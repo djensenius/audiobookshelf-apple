@@ -6,58 +6,97 @@ import SwiftData
 ///
 /// It never writes `LocalLibraryItem` or `LocalFile`: when a download completes, the engine
 /// calls `LocalItemStore.upsertFromDownload(_:)` and then ``deleteRecord(_:)``.
-@ModelActor public actor DownloadStore {
-    /// Creates the record for `record.key`, or updates the existing one in place, keeping its
-    /// `id` and `createdAt`. Parts are matched by `id`: existing ones are updated, new ones
-    /// inserted and missing ones deleted.
+@ModelActor public actor DownloadStore: StoreActor {
+    public enum StoreError: Error, Equatable {
+        /// The record's server connection doesn't exist (it was removed).
+        case connectionNotFound(UUID)
+        /// The record's `id` already belongs to the record for another key.
+        case recordIDConflict(UUID)
+        /// A part's `id` already belongs to another record's part, or appears twice.
+        case partIDConflict(UUID)
+    }
+
+    /// What ``upsertRecord(_:now:)`` saved and removed.
+    public struct UpsertResult: Sendable, Equatable {
+        public var record: DownloadRecordDTO
+        /// Existing parts the new record no longer has, now deleted; the caller removes the
+        /// resume-data blobs of those with `hasResumeData`.
+        public var removedParts: [DownloadPartDTO]
+    }
+
+    var pendingCommitFailure: (any Error)?
+
+    /// Creates the record for `record.key`, or reconciles the existing one in place, keeping its
+    /// `id` and `createdAt`, in one transaction. Parts are matched by `id`: existing ones are
+    /// overwritten from the DTO, new ones inserted and missing ones deleted. This whole-DTO write
+    /// is only for creating and reconciling a download; the engine's updates go through
+    /// ``updateProgress(partID:bytesWritten:expectedBytes:now:)`` and
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)``.
+    ///
+    /// - Throws: ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist, which
+    ///   resolves a download racing the connection's removal (see
+    ///   `ServerConnectionStore.remove(id:now:)`); ``StoreError/recordIDConflict(_:)`` or
+    ///   ``StoreError/partIDConflict(_:)`` instead of letting `#Unique` merge another record's
+    ///   rows.
     @discardableResult
-    public func upsertRecord(_ record: DownloadRecordDTO, now: Date = .now) throws -> DownloadRecordDTO {
-        let model: DownloadRecord
-        if let existing = try fetchRecord(key: record.key) {
-            model = existing
-            model.mediaType = record.mediaType.rawValue
-            model.title = record.title
-            model.state = record.state.rawValue
-            model.relativeDirectory = record.relativeDirectory
-            model.media = record.media
-            let wanted = Set(record.parts.map(\.id))
-            for part in model.parts where !wanted.contains(part.id) {
-                modelContext.delete(part)
+    public func upsertRecord(_ record: DownloadRecordDTO, now: Date = .now) throws -> UpsertResult {
+        try commit {
+            let connectionID = record.key.serverConnectionID
+            var connection = FetchDescriptor<ServerConnectionRecord>(predicate: #Predicate { $0.id == connectionID })
+            connection.fetchLimit = 1
+            guard try modelContext.fetchCount(connection) > 0 else {
+                throw StoreError.connectionNotFound(connectionID)
             }
-            let existingParts = Dictionary(
-                model.parts.filter { wanted.contains($0.id) }.map { ($0.id, $0) },
-                uniquingKeysWith: { first, _ in first }
-            )
-            var parts: [DownloadPart] = []
-            for part in record.parts {
-                if let existingPart = existingParts[part.id] {
-                    part.apply(to: existingPart)
-                    parts.append(existingPart)
-                } else {
-                    parts.append(part.makeModel())
+            let existing = try fetchRecord(key: record.key)
+            if existing == nil, try fetchRecord(id: record.id) != nil {
+                throw StoreError.recordIDConflict(record.id)
+            }
+            try checkPartIDs(record.parts.map(\.id), owner: existing?.id)
+
+            let model: DownloadRecord
+            var removed: [DownloadPartDTO] = []
+            if let existing {
+                model = existing
+                model.mediaType = record.mediaType.rawValue
+                model.title = record.title
+                model.state = record.state.rawValue
+                model.relativeDirectory = record.relativeDirectory
+                model.media = record.media
+                let wanted = Set(record.parts.map(\.id))
+                for part in model.parts where !wanted.contains(part.id) {
+                    removed.append(DownloadPartDTO(part))
+                    modelContext.delete(part)
                 }
+                let existingParts = Dictionary(
+                    model.parts.filter { wanted.contains($0.id) }.map { ($0.id, $0) },
+                    uniquingKeysWith: { first, _ in first }
+                )
+                model.parts = record.parts.map { part in
+                    guard let existingPart = existingParts[part.id] else { return part.makeModel() }
+                    part.apply(to: existingPart)
+                    return existingPart
+                }
+            } else {
+                model = DownloadRecord(
+                    id: record.id,
+                    key: record.key.rawValue,
+                    serverConnectionID: record.key.serverConnectionID,
+                    libraryItemId: record.key.libraryItemId,
+                    episodeId: record.key.episodeId,
+                    mediaType: record.mediaType,
+                    title: record.title,
+                    state: record.state,
+                    relativeDirectory: record.relativeDirectory,
+                    createdAt: now,
+                    media: record.media
+                )
+                modelContext.insert(model)
+                model.parts = record.parts.map { $0.makeModel() }
             }
-            model.parts = parts
-        } else {
-            model = DownloadRecord(
-                id: record.id,
-                key: record.key.rawValue,
-                serverConnectionID: record.key.serverConnectionID,
-                libraryItemId: record.key.libraryItemId,
-                episodeId: record.key.episodeId,
-                mediaType: record.mediaType,
-                title: record.title,
-                state: record.state,
-                relativeDirectory: record.relativeDirectory,
-                createdAt: now,
-                media: record.media
-            )
-            modelContext.insert(model)
-            model.parts = record.parts.map { $0.makeModel() }
+            model.updatedAt = now
+            return UpsertResult(
+                record: DownloadRecordDTO(model), removedParts: removed.sorted(by: DownloadPartDTO.precedes))
         }
-        model.updatedAt = now
-        try modelContext.save()
-        return DownloadRecordDTO(model)
     }
 
     public func record(id: UUID) throws -> DownloadRecordDTO? {
@@ -86,7 +125,14 @@ import SwiftData
     /// (`LocalItemStore.upsertFromDownload(_:)`, then ``deleteRecord(_:)``) to repair a crash
     /// between the two steps.
     public func completedRecords() throws -> [DownloadRecordDTO] {
-        try allRecords().filter(\.isComplete)
+        let completed = DownloadPartState.completed.rawValue
+        return try fetchRecords(
+            FetchDescriptor(
+                predicate: #Predicate { record in
+                    !record.parts.isEmpty && !record.parts.contains { $0.state != completed }
+                }
+            )
+        )
     }
 
     public func part(id: UUID) throws -> DownloadPartDTO? {
@@ -95,42 +141,92 @@ import SwiftData
 
     /// The part whose task has `taskIdentifier`; a lookup cache only, the task's
     /// `taskDescription` (the part's `id`) is authoritative.
+    ///
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)`` keeps the
+    /// identifier unique, but a reconciling ``upsertRecord(_:now:)`` can repeat a stale one; then
+    /// the part whose record was updated most recently wins.
     public func part(taskIdentifier: Int) throws -> DownloadPartDTO? {
-        let value: Int? = taskIdentifier
-        var descriptor = FetchDescriptor<DownloadPart>(predicate: #Predicate { $0.taskIdentifier == value })
-        descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first.map(DownloadPartDTO.init)
+        try fetchParts(taskIdentifier: taskIdentifier)
+            .max { ($0.record?.updatedAt ?? .distantPast) < ($1.record?.updatedAt ?? .distantPast) }
+            .map(DownloadPartDTO.init)
     }
 
-    /// Updates the part with `part.id` in place and touches its record's `updatedAt`. Returns
-    /// `false` when the part doesn't exist.
+    /// Records a part's progress; never changes its state. Returns `false` when the part doesn't
+    /// exist.
     @discardableResult
-    public func updatePart(_ part: DownloadPartDTO, now: Date = .now) throws -> Bool {
-        guard let model = try fetchPart(id: part.id) else { return false }
-        part.apply(to: model)
-        model.record?.updatedAt = now
-        try modelContext.save()
-        return true
+    public func updateProgress(
+        partID: UUID, bytesWritten: Int64, expectedBytes: Int64, now: Date = .now
+    ) throws -> Bool {
+        try commit {
+            guard let part = try fetchPart(id: partID) else { return false }
+            part.bytesWritten = bytesWritten
+            part.expectedBytes = expectedBytes
+            part.record?.updatedAt = now
+            return true
+        }
     }
 
+    /// Moves a part to `state` with its task and error, keeping its progress.
+    ///
+    /// `.completed` is final: leaving it needs `requeue` (an explicit re-download), so a late
+    /// update from a stale task can't undo a completion. Moving to `.failed` counts a retry.
+    /// `taskIdentifier` is set as given (`nil` clears it) and cleared from any other part that
+    /// still has it, as task identifiers restart with each session. `error` becomes `lastError`
+    /// (`nil` clears it); `hasResumeData` is kept when `nil`.
+    ///
+    /// - Returns: `false` when the part doesn't exist or the change was refused.
+    @discardableResult
+    public func setPartState(
+        _ state: DownloadPartState,
+        partID: UUID,
+        taskIdentifier: Int?,
+        error: String? = nil,
+        hasResumeData: Bool? = nil,
+        requeue: Bool = false,
+        now: Date = .now
+    ) throws -> Bool {
+        try commit {
+            guard let part = try fetchPart(id: partID) else { return false }
+            if part.stateValue == .completed, state != .completed, !requeue { return false }
+            if let taskIdentifier {
+                for other in try fetchParts(taskIdentifier: taskIdentifier) where other.id != partID {
+                    other.taskIdentifier = nil
+                }
+            }
+            if state == .failed, part.stateValue != .failed { part.retryCount += 1 }
+            part.state = state.rawValue
+            part.taskIdentifier = taskIdentifier
+            part.lastError = error
+            if let hasResumeData { part.hasResumeData = hasResumeData }
+            part.record?.updatedAt = now
+            return true
+        }
+    }
+
+    /// Sets the whole download's state. Every transition is allowed: the engine drives it
+    /// (queued, downloading, paused, failed and back), and completion is not a record state but
+    /// derived from the parts (``DownloadRecordDTO/isComplete``). Returns `false` when the record
+    /// doesn't exist.
     @discardableResult
     public func setState(_ state: DownloadState, forRecord id: UUID, now: Date = .now) throws -> Bool {
-        guard let model = try fetchRecord(id: id) else { return false }
-        model.state = state.rawValue
-        model.updatedAt = now
-        try modelContext.save()
-        return true
+        try commit {
+            guard let model = try fetchRecord(id: id) else { return false }
+            model.state = state.rawValue
+            model.updatedAt = now
+            return true
+        }
     }
 
     /// Deletes the record and, by cascade, its parts. Returns what was deleted, so the caller can
     /// remove resume-data blobs for its parts, or `nil` when it doesn't exist.
     @discardableResult
     public func deleteRecord(_ id: UUID) throws -> DownloadRecordDTO? {
-        guard let model = try fetchRecord(id: id) else { return nil }
-        let deleted = DownloadRecordDTO(model)
-        modelContext.delete(model)
-        try modelContext.save()
-        return deleted
+        try commit {
+            guard let model = try fetchRecord(id: id) else { return nil }
+            let deleted = DownloadRecordDTO(model)
+            modelContext.delete(model)
+            return deleted
+        }
     }
 
     // MARK: - Private
@@ -138,6 +234,7 @@ import SwiftData
     private func fetchRecords(_ descriptor: FetchDescriptor<DownloadRecord>) throws -> [DownloadRecordDTO] {
         var descriptor = descriptor
         descriptor.sortBy = [SortDescriptor(\.createdAt), SortDescriptor(\.key)]
+        descriptor.relationshipKeyPathsForPrefetching = [\.parts]
         return try modelContext.fetch(descriptor).map(DownloadRecordDTO.init)
     }
 
@@ -152,6 +249,23 @@ import SwiftData
         var descriptor = FetchDescriptor<DownloadRecord>(predicate: #Predicate { $0.key == raw })
         descriptor.fetchLimit = 1
         return try modelContext.fetch(descriptor).first
+    }
+
+    private func fetchParts(taskIdentifier: Int) throws -> [DownloadPart] {
+        let value: Int? = taskIdentifier
+        return try modelContext.fetch(
+            FetchDescriptor<DownloadPart>(predicate: #Predicate { $0.taskIdentifier == value }))
+    }
+
+    /// Throws when a part id repeats or belongs to a part of a record other than `owner`.
+    private func checkPartIDs(_ ids: [UUID], owner: UUID?) throws {
+        var seen: Set<UUID> = []
+        for id in ids {
+            guard seen.insert(id).inserted else { throw StoreError.partIDConflict(id) }
+            if let part = try fetchPart(id: id), part.record?.id != owner || owner == nil {
+                throw StoreError.partIDConflict(id)
+            }
+        }
     }
 
     private func fetchPart(id: UUID) throws -> DownloadPart? {

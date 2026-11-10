@@ -387,17 +387,18 @@ Model notes:
   columns and keeps the rows (tested in #36). An incompatible store (an unrelated
   or non-additive newer schema, or a corrupt file) fails with
   `SwiftDataError.loadIssueModelContainer`, not `.backwardMigration`.
-- **Recovery.** Only a writing process recovers. When the load fails with
-  `.backwardMigration`, `.unknownSchema` or `.unknownDataStoreSchema`, or with
-  `.loadIssueModelContainer` and a probe confirms the store is incompatible,
-  `DataStack` logs a fault, moves the store and its `-wal`/`-shm` files into
-  `Broken/<epoch>-<uuid>/` next to it (keeping only the newest copy) and creates an
-  empty store. The probe calls a store incompatible only when its first 16 bytes
-  are readable and aren't the SQLite header, when reading its metadata fails with
-  SQLite error 11 or 26, or when the metadata matches no schema in
-  `ABSMigrationPlan`. An unreadable file (for example protected data while the
-  device is locked) or any other error is transient: the error is rethrown and the
-  store is left alone. Downloaded files that are no longer referenced are removed
+- **Recovery.** Only a writing process recovers, and only on confirmed damage. When
+  the load fails, `DataStack` resets the store only if its first 16 bytes are
+  readable and aren't the SQLite header, or if the Core Data error chain
+  (`NSUnderlyingErrorKey`, `NSDetailedErrors`) holds SQLite error 11 or 26 or an
+  incompatibility code (134100, 134110, 134130, 134140) and no transient error (disk
+  full, I/O, busy, locked, can't open, no permission, any POSIX error). Anything
+  else, including an unreadable file (protected data while the device is locked),
+  is rethrown and the store left alone. A reset logs a fault and moves the store,
+  then `-wal` and `-shm`, into `Broken/<epoch>-<uuid>/` (keeping only the newest
+  copy). An `INCOMPLETE` marker listing the files is written first and removed
+  last; the next open finishes any marked move before opening, and pruning skips
+  marked copies. Downloaded files that are no longer referenced are removed
   by the orphan sweep in #73 (P4-02). The server still holds synced progress.
 
 ### Store location and container

@@ -18,7 +18,7 @@ public struct LocalLibraryItemDTO: Sendable, Equatable, Identifiable {
     public var addedAt: Date
     public var updatedAt: Date
     public var media: LocalMediaSnapshot
-    /// Ordered by track index, then filename.
+    /// Ordered by track index (untracked last), then relative path.
     public var files: [LocalFileDTO]
 
     public init(
