@@ -83,7 +83,7 @@ public struct DownloadProgress: Sendable, Equatable {
 /// handles the session's events. Create one engine per process: a background session
 /// identifier may only be used by one session at a time.
 public actor DownloadEngine {
-    public static let sessionIdentifier = "org.davidjensenius.Audiobookshelf.downloads"
+    public static let sessionIdentifier = URLSessionConfiguration.absDownloadsIdentifier
     /// Restarts per part and activation that don't count as failures (a system cancellation
     /// or a lost session); later ones go through the ``RetryPolicy``.
     static let maxFreeRestarts = 3
@@ -909,5 +909,14 @@ public actor DownloadEngine {
     private func logError(_ message: String, _ error: any Error) {
         Log.downloads.error(
             "\(message, privacy: .public): \(Log.redact(String(describing: error)), privacy: .public)")
+    }
+}
+
+extension DownloadEngine {
+    /// The production factory: a background session with ``sessionIdentifier``.
+    public static func backgroundSession() -> DownloadSessionFactory {
+        { delegate in
+            URLSession(configuration: .absDownloads(), delegate: delegate, delegateQueue: nil)
+        }
     }
 }

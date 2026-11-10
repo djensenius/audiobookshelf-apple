@@ -19,6 +19,10 @@ extension URLSession: DownloadSession {}
 public typealias DownloadSessionFactory = @Sendable (any URLSessionDelegate) -> any DownloadSession
 
 extension URLSessionConfiguration {
+    /// The identifier of the background download session. Only one session per process may
+    /// use it at a time.
+    public static let absDownloadsIdentifier = "org.davidjensenius.Audiobookshelf.downloads"
+
     /// The background configuration for downloads: transfers continue in `nsurlsessiond`
     /// while the app is suspended or terminated by the system, and on iOS the app is
     /// relaunched to handle their events.
@@ -27,7 +31,7 @@ extension URLSessionConfiguration {
     /// delegate moves every file into the app's own container (ADR 0003). Cookies and the URL
     /// cache are off: downloads authenticate with headers only and the files are moved out of
     /// the session's temporary location.
-    public static func absDownloads(identifier: String = DownloadEngine.sessionIdentifier) -> URLSessionConfiguration {
+    public static func absDownloads(identifier: String = absDownloadsIdentifier) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
         configuration.sharedContainerIdentifier = nil
         configuration.isDiscretionary = false
@@ -38,15 +42,6 @@ extension URLSessionConfiguration {
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         return configuration
-    }
-}
-
-extension DownloadEngine {
-    /// The production factory: a background session with ``sessionIdentifier``.
-    public static func backgroundSession() -> DownloadSessionFactory {
-        { delegate in
-            URLSession(configuration: .absDownloads(), delegate: delegate, delegateQueue: nil)
-        }
     }
 }
 
