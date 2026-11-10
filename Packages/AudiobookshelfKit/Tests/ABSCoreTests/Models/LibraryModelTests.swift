@@ -43,7 +43,8 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(chapters[1].end == 3725.5)
         #expect(chapters[1].title == "Chapter 2")
         let track = try #require(book.tracks?.first)
-        #expect(track.id == 1)
+        #expect(track.index == 1)
+        #expect(track.id == "1-0.0")
         #expect(track.contentUrl == "/api/items/li-book-1/file/649644248522215260")
         #expect(track.endOffset == 3725.5)
     }
@@ -205,6 +206,56 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(metadata.authors?.first?.name == "Author One")
         #expect(session.mediaMetadata?.title == "The First Book")
         #expect(session.libraryItem?.book?.tracks?.count == 1)
+    }
+
+    @Test func decodesNullTrackIndex() throws {
+        let episode = try decode(PodcastEpisode.self, Fixtures.nullIndexEpisode)
+        #expect(episode.audioTrack?.index == nil)
+        #expect(episode.audioTrack?.id == "0-0.0")
+        #expect(episode.audioFile?.index == nil)
+
+        let session = try decode(PlaybackSession.self, Fixtures.nullIndexEpisodeSession)
+        #expect(session.mediaType == .podcast)
+        #expect(session.audioTracks.map(\.index) == [nil])
+        #expect(session.audioTracks.first?.endOffset == 900)
+        let episodes = try #require(session.libraryItem?.podcast?.episodes)
+        #expect(episodes.map(\.id) == ["ep-3"])
+        #expect(episodes.first?.audioTrack?.index == nil)
+    }
+
+    @Test func decodesSDKVersionAsStringOrNumber() throws {
+        let android = try decode(PlaybackSession.self, Fixtures.androidSession)
+        #expect(android.deviceInfo?.sdkVersion == "35")
+        #expect(android.deviceInfo?.clientName == "Abs Android")
+        #expect(android.deviceInfo?.deviceName == "Google Pixel 9")
+        let numeric = try decode(PlaybackSession.self, Fixtures.numericSDKVersionSession)
+        #expect(numeric.deviceInfo?.sdkVersion == "34")
+        #expect(try decode(PlaybackSession.self, Fixtures.session).deviceInfo?.sdkVersion == nil)
+        let reencoded = String(decoding: try JSONEncoder().encode(numeric), as: UTF8.self)
+        #expect(try decode(PlaybackSession.self, reencoded).deviceInfo?.sdkVersion == "34")
+    }
+
+    @Test func decodesFractionalFileTimestamps() throws {
+        let item = try decode(LibraryItem.self, Fixtures.fractionalTimestampsItem)
+        #expect(item.mtimeMs == 1_650_621_074_299.0059)
+        #expect(item.ctimeMs == 1_650_621_074_299.5)
+        #expect(item.birthtimeMs == 1_650_621_070_000.25)
+        let book = try #require(item.book)
+        #expect(book.audioFiles?.first?.metadata?.mtimeMs == 1_650_621_074_299.0059)
+        #expect(book.audioFiles?.first?.metadata?.birthtimeMs == 1_650_621_070_000.123)
+        #expect(book.tracks?.first?.metadata?.mtimeMs == 1_650_621_074_299.0059)
+        #expect(item.libraryFiles?.first?.metadata?.ctimeMs == 1_650_621_074_299.0059)
+        #expect(try decode(LibraryItem.self, Fixtures.singleFileBook).mtimeMs == 1_700_000_001_000)
+
+        let shelfJSON = """
+            [{"id":"recently-added","label":"Recently Added","type":"book","entities":\
+            [\(Fixtures.fractionalTimestampsItem)]}]
+            """
+        guard case .libraryItems(let items) = try decode([Shelf].self, shelfJSON).first?.entities else {
+            Issue.record("Expected library items")
+            return
+        }
+        #expect(items.map(\.id) == ["li-book-6"])
     }
 
     @Test func preservesUnknownPlayMethod() throws {

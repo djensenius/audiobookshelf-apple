@@ -56,5 +56,16 @@ public struct EbookFile: Sendable, Hashable, Codable, Identifiable {
     /// Epoch milliseconds.
     public let updatedAt: Int?
 
+    public init(
+        ino: String, metadata: FileMetadata? = nil, ebookFormat: EbookFormat? = nil, addedAt: Int? = nil,
+        updatedAt: Int? = nil
+    ) {
+        self.ino = ino
+        self.metadata = metadata
+        self.ebookFormat = ebookFormat
+        self.addedAt = addedAt
+        self.updatedAt = updatedAt
+    }
+
     public var id: String { ino }
 }

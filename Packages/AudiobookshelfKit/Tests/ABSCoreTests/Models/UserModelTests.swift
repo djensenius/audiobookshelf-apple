@@ -159,6 +159,22 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(progress.ebookProgress == nil)
     }
 
+    @Test func keepsProgressRowWithNumericStrings() throws {
+        // Rows migrated from the old JSON store can carry numeric strings.
+        let json = #"""
+            {"id":"u","username":"x","mediaProgress":[{"id":"mp","libraryItemId":"li","progress":"0.5",\#
+            "duration":"100","currentTime":"50.25","ebookProgress":"0.75","lastUpdate":1700000000000}]}
+            """#
+        let user = try decode(User.self, json)
+        let progress = try #require(user.mediaProgress.first)
+        #expect(user.mediaProgress.count == 1)
+        #expect(progress.progress == 0.5)
+        #expect(progress.duration == 100)
+        #expect(progress.currentTime == 50.25)
+        #expect(progress.ebookProgress == 0.75)
+        #expect(progress.lastUpdate == 1_700_000_000_000)
+    }
+
     @Test func bookmarkRejectsNonNumericTime() {
         #expect(throws: DecodingError.self) {
             try decode(AudioBookmark.self, #"{"libraryItemId":"li","title":"x","time":"soon"}"#)

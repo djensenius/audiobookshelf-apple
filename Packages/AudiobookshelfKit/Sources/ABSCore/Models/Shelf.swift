@@ -66,6 +66,19 @@ public struct Shelf: Sendable, Hashable, Codable, Identifiable {
     public let total: Int?
     public let entities: ShelfEntities
 
+    public init(
+        id: String, label: String, labelStringKey: String? = nil, type: ShelfType, category: String? = nil,
+        total: Int? = nil, entities: ShelfEntities
+    ) {
+        self.id = id
+        self.label = label
+        self.labelStringKey = labelStringKey
+        self.type = type
+        self.category = category
+        self.total = total
+        self.entities = entities
+    }
+
     enum CodingKeys: String, CodingKey {
         case id, label, labelStringKey, type, category, total, entities
     }

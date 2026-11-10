@@ -89,14 +89,18 @@ public struct MediaProgress: Sendable, Hashable, Codable, Identifiable {
         episodeId = try container.decodeIfPresent(String.self, forKey: .episodeId)
         mediaItemId = try container.decodeIfPresent(String.self, forKey: .mediaItemId)
         mediaItemType = try container.decodeIfPresent(MediaItemType.self, forKey: .mediaItemType)
-        duration = try container.decodeIfPresent(Double.self, forKey: .duration) ?? 0
-        progress = try container.decodeIfPresent(Double.self, forKey: .progress) ?? 0
-        currentTime = try container.decodeIfPresent(Double.self, forKey: .currentTime) ?? 0
+        // `progress` comes from `extraData`, which the 2.x database migration copied unchanged from
+        // the old JSON store, so it can be a numeric string. The FLOAT columns below (`duration`,
+        // `currentTime`, `ebookProgress`) were also copied from old values; decode them the same way.
+        // Timestamps come from DATE columns via `Date.valueOf()` and are always numbers.
+        duration = container.decodeLenientDouble(forKey: .duration) ?? 0
+        progress = container.decodeLenientDouble(forKey: .progress) ?? 0
+        currentTime = container.decodeLenientDouble(forKey: .currentTime) ?? 0
         isFinished = try container.decodeIfPresent(Bool.self, forKey: .isFinished) ?? false
         hideFromContinueListening =
             try container.decodeIfPresent(Bool.self, forKey: .hideFromContinueListening) ?? false
         ebookLocation = try container.decodeIfPresent(String.self, forKey: .ebookLocation)
-        ebookProgress = try container.decodeIfPresent(Double.self, forKey: .ebookProgress)
+        ebookProgress = container.decodeLenientDouble(forKey: .ebookProgress)
         lastUpdate = try container.decodeIfPresent(Int.self, forKey: .lastUpdate)
         startedAt = try container.decodeIfPresent(Int.self, forKey: .startedAt)
         finishedAt = try container.decodeIfPresent(Int.self, forKey: .finishedAt)

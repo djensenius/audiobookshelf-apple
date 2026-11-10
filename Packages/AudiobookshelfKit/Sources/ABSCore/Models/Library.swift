@@ -16,6 +16,25 @@ public struct Library: Sendable, Hashable, Codable, Identifiable {
     public let createdAt: Int?
     /// Epoch milliseconds.
     public let lastUpdate: Int?
+
+    public init(
+        id: String, name: String, folders: [LibraryFolder]? = nil, displayOrder: Int? = nil, icon: String? = nil,
+        mediaType: MediaType, provider: String? = nil, settings: LibrarySettings? = nil, lastScan: Int? = nil,
+        lastScanVersion: String? = nil, createdAt: Int? = nil, lastUpdate: Int? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.folders = folders
+        self.displayOrder = displayOrder
+        self.icon = icon
+        self.mediaType = mediaType
+        self.provider = provider
+        self.settings = settings
+        self.lastScan = lastScan
+        self.lastScanVersion = lastScanVersion
+        self.createdAt = createdAt
+        self.lastUpdate = lastUpdate
+    }
 }
 
 public struct LibraryFolder: Sendable, Hashable, Codable, Identifiable {
@@ -24,6 +43,13 @@ public struct LibraryFolder: Sendable, Hashable, Codable, Identifiable {
     public let libraryId: String?
     /// Epoch milliseconds.
     public let addedAt: Int?
+
+    public init(id: String, fullPath: String, libraryId: String? = nil, addedAt: Int? = nil) {
+        self.id = id
+        self.fullPath = fullPath
+        self.libraryId = libraryId
+        self.addedAt = addedAt
+    }
 }
 
 public struct LibrarySettings: Sendable, Hashable, Codable {
@@ -41,4 +67,27 @@ public struct LibrarySettings: Sendable, Hashable, Codable {
     public let podcastSearchRegion: String?
     public let markAsFinishedPercentComplete: Double?
     public let markAsFinishedTimeRemaining: Double?
+
+    public init(
+        coverAspectRatio: Int? = nil, disableWatcher: Bool? = nil, skipMatchingMediaWithAsin: Bool? = nil,
+        skipMatchingMediaWithIsbn: Bool? = nil, autoScanCronExpression: String? = nil, audiobooksOnly: Bool? = nil,
+        epubsAllowScriptedContent: Bool? = nil, hideSingleBookSeries: Bool? = nil,
+        onlyShowLaterBooksInContinueSeries: Bool? = nil, metadataPrecedence: [String]? = nil,
+        podcastSearchRegion: String? = nil, markAsFinishedPercentComplete: Double? = nil,
+        markAsFinishedTimeRemaining: Double? = nil
+    ) {
+        self.coverAspectRatio = coverAspectRatio
+        self.disableWatcher = disableWatcher
+        self.skipMatchingMediaWithAsin = skipMatchingMediaWithAsin
+        self.skipMatchingMediaWithIsbn = skipMatchingMediaWithIsbn
+        self.autoScanCronExpression = autoScanCronExpression
+        self.audiobooksOnly = audiobooksOnly
+        self.epubsAllowScriptedContent = epubsAllowScriptedContent
+        self.hideSingleBookSeries = hideSingleBookSeries
+        self.onlyShowLaterBooksInContinueSeries = onlyShowLaterBooksInContinueSeries
+        self.metadataPrecedence = metadataPrecedence
+        self.podcastSearchRegion = podcastSearchRegion
+        self.markAsFinishedPercentComplete = markAsFinishedPercentComplete
+        self.markAsFinishedTimeRemaining = markAsFinishedTimeRemaining
+    }
 }
