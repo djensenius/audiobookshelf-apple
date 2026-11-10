@@ -270,6 +270,35 @@ import Testing
         #expect(await store.observerCount == 0)
     }
 
+    @Test func failedEvictionRollsBackTheWrite() async throws {
+        let store = try makeStore()
+        let cap = PlaybackHistoryStore.maxEventsPerMedia
+        let events = (0..<cap).map { event(name: .save, at: now.addingTimeInterval(Double($0))) }
+        for item in events {
+            try await store.record(item)
+        }
+        let before = try await store.events(for: key)
+        #expect(before.count == cap)
+
+        // A new event at the cap: the insert must not survive the failed eviction.
+        let added = event(name: .play, at: now.addingTimeInterval(Double(cap)))
+        await store.failNextEviction(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.record(added) }
+        #expect(await store.hasUncommittedChanges == false)
+        #expect(try await store.event(id: added.id) == nil)
+
+        // An update in place: the old values must survive the failed eviction.
+        var changed = events[0]
+        changed.currentTime = 999
+        changed.details = "changed"
+        await store.failNextEviction(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.record(changed) }
+        #expect(await store.hasUncommittedChanges == false)
+
+        #expect(try await store.events(for: key, limit: cap + 10) == before)
+        #expect(try await store.event(id: events[0].id) == events[0])
+    }
+
     @Test func failedSaveIsRolledBack() async throws {
         let store = try makeStore()
         let kept = event(at: now)

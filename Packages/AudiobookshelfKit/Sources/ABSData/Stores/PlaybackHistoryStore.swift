@@ -9,6 +9,8 @@ import SwiftData
 /// the media the write touched, or to every stream after a bulk delete.
 @ModelActor public actor PlaybackHistoryStore: StoreActor {
     var pendingCommitFailure: (any Error)?
+    /// A test seam: when set, the next eviction throws this before it fetches anything.
+    private var pendingEvictionFailure: (any Error)?
     private var observers: [UUID: Observer] = [:]
     /// Snapshots sent to ``updates(for:)`` streams so far (tests only).
     private(set) var snapshotsSent = 0
@@ -31,7 +33,8 @@ import SwiftData
     public static let maxEventsPerMedia = 500
 
     /// Inserts the event, or updates the row with the same `id` in place, then drops the media's
-    /// events beyond ``maxEventsPerMedia``.
+    /// events beyond ``maxEventsPerMedia``, all in one transaction: if any step fails, neither
+    /// the write nor the eviction is kept.
     ///
     /// - Parameter onlyIfHistoryExists: Records nothing unless the media already has events (the
     ///   legacy rule for sync events). The check and the write happen in one actor call, so no
@@ -42,35 +45,41 @@ import SwiftData
         if onlyIfHistoryExists, try !hasEvents(for: event.mediaKey) { return false }
         var affected: Set<MediaKey> = [event.mediaKey]
         defer { notifyObservers(of: affected) }
-        if let previousKey = try insertOrUpdate(event) {
-            affected.insert(previousKey)
+        try commit {
+            if let previousKey = try insertOrUpdate(event) {
+                affected.insert(previousKey)
+            }
+            try evictEvents(for: event.mediaKey, keeping: Self.maxEventsPerMedia)
         }
-        try evictEvents(for: event.mediaKey, keeping: Self.maxEventsPerMedia)
         return true
     }
 
-    /// Returns the media key an updated row had before, when it changed.
+    /// Makes the next eviction throw `error`, after ``record(_:onlyIfHistoryExists:)`` has
+    /// applied its write but before anything is saved (tests only).
+    func failNextEviction(with error: any Error) {
+        pendingEvictionFailure = error
+    }
+
+    /// Applies the event to the context without saving; the caller commits. Returns the media
+    /// key an updated row had before, when it changed.
     private func insertOrUpdate(_ event: PlaybackHistoryEventDTO) throws -> MediaKey? {
-        try commit {
-            if let existing = try fetchEvent(id: event.id) {
-                let previous = MediaKey(rawValue: existing.mediaKey)
-                event.apply(to: existing)
-                return previous == event.mediaKey ? nil : previous
-            } else {
-                let model = PlaybackHistoryEvent(
-                    id: event.id,
-                    serverConnectionID: event.serverConnectionID,
-                    mediaKey: event.mediaKey.rawValue,
-                    libraryItemId: event.mediaKey.libraryItemId,
-                    mediaDisplayTitle: event.mediaDisplayTitle,
-                    name: event.name,
-                    type: event.type
-                )
-                event.apply(to: model)
-                modelContext.insert(model)
-                return nil
-            }
+        if let existing = try fetchEvent(id: event.id) {
+            let previous = MediaKey(rawValue: existing.mediaKey)
+            event.apply(to: existing)
+            return previous == event.mediaKey ? nil : previous
         }
+        let model = PlaybackHistoryEvent(
+            id: event.id,
+            serverConnectionID: event.serverConnectionID,
+            mediaKey: event.mediaKey.rawValue,
+            libraryItemId: event.mediaKey.libraryItemId,
+            mediaDisplayTitle: event.mediaDisplayTitle,
+            name: event.name,
+            type: event.type
+        )
+        event.apply(to: model)
+        modelContext.insert(model)
+        return nil
     }
 
     public func event(id: UUID) throws -> PlaybackHistoryEventDTO? {
@@ -168,34 +177,38 @@ import SwiftData
     @discardableResult
     public func pruneEvents(for mediaKey: MediaKey, keeping count: Int = maxEventsPerMedia) throws -> Int {
         defer { notifyObservers(of: [mediaKey]) }
-        return try evictEvents(for: mediaKey, keeping: count)
+        return try commit { try evictEvents(for: mediaKey, keeping: count) }
     }
 
     // MARK: - Private
 
+    /// Deletes the media's events beyond `count` from the context without saving; the caller
+    /// commits. Fetches include unsaved changes, so a pending insert counts towards the cap.
     @discardableResult
     private func evictEvents(for mediaKey: MediaKey, keeping count: Int) throws -> Int {
+        if let failure = pendingEvictionFailure {
+            pendingEvictionFailure = nil
+            throw failure
+        }
         let raw = mediaKey.rawValue
         let save = PlaybackHistoryEventName.save.rawValue
         let sync = PlaybackHistoryEventName.sync.rawValue
-        return try commit {
-            let total = try modelContext.fetchCount(
-                FetchDescriptor<PlaybackHistoryEvent>(predicate: #Predicate { $0.mediaKey == raw })
-            )
-            let excess = total - max(count, 0)
-            guard excess > 0 else { return 0 }
-            // Two disjoint sets, so the second fetch never sees rows the first deleted.
-            let routine = try oldest(
-                excess, #Predicate { $0.mediaKey == raw && ($0.name == save || $0.name == sync) }
-            )
-            let others = try oldest(
-                excess - routine.count, #Predicate { $0.mediaKey == raw && $0.name != save && $0.name != sync }
-            )
-            for event in routine + others {
-                modelContext.delete(event)
-            }
-            return routine.count + others.count
+        let total = try modelContext.fetchCount(
+            FetchDescriptor<PlaybackHistoryEvent>(predicate: #Predicate { $0.mediaKey == raw })
+        )
+        let excess = total - max(count, 0)
+        guard excess > 0 else { return 0 }
+        // Two disjoint sets, so the second fetch never sees rows the first deleted.
+        let routine = try oldest(
+            excess, #Predicate { $0.mediaKey == raw && ($0.name == save || $0.name == sync) }
+        )
+        let others = try oldest(
+            excess - routine.count, #Predicate { $0.mediaKey == raw && $0.name != save && $0.name != sync }
+        )
+        for event in routine + others {
+            modelContext.delete(event)
         }
+        return routine.count + others.count
     }
 
     private func oldest(_ limit: Int, _ predicate: Predicate<PlaybackHistoryEvent>) throws -> [PlaybackHistoryEvent] {
