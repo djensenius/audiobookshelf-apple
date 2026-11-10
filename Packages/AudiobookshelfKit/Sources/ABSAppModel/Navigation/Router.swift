@@ -28,9 +28,26 @@ public final class Router {
     /// ID, so the scene (S7a) looks up the library's kind and sections and calls
     /// ``selectLibrary(id:kind:supportedSections:)``, which clears this.
     ///
-    /// Other pending requests, such as S2's `pendingPlayLink`, must also be stored properties
+    /// Other pending requests, such as ``pendingPlayLink``, must also be stored properties
     /// declared here: extensions can't add stored properties.
     public private(set) var pendingLibraryID: String?
+    /// A `play/` link opened in this scene, until the item screen shows its confirmation
+    /// (``PlayLinkDecision``) and calls ``clearPendingPlayLink()``. Every link ``open(_:)``
+    /// navigates to replaces it; a link for another server doesn't. Any change to the Library
+    /// path that drops the exact screen the link opened clears it: a library switch, section
+    /// repair, ``normalize(isCompact:)``, popping the screen, snapshot restore or an identity
+    /// change. An older screen for the same item lower in the path doesn't keep it.
+    public internal(set) var pendingPlayLink: PlayLink?
+    /// The Library path up to and including the screen ``pendingPlayLink`` opened. The link
+    /// stays pending only while the Library path starts with exactly this.
+    private(set) var pendingPlayLinkPath: [Route] = []
+    /// A `search?q=` query opened in this scene, until the Search tab shows it and clears it.
+    /// Cleared like ``pendingPlayLink``, except that a library switch keeps it.
+    public var pendingSearchQuery: String?
+    /// A link for another server connection, waiting for the user to confirm the switch. The
+    /// UI that asks (S6) clears it, and must keep its own copy to reopen after the switch,
+    /// because ``resetForIdentityChange(serverID:userID:)`` clears it too.
+    public var pendingServerSwitch: DeepLink?
     /// One typed path per tab. Bind stacks through ``subscript(path:)``.
     public private(set) var paths: [AppTab: [Route]] = [:]
 
@@ -49,7 +66,10 @@ public final class Router {
     /// `$router[path: tab]`, because `$router.paths[tab, default: []]` isn't a valid key path.
     public subscript(path tab: AppTab) -> [Route] {
         get { paths[tab] ?? [] }
-        set { paths[tab] = newValue.isEmpty ? nil : newValue }
+        set {
+            paths[tab] = newValue.isEmpty ? nil : newValue
+            if tab == .library { dropPendingPlayLinkIfOffPath() }
+        }
     }
 
     /// Adapts the selection to the size class. The view calls this with
@@ -109,12 +129,34 @@ public final class Router {
         self.userID = userID
         resetNavigation()
         pendingLibraryID = nil
+        pendingServerSwitch = nil
         isFullPlayerPresented = false
         isQueueInspectorPresented = false
     }
 
-    /// Returns the tab, library, section and paths to their defaults.
+    /// Drops ``pendingPlayLink``, for example once the item screen has shown its confirmation.
+    public func clearPendingPlayLink() {
+        pendingPlayLink = nil
+        pendingPlayLinkPath = []
+    }
+
+    /// Makes `link` pending for the screen on top of the Library path.
+    func setPendingPlayLink(_ link: PlayLink) {
+        pendingPlayLink = link
+        pendingPlayLinkPath = self[path: .library]
+    }
+
+    /// Drops a library request, because a later link navigated elsewhere.
+    func cancelLibraryRequest() {
+        pendingLibraryID = nil
+    }
+
+    /// Returns the tab, library, section and paths to their defaults, and drops the pending
+    /// play link and search query, which belonged to the old paths. Snapshot restore uses it
+    /// too, so a link opened before the restore leaves nothing stale behind.
     func resetNavigation() {
+        clearPendingPlayLink()
+        pendingSearchQuery = nil
         selectedTab = .home
         libraryID = nil
         libraryKind = nil
