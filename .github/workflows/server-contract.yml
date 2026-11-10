@@ -1,0 +1,52 @@
+name: Server contracts
+
+# Runs the opt-in ABSServerContractTests against real Audiobookshelf servers
+# (docs/testing/server-contracts.md). GitHub's macOS runners have no Docker, so the server
+# runs from its source release on Node 20 (ABS_SERVER_BACKEND=node).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: One server version to run instead of the matrix, for example 2.38.0
+        required: false
+        type: string
+  schedule:
+    - cron: "23 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Audiobookshelf ${{ matrix.version }}
+    runs-on: xcode-27
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # The minimum supported server (ADR 0007) and the latest release at the time of writing.
+        version: ${{ fromJSON(inputs.version && format('["{0}"]', inputs.version) || '["2.26.0","2.37.2"]') }}
+    env:
+      # The image defaults to Xcode 27.1; the project needs 27.2.
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      ABS_SERVER_BACKEND: node
+      ABS_SERVER_VERSION: ${{ matrix.version }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install tools
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.4
+          install: false
+
+      - name: Install ffmpeg
+        run: brew install ffmpeg
+
+      - name: Run the contract tests
+        run: mise exec node@20 -- scripts/test-server.sh test

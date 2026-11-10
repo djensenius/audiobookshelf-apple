@@ -671,9 +671,12 @@ struct PlaybackCoordinatorTests {
         let first = Task { await coordinator.play(itemID: "A") }
         await yieldUntil { service.starts == ["A"] }
 
-        await coordinator.play(itemID: "B")
+        // B's start takes its turn after A's returns, so it can't finish before the gate opens.
+        let second = Task { await coordinator.play(itemID: "B") }
+        await yieldUntil { coordinator.mediaKey == h.key("B") }
         gate.open()
         await first.value
+        await second.value
         await coordinator.waitForPendingCloses()
 
         #expect(coordinator.mediaKey == h.key("B"))

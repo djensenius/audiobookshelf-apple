@@ -17,11 +17,26 @@ private let logger = Log.playback
 ///   load finishing late) is dropped, and a session it opened is closed. Policy checks have their
 ///   own token, so a later play or stop discards a pending one, and a blocked play leaves the
 ///   current item (and its seeks and resumes) untouched.
+/// - **Session starts are serialized.** The server keeps one open session per user and device, so
+///   a `/play` that reached it after a newer one would close the newer session, whatever the
+///   generations say. Starts therefore take turns, in arrival order: each waits for the previous
+///   start to return and for the closes in flight (its stale session's too) before sending
+///   anything, and a play superseded while it waits sends no request. A request that hangs delays
+///   the next start until it fails (the API client's timeout is 30 s): correctness over latency.
 /// - **Closing.** A session is owned by exactly one place: the start continuation until it becomes
 ///   current, then the coordinator. Whoever drops it closes it once, in the background. The next
 ///   `/play` waits up to ``closeWaitTimeout`` for closes in flight, so the server normally sees the
 ///   old session closed first; a slow or failed close never blocks it. Closes are best effort;
 ///   P2-06b's final report is plugged in through ``finalCloseReport``.
+/// - **Interrupted seeks.** The engine keeps the target of a seek it couldn't finish pending and
+///   leaves its own time behind (at 0 after a load). The coordinator treats that target as the
+///   position: ``currentTime``, the last-played record and the paused and closing positions use
+///   it, a resume seeks to it exactly, and a load's `didSeek` is published when the seek lands.
+/// - **Start position.** A new session starts at the newest of the server's progress, the row's
+///   audio progress and the last-played record, and the server's wins a tie, as in a sync merge.
+///   An unsent audio edit is dated by its edit time and kept over server progress whose audio is
+///   still what the row last saw. A synced group is dated by the later of its edit time and the
+///   server's row-wide `lastUpdate`, which is only an upper bound for when that group last changed.
 /// - **Restore is lazy.** ``restoreLastPlayed()`` only publishes the item, position and display
 ///   metadata from the ``LastPlayedRecord``; the session starts and the engine loads on the first
 ///   ``resume(rewindingBy:)`` or play, so opening the app never creates a server session.
@@ -53,12 +68,16 @@ public final class PlaybackCoordinator {
     public private(set) var pendingPlayKey: MediaKey?
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
+    /// Where playback is or is going. An interrupted seek leaves the engine's own time behind
+    /// (at 0 after a load), so a pending target is the position to report and save.
+    private var position: Double { engine.pendingSeekTarget ?? engine.currentTime }
 
     /// The saved playback rate, applied on every load and play.
     public var rate: Double { settings.playbackRate }
     public var timeline: PlaybackTimeline? { phase == .loaded ? engine.timeline : nil }
-    /// Global seconds: the engine's while loaded, else the position play will resume from.
-    public var currentTime: Double { phase == .loaded ? engine.currentTime : unloadedPosition }
+    /// Global seconds: while loaded, the engine's confirmed time, or the target of a seek that
+    /// hasn't landed (an interrupted one stays pending); else the position play will resume from.
+    public var currentTime: Double { phase == .loaded ? position : unloadedPosition }
     public var duration: Double { phase == .loaded ? engine.duration : unloadedDuration }
     public var isPlaying: Bool { phase == .loaded && engine.state == .playing }
     public var isBuffering: Bool {
@@ -110,11 +129,14 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var lastPlayedSavedAt: Date?
     /// The media played to its end; the next play starts again from 0.
     @ObservationIgnored private var reachedEnd = false
+    /// A seek was interrupted and hasn't landed yet, so its `didSeek` is still owed.
+    @ObservationIgnored private var awaitingSeekLanding = false
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
     @ObservationIgnored private var resumingIntent: Int?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private let startGate = StartGate()
     @ObservationIgnored private var observers: [PlaybackObserverToken: @MainActor (PlaybackCoordinatorEvent) -> Void] =
         [:]
     @ObservationIgnored private var queuedEvents: [PlaybackCoordinatorEvent] = []
@@ -185,8 +207,9 @@ public final class PlaybackCoordinator {
     /// The same media, already loaded, resumes in the same session (from `startTime` when given).
     /// Otherwise the streaming policy is checked first (a block leaves the current item as it is),
     /// then the current session is closed and a new one started at `startTime`, or else at the
-    /// newest of server progress, local audio progress and the last-played record, rewound by
-    /// ``AutoRewind``. Finished media starts from the beginning.
+    /// newest of server progress, local audio progress and the last-played record (the server's wins
+    /// a tie, as when progress is merged), rewound by ``AutoRewind``. Finished media starts from the
+    /// beginning.
     /// - Parameter allowingMeteredNetwork: The user agreed to stream on a metered network after
     ///   ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:key:)``. Never overrides "never".
     public func play(
@@ -247,17 +270,21 @@ public final class PlaybackCoordinator {
         }
         guard current == generation else { return }
 
-        await waitForCloses()
-        guard current == generation else { return }
-
-        let sessions = self.sessions
-        async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
-        let session: PlaybackSession
+        let started: StartedSession
         do {
-            session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
+            guard
+                let result = try await startSessionSerially(
+                    itemID: itemID, episodeID: episodeID, generation: current)
+            else { return }
+            started = result
+        } catch is CancellationError {
+            // A cancelled caller abandons the start; that isn't a failure. No session was opened.
+            if current == generation, phase == .starting { phase = .unloaded }
+            return
         } catch {
             return fail(Self.sessionError(error), generation: current)
         }
+        let session = started.session
         guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
 
         let source: AudioEngineSource
@@ -280,31 +307,50 @@ public final class PlaybackCoordinator {
         emit(.sessionStarted(sessionID: session.id, key: key))
 
         let local = try? await progressStore.progress(for: key)
-        let server = await serverProgress
+        let server = started.serverProgress
         guard current == generation else { return }
+        // On equal dates the first candidate wins, so the server's goes first: an unsent edit beats
+        // server progress only when strictly newer, as when ``ProgressSyncState`` merges.
         var candidates: [ProgressCandidate] = []
-        if let local {
-            // Ebook edits bump `lastUpdate`; only the audio position's own date counts here.
-            let date = local.audioEditedAt ?? local.serverBaseline?.lastUpdate ?? local.lastUpdate
+        switch server {
+        case .success(let progress?):
+            // An unsent audio edit stays the newest audio while the server's is as the row last saw
+            // it: the server's date is row-wide, so another device's ebook or finished change moves it.
+            if let local, local.audioDirty, local.serverAudioUnchanged(in: progress) { break }
+            // Playing again intentionally unfinishes a book, so the next audio PATCH keeps the local flag.
+            // Otherwise the position, date and flag all come from the fetched progress: `/play` may
+            // have captured an older position than the fetch returned.
+            if progress.isFinished || progress.currentTime > 0 || progress.duration > 0 {
+                candidates.append(
+                    ProgressCandidate(
+                        currentTime: progress.currentTime, updatedAt: progress.lastUpdate.map(Self.date(ms:)),
+                        isFinished: progress.isFinished))
+            } else {
+                candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
+            }
+        case .success(nil):
+            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
+        case .failure(let error):
+            // Undated: the session position is used only when there is nothing else.
+            logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public))")
+            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
+        }
+        // Dated by the audio and completion groups alone, never `lastUpdate`, which ebook edits bump.
+        // A row with no saved audio has no position to offer, so a finished-only edit on it (an item
+        // never played here, marked finished) adds no candidate: its flag carries no position, and
+        // the server's progress, which has the flag once sent, or the record is the position to use.
+        if let local, let audioSavedAt = local.audioSavedAt {
+            let finishedSavedAt = local.isFinished || local.finishedDirty ? local.finishedSavedAt : nil
             candidates.append(
-                ProgressCandidate(currentTime: local.currentTime, updatedAt: date, isFinished: local.isFinished))
+                ProgressCandidate(
+                    currentTime: local.currentTime, updatedAt: max(audioSavedAt, finishedSavedAt ?? audioSavedAt),
+                    isFinished: local.isFinished))
         }
         let record = lastPlayedStore.load().flatMap { $0.key == key ? $0 : nil }
         if let record {
             candidates.append(
                 ProgressCandidate(
                     currentTime: record.position, updatedAt: record.timestamp, isFinished: record.isFinished))
-        }
-        switch server {
-        case .success(let progress):
-            candidates.append(
-                ProgressCandidate(
-                    currentTime: session.currentTime, updatedAt: progress?.lastUpdate.map(Self.date(ms:)),
-                    isFinished: progress?.isFinished ?? false))
-        case .failure(let error):
-            // Undated: the session position is used only when there is nothing else.
-            logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public))")
-            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
         }
         // Kept until the load succeeds, so a retry after a failure starts there again.
         let plannedStart = pendingStartTime
@@ -343,8 +389,13 @@ public final class PlaybackCoordinator {
             await engine.seek(to: engine.timeline?.clamp(pending) ?? pending)
             guard current == generation, phase == .loaded else { return }
         }
-        emit(.loaded(time: engine.currentTime))
-        emit(.didSeek(time: engine.currentTime))
+        // An interrupted initial seek stays pending with the engine paused at 0: `.loaded` carries
+        // its target, and `.didSeek` waits for the landing (see `handle(_:)`).
+        let landed = engine.pendingSeekTarget == nil
+        awaitingSeekLanding = !landed
+        emit(.loaded(time: position))
+        guard current == generation, phase == .loaded else { return }
+        if landed { emit(.didSeek(time: engine.currentTime)) }
         guard current == generation, phase == .loaded else { return }
         saveLastPlayed()
         // A pause or resume during the seek above takes over.
@@ -364,19 +415,24 @@ public final class PlaybackCoordinator {
     }
 
     /// The single place loaded media resumes. In order: ``willResume``; one awaited seek (to
-    /// `startTime`, to 0 after the end, or back by `seconds` or ``AutoRewind``), which emits
+    /// `startTime`, else exactly to the target of an interrupted seek still pending, else to 0
+    /// after the end, else back by `seconds` or ``AutoRewind``), which emits
     /// ``PlaybackCoordinatorEvent/didSeek(time:)`` with where it landed; then play. A pause during
     /// the seek cancels the play, and a resume while one is in flight is ignored (a `startTime`
     /// replaces it). While already playing, a `startTime` is only a seek.
     private func resumeLoaded(rewindingBy seconds: Double?, startingAt startTime: Double?) async {
         let time = engine.currentTime
         let atEnd = reachedEnd || engine.state == .ended
+        let hasPendingSeek = engine.pendingSeekTarget != nil
         if let startTime, engine.isPlaybackRequested, !atEnd, resumingIntent == nil {
             // Already playing: just move.
             await seek(to: startTime)
             return
         }
-        guard startTime != nil || (resumingIntent == nil && (atEnd || !engine.isPlaybackRequested)) else { return }
+        guard
+            startTime != nil
+                || (resumingIntent == nil && (atEnd || hasPendingSeek || !engine.isPlaybackRequested))
+        else { return }
         resumeIntent += 1
         let intent = resumeIntent
         let current = generation
@@ -387,6 +443,10 @@ public final class PlaybackCoordinator {
         let target: Double?
         if let startTime {
             target = startTime
+        } else if let pending = engine.pendingSeekTarget {
+            // The user's interrupted seek is where playback goes: not rewound from the old
+            // position, nor replaced by the restart from the end.
+            target = pending
         } else if atEnd {
             target = 0
         } else {
@@ -417,7 +477,7 @@ public final class PlaybackCoordinator {
             engine.pause()
             lastPlayedAt = now()
             saveLastPlayed()
-            emit(.paused(time: engine.currentTime))
+            emit(.paused(time: position))
         case .idle, .unloaded: return
         }
     }
@@ -433,13 +493,20 @@ public final class PlaybackCoordinator {
         case .loaded:
             let current = generation
             let target = engine.timeline?.clamp(time) ?? max(time, 0)
-            guard await engine.seek(to: target) == .completed, current == generation, phase == .loaded else {
+            reachedEnd = false
+            awaitingSeekLanding = true
+            let result = await engine.seek(to: target)
+            guard current == generation, phase == .loaded else { return nil }
+            guard result == .completed else {
+                awaitingSeekLanding = engine.pendingSeekTarget != nil
                 return nil
             }
-            reachedEnd = false
             let landed = engine.currentTime
-            emit(.didSeek(time: landed))
-            saveLastPlayed()
+            if awaitingSeekLanding {
+                awaitingSeekLanding = false
+                emit(.didSeek(time: landed))
+                saveLastPlayed()
+            }
             return landed
         case .unloaded:
             let finite = time.isFinite ? max(time, 0) : 0
@@ -517,6 +584,12 @@ public final class PlaybackCoordinator {
         guard phase == .loaded else { return }
         switch event {
         case .tick(let time):
+            if awaitingSeekLanding, engine.pendingSeekTarget == nil {
+                awaitingSeekLanding = false
+                emit(.didSeek(time: engine.currentTime))
+                guard phase == .loaded else { return }
+                saveLastPlayed()
+            }
             if engine.state == .playing {
                 let date = now()
                 lastPlayedAt = date
@@ -545,6 +618,10 @@ public final class PlaybackCoordinator {
     private func startEngine() {
         engine.setRate(Float(rate))
         engine.play()
+        // The engine can refuse at once (the audio session won't activate): it has then cleared
+        // the request and reported `.failed`.
+        guard engine.isPlaybackRequested else { return }
+        error = nil
         emit(.playbackStarted)
     }
 
@@ -564,8 +641,9 @@ public final class PlaybackCoordinator {
     /// Closes the current session (if any) and unloads the engine.
     private func tearDown(reason: SessionCloseReason) {
         let wasLoaded = phase == .loaded
+        awaitingSeekLanding = false
         if wasLoaded {
-            unloadedPosition = engine.currentTime
+            unloadedPosition = position
             unloadedDuration = engine.duration
         }
         resumeIntent += 1
@@ -619,10 +697,33 @@ public final class PlaybackCoordinator {
         timer.cancel()
     }
 
+    /// Takes this start's turn (see the class doc): the previous start has returned and the closes
+    /// in flight have finished or timed out. Returns `nil`, having sent nothing, when a newer play,
+    /// stop or restore superseded `generation` while it queued. The gate is released as this
+    /// returns, before the caller registers the close of a stale session, so the next start's
+    /// ``waitForCloses()`` sees it.
+    private func startSessionSerially(
+        itemID: String, episodeID: String?, generation: Int
+    ) async throws -> StartedSession? {
+        await startGate.acquire()
+        defer { startGate.release() }
+        guard self.generation == generation else { return nil }
+        await waitForCloses()
+        guard self.generation == generation else { return nil }
+        let sessions = self.sessions
+        // Read only, but after the closes: a restart must see the previous session's final report.
+        async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
+        let session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
+        return StartedSession(session: session, serverProgress: await serverProgress)
+    }
+
     /// Waits for the background closes started so far (tests).
     func waitForPendingCloses() async {
         for task in closeTasks.values { await task.value }
     }
+
+    /// The plays queued behind a session start (tests).
+    var queuedSessionStarts: Int { startGate.waiterCount }
 
     private func makeSource(session: PlaybackSession, stream: ResolvedStream) throws(StreamResolutionError)
         -> AudioEngineSource
@@ -681,6 +782,39 @@ public final class PlaybackCoordinator {
 
     private static func date(ms: Int) -> Date {
         Date(timeIntervalSince1970: Double(ms) / 1000)
+    }
+}
+
+/// A session the server opened, with the progress fetched alongside it.
+private struct StartedSession {
+    let session: PlaybackSession
+    let serverProgress: Result<MediaProgress?, any Error>
+}
+
+/// Admits one session start at a time, in arrival order, with no timeout.
+@MainActor
+private final class StartGate {
+    private var isHeld = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    var waiterCount: Int { waiters.count }
+
+    /// Returns at once when the gate is free, else once every earlier waiter has released it.
+    func acquire() async {
+        guard isHeld else {
+            isHeld = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// Hands the gate to the longest waiter, or frees it.
+    func release() {
+        if waiters.isEmpty {
+            isHeld = false
+        } else {
+            waiters.removeFirst().resume()
+        }
     }
 }
 

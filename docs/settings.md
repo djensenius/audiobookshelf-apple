@@ -36,7 +36,7 @@ These legacy settings are not ported:
 
 | Legacy setting | Settings screen | Notes |
 | --- | --- | --- |
-| `enableAltView` | Display: Use bookshelf view | Inverted, as in legacy (`enableBookshelfView`). |
+| `enableAltView` | Display: Use bookshelf view | Inverted, as in legacy (`enableBookshelfView`). It only sets the card style (title and author under the cover, no shelf rows). Grid or list is the per-library `viewMode` in `libraryViewPreferences`, chosen from the library toolbar, not from Settings. |
 | `lockOrientation` | Dropped | See above. |
 | `hapticFeedback` | Display: Haptic feedback | Only on devices that can play haptics (`CHHapticEngine.capabilitiesForHardware().supportsHaptics`): iPhone, not iPad or Mac. Plays the chosen strength when changed. |
 | `languageCode` | Dropped | See above; replaced by the Language row. |
@@ -57,3 +57,8 @@ These legacy settings are not ported:
 | `playbackRate`, `chapterTrack` (`PlayerSettings`) | Not on this screen | Set from the player, as in legacy; stored in `AppSettings`. |
 
 `AppSettings.lastLibraryIDs` is native-only navigation state and has no control.
+
+`AppSettings.libraryViewPreferences` (`settings_libraryViewPreferences`) is native-only too and has
+no Settings control. It stores each library's sort, filter, grid or list view mode and collapse
+series as a small JSON string under the key `serverID|userID|libraryID`. Nothing removes an entry
+when an account or connection is removed (like `lastLibraryIDs`); only `resetAll()` clears it.

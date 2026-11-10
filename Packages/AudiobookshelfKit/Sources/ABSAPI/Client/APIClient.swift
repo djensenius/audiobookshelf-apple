@@ -4,7 +4,8 @@ import Foundation
 ///
 /// Every request carries the connection's custom headers. Authenticated requests carry the
 /// access token; on a 401 the client refreshes the tokens once with `POST /auth/refresh`
-/// (concurrent 401s share a single refresh), persists them through the ``TokenProvider``, and
+/// (concurrent 401s share a single refresh, and clients sharing a provider share it through
+/// ``TokenProvider/refreshTokens(_:using:)``), persists them through the ``TokenProvider``, and
 /// retries the request once. If the server rejects the refresh token, the provider ends the
 /// session and ``APIError/sessionExpired`` is thrown. If the user signs out or in again while a
 /// refresh is in flight, its result is discarded and waiting requests throw `CancellationError`.
@@ -135,7 +136,7 @@ public actor APIClient {
     }
 
     /// Replaces the connection's custom headers.
-    /// - Throws: ``CustomHeaderError`` if a header is reserved (`Authorization` or `Cookie`).
+    /// - Throws: ``CustomHeaderError`` if a header is reserved.
     public func setCustomHeaders(_ headers: [String: String]) throws(CustomHeaderError) {
         try configuration.setCustomHeaders(headers)
     }
@@ -199,7 +200,8 @@ public actor APIClient {
                 // Always handled, whatever the send budget: the refreshed pair is rejected, so the
                 // session is over unless a different one replaced it in the meantime.
                 let replacement =
-                    refreshedSinceSend ? await tokenProvider.tokens() : await expireSession(rejected: tokens)
+                    refreshedSinceSend
+                    ? await tokenProvider.tokens() : await expireSession(rejected: tokens, afterRefreshes: true)
                 guard let current = replacement else { throw APIError.sessionExpired }
                 // A pair another request refreshed from the rejected one is still this chain's
                 // refreshed session, so its rejection expires too instead of refreshing again.
@@ -423,7 +425,7 @@ public actor APIClient {
                 // once it has completed (for example while this request reads the new tokens).
                 // Only this flight's entry is removed, never a newer flight for the same pair.
                 defer { if refreshFlights[current]?.id == id { refreshFlights[current] = nil } }
-                try await refresh(current)
+                try await tokenProvider.refreshTokens(current) { try await self.refresh(current) }
             }
             refreshFlights[current] = RefreshFlight(id: id, task: task)
             try await task.value
@@ -595,17 +597,21 @@ public actor APIClient {
     /// Ends the session if `rejected` is still current. Otherwise the stored tokens changed
     /// since it was used (for example the user signed in again) and the newer tokens are
     /// returned; returns `nil` when the session is over.
-    private func expireSession(rejected: AuthTokens) async -> AuthTokens? {
+    /// - Parameter afterRefreshes: For a 401 to a request, which waits for refreshes of `rejected`
+    ///   that other clients of the provider are running. Never from inside a refresh.
+    private func expireSession(rejected: AuthTokens, afterRefreshes: Bool = false) async -> AuthTokens? {
         nextExpiryID += 1
         let id = nextExpiryID
         let tokenProvider = tokenProvider
         // Records the expiry before any waiter in ``accessToken(replacing:)`` resumes. A failed
         // compare-and-swap (the session already changed) isn't a server expiry.
         let expiry = Task {
-            var expired = false
-            if await tokenProvider.expireSession(ifCurrent: rejected) {
+            let expired =
+                afterRefreshes
+                ? await tokenProvider.expireSessionAfterRefreshes(ifCurrent: rejected)
+                : await tokenProvider.expireSession(ifCurrent: rejected)
+            if expired {
                 pairStates[rejected, default: PairState()].expiredAt = refreshGeneration
-                expired = true
             }
             pendingExpiries[id] = nil
             return expired

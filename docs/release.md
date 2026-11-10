@@ -87,6 +87,18 @@ CI_APP_STORE_SIGNED_APP_PATH=/tmp CI_PRIMARY_REPOSITORY_PATH="$PWD" CI_BUILD_NUM
   ci_scripts/ci_post_xcodebuild.sh && cat TestFlight/WhatToTest.en-US.txt && rm -r TestFlight
 ```
 
+## The legacy app's URL scheme
+
+The app (bundle ID `org.davidjensenius.Audiobookshelf`) registers the `audiobookshelf://`
+URL scheme for deep links ([ADR 0004](adr/0004-navigation.md)). The legacy app
+(`com.audiobookshelf.app`) registers the same scheme, and there is no second one.
+
+- With both installed, iOS doesn't define which app receives an `audiobookshelf://` link,
+  so a link can open the legacy app instead. Sign-in isn't affected, because the sign-in
+  session receives its own callback ([OIDC testing](testing/oidc.md)).
+- Ask testers to remove the legacy app, and check deep links on a device that doesn't
+  have it.
+
 ## `.xcproj` fallback
 
 Apple doesn't say whether Xcode Cloud accepts the JSON project format

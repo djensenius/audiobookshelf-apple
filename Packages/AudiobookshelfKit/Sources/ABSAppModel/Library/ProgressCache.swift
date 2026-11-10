@@ -33,9 +33,14 @@ public final class ProgressCache {
     @Observable
     final class Entry {
         var value: MediaProgress?
-        /// The cache ``ProgressCache/revision`` of the last ``ProgressCache/apply(_:)`` that
-        /// stored a value here or ``ProgressCache/remove(libraryItemID:episodeID:)``, or 0.
+        /// The cache ``ProgressCache/revision`` of the last update that stored a value here or
+        /// ``ProgressCache/remove(libraryItemID:episodeID:)``, or 0.
         @ObservationIgnored var revision = 0
+        /// The `revision` this entry had before its last ``ProgressCache/apply(_:)``; restored by
+        /// ``ProgressCache/rollback(_:to:)``.
+        @ObservationIgnored var revisionBeforeApply = 0
+        @ObservationIgnored var isOptimistic = false
+        @ObservationIgnored var optimisticCommitSerial: Int?
     }
 
     /// Identifies one request for the full list; see ``beginSeed()``.
@@ -44,6 +49,21 @@ public final class ProgressCache {
         let request: Int
         /// ``ProgressCache/revision`` when the request started.
         let boundary: Int
+        fileprivate let optimisticCommitBoundary: Int
+    }
+
+    struct SessionToken: Sendable, Equatable {
+        fileprivate let generation: Int
+    }
+
+    struct OptimisticUpdate: Sendable {
+        fileprivate let key: String
+        fileprivate let progress: MediaProgress
+        fileprivate let revision: Int
+        fileprivate let previousRevision: Int
+        fileprivate let previousRevisionBeforeApply: Int
+        fileprivate let previousIsOptimistic: Bool
+        fileprivate let previousCommitSerial: Int?
     }
 
     private var entries: [String: Entry] = [:]
@@ -52,9 +72,9 @@ public final class ProgressCache {
     private var seedRequests = 0
     /// The request of the last seed applied in this generation.
     private var appliedSeedRequest = 0
+    private var optimisticCommitSerial = 0
 
-    /// Increases with every ``apply(_:)`` that stores progress and every
-    /// ``remove(libraryItemID:episodeID:)``.
+    /// Increases with every stored update and every ``remove(libraryItemID:episodeID:)``.
     public private(set) var revision = 0
 
     public init() {}
@@ -73,7 +93,17 @@ public final class ProgressCache {
     /// ```
     public func beginSeed() -> SeedToken {
         seedRequests += 1
-        return SeedToken(generation: generation, request: seedRequests, boundary: revision)
+        return SeedToken(
+            generation: generation, request: seedRequests, boundary: revision,
+            optimisticCommitBoundary: optimisticCommitSerial)
+    }
+
+    func sessionToken() -> SessionToken {
+        SessionToken(generation: generation)
+    }
+
+    func isCurrent(_ token: SessionToken) -> Bool {
+        token.generation == generation
     }
 
     /// Replaces the cache with the server's full list, requested with `token`. Returns whether it
@@ -92,6 +122,8 @@ public final class ProgressCache {
     /// Against the entries, with `boundary` the ``revision`` when the request started:
     /// - An entry applied after `boundary` may be missing from or older in the list, so it is
     ///   kept unless the list has a row for it with a later `lastUpdate` (both dated).
+    /// - A successful optimistic action is reconciled by a seed requested after its completion,
+    ///   independent of timestamp ordering; a seed already in flight keeps the optimistic value.
     /// - An entry removed after `boundary` stays removed, even if the list has a row for it.
     /// - Any other entry missing from the list is removed.
     /// - Any other entry listed takes the list's row unless the cached one is newer (for example
@@ -115,6 +147,18 @@ public final class ProgressCache {
                 if entry.revision > boundary { seeded[key] = nil }
                 continue
             }
+            if entry.isOptimistic {
+                guard entry.revision <= boundary,
+                    let commitSerial = entry.optimisticCommitSerial,
+                    commitSerial <= token.optimisticCommitBoundary
+                else {
+                    seeded[key] = existing
+                    continue
+                }
+                // This complete server snapshot started after the successful write, so its
+                // timestamp is authoritative even when the device clock ran ahead.
+                continue
+            }
             if entry.revision > boundary {
                 if let incoming = seeded[key], Self.isStrictlyNewer(incoming, than: existing) { continue }
                 seeded[key] = existing
@@ -125,11 +169,20 @@ public final class ProgressCache {
         for (key, entry) in entries where seeded[key] == nil && entry.value != nil {
             // A real change, so readers are notified and create a new entry when they read again.
             entry.value = nil
+            entry.isOptimistic = false
+            entry.optimisticCommitSerial = nil
             entries[key] = nil
         }
         for (key, value) in seeded {
             let entry = entry(for: key)
             if entry.value != value { entry.value = value }
+            if entry.isOptimistic, entry.revision <= boundary,
+                let commitSerial = entry.optimisticCommitSerial,
+                commitSerial <= token.optimisticCommitBoundary
+            {
+                entry.isOptimistic = false
+                entry.optimisticCommitSerial = nil
+            }
         }
         return true
     }
@@ -141,8 +194,80 @@ public final class ProgressCache {
         let entry = entry(for: progress.progressKey)
         if let existing = entry.value, !Self.isNewer(progress, than: existing) { return false }
         revision += 1
+        entry.revisionBeforeApply = entry.revision
         entry.revision = revision
         entry.value = progress
+        entry.isOptimistic = false
+        entry.optimisticCommitSerial = nil
+        return true
+    }
+
+    func applyOptimistic(_ progress: MediaProgress, token: SessionToken) -> OptimisticUpdate? {
+        guard isCurrent(token) else { return nil }
+        let entry = entry(for: progress.progressKey)
+        let previousRevision = entry.revision
+        let previousRevisionBeforeApply = entry.revisionBeforeApply
+        let previousIsOptimistic = entry.isOptimistic
+        let previousCommitSerial = entry.optimisticCommitSerial
+        revision += 1
+        entry.revisionBeforeApply = previousRevision
+        entry.revision = revision
+        entry.value = progress
+        entry.isOptimistic = true
+        entry.optimisticCommitSerial = nil
+        return OptimisticUpdate(
+            key: progress.progressKey, progress: progress, revision: revision,
+            previousRevision: previousRevision, previousRevisionBeforeApply: previousRevisionBeforeApply,
+            previousIsOptimistic: previousIsOptimistic, previousCommitSerial: previousCommitSerial)
+    }
+
+    @discardableResult
+    func commitOptimistic(_ update: OptimisticUpdate, token: SessionToken) -> Bool {
+        guard isCurrent(token), let entry = entries[update.key],
+            entry.revision == update.revision, entry.value == update.progress
+        else { return false }
+        optimisticCommitSerial += 1
+        entry.optimisticCommitSerial = optimisticCommitSerial
+        return true
+    }
+
+    @discardableResult
+    func rollbackOptimistic(
+        _ update: OptimisticUpdate, to previous: MediaProgress?, token: SessionToken
+    ) -> Bool {
+        guard isCurrent(token), let entry = entries[update.key],
+            entry.revision == update.revision, entry.value == update.progress
+        else { return false }
+        entry.revision = update.previousRevision
+        entry.revisionBeforeApply = update.previousRevisionBeforeApply
+        entry.value = previous
+        entry.isOptimistic = update.previousIsOptimistic
+        entry.optimisticCommitSerial = update.previousCommitSerial
+        return true
+    }
+
+    /// Puts `previous` back (or removes the entry when it is `nil`), but only while the entry
+    /// still holds `applied`: an update that arrived since (the socket, local playback, another
+    /// action) is newer and stays. Returns whether the entry was restored.
+    ///
+    /// The entry gets the revision it had before `applied`, so the rollback doesn't count as a
+    /// local change. That matters in two cases. With a `nil` pre-image, a seed requested before
+    /// the optimistic apply still lands when it arrives after the rollback (otherwise the
+    /// tombstone would make it skip the entry). With a non-nil pre-image it changes the outcome
+    /// only when a list row's `lastUpdate` equals the cached one: the row replaces the entry
+    /// instead of the local value being kept.
+    ///
+    /// A seed that arrives after the optimistic apply and loses to it can leave the rollback
+    /// restoring a pre-image older than that seed's row; the next seed corrects it (as before
+    /// this change).
+    @discardableResult
+    public func rollback(_ applied: MediaProgress, to previous: MediaProgress?) -> Bool {
+        let entry = entry(for: applied.progressKey)
+        guard entry.value == applied else { return false }
+        entry.revision = entry.revisionBeforeApply
+        entry.value = previous
+        entry.isOptimistic = false
+        entry.optimisticCommitSerial = nil
         return true
     }
 
@@ -153,6 +278,8 @@ public final class ProgressCache {
         revision += 1
         entry.revision = revision
         if entry.value != nil { entry.value = nil }
+        entry.isOptimistic = false
+        entry.optimisticCommitSerial = nil
     }
 
     /// Empties every entry. The entry objects are kept, so views watching a key (even one that
@@ -161,8 +288,12 @@ public final class ProgressCache {
     public func clear() {
         generation += 1
         appliedSeedRequest = 0
+        optimisticCommitSerial = 0
         for entry in entries.values {
             entry.revision = 0
+            entry.revisionBeforeApply = 0
+            entry.isOptimistic = false
+            entry.optimisticCommitSerial = nil
             // Setting nil over nil isn't guaranteed to stay silent, so only change real values.
             if entry.value != nil { entry.value = nil }
         }
