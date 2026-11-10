@@ -106,7 +106,8 @@ extension ProgressSend {
 /// audio, any PATCH can auto-finish, and one without server progress creates defaults): when
 /// that PATCH is acknowledged, when an echo matches it after its response was lost, when server
 /// progress is merged while it is in flight, and when its entry is dropped from the full list.
-/// A group's flag clears when its own send is acknowledged or it stops being dirty.
+/// While a group's flag is set, no echo settles it, even one matching a send we hold: the flag
+/// clears only when the group's own send is acknowledged (the response to a PATCH we hold).
 struct ProgressSyncState: Sendable, Equatable {
     var currentTime: Double = 0
     var progress: Double = 0
@@ -125,6 +126,9 @@ struct ProgressSyncState: Sendable, Equatable {
     var unacknowledgedSends: [ProgressSend] = []
     /// Groups whose `<group>HistoryTruncated` flag is set.
     var truncated: ProgressGroups = []
+    /// Whether the row's latest send carried ebook (in memory only, set by the store): an
+    /// acknowledged ebook send leaves no entry, so the evidence can't tell.
+    var ebookSentLast = false
 
     /// A row seeded from known server progress: every field and the baseline, nothing dirty.
     init(seed server: ProgressBaseline) {
@@ -140,27 +144,28 @@ struct ProgressSyncState: Sendable, Equatable {
 
     // MARK: - Local edits
 
-    /// Applies a local change: marks each changed group dirty and sets its edit time to `now`.
+    /// Applies a local change: marks each changed group dirty and sets its edit time to `now`
+    /// (or just after the group's previous edit time, if that isn't earlier).
     mutating func apply(_ edit: ProgressEdit, now: Date) {
         if let audio = edit.audio {
             currentTime = audio.currentTime
             duration = audio.duration
             progress = audio.progress
             dirty.insert(.audio)
-            audioEditedAt = now
+            audioEditedAt = Self.edit(after: audioEditedAt, now: now)
         }
         if let finished = edit.isFinished {
             isFinished = finished
             // Whole milliseconds, as the server stores it, so its echo compares equal.
             finishedAt = finished ? Self.wholeMilliseconds(now) : nil
             dirty.insert(.finished)
-            finishedEditedAt = now
+            finishedEditedAt = Self.edit(after: finishedEditedAt, now: now)
         }
         if let ebook = edit.ebook {
             ebookLocation = ebook.location
             ebookProgress = ebook.progress
             dirty.insert(.ebook)
-            ebookEditedAt = now
+            ebookEditedAt = Self.edit(after: ebookEditedAt, now: now)
         }
         lastUpdate = max(lastUpdate, now)
     }
@@ -188,14 +193,19 @@ struct ProgressSyncState: Sendable, Equatable {
 
     /// The group the next PATCH carries: audio, then finished, then ebook. When the newest
     /// unacknowledged send (a failed or unanswered one) carried audio or finished and ebook is
-    /// dirty, ebook goes next, so the two alternate while one keeps failing. Only once a server
+    /// dirty, ebook goes next, unless ebook was sent last (``ebookSentLast``), so the two
+    /// alternate while one keeps failing. Only once a server
     /// baseline exists: on a row the server has no progress for, an ebook PATCH creates it with
     /// zero audio and unfinished (#53), so audio and finished go first.
     var nextSendGroup: ProgressGroups? {
         let chain = [ProgressGroups.audio, .finished].first { dirty.contains($0) }
         guard dirty.contains(.ebook) else { return chain }
         guard let chain else { return .ebook }
-        if serverBaseline != nil, let last = unacknowledgedSends.last, !last.groups.contains(.ebook) { return .ebook }
+        if !ebookSentLast, serverBaseline != nil, let last = unacknowledgedSends.last,
+            !last.groups.contains(.ebook)
+        {
+            return .ebook
+        }
         return chain
     }
 
@@ -262,6 +272,14 @@ struct ProgressSyncState: Sendable, Equatable {
         shieldSideEffects(of: sent, unseeded: unseeded)
     }
 
+    /// A PATCH taken from a deleted row for the same media may still reach the server (and may
+    /// create its progress, with side effects on every group), and this row holds no evidence of
+    /// it: each pending edit keeps its local value until its own send is acknowledged, as when
+    /// evidence was truncated.
+    mutating func shieldFromObsoleteSend() {
+        truncated.formUnion(dirty)
+    }
+
     // MARK: - Merging server progress
 
     /// Merges server progress, group by group, except the `excluded` groups (those carried by a
@@ -302,22 +320,36 @@ struct ProgressSyncState: Sendable, Equatable {
         }
         // The server hasn't changed the group since we last saw it: keep the local edit.
         if let baseline = serverBaseline, Self.matches(server, baseline, group) { return }
+        // The server value may be one of our dropped sends, or a side effect of our PATCH. Even
+        // one matching a send we hold may be the echo of a dropped send with the same value, the
+        // held one never delivered: only an acknowledgement (``acknowledge``) settles the group.
+        if truncated.contains(group) { return }
         // The echo of one of our PATCHes whose response was lost. Only this group's evidence is
         // settled and pruned (from that entry and every older one); other groups keep theirs.
-        if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }) {
+        if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }),
+            let first = unacknowledgedSends.firstIndex(where: { Self.matches(server, $0, group) })
+        {
+            // An older matching send may be the echo's origin, and the newest one may never have
+            // reached the server: unless the newest would leave the server holding the same value
+            // either way (no other value sent in between, and not matched by normalization), only
+            // the evidence up to the oldest match is settled and the edit stays pending.
+            let ambiguous =
+                first < index
+                && (!Self.holdsSentValue(server, unacknowledgedSends[index], group)
+                    || unacknowledgedSends[first..<index].contains {
+                        $0.groups.contains(group) && !Self.matches(server, $0, group)
+                    })
             let sentEditedAt = unacknowledgedSends[index].editedAt(group)
-            for older in 0...index {
+            for older in 0...(ambiguous ? first : index) {
                 unacknowledgedSends[older].remove(group)
             }
             unacknowledgedSends.removeAll { $0.groups.isEmpty }
-            if editedAt(group) == sentEditedAt {
+            if !ambiguous, editedAt(group) == sentEditedAt {
                 take(group, from: server)  // The server's normalized form of our value.
                 markClean(group)
             }
             return
         }
-        // The server value may be one of our dropped sends, or a side effect of our PATCH.
-        if truncated.contains(group) { return }
         // A real conflict. `server.lastUpdate` is row-wide, an upper bound on when the group
         // changed, so ties and unknown edit times favour the server.
         if let edited = editedAt(group), edited > server.lastUpdate { return }
@@ -434,6 +466,14 @@ struct ProgressSyncState: Sendable, Equatable {
         }
     }
 
+    /// Whether `server` holds `send`'s value of `group` as sent, not a normalization of it (an
+    /// auto-finished un-finish, which a repeat applied to the finished progress wouldn't give).
+    private static func holdsSentValue(_ server: ProgressBaseline, _ send: ProgressSend, _ group: ProgressGroups)
+        -> Bool
+    {
+        group != .finished || send.finished?.isFinished == server.isFinished
+    }
+
     private static func audioMatches(_ server: ProgressBaseline, _ currentTime: Double, _ duration: Double) -> Bool {
         abs(server.currentTime - currentTime) <= 1 && abs(server.duration - duration) <= 1
     }
@@ -460,6 +500,14 @@ struct ProgressSyncState: Sendable, Equatable {
         Int64((date.timeIntervalSince1970 * 1000).rounded())
     }
 
+    /// An edit time identifies the edit (an acknowledgement clears a group only if it wasn't
+    /// edited since the send), so it is later than the group's previous one even when the clock
+    /// repeats a value or steps back.
+    private static func edit(after previous: Date?, now: Date) -> Date {
+        guard let previous, now <= previous else { return now }
+        return Date(timeIntervalSinceReferenceDate: previous.timeIntervalSinceReferenceDate.nextUp)
+    }
+
     /// `date` truncated to whole milliseconds, as the server stores it.
     static func wholeMilliseconds(_ date: Date) -> Date {
         Date(timeIntervalSince1970: (date.timeIntervalSince1970 * 1000).rounded(.down) / 1000)
@@ -467,7 +515,7 @@ struct ProgressSyncState: Sendable, Equatable {
 }
 
 extension ProgressBaseline {
-    mutating func copy(_ group: ProgressGroups, from other: ProgressBaseline) {
+    fileprivate mutating func copy(_ group: ProgressGroups, from other: ProgressBaseline) {
         switch group {
         case .audio:
             currentTime = other.currentTime

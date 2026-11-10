@@ -26,7 +26,8 @@ public enum ServerProgressSource: Sendable, Equatable {
     /// check was issued after the row's last settlement, so it includes every acknowledged PATCH.
     case fetch
     /// A socket event (`user_updated`, `user_item_progress_updated`). It may have been emitted
-    /// before an acknowledged PATCH was applied, as the PATCH's 200 has no body.
+    /// before an acknowledged PATCH was applied, as the PATCH's 200 has no body; a value equal to
+    /// the acknowledged one doesn't prove otherwise.
     case socket
 }
 
@@ -53,17 +54,37 @@ public enum SessionUploadResult: Sendable, Equatable {
     public static let missingResultsPerFailure = 3
 
     var pendingCommitFailure: (any Error)?
+    /// Test seams: the next row lookup fails with this error; the number of row lookups made.
+    private var pendingFetchFailure: (any Error)?
+    private(set) var rowFetchCount = 0
 
     // In memory only: no fetch or PATCH outlives the process.
     private var generation: UInt64 = 0
     private var rowGenerations: [String: UInt64] = [:]
-    private var inFlight: [String: (token: UUID, groups: ProgressGroups)] = [:]
-    /// Groups acknowledged without a server time whose value the server hasn't confirmed since.
-    private var unconfirmed: [String: ProgressGroups] = [:]
+    /// The generation after each row last merged server values: a fetch captured since was read
+    /// after the server held them.
+    private var mergedAt: [String: UInt64] = [:]
+    /// The send in flight per row, with the row it was taken from: a row deleted meanwhile and
+    /// recreated for the same key isn't the one the response settles.
+    private var inFlight: [String: (token: UUID, groups: ProgressGroups, row: PersistentIdentifier)] = [:]
+    /// Rows acknowledged without a server time that wait for a fetch issued after the
+    /// acknowledgement, with the latest socket value received meanwhile and its capture.
+    /// Rows whose latest send was an ebook one: their next send goes back to audio or finished.
+    private var ebookSentLast: Set<String> = []
+    private var awaitingFetch: [String: (key: MediaKey, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] =
+        [:]
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "persistence")
 
     // MARK: - Progress
+
+    /// Rows whose PATCH was acknowledged without a server time: fetch each one
+    /// (`GET /api/me/progress/:id`, capturing the generation first) and apply it with
+    /// `source: .fetch`. Until then their socket values are held. Without the fetch a row keeps
+    /// the acknowledged values, which the server holds unless it normalized them.
+    public var needsConfirmationFetch: Set<MediaKey> {
+        Set(awaitingFetch.values.map(\.key))
+    }
 
     /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
     public func captureGeneration() -> ProgressGeneration {
@@ -115,45 +136,62 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Merges server progress (from `/api/me`, an expanded item, `/api/me/progress/:id` or a
     /// socket event) into existing rows; media without a row is skipped. Values for a row edited
     /// or settled since `capturedAt` are dropped, and groups carried by a PATCH in flight aren't
-    /// merged. Returns the keys whose rows were merged.
+    /// merged, nor are values whose `lastUpdate` isn't later than the baseline's (another write in
+    /// the same millisecond may predate it), except from a fetch captured after the row's last
+    /// merge. Returns the keys whose rows were merged.
     ///
-    /// A PATCH's 200 carries no server time, so after an acknowledgement a socket event can hold
-    /// older values with any `lastUpdate`. Until a fetch, or a socket event holding the
-    /// acknowledged value (socket events arrive in order), socket values for the acknowledged
-    /// groups are ignored.
+    /// A PATCH's 200 carries no server time, so after an acknowledgement a socket event may have
+    /// been emitted before the PATCH was applied, with any `lastUpdate`. Until a fetch issued
+    /// after the acknowledgement is applied (``needsConfirmationFetch``), socket values for the
+    /// row aren't merged; the latest is kept and merged after that fetch only if its `lastUpdate`
+    /// is strictly later than the fetch's (on a tie the fetch wins).
     @discardableResult
     public func applyServerProgress(
         _ updates: [MediaKey: ProgressBaseline],
         capturedAt: ProgressGeneration,
         source: ServerProgressSource
     ) throws -> Set<MediaKey> {
-        let (merged, held) = try commit {
+        var recorded: [String: ProgressBaseline] = [:]
+        var confirmed: Set<String> = []
+        let merged = try commit {
             var merged: Set<MediaKey> = []
-            var held: [String: ProgressGroups] = [:]
+            let rows = try fetchRows(of: Set(updates.keys.map(\.serverConnectionID)))
             for (key, server) in updates {
-                if let edited = rowGenerations[key.rawValue], edited > capturedAt.value { continue }
-                guard let row = try fetchRow(key) else { continue }
-                var state = ProgressSyncState(row)
-                var server = server
-                var stillHeld = source == .fetch ? [] : unconfirmed[key.rawValue] ?? []
-                if let baseline = state.serverBaseline {
-                    for group in ProgressGroups.each where stillHeld.contains(group) {
-                        if ProgressSyncState.matches(server, baseline, group) {
-                            stillHeld.remove(group)
-                        } else {
-                            server.copy(group, from: baseline)
-                        }
-                    }
+                let raw = key.rawValue
+                guard let row = rows[raw] else { continue }
+                if let edited = rowGenerations[raw], edited > capturedAt.value { continue }
+                let takingTies = source == .fetch && capturedAt.value >= mergedAt[raw] ?? 0
+                guard let awaiting = awaitingFetch[raw] else {
+                    if merge(server, into: row, takingTies: takingTies) { merged.insert(key) }
+                    continue
                 }
-                guard state.merge(server, excluding: inFlight[key.rawValue]?.groups ?? []) else { continue }
-                state.write(to: row)
-                merged.insert(key)
-                held[key.rawValue] = stillHeld
+                guard source == .fetch else {
+                    recorded[raw] = server
+                    continue
+                }
+                // Passing the generation check, the fetch was issued after the acknowledgement.
+                confirmed.insert(raw)
+                if merge(server, into: row, takingTies: takingTies) { merged.insert(key) }
+                // Server times are milliseconds, so a pre-PATCH snapshot can tie the fetch; only a
+                // strictly newer one can have been emitted after it.
+                if let latest = awaiting.latest, rowGenerations[raw] ?? 0 <= latest.capturedAt,
+                    latest.server.lastUpdate > server.lastUpdate,
+                    merge(latest.server, into: row)
+                {
+                    merged.insert(key)
+                }
             }
-            return (merged, held)
+            return merged
         }
-        for (key, groups) in held {
-            unconfirmed[key] = groups.isEmpty ? nil : groups
+        for (raw, server) in recorded {
+            awaitingFetch[raw]?.latest = (server, capturedAt.value)
+        }
+        for raw in confirmed {
+            awaitingFetch[raw] = nil
+        }
+        if !merged.isEmpty {
+            generation += 1
+            for key in merged { mergedAt[key.rawValue] = generation }
         }
         return merged
     }
@@ -165,45 +203,49 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// the next group.
     public func beginSend(for key: MediaKey, now: Date = .now) throws -> ProgressPatch? {
         guard inFlight[key.rawValue] == nil else { return nil }
-        let send: ProgressSend? = try commit {
+        let taken: (ProgressSend, PersistentIdentifier)? = try commit {
             guard let row = try fetchRow(key) else { return nil }
             var state = ProgressSyncState(row)
+            state.ebookSentLast = ebookSentLast.contains(key.rawValue)
             guard let send = state.beginSend() else { return nil }
             state.write(to: row)
             row.lastSyncAttemptAt = now
-            return send
+            return (send, row.persistentModelID)
         }
-        guard let send else { return nil }
+        guard let (send, rowID) = taken else { return nil }
         let patch = ProgressPatch(key: key, values: send, token: UUID())
-        inFlight[key.rawValue] = (patch.token, send.groups)
+        inFlight[key.rawValue] = (patch.token, send.groups, rowID)
+        if send.groups == .ebook {
+            ebookSentLast.insert(key.rawValue)
+        } else {
+            ebookSentLast.remove(key.rawValue)
+        }
         return patch
     }
 
     /// The PATCH succeeded. `serverLastUpdate` is the response's `lastUpdate`, when it has one.
     /// Returns `false`, changing nothing, when `patch` is not the row's send in flight (a late or
-    /// repeated response for a send already settled).
+    /// repeated response for a send already settled). A row deleted and recreated for the same
+    /// key since ``beginSend(for:now:)`` isn't acknowledged, but its pending edits are shielded
+    /// from the old PATCH's echo; if that can't be saved, the send stays in flight and this
+    /// throws, so retry it.
     @discardableResult
     public func completeSend(_ patch: ProgressPatch, serverLastUpdate: Date?) throws -> Bool {
-        guard inFlight[patch.key.rawValue]?.token == patch.token else { return false }
-        // Settled even when the save fails: the send stays recorded, so a later fetch still
-        // recognises its echo.
-        defer { settle(patch.key) }
-        try commit {
-            guard let row = try fetchRow(patch.key) else { return }
+        guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
+        let acknowledged = try settle(patch.key, sentFrom: flight.row) { row in
             var state = ProgressSyncState(row)
             state.acknowledge(patch.values, serverLastUpdate: serverLastUpdate)
             state.write(to: row)
             row.lastSyncError = nil
         }
-        if serverLastUpdate == nil {
-            unconfirmed[patch.key.rawValue, default: []].formUnion(patch.values.groups)
-        }
+        if acknowledged, serverLastUpdate == nil { awaitingFetch[patch.key.rawValue] = (patch.key, nil) }
         return true
     }
 
     /// The PATCH failed or its response was lost. The send stays recorded as unacknowledged, and
     /// the next attempt sends the then-current values. Returns `false`, changing nothing, when
-    /// `patch` is not the row's send in flight.
+    /// `patch` is not the row's send in flight. Like ``completeSend(_:serverLastUpdate:)``, it
+    /// throws without settling when a recreated row's shield can't be saved; retry it.
     ///
     /// Call this only once the PATCH's `URLSessionTask` has really completed (ADR 0007, #53). The
     /// token stops a late outcome from settling a newer send, but it can't stop an old request
@@ -211,12 +253,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// must not start the next send while the previous task may still be delivered.
     @discardableResult
     public func failSend(_ patch: ProgressPatch, error: String?) throws -> Bool {
-        guard inFlight[patch.key.rawValue]?.token == patch.token else { return false }
-        defer { settle(patch.key) }
-        try commit {
-            guard let row = try fetchRow(patch.key) else { return }
-            row.lastSyncError = error
-        }
+        guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
+        try settle(patch.key, sentFrom: flight.row) { $0.lastSyncError = error }
         return true
     }
 
@@ -252,7 +290,9 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         if deleted {
             rowGenerations[key.rawValue] = nil
-            unconfirmed[key.rawValue] = nil
+            mergedAt[key.rawValue] = nil
+            awaitingFetch[key.rawValue] = nil
+            ebookSentLast.remove(key.rawValue)
         }
         return deleted
     }
@@ -270,7 +310,8 @@ public enum SessionUploadResult: Sendable, Equatable {
             return rows.map(\.key)
         }
         for key in keys {
-            unconfirmed[key] = nil
+            awaitingFetch[key] = nil
+            mergedAt[key] = nil
             if inFlight[key] == nil { rowGenerations[key] = nil }
         }
         return keys.count
@@ -403,6 +444,57 @@ public enum SessionUploadResult: Sendable, Equatable {
         rowGenerations[key.rawValue] = generation
     }
 
+    /// Merges `server` into the row (except groups in flight); `false` when the
+    /// values are stale. Server times are milliseconds, so a socket event or a fetch response with
+    /// the baseline's time may hold another write made before the one the baseline holds (an
+    /// earlier event, or a fetch read before it); it counts as stale unless `takingTies` (a fetch
+    /// issued after the baseline's values were merged, so read after the server held them).
+    private func merge(_ server: ProgressBaseline, into row: LocalMediaProgress, takingTies: Bool = false) -> Bool {
+        if !takingTies, let baseline = row.serverBaseline, server.lastUpdate <= baseline.lastUpdate {
+            return false
+        }
+        var state = ProgressSyncState(row)
+        guard state.merge(server, excluding: inFlight[row.key]?.groups ?? []) else { return false }
+        state.write(to: row)
+        return true
+    }
+
+    /// Settles the send in flight for `key`, applying `outcome` to the row it was taken from in the
+    /// same save; returns whether that row was there. A row recreated for the key since isn't
+    /// passed to `outcome`: its pending edits are shielded from the old PATCH's echo instead, and
+    /// if that save, or the lookup telling the rows apart, fails, the send stays in flight (its
+    /// groups still excluded from merges) until a retried outcome saves the shield. Once the lookup
+    /// found the send's own row, or none, the send is settled even when the save fails: it stays
+    /// recorded in the row, so a later fetch still recognises its echo.
+    @discardableResult
+    private func settle(
+        _ key: MediaKey, sentFrom rowID: PersistentIdentifier, applying outcome: (LocalMediaProgress) -> Void
+    ) throws -> Bool {
+        var ownRowOrNone = false
+        do {
+            let applied = try commit {
+                guard let row = try fetchRow(key) else {
+                    ownRowOrNone = true
+                    return false
+                }
+                guard row.persistentModelID == rowID else {
+                    var state = ProgressSyncState(row)
+                    state.shieldFromObsoleteSend()
+                    state.write(to: row)
+                    return false
+                }
+                ownRowOrNone = true
+                outcome(row)
+                return true
+            }
+            settle(key)
+            return applied
+        } catch {
+            if ownRowOrNone { settle(key) }
+            throw error
+        }
+    }
+
     private func settle(_ key: MediaKey) {
         inFlight[key.rawValue] = nil
         advance(key)
@@ -412,7 +504,33 @@ public enum SessionUploadResult: Sendable, Equatable {
         let raw = key.rawValue
         var descriptor = FetchDescriptor<LocalMediaProgress>(predicate: #Predicate { $0.key == raw })
         descriptor.fetchLimit = 1
-        return try modelContext.fetch(descriptor).first
+        return try lookUp(descriptor).first
+    }
+
+    /// The rows of the given connections by key, in one lookup per connection (usually one):
+    /// local rows are few, while a server snapshot may list thousands of items.
+    private func fetchRows(of connections: Set<UUID>) throws -> [String: LocalMediaProgress] {
+        var rows: [String: LocalMediaProgress] = [:]
+        for connection in connections {
+            let descriptor = FetchDescriptor<LocalMediaProgress>(
+                predicate: #Predicate { $0.serverConnectionID == connection })
+            for row in try lookUp(descriptor) { rows[row.key] = row }
+        }
+        return rows
+    }
+
+    private func lookUp(_ descriptor: FetchDescriptor<LocalMediaProgress>) throws -> [LocalMediaProgress] {
+        rowFetchCount += 1
+        if let failure = pendingFetchFailure {
+            pendingFetchFailure = nil
+            throw failure
+        }
+        return try modelContext.fetch(descriptor)
+    }
+
+    /// Makes the next row lookup fail with `error` (tests only).
+    func failNextRowFetch(with error: any Error) {
+        pendingFetchFailure = error
     }
 
     private func fetchRows(_ predicate: Predicate<LocalMediaProgress>) throws -> [LocalMediaProgressDTO] {

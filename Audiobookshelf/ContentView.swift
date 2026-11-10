@@ -1,3 +1,4 @@
+import ABSAppModel
 import ABSCore
 import ABSUI
 import SwiftUI
@@ -17,6 +18,23 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
             .padding()
+            // Temporary entry point until the app shell (#44) and Account (#92) link to Logs.
+            .toolbar {
+                ToolbarItem(placement: .secondaryAction) {
+                    NavigationLink(value: Route.logs) {
+                        Label {
+                            Text(verbatim: L10n.string("ButtonLogs"))
+                        } icon: {
+                            Image(systemName: "doc.text.magnifyingglass")
+                        }
+                    }
+                }
+            }
+            .navigationDestination(for: Route.self) { route in
+                if route == .logs {
+                    LogsView()
+                }
+            }
             #if os(iOS)
                 // Temporary entry point until the app shell (#44) pushes Settings from Account.
                 .toolbar {
