@@ -305,11 +305,11 @@ public final class ConnectViewModel {
         do {
             try await backend.remove(connection.id)
         } catch {
-            guard isCurrent(attempt) else { return }
+            guard attempt == self.attempt else { return }
             failure = ConnectFailure(error)
         }
         // Removal can finish after the user has started a different flow.
-        guard isCurrent(attempt) else { return }
+        guard attempt == self.attempt else { return }
         if phase == .servers, savedServers.isEmpty { phase = .address }
     }
 
@@ -399,14 +399,23 @@ public final class ConnectViewModel {
     /// Runs `work` as the cancellable ``task``, cancelled also if the caller is.
     private func run(_ work: @escaping @MainActor () async -> Void) async {
         task?.cancel()
+        let attempt = self.attempt
         let task = Task { await work() }
         self.task = task
         await withTaskCancellationHandler {
             await task.value
         } onCancel: {
             task.cancel()
+            Task { @MainActor in self.cancel(attempt: attempt) }
         }
+        // The cancellation handler's actor hop may run after work finishes.
+        if Task.isCancelled { cancel(attempt: attempt) }
         if self.task == task { self.task = nil }
+    }
+
+    private func cancel(attempt: Int) {
+        guard attempt == self.attempt else { return }
+        cancel()
     }
 
     private func finish() {
@@ -453,7 +462,8 @@ public final class ConnectViewModel {
         return attempt
     }
 
-    private func isCurrent(_ attempt: Int) -> Bool { attempt == self.attempt }
+    // Check cancellation synchronously, before a queued cancellation handler can reset the flow.
+    private func isCurrent(_ attempt: Int) -> Bool { attempt == self.attempt && !Task.isCancelled }
 
     private func ensureCurrent(_ attempt: Int) throws {
         guard isCurrent(attempt) else { throw CancellationError() }

@@ -78,6 +78,15 @@ public final class PlaybackCoordinator {
     /// Global seconds: while loaded, the engine's confirmed time, or the target of a seek that
     /// hasn't landed (an interrupted one stays pending); else the position play will resume from.
     public var currentTime: Double { phase == .loaded ? position : unloadedPosition }
+    /// A sample suitable for listening credit, unlike `currentTime` which may be a seek target.
+    public var confirmedPlaybackTime: Double? {
+        guard phase == .loaded else { return closingPlaybackTime }
+        guard !awaitingSeekLanding, engine.pendingSeekTarget == nil,
+            engine.state == .playing || engine.state == .paused || engine.state == .ended
+        else { return nil }
+        return engine.currentTime
+    }
+    @ObservationIgnored private var closingPlaybackTime: Double?
     public var duration: Double { phase == .loaded ? engine.duration : unloadedDuration }
     public var isPlaying: Bool { phase == .loaded && engine.state == .playing }
     public var isBuffering: Bool {
@@ -640,6 +649,8 @@ public final class PlaybackCoordinator {
 
     /// Closes the current session (if any) and unloads the engine.
     private func tearDown(reason: SessionCloseReason) {
+        closingPlaybackTime = confirmedPlaybackTime
+        defer { closingPlaybackTime = nil }
         let wasLoaded = phase == .loaded
         awaitingSeekLanding = false
         if wasLoaded {

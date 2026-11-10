@@ -959,7 +959,7 @@ private struct Simulation {
             origins[0] = .ours(audio.editedAt)
         }
         if let ebook = send.ebook {
-            server.ebookLocation = ebook.ebookLocation
+            if let location = ebook.ebookLocation { server.ebookLocation = location }
             server.ebookProgress = ebook.ebookProgress
             origins[2] = .ours(ebook.editedAt)
         }
