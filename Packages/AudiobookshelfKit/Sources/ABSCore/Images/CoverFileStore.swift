@@ -168,6 +168,7 @@ public actor CoverFileStore {
         // A retired copy at the destination is replaced rather than deleted on release.
         let wasRetired = leases.cancelDeletion(Self.leaseKey(destination))
         let replacedBytes = wasRetired ? 0 : Self.allocatedSize(destination)
+        let addedBytes = Self.allocatedSize(staging)
         guard rename(staging.path, destination.path) == 0 else {
             let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             try? FileManager.default.removeItem(at: staging)
@@ -176,7 +177,7 @@ public actor CoverFileStore {
         }
         try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: destination.path)
         let leased = LeasedFile(url: destination, lease: lease(destination))
-        totalBytes += Self.allocatedSize(destination) - replacedBytes
+        totalBytes += addedBytes - replacedBytes
         for other in Self.extensions where other != ext {
             retire(folder.appending(path: "\(key.fileStem).\(other)"))
         }
@@ -282,7 +283,10 @@ public actor CoverFileStore {
         url.resolvingSymlinksInPath().path
     }
 
+    /// Measured fresh: a `URL` caches resource values, and its file may have been replaced since.
     private static func allocatedSize(_ url: URL) -> Int {
-        (try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0
+        var url = url
+        url.removeAllCachedResourceValues()
+        return (try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0
     }
 }
