@@ -605,6 +605,33 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(tokens.expiredCount == 1)
     }
 
+    @Test func laterUnauthorizedAfterSamePairRefreshRefreshesAgain() async throws {
+        // The refresh always returns the same pair. `/api/me` works after one refresh and
+        // `/api/other` only after a second one.
+        let refreshes = Mutex(0)
+        let server = StubServer { request in
+            switch request.url?.path() {
+            case refreshPath:
+                refreshes.withLock { $0 += 1 }
+                return .json(#"{"user":{"accessToken":"access-1"}}"#)
+            case "/abs/api/me" where refreshes.withLock({ $0 >= 1 }),
+                "/abs/api/other" where refreshes.withLock({ $0 >= 2 }):
+                return .json(#"{"ok":true}"#)
+            default:
+                return .text("Unauthorized", status: 401)
+            }
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/me")) == OK(ok: true))
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
+
+        #expect(server.requests(path: refreshPath).count == 2)
+        #expect(tokens.current == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
+        #expect(tokens.expiredCount == 0)
+    }
+
     @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {
         let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(400)))
         let tokens = InMemoryTokenProvider()
