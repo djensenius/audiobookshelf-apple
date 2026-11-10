@@ -21,7 +21,7 @@ public actor APIClient {
     /// refresh of its own pair (not one left over from a previous sign-in).
     private var refreshFlights: [AuthTokens: RefreshFlight] = [:]
     private var nextFlightID = 0
-    /// Recent successful refreshes as (rejected pair, refreshed pair, generation). They tell a
+    /// Successful refreshes as (rejected pair, refreshed pair, generation). They tell a
     /// stale token read apart from a session that needs refreshing, and whether the current pair
     /// descends from a rejected one. A refresh that returns the same pair is recorded as `(A, A)`.
     /// Edges can be appended out of order (a slow provider may return after a later refresh).
@@ -29,7 +29,11 @@ public actor APIClient {
     /// Bumped each time a refresh completes. A request only reuses refreshes that completed
     /// after it was sent, so an old refresh never stands in for a new 401.
     private var refreshGeneration = 0
-    private static let completedRefreshLimit = 8
+    /// How many in-flight requests read their tokens at each generation. A refresh is only
+    /// consulted by requests that read before it completed, so `completedRefreshes` keeps every
+    /// refresh newer than the oldest of these and drops the rest (no fixed limit that could drop
+    /// a pair a slow request still needs to trace).
+    private var requestGenerations: [Int: Int] = [:]
 
     private struct CompletedRefresh {
         let from: AuthTokens
@@ -99,6 +103,9 @@ public actor APIClient {
         // The refresh generation before `tokens` was read. A 401 for `tokens` reuses any refresh
         // completed after that, including one that finished between the read and the send.
         var tokensGeneration = refreshGeneration
+        let readGeneration = tokensGeneration
+        requestGenerations[readGeneration, default: 0] += 1
+        defer { endRequest(readAt: readGeneration) }
         guard var tokens = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
         // The pair a refresh produced for this request. That pair being rejected ends the
         // session; any other pair (for example from a new sign-in) gets its own refresh first.
@@ -203,6 +210,19 @@ public actor APIClient {
         return RefreshOutcome(tokens: current, didRefresh: descendants.contains(current))
     }
 
+    private func endRequest(readAt generation: Int) {
+        requestGenerations[generation, default: 1] -= 1
+        if requestGenerations[generation] == 0 { requestGenerations[generation] = nil }
+        pruneCompletedRefreshes()
+    }
+
+    /// Drops refreshes no in-flight request can consult: those completed at or before the oldest
+    /// generation a request read its tokens at (or all of them when no request is in flight).
+    private func pruneCompletedRefreshes() {
+        let oldest = requestGenerations.keys.min() ?? refreshGeneration
+        completedRefreshes.removeAll { $0.generation <= oldest }
+    }
+
     private func completedRefresh(of rejected: AuthTokens, since sent: Int) -> Bool {
         completedRefreshes.contains { $0.from == rejected && $0.generation > sent }
     }
@@ -242,7 +262,7 @@ public actor APIClient {
             // flight and its result.
             refreshGeneration += 1
             completedRefreshes.append(CompletedRefresh(from: tokens, to: refreshed, generation: refreshGeneration))
-            if completedRefreshes.count > Self.completedRefreshLimit { completedRefreshes.removeFirst() }
+            pruneCompletedRefreshes()
             return
         case 401:
             // The server only answers 401 for a bad refresh token; a 403 here comes from a proxy
