@@ -8,6 +8,6 @@ final class RedirectSuppressingDelegate: NSObject, URLSessionTaskDelegate, Senda
         willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest
     ) async -> URLRequest? {
-        nil
+        RedirectDecisions.report(nil, for: task)
     }
 }
