@@ -22,7 +22,8 @@ which:
    - a compare link and a triage checklist,
    - a table of changed areas,
    - the commits (linked to upstream, with sanitized subjects; see below),
-   - the upstream issues and pull requests referenced by commit subjects,
+   - the upstream issues and pull requests referenced by commit subjects
+     (`#123`, `GH-123`, and `advplyr/audiobookshelf-app#123` in any case),
    - the changed files grouped by area, with porting guidance.
 5. Optionally adds the issue to the [roadmap project](https://github.com/users/djensenius/projects/15).
 
@@ -35,6 +36,8 @@ smuggle in mentions), `|` is escaped for tables, `#123` / `GH-123` become
 `advplyr/audiobookshelf-app#123` links via `redirect.github.com` (like
 Dependabot, so no "mentioned this" backlinks appear on upstream threads), other
 `owner/repo#123` references and `@mentions` are broken with a zero-width space,
+`github.com` links (scheme and host in any letter case, with or without `www.`)
+are rewritten to `redirect.github.com`,
 and control characters in subjects and file paths are replaced.
 
 There is deliberately no mirror branch: the workflow's `GITHUB_TOKEN` cannot push
@@ -55,9 +58,17 @@ Each issue body ends with two hidden HTML comments:
 
 The next run looks for issues (open **or** closed) whose body contains
 `upstream-sync:head=`, using two queries: the 100 newest `upstream-port` issues,
-and a search for that text across all issues (labelled or not). The newest issue
-that is either labelled `upstream-port` and mentions the marker, or carries a
-valid marker, decides the base:
+and a search for that text across all issues (labelled or not).
+
+Only issues opened by a **trusted author** count: GitHub Actions
+(`github-actions[bot]`, which `gh` reports as `app/github-actions`), the owner of
+`GH_REPO`, and any logins listed in `UPSTREAM_SYNC_TRUSTED_AUTHORS`. Anyone can
+open an issue, so marker issues from other authors are logged ("Ignoring …") and
+otherwise ignored; they can neither move the base nor stop the job. Logins are
+compared case-insensitively.
+
+Among trusted issues, the newest one that is either labelled `upstream-port` and
+mentions the marker, or carries a valid marker, decides the base:
 
 - labelled with a valid marker: its last `head` marker is the base, and
   everything after it is reported;
@@ -72,7 +83,9 @@ marker) are ignored. Consequences:
 - Do not edit or delete the markers, and do not delete these issues. Closing
   them is fine.
 - To skip ahead or re-report a range, create an `upstream-port` issue whose body
-  contains the desired `head` marker (or edit the latest one).
+  contains the desired `head` marker (or edit the latest one). Its author must be
+  trusted: the repository owner, or someone added to
+  `UPSTREAM_SYNC_TRUSTED_AUTHORS`.
 - If the `upstream-port` label is renamed, update `SYNC_LABEL`.
 
 ## Triaging an `upstream-port` issue
@@ -142,6 +155,7 @@ All settings are environment variables with defaults in the script:
 | `UPSTREAM_BRANCH` | `master` | Branch to follow |
 | `UPSTREAM_BASELINE` | `609f9d6…` | Starting point when no marker exists |
 | `SYNC_LABEL` | `upstream-port` | Label for created and scanned issues |
+| `UPSTREAM_SYNC_TRUSTED_AUTHORS` | empty | Extra comma-separated logins whose marker issues are trusted, in addition to `github-actions[bot]` and the `GH_REPO` owner |
 | `GH_REPO` | current repository | Where issues are created |
 | `PROJECT_OWNER` / `PROJECT_NUMBER` | `djensenius` / `15` | Project to add issues to |
 | `PROJECT_TOKEN` | empty | Token for adding issues to the project |
@@ -168,7 +182,7 @@ is no longer an ancestor of upstream `master` (force-push), or with
 
 1. Compare the old and new upstream histories and find the first upstream commit
    that has not been reported yet (its parent is the new base).
-2. Create an `upstream-port` issue (it can be closed immediately) whose body
+2. As a trusted author, create an `upstream-port` issue (it can be closed immediately) whose body
    contains `<!-- upstream-sync:head=<new base sha> -->`, explaining the reset.
 3. Re-run the workflow with `dry_run=true` to confirm, then without it.
 
