@@ -86,7 +86,7 @@ public final class SleepTimer {
     }
 
     @ObservationIgnored private let control: any SleepTimerPlaybackControl
-    @ObservationIgnored private let feedback: any SleepTimerFeedback
+    @ObservationIgnored private let feedback: (any SleepTimerFeedback)?
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let calendar: Calendar
     @ObservationIgnored private let tickInterval: Duration
@@ -113,10 +113,12 @@ public final class SleepTimer {
     @ObservationIgnored private(set) var tickCount = 0
     var isTicking: Bool { tickTask != nil }
 
-    /// - Parameter tickInterval: How often the countdown, fade and chime update.
+    /// - Parameters:
+    ///   - feedback: Plays the chime and the reset feedback; `nil` plays nothing.
+    ///   - tickInterval: How often the countdown, fade and chime update.
     public init(
         control: any SleepTimerPlaybackControl,
-        feedback: any SleepTimerFeedback = SystemSleepTimerFeedback(),
+        feedback: (any SleepTimerFeedback)? = nil,
         options: SleepTimerOptions = SleepTimerOptions(),
         clock: any Clock<Duration> = ContinuousClock(),
         calendar: Calendar = .autoupdatingCurrent,
@@ -197,7 +199,7 @@ public final class SleepTimer {
             guard control.isPlaying, begin(run.mode, isAutomatic: run.isAutomatic, at: control.currentTime) else {
                 return false
             }
-            if options.playsResetFeedback { feedback.playResetFeedback() }
+            if options.playsResetFeedback { feedback?.playResetFeedback() }
             return true
         }
         guard let expiredRun = restartableRun, let graceEnd else { return false }
@@ -227,7 +229,7 @@ public final class SleepTimer {
         let time = time(rewoundBy: rewind)
         if let expiredRun = restartableRun {
             if begin(expiredRun.mode, isAutomatic: expiredRun.isAutomatic, at: time), options.playsResetFeedback {
-                feedback.playResetFeedback()
+                feedback?.playResetFeedback()
             }
         } else if shouldStartAutomatically(at: date) {
             begin(options.autoSleep.mode, isAutomatic: true, at: time)
@@ -339,7 +341,7 @@ public final class SleepTimer {
                 run.chime = .played
             } else if isPlaying {
                 run.chime = .played
-                if options.playsAlmostDoneChime { feedback.playChime() }
+                if options.playsAlmostDoneChime { feedback?.playChime() }
             }
         }
         trackFade(of: &run, left: left, at: time)
@@ -394,7 +396,7 @@ public final class SleepTimer {
         }
         if time != nil { didSeek(to: landed) }
         control.play()
-        if options.playsResetFeedback { feedback.playResetFeedback() }
+        if options.playsResetFeedback { feedback?.playResetFeedback() }
     }
 
     /// The pending rewind, consumed; nothing once playback moved away from where it was set.
