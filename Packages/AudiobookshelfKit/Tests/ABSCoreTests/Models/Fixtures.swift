@@ -161,4 +161,25 @@ enum Fixtures {
         "sequence":"1-3"},"collapsedSeries":{"id":"se-2","name":"The Subseries","nameIgnorePrefix":"Subseries",\
         "sequence":"4","numBooks":2,"libraryItemIds":["li-book-4","li-book-5"]}}
         """
+
+    /// An expanded episode whose track has `index: null` (servers 2.26.0–2.26.2).
+    static let nullIndexEpisode = """
+        {"libraryItemId":"li-pod-1","podcastId":"pod-1","id":"ep-3","index":null,"title":"Episode Three",\
+        "audioFile":{"index":null,"ino":"23","metadata":{"filename":"ep3.mp3","ext":".mp3","path":\
+        "/podcasts/Show/ep3.mp3","relPath":"ep3.mp3","size":2000000},"duration":900,"mimeType":"audio/mpeg"},\
+        "audioTrack":{"index":null,"startOffset":0,"duration":900,"title":"ep3.mp3","contentUrl":\
+        "/api/items/li-pod-1/file/23","mimeType":"audio/mpeg"},"duration":900,"size":2000000}
+        """
+
+    /// `POST /api/items/:id/play/:episodeId` on a 2.26.0–2.26.2 server: the track has `index: null`.
+    static let nullIndexEpisodeSession = """
+        {"id":"ps-3","userId":"user-1","libraryId":"lib-pods","libraryItemId":"li-pod-1","episodeId":"ep-3",\
+        "mediaType":"podcast","mediaMetadata":{"title":"The Show","author":"Host"},"chapters":[],\
+        "displayTitle":"Episode Three","displayAuthor":"Host","duration":900,"playMethod":0,"timeListening":0,\
+        "startTime":0,"currentTime":0,"startedAt":1700000100000,"updatedAt":1700000100000,"audioTracks":\
+        [{"index":null,"startOffset":0,"duration":900,"title":"ep3.mp3","contentUrl":\
+        "/api/items/li-pod-1/file/23","mimeType":"audio/mpeg"}],"libraryItem":{"id":"li-pod-1",\
+        "libraryId":"lib-pods","mediaType":"podcast","media":{"id":"pod-1","metadata":{"title":"The Show"},\
+        "episodes":[\(nullIndexEpisode)]}}}
+        """
 }

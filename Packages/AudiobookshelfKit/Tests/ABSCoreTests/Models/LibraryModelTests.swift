@@ -43,7 +43,8 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(chapters[1].end == 3725.5)
         #expect(chapters[1].title == "Chapter 2")
         let track = try #require(book.tracks?.first)
-        #expect(track.id == 1)
+        #expect(track.index == 1)
+        #expect(track.id == "1-0.0")
         #expect(track.contentUrl == "/api/items/li-book-1/file/649644248522215260")
         #expect(track.endOffset == 3725.5)
     }
@@ -205,6 +206,21 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(metadata.authors?.first?.name == "Author One")
         #expect(session.mediaMetadata?.title == "The First Book")
         #expect(session.libraryItem?.book?.tracks?.count == 1)
+    }
+
+    @Test func decodesNullTrackIndex() throws {
+        let episode = try decode(PodcastEpisode.self, Fixtures.nullIndexEpisode)
+        #expect(episode.audioTrack?.index == nil)
+        #expect(episode.audioTrack?.id == "0-0.0")
+        #expect(episode.audioFile?.index == nil)
+
+        let session = try decode(PlaybackSession.self, Fixtures.nullIndexEpisodeSession)
+        #expect(session.mediaType == .podcast)
+        #expect(session.audioTracks.map(\.index) == [nil])
+        #expect(session.audioTracks.first?.endOffset == 900)
+        let episodes = try #require(session.libraryItem?.podcast?.episodes)
+        #expect(episodes.map(\.id) == ["ep-3"])
+        #expect(episodes.first?.audioTrack?.index == nil)
     }
 
     @Test func preservesUnknownPlayMethod() throws {

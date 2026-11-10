@@ -65,7 +65,8 @@ public struct AudioFile: Sendable, Hashable, Codable, Identifiable {
 
 /// A playable track. Offsets and durations are in seconds.
 public struct AudioTrack: Sendable, Hashable, Codable, Identifiable {
-    public let index: Int
+    /// 1-based. Servers 2.26.0–2.26.2 may send `null` for podcast episode tracks.
+    public let index: Int?
     public let startOffset: Double?
     public let duration: Double
     public let title: String?
@@ -76,7 +77,8 @@ public struct AudioTrack: Sendable, Hashable, Codable, Identifiable {
     public let metadata: FileMetadata?
 
     public init(
-        index: Int, startOffset: Double? = nil, duration: Double, title: String? = nil, contentUrl: String? = nil,
+        index: Int? = nil, startOffset: Double? = nil, duration: Double, title: String? = nil,
+        contentUrl: String? = nil,
         mimeType: String? = nil, codec: String? = nil, metadata: FileMetadata? = nil
     ) {
         self.index = index
@@ -89,7 +91,9 @@ public struct AudioTrack: Sendable, Hashable, Codable, Identifiable {
         self.metadata = metadata
     }
 
-    public var id: Int { index }
+    /// `"<index>-<startOffset>"`, with `0` for missing values. Tracks in one media item have distinct
+    /// start offsets, so this stays unique when `index` is `null`.
+    public var id: String { "\(index ?? 0)-\(startOffset ?? 0)" }
 
     /// Seconds from the start of the media at which this track ends.
     public var endOffset: Double { (startOffset ?? 0) + duration }

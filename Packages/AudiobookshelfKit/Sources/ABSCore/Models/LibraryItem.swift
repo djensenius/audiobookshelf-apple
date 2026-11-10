@@ -172,6 +172,18 @@ public struct LibraryFile: Sendable, Hashable, Codable, Identifiable {
     /// Epoch milliseconds.
     public let updatedAt: Int?
 
+    public init(
+        ino: String, metadata: FileMetadata? = nil, isSupplementary: Bool? = nil, fileType: String? = nil,
+        addedAt: Int? = nil, updatedAt: Int? = nil
+    ) {
+        self.ino = ino
+        self.metadata = metadata
+        self.isSupplementary = isSupplementary
+        self.fileType = fileType
+        self.addedAt = addedAt
+        self.updatedAt = updatedAt
+    }
+
     public var id: String { ino }
 }
 
