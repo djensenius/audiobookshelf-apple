@@ -1,0 +1,97 @@
+import AVFoundation
+import os
+
+#if os(iOS)
+    import AudioToolbox
+#endif
+
+private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "SleepTimer")
+
+/// The sounds and vibrations of a ``SleepTimer``.
+@MainActor
+public protocol SleepTimerFeedback: AnyObject {
+    /// The almost-done chime, ``SleepTimer/chimeLeadTime`` seconds before the timer pauses playback.
+    func playChime()
+    /// Confirms that a shake reset the timer.
+    func playResetFeedback()
+}
+
+/// Plays a synthesized bell for the chime and vibrates (iOS only) for a reset.
+@MainActor
+public final class SystemSleepTimerFeedback: SleepTimerFeedback {
+    /// The Android `SLEEP_TIMER_CHIME_SOUND_VOLUME`.
+    static let chimeVolume: Float = 0.7
+    static let chimeDuration: Double = 1.5
+    static let sampleRate: Double = 44_100
+    private static let fundamental: Double = 880
+    /// Frequency ratio, amplitude and exponential decay rate of each partial.
+    private static let partials: [(ratio: Double, amplitude: Double, decay: Double)] = [
+        (1, 0.6, 3), (2.76, 0.25, 5), (5.4, 0.1, 8),
+    ]
+
+    private var engine: AVAudioEngine?
+    private var chimeGeneration = 0
+
+    public init() {}
+
+    public func playChime() {
+        guard let buffer = Self.makeChime() else { return }
+        let engine = AVAudioEngine()
+        let node = AVAudioPlayerNode()
+        engine.attach(node)
+        node.volume = Self.chimeVolume
+        do {
+            try engine.connectNode(node, to: engine.mainMixerNode, format: buffer.format)
+            try engine.start()
+        } catch {
+            logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        self.engine?.stop()
+        self.engine = engine
+        chimeGeneration += 1
+        let generation = chimeGeneration
+        node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            Task { @MainActor in self?.chimeDidFinish(generation) }
+        }
+        do {
+            try node.playAudio()
+        } catch {
+            logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
+            chimeDidFinish(generation)
+        }
+    }
+
+    public func playResetFeedback() {
+        #if os(iOS)
+            AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+        #endif
+    }
+
+    private func chimeDidFinish(_ generation: Int) {
+        guard generation == chimeGeneration else { return }
+        engine?.stop()
+        engine = nil
+    }
+
+    /// A mono bell: decaying inharmonic partials over an 880 Hz fundamental with a 5 ms attack. Peaks below 1.
+    static func makeChime() -> AVAudioPCMBuffer? {
+        let frameCount = AVAudioFrameCount(chimeDuration * sampleRate)
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1),
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount),
+            let samples = buffer.floatChannelData?[0]
+        else { return nil }
+        let attackFrames = 0.005 * sampleRate
+        for frame in 0..<Int(frameCount) {
+            let time = Double(frame) / sampleRate
+            let attack = min(Double(frame) / attackFrames, 1)
+            let value = partials.reduce(0) { sum, partial in
+                sum + partial.amplitude * exp(-partial.decay * time)
+                    * sin(2 * .pi * fundamental * partial.ratio * time)
+            }
+            samples[frame] = Float(attack * value)
+        }
+        buffer.frameLength = frameCount
+        return buffer
+    }
+}
