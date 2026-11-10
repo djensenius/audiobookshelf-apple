@@ -56,7 +56,7 @@ public final class SleepTimer {
 
     private enum Goal {
         case length(TimeInterval)
-        /// The end of the chapter (or gap, or track), moved by added and subtracted media seconds.
+        /// The end of the chapter (or gap, or track), moved by added and subtracted listening time.
         case chapterEnd(segmentEnd: Double, offset: Double)
     }
 
@@ -164,9 +164,9 @@ public final class SleepTimer {
         stopRun()
     }
 
-    /// Adds `seconds` of listening time. For end of chapter, the end moves by `seconds` of media at the current rate
-    /// (a gap between tracks in them doesn't play), up to the end of the media. Unlike Android, a duration isn't
-    /// capped at the media left: it only counts down while audio plays.
+    /// Adds `seconds` of listening time. For end of chapter, the end moves past `seconds` of media at the current
+    /// rate, skipping gaps between tracks, up to the end of the media. Unlike Android, a duration isn't capped at
+    /// the media left: it only counts down while audio plays.
     public func add(_ seconds: TimeInterval) {
         guard var run, seconds.isFinite, seconds > 0 else { return }
         switch run.goal {
@@ -174,14 +174,15 @@ public final class SleepTimer {
             run.goal = .length(length + seconds)
         case .chapterEnd(let segmentEnd, let offset):
             let limit = max(control.timeline?.duration ?? .infinity, segmentEnd + offset)
-            let end = min(segmentEnd + offset + seconds * rate, limit)
-            run.goal = .chapterEnd(segmentEnd: segmentEnd, offset: end - segmentEnd)
+            let end = Self.position(in: control.timeline, from: segmentEnd + offset, playing: seconds * rate)
+            run.goal = .chapterEnd(segmentEnd: segmentEnd, offset: min(end, limit) - segmentEnd)
         }
         run.wasCutShort = false
         update(run)
     }
 
-    /// Removes `seconds`, leaving at least ``minimumRemaining``.
+    /// Removes `seconds` of listening time, leaving at least ``minimumRemaining``. For end of chapter, the end moves
+    /// to where that much media plays from now at the current rate, skipping gaps between tracks.
     public func subtract(_ seconds: TimeInterval) {
         guard var run, seconds.isFinite, seconds > 0 else { return }
         let left = remaining(of: run)
@@ -189,8 +190,10 @@ public final class SleepTimer {
         if left - seconds <= Self.minimumRemaining { run.wasCutShort = true }
         switch run.goal {
         case .length(let length): run.goal = .length(length - (left - newLeft))
-        case .chapterEnd(let segmentEnd, let offset):
-            run.goal = .chapterEnd(segmentEnd: segmentEnd, offset: offset - (left - newLeft) * rate)
+        case .chapterEnd(let segmentEnd, _) where newLeft < left:
+            let end = Self.position(in: control.timeline, from: control.currentTime, playing: newLeft * rate)
+            run.goal = .chapterEnd(segmentEnd: segmentEnd, offset: end - segmentEnd)
+        case .chapterEnd: break
         }
         update(run)
     }
@@ -528,6 +531,19 @@ public final class SleepTimer {
     private static func played(in timeline: PlaybackTimeline?, from start: Double, to end: Double) -> Double {
         guard let timeline, end > start else { return end - start }
         return timeline.tracks.reduce(0) { $0 + max(min($1.playbackEnd, end) - max($1.start, start), 0) }
+    }
+
+    /// Where playback is once `amount` media seconds play from `start`, skipping the gaps between tracks: the
+    /// inverse of `played`. Past the last track, the plain distance.
+    private static func position(in timeline: PlaybackTimeline?, from start: Double, playing amount: Double) -> Double {
+        var position = start, left = amount
+        for track in timeline?.tracks ?? [] where track.playbackEnd > position {
+            let from = max(track.start, position)
+            if left <= track.playbackEnd - from { return from + left }
+            left -= track.playbackEnd - from
+            position = track.playbackEnd
+        }
+        return position + left
     }
 
     /// The end of the chapter playing at `time` (or of the gap before the next chapter; of the track without

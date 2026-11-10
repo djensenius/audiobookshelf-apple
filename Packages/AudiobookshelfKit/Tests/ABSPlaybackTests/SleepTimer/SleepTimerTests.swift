@@ -52,6 +52,17 @@ private final class Harness {
 
 private let chapters = TimelineFixture.crossingChapters.timeline
 
+/// Tracks over `ranges` (with gaps between them), and chapters ending at `chapterEnd` and at the end.
+private func gappedTimeline(_ ranges: [ClosedRange<Double>], chapterEnd: Double) -> PlaybackTimeline {
+    let tracks = ranges.enumerated().map { index, range in
+        AudioTrack(index: index + 1, startOffset: range.lowerBound, duration: range.upperBound - range.lowerBound)
+    }
+    let end = ranges.last?.upperBound ?? chapterEnd
+    return PlaybackTimeline(
+        tracks: tracks,
+        chapters: [Chapter(id: 0, start: 0, end: chapterEnd), Chapter(id: 1, start: chapterEnd, end: end)])
+}
+
 /// How a grace period ends.
 enum GraceEnd: CaseIterable, Sendable { case graceTask, clockOnly, cancel, anotherItem }
 /// What happens between an automatic timer's expiry and the next play.
@@ -331,12 +342,7 @@ struct SleepTimerTests {
     }
 
     @Test func chapterTimeLeftLeavesOutGapsBetweenTracks() async {
-        let timeline = PlaybackTimeline(
-            tracks: [
-                AudioTrack(index: 1, startOffset: 5, duration: 95),
-                AudioTrack(index: 2, startOffset: 110, duration: 90),
-            ],
-            chapters: [Chapter(id: 0, start: 0, end: 120), Chapter(id: 1, start: 120, end: 200)])
+        let timeline = gappedTimeline([5...100, 110...200], chapterEnd: 120)
         let harness = Harness(timeline: timeline, at: 70, options: SleepTimerOptions(playsAlmostDoneChime: true))
         harness.timer.start(.endOfChapter)
         #expect(harness.timer.remaining == 40, "30 s of the first track, then 10 of the second")
@@ -464,6 +470,35 @@ struct SleepTimerTests {
         #expect(harness.timer.remaining == 35)
         harness.timer.add(10_000)
         #expect(harness.timer.remaining == 850, "Capped at the end of the media")
+    }
+
+    /// Adding or subtracting chapter time changes the listening time by that much: the end walks over the tracks,
+    /// so the gaps between them don't count. All start at 70; a negative change subtracts.
+    @Test(
+        arguments: [
+            // Copilot's example: 30 s of the first track and 10 of the second, less 39.
+            ([5...100, 110...200], 120, 1, -39, 1, 71),
+            // 200 media seconds at 2× over four tracks, less 80 s, leaves 40: the end moves back across two gaps,
+            // to 10 s past a third.
+            ([0...100, 110...150, 160...250, 260...400], 300, 2, -80, 20, 120),
+            // 30 s to the end of the first track, then 20 of the second.
+            ([5...100, 110...200], 100, 1, 20, 50, 130),
+            // Without gaps, as before.
+            ([0...200], 120, 1, -39, 11, 81),
+            ([0...200], 120, 1, 20, 70, 140),
+        ] as [([ClosedRange<Double>], Double, Double, Double, Double, Double)])
+    func adjustingChapterTimeSkipsGapsBetweenTracks(
+        tracks: [ClosedRange<Double>], chapterEnd: Double, rate: Double, change: Double, left: Double, pause: Double
+    ) async {
+        let harness = Harness(timeline: gappedTimeline(tracks, chapterEnd: chapterEnd), at: 70)
+        harness.control.rate = rate
+        harness.timer.start(.endOfChapter)
+        if change < 0 { harness.timer.subtract(-change) } else { harness.timer.add(change) }
+        #expect(harness.timer.remaining == left)
+        await harness.play(from: 70, to: pause - 1)
+        #expect(harness.control.pauseCount == 0)
+        await harness.play(from: pause - 1, to: pause)
+        #expect(harness.control.pauseCount == 1)
     }
 
     @Test func chapterTimeAddedSurvivesSeeksWithinTheChapterOrTheAddedTime() async {
