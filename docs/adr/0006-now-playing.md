@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-09
-- Issue: #TBD
+- Issue: #47 (P2-01)
 
 ## Context
 
@@ -197,13 +197,16 @@ Evidence key:
 **Use the NowPlaying framework (`MediaSession`) as the only Now Playing API on iOS,
 macOS and CarPlay. Do not import MediaPlayer anywhere in the native app.**
 
-Rules for the Now Playing implementation issue:
+Rules for the Now Playing implementation (P2-07 #54; CarPlay parts in P5-02 #79 and
+P5-04 #81):
 
 1. **One owner.** All NowPlaying code lives in
-   `Packages/AudiobookshelfKit/Sources/ABSPlayback/NowPlaying/`.
-   - The `@MainActor @Observable` player, or a small adapter it owns, conforms to
+   `Packages/AudiobookshelfKit/Sources/ABSPlayback/NowPlaying/`, and its tests live
+   in `Packages/AudiobookshelfKit/Tests/ABSPlaybackTests/NowPlaying/`.
+   - `PlaybackCoordinator` (P2-06a #52), or a small adapter it owns, conforms to
      `MediaSessionRepresentable`.
-   - Nothing else imports `NowPlaying` or `_NowPlaying_AppIntents`.
+   - Nothing else imports `NowPlaying` or `_NowPlaying_AppIntents`. That includes
+     the app, its tests and the `AudiobookshelfWidgets` extension (P5-11a #88).
    - The UI, CarPlay and intents talk to the player, never to the session.
 2. **Content.**
    - Books use `BookContent` with `chapter = (index + 1, count)`.
@@ -211,11 +214,41 @@ Rules for the Now Playing implementation issue:
    - In chapter-track mode, `title` is the chapter title and `duration` and
      `elapsedTime` are relative to the chapter, matching the legacy app. The book
      title is not shown in that mode; this is a known gap, re-checked at runtime.
-   - Set `appEntityIdentifiers` to our book and episode `AppEntity` IDs.
+   - Set `appEntityIdentifiers` from an **injected closure**. `ABSPlayback` never
+     imports the app or widget `AppEntity` types. It defines only the closure type
+     and calls it. The composition root (`AppEnvironment` in the app, or the widget
+     extension's equivalent) supplies the closure, which maps a `MediaKey` (ABSData)
+     to the entity identifiers. The shape below typechecks for iOS 27.0 and
+     macOS 27.0 under Swift 6 with a stub `MediaKey`; `key.rawValue` stands in for
+     whatever accessor `MediaKey` exposes:
+
+     ```swift
+     // ABSPlayback/NowPlaying/ (imports AppIntents and _NowPlaying_AppIntents only)
+     public typealias NowPlayingEntityIdentifiers = @Sendable (MediaKey) -> [EntityIdentifier]
+
+     var content = BookContent(id: key.rawValue, title: title, authorName: author,
+                               duration: .finite(duration), artwork: artwork)
+     content.appEntityIdentifiers = entityIdentifiers(key)
+
+     // App (or widget) composition root, which owns BookEntity / EpisodeEntity
+     let entityIdentifiers: NowPlayingEntityIdentifiers = { key in
+         [EntityIdentifier(for: BookEntity.self, identifier: key.rawValue)]
+     }
+     ```
+
+     `EntityIdentifier` is `Sendable` (AppIntents swiftinterface), so the closure can
+     be stored on the `@MainActor` session adapter and passed in through the
+     `PlaybackCoordinator` (P2-06a #52) initializer.
 3. **Commands.**
    - Commands: `play`, `pause`, `togglePlayPause`, and `skipForward`/`skipBackward`
      with the user's jump intervals.
-   - `next` and `previous` jump by the same intervals, as in the legacy app.
+   - The remote **next/previous track** commands jump forward and back by the same
+     user intervals, as in the legacy app (`AudioPlayer.swift` lines 741–757). AirPods
+     double and triple press send next and previous, so this keeps AirPods behaving
+     as before. These commands do **not** change chapter.
+   - Chapter navigation lives in the in-app player (chapter list) and in CarPlay
+     (the Up Next chapter list, P5-04 #81). P2-07 (#54), whose scope lists "next and
+     previous chapter", is amended to match this mapping.
    - `changePlaybackRate(supported:)` with the app's rate list.
    - Include `seekToPosition` **only** when the user allows seeking from media
      controls; leaving it out disables seeking.
@@ -225,6 +258,25 @@ Rules for the Now Playing implementation issue:
    - Call `requestToBecomeSystemPrimary()` only on iOS and only from a
      user-initiated play while the app is in the foreground.
    - Set the session reference to `nil` when playback ends.
+   - **CarPlay-only launch.** When the app is launched with only the CarPlay scene
+     (for example, the phone is locked in a car), it isn't in the foreground.
+     Apple's documentation for `requestToBecomeSystemPrimary()` says the app "must
+     be in the foreground when calling this method, otherwise this request doesn't
+     take effect". So on that path the call can't be made usefully. The same page
+     says the call "isn't required [for local playback] unless your app needs to
+     take over as the system primary from another session". P5-02 (#79) must handle
+     this:
+     - always call `requestToBecomeApplicationPrimary()` when playback starts from
+       CarPlay;
+     - treat `requestToBecomeSystemPrimary()` as best effort: skip it (or ignore its
+       failure) when no foreground window scene is active, and never block playback
+       on it;
+     - rely on starting audio with an active `.playback` audio session to make us
+       the system Now Playing app;
+     - on device, check that CarPlay and the Lock Screen show our session after a
+       CarPlay-only launch, including when another app was playing before.
+
+     If they don't, that is a fallback trigger (see below).
 5. **CarPlay** configures only `CPNowPlayingTemplate.shared`:
    - the Up Next button for chapters;
    - `allowsMiniPlayer`;
@@ -252,15 +304,15 @@ handle with the runtime gate below.
 
 ### Fallback (all-or-nothing)
 
-The Now Playing issue may find a blocking CarPlay or Lock Screen failure on a device,
-for example: no metadata in CarPlay, broken transport, or a scrubber that can't be
-hidden. In that case, write a **new ADR that supersedes this one and switches every
-platform to MediaPlayer at once**. Invert the lint rule in the same PR. Never fix a
-gap by adding MediaPlayer calls next to `MediaSession`.
+P2-07 (#54), P5-02 (#79) or P5-04 (#81) may find a blocking CarPlay or Lock Screen
+failure on a device, for example: no metadata in CarPlay, broken transport, or a
+scrubber that can't be hidden. In that case, write a **new ADR that supersedes this
+one and switches every platform to MediaPlayer at once**. Invert the lint rule in
+the same PR. Never fix a gap by adding MediaPlayer calls next to `MediaSession`.
 
 ### Lint rule
 
-The rule lands with the Now Playing issue, not in this PR. Add this `mise` task and
+The rule lands with P2-07 (#54), not in this PR. Add this `mise` task and
 make `lint` depend on it. It uses a TOML literal string, so the backslashes are not
 escaped:
 
@@ -270,8 +322,13 @@ description = "ADR 0006: NowPlaying only, in ABSPlayback/NowPlaying; no MediaPla
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
-dirs=(Audiobookshelf AudiobookshelfTests Packages)
-allowed='Packages/AudiobookshelfKit/Sources/ABSPlayback/NowPlaying/'
+# Native sources only; legacy ios/ still imports MediaPlayer and is not scanned.
+dirs=()
+for d in Audiobookshelf AudiobookshelfTests AudiobookshelfUITests AudiobookshelfWidgets Packages; do
+  if [[ -d "$d" ]]; then dirs+=("$d"); fi
+done
+if ((${#dirs[@]} == 0)); then exit 0; fi
+allowed='^Packages/AudiobookshelfKit/(Sources/ABSPlayback|Tests/ABSPlaybackTests)/NowPlaying/'
 imp='^[[:space:]]*(@[_A-Za-z]+[[:space:]]+)*((public|package|internal|fileprivate|private)[[:space:]]+)?import[[:space:]]+((typealias|struct|class|enum|protocol|let|var|func)[[:space:]]+)?'
 mp_symbols='\bMP(NowPlaying|RemoteCommand|MediaItemArtwork|MediaItemProperty|AppEntityIdentifier|SkipInterval|ChangePlayback|ChangeRepeatMode|ChangeShuffleMode|FeedbackCommand|RatingCommand)[A-Za-z]*'
 status=0
@@ -282,8 +339,8 @@ if grep -rnE --include='*.swift' \
   status=1
 fi
 if grep -rnE --include='*.swift' -e "${imp}(NowPlaying|_NowPlaying_AppIntents)([.[:space:]]|$)" "${dirs[@]}" \
-    | grep -v "^${allowed}"; then
-  echo "error: import NowPlaying only in ${allowed} (ADR 0006)" >&2
+    | grep -vE "${allowed}"; then
+  echo "error: import NowPlaying only under ABSPlayback/NowPlaying/ or ABSPlaybackTests/NowPlaying/ (ADR 0006)" >&2
   status=1
 fi
 exit "$status"
@@ -292,9 +349,15 @@ exit "$status"
 
 What the rule covers:
 
-- **Paths.** It scans only native sources (`Audiobookshelf`, `AudiobookshelfTests`,
-  `Packages`). Legacy `ios/` is excluded on purpose, because it still imports
-  MediaPlayer.
+- **Paths.** It scans the native sources: the app (`Audiobookshelf`), its tests
+  (`AudiobookshelfTests`, `AudiobookshelfUITests`), the widget, control and Live
+  Activity extension (`AudiobookshelfWidgets`, added by P5-11a #88) and `Packages`.
+  Folders that don't exist yet are skipped, so the task works before the extension
+  lands. Legacy `ios/` is excluded on purpose, because it still imports MediaPlayer.
+- **Allow-list.** `import NowPlaying` / `_NowPlaying_AppIntents` is allowed only
+  under `Packages/AudiobookshelfKit/Sources/ABSPlayback/NowPlaying/` and its tests,
+  `Packages/AudiobookshelfKit/Tests/ABSPlaybackTests/NowPlaying/`. Widgets can't use
+  `MediaSession` anyway (it is unavailable in app extensions).
 - **Import forms.** It catches attribute-prefixed imports
   (`@preconcurrency import MediaPlayer`), access-level imports, scoped imports
   (`import class MediaPlayer.…`) and submodule imports.
@@ -334,9 +397,14 @@ What the rule covers:
   - keep all NowPlaying code in `ABSPlayback/NowPlaying/`;
   - never import MediaPlayer;
   - change this decision only with a superseding ADR.
-- Follow-ups for the Now Playing issue:
-  - implement the session and the lint task;
-  - run the runtime checks below and record the results in its PR.
+- Follow-ups:
+  - P2-07 (#54) implements the session and the `lint:nowplaying` task. Its "next and
+    previous chapter" scope is amended to remote next/previous = jump by the user's
+    intervals (Decision rule 3). It also runs the Lock Screen, Control Center,
+    AirPods, Mac media keys and intent checks below.
+  - P5-02 (#79) and P5-04 (#81) run the CarPlay checks below. #79 also owns the
+    CarPlay-only launch handling (Decision rule 4).
+  - Each issue records its results in its PR.
 
 ## Validation
 
@@ -387,14 +455,27 @@ Other spike results:
   symbols are visible without importing that API's module (results listed under
   Lint rule).
 - **Lint dry run.** We ran the command above against a scratch tree with macOS BSD
-  grep 2.6.0, and the script passes `shellcheck`.
-  - Clean tree: exit 0. NowPlaying imports appeared only in the allowed folder;
-    `import MediaPlayerX`, `import NowPlayingKit` and a type named `MPPlayer` were
-    not flagged.
-  - Seeded violations: exit 1, flagging `import MediaPlayer`,
-    `@preconcurrency import MediaPlayer`, `import _MediaPlayer_AppIntents`, MP
-    symbol uses, and `import NowPlaying` in `ABSUI`. Comment lines that mention
-    `MPChangePlaybackPositionCommand` were ignored.
+  grep 2.6.0 and GNU bash 5.3, and the script passes `shellcheck`.
+  - Empty tree, with none of the scanned folders present: exit 0.
+  - Clean tree: exit 0. `AudiobookshelfTests` and `AudiobookshelfUITests` were
+    missing, which shows that missing folders are skipped. NowPlaying imports
+    appeared only in the allowed Sources and Tests `NowPlaying/` folders.
+    `import MediaPlayerX`, `import NowPlayingKit`, a type named `MPPlayer` and an MP
+    symbol inside a `//` comment were not flagged.
+  - Seeded violations: exit 1, with every case flagged:
+    - `@preconcurrency import MediaPlayer` and `MPRemoteCommandCenter` in
+      `AudiobookshelfWidgets`;
+    - `import NowPlaying` in `AudiobookshelfWidgets`;
+    - `import _MediaPlayer_AppIntents` in `ABSUI`;
+    - `import NowPlaying` in the app target;
+    - `import NowPlaying` in `ABSPlaybackTests` outside `NowPlaying/`.
+  - The first commit of this ADR used a fixed folder list. That version ran
+    `grep -r` on missing folders, which exits 2, and under `pipefail` that could
+    hide real violations. The folder filter fixes this.
+- **Injected identifiers closure.** The `NowPlayingEntityIdentifiers` shape in
+  Decision rule 2 typechecks (exit 0) for `arm64-apple-ios27.0-simulator` and
+  `arm64-apple-macos27.0` with Swift 6 strict concurrency. The check used a stub
+  `MediaKey` and a stub `BookEntity`/`EntityQuery`.
 
 ### Not verified (assumed from docs)
 
@@ -412,33 +493,40 @@ Nothing in this spike was run.
   - whether the CarPlay rate button reflects `changePlaybackRate`;
   - whether `next`/`previous` are what AirPods double and triple press send.
 
-### Runtime gate (the Now Playing issue must record each result)
+### Runtime gate
 
-1. iPhone (physical device) Lock Screen and Control Center:
+This ADR is Accepted on the strength of the typecheck spike. The on-device checks
+are done by the issues that implement each surface, and each issue records its
+results in its PR:
+
+1. iPhone (physical device) Lock Screen and Control Center, performed in #54
+   (P2-07):
    - title, author and artwork appear;
    - the chapter `n of N` display;
    - rate and elapsed-time extrapolation;
    - skip buttons show the configured intervals;
    - the scrubber is hidden when seeking is off.
-2. AirPods: play/pause, double and triple press, and pause when the route
-   disconnects.
-3. Mac: media keys, the Control Center Now Playing item, and artwork.
+2. AirPods, performed in #54 (P2-07):
+   - play/pause;
+   - double and triple press jump forward and back by the user's intervals;
+   - pause when the route disconnects.
+3. Mac media keys, the Control Center Now Playing item and artwork, performed in
+   #54 (P2-07).
 4. CarPlay, on a device via Device Hub, the CarPlay Simulator app, or a car:
-   - metadata;
-   - transport;
-   - skip intervals;
-   - rate button behavior;
-   - Up Next chapter list;
-   - mini player.
+   - performed in #79 (P5-02): metadata, transport, skip intervals, the mini
+     player, and Now Playing after a CarPlay-only launch;
+   - performed in #81 (P5-04): rate button behavior, the Up Next chapter list and
+     the sleep-timer button.
 5. A `PlayAudioIntent` / `AudioPlaybackIntent` from Shortcuts resumes the right
-   item.
+   item, and `appEntityIdentifiers` come from the injected closure. Performed in #54
+   (P2-07).
 
 If 1, 3 or 4 fail in a way that can't be fixed with NowPlaying APIs, apply the
 fallback above.
 
 ### Ongoing
 
-`mise run lint:nowplaying` in CI, once the Now Playing issue lands.
+`mise run lint:nowplaying` runs in CI once #54 (P2-07) lands.
 
 ## References
 
