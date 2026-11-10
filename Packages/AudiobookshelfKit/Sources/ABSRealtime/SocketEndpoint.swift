@@ -5,6 +5,7 @@ enum SocketEndpoint {
     /// `https://host/abs` → `wss://host/abs/socket.io/?EIO=4&transport=websocket`. Keeps the
     /// port and any subpath (the server also listens on `<RouterBasePath>/socket.io`). Returns
     /// `nil` for schemes other than http, https, ws and wss, or an address without a host.
+    /// Percent-escapes in the subpath (e.g. `%2F`) are kept as they are.
     static func url(forServerAddress address: URL) -> URL? {
         guard var components = URLComponents(url: address, resolvingAgainstBaseURL: false),
             let host = components.host, !host.isEmpty
@@ -14,9 +15,9 @@ enum SocketEndpoint {
         case "https", "wss": components.scheme = "wss"
         default: return nil
         }
-        var path = components.path
+        var path = components.percentEncodedPath
         while path.hasSuffix("/") { path.removeLast() }
-        components.path = path + "/socket.io/"
+        components.percentEncodedPath = path + "/socket.io/"
         components.queryItems = [
             URLQueryItem(name: "EIO", value: "4"),
             URLQueryItem(name: "transport", value: "websocket"),

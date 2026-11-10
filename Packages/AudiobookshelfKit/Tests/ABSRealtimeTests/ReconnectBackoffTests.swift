@@ -17,4 +17,10 @@ import Testing
         #expect(backoff.delay(attempt: 3, random: 1) == .seconds(12))
         #expect(backoff.delay(attempt: 4, random: 1) == .seconds(15))
     }
+
+    @Test func appliesJitterBeforeTheCap() {
+        #expect(backoff.delay(attempt: 4, random: 0) == .seconds(8))
+        #expect(backoff.delay(attempt: 5, random: 0) == .seconds(15))
+        #expect(backoff.delay(attempt: 1_000, random: 0) == .seconds(15))
+    }
 }

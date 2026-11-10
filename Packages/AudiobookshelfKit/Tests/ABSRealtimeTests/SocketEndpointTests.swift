@@ -10,6 +10,8 @@ import Testing
         ("https://example.com/audiobookshelf", "wss://example.com/audiobookshelf/socket.io/?EIO=4&transport=websocket"),
         ("https://example.com/a/b//?x=1#frag", "wss://example.com/a/b/socket.io/?EIO=4&transport=websocket"),
         ("wss://example.com:8443/abs", "wss://example.com:8443/abs/socket.io/?EIO=4&transport=websocket"),
+        ("https://host/abs%2Ftenant", "wss://host/abs%2Ftenant/socket.io/?EIO=4&transport=websocket"),
+        ("https://host/my%20books/", "wss://host/my%20books/socket.io/?EIO=4&transport=websocket"),
     ])
     func buildsSocketURL(address: String, expected: String) throws {
         let url = try #require(URL(string: address))
