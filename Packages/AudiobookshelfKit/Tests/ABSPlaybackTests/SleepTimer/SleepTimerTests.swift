@@ -243,14 +243,13 @@ struct SleepTimerTests {
         #expect(harness.timer.isRunning == false)
     }
 
-    @Test func endOfChapterWithLessThanTenSecondsLeftUsesTheNextChapter() {
-        let harness = Harness(timeline: chapters, at: 445)
+    /// Under 10 media seconds of the chapter left, at any rate, the next chapter (Android `getChapterEndTime`).
+    @Test(arguments: [(440.0, 1.0, 10.0), (440.5, 1, 559.5), (431, 2, 9.5), (440.5, 2, 279.75)])
+    func endOfChapterWithLessThanTenSecondsLeftUsesTheNextChapter(time: Double, rate: Double, remaining: Double) {
+        let harness = Harness(timeline: chapters, at: time)
+        harness.control.rate = rate
         harness.timer.start(.endOfChapter)
-        #expect(harness.timer.remaining == 555)
-
-        harness.control.currentTime = 440
-        harness.timer.start(.endOfChapter)
-        #expect(harness.timer.remaining == 10)
+        #expect(harness.timer.remaining == remaining)
     }
 
     @Test(arguments: zip([1, 0.75, 1], [447.3, 440, 440]))

@@ -32,7 +32,8 @@ public final class SleepTimer {
     public static let gracePeriod: TimeInterval = 120
     /// A running duration timer resets only after this many seconds (Android `checkShouldResetSleepTimer`).
     static let resetGuard: TimeInterval = 3
-    /// An end-of-chapter timer started closer than this to the chapter's end waits for the next one.
+    /// An end-of-chapter timer started with less than this many media seconds of the chapter left waits for the next
+    /// one (Android `getChapterEndTime`, at any rate; legacy iOS had no cutoff).
     static let minimumChapterRemaining: TimeInterval = 10
     /// Subtracting time leaves at least this much.
     static let minimumRemaining: TimeInterval = 1
@@ -493,7 +494,7 @@ public final class SleepTimer {
         guard let timeline = control.timeline, let end = Self.segmentEnd(in: timeline, at: time), end > time else {
             return nil
         }
-        if skippingShortRemainder, (end - time) / rate < Self.minimumChapterRemaining,
+        if skippingShortRemainder, end - time < Self.minimumChapterRemaining,
             let next = Self.segmentEnd(in: timeline, at: end), next > end
         {
             return next
