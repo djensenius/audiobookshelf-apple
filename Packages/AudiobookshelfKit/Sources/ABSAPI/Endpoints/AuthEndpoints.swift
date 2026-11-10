@@ -53,10 +53,16 @@ public enum AuthEndpoints {
     /// connection's cookie jar can hold one (`/auth/refresh` sets it), so the request is sent
     /// without cookies to make the header token the one invalidated. `/logout` is not behind the
     /// access-token check, so no access token is sent and a 401 never triggers a refresh.
-    public static func logout(refreshToken: String) -> Endpoint<LogoutResponse> {
-        Endpoint(
-            .post, "/logout", headers: ["x-refresh-token": refreshToken], requiresAuthentication: false,
-            sendsCookies: false)
+    ///
+    /// For an OpenID session, pass the cookies saved at sign-in: they're sent in an explicit
+    /// `Cookie` header (the jar's cookies still aren't), so the server returns the identity
+    /// provider's end-session URL in ``LogoutResponse/redirectURL``.
+    public static func logout(
+        refreshToken: String, openIDSession: OpenIDSessionCookies? = nil
+    ) -> Endpoint<LogoutResponse> {
+        var headers = ["x-refresh-token": refreshToken]
+        if let openIDSession { headers["Cookie"] = openIDSession.headerValue }
+        return Endpoint(.post, "/logout", headers: headers, requiresAuthentication: false, sendsCookies: false)
     }
 }
 
