@@ -15,22 +15,63 @@ final class CallLog {
     func count(of entry: String) -> Int { entries.filter { $0 == entry }.count }
 
     func clear() { entries = [] }
+
+    /// The entries other than flushes, whose order is concurrent.
+    var withoutFlushes: [String] { entries.filter { !$0.contains(".flush") } }
+
+    var flushes: Set<String> { Set(entries.filter { $0.contains(".flush") }) }
+}
+
+/// Holds its waiters until it's opened, then lets everyone through.
+@MainActor
+final class Gate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        for waiter in waiters { waiter.resume() }
+        waiters = []
+    }
 }
 
 let identityA = SessionIdentity(connectionID: UUID(uuidString: "AAAAAAAA-0000-0000-0000-000000000000")!, userID: "a")
 let identityB = SessionIdentity(connectionID: UUID(uuidString: "BBBBBBBB-0000-0000-0000-000000000000")!, userID: "b")
 
+private struct NoTokens: TokenProvider {
+    func tokens() async -> AuthTokens? { nil }
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool { false }
+    func expireSession(ifCurrent rejected: AuthTokens) async -> Bool { false }
+}
+
+func makeClient() throws -> APIClient {
+    APIClient(
+        configuration: try APIClientConfiguration(baseURL: URL(string: "https://abs.example")!),
+        tokenProvider: NoTokens())
+}
+
 /// The account, as `AccountManager` would report it.
 @MainActor @Observable
 final class FakeAccountSource: AccountSessionSource {
     var phase: AccountSessionPhase = .signedOut
-    let client: APIClient? = nil
+    var client: APIClient?
 
     @ObservationIgnored private let log: CallLog
     /// What ``restore()`` ends in.
     @ObservationIgnored var restoredPhase: AccountSessionPhase = .signedOut
+    @ObservationIgnored var restoredClient: APIClient?
+    @ObservationIgnored var restoreGate: Gate?
     @ObservationIgnored var restoreError: (any Error)?
     @ObservationIgnored var switchError: (any Error)?
+    /// The switch fails without throwing and leaves the account signed out.
+    @ObservationIgnored var switchSignsOut = false
+    /// Runs inside ``switch(to:)``, before it changes anything.
+    @ObservationIgnored var onSwitch: (@MainActor () -> Void)?
     @ObservationIgnored private(set) var restoreCount = 0
 
     init(log: CallLog) {
@@ -41,29 +82,58 @@ final class FakeAccountSource: AccountSessionSource {
         restoreCount += 1
         log.record("accounts.restore")
         phase = .restoring
+        await restoreGate?.wait()
         await Task.yield()
         if let restoreError { throw restoreError }
+        client = restoredClient
         phase = restoredPhase
     }
 
     func logout() async -> URL? {
         log.record("accounts.logout")
         phase = .signedOut
+        client = nil
         return URL(string: "https://idp.example/logout")
     }
 
     func `switch`(to connectionID: UUID) async throws {
         let target = [identityA, identityB].first { $0.connectionID == connectionID }
         log.record("accounts.switch(\(target?.userID ?? "?"))")
+        onSwitch?()
         if let switchError { throw switchError }
-        guard let target else { return }
         phase = .restoring
         await Task.yield()
+        if switchSignsOut {
+            phase = .signedOut
+            return
+        }
+        guard let target else { return }
         phase = .active(target, isOffline: false)
     }
 
+    func remove(_ connectionID: UUID) async throws -> URL? {
+        let target = [identityA, identityB].first { $0.connectionID == connectionID }
+        log.record("accounts.remove(\(target?.userID ?? "?"))")
+        guard phase.identity?.connectionID == connectionID else { return nil }
+        phase = .signedOut
+        client = nil
+        return URL(string: "https://idp.example/logout")
+    }
+
     /// The server rejects the session: the identity disappears on its own.
-    func expire() { phase = .signedOut }
+    func expire() {
+        phase = .signedOut
+        client = nil
+    }
+
+    /// Restores again, as from offline, and gets `client` for the same identity.
+    func reconnect(client: APIClient) async {
+        guard let identity = phase.identity else { return }
+        phase = .restoring
+        await Task.yield()
+        self.client = client
+        phase = .active(identity, isOffline: false)
+    }
 }
 
 /// A participant that records its calls; `name` prefixes each entry.
@@ -71,9 +141,10 @@ final class FakeAccountSource: AccountSessionSource {
 final class FakeParticipant: SessionParticipant {
     let name: String
     private let log: CallLog
-    /// When set, ``flush()`` waits for ``releaseFlush()``.
-    var blocksFlush = false
-    private var flushWaiter: CheckedContinuation<Void, Never>?
+    /// When set, ``flush()`` waits for it to open, or for cancellation.
+    var flushGate: Gate?
+    /// Runs once inside the next ``sessionDidStart(_:)``.
+    var onStart: (@MainActor () async -> Void)?
 
     init(_ name: String, log: CallLog) {
         self.name = name
@@ -82,6 +153,14 @@ final class FakeParticipant: SessionParticipant {
 
     func sessionDidStart(_ context: SessionContext) async {
         log.record("\(name).start(\(context.identity.userID))")
+        if let onStart {
+            self.onStart = nil
+            await onStart()
+        }
+    }
+
+    func sessionDidReconnect(_ context: SessionContext) async {
+        log.record("\(name).reconnect(\(context.identity.userID))")
     }
 
     func sessionWillEnd(_ reason: SessionEndReason) async {
@@ -90,46 +169,65 @@ final class FakeParticipant: SessionParticipant {
 
     func flush() async {
         log.record("\(name).flush")
-        guard blocksFlush else { return }
-        await withCheckedContinuation { flushWaiter = $0 }
-        log.record("\(name).flushed")
-    }
-
-    func releaseFlush() {
-        flushWaiter?.resume()
-        flushWaiter = nil
+        if let flushGate {
+            await withTaskCancellationHandler {
+                await flushGate.wait()
+            } onCancel: {
+                Task { @MainActor in flushGate.open() }
+            }
+        }
+        log.record(Task.isCancelled ? "\(name).flushCancelled" : "\(name).flushed")
     }
 }
 
-/// The library: connects, marks the seed boundary, fetches `/api/me` and seeds, then clears.
+/// The library: connects, marks the seed boundary, fetches `/api/me` and seeds, then clears. A
+/// seed drops itself when the library reconnected, reseeded or cleared since it began.
 @MainActor
 final class FakeLibrary: SessionSeeding {
     private let log: CallLog
+    /// When set, ``sessionDidStart(_:)`` waits for it after connecting.
+    var connectGate: Gate?
+    /// When set, ``seed(_:)`` waits for it after fetching.
+    var seedGate: Gate?
+    private var generation = 0
 
     init(log: CallLog) {
         self.log = log
     }
 
     func sessionDidStart(_ context: SessionContext) async {
+        generation += 1
         log.record("library.connect(\(context.identity.userID))")
+        await connectGate?.wait()
+    }
+
+    func sessionDidReconnect(_ context: SessionContext) async {
+        log.record("library.reconnect(\(context.identity.userID))")
     }
 
     func sessionWillEnd(_ reason: SessionEndReason) async {
+        generation += 1
         log.record("library.clear(\(reason))")
     }
 
     func flush() async {
         log.record("library.flush")
+        log.record("library.flushed")
     }
 
     func beginSeed(_ context: SessionContext) async {
+        generation += 1
         log.record("library.beginSeed(\(context.identity.userID))")
     }
 
     func seed(_ context: SessionContext) async {
+        let generation = generation
         log.record("library.fetchMe(\(context.identity.userID))")
-        await Task.yield()
-        guard !Task.isCancelled else { return }
+        if let seedGate { await seedGate.wait() } else { await Task.yield() }
+        guard generation == self.generation else {
+            log.record("library.seedDropped(\(context.identity.userID))")
+            return
+        }
         log.record("library.seed(\(context.identity.userID))")
     }
 }

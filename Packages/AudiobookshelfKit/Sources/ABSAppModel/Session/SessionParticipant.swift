@@ -19,8 +19,11 @@ public struct SessionContext: Sendable {
 public enum SessionEndReason: Sendable, Hashable {
     /// The user signed out.
     case signOut
-    /// The user switched to another account, or the source changed identity by itself.
+    /// The user switched to another account or is adding one, or the source changed identity by
+    /// itself.
     case `switch`
+    /// The user removed the active account: its saved data may be deleted next.
+    case removed
     /// The server rejected the session. The tokens are gone, so participants must not send
     /// anything to the server; keep unsent work in the durable store instead.
     case expired
@@ -29,7 +32,8 @@ public enum SessionEndReason: Sendable, Hashable {
 /// When a participant starts relative to the library seed. See ``SessionLifecycle``.
 public enum SessionStage: Sendable, Hashable {
     /// Starts before ``SessionSeeding/beginSeed(_:)``: the library connect, image request
-    /// builders and anything else that doesn't write progress.
+    /// builders and anything else that doesn't write progress. A `.connect` participant must
+    /// never apply progress to the library, or the seed may drop it.
     case connect
     /// Starts after ``SessionSeeding/beginSeed(_:)``: everything that applies progress to the
     /// library (playback, the progress syncer, the realtime socket).
@@ -37,18 +41,36 @@ public enum SessionStage: Sendable, Hashable {
 }
 
 /// Something with per-session state: the library, images, playback, downloads.
+///
+/// The lifecycle calls these one transition at a time, so:
+/// - ``sessionDidStart(_:)``, ``sessionDidReconnect(_:)`` and ``sessionWillEnd(_:)`` must return
+///   promptly; they hold up the gate and every other transition. Start network work in a task the
+///   participant owns and cancels on end. For example, the library adapter (S7a) must not await
+///   `LibraryStore.refresh()` inside `sessionDidStart`: it sets the connection, then refreshes in
+///   its own task. ``sessionWillEnd(_:)`` is given at most the lifecycle's flush timeout.
+/// - A participant must not call ``SessionLifecycle`` transitions (`signOut()`,
+///   `switchAccount(to:)` and the rest) from these methods or ``flush()``. Such a call doesn't
+///   wait: the lifecycle runs it after the current transition finishes.
 @MainActor
 public protocol SessionParticipant: AnyObject, Sendable {
     func sessionDidStart(_ context: SessionContext) async
+    /// The same identity came back online or got a new client, for example after a launch with
+    /// a locked Keychain. Replace the client from `context`. Called in start order, around a new
+    /// seed boundary as at start. The default does nothing.
+    func sessionDidReconnect(_ context: SessionContext) async
     /// Stops the participant's work for the session. With ``SessionEndReason/expired`` this must
     /// not use the network.
     func sessionWillEnd(_ reason: SessionEndReason) async
-    /// Sends pending work to the server, on background and before a sign-out or switch. The
-    /// lifecycle waits for it only up to its flush timeout. The default does nothing.
+    /// Sends pending work to the server, on background and before a sign-out, switch or removal.
+    /// Every participant flushes concurrently, and the lifecycle waits at most its flush
+    /// timeout, then cancels the flushes. A flush must honour cancellation, and must tolerate
+    /// ``sessionWillEnd(_:)`` arriving while a cancelled flush is still running. The default does
+    /// nothing.
     func flush() async
 }
 
 extension SessionParticipant {
+    public func sessionDidReconnect(_ context: SessionContext) async {}
     public func flush() async {}
 }
 
@@ -62,7 +84,8 @@ public protocol SessionSeeding: SessionParticipant {
     /// Marks the seed boundary. Progress applied after it survives the seed.
     func beginSeed(_ context: SessionContext) async
     /// Fetches the user's progress (`/api/me`) and seeds the library with it. Runs in its own
-    /// task, cancelled when the session ends; a seed that finishes after the session ended
-    /// must be dropped by the seeder.
+    /// task, cancelled when the session ends or reconnects. Cancellation can arrive after the
+    /// fetch returned, so the seeder must drop a seed whose session ended or reseeded since,
+    /// by a generation or the token from ``beginSeed(_:)``, not only by `Task.isCancelled`.
     func seed(_ context: SessionContext) async
 }

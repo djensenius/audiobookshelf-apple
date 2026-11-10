@@ -9,6 +9,8 @@ public enum AuthGate: Sendable, Equatable {
     /// A session is running. `isOffline` is `true` while the server can't be reached and the
     /// app runs from saved data.
     case ready(SessionIdentity, isOffline: Bool)
+    /// The session of `from` has ended and another account is being made active.
+    case switching(from: SessionIdentity)
     /// The local store couldn't be opened, so nothing can be restored or saved.
     case storeUnavailable(SessionStoreError)
 
@@ -19,7 +21,7 @@ public enum AuthGate: Sendable, Equatable {
 }
 
 /// Wraps the error that made the local store unavailable, so ``AuthGate`` can be `Equatable`.
-/// Two values are equal when their descriptions are.
+/// Two values are equal when their errors have the same type and description.
 public struct SessionStoreError: Error, Sendable, Equatable, CustomStringConvertible {
     public let underlying: any Error
 
@@ -30,6 +32,7 @@ public struct SessionStoreError: Error, Sendable, Equatable, CustomStringConvert
     public var description: String { String(describing: underlying) }
 
     public static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.description == rhs.description
+        ObjectIdentifier(type(of: lhs.underlying)) == ObjectIdentifier(type(of: rhs.underlying))
+            && lhs.description == rhs.description
     }
 }

@@ -17,9 +17,11 @@ public enum AccountSessionPhase: Sendable, Hashable {
 
 /// The accounts seam of ``SessionLifecycle``; `AccountManager` conforms through an adapter.
 ///
-/// ``phase`` must be observable: the lifecycle watches it with `Observations`, and a session
-/// whose identity disappears without ``SessionLifecycle/signOut()`` or
-/// ``SessionLifecycle/switchAccount(to:)`` is treated as expired on the server.
+/// ``phase`` and ``client`` must be observable: the lifecycle watches them with `Observations`.
+/// A session whose identity disappears without a ``SessionLifecycle`` transition is treated as
+/// expired on the server. Sign out, switch and remove through ``SessionLifecycle``, not the
+/// source, so the session is flushed and ended first; before signing in to another account
+/// while signed in, call ``SessionLifecycle/prepareForAccountChange()``.
 @MainActor
 public protocol AccountSessionSource: AnyObject, Observable, Sendable {
     var phase: AccountSessionPhase { get }
@@ -36,4 +38,7 @@ public protocol AccountSessionSource: AnyObject, Observable, Sendable {
     func logout() async -> URL?
     /// Makes another saved connection active.
     func `switch`(to connectionID: UUID) async throws
+    /// Forgets a saved connection, signing out if it's the active one.
+    /// - Returns: An OpenID end-session URL to open, as for ``logout()``.
+    func remove(_ connectionID: UUID) async throws -> URL?
 }

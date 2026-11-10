@@ -1,3 +1,4 @@
+import ABSAPI
 import Foundation
 import Testing
 
@@ -16,9 +17,10 @@ private struct Harness {
     let clock = ManualClock()
     let lifecycle: SessionLifecycle
 
-    init(restoredPhase: AccountSessionPhase = .active(identityA, isOffline: false)) {
+    init(restoredPhase: AccountSessionPhase = .active(identityA, isOffline: false), restoredClient: APIClient? = nil) {
         source = FakeAccountSource(log: log)
         source.restoredPhase = restoredPhase
+        source.restoredClient = restoredClient
         library = FakeLibrary(log: log)
         images = FakeParticipant("images", log: log)
         playback = FakeParticipant("playback", log: log)
@@ -39,9 +41,25 @@ private struct Harness {
     }
 }
 
+private let allFlushes: Set<String> = [
+    "socket.flush", "socket.flushed", "playback.flush", "playback.flushed", "images.flush", "images.flushed",
+    "library.flush", "library.flushed",
+]
+
+private func pipeline(_ user: String) -> [String] {
+    [
+        "library.connect(\(user))", "images.start(\(user))", "library.beginSeed(\(user))", "playback.start(\(user))",
+        "socket.start(\(user))", "library.fetchMe(\(user))", "library.seed(\(user))",
+    ]
+}
+
+private func teardown(_ reason: String) -> [String] {
+    ["socket.end(\(reason))", "playback.end(\(reason))", "images.end(\(reason))", "library.clear(\(reason))"]
+}
+
 @MainActor
 @Suite struct SessionLifecycleTests {
-    // MARK: Start order
+    // MARK: Start
 
     @Test func startConnectsThenBeginsSeedThenStartsSourcesThenSeeds() async {
         let harness = Harness()
@@ -49,17 +67,7 @@ private struct Harness {
         await harness.lifecycle.start()
         #expect(await eventually { harness.log.entries.contains("library.seed(a)") })
 
-        #expect(
-            harness.log.entries == [
-                "accounts.restore",
-                "library.connect(a)",
-                "images.start(a)",
-                "library.beginSeed(a)",
-                "playback.start(a)",
-                "socket.start(a)",
-                "library.fetchMe(a)",
-                "library.seed(a)",
-            ])
+        #expect(harness.log.entries == ["accounts.restore"] + pipeline("a"))
         #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
     }
 
@@ -78,7 +86,46 @@ private struct Harness {
         #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
     }
 
-    // MARK: End order
+    // MARK: Reconnect
+
+    @Test func comingOnlineWithAClientReseedsAroundTheSources() async throws {
+        let harness = Harness(restoredPhase: .active(identityA, isOffline: true))
+        try await harness.started()
+
+        await harness.source.reconnect(client: try makeClient())
+        #expect(await eventually { harness.log.entries.contains("library.seed(a)") })
+
+        #expect(
+            harness.log.entries == [
+                "library.reconnect(a)", "images.reconnect(a)", "library.beginSeed(a)", "playback.reconnect(a)",
+                "socket.reconnect(a)", "library.fetchMe(a)", "library.seed(a)",
+            ])
+        #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
+    }
+
+    @Test func aNewClientForTheSameIdentityReseeds() async throws {
+        let harness = Harness(restoredClient: try makeClient())
+        try await harness.started()
+
+        await harness.source.reconnect(client: try makeClient())
+        #expect(await eventually { harness.log.entries.contains("library.seed(a)") })
+
+        #expect(harness.log.entries.first == "library.reconnect(a)")
+        #expect(harness.log.count(of: "library.beginSeed(a)") == 1)
+        #expect(!harness.log.entries.contains { $0.contains(".end(") || $0.contains(".start(") })
+    }
+
+    @Test func goingOfflineOnlyChangesTheGate() async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        harness.source.phase = .active(identityA, isOffline: true)
+        #expect(await eventually { harness.lifecycle.gate == .ready(identityA, isOffline: true) })
+
+        #expect(harness.log.entries.isEmpty)
+    }
+
+    // MARK: Sign out
 
     @Test func signOutFlushesThenEndsInReverseThenClearsThenLogsOut() async throws {
         let harness = Harness()
@@ -86,48 +133,85 @@ private struct Harness {
 
         let url = await harness.lifecycle.signOut()
 
-        #expect(
-            harness.log.entries == [
-                "socket.flush",
-                "playback.flush",
-                "images.flush",
-                "library.flush",
-                "socket.end(signOut)",
-                "playback.end(signOut)",
-                "images.end(signOut)",
-                "library.clear(signOut)",
-                "accounts.logout",
-            ])
+        #expect(harness.log.flushes == allFlushes)
+        #expect(harness.log.withoutFlushes == teardown("signOut") + ["accounts.logout"])
+        let lastFlush = try #require(harness.log.entries.lastIndex { $0.contains(".flush") })
+        #expect(lastFlush < harness.log.entries.firstIndex(of: "socket.end(signOut)") ?? 0)
         #expect(url == URL(string: "https://idp.example/logout"))
         #expect(harness.lifecycle.gate == .connect)
     }
 
+    @Test func secondSignOutDoesNothing() async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        async let first = harness.lifecycle.signOut()
+        async let second = harness.lifecycle.signOut()
+        _ = await (first, second)
+
+        #expect(harness.log.count(of: "accounts.logout") == 1)
+        #expect(harness.log.count(of: "library.clear(signOut)") == 1)
+        #expect(harness.lifecycle.gate == .connect)
+    }
+
+    @Test func signOutBeforeStartFinishesRunsAfterTheRestore() async {
+        let harness = Harness()
+        let restoreGate = Gate()
+        harness.source.restoreGate = restoreGate
+
+        let start = Task { await harness.lifecycle.start() }
+        #expect(await eventually { harness.source.restoreCount == 1 })
+        let signOut = Task { await harness.lifecycle.signOut() }
+        restoreGate.open()
+        await start.value
+        _ = await signOut.value
+
+        let entries = harness.log.withoutFlushes.filter {
+            !$0.hasPrefix("library.fetchMe") && !$0.hasPrefix("library.seed")
+        }
+        #expect(entries == ["accounts.restore"] + pipeline("a").prefix(5) + teardown("signOut") + ["accounts.logout"])
+        #expect(harness.lifecycle.gate == .connect)
+    }
+
+    @Test func signOutFromInsideTheStartRunsAfterItInsteadOfDeadlocking() async {
+        let harness = Harness()
+        let lifecycle = harness.lifecycle
+        harness.playback.onStart = { _ = await lifecycle.signOut() }
+
+        await harness.lifecycle.start()
+        #expect(await eventually { harness.log.entries.contains("accounts.logout") })
+
+        let entries = harness.log.withoutFlushes.filter {
+            !$0.hasPrefix("library.fetchMe") && !$0.hasPrefix("library.seed")
+        }
+        #expect(entries == ["accounts.restore"] + pipeline("a").prefix(5) + teardown("signOut") + ["accounts.logout"])
+        #expect(harness.lifecycle.gate == .connect)
+    }
+
+    @Test func signOutKeepsAStoreUnavailableGate() async {
+        let harness = Harness()
+        harness.source.restoreError = StoreFailure()
+        await harness.lifecycle.start()
+
+        await harness.lifecycle.signOut()
+
+        #expect(harness.lifecycle.gate == .storeUnavailable(SessionStoreError(StoreFailure())))
+    }
+
+    // MARK: Switch
+
     @Test func switchEndsAccountACompletelyBeforeBConnects() async throws {
         let harness = Harness()
         try await harness.started()
+        var gateDuringSwitch: AuthGate?
+        harness.source.onSwitch = { gateDuringSwitch = harness.lifecycle.gate }
 
         try await harness.lifecycle.switchAccount(to: identityB.connectionID)
         #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
 
-        #expect(
-            harness.log.entries == [
-                "socket.flush",
-                "playback.flush",
-                "images.flush",
-                "library.flush",
-                "socket.end(switch)",
-                "playback.end(switch)",
-                "images.end(switch)",
-                "library.clear(switch)",
-                "accounts.switch(b)",
-                "library.connect(b)",
-                "images.start(b)",
-                "library.beginSeed(b)",
-                "playback.start(b)",
-                "socket.start(b)",
-                "library.fetchMe(b)",
-                "library.seed(b)",
-            ])
+        #expect(harness.log.flushes == allFlushes)
+        #expect(harness.log.withoutFlushes == teardown("switch") + ["accounts.switch(b)"] + pipeline("b"))
+        #expect(gateDuringSwitch == .switching(from: identityA))
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
@@ -149,10 +233,21 @@ private struct Harness {
         await #expect(throws: StoreFailure.self) {
             try await harness.lifecycle.switchAccount(to: identityB.connectionID)
         }
+        #expect(await eventually { harness.log.entries.contains("library.seed(a)") })
 
-        #expect(harness.log.entries.contains("library.clear(switch)"))
-        #expect(harness.log.entries.last(where: { $0.hasPrefix("library.connect") }) == "library.connect(a)")
+        #expect(harness.log.withoutFlushes == teardown("switch") + ["accounts.switch(b)"] + pipeline("a"))
         #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
+    }
+
+    @Test func switchThatSignsOutWithoutThrowingShowsConnect() async throws {
+        let harness = Harness()
+        try await harness.started()
+        harness.source.switchSignsOut = true
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+
+        #expect(harness.log.withoutFlushes == teardown("switch") + ["accounts.switch(b)"])
+        #expect(harness.lifecycle.gate == .connect)
     }
 
     @Test func identityChangedByTheSourceEndsTheOldSessionFirst() async throws {
@@ -162,12 +257,76 @@ private struct Harness {
         harness.source.phase = .active(identityB, isOffline: false)
         #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
 
-        let entries = harness.log.entries
-        #expect(!entries.contains { $0.hasSuffix(".flush") })
-        let cleared = try #require(entries.firstIndex(of: "library.clear(switch)"))
-        let connected = try #require(entries.firstIndex(of: "library.connect(b)"))
-        #expect(cleared < connected)
+        #expect(harness.log.entries == teardown("switch") + pipeline("b"))
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
+    @Test func seedThatFinishesAfterTheSwitchIsDropped() async {
+        let harness = Harness()
+        let seedGate = Gate()
+        harness.library.seedGate = seedGate
+        await harness.lifecycle.start()
+        #expect(await eventually { harness.log.entries.contains("library.fetchMe(a)") })
+
+        try? await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("library.fetchMe(b)") })
+        seedGate.open()
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        #expect(harness.log.entries.contains("library.seedDropped(a)"))
+        #expect(!harness.log.entries.contains("library.seed(a)"))
+    }
+
+    // MARK: Account changes
+
+    @Test func removingTheActiveAccountEndsItWithRemoved() async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        let url = try await harness.lifecycle.removeAccount(identityA.connectionID)
+
+        #expect(harness.log.flushes == allFlushes)
+        #expect(harness.log.withoutFlushes == teardown("removed") + ["accounts.remove(a)"])
+        #expect(url == URL(string: "https://idp.example/logout"))
+        #expect(harness.lifecycle.gate == .connect)
+    }
+
+    @Test func removingAnotherAccountLeavesTheSession() async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        try await harness.lifecycle.removeAccount(identityB.connectionID)
+
+        #expect(harness.log.entries == ["accounts.remove(b)"])
+        #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
+    }
+
+    @Test func preparingForAnAddedAccountEndsTheSessionUntilItSignsIn() async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        await harness.lifecycle.prepareForAccountChange()
+        #expect(harness.log.withoutFlushes == teardown("switch"))
+        #expect(harness.lifecycle.gate == .switching(from: identityA))
+
+        harness.log.clear()
+        harness.source.phase = .active(identityB, isOffline: false)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+        #expect(harness.log.entries == pipeline("b"))
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
+    @Test func cancellingAnAccountChangeRestartsTheSession() async throws {
+        let harness = Harness()
+        try await harness.started()
+        await harness.lifecycle.prepareForAccountChange()
+        harness.log.clear()
+
+        await harness.lifecycle.cancelAccountChange()
+        #expect(await eventually { harness.log.entries.contains("library.seed(a)") })
+
+        #expect(harness.log.entries == pipeline("a"))
+        #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
     }
 
     // MARK: Expiry
@@ -179,43 +338,72 @@ private struct Harness {
         harness.source.expire()
         #expect(await eventually { harness.lifecycle.gate == .connect })
 
-        #expect(
-            harness.log.entries == [
-                "socket.end(expired)",
-                "playback.end(expired)",
-                "images.end(expired)",
-                "library.clear(expired)",
-            ])
+        #expect(harness.log.entries == teardown("expired"))
+    }
+
+    @Test func expiryWhileTheSessionStartsEndsItAsExpired() async {
+        let harness = Harness()
+        let connectGate = Gate()
+        harness.library.connectGate = connectGate
+        let start = Task { await harness.lifecycle.start() }
+        #expect(await eventually { harness.log.entries.contains("library.connect(a)") })
+
+        harness.source.expire()
+        connectGate.open()
+        await start.value
+        #expect(await eventually { harness.lifecycle.gate == .connect })
+
+        #expect(harness.log.entries.suffix(4) == teardown("expired")[...])
+        #expect(harness.log.flushes.isEmpty)
+        #expect(!harness.log.entries.contains { $0.hasPrefix("library.fetchMe") || $0.hasPrefix("library.seed") })
+    }
+
+    @Test func expiryDuringASwitchFlushEndsTheOldSessionOnce() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let flushGate = Gate()
+        harness.playback.flushGate = flushGate
+
+        let switching = Task { try await harness.lifecycle.switchAccount(to: identityB.connectionID) }
+        #expect(await eventually { harness.log.entries.contains("playback.flush") && harness.clock.sleeperCount == 1 })
+        harness.source.expire()
+        harness.clock.advance(by: .seconds(3))
+        try await switching.value
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        #expect(harness.log.withoutFlushes == teardown("switch") + ["accounts.switch(b)"] + pipeline("b"))
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
     // MARK: Flush
 
-    @Test func signOutWaitsForTheFlushOnlyUpToTheTimeout() async throws {
+    @Test func flushIsBoundedAndASlowParticipantDoesNotStarveTheOthers() async throws {
         let harness = Harness()
         try await harness.started()
-        harness.playback.blocksFlush = true
-        defer { harness.playback.releaseFlush() }
+        let flushGate = Gate()
+        harness.playback.flushGate = flushGate
+        defer { flushGate.open() }
 
         let signOut = Task { await harness.lifecycle.signOut() }
-        #expect(await eventually { harness.log.entries.contains("playback.flush") && harness.clock.sleeperCount == 1 })
+        #expect(
+            await eventually {
+                ["socket.flushed", "images.flushed", "library.flushed", "playback.flush"]
+                    .allSatisfy(harness.log.entries.contains) && harness.clock.sleeperCount == 1
+            })
 
         harness.clock.advance(by: .seconds(2))
         for _ in 0..<50 { await Task.yield() }
+        #expect(harness.clock.sleeperCount == 1)
+        #expect(!harness.log.entries.contains("playback.flushed"))
+        #expect(!harness.log.entries.contains("playback.flushCancelled"))
         #expect(!harness.log.entries.contains("socket.end(signOut)"))
 
         harness.clock.advance(by: .seconds(1))
         _ = await signOut.value
+        #expect(await eventually { harness.log.entries.contains("playback.flushCancelled") })
 
-        #expect(
-            harness.log.entries == [
-                "socket.flush",
-                "playback.flush",
-                "socket.end(signOut)",
-                "playback.end(signOut)",
-                "images.end(signOut)",
-                "library.clear(signOut)",
-                "accounts.logout",
-            ])
+        #expect(!harness.log.entries.contains("playback.flushed"))
+        #expect(harness.log.withoutFlushes == teardown("signOut") + ["accounts.logout"])
     }
 
     @Test func backgroundFlushesTheSessionAndActiveDoesNot() async throws {
@@ -227,8 +415,18 @@ private struct Harness {
         #expect(harness.log.entries.isEmpty)
 
         await harness.lifecycle.handle(scenePhase: .background)
-        #expect(harness.log.entries == ["socket.flush", "playback.flush", "images.flush", "library.flush"])
+        #expect(harness.log.flushes == allFlushes)
+        #expect(harness.log.withoutFlushes.isEmpty)
         #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
+    }
+
+    @Test func backgroundWithoutASessionDoesNothing() async {
+        let harness = Harness(restoredPhase: .signedOut)
+        await harness.lifecycle.start()
+
+        await harness.lifecycle.handle(scenePhase: .background)
+
+        #expect(harness.log.entries == ["accounts.restore"])
     }
 
     // MARK: Gate
@@ -254,16 +452,6 @@ private struct Harness {
 
         #expect(harness.lifecycle.gate == .ready(identityA, isOffline: true))
         #expect(harness.lifecycle.gate.identity?.snapshotKey == "nav.snapshot.AAAAAAAA-0000-0000-0000-000000000000.a")
-    }
-
-    @Test func gateFollowsConnectivityWithoutRestartingTheSession() async throws {
-        let harness = Harness()
-        try await harness.started()
-
-        harness.source.phase = .active(identityA, isOffline: true)
-        #expect(await eventually { harness.lifecycle.gate == .ready(identityA, isOffline: true) })
-
-        #expect(harness.log.entries.isEmpty)
     }
 
     @Test func gateGoesFromConnectToReadyWhenTheUserSignsIn() async {
@@ -293,5 +481,12 @@ private struct Harness {
         await lifecycle.start()
 
         #expect(lifecycle.gate == .storeUnavailable(SessionStoreError(StoreFailure())))
+    }
+
+    @Test func storeErrorsOfDifferentTypesDiffer() {
+        struct Other: Error, CustomStringConvertible {
+            var description: String { "The store couldn't be opened." }
+        }
+        #expect(SessionStoreError(StoreFailure()) != SessionStoreError(Other()))
     }
 }
