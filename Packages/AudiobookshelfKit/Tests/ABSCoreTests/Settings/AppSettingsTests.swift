@@ -246,13 +246,121 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
     }
 
     @Test func usesTheAppGroupSuiteWhenAvailable() {
-        let identifier = "group.ABSCoreTests.\(UUID().uuidString)"
-        defer { UserDefaults.standard.removePersistentDomain(forName: identifier) }
+        // A non-`group.` suite name, so the test doesn't create an App Group preferences file.
+        let identifier = "ABSCoreTests.AppGroupStandIn.\(UUID().uuidString)"
         let defaults = AppSettings.sharedDefaults(appGroupIdentifier: identifier) { $0 == identifier }
+        defer { defaults.removePersistentDomain(forName: identifier) }
         #expect(defaults !== UserDefaults.standard)
         defaults.set(true, forKey: AppSettings.Key.autoSleepTimer.rawValue)
         #expect(UserDefaults(suiteName: identifier)?.bool(forKey: AppSettings.Key.autoSleepTimer.rawValue) == true)
-        defaults.removePersistentDomain(forName: identifier)
+        #expect(UserDefaults.standard.object(forKey: AppSettings.Key.autoSleepTimer.rawValue) == nil)
+    }
+
+    @Test func invalidAssignmentsAreRejected() async throws {
+        try await withIsolatedDefaults { defaults, _ in
+            let settings = AppSettings(defaults: defaults)
+            settings.jumpForwardTime = 30
+            settings.jumpForwardTime = 0
+            settings.jumpBackwardsTime = -5
+            settings.sleepTimerLength = -1
+            settings.autoSleepTimerAutoRewindTime = -1
+            settings.playbackRate = 0
+            settings.playbackRate = .nan
+            settings.autoSleepTimerStartTime = "25:00"
+            settings.autoSleepTimerEndTime = "6:00"
+
+            func stored(_ key: AppSettings.Key) -> Any? { defaults.object(forKey: key.rawValue) }
+            #expect(settings.jumpForwardTime == 30)
+            #expect(stored(.jumpForwardTime) as? Int == 30)
+            #expect(settings.jumpBackwardsTime == 10)
+            #expect(stored(.jumpBackwardsTime) == nil)
+            #expect(settings.sleepTimerLength == 900_000)
+            #expect(stored(.sleepTimerLength) == nil)
+            #expect(settings.autoSleepTimerAutoRewindTime == 300_000)
+            #expect(stored(.autoSleepTimerAutoRewindTime) == nil)
+            #expect(settings.playbackRate == 1.0)
+            #expect(stored(.playbackRate) == nil)
+            #expect(settings.autoSleepTimerStartTime == "22:00")
+            #expect(stored(.autoSleepTimerStartTime) == nil)
+            #expect(settings.autoSleepTimerEndTime == "06:00")
+            #expect(stored(.autoSleepTimerEndTime) == nil)
+            #expect(AppSettings(defaults: defaults).jumpForwardTime == settings.jumpForwardTime)
+        }
+    }
+
+    @Test func storeDeallocatesAndLaterWritesAreSafe() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            weak var weakSettings: AppSettings?
+            do {
+                let settings = AppSettings(defaults: defaults)
+                weakSettings = settings
+                settings.jumpForwardTime = 15
+            }
+            #expect(weakSettings == nil)
+
+            UserDefaults(suiteName: suiteName)?.set(45, forKey: AppSettings.Key.jumpForwardTime.rawValue)
+            await Task.detached {
+                for value in 1...20 {
+                    UserDefaults(suiteName: suiteName)?.set(value, forKey: AppSettings.Key.jumpBackwardsTime.rawValue)
+                }
+            }.value
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(AppSettings(defaults: defaults).jumpForwardTime == 45)
+        }
+    }
+
+    @Test func burstOfBackgroundWritesEndsAtTheLastValue() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            let settings = AppSettings(defaults: defaults)
+            await Task.detached {
+                let external = UserDefaults(suiteName: suiteName)
+                for value in 1...100 {
+                    external?.set(value, forKey: AppSettings.Key.jumpBackwardsTime.rawValue)
+                }
+            }.value
+            #expect(await eventually { settings.jumpBackwardsTime == 100 })
+        }
+    }
+
+    @Test func snapshotReadsValidatedValuesOffTheMainActor() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            let settings = AppSettings(defaults: defaults)
+            settings.theme = .dark
+            settings.playbackRate = 1.5
+            settings.setLastLibraryID("lib-1", serverID: "s", userID: "u")
+            defaults.set(-3, forKey: AppSettings.Key.jumpForwardTime.rawValue)
+
+            let snapshot = await Task.detached { () -> AppSettings.Snapshot? in
+                guard let defaults = UserDefaults(suiteName: suiteName) else { return nil }
+                return AppSettings.snapshot(from: defaults)
+            }.value
+            let values = try #require(snapshot)
+            #expect(values.theme == .dark)
+            #expect(values.playbackRate == 1.5)
+            #expect(values.jumpForwardTime == 10)
+            #expect(values.chapterTrack == true)
+            #expect(values.lastLibraryID(serverID: "s", userID: "u") == "lib-1")
+            #expect(values.jumpForwardTime == settings.jumpForwardTime)
+        }
+    }
+
+    @Test func resetRemovesStoredValues() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            let settings = AppSettings(defaults: defaults)
+            settings.theme = .black
+            settings.jumpForwardTime = 60
+            settings.setLastLibraryID("lib", serverID: "s", userID: "u")
+
+            settings.reset(.theme)
+            #expect(settings.theme == .system)
+            #expect(defaults.object(forKey: AppSettings.Key.theme.rawValue) == nil)
+            #expect(settings.jumpForwardTime == 60)
+
+            settings.resetAll()
+            #expect(settings.jumpForwardTime == 10)
+            #expect(settings.lastLibraryIDs.isEmpty)
+            #expect(defaults.persistentDomain(forName: suiteName)?.isEmpty ?? true)
+        }
     }
 
     #if os(macOS)

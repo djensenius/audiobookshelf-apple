@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import Synchronization
 
 #if os(macOS)
     import Security
@@ -12,12 +13,16 @@ import Observation
 /// views, widgets and other scenes can also bind to it with
 /// `@AppStorage(AppSettings.Key.<name>.rawValue, store: settings.defaults)`.
 /// Writes from anywhere in the process (another `UserDefaults` instance for the same
-/// suite, `@AppStorage`) are picked up through key-value observing and republished
-/// through Observation.
+/// suite, `@AppStorage`) and, for the App Group suite, from other processes such as
+/// widgets are picked up through key-value observing and republished through
+/// Observation. ``lastLibraryIDs`` is a dictionary and can't be bound with
+/// `@AppStorage`. Code off the main actor reads validated values with
+/// ``snapshot(from:)``.
 ///
 /// Missing or invalid stored values (wrong type, out of range, unknown enum case) read
-/// as the default. Defaults are never written back, so the store only contains values
-/// the user changed.
+/// as the default, and invalid values assigned to a property are rejected (the property
+/// keeps its previous value and nothing is written). Defaults are never written back, so
+/// the store only contains values the user changed.
 ///
 /// Names, units and defaults follow the legacy app (`pages/settings.vue`,
 /// `DeviceSettings.swift`, `PlayerSettings.swift`). Dropped legacy settings:
@@ -102,10 +107,12 @@ public final class AppSettings {
     // MARK: Playback
 
     /// Seconds. Must be positive.
-    public var jumpForwardTime = Default.jumpForwardTime { didSet { persist(.jumpForwardTime, jumpForwardTime) } }
+    public var jumpForwardTime = Default.jumpForwardTime {
+        didSet { persist(.jumpForwardTime, \.jumpForwardTime, oldValue, isValid: Self.isJumpInterval) }
+    }
     /// Seconds. Must be positive.
     public var jumpBackwardsTime = Default.jumpBackwardsTime {
-        didSet { persist(.jumpBackwardsTime, jumpBackwardsTime) }
+        didSet { persist(.jumpBackwardsTime, \.jumpBackwardsTime, oldValue, isValid: Self.isJumpInterval) }
     }
     public var disableAutoRewind = Default.disableAutoRewind {
         didSet { persist(.disableAutoRewind, disableAutoRewind) }
@@ -121,7 +128,7 @@ public final class AppSettings {
 
     /// Milliseconds; `0` means "end of chapter" (legacy).
     public var sleepTimerLength = Default.sleepTimerLength {
-        didSet { persist(.sleepTimerLength, sleepTimerLength) }
+        didSet { persist(.sleepTimerLength, \.sleepTimerLength, oldValue, isValid: Self.isDuration) }
     }
     public var disableShakeToResetSleepTimer = Default.disableShakeToResetSleepTimer {
         didSet { persist(.disableShakeToResetSleepTimer, disableShakeToResetSleepTimer) }
@@ -141,18 +148,20 @@ public final class AppSettings {
     public var autoSleepTimer = Default.autoSleepTimer { didSet { persist(.autoSleepTimer, autoSleepTimer) } }
     /// 24-hour `HH:mm`.
     public var autoSleepTimerStartTime = Default.autoSleepTimerStartTime {
-        didSet { persist(.autoSleepTimerStartTime, autoSleepTimerStartTime) }
+        didSet { persist(.autoSleepTimerStartTime, \.autoSleepTimerStartTime, oldValue, isValid: Self.isTimeOfDay) }
     }
     /// 24-hour `HH:mm`.
     public var autoSleepTimerEndTime = Default.autoSleepTimerEndTime {
-        didSet { persist(.autoSleepTimerEndTime, autoSleepTimerEndTime) }
+        didSet { persist(.autoSleepTimerEndTime, \.autoSleepTimerEndTime, oldValue, isValid: Self.isTimeOfDay) }
     }
     public var autoSleepTimerAutoRewind = Default.autoSleepTimerAutoRewind {
         didSet { persist(.autoSleepTimerAutoRewind, autoSleepTimerAutoRewind) }
     }
     /// Milliseconds.
     public var autoSleepTimerAutoRewindTime = Default.autoSleepTimerAutoRewindTime {
-        didSet { persist(.autoSleepTimerAutoRewindTime, autoSleepTimerAutoRewindTime) }
+        didSet {
+            persist(.autoSleepTimerAutoRewindTime, \.autoSleepTimerAutoRewindTime, oldValue, isValid: Self.isDuration)
+        }
     }
 
     // MARK: Data
@@ -167,12 +176,17 @@ public final class AppSettings {
     // MARK: Player
 
     /// Must be positive.
-    public var playbackRate = Default.playbackRate { didSet { persist(.playbackRate, playbackRate) } }
+    public var playbackRate = Default.playbackRate {
+        didSet { persist(.playbackRate, \.playbackRate, oldValue, isValid: Self.isPlaybackRate) }
+    }
     public var chapterTrack = Default.chapterTrack { didSet { persist(.chapterTrack, chapterTrack) } }
 
     // MARK: Navigation
 
     /// Last-used library per server and user; see ``lastLibraryID(serverID:userID:)``.
+    ///
+    /// Stored as a `[String: String]` dictionary, which `@AppStorage` can't bind to; use
+    /// this store or ``Snapshot`` to read it.
     public private(set) var lastLibraryIDs: [String: String] = [:] {
         didSet { persist(.lastLibraryIDs, lastLibraryIDs) }
     }
@@ -186,12 +200,24 @@ public final class AppSettings {
         self.defaults = defaults
         reloadFromStore()
         observer = DefaultsObserver(defaults: defaults, keys: Key.allCases.map(\.rawValue)) { [weak self] in
-            if Thread.isMainThread {
-                MainActor.assumeIsolated { self?.reloadFromStore() }
-            } else {
-                Task { @MainActor in self?.reloadFromStore() }
-            }
+            self?.reloadFromStore()
         }
+    }
+
+    // MARK: Reset
+
+    /// Removes the stored value so the default applies again.
+    public func reset(_ key: Key) {
+        defaults.removeObject(forKey: key.rawValue)
+        reloadFromStore()
+    }
+
+    /// Removes every stored setting, including the last-used libraries.
+    public func resetAll() {
+        for key in Key.allCases {
+            defaults.removeObject(forKey: key.rawValue)
+        }
+        reloadFromStore()
     }
 
     // MARK: Last-used library
@@ -229,7 +255,9 @@ public final class AppSettings {
     public nonisolated static func isAppGroupAvailable(_ identifier: String) -> Bool {
         #if os(macOS)
             // On macOS `containerURL(forSecurityApplicationGroupIdentifier:)` returns a URL even
-            // when the process isn't entitled, so check the entitlement itself.
+            // when the process isn't entitled, so check the entitlement itself. This is a
+            // best-effort check: on macOS 15 and later, an App Group entitlement that no
+            // provisioning profile authorises may still be denied at runtime.
             guard let task = SecTaskCreateFromSelf(nil),
                 let groups = SecTaskCopyValueForEntitlement(
                     task, "com.apple.security.application-groups" as CFString, nil) as? [String]
@@ -240,64 +268,15 @@ public final class AppSettings {
         #endif
     }
 
-    // MARK: Reading and writing
+    // MARK: Validation
 
-    private func persist(_ key: Key, _ value: Any) {
-        guard !isReloading else { return }
-        defaults.set(value, forKey: key.rawValue)
-    }
+    /// Jump intervals are positive seconds.
+    nonisolated static func isJumpInterval(_ value: Int) -> Bool { value > 0 }
 
-    /// Re-reads every key and assigns only the values that changed, so observers of
-    /// unchanged settings aren't notified.
-    private func reloadFromStore() {
-        isReloading = true
-        defer { isReloading = false }
-        let store = Reader(defaults: defaults)
-        update(\.enableAltView, store.bool(.enableAltView, Default.enableAltView))
-        update(\.theme, store.enumValue(.theme, Default.theme))
-        update(\.hapticFeedback, store.enumValue(.hapticFeedback, Default.hapticFeedback))
-        update(\.jumpForwardTime, store.int(.jumpForwardTime, Default.jumpForwardTime) { $0 > 0 })
-        update(\.jumpBackwardsTime, store.int(.jumpBackwardsTime, Default.jumpBackwardsTime) { $0 > 0 })
-        update(\.disableAutoRewind, store.bool(.disableAutoRewind, Default.disableAutoRewind))
-        update(\.enableMp3IndexSeeking, store.bool(.enableMp3IndexSeeking, Default.enableMp3IndexSeeking))
-        update(
-            \.allowSeekingOnMediaControls,
-            store.bool(.allowSeekingOnMediaControls, Default.allowSeekingOnMediaControls))
-        update(\.sleepTimerLength, store.int(.sleepTimerLength, Default.sleepTimerLength) { $0 >= 0 })
-        update(
-            \.disableShakeToResetSleepTimer,
-            store.bool(.disableShakeToResetSleepTimer, Default.disableShakeToResetSleepTimer))
-        update(\.shakeSensitivity, store.enumValue(.shakeSensitivity, Default.shakeSensitivity))
-        update(\.disableSleepTimerFadeOut, store.bool(.disableSleepTimerFadeOut, Default.disableSleepTimerFadeOut))
-        update(
-            \.disableSleepTimerResetFeedback,
-            store.bool(.disableSleepTimerResetFeedback, Default.disableSleepTimerResetFeedback))
-        update(
-            \.enableSleepTimerAlmostDoneChime,
-            store.bool(.enableSleepTimerAlmostDoneChime, Default.enableSleepTimerAlmostDoneChime))
-        update(\.autoSleepTimer, store.bool(.autoSleepTimer, Default.autoSleepTimer))
-        update(
-            \.autoSleepTimerStartTime,
-            store.string(.autoSleepTimerStartTime, Default.autoSleepTimerStartTime, where: Self.isTimeOfDay))
-        update(
-            \.autoSleepTimerEndTime,
-            store.string(.autoSleepTimerEndTime, Default.autoSleepTimerEndTime, where: Self.isTimeOfDay))
-        update(\.autoSleepTimerAutoRewind, store.bool(.autoSleepTimerAutoRewind, Default.autoSleepTimerAutoRewind))
-        update(
-            \.autoSleepTimerAutoRewindTime,
-            store.int(.autoSleepTimerAutoRewindTime, Default.autoSleepTimerAutoRewindTime) { $0 >= 0 })
-        update(\.downloadUsingCellular, store.enumValue(.downloadUsingCellular, Default.downloadUsingCellular))
-        update(\.streamingUsingCellular, store.enumValue(.streamingUsingCellular, Default.streamingUsingCellular))
-        update(\.playbackRate, store.double(.playbackRate, Default.playbackRate) { $0.isFinite && $0 > 0 })
-        update(\.chapterTrack, store.bool(.chapterTrack, Default.chapterTrack))
-        update(\.lastLibraryIDs, store.stringDictionary(.lastLibraryIDs))
-    }
+    /// Durations are non-negative milliseconds.
+    nonisolated static func isDuration(_ value: Int) -> Bool { value >= 0 }
 
-    private func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppSettings, Value>, _ value: Value) {
-        if self[keyPath: keyPath] != value {
-            self[keyPath: keyPath] = value
-        }
-    }
+    nonisolated static func isPlaybackRate(_ value: Double) -> Bool { value.isFinite && value > 0 }
 
     /// Accepts `HH:mm` with hours 00–23 and minutes 00–59.
     nonisolated static func isTimeOfDay(_ value: String) -> Bool {
@@ -306,6 +285,148 @@ public final class AppSettings {
             let hours = Int(parts[0]), let minutes = Int(parts[1])
         else { return false }
         return (0..<24).contains(hours) && (0..<60).contains(minutes)
+    }
+
+    // MARK: Reading and writing
+
+    private func persist(_ key: Key, _ value: Any) {
+        guard !isReloading else { return }
+        defaults.set(value, forKey: key.rawValue)
+    }
+
+    /// Persists a validated setting. An invalid value is never written; the property goes
+    /// back to its previous value, which is always valid.
+    private func persist<Value>(
+        _ key: Key, _ keyPath: ReferenceWritableKeyPath<AppSettings, Value>, _ oldValue: Value,
+        isValid: (Value) -> Bool
+    ) {
+        let value = self[keyPath: keyPath]
+        guard isValid(value) else {
+            let wasReloading = isReloading
+            isReloading = true
+            defer { isReloading = wasReloading }
+            self[keyPath: keyPath] = oldValue
+            return
+        }
+        persist(key, value)
+    }
+
+    /// Re-reads every key and assigns only the values that changed, so observers of
+    /// unchanged settings aren't notified.
+    private func reloadFromStore() {
+        isReloading = true
+        defer { isReloading = false }
+        let snapshot = Snapshot(defaults: defaults)
+        update(\.enableAltView, snapshot.enableAltView)
+        update(\.theme, snapshot.theme)
+        update(\.hapticFeedback, snapshot.hapticFeedback)
+        update(\.jumpForwardTime, snapshot.jumpForwardTime)
+        update(\.jumpBackwardsTime, snapshot.jumpBackwardsTime)
+        update(\.disableAutoRewind, snapshot.disableAutoRewind)
+        update(\.enableMp3IndexSeeking, snapshot.enableMp3IndexSeeking)
+        update(\.allowSeekingOnMediaControls, snapshot.allowSeekingOnMediaControls)
+        update(\.sleepTimerLength, snapshot.sleepTimerLength)
+        update(\.disableShakeToResetSleepTimer, snapshot.disableShakeToResetSleepTimer)
+        update(\.shakeSensitivity, snapshot.shakeSensitivity)
+        update(\.disableSleepTimerFadeOut, snapshot.disableSleepTimerFadeOut)
+        update(\.disableSleepTimerResetFeedback, snapshot.disableSleepTimerResetFeedback)
+        update(\.enableSleepTimerAlmostDoneChime, snapshot.enableSleepTimerAlmostDoneChime)
+        update(\.autoSleepTimer, snapshot.autoSleepTimer)
+        update(\.autoSleepTimerStartTime, snapshot.autoSleepTimerStartTime)
+        update(\.autoSleepTimerEndTime, snapshot.autoSleepTimerEndTime)
+        update(\.autoSleepTimerAutoRewind, snapshot.autoSleepTimerAutoRewind)
+        update(\.autoSleepTimerAutoRewindTime, snapshot.autoSleepTimerAutoRewindTime)
+        update(\.downloadUsingCellular, snapshot.downloadUsingCellular)
+        update(\.streamingUsingCellular, snapshot.streamingUsingCellular)
+        update(\.playbackRate, snapshot.playbackRate)
+        update(\.chapterTrack, snapshot.chapterTrack)
+        update(\.lastLibraryIDs, snapshot.lastLibraryIDs)
+    }
+
+    private func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppSettings, Value>, _ value: Value) {
+        if self[keyPath: keyPath] != value {
+            self[keyPath: keyPath] = value
+        }
+    }
+}
+
+// MARK: - Snapshot
+
+extension AppSettings {
+    /// A validated, read-only copy of the stored settings for code that isn't on the main
+    /// actor, such as widgets and App Intents. Uses the same defaults and validation as
+    /// ``AppSettings``.
+    public struct Snapshot: Sendable, Equatable {
+        public let enableAltView: Bool
+        public let theme: AppTheme
+        public let hapticFeedback: HapticFeedback
+        public let jumpForwardTime: Int
+        public let jumpBackwardsTime: Int
+        public let disableAutoRewind: Bool
+        public let enableMp3IndexSeeking: Bool
+        public let allowSeekingOnMediaControls: Bool
+        public let sleepTimerLength: Int
+        public let disableShakeToResetSleepTimer: Bool
+        public let shakeSensitivity: ShakeSensitivity
+        public let disableSleepTimerFadeOut: Bool
+        public let disableSleepTimerResetFeedback: Bool
+        public let enableSleepTimerAlmostDoneChime: Bool
+        public let autoSleepTimer: Bool
+        public let autoSleepTimerStartTime: String
+        public let autoSleepTimerEndTime: String
+        public let autoSleepTimerAutoRewind: Bool
+        public let autoSleepTimerAutoRewindTime: Int
+        public let downloadUsingCellular: CellularPolicy
+        public let streamingUsingCellular: CellularPolicy
+        public let playbackRate: Double
+        public let chapterTrack: Bool
+        public let lastLibraryIDs: [String: String]
+
+        init(defaults: UserDefaults) {
+            let store = Reader(defaults: defaults)
+            enableAltView = store.bool(.enableAltView, Default.enableAltView)
+            theme = store.enumValue(.theme, Default.theme)
+            hapticFeedback = store.enumValue(.hapticFeedback, Default.hapticFeedback)
+            jumpForwardTime = store.int(.jumpForwardTime, Default.jumpForwardTime, where: isJumpInterval)
+            jumpBackwardsTime = store.int(.jumpBackwardsTime, Default.jumpBackwardsTime, where: isJumpInterval)
+            disableAutoRewind = store.bool(.disableAutoRewind, Default.disableAutoRewind)
+            enableMp3IndexSeeking = store.bool(.enableMp3IndexSeeking, Default.enableMp3IndexSeeking)
+            allowSeekingOnMediaControls = store.bool(
+                .allowSeekingOnMediaControls, Default.allowSeekingOnMediaControls)
+            sleepTimerLength = store.int(.sleepTimerLength, Default.sleepTimerLength, where: isDuration)
+            disableShakeToResetSleepTimer = store.bool(
+                .disableShakeToResetSleepTimer, Default.disableShakeToResetSleepTimer)
+            shakeSensitivity = store.enumValue(.shakeSensitivity, Default.shakeSensitivity)
+            disableSleepTimerFadeOut = store.bool(.disableSleepTimerFadeOut, Default.disableSleepTimerFadeOut)
+            disableSleepTimerResetFeedback = store.bool(
+                .disableSleepTimerResetFeedback, Default.disableSleepTimerResetFeedback)
+            enableSleepTimerAlmostDoneChime = store.bool(
+                .enableSleepTimerAlmostDoneChime, Default.enableSleepTimerAlmostDoneChime)
+            autoSleepTimer = store.bool(.autoSleepTimer, Default.autoSleepTimer)
+            autoSleepTimerStartTime = store.string(
+                .autoSleepTimerStartTime, Default.autoSleepTimerStartTime, where: isTimeOfDay)
+            autoSleepTimerEndTime = store.string(
+                .autoSleepTimerEndTime, Default.autoSleepTimerEndTime, where: isTimeOfDay)
+            autoSleepTimerAutoRewind = store.bool(.autoSleepTimerAutoRewind, Default.autoSleepTimerAutoRewind)
+            autoSleepTimerAutoRewindTime = store.int(
+                .autoSleepTimerAutoRewindTime, Default.autoSleepTimerAutoRewindTime, where: isDuration)
+            downloadUsingCellular = store.enumValue(.downloadUsingCellular, Default.downloadUsingCellular)
+            streamingUsingCellular = store.enumValue(.streamingUsingCellular, Default.streamingUsingCellular)
+            playbackRate = store.double(.playbackRate, Default.playbackRate, where: isPlaybackRate)
+            chapterTrack = store.bool(.chapterTrack, Default.chapterTrack)
+            lastLibraryIDs = store.stringDictionary(.lastLibraryIDs)
+        }
+
+        public func lastLibraryID(serverID: String, userID: String) -> String? {
+            lastLibraryIDs[AppSettings.accountKey(serverID: serverID, userID: userID)]
+        }
+    }
+
+    /// Reads a validated snapshot of the settings in `defaults`, by default the App Group
+    /// store (or the app's own store when the App Group is unavailable). Safe off the main
+    /// actor.
+    public nonisolated static func snapshot(from defaults: UserDefaults = AppSettings.sharedDefaults()) -> Snapshot {
+        Snapshot(defaults: defaults)
     }
 }
 
@@ -344,17 +465,22 @@ private struct Reader {
     }
 }
 
-/// Key-value observes `UserDefaults` keys, which reports writes from any `UserDefaults`
-/// instance for the same suite (including `@AppStorage`).
+/// Key-value observes `UserDefaults` keys. KVO reports writes from any `UserDefaults`
+/// instance for the same suite in this process (including `@AppStorage`) and, for the App
+/// Group suite, writes from other processes such as widgets.
 ///
-/// `@unchecked Sendable`: every stored property is immutable after `init`, and
-/// `UserDefaults` KVO registration and removal are thread-safe.
+/// Notifications on the main thread run `onChange` synchronously. Notifications on other
+/// threads are coalesced: a burst schedules a single main-actor `onChange`.
+///
+/// `@unchecked Sendable`: `defaults`, `keys` and `onChange` are immutable after `init`,
+/// `pending` is a `Mutex`, and `UserDefaults` KVO registration and removal are thread-safe.
 private final class DefaultsObserver: NSObject, @unchecked Sendable {
     private let defaults: UserDefaults
     private let keys: [String]
-    private let onChange: @Sendable () -> Void
+    private let onChange: @MainActor @Sendable () -> Void
+    private let pending = Mutex(false)
 
-    init(defaults: UserDefaults, keys: [String], onChange: @escaping @Sendable () -> Void) {
+    init(defaults: UserDefaults, keys: [String], onChange: @escaping @MainActor @Sendable () -> Void) {
         self.defaults = defaults
         self.keys = keys
         self.onChange = onChange
@@ -374,6 +500,19 @@ private final class DefaultsObserver: NSObject, @unchecked Sendable {
         forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?,
         context: UnsafeMutableRawPointer?
     ) {
-        onChange()
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { onChange() }
+            return
+        }
+        let shouldSchedule = pending.withLock { isPending in
+            defer { isPending = true }
+            return !isPending
+        }
+        guard shouldSchedule else { return }
+        Task { @MainActor in
+            // Clear first so writes that land during the reload schedule another one.
+            self.pending.withLock { $0 = false }
+            self.onChange()
+        }
     }
 }
