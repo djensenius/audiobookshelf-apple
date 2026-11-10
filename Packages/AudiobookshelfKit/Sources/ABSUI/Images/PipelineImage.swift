@@ -45,12 +45,27 @@ enum ImageReveal {
     }
 }
 
+/// The cover a ``PipelineImage`` shows, whatever its size, bucket or version: the same entity
+/// ID on another server (such as a cloned library) is a different cover.
+struct CoverIdentity: Hashable {
+    var serverID: UUID
+    var kind: ImageKind
+    var entityID: String
+
+    init(_ key: ImageKey) {
+        serverID = key.serverID
+        kind = key.kind
+        entityID = key.entityID
+    }
+}
+
 /// What a ``PipelineImage`` shows, and how each load step changes it. Generic over the image
 /// so it can be tested without decoding.
 struct ImageLoadState<Image> {
     private(set) var image: Image?
-    /// The entity `image` shows; a different entity clears it rather than showing a stale cover.
-    private(set) var entity: String?
+    /// The cover `image` shows; a different one clears it rather than showing a stale cover,
+    /// while a new size or version of the same one keeps it until the new image arrives.
+    private(set) var entity: CoverIdentity?
     private(set) var failed = false
 
     /// Starts a load and returns whether to run it. With no request or no pipeline it clears
@@ -60,7 +75,7 @@ struct ImageLoadState<Image> {
             self = Self()
             return false
         }
-        if entity != request.key.entityID {
+        if entity != CoverIdentity(request.key) {
             image = nil
             failed = false
         }
@@ -74,7 +89,7 @@ struct ImageLoadState<Image> {
         switch result {
         case .success(let loaded):
             image = loaded
-            entity = request.key.entityID
+            entity = CoverIdentity(request.key)
             failed = false
         case .failure:
             image = nil

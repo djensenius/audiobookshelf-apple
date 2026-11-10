@@ -65,11 +65,15 @@ import Testing
 
     private struct LoadFailed: Error {}
 
-    private func request(_ id: String) throws -> ImageLoadRequest {
+    private static let server = UUID()
+
+    private func request(
+        _ id: String, server: UUID = Self.server, kind: ImageKind = .itemCover, width: Double = 100
+    ) throws -> ImageLoadRequest {
         try #require(
             ImageLoadRequest(
-                key: ImageKey(serverID: UUID(), kind: .itemCover, entityID: id, updatedAt: 1),
-                size: CGSize(width: 100, height: 160), scale: 2))
+                key: ImageKey(serverID: server, kind: kind, entityID: id, updatedAt: 1),
+                size: CGSize(width: width, height: width * 1.6), scale: 2))
     }
 
     @Test func losingThePipelineOrRequestClearsTheLoadedImage() throws {
@@ -103,7 +107,7 @@ import Testing
         state.finish(first, result: .failure(LoadFailed()), isCancelled: true)
         #expect(state.image == nil && !state.failed)
         state.finish(second, result: .success("second"), isCancelled: false)
-        #expect(state.image == "second" && state.entity == "li_2")
+        #expect(state.image == "second" && state.entity?.entityID == "li_2")
     }
 
     @Test func disappearingReleasesTheImageAndReturningReloadsIt() throws {
@@ -124,10 +128,22 @@ import Testing
         let small = try request("li_1")
         _ = state.begin(small, hasPipeline: true)
         state.finish(small, result: .success("small"), isCancelled: false)
-        let larger = try #require(
-            ImageLoadRequest(key: small.key, size: CGSize(width: 300, height: 480), scale: 2))
+        let larger = try request("li_1", width: 300)
+        #expect(larger.key.bucket != small.key.bucket)
         let loadsLarger = state.begin(larger, hasPipeline: true)
         #expect(loadsLarger)
         #expect(state.image == "small")
+    }
+
+    @Test(arguments: [false, true])
+    func sameEntityIDOnAnotherServerOrKindClearsTheImage(changesKind: Bool) throws {
+        var state = ImageLoadState<String>()
+        let first = try request("li_1")
+        _ = state.begin(first, hasPipeline: true)
+        state.finish(first, result: .success("server A"), isCancelled: false)
+        let other = changesKind ? try request("li_1", kind: .authorImage) : try request("li_1", server: UUID())
+        let loadsOther = state.begin(other, hasPipeline: true)
+        #expect(loadsOther)
+        #expect(state.image == nil)
     }
 }
