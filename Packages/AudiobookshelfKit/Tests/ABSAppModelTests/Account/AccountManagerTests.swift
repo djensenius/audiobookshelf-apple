@@ -166,10 +166,10 @@ private struct Harness {
     }
 
     func makeManager() -> AccountManager {
-        let openID = OIDCLoginService { configuration in
+        let openID = OIDCLoginService { configuration, cookieStorage in
             let client = APIClient(
                 configuration: configuration, tokenProvider: SignedOutTokenProvider(),
-                sessionConfiguration: StubURLProtocol.sessionConfiguration())
+                sessionConfiguration: StubURLProtocol.sessionConfiguration(), cookieStorage: cookieStorage)
             if let jar = client.cookieStorage, let host = configuration.baseURL.host() {
                 StubURLProtocol.useCookieStorage(jar, host: host)
             }
