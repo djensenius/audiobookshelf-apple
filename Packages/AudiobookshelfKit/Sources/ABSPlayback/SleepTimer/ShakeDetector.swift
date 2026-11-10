@@ -21,6 +21,9 @@ public protocol ShakeDetecting: AnyObject {
     ///
     /// Updates stop when iOS suspends the app, which it likely does once the timer paused playback in the
     /// background: a shake during the grace period probably needs the app in the foreground (check on a device).
+    ///
+    /// A motion manager has one accelerometer handler, so starting replaces another detector's updates. A detector
+    /// stops the manager only while its own updates run.
     @MainActor
     public final class ShakeDetector: ShakeDetecting {
         /// The Android `SENSOR_DELAY_UI` rate.
@@ -31,6 +34,7 @@ public protocol ShakeDetecting: AnyObject {
         private let motionManager: CMMotionManager
         private var recognizer: ShakeRecognizer?
         private var onShake: (@MainActor () -> Void)?
+        private var isUpdating = false
 
         /// - Parameter motionManager: The app's motion manager, if it has one; otherwise a shared one.
         public init(motionManager: CMMotionManager? = nil) {
@@ -38,7 +42,7 @@ public protocol ShakeDetecting: AnyObject {
         }
 
         isolated deinit {
-            motionManager.stopAccelerometerUpdates()
+            if isUpdating { motionManager.stopAccelerometerUpdates() }
         }
 
         public func start(sensitivity: ShakeSensitivity, onShake: @escaping @MainActor () -> Void) {
@@ -58,10 +62,12 @@ public protocol ShakeDetecting: AnyObject {
                 // Safe: the handler runs on `OperationQueue.main`, which executes on the main thread.
                 MainActor.assumeIsolated { self?.receive(sample) }
             }
+            isUpdating = true
         }
 
         public func stop() {
-            motionManager.stopAccelerometerUpdates()
+            if isUpdating { motionManager.stopAccelerometerUpdates() }
+            isUpdating = false
             recognizer = nil
             onShake = nil
         }
