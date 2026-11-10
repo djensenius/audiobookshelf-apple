@@ -53,6 +53,7 @@ public enum SessionScenePhase: Sendable, Hashable {
 @MainActor @Observable
 public final class SessionLifecycle {
     public private(set) var gate: AuthGate = .launching
+    public private(set) var linkEpoch: UInt64 = 0
 
     @ObservationIgnored private let source: any AccountSessionSource
     @ObservationIgnored private let clock: any Clock<Duration>
