@@ -1,26 +1,29 @@
 import Foundation
 import Synchronization
 
+@testable import ABSAPI
+
 /// A canned response returned by ``StubURLProtocol``.
 struct StubResponse: Sendable {
     var status: Int
     var headers: [String: String] = [:]
     var body = Data()
-    /// Delays the response so concurrent requests overlap.
-    var delay: Duration?
+    /// Holds the response until the test opens the gate, so concurrent requests overlap in a
+    /// chosen order.
+    var gate: StubGate?
     /// Fails the request with this error instead of responding.
     var error: URLError?
     /// Redirects to this URL (with `status` and a `Location` header) through
     /// `urlProtocol(_:wasRedirectedTo:redirectResponse:)`, so session and task delegates run.
     var redirect: URL?
 
-    static func json(_ json: String, status: Int = 200, delay: Duration? = nil) -> StubResponse {
+    static func json(_ json: String, status: Int = 200, gate: StubGate? = nil) -> StubResponse {
         StubResponse(
-            status: status, headers: ["Content-Type": "application/json"], body: Data(json.utf8), delay: delay)
+            status: status, headers: ["Content-Type": "application/json"], body: Data(json.utf8), gate: gate)
     }
 
-    static func text(_ text: String, status: Int) -> StubResponse {
-        StubResponse(status: status, headers: ["Content-Type": "text/plain"], body: Data(text.utf8))
+    static func text(_ text: String, status: Int, gate: StubGate? = nil) -> StubResponse {
+        StubResponse(status: status, headers: ["Content-Type": "text/plain"], body: Data(text.utf8), gate: gate)
     }
 
     static func redirect(to location: String, status: Int = 302) -> StubResponse {
@@ -102,12 +105,10 @@ final class StubURLProtocol: URLProtocol {
                 cookieStorage.setCookie(cookie)
             }
         }
-        if let delay = stub.delay {
+        if let gate = stub.gate {
             let box = UncheckedProtocol(value: self)
             let recorded = request
-            DispatchQueue.global().asyncAfter(deadline: .now() + delay.timeInterval) {
-                box.value.deliver(stub, for: recorded)
-            }
+            gate.hold { box.value.deliver(stub, for: recorded) }
         } else {
             deliver(stub, for: request)
         }
@@ -139,22 +140,44 @@ final class StubURLProtocol: URLProtocol {
                 next.httpMethod = "GET"
                 next.httpBody = nil
             }
-            client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
-            // A followed redirect stops this instance (and the session loads `next` with a new
-            // one); a declined redirect doesn't, and the task waits for this instance to deliver
-            // the 3xx response. Finishing right away races the redirect: the session can complete
-            // the task with the 3xx before asking its delegate. So the 3xx is only delivered if
-            // the redirect wasn't followed within a grace period.
-            let box = UncheckedProtocol(value: self)
-            DispatchQueue.global().asyncAfter(deadline: .now() + Self.declinedRedirectGrace) {
-                box.value.finish(with: response, body: stub.body)
+            // A followed redirect stops this instance, and the session loads `next` with a new
+            // one. A declined redirect doesn't: the task waits for this instance to deliver the 3xx
+            // response. Delivering it before the redirect decision would race that decision (the
+            // session can complete the task with the 3xx before asking its delegate), so the
+            // response is delivered only once the task's delegate has declined the redirect. (It
+            // may still reach the session before the session applies the decline; either way the
+            // task completes with the 3xx, which is the declined outcome.)
+            guard let task else {
+                client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+                return
             }
+            let box = UncheckedProtocol(value: self)
+            Self.awaitRedirectDecision(for: task) { followed in
+                if !followed { box.value.finish(with: response, body: stub.body) }
+            }
+            client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
             return
         }
         finish(with: response, body: stub.body)
     }
 
-    private static let declinedRedirectGrace: TimeInterval = 0.25
+    /// Pending redirect decisions, keyed by task. ABSAPI's redirect delegates report each decision
+    /// through ``RedirectDecisions``.
+    private static let pendingDecisions: Mutex<[ObjectIdentifier: @Sendable (Bool) -> Void]> = {
+        RedirectDecisions.observer.withLock { observer in
+            observer = { task, followed in
+                let decided = StubURLProtocol.pendingDecisions.withLock {
+                    $0.removeValue(forKey: ObjectIdentifier(task))
+                }
+                decided?(followed)
+            }
+        }
+        return Mutex([:])
+    }()
+
+    private static func awaitRedirectDecision(for task: URLSessionTask, _ decided: @escaping @Sendable (Bool) -> Void) {
+        pendingDecisions.withLock { $0[ObjectIdentifier(task)] = decided }
+    }
 
     private func finish(with response: HTTPURLResponse, body: Data) {
         guard !isStopped.withLock({ $0 }) else { return }
@@ -219,15 +242,75 @@ struct StubServer: Sendable {
 }
 
 // URLProtocol is not Sendable, but the URL loading system lets a protocol call its client
-// from any thread, and the delayed and declined-redirect deliveries are the only uses after
+// from any thread, and the gated and declined-redirect deliveries are the only uses after
 // `startLoading` returns.
 private struct UncheckedProtocol: @unchecked Sendable {
     let value: StubURLProtocol
 }
 
-extension Duration {
-    fileprivate var timeInterval: TimeInterval {
-        let (seconds, attoseconds) = components
-        return TimeInterval(seconds) + TimeInterval(attoseconds) / 1e18
+/// Counts passes and lets a test wait, without polling, until a number of them have happened.
+final class Checkpoint: Sendable {
+    private struct State {
+        var passes = 0
+        var waiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    }
+
+    private let state = Mutex(State())
+
+    func pass() {
+        let ready = state.withLock { state in
+            state.passes += 1
+            let passes = state.passes
+            defer { state.waiters.removeAll { $0.count <= passes } }
+            return state.waiters.filter { $0.count <= passes }.map(\.continuation)
+        }
+        ready.forEach { $0.resume() }
+    }
+
+    /// Returns once ``pass()`` has been called `count` times in total.
+    func reached(_ count: Int = 1) async {
+        await withCheckedContinuation { continuation in
+            let ready = state.withLock { state in
+                if state.passes >= count { return true }
+                state.waiters.append((count, continuation))
+                return false
+            }
+            if ready { continuation.resume() }
+        }
+    }
+}
+
+/// Holds gated stub responses until ``open()``; later ones are delivered right away.
+/// ``arrived(_:)`` waits until requests have reached the gate (the stub has recorded them).
+final class StubGate: Sendable {
+    private struct State {
+        var isOpen = false
+        var held: [@Sendable () -> Void] = []
+    }
+
+    private let state = Mutex(State())
+    private let arrivals = Checkpoint()
+
+    /// Returns once `count` requests in total have reached the gate.
+    func arrived(_ count: Int = 1) async {
+        await arrivals.reached(count)
+    }
+
+    func open() {
+        let held = state.withLock { state in
+            state.isOpen = true
+            defer { state.held = [] }
+            return state.held
+        }
+        held.forEach { $0() }
+    }
+
+    fileprivate func hold(_ deliver: @escaping @Sendable () -> Void) {
+        let isOpen = state.withLock { state in
+            if !state.isOpen { state.held.append(deliver) }
+            return state.isOpen
+        }
+        arrivals.pass()
+        if isOpen { deliver() }
     }
 }

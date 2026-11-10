@@ -131,9 +131,8 @@ import Testing
             try await store.updateProgress(
                 partID: part.id, bytesWritten: 20, expectedBytes: 20, now: now.addingTimeInterval(1)))
         #expect(try await store.part(id: part.id)?.state == .failed)
-        #expect(
-            try await store.setPartState(
-                .completed, partID: part.id, taskIdentifier: 7, hasResumeData: true, now: later))
+        #expect(try await store.setPartState(.running, partID: part.id, taskIdentifier: 7, hasResumeData: true))
+        #expect(try await store.completePart(partID: part.id, finalBytes: 20, now: later))
         // A late, throttled progress write after completion is ignored.
         #expect(
             try await store.updateProgress(
@@ -144,8 +143,9 @@ import Testing
         #expect(updated.bytesWritten == 20)
         #expect(updated.expectedBytes == 20)
         #expect(updated.retryCount == 1)
-        #expect(updated.hasResumeData)
-        #expect(updated.taskIdentifier == 7)
+        // Completion clears the task and the resume-data flag.
+        #expect(!updated.hasResumeData)
+        #expect(updated.taskIdentifier == nil)
         #expect(try await store.record(id: created.id)?.updatedAt == later)
         #expect(try await store.completedRecords().map(\.id) == [created.id])
         #expect(try await store.updateProgress(partID: UUID(), bytesWritten: 1, expectedBytes: 1) == false)
@@ -162,7 +162,10 @@ import Testing
         #expect(current.retryCount == 1)
         #expect(current.lastError == "again")
 
-        #expect(try await store.setPartState(.completed, partID: part.id, taskIdentifier: nil))
+        await #expect(throws: DownloadStore.StoreError.completionNeedsFinalBytes) {
+            try await store.setPartState(.completed, partID: part.id, taskIdentifier: nil)
+        }
+        #expect(try await store.completePart(partID: part.id, finalBytes: 100))
         #expect(try await store.setPartState(.running, partID: part.id, taskIdentifier: 4) == false)
         current = try #require(try await store.part(id: part.id))
         #expect(current.state == .completed)
@@ -172,6 +175,28 @@ import Testing
         #expect(try await store.setPartState(.queued, partID: part.id, taskIdentifier: nil, requeue: true))
         #expect(try await store.part(id: part.id)?.state == .queued)
         #expect(try await store.setPartState(.running, partID: UUID(), taskIdentifier: nil) == false)
+        #expect(try await store.completePart(partID: UUID(), finalBytes: 1) == false)
+    }
+
+    /// The task finishes before its last throttled progress write lands, with an unknown length:
+    /// the final size comes with the completion, and a late progress write can't change it.
+    @Test func completionBeforeFinalProgressRecordsFinalSize() async throws {
+        let (store, container) = try makeStore()
+        var part = Self.part()
+        part.expectedBytes = -1
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [part]), now: now).record
+        #expect(try await store.setPartState(.running, partID: part.id, taskIdentifier: 5))
+        #expect(try await store.updateProgress(partID: part.id, bytesWritten: 600, expectedBytes: -1))
+        #expect(try await store.completePart(partID: part.id, finalBytes: 1_000, now: now.addingTimeInterval(1)))
+        #expect(try await store.updateProgress(partID: part.id, bytesWritten: 900, expectedBytes: -1) == false)
+
+        let completed = try #require(try await store.completedRecords().first)
+        #expect(completed.id == created.id)
+        #expect(completed.parts.map(\.state) == [.completed])
+        #expect(completed.parts.map(\.bytesWritten) == [1_000])
+        #expect(completed.parts.map(\.expectedBytes) == [1_000])
+        let item = try await LocalItemStore(modelContainer: container).upsertFromDownload(completed, now: now)
+        #expect(item.files.map(\.size) == [1_000])
     }
 
     @Test func taskIdentifierLookupPrefersTheLatestRecord() async throws {
