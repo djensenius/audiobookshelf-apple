@@ -74,6 +74,15 @@ extension Router {
         }
     }
 
+    /// Clears ``pendingPlayLink`` once the Library path no longer holds the screen it opened,
+    /// so the item screen never confirms a link for a screen that was discarded.
+    func dropPendingPlayLinkIfOffPath() {
+        guard let link = pendingPlayLink,
+            let target = Self.itemRoutes(id: link.itemID, episodeID: link.episodeID).last
+        else { return }
+        if !self[path: .library].contains(target) { pendingPlayLink = nil }
+    }
+
     private static func itemRoutes(id: String, episodeID: String?) -> [Route] {
         guard let episodeID else { return [.item(id: id)] }
         return [.item(id: id), .episode(itemID: id, episodeID: episodeID)]

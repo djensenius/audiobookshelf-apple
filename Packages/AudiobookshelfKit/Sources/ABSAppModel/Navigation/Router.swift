@@ -33,8 +33,9 @@ public final class Router {
     public private(set) var pendingLibraryID: String?
     /// A `play/` link opened in this scene, until the item screen shows its confirmation
     /// (``PlayLinkDecision``) and clears it. Every link ``open(_:)`` navigates to replaces it;
-    /// a link for another server doesn't. A library switch that resets paths, a snapshot
-    /// restore and an identity change clear it, because the item is no longer on screen.
+    /// a link for another server doesn't. Any change to the Library path that drops the
+    /// link's item (or episode) screen clears it: a library switch, section repair,
+    /// ``normalize(isCompact:)``, popping the screen, snapshot restore or an identity change.
     public var pendingPlayLink: PlayLink?
     /// A `search?q=` query opened in this scene, until the Search tab shows it and clears it.
     /// Cleared like ``pendingPlayLink``, except that a library switch keeps it.
@@ -61,7 +62,10 @@ public final class Router {
     /// `$router[path: tab]`, because `$router.paths[tab, default: []]` isn't a valid key path.
     public subscript(path tab: AppTab) -> [Route] {
         get { paths[tab] ?? [] }
-        set { paths[tab] = newValue.isEmpty ? nil : newValue }
+        set {
+            paths[tab] = newValue.isEmpty ? nil : newValue
+            if tab == .library { dropPendingPlayLinkIfOffPath() }
+        }
     }
 
     /// Adapts the selection to the size class. The view calls this with
@@ -95,9 +99,7 @@ public final class Router {
     /// (when ``libraryID`` is `nil`) keeps them. Either way, a selected tab or Library section
     /// that isn't in `supportedSections` falls back to Library or the default grid, and the
     /// paths of unsupported sections are cleared, which repairs the selection after a book ↔
-    /// podcast switch or a permission change. Clears a matching ``pendingLibraryID``, and
-    /// clears ``pendingPlayLink`` when the paths are reset: `open(_:)` pushes the item only
-    /// onto Library, which the reset empties.
+    /// podcast switch or a permission change. Clears a matching ``pendingLibraryID``.
     ///
     /// - Parameter supportedSections: the sections the library shows for this user, usually
     ///   ``AppTab/sections(for:canAddPodcast:hasPlaylists:)``.
@@ -106,7 +108,6 @@ public final class Router {
             for tab in AppTab.allCases where tab.isLibraryScoped {
                 self[path: tab] = []
             }
-            pendingPlayLink = nil
         }
         libraryID = id
         libraryKind = kind
