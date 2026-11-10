@@ -15,7 +15,7 @@ public enum L10n {
     /// fills untranslated keys with English; if a lookup still returns the key itself, this
     /// falls back to the English table.
     ///
-    /// Values may contain Markdown such as `**bold**`. Use ``attributed(_:_:locale:)`` to
+    /// Values may contain Markdown such as `^[**bold**]()`. Use ``attributed(_:_:locale:)`` to
     /// render it; never parse this method's formatted result as Markdown, because the
     /// arguments (often server data) would be parsed too.
     public static func string(_ key: String, _ arguments: String..., locale: Locale? = nil) -> String {
@@ -41,7 +41,9 @@ public enum L10n {
                 return "\u{E000}\(values.count - 1)\u{E001}"
             }
         }
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        // Extended attributes: the importer writes bold as `^[**x**]()` (see docs/localization.md).
+        var options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        options.allowsExtendedAttributes = true
         let parsed = (try? AttributedString(markdown: format, options: options)) ?? AttributedString(format)
         guard !values.isEmpty else { return parsed }
         // Rebuild run by run so inserted arguments are never scanned for sentinels again.

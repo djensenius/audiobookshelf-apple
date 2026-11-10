@@ -21,14 +21,38 @@ import Testing
     }
 
     @Test(arguments: [
-        ("Welcome, <strong>{0}</strong>", "Welcome, **%1$@**"),
-        ("<strong>Important!</strong> Read this.", "**Important!** Read this."),
-        ("<b>Bold</b> and <B>bold</B>", "**Bold** and **bold**"),
-        ("A <strong> spaced </strong> word", "A  **spaced**  word"),
+        ("Welcome, <strong>{0}</strong>", "Welcome, ^[**%1$@**]()"),
+        ("<strong>Important!</strong> Read this.", "^[**Important!**]() Read this."),
+        ("<b>Bold</b> and <B>bold</B>", "^[**Bold**]() and ^[**bold**]()"),
+        ("A <strong> spaced </strong> word", "A  ^[**spaced**]()  word"),
+        ("<strong>重要提示！</strong>此应用", "^[**重要提示！**]()此应用"),
+        ("<strong>[a]</strong>", "^[**\\[a\\]**]()"),
         ("Line<br>break<br/>and<br />more", "Line\nbreak\nand\nmore"),
     ])
     func convertsHTMLToMarkdown(input: String, expected: String) {
         #expect(StringConverter.convert(input, isFormat: true) == expected)
+    }
+
+    /// Renders with the options `L10n.attributed` uses.
+    @Test(arguments: [
+        ("<strong>重要提示！</strong>此应用旨在", "重要提示！", "此应用旨在"),
+        ("<strong>重要！</strong>此應用程式", "重要！", "此應用程式"),
+        ("<strong>Important!</strong> This app", "Important!", " This app"),
+        ("<strong>[a]</strong>b", "[a]", "b"),
+    ])
+    func boldRendersAtAnyBoundary(input: String, bold: String, rest: String) throws {
+        var options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        options.allowsExtendedAttributes = true
+        let rendered = try AttributedString(
+            markdown: StringConverter.convert(input, isFormat: false),
+            options: options
+        )
+        #expect(String(rendered.characters) == bold + rest)
+        let runs = rendered.runs.map { (String(rendered[$0.range].characters), $0.inlinePresentationIntent) }
+        #expect(runs.count == 2)
+        #expect(runs.first?.0 == bold)
+        #expect(runs.first?.1 == .stronglyEmphasized)
+        #expect(runs.last?.1 == nil)
     }
 
     @Test func reportsUnsupportedMarkup() {

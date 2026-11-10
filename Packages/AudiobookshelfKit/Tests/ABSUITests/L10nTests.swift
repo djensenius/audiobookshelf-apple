@@ -54,6 +54,17 @@ import Testing
         #expect(unresolved.isEmpty)
     }
 
+    /// Bold ending in punctuation and followed by a letter, which plain `**x**` can't close.
+    @Test(arguments: [("zh-Hans", "重要提示！", "此应用"), ("zh-Hant", "重要！", "此應用程式")])
+    func attributedBoldsBeforeCJKText(locale: String, bold: String, following: String) {
+        let value = L10n.attributed("MessageAudiobookshelfServerRequired", locale: Locale(identifier: locale))
+        let text = String(value.characters)
+        #expect(!text.contains("*") && !text.contains("^["))
+        #expect(text.hasPrefix(bold + following))
+        let boldRuns = value.runs.filter { $0.inlinePresentationIntent == .stronglyEmphasized }
+        #expect(boldRuns.map { String(value[$0.range].characters) } == [bold])
+    }
+
     @Test func attributedRendersMarkdownFromFormatOnly() throws {
         let argument = "[x](https://evil) a_b_"
         let value = L10n.attributed("HeaderWelcome", argument, locale: Locale(identifier: "en"))
