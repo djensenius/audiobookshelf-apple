@@ -11,7 +11,7 @@ depends = ["lint:repo", "lint:swift"]
 
 [tasks."lint:repo"]
 description = "Lint shell scripts and workflows (no Xcode needed)"
-depends = ["lint:shell", "lint:actions"]
+depends = ["lint:shell", "lint:actions", "lint:nowplaying"]
 
 [tasks."lint:shell"]
 description = "Lint shell scripts with ShellCheck"
@@ -20,6 +20,10 @@ run = "shellcheck scripts/*.sh ci_scripts/*.sh"
 [tasks."lint:actions"]
 description = "Lint GitHub Actions workflows with actionlint"
 run = "actionlint"
+
+[tasks."lint:nowplaying"]
+description = "ADR 0006: NowPlaying only, in ABSPlayback/NowPlaying; no MediaPlayer"
+run = "scripts/lint-nowplaying.sh"
 
 [tasks."lint:swift"]
 description = "Lint Swift sources with swift format"
@@ -54,8 +58,14 @@ description = "Rewrite Audiobookshelf.xcodeproj/project.xcproj in canonical form
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "scripts/xcprojformatter.sh --update Audiobookshelf.xcodeproj"
 
+[tasks."build:kit:extension"]
+description = "Build AudiobookshelfKit as application-extension-only code for the iOS Simulator (widgets/extensions)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "swift build --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm-appex --triple arm64-apple-ios27.0-simulator --sdk \"$(xcrun --sdk iphonesimulator --show-sdk-path)\" -Xswiftc -application-extension"
+
 [tasks."build:ios"]
 description = "Build the app for the iOS Simulator"
+depends = ["build:kit:extension"]
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "xcodebuild build -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO"
 
@@ -68,6 +78,11 @@ run = "xcodebuild build -project Audiobookshelf.xcodeproj -scheme Audiobookshelf
 description = "Run AudiobookshelfKit package tests"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm"
+
+[tasks."test:kit:slow"]
+description = "Run slow AudiobookshelfKit tests (OSLogStore integration)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}", ABS_SLOW_TESTS = "1" }
+run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter OSLogStoreIntegrationTests"
 
 [tasks."test:app"]
 description = "Run app tests on macOS"

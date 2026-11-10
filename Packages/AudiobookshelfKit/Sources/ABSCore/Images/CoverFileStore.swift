@@ -14,20 +14,49 @@ final class FileLease: Sendable {
     }
 }
 
-/// Per-file lease counts, readable from any thread.
+/// Per-file lease counts, readable from any thread, and the files waiting for their last lease
+/// to be released before they are deleted.
 private final class LeaseCounts: Sendable {
-    private let counts = Mutex<[String: Int]>([:])
+    private struct State {
+        var counts: [String: Int] = [:]
+        var pendingDeletion: Set<String> = []
+    }
 
-    var leasedPaths: Set<String> { counts.withLock { Set($0.keys) } }
+    private let state = Mutex(State())
+
+    var leasedPaths: Set<String> { state.withLock { Set($0.counts.keys) } }
+
+    func isPendingDeletion(_ path: String) -> Bool {
+        state.withLock { $0.pendingDeletion.contains(path) }
+    }
 
     func lease(_ path: String) -> FileLease {
-        counts.withLock { $0[path, default: 0] += 1 }
-        return FileLease { [counts = self] in
-            counts.counts.withLock { counts in
-                counts[path, default: 1] -= 1
-                if counts[path] == 0 { counts.removeValue(forKey: path) }
+        state.withLock { $0.counts[path, default: 0] += 1 }
+        return FileLease { [self] in
+            state.withLock { state in
+                state.counts[path, default: 1] -= 1
+                guard state.counts[path] == 0 else { return }
+                state.counts.removeValue(forKey: path)
+                // Deleted under the lock, so an insert can't publish a new file here first.
+                if state.pendingDeletion.remove(path) != nil { try? FileManager.default.removeItem(atPath: path) }
             }
         }
+    }
+
+    /// Deletes `path` now, or once its last lease is released.
+    func deleteWhenUnleased(_ path: String) {
+        state.withLock { state in
+            if state.counts[path] != nil {
+                state.pendingDeletion.insert(path)
+            } else {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+        }
+    }
+
+    /// Keeps `path` from a pending deletion; returns whether one was pending.
+    func cancelDeletion(_ path: String) -> Bool {
+        state.withLock { $0.pendingDeletion.remove(path) != nil }
     }
 }
 
@@ -39,7 +68,7 @@ struct LeasedFile: Sendable {
 
 /// The encoded image file cache (ADR 0005, "`CoverFileStore`").
 ///
-/// Files live at `<directory>/<serverID>/<kind>-<entityID>-<updatedAt>-<bucket>.<ext>`. Only
+/// Files live at `<directory>/<serverID>/<ImageKey.fileStem>.<ext>`. Only
 /// the app process writes and evicts. Eviction is least recently used by modification date
 /// (touched on hits at most once a day), skips leased files, and brings the total to 90 % of
 /// the cap.
@@ -51,6 +80,8 @@ public actor CoverFileStore {
     private var totalBytes = 0
     private var isScanned = false
     private var evictionTask: Task<Void, Never>?
+    /// Bumped by ``removeServer(_:)``, so fetches started before it can't write.
+    private var serverGenerations: [UUID: Int] = [:]
     /// The number of background evictions started, for tests.
     private(set) var evictionCount = 0
 
@@ -63,11 +94,17 @@ public actor CoverFileStore {
     }
 
     /// `Library/Caches/Images` in the App Group container, so the widget can read it, or the
-    /// app's own caches directory when the App Group entitlement is missing.
+    /// app's own caches directory when the App Group container is missing or not writable (as
+    /// on an unsigned macOS build).
     public static func defaultDirectory(appGroup: String = AppSettings.appGroupIdentifier) -> URL {
-        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
-        return (container?.appending(path: "Library/Caches", directoryHint: .isDirectory) ?? URL.cachesDirectory)
-            .appending(path: "Images", directoryHint: .isDirectory)
+        let fallback = URL.cachesDirectory.appending(path: "Images", directoryHint: .isDirectory)
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
+        else { return fallback }
+        let directory = container.appending(path: "Library/Caches/Images", directoryHint: .isDirectory)
+        guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil,
+            FileManager.default.isWritableFile(atPath: directory.path)
+        else { return fallback }
+        return directory
     }
 
     /// The total size of the cache files, in bytes.
@@ -79,6 +116,7 @@ public actor CoverFileStore {
     /// Rescans the folder, resetting the size from what it finds (which picks up files the OS
     /// purged), and evicts down to 90 % of the cap if it is over. Run at launch and when the app
     /// enters the background.
+    // TODO(#143): call at launch and from a background maintenance task.
     public func fullPass() {
         isScanned = true
         totalBytes = files().reduce(0) { $0 + $1.size }
@@ -91,7 +129,9 @@ public actor CoverFileStore {
         let folder = folder(for: key.serverID)
         for ext in Self.extensions {
             let url = folder.appending(path: "\(key.fileStem).\(ext)")
-            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]) else { continue }
+            guard !leases.isPendingDeletion(Self.leaseKey(url)),
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+            else { continue }
             if let modified = values.contentModificationDate, now().timeIntervalSince(modified) > 86_400 {
                 try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: url.path)
             }
@@ -100,20 +140,47 @@ public actor CoverFileStore {
         return nil
     }
 
-    /// Moves `file` into the store as `key`'s file and returns it leased.
-    func insert(moving file: URL, for key: ImageKey, pathExtension: String) throws -> LeasedFile {
+    /// The current generation of `serverID`'s folder; pass it to ``insert(moving:for:pathExtension:generation:)``.
+    func generation(for serverID: UUID) -> Int {
+        serverGenerations[serverID, default: 0]
+    }
+
+    /// Moves `file` into the store as `key`'s file and returns it leased. Throws
+    /// `CancellationError` if the server was removed since `generation` was read.
+    ///
+    /// The new file replaces the old one atomically, and only once it is complete; copies under
+    /// other extensions are deleted afterwards, each once its last lease is released.
+    func insert(moving file: URL, for key: ImageKey, pathExtension: String, generation: Int) throws -> LeasedFile {
+        guard generation == self.generation(for: key.serverID) else { throw CancellationError() }
         scanIfNeeded()
         let folder = folder(for: key.serverID)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let ext = Self.extensions.contains(pathExtension) ? pathExtension : "img"
         let destination = folder.appending(path: "\(key.fileStem).\(ext)")
-        for other in Self.extensions {
-            remove(folder.appending(path: "\(key.fileStem).\(other)"))
+        // Staged beside the destination, so the final rename is atomic.
+        let staging = folder.appending(path: ".\(UUID().uuidString).partial")
+        do {
+            try FileManager.default.moveItem(at: file, to: staging)
+        } catch {
+            try? FileManager.default.removeItem(at: staging)
+            throw error
         }
-        try FileManager.default.moveItem(at: file, to: destination)
+        // A retired copy at the destination is replaced rather than deleted on release.
+        let wasRetired = leases.cancelDeletion(Self.leaseKey(destination))
+        let replacedBytes = wasRetired ? 0 : Self.allocatedSize(destination)
+        let addedBytes = Self.allocatedSize(staging)
+        guard rename(staging.path, destination.path) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            try? FileManager.default.removeItem(at: staging)
+            if wasRetired { leases.deleteWhenUnleased(Self.leaseKey(destination)) }
+            throw error
+        }
         try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: destination.path)
         let leased = LeasedFile(url: destination, lease: lease(destination))
-        totalBytes += Self.allocatedSize(destination)
+        totalBytes += addedBytes - replacedBytes
+        for other in Self.extensions where other != ext {
+            retire(folder.appending(path: "\(key.fileStem).\(other)"))
+        }
         if totalBytes > limit, evictionTask == nil {
             evictionCount += 1
             evictionTask = Task(priority: .background) {
@@ -126,11 +193,21 @@ public actor CoverFileStore {
 
     /// Deletes one server's files, for example when its connection is removed.
     public func removeServer(_ serverID: UUID) {
+        serverGenerations[serverID, default: 0] += 1
         scanIfNeeded()
         let folder = folder(for: serverID)
         let removed = files(in: folder).reduce(0) { $0 + $1.size }
         try? FileManager.default.removeItem(at: folder)
         totalBytes = max(0, totalBytes - removed)
+    }
+
+    /// Deletes a stored file that turned out not to decode, once its readers are done.
+    func discard(_ url: URL) {
+        guard
+            url.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path
+                == directory.standardizedFileURL.path
+        else { return }
+        retire(url)
     }
 
     /// Waits for a running background eviction, for tests.
@@ -144,10 +221,22 @@ public actor CoverFileStore {
 
     private func evict(toBytes target: Int) {
         let leased = leases.leasedPaths
-        for file in files().sorted(by: { $0.modified < $1.modified }) where totalBytes > target {
+        let listing = files()
+        // Resync with the folder, which the OS may have purged since the last pass.
+        totalBytes = listing.reduce(0) { $0 + $1.size }
+        for file in listing.sorted(by: { $0.modified < $1.modified }) where totalBytes > target {
             guard !leased.contains(Self.leaseKey(file.url)) else { continue }
             remove(file.url)
         }
+    }
+
+    /// Deletes `url` now, or once its last lease is released. Lookups skip it meanwhile, and it
+    /// no longer counts towards the cap.
+    private func retire(_ url: URL) {
+        let path = Self.leaseKey(url)
+        guard FileManager.default.fileExists(atPath: path), !leases.isPendingDeletion(path) else { return }
+        totalBytes = max(0, totalBytes - Self.allocatedSize(url))
+        leases.deleteWhenUnleased(path)
     }
 
     private func remove(_ url: URL) {
@@ -174,13 +263,15 @@ public actor CoverFileStore {
         var modified: Date
     }
 
+    /// The cache files, without those retired and waiting for their lease to be released, which
+    /// ``retire(_:)`` has already taken out of `totalBytes`.
     private func files(in root: URL? = nil) -> [File] {
         let keys: [URLResourceKey] = [.isRegularFileKey, .totalFileAllocatedSizeKey, .contentModificationDateKey]
         guard let enumerator = FileManager.default.enumerator(at: root ?? directory, includingPropertiesForKeys: keys)
         else { return [] }
         return enumerator.compactMap { item in
             guard let url = item as? URL, let values = try? url.resourceValues(forKeys: Set(keys)),
-                values.isRegularFile == true
+                values.isRegularFile == true, !leases.isPendingDeletion(Self.leaseKey(url))
             else { return nil }
             return File(
                 url: url, size: values.totalFileAllocatedSize ?? 0,
@@ -192,7 +283,10 @@ public actor CoverFileStore {
         url.resolvingSymlinksInPath().path
     }
 
+    /// Measured fresh: a `URL` caches resource values, and its file may have been replaced since.
     private static func allocatedSize(_ url: URL) -> Int {
-        (try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0
+        var url = url
+        url.removeAllCachedResourceValues()
+        return (try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey]))?.totalFileAllocatedSize ?? 0
     }
 }

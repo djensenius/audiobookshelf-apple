@@ -281,29 +281,41 @@ private struct HTMLParser {
         index = scalars.count
     }
 
-    /// Skips to after the matching `</template>`, counting nested templates and ignoring
-    /// tags inside comments. An unclosed template drops the rest of the input.
+    /// Skips to after the matching `</template>`, counting nested templates. Whole tags
+    /// (including quoted attribute values) and comments are stepped over, so `<template>`
+    /// inside an attribute or comment doesn't count. An unclosed template, tag or comment
+    /// drops the rest of the input.
     private mutating func skipTemplate() {
-        let opening = Array("<template".unicodeScalars)
-        let closing = Array("</template".unicodeScalars)
         var depth = 1
-        var position = index
-        while position < scalars.count {
-            if matches("<!--", at: position) {
-                guard let end = find("-->", from: position + 4) else { break }
-                position = end + 3
-            } else if matchesTag(closing, at: position) {
-                depth -= 1
-                if depth == 0 {
-                    skipPast(">", from: position + closing.count)
-                    return
+        while index < scalars.count {
+            guard scalars[index] == "<" else {
+                index += 1
+                continue
+            }
+            let start = index
+            if matches("<!--", at: start) {
+                guard let end = find("-->", from: start + 4) else { break }
+                index = end + 3
+            } else if start + 2 < scalars.count, scalars[start + 1] == "/", isLetter(scalars[start + 2]) {
+                index = start + 2
+                let name = readName()
+                skipPast(">", from: index)
+                if name == "template" {
+                    depth -= 1
+                    if depth == 0 { return }
                 }
-                position += closing.count
-            } else if matchesTag(opening, at: position) {
-                depth += 1
-                position += opening.count
+            } else if start + 1 < scalars.count, isLetter(scalars[start + 1]) {
+                index = start + 1
+                let name = readName()
+                guard readAttributes() != nil else { break }
+                if name == "template" {
+                    depth += 1
+                } else if Self.rawTextElements.contains(name) {
+                    // Raw-text bodies aren't markup: `"</template>"` in a script is just text.
+                    skipRawText(name)
+                }
             } else {
-                position += 1
+                index = start + 1
             }
         }
         index = scalars.count

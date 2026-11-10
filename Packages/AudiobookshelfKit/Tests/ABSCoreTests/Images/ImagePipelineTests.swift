@@ -6,46 +6,28 @@ import UniformTypeIdentifiers
 
 @testable import ABSCore
 
-@Suite struct ImagePipelineTests {
-    private let directory: TemporaryDirectory
-    private let serverID = UUID()
+@Suite(.timeLimit(.minutes(1))) struct ImagePipelineTests {
+    private let harness: PipelineHarness
+    private let gridBox = PipelineHarness.gridBox
 
     init() throws {
-        directory = try TemporaryDirectory()
+        harness = try PipelineHarness()
     }
 
-    private func makePipeline(
-        host: String? = nil, headers: [String: String] = [:], limits: ImageCacheLimits = .iPhone,
-        downloaded: [String: DownloadedCover] = [:], isOnline: @escaping @Sendable () -> Bool = { true }
-    ) async -> (ImagePipeline, CoverFileStore) {
-        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: limits.diskBytes)
-        let pipeline = ImagePipeline(
-            limits: limits, fileStore: store, downloadedCovers: FakeDownloadedCovers(covers: downloaded),
-            sessionConfiguration: ImageStubProtocol.configuration(), isOnline: isOnline)
-        if let host {
-            await pipeline.setRequestBuilder(TestRequestBuilder(host: host, headers: headers), for: serverID)
-        }
-        return (pipeline, store)
-    }
+    private var directory: URL { harness.directory.url }
 
     private func key(_ id: String = "item-1", updatedAt: Int? = 1, url: URL? = nil) -> ImageKey {
-        ImageKey(serverID: serverID, kind: .itemCover, entityID: id, updatedAt: updatedAt, externalURL: url)
+        harness.key(id, updatedAt: updatedAt, url: url)
     }
-
-    private static func pngRoute(width: Int = 600, height: Int = 960, delay: Duration? = nil) -> String {
-        ImageStubProtocol.register(
-            .init(body: TestImages.data(width: width, height: height), mimeType: "image/png", delay: delay))
-    }
-
-    private static let gridBox = PixelBox(width: 512, height: 832)
 
     @Test func concurrentLoadsShareOneFetch() async throws {
-        let host = Self.pngRoute(delay: .milliseconds(200))
-        let (pipeline, _) = await makePipeline(host: host)
+        let host = PipelineHarness.pngRoute(delay: .milliseconds(200))
+        let (pipeline, _) = await harness.make(host: host)
         let key = key()
+        let gridBox = gridBox
         let images = try await withThrowingTaskGroup(of: CoverImage.self) { group in
             for _ in 0..<10 {
-                group.addTask { try await pipeline.image(for: key, pixelBox: Self.gridBox) }
+                group.addTask { try await pipeline.image(for: key, pixelBox: gridBox) }
             }
             group.addTask { try await pipeline.image(for: key, pixelBox: PixelBox(width: 192, height: 288)) }
             return try await group.reduce(into: []) { $0.append($1) }
@@ -59,15 +41,15 @@ import UniformTypeIdentifiers
     }
 
     @Test func memoryThenDiskHitsAfterRestart() async throws {
-        let host = Self.pngRoute()
-        let (pipeline, store) = await makePipeline(host: host)
-        let first = try await pipeline.image(for: key(), pixelBox: Self.gridBox)
-        let second = try await pipeline.image(for: key(), pixelBox: Self.gridBox)
+        let host = PipelineHarness.pngRoute()
+        let (pipeline, store) = await harness.make(host: host)
+        let first = try await pipeline.image(for: key(), pixelBox: gridBox)
+        let second = try await pipeline.image(for: key(), pixelBox: gridBox)
         #expect(first.cgImage === second.cgImage)
         #expect(await store.size > 0)
 
-        let (restarted, _) = await makePipeline(host: host)
-        let fromDisk = try await restarted.image(for: key(), pixelBox: Self.gridBox)
+        let (restarted, _) = await harness.make(host: host)
+        let fromDisk = try await restarted.image(for: key(), pixelBox: gridBox)
         #expect(fromDisk.pixelWidth == first.pixelWidth)
         #expect(ImageStubProtocol.route(host)?.requests.count == 1)
         #expect(await restarted.networkFetchCount == 0)
@@ -75,12 +57,12 @@ import UniformTypeIdentifiers
 
     @Test(arguments: [UTType.jpeg, .png])
     func downsamplesToTheBucket(type: UTType) async throws {
-        let file = try TestImages.file(width: 4000, height: 3000, type: type, in: directory.url)
-        let (pipeline, _) = await makePipeline()
+        let file = try TestImages.file(width: 4000, height: 3000, type: type, in: directory)
+        let (pipeline, _) = await harness.make(local: file)
         for bucket in ImageWidthBucket.allCases {
             let side = Double(bucket.rawValue)
             let image = try await pipeline.image(
-                for: key(url: file).with(bucket: bucket), pixelBox: PixelBox(width: side, height: side))
+                for: key().with(bucket: bucket), pixelBox: PixelBox(width: side, height: side))
             #expect(max(image.pixelWidth, image.pixelHeight) <= bucket.rawValue)
             #expect(image.pixelWidth == bucket.rawValue)
             #expect(image.cgImage.bitsPerComponent == 8)
@@ -89,92 +71,155 @@ import UniformTypeIdentifiers
     }
 
     @Test func squareCoverFitsTheGridBox() async throws {
-        let file = try TestImages.file(width: 1000, height: 1000, in: directory.url)
-        let (pipeline, _) = await makePipeline()
-        let image = try await pipeline.image(for: key(url: file), pixelBox: Self.gridBox)
+        let file = try TestImages.file(width: 1000, height: 1000, in: directory)
+        let (pipeline, _) = await harness.make(local: file)
+        let image = try await pipeline.image(for: key(), pixelBox: gridBox)
         #expect(image.pixelWidth == 512 && image.pixelHeight == 512)
     }
 
-    @Test func localFileURLsAreReadDirectly() async throws {
-        let file = try TestImages.file(width: 300, height: 480, type: .jpeg, in: directory.url)
-        let (pipeline, store) = await makePipeline()
-        let image = try await pipeline.cgImage(for: key(url: file), size: CGSize(width: 1200, height: 1200))
+    @Test func downloadedCoversAreReadDirectly() async throws {
+        let file = try TestImages.file(width: 300, height: 480, type: .jpeg, in: directory)
+        let (pipeline, store) = await harness.make(local: file)
+        let image = try await pipeline.cgImage(for: key(), size: CGSize(width: 1200, height: 1200))
         #expect(image.width == 300 && image.height == 480)
         #expect(await pipeline.networkFetchCount == 0)
         #expect(await store.size == 0)
     }
 
+    @Test func fileExternalURLsAreRejected() async throws {
+        let file = try TestImages.file(width: 300, height: 480, in: directory)
+        let (pipeline, _) = await harness.make()
+        await #expect(throws: ImagePipelineError.noRequest) {
+            try await pipeline.image(for: key(url: file), pixelBox: gridBox)
+        }
+    }
+
     @Test func customHeadersAreSentWithoutCookiesOrToken() async throws {
-        let host = Self.pngRoute()
-        let headers = ["CF-Access-Client-Id": "client", "CF-Access-Client-Secret": "secret"]
-        let (pipeline, _) = await makePipeline(host: host, headers: headers)
-        _ = try await pipeline.image(for: key(), pixelBox: Self.gridBox)
+        let host = PipelineHarness.pngRoute()
+        let headers = [
+            "CF-Access-Client-Id": "client", "CF-Access-Client-Secret": "secret", "Authorization": "Bearer t",
+            "Cookie": "connect.sid=1",
+        ]
+        let configuration = ImageStubProtocol.configuration()
+        configuration.httpAdditionalHeaders = ["Authorization": "Bearer session", "X-Session": "1"]
+        let (pipeline, _) = await harness.make(host: host, headers: headers, configuration: configuration)
+        _ = try await pipeline.image(for: key(), pixelBox: gridBox)
         let request = try #require(ImageStubProtocol.route(host)?.requests.first)
         #expect(request.value(forHTTPHeaderField: "CF-Access-Client-Id") == "client")
         #expect(request.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
         #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
         #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+        #expect(request.value(forHTTPHeaderField: "X-Session") == nil)
         #expect(request.httpShouldHandleCookies == false)
         #expect(request.url?.query()?.contains("token") == false)
+        // The caller's configuration is copied, not changed.
+        #expect(configuration.httpAdditionalHeaders?["X-Session"] as? String == "1")
+    }
+
+    @Test func crossOriginRedirectStripsHeadersAndCookiesAreNeitherSentNorStored() async throws {
+        let target = ImageStubProtocol.register(
+            .init(body: TestImages.data(width: 600, height: 960), headers: ["Set-Cookie": "cdn=1; Path=/"]))
+        let origin = ImageStubProtocol.register(
+            .init(headers: ["Set-Cookie": "origin=1; Path=/"], redirectTo: "https://\(target)/cover.png"))
+        let seeded = try #require(
+            HTTPCookie(properties: [.domain: origin, .path: "/", .name: "connect.sid", .value: "session"]))
+        HTTPCookieStorage.shared.setCookie(seeded)
+        defer { HTTPCookieStorage.shared.deleteCookie(seeded) }
+        // The caller's configuration would send and store cookies; the pipeline turns that off.
+        let configuration = ImageStubProtocol.configuration()
+        configuration.httpCookieStorage = .shared
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let headers = [
+            "CF-Access-Client-Id": "client", "CF-Access-Client-Secret": "secret", "Authorization": "Bearer t",
+        ]
+        let (pipeline, _) = await harness.make(host: origin, headers: headers, configuration: configuration)
+        _ = try await pipeline.image(for: key(), pixelBox: gridBox)
+
+        let first = try #require(ImageStubProtocol.route(origin)?.requests.first)
+        #expect(first.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
+        #expect(first.value(forHTTPHeaderField: "Cookie") == nil)
+        let hop = try #require(ImageStubProtocol.route(target)?.requests.first)
+        for name in ["CF-Access-Client-Id", "CF-Access-Client-Secret", "Authorization", "Cookie"] {
+            #expect(hop.value(forHTTPHeaderField: name) == nil, "\(name)")
+        }
+        #expect(hop.value(forHTTPHeaderField: "Accept") == "image/*")
+        // URLSession doesn't attach or store cookies for a custom URLProtocol, so the checks
+        // that catch a regression here are the per-request flags; the storage checks document it.
+        #expect(first.httpShouldHandleCookies == false)
+        #expect(hop.httpShouldHandleCookies == false)
+        for host in [origin, target] {
+            let stored = HTTPCookieStorage.shared.cookies(for: try #require(URL(string: "https://\(host)/"))) ?? []
+            #expect(stored.map(\.name).filter { $0 != "connect.sid" }.isEmpty)
+        }
     }
 
     @Test func httpErrorLeavesNoCacheEntry() async throws {
         let host = ImageStubProtocol.register(.init(status: 404, body: Data("missing".utf8), mimeType: "text/plain"))
-        let (pipeline, store) = await makePipeline(host: host)
+        let (pipeline, store) = await harness.make(host: host)
         await #expect(throws: ImagePipelineError.httpStatus(404)) {
-            try await pipeline.image(for: key(), pixelBox: Self.gridBox)
+            try await pipeline.image(for: key(), pixelBox: gridBox)
         }
         #expect(await store.size == 0)
         #expect(await pipeline.memoryCost.lru == 0)
     }
 
-    @Test func inputsOverFourMebibytesAreRejected() async throws {
-        let host = ImageStubProtocol.register(.init(body: Data(count: 5 << 20), mimeType: "image/png"))
-        let (pipeline, store) = await makePipeline(host: host)
-        await #expect(throws: ImagePipelineError.tooLarge) {
-            try await pipeline.image(for: key(), pixelBox: Self.gridBox)
-        }
-        #expect(await store.size == 0)
-    }
-
     @Test func cancellingOneWaiterKeepsTheOthers() async throws {
-        let host = Self.pngRoute(delay: .milliseconds(300))
-        let (pipeline, _) = await makePipeline(host: host)
-        let key = key()
-        let leaving = Task { try await pipeline.image(for: key, pixelBox: Self.gridBox) }
-        let staying = Task { try await pipeline.image(for: key, pixelBox: Self.gridBox) }
-        try await eventually { ImageStubProtocol.route(host)?.requests.count == 1 }
+        let gate = Gate()
+        let host = PipelineHarness.pngRoute(gate: gate)
+        let (pipeline, _) = await harness.make(host: host)
+        let (key, gridBox) = (key(), gridBox)
+        let leaving = Task { try await pipeline.image(for: key, pixelBox: gridBox) }
+        let staying = Task { try await pipeline.image(for: key, pixelBox: gridBox) }
+        await ImageStubProtocol.wait(for: host) { $0.requests.count == 1 }
         leaving.cancel()
         await #expect(throws: CancellationError.self) { try await leaving.value }
+        gate.open()
         let image = try await staying.value
         #expect(image.pixelWidth > 0)
         #expect(ImageStubProtocol.route(host)?.stopped == 0)
     }
 
+    @Test func fetchContinuesWhileAnotherBoxWaits() async throws {
+        let gate = Gate()
+        let host = PipelineHarness.pngRoute(gate: gate)
+        let (pipeline, _) = await harness.make(host: host)
+        let (key, gridBox) = (key(), gridBox)
+        let leaving = Task { try await pipeline.image(for: key, pixelBox: gridBox) }
+        let staying = Task { try await pipeline.image(for: key, pixelBox: PixelBox(width: 192, height: 288)) }
+        await ImageStubProtocol.wait(for: host) { $0.requests.count == 1 }
+        leaving.cancel()
+        await #expect(throws: CancellationError.self) { try await leaving.value }
+        gate.open()
+        #expect(try await staying.value.pixelHeight <= 288)
+        #expect(ImageStubProtocol.route(host)?.stopped == 0)
+        #expect(ImageStubProtocol.route(host)?.requests.count == 1)
+    }
+
     @Test func fetchIsCancelledWhenEveryWaiterLeaves() async throws {
-        let host = Self.pngRoute(delay: .seconds(30))
-        let (pipeline, store) = await makePipeline(host: host)
+        let host = PipelineHarness.pngRoute(gate: Gate())
+        let (pipeline, store) = await harness.make(host: host)
         let key = key()
-        let tasks = [Self.gridBox, PixelBox(width: 192, height: 288)].map { box in
+        let tasks = [gridBox, PixelBox(width: 192, height: 288)].map { box in
             Task { try await pipeline.image(for: key, pixelBox: box) }
         }
-        try await eventually { ImageStubProtocol.route(host)?.requests.count == 1 }
+        await ImageStubProtocol.wait(for: host) { $0.requests.count == 1 }
         for task in tasks {
             task.cancel()
             await #expect(throws: CancellationError.self) { try await task.value }
         }
-        try await eventually { ImageStubProtocol.route(host)?.stopped == 1 }
+        await ImageStubProtocol.wait(for: host) { $0.stopped == 1 }
         #expect(await store.size == 0)
     }
 
     @Test func gridOf500CoversStaysWithinTheMemoryBudget() async throws {
-        let file = try TestImages.file(width: 600, height: 960, in: directory.url)
-        let (pipeline, _) = await makePipeline(limits: .iPhone)
+        let file = try TestImages.file(width: 600, height: 960, in: directory)
+        let (pipeline, _) = await harness.make(limits: .iPhone, local: file)
         let budget = ImageCacheLimits.iPhone.memoryBytes
         var visible: [CoverImage] = []
         var peak = 0
         for index in 0..<500 {
-            let image = try await pipeline.image(for: key("item-\(index)", url: file), pixelBox: Self.gridBox)
+            let image = try await pipeline.image(for: key("item-\(index)"), pixelBox: gridBox)
             #expect(image.pixelWidth <= 512 && image.pixelHeight <= 832)
             // A lazy grid keeps about 30 covers alive.
             visible.append(image)
@@ -188,22 +233,22 @@ import UniformTypeIdentifiers
     }
 
     @Test func liveImagesCountAgainstTheCapUntilReleased() async throws {
-        let file = try TestImages.file(width: 512, height: 512, in: directory.url)
+        let file = try TestImages.file(width: 512, height: 512, in: directory)
         let mebibyte = 1 << 20
         let limits = ImageCacheLimits(memoryBytes: 5 * mebibyte / 2, diskBytes: mebibyte, maxConcurrentDecodes: 2)
-        let (pipeline, _) = await makePipeline(limits: limits)
+        let (pipeline, _) = await harness.make(limits: limits, local: file)
         let box = PixelBox(width: 512, height: 512)
         var held = [
-            try await pipeline.image(for: key("a", url: file), pixelBox: box),
-            try await pipeline.image(for: key("b", url: file), pixelBox: box),
+            try await pipeline.image(for: key("a"), pixelBox: box),
+            try await pipeline.image(for: key("b"), pixelBox: box),
         ]
         let finished = Mutex(false)
-        let third = Task {
-            let image = try await pipeline.image(for: key("c", url: file), pixelBox: box)
+        let third = Task { [key = key("c")] in
+            let image = try await pipeline.image(for: key, pixelBox: box)
             finished.withLock { $0 = true }
             return image
         }
-        try await Task.sleep(for: .milliseconds(200))
+        while await pipeline.memoryWaiterCount == 0 { await Task.yield() }
         #expect(finished.withLock { $0 } == false)
         held.removeFirst()
         let image = try await third.value
@@ -213,15 +258,15 @@ import UniformTypeIdentifiers
 
     @Test func offlinePrefersTheExactCachedVersionThenTheStaleDownload() async throws {
         let online = Mutex(true)
-        let host = Self.pngRoute(width: 200, height: 320)
-        let downloaded = try TestImages.file(width: 100, height: 160, in: directory.url)
+        let host = PipelineHarness.pngRoute(width: 200, height: 320)
+        let downloaded = try TestImages.file(width: 100, height: 160, in: directory)
         let covers = ["item-1": DownloadedCover(fileURL: downloaded, updatedAt: 1)]
         let box = PixelBox(width: 1200, height: 1200)
 
         // Version 2 is on disk: offline, it beats the older downloaded cover.
-        let (warm, _) = await makePipeline(host: host)
-        _ = try await warm.image(for: key(updatedAt: 2), pixelBox: Self.gridBox)
-        let (offline, _) = await makePipeline(host: host, downloaded: covers) { online.withLock { $0 } }
+        let (warm, _) = await harness.make(host: host)
+        _ = try await warm.image(for: key(updatedAt: 2), pixelBox: gridBox)
+        let (offline, _) = await harness.make(host: host, downloaded: covers) { online.withLock { $0 } }
         online.withLock { $0 = false }
         #expect(try await offline.image(for: key(updatedAt: 2), pixelBox: box).pixelWidth == 200)
 
@@ -233,29 +278,5 @@ import UniformTypeIdentifiers
         let fresh = try await offline.image(for: key(updatedAt: 3), pixelBox: box)
         #expect(fresh.pixelWidth == 200)
         #expect(ImageStubProtocol.route(host)?.requests.count == (requests ?? 0) + 1)
-    }
-
-    private func eventually(_ condition: @Sendable () -> Bool) async throws {
-        for _ in 0..<500 where !condition() {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        #expect(condition())
-    }
-}
-
-@Suite struct ImageKeyTests {
-    @Test func bucketsAndPixelBoxes() {
-        #expect(ImageWidthBucket(pixelWidth: 180) == .small)
-        #expect(ImageWidthBucket(pixelWidth: 510) == .medium)
-        #expect(ImageWidthBucket(pixelWidth: 2048) == .large)
-        let box = PixelBox(size: CGSize(width: 170, height: 272), scale: 3)
-        #expect(box == PixelBox(width: 512, height: 832))
-        #expect(PixelBox(width: 5000, height: 1).height == 32 && PixelBox(width: 5000, height: 1).width == 1200)
-    }
-
-    @Test func fileStemIsSanitised() {
-        let key = ImageKey(
-            serverID: UUID(), kind: .authorImage, entityID: "../a/b", updatedAt: 42, bucket: .small)
-        #expect(key.fileStem == "authorImage-___a_b-42-300")
     }
 }

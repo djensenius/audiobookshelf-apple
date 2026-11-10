@@ -14,19 +14,25 @@ public actor ImagePipeline {
     private let downloadedCovers: (any DownloadedCoverLookup)?
     private let isOnline: @Sendable () -> Bool
     private let session: URLSession
+    private let sessionDelegate = ImageSessionDelegate()
     private let ledger = ImageMemoryLedger()
     private let memory: ImageMemoryCache
     private let decodeSlots: AsyncSemaphore
     private let largeDecodeSlot = AsyncSemaphore(permits: 1)
     private var builders: [UUID: any ImageRequestBuilding] = [:]
-    private var fetches: [ImageKey: Flight<FetchedFile>] = [:]
+    /// Servers removed since their builder was last set, which nothing may fetch for.
+    private var removedServers: Set<UUID> = []
+    private var fetches: [FetchKey: Flight<FetchedFile>] = [:]
     private var decodes: [MemoryKey: Flight<DecodedBitmap>] = [:]
     /// Network requests started, for tests.
     private(set) var networkFetchCount = 0
+    /// Decodes that took the large-decode slot, for tests.
+    private(set) var largeDecodeCount = 0
 
     /// - Parameters:
-    ///   - sessionConfiguration: The base configuration. The pipeline turns off `URLCache` and
-    ///     cookies; tests add a `URLProtocol` here.
+    ///   - sessionConfiguration: The base configuration, copied. The pipeline turns off
+    ///     `URLCache`, cookies and additional headers, and caps each request at 60 s; tests add a
+    ///     `URLProtocol` here.
     ///   - isOnline: Whether the network is reachable, for example from `NetworkMonitor`.
     public init(
         limits: ImageCacheLimits,
@@ -41,19 +47,29 @@ public actor ImagePipeline {
         self.isOnline = isOnline
         memory = ImageMemoryCache(limit: limits.memoryBytes, ledger: ledger)
         decodeSlots = AsyncSemaphore(permits: limits.maxConcurrentDecodes)
-        let configuration = sessionConfiguration
+        let configuration = (sessionConfiguration.copy() as? URLSessionConfiguration) ?? .ephemeral
+        configuration.httpAdditionalHeaders = nil
+        configuration.timeoutIntervalForResource = 60
         configuration.urlCache = nil
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
-        session = URLSession(configuration: configuration)
+        session = URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
+    }
+
+    deinit {
+        // The session retains its delegate until invalidated.
+        session.invalidateAndCancel()
+        try? FileManager.default.removeItem(at: sessionDelegate.temporaryFolder)
     }
 
     /// Sets the request builder (`MediaURLBuilder`) for one server connection, or removes it.
-    /// Replace it whenever the connection's address or custom headers change.
+    /// Replace it whenever the connection's address or custom headers change. Setting a builder
+    /// re-enables fetching for a server passed to ``removeServer(_:)``.
     public func setRequestBuilder(_ builder: (any ImageRequestBuilding)?, for serverID: UUID) {
         builders[serverID] = builder
+        if builder != nil { removedServers.remove(serverID) }
     }
 
     /// The image for `key`, downsampled to fit `pixelBox`. Keep the returned wrapper for as long
@@ -62,6 +78,7 @@ public actor ImagePipeline {
         let memoryKey = MemoryKey(key: key, box: pixelBox)
         if let hit = memory.image(for: memoryKey) { return CoverImage(hit) }
         while true {
+            try Task.checkCancellation()
             let flight: Flight<DecodedBitmap>
             if let existing = decodes[memoryKey], !existing.isAbandoned {
                 flight = existing
@@ -88,6 +105,10 @@ public actor ImagePipeline {
     }
 
     /// The image for `key` fitted into `size` pixels, for Now Playing and CarPlay.
+    ///
+    /// The bitmap stops counting against the memory cap once this returns, so callers that keep
+    /// an image on screen for long (or many of them) should hold the ``CoverImage`` from
+    /// ``image(for:pixelBox:)`` instead.
     public func cgImage(for key: ImageKey, size: CGSize) async throws -> CGImage {
         try await image(for: key, pixelBox: PixelBox(width: size.width, height: size.height)).cgImage
     }
@@ -98,14 +119,31 @@ public actor ImagePipeline {
         memory.trim(toFraction: fraction)
     }
 
-    /// Deletes a removed server's cached files and forgets its request builder.
+    /// Forgets a removed server: its request builder, in-flight fetches and decodes (which are
+    /// cancelled), memory entries and cached files. Fetches already running can't write to the
+    /// store afterwards, and new ones fail until a builder is set again.
+    // TODO(#143): wait for the server's file leases before deleting its folder.
     public func removeServer(_ serverID: UUID) async {
         builders[serverID] = nil
+        removedServers.insert(serverID)
+        for (key, flight) in fetches where key.key.serverID == serverID {
+            flight.cancel()
+            fetches[key] = nil
+        }
+        for (key, flight) in decodes where key.key.serverID == serverID {
+            flight.cancel()
+            decodes[key] = nil
+        }
+        memory.removeAll { $0.key.serverID == serverID }
         await fileStore.removeServer(serverID)
     }
 
     /// The bytes in the memory LRU, and of every live image plus reservations.
     var memoryCost: (lru: Int, combined: Int) { (memory.totalCost, ledger.total) }
+    /// Decodes waiting for memory, for tests.
+    var memoryWaiterCount: Int { ledger.waiterCount }
+    /// The folder of this pipeline's temporary downloads, for tests.
+    nonisolated var temporaryFolder: URL { sessionDelegate.temporaryFolder }
 
     // MARK: Decode
 
@@ -115,15 +153,16 @@ public actor ImagePipeline {
 
     private func decode(_ memoryKey: MemoryKey) async throws -> DecodedBitmap {
         do {
-            return try await decodeOnce(memoryKey)
+            return try await decodeOnce(memoryKey, skipsDownloaded: false)
         } catch ImagePipelineError.fileMissing {
-            // The file vanished (an OS purge or a deleted download): fetch it once more.
-            return try await decodeOnce(memoryKey)
+            // The file vanished (an OS purge or a deleted download): fetch it once more, without
+            // the downloaded cover, which may be the file that vanished.
+            return try await decodeOnce(memoryKey, skipsDownloaded: true)
         }
     }
 
-    private func decodeOnce(_ memoryKey: MemoryKey) async throws -> DecodedBitmap {
-        let file = try await fetchedFile(for: memoryKey.key)
+    private func decodeOnce(_ memoryKey: MemoryKey, skipsDownloaded: Bool) async throws -> DecodedBitmap {
+        let file = try await fetchedFile(for: FetchKey(key: memoryKey.key, skipsDownloaded: skipsDownloaded))
         // A stale downloaded cover is cached under its own version, never the requested one.
         let storeKey = MemoryKey(key: memoryKey.key.with(updatedAt: file.updatedAt), box: memoryKey.box)
         if let hit = memory.image(for: storeKey) { return hit }
@@ -138,21 +177,31 @@ public actor ImagePipeline {
                 if holdsLarge { await largeDecodeSlot.release() }
             }
         }
-        let info = try await ImageDecoder.inspect(file.url)
-        let cost = ImageDecoder.estimatedCost(of: info, box: memoryKey.box, bucket: memoryKey.key.bucket)
-        try await reserveMemory(cost)
-        reserved = cost
-        if memoryKey.box.isLarge || info.needsNormalizing {
-            try await largeDecodeSlot.acquire()
-            holdsLarge = true
-        }
-        var cgImage = try await ImageDecoder.decode(info, box: memoryKey.box, bucket: memoryKey.key.bucket)
-        if ImageDecoder.needsNormalizing(cgImage) {
-            if !holdsLarge {
+        try Task.checkCancellation()
+        var cgImage: CGImage
+        do {
+            let info = try await ImageDecoder.inspect(file.url)
+            let cost = ImageDecoder.estimatedCost(of: info, box: memoryKey.box, bucket: memoryKey.key.bucket)
+            try await reserveMemory(cost)
+            reserved = cost
+            if memoryKey.box.isLarge || info.needsNormalizing {
                 try await largeDecodeSlot.acquire()
                 holdsLarge = true
+                largeDecodeCount += 1
             }
-            cgImage = try await ImageDecoder.normalize(cgImage)
+            cgImage = try await ImageDecoder.decode(info, box: memoryKey.box, bucket: memoryKey.key.bucket)
+            if ImageDecoder.needsNormalizing(cgImage) {
+                if !holdsLarge {
+                    try await largeDecodeSlot.acquire()
+                    holdsLarge = true
+                    largeDecodeCount += 1
+                }
+                cgImage = try await ImageDecoder.normalize(cgImage)
+            }
+        } catch ImagePipelineError.unsupportedImage where file.isStored {
+            // A damaged cached file: delete it, and refetch once (as for a vanished file).
+            await fileStore.discard(file.url)
+            throw skipsDownloaded ? ImagePipelineError.unsupportedImage : .fileMissing
         }
         try Task.checkCancellation()
         let image = DecodedBitmap(cgImage, ledger: ledger)
@@ -181,16 +230,26 @@ public actor ImagePipeline {
 
     // MARK: Fetch
 
-    /// The encoded input for `key`, as a file. Joined by every decode of the key.
+    /// One fetch: a vanished-file retry skips the downloaded cover, so it's a separate fetch.
+    struct FetchKey: Hashable {
+        var key: ImageKey
+        var skipsDownloaded: Bool
+    }
+
+    /// The encoded input for a key, as a file. Joined by every decode of the key.
     struct FetchedFile: Sendable {
         var url: URL
         /// The version the file holds, which differs from the key's for a stale downloaded cover.
         var updatedAt: Int?
+        /// Keeps a stored file from eviction, or deletes an unstored download when released.
         var lease: FileLease?
+        /// Whether the file is in ``CoverFileStore``.
+        var isStored = false
     }
 
-    private func fetchedFile(for key: ImageKey) async throws -> FetchedFile {
+    private func fetchedFile(for key: FetchKey) async throws -> FetchedFile {
         while true {
+            try Task.checkCancellation()
             let flight: Flight<FetchedFile>
             if let existing = fetches[key], !existing.isAbandoned {
                 flight = existing
@@ -199,7 +258,7 @@ public actor ImagePipeline {
                 fetches[key] = flight
                 flight.start {
                     do {
-                        let file = try await self.fetch(key)
+                        let file = try await self.fetch(key.key, skipsDownloaded: key.skipsDownloaded)
                         await self.removeFetch(key, flight)
                         return file
                     } catch {
@@ -216,20 +275,17 @@ public actor ImagePipeline {
         }
     }
 
-    private func removeFetch(_ key: ImageKey, _ flight: Flight<FetchedFile>) {
+    private func removeFetch(_ key: FetchKey, _ flight: Flight<FetchedFile>) {
         if fetches[key] === flight { fetches[key] = nil }
     }
 
-    private func fetch(_ key: ImageKey) async throws -> FetchedFile {
-        if let url = key.externalURL, url.isFileURL {
-            return FetchedFile(url: url, updatedAt: key.updatedAt)
-        }
-        let downloaded = await downloadedCovers?.downloadedCover(for: key)
+    private func fetch(_ key: ImageKey, skipsDownloaded: Bool) async throws -> FetchedFile {
+        let downloaded = skipsDownloaded ? nil : await downloadedCovers?.downloadedCover(for: key)
         if let downloaded, Self.isFresh(downloaded, for: key) {
             return FetchedFile(url: downloaded.fileURL, updatedAt: key.updatedAt)
         }
         if let cached = await fileStore.lookup(key) {
-            return FetchedFile(url: cached.url, updatedAt: key.updatedAt, lease: cached.lease)
+            return FetchedFile(url: cached.url, updatedAt: key.updatedAt, lease: cached.lease, isStored: true)
         }
         do {
             guard isOnline() else { throw ImagePipelineError.offline }
@@ -246,6 +302,8 @@ public actor ImagePipeline {
     }
 
     private func download(_ key: ImageKey) async throws -> FetchedFile {
+        // A removed server's external covers would recreate its folder.
+        guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
         let built: URLRequest?
         if let builder = builders[key.serverID] {
             built = builder.imageRequest(for: key.source)
@@ -257,29 +315,37 @@ public actor ImagePipeline {
         }
         guard var request = built, let scheme = request.url?.scheme?.lowercased(), scheme == "http" || scheme == "https"
         else { throw ImagePipelineError.noRequest }
+        // Images never carry the Audiobookshelf token or cookies, whatever the builder adds.
+        request.setValue(nil, forHTTPHeaderField: "Authorization")
+        request.setValue(nil, forHTTPHeaderField: "Cookie")
         request.httpShouldHandleCookies = false
         request.cachePolicy = .reloadIgnoringLocalCacheData
         if request.value(forHTTPHeaderField: "Accept") == nil {
             request.setValue("image/*", forHTTPHeaderField: "Accept")
         }
+        let generation = await fileStore.generation(for: key.serverID)
         networkFetchCount += 1
-        let delegate = ImageTaskDelegate(original: request)
-        let (temporary, response): (URL, URLResponse)
-        do {
-            (temporary, response) = try await session.download(for: request, delegate: delegate)
-        } catch {
-            if delegate.exceededLimit { throw ImagePipelineError.tooLarge }
-            throw error
+        let (temporary, response) = try await sessionDelegate.download(request, session: session)
+        var keepsTemporary = false
+        defer {
+            if !keepsTemporary { try? FileManager.default.removeItem(at: temporary) }
         }
-        defer { try? FileManager.default.removeItem(at: temporary) }
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 200
-        guard (200..<300).contains(status) else { throw ImagePipelineError.httpStatus(status) }
-        let size = (try? temporary.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-        guard size <= ImageCacheLimits.maxInputBytes else { throw ImagePipelineError.tooLarge }
+        // A 2xx that isn't an image (a proxy's login page) is never cached.
+        guard await ImageDecoder.isImage(temporary) else { throw ImagePipelineError.unsupportedImage }
         try Task.checkCancellation()
-        let stored = try await fileStore.insert(
-            moving: temporary, for: key, pathExtension: Self.pathExtension(for: response, key: key))
-        return FetchedFile(url: stored.url, updatedAt: key.updatedAt, lease: stored.lease)
+        do {
+            let stored = try await fileStore.insert(
+                moving: temporary, for: key, pathExtension: Self.pathExtension(for: response, key: key),
+                generation: generation)
+            return FetchedFile(url: stored.url, updatedAt: key.updatedAt, lease: stored.lease, isStored: true)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // The store isn't writable (a full disk or a missing container): decode the download.
+            keepsTemporary = true
+            let lease = FileLease { try? FileManager.default.removeItem(at: temporary) }
+            return FetchedFile(url: temporary, updatedAt: key.updatedAt, lease: lease)
+        }
     }
 
     private static func pathExtension(for response: URLResponse, key: ImageKey) -> String {

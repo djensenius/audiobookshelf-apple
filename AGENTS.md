@@ -84,10 +84,12 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 
 | Command | What it does |
 | --- | --- |
-| `mise run lint` | ShellCheck, actionlint, and `swift format lint --strict` (`lint:repo` skips Swift) |
+| `mise run lint` | ShellCheck, actionlint, the ADR 0006 Now Playing import rule (`lint:nowplaying`), and `swift format lint --strict` (`lint:repo` skips Swift) |
 | `mise run format` | `swift format` Swift sources in place |
 | `mise run build:ios` / `build:macos` | Build the app (unsigned) into `.build/DerivedData` |
+| `mise run build:kit:extension` | Build AudiobookshelfKit with `-application-extension` for the iOS Simulator (run by `build:ios`) |
 | `mise run test` | Package tests (`test:kit`), tool tests (`test:tools`), and macOS app tests (`test:app`, signed ad hoc) |
+| `mise run test:kit:slow` | Slow package tests tagged `.slow` (opt-in via `ABS_SLOW_TESTS=1`; CI runs them on pushes to `main`) |
 | `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer) |
 | `mise run strings` / `strings:check` | Generate or verify ABSUI's `Localizable.xcstrings` from `strings/*.json` and `Localization/native/`; see [docs/localization.md](docs/localization.md) |
 | `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |

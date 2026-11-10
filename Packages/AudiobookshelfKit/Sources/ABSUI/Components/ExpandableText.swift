@@ -55,7 +55,9 @@ public struct ExpandableText: View {
                 }
                 .background(alignment: .topLeading) {
                     // Measures the untruncated height at the same width.
+                    // Clears any ancestor `.lineLimit`, which would cap the measured height.
                     Text(text)
+                        .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
                         .hidden()
                         .onGeometryChange(for: CGFloat.self) {
