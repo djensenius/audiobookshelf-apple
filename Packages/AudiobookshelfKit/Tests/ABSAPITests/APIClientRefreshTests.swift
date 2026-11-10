@@ -82,14 +82,19 @@ private final class GatedTokenProvider: TokenProvider {
     }
 }
 
-/// Wraps an ``InMemoryTokenProvider`` and, after committing its first successful swap, waits for
-/// ``release()`` before returning, so a later refresh can finish first. ``held()`` returns once
-/// that swap is holding.
-private final class SlowFirstSwapTokenProvider: TokenProvider {
+/// Wraps an ``InMemoryTokenProvider`` and, after committing its `heldSwap`th successful swap
+/// (the first by default), waits for ``release()`` before returning, so other work can happen
+/// between the commit and the return. ``held()`` returns once that swap is holding.
+private final class SlowSwapTokenProvider: TokenProvider {
     let inner = InMemoryTokenProvider()
+    private let heldSwap: Int
     private let swaps = Mutex(0)
     private let holding = Checkpoint()
     private let released = Checkpoint()
+
+    init(holdingSwap heldSwap: Int = 1) {
+        self.heldSwap = heldSwap
+    }
 
     func held() async {
         await holding.reached()
@@ -109,7 +114,7 @@ private final class SlowFirstSwapTokenProvider: TokenProvider {
             $0 += 1
             return $0
         }
-        if swap == 1 {
+        if swap == heldSwap {
             holding.pass()
             await released.reached()
         }
@@ -653,7 +658,7 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
                 && request.value(forHTTPHeaderField: "Authorization") == "Bearer access-3"
             return accepted ? .json(#"{"ok":true}"#) : .text("Unauthorized", status: 401)
         }
-        let tokens = SlowFirstSwapTokenProvider()
+        let tokens = SlowSwapTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         // The first request's refresh (1 -> 2) commits but returns late; meanwhile another request
@@ -818,6 +823,126 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(sent == ["Bearer access-1", "Bearer access-2", "Bearer access-3"])
         #expect(tokens.current == nil)
         #expect(tokens.expiredCount == 1)
+    }
+
+    /// A request's retry with its refreshed pair 2 is rejected while another request's refresh of
+    /// pair 2 is in flight: (a) before the provider swaps 2 -> 3, or (b) after the swap but before
+    /// it returns. The rejection waits for that refresh instead of expiring the session (which
+    /// would discard it) and retries once with pair 3. Pair 3 descends from this request's refresh,
+    /// so if it is rejected too the session expires without a third refresh.
+    @Test(arguments: [false, true], [true, false])
+    func retryRejectedDuringOtherRefreshOfRefreshedPairWaitsForIt(
+        swapCommitted: Bool, retryAccepted: Bool
+    ) async throws {
+        let refreshGate = StubGate()  // (a): holds the 2 -> 3 refresh response
+        let retryGate = StubGate()  // holds the 401 for the retry with pair 2
+        let finalGate = StubGate()  // holds the answer for the retry with pair 3
+        let server = StubServer { request in
+            let path = request.url?.path()
+            if path == refreshPath {
+                let generation = Int(request.value(forHTTPHeaderField: "x-refresh-token")?.dropFirst(8) ?? "") ?? 0
+                let next = generation + 1
+                return .json(
+                    #"{"user":{"accessToken":"access-\#(next)","refreshToken":"refresh-\#(next)"}}"#,
+                    gate: generation == 2 && !swapCommitted ? refreshGate : nil)
+            }
+            switch (path, request.value(forHTTPHeaderField: "Authorization")) {
+            case ("/abs/api/me", "Bearer access-2"):
+                return .json("{}", status: 401, gate: retryGate)
+            case ("/abs/api/me", "Bearer access-3"):
+                return retryAccepted
+                    ? .json(#"{"ok":true}"#, gate: finalGate) : .json("{}", status: 401, gate: finalGate)
+            case ("/abs/api/other", "Bearer access-3"):
+                return .json(#"{"ok":true}"#)
+            default:
+                return .json("{}", status: 401)
+            }
+        }
+        // Swap 1 is the first request's 1 -> 2; (b) holds swap 2 (2 -> 3) after committing it.
+        let tokens = SlowSwapTokenProvider(holdingSwap: swapCommitted ? 2 : 0)
+        let client = try makeClient(server, tokens: tokens)
+        // Passes once the first request has handled its retry's 401: it joined the refresh, or
+        // (without waiting for it) finished or sent its next retry.
+        let handled = Checkpoint()
+        await client.observeRefreshJoins { handled.pass() }
+
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await retryGate.arrived()
+        let other = Task { try await client.send(Endpoint<OK>(.get, "/api/other")) }
+        if swapCommitted { await tokens.held() } else { await refreshGate.arrived() }
+        Task {
+            _ = await first.result
+            handled.pass()
+        }
+        Task {
+            await finalGate.arrived()
+            handled.pass()
+        }
+        retryGate.open()
+        await handled.reached()
+        if swapCommitted { tokens.release() } else { refreshGate.open() }
+        #expect(try await other.value == OK(ok: true))
+        finalGate.open()
+
+        if retryAccepted {
+            #expect(try await first.value == OK(ok: true))
+            #expect(tokens.inner.current == AuthTokens(accessToken: "access-3", refreshToken: "refresh-3"))
+            #expect(tokens.inner.expiredCount == 0)
+        } else {
+            await #expect(throws: APIError.sessionExpired) { try await first.value }
+            #expect(tokens.inner.current == nil)
+            #expect(tokens.inner.expiredCount == 1)
+        }
+        let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
+        #expect(refreshTokens == ["refresh-1", "refresh-2"])
+        let sent = server.requests(path: "/abs/api/me").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-1", "Bearer access-2", "Bearer access-3"])
+    }
+
+    /// As above, but the other request's refresh returns pair 2 unchanged. It completed after the
+    /// rejected send, so it answers that rejection: the request retries with pair 2 once instead
+    /// of ending the session the other request just refreshed.
+    @Test func retryRejectedDuringOtherSamePairRefreshRetriesOnce() async throws {
+        let refreshes = Mutex(0)
+        let refreshGate = StubGate()
+        let retryGate = StubGate()
+        let server = StubServer { request in
+            let path = request.url?.path()
+            if path == refreshPath {
+                refreshes.withLock { $0 += 1 }
+                return request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1"
+                    ? .json(refreshedJSON) : .json(#"{"user":{"accessToken":"access-2"}}"#, gate: refreshGate)
+            }
+            guard request.value(forHTTPHeaderField: "Authorization") == "Bearer access-2" else {
+                return .json("{}", status: 401)
+            }
+            if refreshes.withLock({ $0 >= 2 }) { return .json(#"{"ok":true}"#) }
+            return .json("{}", status: 401, gate: path == "/abs/api/me" ? retryGate : nil)
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+        let handled = Checkpoint()
+        await client.observeRefreshJoins { handled.pass() }
+
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await retryGate.arrived()
+        let other = Task { try await client.send(Endpoint<OK>(.get, "/api/other")) }
+        await refreshGate.arrived()
+        Task {
+            _ = await first.result
+            handled.pass()
+        }
+        retryGate.open()
+        await handled.reached()
+        refreshGate.open()
+
+        #expect(try await other.value == OK(ok: true))
+        #expect(try await first.value == OK(ok: true))
+        #expect(refreshes.withLock { $0 } == 2)
+        let sent = server.requests(path: "/abs/api/me").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-1", "Bearer access-2", "Bearer access-2"])
+        #expect(tokens.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+        #expect(tokens.expiredCount == 0)
     }
 
     /// (c) The request that started a refresh is cancelled while it waits; the refresh still

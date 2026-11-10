@@ -128,9 +128,21 @@ public actor APIClient {
             let next: AuthTokens
             let nextGeneration = refreshGeneration
             if tokens == refreshedPair {
+                // Another request may be refreshing this pair. Its result decides the outcome:
+                // expiring now would discard it, and its edge is recorded only once it finishes.
+                // If it refreshed the pair after this send, this rejection is answered and the
+                // request retries with the current pair; if it failed, the pair is still rejected.
+                var refreshedSinceSend = false
+                if let flight = refreshFlights[tokens] {
+                    refreshJoinObserver?()
+                    _ = try? await flight.task.value
+                    refreshedSinceSend = completedRefresh(of: tokens, since: sendGeneration)
+                }
                 // Always handled, whatever the send budget: the refreshed pair is rejected, so the
                 // session is over unless a different one replaced it in the meantime.
-                guard let current = await expireSession(rejected: tokens) else { throw APIError.sessionExpired }
+                let replacement =
+                    refreshedSinceSend ? await tokenProvider.tokens() : await expireSession(rejected: tokens)
+                guard let current = replacement else { throw APIError.sessionExpired }
                 // A pair another request refreshed from the rejected one is still this chain's
                 // refreshed session, so its rejection expires too instead of refreshing again.
                 if outcome(current, after: tokens, since: tokensGeneration, sentAt: sendGeneration).didRefresh {
