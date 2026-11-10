@@ -155,8 +155,15 @@ public final class ProgressCache {
     /// action) is newer and stays. Returns whether the entry was restored.
     ///
     /// The entry gets the revision it had before `applied`, so the rollback doesn't count as a
-    /// local change: a seed requested before the optimistic apply still applies when it arrives
-    /// after the rollback.
+    /// local change. That matters in two cases. With a `nil` pre-image, a seed requested before
+    /// the optimistic apply still lands when it arrives after the rollback (otherwise the
+    /// tombstone would make it skip the entry). With a non-nil pre-image it changes the outcome
+    /// only when a list row's `lastUpdate` equals the cached one: the row replaces the entry
+    /// instead of the local value being kept.
+    ///
+    /// A seed that arrives after the optimistic apply and loses to it can leave the rollback
+    /// restoring a pre-image older than that seed's row; the next seed corrects it (as before
+    /// this change).
     @discardableResult
     public func rollback(_ applied: MediaProgress, to previous: MediaProgress?) -> Bool {
         let entry = entry(for: applied.progressKey)

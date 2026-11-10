@@ -179,6 +179,8 @@ public final class ProgressItemActions: ItemActionPerforming {
             try await writer.writeProgress(
                 itemID: target.libraryItemID, episodeID: target.episodeID, update: update)
         } catch {
+            // The pre-image may be older than a seed row that lost to the optimistic value; the
+            // next seed corrects that.
             if let applied { cache.rollback(applied, to: before) }
             throw error
         }

@@ -283,6 +283,19 @@ private func progress(
         #expect(cache.progress(libraryItemID: "x")?.currentTime == 1)
     }
 
+    @Test func aRollbackLetsAnEqualDatedSeedRowReplaceTheRestoredEntry() {
+        let cache = ProgressCache()
+        let previous = progress("x", currentTime: 1, lastUpdate: 10)
+        cache.apply(previous)
+        let token = cache.beginSeed()
+        let optimistic = progress("x", currentTime: 9, lastUpdate: 90)
+        cache.apply(optimistic)
+        #expect(cache.rollback(optimistic, to: previous))
+
+        cache.seed([progress("x", currentTime: 7, lastUpdate: 10)], token: token)
+        #expect(cache.progress(libraryItemID: "x")?.currentTime == 7)
+    }
+
     @Test func clearKeepsObserversOfMissingProgressAttached() {
         let cache = ProgressCache()
         cache.apply(progress("a", lastUpdate: 1))
