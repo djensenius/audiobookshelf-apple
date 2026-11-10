@@ -47,12 +47,14 @@ struct QueueAutoAdvanceTests {
 
     /// Plays episode e1 of a serial podcast and ends it, with the next-episode lookup held at
     /// `gate`; returns once the lookup started.
-    private func endEpisodeWhileLookupIsHeld(_ gate: Gate) async {
+    @discardableResult
+    private func endEpisodeWhileLookupIsHeld(_ gate: Gate) async -> (PlaybackQueueAdvancer, StubEpisodeSource) {
         let source = StubEpisodeSource(listing(isSerial: true, finished: []), gate: gate)
-        attach(episodes: source)
+        let advancer = attach(episodes: source)
         await coordinator.play(itemID: "P", episodeID: "e1")
         h.engine.finish()
         await yieldUntil { source.requests == 1 }
+        return (advancer, source)
     }
 
     private func episodeKey(_ id: String) -> MediaKey {
@@ -304,6 +306,31 @@ struct QueueAutoAdvanceTests {
 
         #expect(h.service.starts == ["A"])
         #expect(queue.items == [queueItem("A"), queueItem("B")])
+    }
+
+    @Test func detachWhileDecidingCancelsTheAdvance() async throws {
+        let gate = Gate()
+        let (advancer, _) = await endEpisodeWhileLookupIsHeld(gate)
+
+        advancer.detach(from: coordinator)
+        gate.open()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(coordinator.mediaKey == episodeKey("e1"))
+        #expect(h.service.starts == ["P"])
+    }
+
+    @Test func repeatedEndWhileDecidingAdvancesOnce() async throws {
+        let gate = Gate()
+        let (_, source) = await endEpisodeWhileLookupIsHeld(gate)
+
+        h.engine.finish()
+        gate.open()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(source.requests == 1)
+        #expect(coordinator.mediaKey == episodeKey("e2"))
+        #expect(h.service.starts == ["P", "P"])
     }
 
     @Test func detachLeavesAnotherProviderInPlace() {

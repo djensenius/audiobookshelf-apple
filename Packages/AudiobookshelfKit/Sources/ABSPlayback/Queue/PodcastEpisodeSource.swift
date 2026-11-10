@@ -53,7 +53,10 @@ public protocol PodcastEpisodeSource: Sendable {
 
 /// ``PodcastEpisodeSource`` over one connection's ``APIClient``: the expanded item and the user's
 /// progress from `GET /api/me`. An episode's finished change that hasn't synced yet
-/// (`finishedDirty` in local progress) overrides the server's.
+/// (`finishedDirty` in local progress) overrides the server's. Local progress is read in
+/// ``PodcastEpisodeListing/playOrder`` only until two episodes are unfinished, so
+/// `finishedEpisodeIDs` is exact for that prefix, which is all
+/// ``PodcastEpisodeListing/nextUnfinished(after:)`` reads, whichever episode ended.
 public struct APIPodcastEpisodeSource: PodcastEpisodeSource {
     private let client: APIClient
     private let serverConnectionID: UUID
@@ -70,15 +73,18 @@ public struct APIPodcastEpisodeSource: PodcastEpisodeSource {
         async let user = client.send(UserEndpoints.me)
         var listing = PodcastEpisodeListing(item: try await item, progress: try await user.mediaProgress)
         guard let localProgress else { return listing }
-        for episode in listing.episodes {
+        var unfinished = 0
+        for episode in listing.playOrder where unfinished < 2 {
             let key = MediaKey(
                 serverConnectionID: serverConnectionID, libraryItemId: podcastItemID, episodeId: episode.id)
-            guard let local = try? await localProgress.progress(for: key), local.finishedDirty else { continue }
-            if local.isFinished {
-                listing.finishedEpisodeIDs.insert(episode.id)
-            } else {
-                listing.finishedEpisodeIDs.remove(episode.id)
+            if let local = try? await localProgress.progress(for: key), local.finishedDirty {
+                if local.isFinished {
+                    listing.finishedEpisodeIDs.insert(episode.id)
+                } else {
+                    listing.finishedEpisodeIDs.remove(episode.id)
+                }
             }
+            if !listing.finishedEpisodeIDs.contains(episode.id) { unfinished += 1 }
         }
         return listing
     }

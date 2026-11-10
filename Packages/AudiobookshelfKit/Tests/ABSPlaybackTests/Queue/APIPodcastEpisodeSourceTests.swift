@@ -49,6 +49,23 @@ private struct NoTokens: TokenProvider {
     func expireSession(ifCurrent rejected: ABSAPI.AuthTokens) async -> Bool { false }
 }
 
+/// Local progress that records which media were looked up.
+private final class RecordingProgress: LocalProgressReading {
+    private let store: LocalProgressStore
+    private let lookups = Mutex<[String]>([])
+
+    init(_ store: LocalProgressStore) {
+        self.store = store
+    }
+
+    var episodeIDs: [String] { lookups.withLock { $0 } }
+
+    func progress(for key: MediaKey) async throws -> LocalMediaProgressDTO? {
+        lookups.withLock { $0.append(key.episodeId ?? "") }
+        return try await store.progress(for: key)
+    }
+}
+
 struct APIPodcastEpisodeSourceTests {
     let connection = UUID()
     let host = "\(UUID().uuidString.lowercased()).stub.test"
@@ -102,5 +119,21 @@ struct APIPodcastEpisodeSourceTests {
 
         #expect(listing.finishedEpisodeIDs == ["e1", "e3"])
         #expect(listing.nextUnfinished(after: "e1")?.id == "e2")
+    }
+
+    @Test func localProgressIsReadOnlyUntilTwoEpisodesAreUnfinished() async throws {
+        let store = try LocalProgressStore(modelContainer: DataStack(location: .inMemory).container)
+        // Server: e1 and e2 finished. This device un-finished e1, not synced yet.
+        try await store.recordEdit(ProgressEdit(isFinished: false), for: key("e1"), now: .now)
+        let progress = RecordingProgress(store)
+
+        let listing = try await source(localProgress: progress).listing(podcastItemID: "li-1")
+
+        // Play order e1, e2, e3, e4: e1 and e3 are the first two unfinished, so e4 isn't read.
+        #expect(progress.episodeIDs == ["e1", "e2", "e3"])
+        #expect(listing.nextUnfinished(after: "e1")?.id == "e3")
+        #expect(listing.nextUnfinished(after: "e3")?.id == "e1")
+        #expect(listing.nextUnfinished(after: "e4")?.id == "e1")
+        #expect(listing.nextUnfinished(after: "e2")?.id == "e1")
     }
 }
