@@ -221,12 +221,21 @@ dependency.
      This is new compared with the legacy app, which was single-page only. It is in
      the P6-13 #105 scope.
      - **When to show a spread:** the reader uses the shared `spread` setting
-       (`auto`/`none`) in reader settings. With `auto`, show two pages when the
-       horizontal size class is regular and the reader area is wider than it is
-       tall. That covers iPad landscape, wide Mac windows, and iPhone Duo spanned
-       across the hinge, where one page sits on each side of the hinge reserved
-       region. iPhone, iPad portrait, narrow Mac windows, a folded Duo, and `none`
-       show a single page.
+       (`auto`/`none`) in reader settings. `none` always shows a single page.
+       With `auto`, the decision is split by platform:
+       - **iOS and iPadOS:** show two pages when the horizontal size class is
+         `.regular` and the reader area, measured with `onGeometryChange`, is
+         wider than it is tall. This covers iPad landscape, including large Split
+         View panes.
+       - **iPhone Duo spanned across the hinge:** show two pages, one on each side
+         of the hinge reserved region (`GeometryProxy.reservedRegions`). This
+         applies even if the size class reports compact.
+       - **macOS:** size classes don't describe the window, so decide from the
+         reader's measured size. Show two pages when the width is at least 800 pt
+         (the same threshold as epub.js `minSpreadWidth`) and the width is greater
+         than the height. Re-evaluate as the window resizes.
+       - **Single page:** iPhone, iPad portrait, narrow Mac windows and a folded
+         Duo show one page.
      - **Pairing:** page 1 (the cover) is shown alone, then pages pair as (2, 3),
        (4, 5), and so on. These pages are also shown alone:
        - pages marked `DoublePage="True"` or `Type="FrontCover"` in
