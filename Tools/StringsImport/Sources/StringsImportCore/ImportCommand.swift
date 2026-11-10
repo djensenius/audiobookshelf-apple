@@ -1,0 +1,95 @@
+import Foundation
+
+/// The `import-strings` command: `import-strings [--check] [--root <repository root>]`.
+///
+/// Reads `strings/*.json` and `Localization/native/*.json` under the root, writes ABSUI's
+/// `Localizable.xcstrings`, and verifies the app's `CFBundleLocalizations`. With `--check`
+/// it writes nothing and fails if either is out of date.
+public enum ImportCommand {
+    public static let catalogPath = "Packages/AudiobookshelfKit/Sources/ABSUI/Resources/Localizable.xcstrings"
+    public static let infoPlistPath = "Audiobookshelf/Info.plist"
+    public static let legacyPath = "strings"
+    public static let nativePath = "Localization/native"
+
+    /// Runs the command and returns the process exit status.
+    public static func run(arguments: [String], root defaultRoot: URL, log: (String) -> Void = { print($0) }) -> Int32 {
+        var check = false
+        var root = defaultRoot
+        var remaining = arguments[...]
+        while let argument = remaining.popFirst() {
+            switch argument {
+            case "--check":
+                check = true
+            case "--root":
+                guard let path = remaining.popFirst() else {
+                    log("error: --root needs a path")
+                    return 1
+                }
+                root = URL(filePath: path)
+            default:
+                log("error: unknown argument \(argument); usage: import-strings [--check] [--root <path>]")
+                return 1
+            }
+        }
+
+        let result: CatalogBuildResult
+        do {
+            let files = try LocaleFile.merging(
+                legacy: LocaleFile.load(directory: root.appending(path: legacyPath)),
+                native: LocaleFile.load(directory: root.appending(path: nativePath))
+            )
+            result = try CatalogBuilder.build(files: files)
+        } catch {
+            log("error: \(error)")
+            return 1
+        }
+        for warning in result.warnings {
+            log("warning: \(warning)")
+        }
+
+        var outOfDate = false
+        let catalogURL = root.appending(path: catalogPath)
+        if (try? String(contentsOf: catalogURL, encoding: .utf8)) != result.json {
+            if check {
+                log("error: \(catalogPath) is out of date; run 'mise run strings'")
+                outOfDate = true
+            } else {
+                do {
+                    try result.json.write(to: catalogURL, atomically: true, encoding: .utf8)
+                } catch {
+                    log("error: could not write \(catalogPath): \(error)")
+                    return 1
+                }
+                log("Wrote \(catalogPath)")
+            }
+        }
+
+        // Info.plist is hand-edited (rewriting it would reformat the file), so only verify it.
+        if declaredLocalizations(at: root.appending(path: infoPlistPath)) != result.locales {
+            let items = result.locales.map { "\t\t<string>\($0)</string>" }.joined(separator: "\n")
+            log(
+                """
+                error: CFBundleLocalizations in \(infoPlistPath) does not match the catalog's locales. Use:
+                \t<key>CFBundleLocalizations</key>
+                \t<array>
+                \(items)
+                \t</array>
+                """
+            )
+            outOfDate = true
+        }
+
+        if outOfDate {
+            return 1
+        }
+        log("\(result.locales.count) locales: \(result.locales.joined(separator: " "))")
+        return 0
+    }
+
+    private static func declaredLocalizations(at url: URL) -> [String]? {
+        guard let data = try? Data(contentsOf: url),
+            let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+        return plist["CFBundleLocalizations"] as? [String]
+    }
+}

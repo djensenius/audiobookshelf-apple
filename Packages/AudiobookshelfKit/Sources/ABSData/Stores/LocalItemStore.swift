@@ -159,7 +159,8 @@ import SwiftData
     // MARK: - Private
 
     /// The file for an audio or ebook part. An episode download's files always carry its
-    /// episode id, even when the part doesn't.
+    /// episode id, even when the part doesn't. Its size is the completed part's `bytesWritten`,
+    /// the final size `DownloadStore.completePart(partID:finalBytes:now:)` recorded.
     private static func file(from part: DownloadPartDTO, episodeId: String?) -> LocalFileDTO? {
         let kind: LocalFileKind
         switch part.kind {
@@ -172,7 +173,7 @@ import SwiftData
             relativePath: part.destinationRelativePath,
             filename: part.filename,
             mimeType: part.mimeType,
-            size: max(part.bytesWritten, part.expectedBytes),
+            size: part.bytesWritten,
             serverIno: part.serverIno,
             trackIndex: part.trackIndex,
             episodeId: part.episodeId ?? episodeId
