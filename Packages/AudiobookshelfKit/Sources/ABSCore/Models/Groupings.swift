@@ -80,6 +80,23 @@ public struct Playlist: Sendable, Hashable, Codable, Identifiable {
         self.lastUpdate = lastUpdate
         self.createdAt = createdAt
     }
+
+    enum CodingKeys: String, CodingKey {
+        case id, libraryId, userId, name, description, coverPath, items, lastUpdate, createdAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        libraryId = try container.decode(String.self, forKey: .libraryId)
+        userId = try container.decodeIfPresent(String.self, forKey: .userId)
+        name = try container.decode(String.self, forKey: .name)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        coverPath = try container.decodeIfPresent(String.self, forKey: .coverPath)
+        items = try container.decode(LossyArray<PlaylistItem>.self, forKey: .items).elements
+        lastUpdate = try container.decodeIfPresent(Int.self, forKey: .lastUpdate)
+        createdAt = try container.decodeIfPresent(Int.self, forKey: .createdAt)
+    }
 }
 
 public struct PlaylistItem: Sendable, Hashable, Codable, Identifiable {
@@ -97,6 +114,20 @@ public struct PlaylistItem: Sendable, Hashable, Codable, Identifiable {
         self.episodeId = episodeId
         self.episode = episode
         self.libraryItem = libraryItem
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case libraryItemId, episodeId, episode, libraryItem
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        libraryItemId = try container.decode(String.self, forKey: .libraryItemId)
+        episodeId = try container.decodeIfPresent(String.self, forKey: .episodeId)
+        // Expansions are optional detail, not identity. A malformed expansion must not
+        // discard an otherwise identifiable member or turn an episode into a book.
+        episode = try? container.decodeIfPresent(PodcastEpisode.self, forKey: .episode)
+        libraryItem = try? container.decodeIfPresent(LibraryItem.self, forKey: .libraryItem)
     }
 
     public var id: String {
