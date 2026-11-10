@@ -111,7 +111,8 @@ public final class SleepTimer {
     /// Counts expiries, so an expiry's seek task only touches its own automatic rewind.
     @ObservationIgnored private var expiryID = 0
     /// The expiry's seek back to where the fade began, from where playback paused, until its task starts it or a
-    /// reset or play takes it over.
+    /// reset or play takes it over. A reset's `undo` can restore it with no task behind it; the next play or reset
+    /// then delivers the seek.
     @ObservationIgnored private var queuedFadeRewind: (from: Double, to: Double)?
     @ObservationIgnored private var itemID: String?
     /// Changes when a run begins or stops, or playback plays or pauses, so a reset's resume can tell it was overtaken.
@@ -253,7 +254,8 @@ public final class SleepTimer {
     /// period, or starts the automatic timer inside its window. Returns the seconds to rewind before playing,
     /// which are consumed: the automatic rewind, if playback is still (or a seek in flight puts it back) where the
     /// automatic timer paused it, plus the way back to where the fade began if the expiry's seek there hasn't started
-    /// (the play takes it over).
+    /// (the play takes it over). The two come as one value, which the coordinator must apply whole: if playback then
+    /// aborts (the audio session fails to start, say), the seek the expiry's task would have made is gone.
     public func playbackWillStart(at date: Date = .now) -> TimeInterval {
         runID += 1
         let rewind = takeRewind()
