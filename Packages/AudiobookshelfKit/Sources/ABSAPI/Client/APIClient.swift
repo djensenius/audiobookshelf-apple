@@ -20,9 +20,10 @@ public actor APIClient {
     /// refresh of its own pair (not one left over from a previous sign-in).
     private var refreshFlights: [AuthTokens: RefreshFlight] = [:]
     private var nextFlightID = 0
-    /// Recent successful refreshes as (rejected pair, refreshed pair), oldest first. They tell a
-    /// stale token read apart from a session that needs refreshing, and whether the current
-    /// pair descends from a rejected one.
+    /// Recent successful refreshes as (rejected pair, refreshed pair). They tell a stale token
+    /// read apart from a session that needs refreshing, and whether the current pair descends
+    /// from a rejected one. A refresh that returns the same pair is recorded as `(A, A)`. Edges
+    /// can be appended out of order (a slow provider may return after a later refresh).
     private var completedRefreshes: [(from: AuthTokens, to: AuthTokens)] = []
     private static let completedRefreshLimit = 8
 
@@ -132,7 +133,9 @@ public actor APIClient {
             guard let current = await tokenProvider.tokens() else { throw APIError.sessionExpired }
             // A refresh may have started during the read above.
             if refreshFlights[rejected] != nil { continue }
-            if current.accessToken != rejected.accessToken { return outcome(current, after: rejected) }
+            // Either a completed refresh already produced `current`, or it is a different session.
+            let result = outcome(current, after: rejected)
+            if result.didRefresh || current != rejected { return result }
             // A refresh of `rejected` already finished, so the read predates it; read once more.
             if !hasRereadStaleTokens, completedRefresh(of: rejected) {
                 hasRereadStaleTokens = true
@@ -161,14 +164,21 @@ public actor APIClient {
         return outcome(current, after: rejected)
     }
 
-    /// `current` counts as refreshed only if it descends from `rejected` through completed
-    /// refreshes; otherwise it belongs to a different session that hasn't been refreshed.
+    /// `current` counts as refreshed only if it descends from `rejected` through one or more
+    /// completed refreshes (including one that returned the same pair); otherwise it belongs to a
+    /// different session that hasn't been refreshed.
     private func outcome(_ current: AuthTokens, after rejected: AuthTokens) -> RefreshOutcome {
-        var lineage: Set = [rejected]
-        for refresh in completedRefreshes where lineage.contains(refresh.from) {
-            lineage.insert(refresh.to)
+        var next: [AuthTokens: [AuthTokens]] = [:]
+        for refresh in completedRefreshes {
+            next[refresh.from, default: []].append(refresh.to)
         }
-        return RefreshOutcome(tokens: current, didRefresh: current != rejected && lineage.contains(current))
+        // Walks the edges from `rejected` to a fixed point, so their order doesn't matter.
+        var descendants: Set<AuthTokens> = []
+        var pending = next[rejected] ?? []
+        while let pair = pending.popLast() {
+            if descendants.insert(pair).inserted { pending += next[pair] ?? [] }
+        }
+        return RefreshOutcome(tokens: current, didRefresh: descendants.contains(current))
     }
 
     private func completedRefresh(of rejected: AuthTokens) -> Bool {
