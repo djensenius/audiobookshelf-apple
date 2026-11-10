@@ -391,6 +391,13 @@ private func query(_ request: URLRequest?) -> [String: String] {
         #expect(OIDCLoginService.refusal(from: response, server: server) == .serverRefused(message: message))
     }
 
+    @Test func forbiddenCallbackIsAccessDenied() async throws {
+        let server = stubServer(callback: .text("Forbidden", status: 403))
+        await #expect(throws: ServerValidationError.accessDenied(status: 403)) {
+            try await login(server, authenticator: FakeAuthenticator())
+        }
+    }
+
     @Test func tooManyAttemptsFromCallback() async throws {
         let server = stubServer(callback: .text("Too many requests", status: 429))
         await #expect(throws: ServerValidationError.tooManyAttempts) {

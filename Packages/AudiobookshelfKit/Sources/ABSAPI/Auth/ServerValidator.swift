@@ -24,8 +24,10 @@ public struct ServerValidator: Sendable {
     /// instead; the UI warns and calls again with the explicit `http://` address. A result that
     /// fell back has ``ValidatedServer/fellBackToHTTP`` set so the UI can warn before sign-in.
     ///
-    /// A redirect to another host is refused; a redirect on the same host (for example to
-    /// `https` or another port) is adopted as the server address.
+    /// Redirects are followed here, not by `URLSession`, so each hop is checked before it is
+    /// sent: a redirect to another host or from `https` to `http` is refused, and a redirect on
+    /// the same host (for example to `https` or another port) is sent with the custom headers and
+    /// adopted as the server address.
     public func validate(address input: String, customHeaders: [String: String] = [:]) async throws
         -> ValidatedServer
     {
@@ -40,16 +42,14 @@ public struct ServerValidator: Sendable {
         for (index, candidate) in candidates.enumerated() {
             // Every candidate after the first is the inferred plain-http fallback.
             if index > 0, !customHeaders.isEmpty { throw ServerValidationError.httpsUnavailable(candidate) }
-            let configuration = try Self.configuration(candidate, customHeaders: customHeaders)
-            let reply: APIResponse<ServerStatus>
+            let address: ServerAddress
+            let status: ServerStatus
             do {
-                reply = try await client(configuration).response(for: AuthEndpoints.status())
+                (address, status) = try await self.status(at: candidate, customHeaders: customHeaders)
             } catch let error as APIError {
                 if index < candidates.count - 1, Self.allowsHTTPFallback(after: error) { continue }
                 throw Self.statusError(error)
             }
-            let address = try Self.resolvedAddress(candidate, finalURL: reply.httpResponse.url)
-            let status = reply.value
             guard status.isInit else { throw ServerValidationError.serverNotInitialized }
             let features = try Self.features(serverVersion: status.serverVersion)
             return ValidatedServer(
@@ -62,8 +62,8 @@ public struct ServerValidator: Sendable {
     }
 
     /// Signs in with `POST /login` and returns the user, the token pair to store, and the
-    /// server's version gates. If the response is refused (unsupported version or no tokens),
-    /// the session the server just created is logged out, best effort.
+    /// server's version gates. If the response is refused (unsupported version, no tokens, or a
+    /// body that doesn't decode), the session the server just created is logged out, best effort.
     public func login(to server: ValidatedServer, username: String, password: String) async throws -> LoginResult {
         let client = client(server.configuration)
         let reply: APIResponse<Data>
@@ -78,24 +78,20 @@ public struct ServerValidator: Sendable {
 
     /// Turns a sign-in response (`POST /login` or `GET /auth/openid/callback`) into a
     /// ``LoginResult``, applying the version gate and requiring both tokens. If the response is
-    /// refused, the session the server just created is logged out through `client`, best effort.
+    /// refused, including when it fails to decode, the session the server just created is logged
+    /// out through `client`, best effort.
     static func loginResult(from reply: APIResponse<Data>, client: APIClient) async throws -> LoginResult {
         guard !(300..<400).contains(reply.httpResponse.statusCode) else {
             throw ServerValidationError.loginRedirected
         }
-        let response: AuthResponse
         do {
-            response = try JSONDecoder().decode(AuthResponse.self, from: reply.value)
-        } catch {
-            throw ServerValidationError.unexpected(.decoding(String(describing: error)))
-        }
-
-        do {
+            let response = try Self.decodeAuthResponse(reply.value)
             let features = try Self.features(of: response)
             guard let tokens = response.sessionTokens else { throw ServerValidationError.missingTokens }
             return LoginResult(response: response, tokens: tokens, features: features)
         } catch {
-            // Read separately: `AuthResponse.tokens` is `nil` without an access token.
+            // Read on its own: `AuthResponse.tokens` is `nil` without an access token, and the
+            // rest of the body may not decode.
             let body = try? JSONDecoder().decode(LoginRefreshToken.self, from: reply.value)
             if let refreshToken = body?.user.refreshToken, !refreshToken.isEmpty {
                 _ = try? await client.send(AuthEndpoints.logout(refreshToken: refreshToken))
@@ -113,13 +109,21 @@ public struct ServerValidator: Sendable {
 
     /// Calls `POST /api/authorize` with `client`'s stored tokens and re-checks the version, so
     /// a downgraded server is caught on launch.
+    ///
+    /// A redirect is not followed: a hop to another origin would answer without the token, so its
+    /// response says nothing about the session. It throws
+    /// ``ServerValidationError/loginRedirected``.
     public func authorize(with client: APIClient) async throws -> AuthorizeResult {
-        let response: AuthResponse
+        let reply: APIResponse<Data>
         do {
-            response = try await client.send(AuthEndpoints.authorize())
+            reply = try await client.response(for: Self.unparsed(AuthEndpoints.authorize()))
         } catch let error as APIError {
             throw Self.authorizeError(error)
         }
+        guard !(300..<400).contains(reply.httpResponse.statusCode) else {
+            throw ServerValidationError.loginRedirected
+        }
+        let response = try Self.decodeAuthResponse(reply.value)
         return AuthorizeResult(response: response, features: try Self.features(of: response))
     }
 
@@ -137,6 +141,60 @@ public struct ServerValidator: Sendable {
     }
 
     // MARK: - Helpers
+
+    /// The most redirects ``validate(address:customHeaders:)`` follows for one candidate.
+    static let maxStatusRedirects = 5
+
+    /// Reads `/status` at `candidate`, following same-host redirects itself so that each hop is
+    /// checked before it is sent and keeps the custom headers. Returns the address the status was
+    /// finally served from.
+    /// - Throws: `APIError` for a failed request, or ``ServerValidationError`` for a refused redirect.
+    private func status(
+        at candidate: ServerAddress, customHeaders: [String: String]
+    ) async throws -> (ServerAddress, ServerStatus) {
+        var endpoint = Self.unparsed(AuthEndpoints.status())
+        endpoint.followsRedirects = false
+        var address = candidate
+        var redirects = 0
+        while true {
+            let configuration = try Self.configuration(address, customHeaders: customHeaders)
+            let reply = try await client(configuration).response(for: endpoint)
+            let response = reply.httpResponse
+            guard (300..<400).contains(response.statusCode) else {
+                do {
+                    return (address, try JSONDecoder().decode(ServerStatus.self, from: reply.value))
+                } catch {
+                    throw APIError.decoding("ServerStatus")
+                }
+            }
+            redirects += 1
+            guard redirects <= Self.maxStatusRedirects else {
+                throw ServerValidationError.statusFailed(status: response.statusCode)
+            }
+            address = try Self.redirectTarget(of: response, from: address)
+        }
+    }
+
+    /// The server address a `/status` redirect points to, checked before it is followed.
+    private static func redirectTarget(
+        of response: HTTPURLResponse, from current: ServerAddress
+    ) throws(ServerValidationError) -> ServerAddress {
+        guard let location = response.value(forHTTPHeaderField: "Location"),
+            let target = URL(string: location, relativeTo: response.url ?? current.url)?.absoluteURL,
+            let scheme = target.scheme?.lowercased(), scheme == "http" || scheme == "https"
+        else { throw .statusFailed(status: response.statusCode) }
+        if current.url.scheme?.lowercased() == "https", scheme == "http" { throw .insecureRedirect }
+        return try resolvedAddress(current, finalURL: target)
+    }
+
+    /// Decodes a login or authorize body. The error carries no server text.
+    private static func decodeAuthResponse(_ data: Data) throws(ServerValidationError) -> AuthResponse {
+        do {
+            return try JSONDecoder().decode(AuthResponse.self, from: data)
+        } catch {
+            throw .unexpected(.decoding("AuthResponse"))
+        }
+    }
 
     private func client(_ configuration: APIClientConfiguration) -> APIClient {
         APIClient(
@@ -162,13 +220,11 @@ public struct ServerValidator: Sendable {
             followsRedirects: endpoint.followsRedirects, sendsCookies: endpoint.sendsCookies)
     }
 
-    /// The server address `/status` was finally served from: the final origin plus the base
-    /// path before `/status`. Another host is refused; the client never follows a downgrade to
-    /// `http`.
+    /// The server address a `/status` redirect points to: its origin plus the base path before
+    /// `/status`. Another host is refused.
     private static func resolvedAddress(
-        _ candidate: ServerAddress, finalURL: URL?
+        _ candidate: ServerAddress, finalURL: URL
     ) throws(ServerValidationError) -> ServerAddress {
-        guard let finalURL else { return candidate }
         let host = finalURL.host()?.lowercased() ?? ""
         guard host == candidate.url.host()?.lowercased() else { throw .redirectedToOtherHost(host) }
         guard var components = URLComponents(url: finalURL, resolvingAgainstBaseURL: false) else {
@@ -219,7 +275,11 @@ public struct ServerValidator: Sendable {
 
     private static func authorizeError(_ error: APIError) -> ServerValidationError {
         switch error {
-        case .sessionExpired, .notAuthenticated, .unauthorized, .forbidden: .sessionExpired
+        case .sessionExpired, .notAuthenticated: .sessionExpired
+        // A 403 is from a proxy (the client keeps the session), and a 401 that still reaches here
+        // was not a verdict on the token, so neither means the session is over.
+        case .unauthorized: .accessDenied(status: 401)
+        case .forbidden: .accessDenied(status: 403)
         default: genericError(error)
         }
     }
@@ -277,7 +337,8 @@ public enum ServerValidationError: Error, Sendable, Equatable, LocalizedError {
     case httpsUnavailable(ServerAddress)
     /// `/status` returned 404 or something that isn't an Audiobookshelf status.
     case notAudiobookshelf
-    /// `/status` returned 401 or 403, usually from a proxy that needs custom headers.
+    /// `/status` or `/api/authorize` returned 401 or 403 without ending the session, usually from
+    /// a proxy that needs custom headers.
     case accessDenied(status: Int)
     /// `/status` returned another error status.
     case statusFailed(status: Int)
@@ -290,7 +351,7 @@ public enum ServerValidationError: Error, Sendable, Equatable, LocalizedError {
     case unsupportedVersion(String?)
     case invalidCredentials
     case tooManyAttempts
-    /// `POST /login` answered with a redirect, which is not followed.
+    /// `POST /login` or `POST /api/authorize` answered with a redirect, which is not followed.
     case loginRedirected
     /// The login response had no access or refresh token.
     case missingTokens
@@ -354,6 +415,8 @@ public enum ServerValidationError: Error, Sendable, Equatable, LocalizedError {
         case .unauthorized: return "unexpected(unauthorized)"
         case .forbidden: return "unexpected(forbidden)"
         case .encoding: return "unexpected(encoding)"
+        // `JSONDecoder` messages can quote the server's response.
+        case .decoding: return "unexpected(decoding failed)"
         default: return "unexpected(\(error))"
         }
     }
