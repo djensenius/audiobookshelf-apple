@@ -12,10 +12,10 @@ import Testing
         directory = try TemporaryDirectory()
     }
 
-    /// A 16 KiB file (whole APFS blocks, so its allocated size is exact).
-    private func temporaryFile() throws -> URL {
+    /// A 16 KiB file by default; whole APFS blocks, so its allocated size is exact.
+    private func temporaryFile(bytes: Int = 16_384) throws -> URL {
         let url = directory.url.appending(path: UUID().uuidString)
-        try Data(repeating: 7, count: 16_384).write(to: url)
+        try Data(repeating: 7, count: bytes).write(to: url)
         return url
     }
 
@@ -141,5 +141,38 @@ import Testing
         #expect(await store.size == 32_768)
         #expect(await store.lookup(key("b")) != nil)
         #expect(await store.lookup(key("c")) != nil)
+    }
+
+    @Test func sameExtensionReplacementsCountTheNewSize() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
+        _ = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "jpg", generation: 0)
+        let larger = try await store.insert(
+            moving: temporaryFile(bytes: 65_536), for: key("a"), pathExtension: "jpg", generation: 0)
+        #expect(await store.size == 65_536)
+        _ = try await store.insert(
+            moving: temporaryFile(bytes: 4_096), for: key("a"), pathExtension: "jpg", generation: 0)
+        #expect(await store.size == 4_096)
+        await store.discard(larger.url)
+        #expect(await store.size == 0)
+    }
+
+    @Test func largerReplacementOverTheCapEvicts() async throws {
+        let tick = Mutex(0.0)
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 60_000) {
+            tick.withLock { value in
+                value += 60
+                return Date(timeIntervalSince1970: value)
+            }
+        }
+        for id in ["a", "b"] {
+            _ = try await store.insert(moving: temporaryFile(), for: key(id), pathExtension: "jpg", generation: 0)
+        }
+        _ = try await store.insert(
+            moving: temporaryFile(bytes: 49_152), for: key("b"), pathExtension: "jpg", generation: 0)
+        await store.waitForEviction()
+        #expect(await store.evictionCount == 1)
+        #expect(await store.size == 49_152)
+        #expect(await store.lookup(key("a")) == nil)
+        #expect(await store.lookup(key("b")) != nil)
     }
 }
