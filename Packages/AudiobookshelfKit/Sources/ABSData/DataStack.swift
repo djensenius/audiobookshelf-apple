@@ -23,6 +23,9 @@ public struct DataStack: Sendable {
         /// A read-only process (a widget) can't use the App Group container, so there is no
         /// store it could share with the app.
         case appGroupUnavailable
+        /// The process has the App Group entitlement but its container couldn't be resolved.
+        /// Falling back would split the data from the shared store, so this is an error.
+        case appGroupContainerUnresolved
     }
 
     public static let storeName = "Audiobookshelf"
@@ -41,19 +44,25 @@ public struct DataStack: Sendable {
         try self.init(
             location: location,
             allowsSave: allowsSave,
-            groupContainerURL: Self.entitledGroupContainerURL,
+            isAppGroupEntitled: { AppSettings.isAppGroupAvailable(AppSettings.appGroupIdentifier) },
+            groupContainerURL: {
+                FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppSettings.appGroupIdentifier)
+            },
             fallbackDirectory: URL.applicationSupportDirectory,
             onFallback: Self.reportFallback
         )
     }
 
     /// - Parameters:
-    ///   - groupContainerURL: The App Group container, or `nil` when the process isn't entitled.
+    ///   - isAppGroupEntitled: Whether the process has the App Group entitlement (on iOS, whether
+    ///     the container resolves).
+    ///   - groupContainerURL: The App Group container, or `nil` when it can't be resolved.
     ///   - fallbackDirectory: Where the store goes when the process isn't entitled.
     ///   - onFallback: Called when the App Group store is replaced by the fallback store.
     init(
         location: Location,
         allowsSave: Bool,
+        isAppGroupEntitled: () -> Bool = { true },
         groupContainerURL: () -> URL?,
         fallbackDirectory: URL,
         now: Date = .now,
@@ -76,7 +85,11 @@ public struct DataStack: Sendable {
             container = try Self.openOnDisk(at: url, schema: schema, allowsSave: allowsSave, now: now)
             resolvedLocation = .url(url)
         case .appGroup:
-            if let groupURL = groupContainerURL() {
+            if isAppGroupEntitled() {
+                guard let groupURL = groupContainerURL() else {
+                    Self.logger.fault("App Group entitlement present but its container can't be resolved")
+                    throw LoadError.appGroupContainerUnresolved
+                }
                 // Load failures are rethrown, never answered with a private store: a store that is
                 // locked, full or briefly unreadable would otherwise be split in two, and the
                 // orphan sweep could delete downloads the private store doesn't know about.
@@ -98,13 +111,6 @@ public struct DataStack: Sendable {
     }
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "persistence")
-
-    /// The App Group container when this process is entitled to it.
-    private static func entitledGroupContainerURL() -> URL? {
-        let identifier = AppSettings.appGroupIdentifier
-        guard AppSettings.isAppGroupAvailable(identifier) else { return nil }
-        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: identifier)
-    }
 
     /// A missing App Group entitlement is a build configuration error everywhere except the
     /// ad hoc signed macOS app test host (`mise run test:app`), which has no App Group.
@@ -179,6 +185,9 @@ public struct DataStack: Sendable {
     private static let transientSQLiteCodes: Set<Int> = [3, 5, 6, 10, 13, 14]
     private static let corruptSQLiteCodes: Set<Int> = [11, 26]
 
+    /// Errors inspected in a load error chain; a longer chain is never confirmed.
+    static let maxInspectedErrors = 32
+
     /// Whether a load error confirms the store can't be used: a Core Data incompatibility or
     /// SQLite corruption somewhere in the chain (`NSUnderlyingErrorKey`, `NSDetailedErrors`), and
     /// no transient failure (disk full, I/O, busy, locked, can't open, no permission, or any POSIX
@@ -186,7 +195,9 @@ public struct DataStack: Sendable {
     static func isConfirmedIncompatibility(_ error: NSError?) -> Bool {
         var chain: [NSError] = []
         var pending = error.map { [$0] } ?? []
-        while let next = pending.popLast(), chain.count < 32 {
+        while let next = pending.popLast() {
+            // A chain too large to inspect fully might hide a transient error: not confirmed.
+            guard chain.count < maxInspectedErrors else { return false }
             chain.append(next)
             pending += [next.userInfo[NSUnderlyingErrorKey] as? NSError].compactMap { $0 }
             pending += next.userInfo[NSDetailedErrorsKey] as? [NSError] ?? []

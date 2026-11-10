@@ -230,6 +230,7 @@ private enum SupersetSchemaV2: VersionedSchema {
         let stack = try DataStack(
             location: .appGroup,
             allowsSave: true,
+            isAppGroupEntitled: { false },
             groupContainerURL: { nil },
             fallbackDirectory: directory,
             onFallback: { fallbacks += 1 }
@@ -252,10 +253,31 @@ private enum SupersetSchemaV2: VersionedSchema {
             _ = try DataStack(
                 location: .appGroup,
                 allowsSave: false,
+                isAppGroupEntitled: { false },
                 groupContainerURL: { nil },
                 fallbackDirectory: directory
             )
         }
+        #expect(!exists(directory))
+    }
+
+    /// An entitled process whose container can't be resolved must not fall back and split the data.
+    @Test(arguments: [true, false]) func entitledButUnresolvedGroupContainerThrows(allowsSave: Bool) throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        var fallbacks = 0
+
+        #expect(throws: DataStack.LoadError.appGroupContainerUnresolved) {
+            _ = try DataStack(
+                location: .appGroup,
+                allowsSave: allowsSave,
+                isAppGroupEntitled: { true },
+                groupContainerURL: { nil },
+                fallbackDirectory: directory,
+                onFallback: { fallbacks += 1 }
+            )
+        }
+        #expect(fallbacks == 0)
         #expect(!exists(directory))
     }
 
@@ -388,6 +410,23 @@ private enum SupersetSchemaV2: VersionedSchema {
         #expect(
             DataStack.isConfirmedIncompatibility(
                 cocoa(259, [NSUnderlyingErrorKey: cocoa(1, [NSSQLiteErrorDomain: 11])])))
+    }
+
+    @Test func errorChainBeyondInspectionLimitIsNeverConfirmed() {
+        /// A linear chain of `count` migration errors whose innermost error is `innermost`.
+        func chain(count: Int, innermost: NSError) -> NSError {
+            (1..<count).reduce(innermost) { inner, _ in
+                NSError(domain: NSCocoaErrorDomain, code: 134_110, userInfo: [NSUnderlyingErrorKey: inner])
+            }
+        }
+        let migration = NSError(domain: NSCocoaErrorDomain, code: 134_110)
+        let full = NSError(domain: NSCocoaErrorDomain, code: 134_110, userInfo: [NSSQLiteErrorDomain: 13])
+        let limit = DataStack.maxInspectedErrors
+
+        #expect(DataStack.isConfirmedIncompatibility(chain(count: limit, innermost: migration)))
+        #expect(!DataStack.isConfirmedIncompatibility(chain(count: limit, innermost: full)))
+        #expect(!DataStack.isConfirmedIncompatibility(chain(count: limit + 1, innermost: full)))
+        #expect(!DataStack.isConfirmedIncompatibility(chain(count: limit + 1, innermost: migration)))
     }
 
     /// A crash after the main store moved leaves the marker and the side files; the next open
