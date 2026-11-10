@@ -27,6 +27,8 @@
   "LabelLogLevelInfo": "Info",
   "LabelLogLevelNotice": "Notice",
   "LabelLogMinimumLevel": "Minimum level",
+  "LabelMiniPlayerAccessibility": "Mini player, {0}",
+  "LabelMiniPlayerHint": "Opens the full player.",
   "LabelThemeSystem": "System",
   "LabelToday": "Today",
   "LabelYesterday": "Yesterday",

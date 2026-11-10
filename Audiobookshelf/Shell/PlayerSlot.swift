@@ -87,6 +87,8 @@ private struct MiniPlayerPlaceholder: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(Text(verbatim: L10n.string("LabelMiniPlayerAccessibility", player.title)))
+        .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
     }
 }
 

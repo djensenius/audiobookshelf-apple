@@ -71,17 +71,29 @@ import Testing
         let identifier = try #require(Bundle.main.bundleIdentifier)
         let urlTypes = try #require(Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]])
 
-        // ADR 0004: the legacy scheme, once, and no second one.
-        #expect(urlTypes.count == 1)
-        let urlType = try #require(urlTypes.first)
+        // ADR 0004: the legacy scheme, so links made for the old app open this one. It has to be
+        // among the URL types, whatever else is registered.
+        let urlType = try #require(
+            urlTypes.first { ($0["CFBundleURLSchemes"] as? [String])?.contains("audiobookshelf") == true })
         #expect(urlType["CFBundleURLName"] as? String == identifier)
         #expect(urlType["CFBundleTypeRole"] as? String == "Editor")
-        let schemes = try #require(urlType["CFBundleURLSchemes"] as? [String])
-        #expect(schemes == ["audiobookshelf"])
 
         // What the app registers is what `DeepLink` accepts.
-        let url = try #require(URL(string: "\(schemes[0])://item/li_1"))
+        let url = try #require(URL(string: "audiobookshelf://item/li_1"))
         #expect(DeepLink(url: url)?.target == .item(id: "li_1", episodeID: nil))
+    }
+
+    @Test func hostAppInfoPlistCarriesTheVersion() throws {
+        // `PlaybackDeviceInfo` sends the host app's `CFBundleShortVersionString` to the server.
+        let info = try #require(Bundle.main.infoDictionary)
+        let marketing = try #require(info["CFBundleShortVersionString"] as? String)
+        let build = try #require(info["CFBundleVersion"] as? String)
+
+        let version = AppVersion()
+        #expect(version.marketing == marketing)
+        #expect(version.build == build)
+        // Not AppVersion's fallback, so the host app's Info.plist was read.
+        #expect(version != AppVersion(marketing: "0.0.0", build: "0"))
     }
 
     @Test(arguments: AppTab.allCases)
@@ -90,7 +102,10 @@ import Testing
         #expect(symbolExists(tab.systemImage), "\(tab) has no SF Symbol named \(tab.systemImage)")
     }
 
-    @Test(arguments: ["HeaderBrowse", "MessageStoreUnavailable", "MessageStoreUnavailableHelp"])
+    @Test(arguments: [
+        "HeaderBrowse", "LabelMiniPlayerAccessibility", "LabelMiniPlayerHint", "MessageStoreUnavailable",
+        "MessageStoreUnavailableHelp",
+    ])
     func shellStringsResolve(key: String) {
         #expect(L10n.string(key) != key)
     }
