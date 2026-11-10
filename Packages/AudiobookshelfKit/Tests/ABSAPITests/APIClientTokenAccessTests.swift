@@ -509,3 +509,132 @@ private final class TestClock: Sendable {
         #expect(error.isTransient == isTransient)
     }
 }
+
+/// Signs the user out right after committing a refresh, before the client re-reads the tokens.
+private final class SignOutAfterSwapProvider: TokenProvider {
+    let inner: InMemoryTokenProvider
+
+    init(_ tokens: AuthTokens) {
+        inner = InMemoryTokenProvider(tokens)
+    }
+
+    func tokens() async -> AuthTokens? {
+        await inner.tokens()
+    }
+
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
+        guard await inner.replaceTokens(expected: expected, with: new) else { return false }
+        inner.signOut()
+        return true
+    }
+
+    func expireSession(ifCurrent rejected: AuthTokens) async -> Bool {
+        await inner.expireSession(ifCurrent: rejected)
+    }
+}
+
+@Suite struct APIClientTokenRefreshFollowUpTests {
+    @Test func signOutAfterJoinedRefreshSucceedsThrowsNotAuthenticated() async throws {
+        let gate = StubGate()
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath { return .json(refreshJSON(freshToken), gate: gate) }
+            return .text("Unauthorized", status: 401)
+        }
+        let tokens = SignOutAfterSwapProvider(AuthTokens(accessToken: expiringToken, refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+        await client.setNow { now }
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
+
+        let response = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await gate.arrived()
+        let token = Task { try await client.accessToken(replacing: nil) }
+        await joins.reached()
+        gate.open()
+
+        await #expect(throws: APIError.notAuthenticated) { try await token.value }
+        _ = try? await response.value
+        #expect(server.requests(path: refreshPath).count == 1)
+        #expect(tokens.inner.expiredCount == 0)
+    }
+
+    @Test func cancelledCallerGetsCancellationErrorWhenSessionIsReplaced() async throws {
+        let gate = StubGate()
+        let (client, _, tokens) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .json(refreshJSON(freshToken), gate: gate))
+
+        let token = Task { try await client.accessToken(replacing: nil) }
+        await gate.arrived()
+        tokens.signIn(newSession)
+        token.cancel()
+        gate.open()
+
+        await #expect(throws: CancellationError.self) { try await token.value }
+    }
+
+    @Test func transientFailuresPauseEarlyRefreshesButNotReactiveOnes() async throws {
+        let (client, server, _) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .text("Bad gateway", status: 502))
+        let clock = TestClock()
+        await client.setNow { clock.read() }
+        let refreshes = { server.requests(path: refreshPath).count }
+
+        #expect(try await client.accessToken(replacing: nil) == expiringToken)
+        #expect(refreshes() == 1)
+        clock.advance(by: 10)
+        #expect(try await client.accessToken(replacing: nil) == expiringToken)
+        #expect(refreshes() == 1)
+        // A 401 still refreshes during the pause.
+        await #expect(throws: APIError.http(status: 502, message: "Bad gateway")) {
+            try await client.accessToken(replacing: expiringToken)
+        }
+        #expect(refreshes() == 2)
+
+        // The pause is a quarter of the 120 s leeway; the failure after it starts another.
+        clock.advance(by: 21)
+        #expect(try await client.accessToken(replacing: nil) == expiringToken)
+        #expect(refreshes() == 3)
+        clock.advance(by: 9)
+        #expect(try await client.accessToken(replacing: nil) == expiringToken)
+        #expect(refreshes() == 3)
+
+        // Once the token has expired there's no pause, and the failure is thrown.
+        clock.advance(by: 21)
+        await #expect(throws: APIError.http(status: 502, message: "Bad gateway")) {
+            try await client.accessToken(replacing: nil)
+        }
+        #expect(refreshes() == 4)
+    }
+
+    /// A stored token from a server whose clock is an hour behind this device looks expired, so
+    /// it's refreshed once; the token that refresh returns is timed from its arrival.
+    @Test func storedTokenFromSkewedServerIsRefreshedOnce() async throws {
+        let t = Int(now.timeIntervalSince1970)
+        let stored = makeJWT(claims: #"{"n":"stored","iat":\#(t - 3600),"exp":\#(t)}"#)
+        let refreshed = makeJWT(claims: #"{"n":"refreshed","iat":\#(t - 3600),"exp":\#(t)}"#)
+        let (client, server, _) = try await makeExpiryClient(
+            accessToken: stored, refresh: .json(refreshJSON(refreshed)))
+
+        #expect(try await client.accessToken(replacing: nil) == refreshed)
+        #expect(try await client.accessToken(replacing: nil) == refreshed)
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
+    @Test func refreshedTokenWithoutIssuedAtUsesItsExp() async throws {
+        let refreshed = makeJWT(expiringAt: now.addingTimeInterval(600))
+        let (client, server, _) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .json(refreshJSON(refreshed)))
+        let clock = TestClock()
+        await client.setNow { clock.read() }
+
+        #expect(try await client.accessToken(replacing: nil) == refreshed)
+        #expect(try await client.accessToken(replacing: nil) == refreshed)
+        #expect(server.requests(path: refreshPath).count == 1)
+        clock.advance(by: 600 - 121)
+        #expect(try await client.accessToken(replacing: nil) == refreshed)
+        #expect(server.requests(path: refreshPath).count == 1)
+        clock.advance(by: 2)
+        _ = try await client.accessToken(replacing: nil)
+        #expect(server.requests(path: refreshPath).count == 2)
+    }
+}

@@ -28,7 +28,8 @@ public enum APIError: Error, Sendable, Equatable {
     case decoding(String)
 
     /// A connection failure, timeout, 408, 429 or 5xx: the server may answer if asked again later.
-    /// TLS, ATS and malformed-URL failures aren't transient.
+    /// TLS, ATS and malformed-URL failures aren't transient. (``APIClient`` reports a timeout
+    /// as ``timedOut``, never as `network(.timedOut)`.)
     var isTransient: Bool {
         switch self {
         case .timedOut: true
@@ -40,6 +41,6 @@ public enum APIError: Error, Sendable, Equatable {
 
     private static let connectivityCodes: Set<URLError.Code> = [
         .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost,
-        .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed, .timedOut,
+        .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed,
     ]
 }
