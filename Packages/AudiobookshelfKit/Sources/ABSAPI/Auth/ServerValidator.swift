@@ -95,9 +95,10 @@ public struct ServerValidator: Sendable {
         return try await Self.loginResult(from: reply, client: client)
     }
 
-    /// Turns a sign-in response into a ``LoginResult``, applying the version gate and requiring
-    /// both tokens. If the response is refused, including when it fails to decode, the session
-    /// the server just created is logged out through `client`, best effort.
+    /// Turns a sign-in response (`POST /login` or `GET /auth/openid/callback`) into a
+    /// ``LoginResult``, applying the version gate and requiring both tokens. If the response is
+    /// refused, including when it fails to decode, the session the server just created is logged
+    /// out through `client`, best effort.
     static func loginResult(from reply: APIResponse<Data>, client: APIClient) async throws -> LoginResult {
         guard !(300..<400).contains(reply.httpResponse.statusCode) else {
             throw ServerValidationError.loginRedirected
@@ -524,7 +525,7 @@ public enum ServerValidationError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
-/// The token provider for the unauthenticated clients the validator creates.
+/// The token provider for the unauthenticated clients the validator and OpenID sign-in create.
 struct SignedOutTokenProvider: TokenProvider {
     func tokens() async -> AuthTokens? { nil }
     func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool { false }
