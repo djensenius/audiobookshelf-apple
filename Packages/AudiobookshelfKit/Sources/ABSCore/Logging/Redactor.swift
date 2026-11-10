@@ -27,53 +27,73 @@ public struct Redactor: Sendable, Equatable {
     }
 
     public func redact(_ text: String) -> String {
-        var result = text
-        // Longest first so a secret that contains another is removed whole.
-        let secrets = secrets.filter { $0.count >= Self.minimumSecretLength }.sorted { $0.count > $1.count }
-        for secret in secrets {
-            result = result.replacingOccurrences(of: secret, with: Self.placeholder)
-        }
+        // Find every sensitive range in the original text before replacing anything, so a
+        // custom secret can't break a built-in rule (for example a secret `pass` inside `"password"`).
+        let original = text as NSString
+        let whole = NSRange(location: 0, length: original.length)
+        var ranges: [NSRange] = []
         for rule in Self.rules {
-            result = rule.apply(to: result)
+            for match in rule.regex.matches(in: text, range: whole) {
+                ranges.append(match.range(withName: "value"))
+            }
         }
-        return result
+        for secret in secrets where secret.count >= Self.minimumSecretLength {
+            var search = whole
+            while true {
+                let found = original.range(of: secret, options: .literal, range: search)
+                guard found.location != NSNotFound else { break }
+                ranges.append(found)
+                search = NSRange(location: found.upperBound, length: whole.upperBound - found.upperBound)
+            }
+        }
+
+        let result = NSMutableString(string: original)
+        for range in Self.merged(ranges).reversed() {
+            result.replaceCharacters(in: range, with: Self.placeholder)
+        }
+        return result as String
     }
 
+    /// Sorted, non-empty ranges with overlapping and adjacent ones combined.
+    private static func merged(_ ranges: [NSRange]) -> [NSRange] {
+        var merged: [NSRange] = []
+        for range in ranges.filter({ $0.location != NSNotFound && $0.length > 0 }).sorted(by: {
+            $0.location < $1.location
+        }) {
+            if let last = merged.last, range.location <= last.upperBound {
+                merged[merged.count - 1].length = max(last.upperBound, range.upperBound) - last.location
+            } else {
+                merged.append(range)
+            }
+        }
+        return merged
+    }
+
+    /// A pattern whose `value` capture group is the sensitive part of each match.
     private struct Rule: Sendable {
         let regex: NSRegularExpression
-        let template: String
 
-        init(_ pattern: String, keeping prefix: String, options: NSRegularExpression.Options = [.caseInsensitive]) {
+        init(_ pattern: String, options: NSRegularExpression.Options = [.caseInsensitive]) {
             // The patterns are constants, so failing to compile one is a programming error.
             guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else {
                 preconditionFailure("Invalid redaction pattern: \(pattern)")
             }
             self.regex = regex
-            self.template = prefix + NSRegularExpression.escapedTemplate(for: Redactor.placeholder)
-        }
-
-        func apply(to text: String) -> String {
-            regex.stringByReplacingMatches(
-                in: text,
-                range: NSRange(text.startIndex..., in: text),
-                withTemplate: template
-            )
         }
     }
 
     private static let rules = [
         // Bearer credentials, whether a JWT or an opaque token.
-        Rule(#"(\bBearer\s+)[^\s,;"']+"#, keeping: "$1"),
+        Rule(#"\bBearer\s+(?<value>[^\s,;"']+)"#),
         // Token and OAuth (PKCE) query parameters, in URLs or bare `name=value` text.
         Rule(
-            #"((?:^|[?&;\s])(?:access_?token|refresh_?token|token|code_verifier|code)=)[^&#\s"']*"#,
-            keeping: "$1",
+            #"(?:^|[?&;\s])(?:access_?token|refresh_?token|token|code_verifier|code)=(?<value>[^&#\s"']*)"#,
             options: [.caseInsensitive, .anchorsMatchLines]
         ),
-        // JSON passwords.
-        Rule(#"("password"\s*:\s*")[^"]*"#, keeping: "$1"),
+        // JSON passwords, including escaped characters such as `\"`.
+        Rule(#""password"\s*:\s*"(?<value>(?:[^"\\]|\\.)*)"#),
         // Any JWT left over, for example inside a JSON body. JWTs always start with `eyJ`.
-        Rule(#"\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*"#, keeping: "", options: []),
+        Rule(#"\b(?<value>eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*)"#, options: []),
     ]
 }
 

@@ -82,4 +82,21 @@ import Testing
             #expect(!text.contains("hunter2-secret"))
         }
     }
+
+    @Test func customSecretsDoNotDisableBuiltInRules() {
+        #expect(Redactor(secrets: ["pass"]).redact(#"{"password":"hunter2"}"#) == #"{"<redacted>word":"<redacted>"}"#)
+        #expect(Redactor(secrets: ["token"]).redact("/a?token=abc") == "/a?<redacted>=<redacted>")
+    }
+
+    @Test func mergesOverlappingAndAdjacentRanges() {
+        #expect(Redactor(secrets: ["abcdef", "defghi"]).redact("xabcdefghiy") == "x<redacted>y")
+        #expect(Redactor(secrets: ["abcd", "efgh"]).redact("abcdefgh") == "<redacted>")
+        #expect(Redactor(secrets: ["s3cret"]).redact("?token=s3cret&s3cret") == "?token=<redacted>&<redacted>")
+    }
+
+    @Test func redactsJSONPasswordsWithEscapedQuotes() {
+        #expect(
+            Log.redact(#"{"password":"prefix\"suffixsecret","next":1}"#) == #"{"password":"<redacted>","next":1}"#
+        )
+    }
 }
