@@ -83,10 +83,15 @@ enum RedirectPolicy {
 final class RedirectChainDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     private let stripped = Mutex(false)
     private let staysOnOrigin: Bool
+    private let cookies: WrittenCookies?
 
-    /// - Parameter staysOnOrigin: Declines hops that would be stripped instead of following them.
-    init(staysOnOrigin: Bool = false) {
+    /// - Parameters:
+    ///   - staysOnOrigin: Declines hops that would be stripped instead of following them.
+    ///   - cookies: For a request whose cookies the client writes, stores each followed
+    ///     same-origin hop's `Set-Cookie` and rebuilds the next hop's `Cookie` header with it.
+    init(staysOnOrigin: Bool = false, cookies: WrittenCookies? = nil) {
         self.staysOnOrigin = staysOnOrigin
+        self.cookies = cookies
     }
 
     /// Whether any hop of this task was stripped of credentials.
@@ -114,8 +119,14 @@ final class RedirectChainDelegate: NSObject, URLSessionTaskDelegate, Sendable {
         if hop.isStripped {
             if staysOnOrigin { return nil }
             stripped.withLock { $0 = true }
+            return hop.request
         }
-        return hop.request
+        guard let cookies, let url = hop.request.url else { return hop.request }
+        cookies.store(from: response)
+        var next = hop.request
+        next.httpShouldHandleCookies = false
+        next.setValue(cookies.header(for: url), forHTTPHeaderField: "Cookie")
+        return next
     }
 }
 
