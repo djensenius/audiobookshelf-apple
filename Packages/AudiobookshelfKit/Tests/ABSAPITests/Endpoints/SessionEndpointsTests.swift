@@ -280,6 +280,46 @@ private func localSession(
         }
     }
 
+    @Test(arguments: [
+        (Double.nan, 0.0), (0, .nan), (.infinity, 0), (0, -.infinity), (-1, 0), (0, -0.5),
+    ])
+    func localPayloadRejectsAnInvalidPosition(startTime: Double, currentTime: Double) {
+        let session = PlaybackSession(
+            id: localSessionID, libraryItemId: "li-1", mediaType: .book, playMethod: .local,
+            startTime: startTime, currentTime: currentTime, startedAt: 1)
+        #expect(throws: LocalSessionPayloadError.invalidPosition) {
+            try LocalPlaybackSessionPayload(session: session, deviceInfo: deviceInfo)
+        }
+    }
+
+    @Test func localPayloadClampsDurationAndListeningTime() throws {
+        let session = PlaybackSession(
+            id: localSessionID, libraryItemId: "li-1", mediaType: .book, duration: .nan, playMethod: .local,
+            timeListening: -.infinity, startTime: 5, currentTime: 9, startedAt: 1)
+        let payload = try LocalPlaybackSessionPayload(session: session, deviceInfo: deviceInfo)
+        #expect(payload.duration == 0)
+        #expect(payload.timeListening == 0)
+        #expect(payload.currentTime == 9)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any])
+        #expect(json["duration"] as? Double == 0)
+        #expect(json["timeListening"] as? Double == 0)
+    }
+
+    @Test func nonFiniteSessionIsFilteredAndTheBatchStillEncodes() throws {
+        let bad = PlaybackSession(
+            id: otherLocalSessionID, libraryItemId: "li-2", mediaType: .book, playMethod: .local,
+            currentTime: .nan, startedAt: 1)
+        let valid = [localSession(), bad].compactMap {
+            try? LocalPlaybackSessionPayload(session: $0, deviceInfo: deviceInfo)
+        }
+        let batch = try LocalPlaybackSessionBatch(sessions: valid, deviceInfo: deviceInfo)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(batch)) as? [String: Any])
+        let sessions = try #require(json["sessions"] as? [[String: Any]])
+        #expect(sessions.map { $0["id"] as? String } == [localSessionID])
+    }
+
     @Test func oneInvalidSessionDoesNotBlockTheBatch() async throws {
         let server = StubServer { _ in .json(#"{"results":[]}"#) }
         let candidates = [
