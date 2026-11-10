@@ -1,3 +1,4 @@
+import ABSCore
 import Accessibility
 import Foundation
 import Testing
@@ -70,10 +71,66 @@ import Testing
         #expect(DailyListeningChartDescriptor.minutesText(75, locale: german) == expected)
         #expect(DailyListeningChartDescriptor.minutesText(75, locale: german) != Self.minutes(75))
     }
+
+    /// `Day.minutes` is any `Int` a caller passes. Each day is clamped to `0...maxMinutes`
+    /// before it's summed, averaged or used for the axis maximum, so none of it overflows.
+    @Test func hugeDaysStayInRange() throws {
+        let bound = TimeFormatting.maxMinutes
+        let minutes = [Int.max, Int.min, bound, bound + 1, 0, 5, -5]
+        let days = minutes.enumerated().map {
+            DailyListeningChartDescriptor.Day(label: "Day \($0.offset)", minutes: $0.element)
+        }
+        let descriptor = DailyListeningChartDescriptor(days: days, locale: Self.locale)
+        let chart = descriptor.makeChartDescriptor()
+
+        let clamped = [bound, 0, bound, bound, 0, 5, 0]
+        let total = 3 * bound + 5
+        let average = 7_142_857_142_858  // 50,000,000,000,006 / 7
+        #expect(clamped.reduce(0, +) == total)
+        #expect(descriptor.totals.total == total)
+        #expect(descriptor.totals.average == average)
+        // The total is itself past the bound, so `minutesText` clamps it again when it's spoken.
+        #expect(
+            chart.summary
+                == L10n.string(
+                    "MessageStatsChartSummary", Self.minutes(bound), Self.minutes(average), locale: Self.locale))
+        #expect(chart.yAxis?.range == 0...Double(bound))
+        #expect(chart.series.first?.dataPoints.map { $0.yValue?.__number } == clamped.map(Double.init))
+    }
+
+    @Test func minutesTextIsClamped() {
+        let bound = TimeFormatting.maxMinutes
+        let text = { (minutes: Int) in DailyListeningChartDescriptor.minutesText(minutes, locale: Self.locale) }
+        #expect(text(75) == Self.minutes(75))
+        #expect(text(bound) == Self.minutes(bound))
+        #expect(text(bound + 1) == Self.minutes(bound))
+        #expect(text(Int.max) == Self.minutes(bound))
+        #expect(text(-5) == Self.minutes(0))
+        #expect(text(Int.min) == Self.minutes(0))
+    }
+
+    /// VoiceOver can ask the axis to describe any value; none may trap the `Int` conversion.
+    @Test func axisValuesAreSanitised() throws {
+        let bound = TimeFormatting.maxMinutes
+        let chart = DailyListeningChartDescriptor(days: Self.days, locale: Self.locale).makeChartDescriptor()
+        let yAxis = try #require(chart.yAxis)
+        for value in [.nan, .infinity, -.infinity, -5, -1e30] as [Double] {
+            #expect(yAxis.valueDescriptionProvider(value) == Self.minutes(0), "\(value)")
+        }
+        for value in [1e30, .greatestFiniteMagnitude, Double(bound) + 1] as [Double] {
+            #expect(yAxis.valueDescriptionProvider(value) == Self.minutes(bound), "\(value)")
+        }
+        #expect(yAxis.valueDescriptionProvider(22.5) == Self.minutes(23))
+    }
 }
 
 @Suite struct ListeningTimeTextTests {
     private static let locale = Locale(identifier: "en_US")
+
+    private static func minutes(_ value: Int) -> String {
+        Duration.seconds(value * 60).formatted(
+            Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: .wide).locale(locale))
+    }
 
     @Test func zeroReadsAsZeroMinutes() {
         let expected = Duration.seconds(0).formatted(
@@ -91,9 +148,54 @@ import Testing
         #expect(ListeningTimeText.spoken(20, locale: Self.locale) == expected)
     }
 
-    @Test func longerTotalsReadInHoursAndMinutes() {
-        let expected = DurationStyle.elapsed(showSeconds: false).accessibilityString(3_725, locale: Self.locale)
-        #expect(ListeningTimeText.spoken(3_725, locale: Self.locale) == expected)
+    /// Totals that round to no minutes keep the fallbacks: seconds, or zero minutes for none.
+    @Test func totalsThatRoundToNoMinutesKeepTheFallbacks() {
+        #expect(ListeningTimeText.spoken(29, locale: Self.locale) == "29 seconds")
+        #expect(ListeningTimeText.spoken(29.4, locale: Self.locale) == "29 seconds")
+        for seconds in [0, 0.4, -5, -1e30, .infinity, -.infinity, .nan] as [TimeInterval] {
+            #expect(ListeningTimeText.spoken(seconds, locale: Self.locale) == "0 minutes", "\(seconds)")
+        }
+    }
+
+    /// The tile shows `Math.round(seconds / 60)`, so from half a minute that is 1.
+    @Test func halfAMinuteAndMoreReadsAsTheTilesMinutes() {
+        for seconds in [30, 45, 59.9, 60, 89] as [TimeInterval] {
+            #expect(ListeningTimeText.spoken(seconds, locale: Self.locale) == "1 minute", "\(seconds)")
+        }
+        #expect(ListeningTimeText.spoken(90, locale: Self.locale) == "2 minutes")
+    }
+
+    /// `DurationStyle.elapsed(showSeconds: false)` doesn't round up when the minute-of-hour is
+    /// zero, so it reads 3,630 seconds as "1 hour" while the tile shows 61.
+    @Test func readsTheMinutesTheTileShows() {
+        #expect(TimeFormatting.wholeMinutes(seconds: 3_630) == 61)
+        #expect(ListeningTimeText.spoken(3_630, locale: Self.locale) == "61 minutes")
+        #expect(ListeningTimeText.spoken(3_630, locale: Self.locale) == Self.minutes(61))
+    }
+
+    @Test func anExactHourReadsAsSixtyMinutes() {
+        #expect(TimeFormatting.wholeMinutes(seconds: 3_600) == 60)
+        #expect(ListeningTimeText.spoken(3_600, locale: Self.locale) == "60 minutes")
+        #expect(ListeningTimeText.spoken(3_629, locale: Self.locale) == "60 minutes")
+    }
+
+    /// Whatever the total, the spoken text carries the number the tile formats.
+    @Test(arguments: [30, 3_599, 3_600, 3_630, 3_660 + 29, 3_725, 7_500, 86_400, 75_000, 360_090] as [TimeInterval])
+    func spokenValueAgreesWithTheTile(seconds: TimeInterval) {
+        let minutes = TimeFormatting.wholeMinutes(seconds: seconds)
+        let tile = minutes.formatted(.number.locale(Self.locale))
+        let spoken = ListeningTimeText.spoken(seconds, locale: Self.locale)
+        #expect(spoken == Self.minutes(minutes))
+        #expect(spoken.hasPrefix(tile), "\(spoken) vs \(tile)")
+    }
+
+    /// A total `Int` can't hold reads as the clamped minutes the tile shows.
+    @Test(
+        arguments: [
+            1e30, .greatestFiniteMagnitude, TimeFormatting.maxSeconds, TimeFormatting.maxSeconds.nextUp,
+        ] as [TimeInterval])
+    func hugeTotalsReadTheClampedMinutes(seconds: TimeInterval) {
+        #expect(ListeningTimeText.spoken(seconds, locale: Self.locale) == Self.minutes(TimeFormatting.maxMinutes))
     }
 
     @Test func usesTheLocale() {

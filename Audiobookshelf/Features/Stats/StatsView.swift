@@ -128,7 +128,7 @@ private struct StatsTiles: View {
     @Environment(\.locale) private var locale
 
     var body: some View {
-        let minutes = model.totalTime.isFinite ? Int((max(model.totalTime, 0) / 60).rounded()) : 0
+        let minutes = TimeFormatting.wholeMinutes(seconds: model.totalTime)
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .top, spacing: ABSSpacing.large) { tiles(minutes: minutes) }
             VStack(spacing: ABSSpacing.medium) { tiles(minutes: minutes) }

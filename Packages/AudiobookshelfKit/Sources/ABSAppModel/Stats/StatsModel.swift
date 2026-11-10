@@ -34,9 +34,9 @@ public struct StatsDay: Sendable, Hashable, Identifiable {
 
     public var id: String { key }
 
-    /// Whole minutes, rounded like the legacy chart.
+    /// Whole minutes, rounded like the legacy chart. Times `Int` can't hold are clamped first.
     public var minutes: Int {
-        seconds.isFinite && seconds > 0 ? Int((seconds / 60).rounded()) : 0
+        TimeFormatting.wholeMinutes(seconds: seconds)
     }
 
     /// The key's day formatted with `style`. The time zone is replaced with UTC, the zone the

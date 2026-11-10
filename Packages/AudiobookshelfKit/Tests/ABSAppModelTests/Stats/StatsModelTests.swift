@@ -126,6 +126,55 @@ private let enUS = Locale(identifier: "en_US")
         #expect(!model.isEmpty)
     }
 
+    private func day(seconds: Double) throws -> StatsDay {
+        StatsDay(key: "2024-03-02", date: try date("2024-03-02T00:00:00Z"), seconds: seconds)
+    }
+
+    /// Whole minutes round half up, like the legacy chart.
+    @Test(arguments: [(0, 0), (29.9, 0), (30, 1), (3_600, 60), (3_630, 61), (5_400.5, 90)] as [(Double, Int)])
+    func dayMinutesRoundToTheNearestMinute(seconds: Double, expected: Int) throws {
+        #expect(try day(seconds: seconds).minutes == expected)
+    }
+
+    /// Negative and non-finite times are no listening.
+    @Test(arguments: [-5, -1e30, -.greatestFiniteMagnitude, -.infinity, .infinity, .nan] as [Double])
+    func dayMinutesOfNegativeAndNonFiniteTimesAreZero(seconds: Double) throws {
+        #expect(try day(seconds: seconds).minutes == 0)
+    }
+
+    /// Finite values `Int` can't hold are clamped to the duration formatter's bound before they
+    /// are converted: 1e30 used to trap.
+    @Test(
+        arguments: [
+            1e30, .greatestFiniteMagnitude, TimeFormatting.maxSeconds, TimeFormatting.maxSeconds.nextUp,
+            TimeFormatting.maxSeconds.nextDown,
+        ] as [Double])
+    func dayMinutesPastTheBoundAreClamped(seconds: Double) throws {
+        #expect(try day(seconds: seconds).minutes == TimeFormatting.maxMinutes)
+    }
+
+    @Test func dayMinutesJustUnderTheBoundAreNotClamped() throws {
+        #expect(try day(seconds: TimeFormatting.maxSeconds - 60).minutes == TimeFormatting.maxMinutes - 1)
+    }
+
+    /// A server can send finite numbers far past `Int`'s range, and JSON `1e30` decodes as one.
+    /// Loading them keeps the raw seconds and gives every day whole minutes within the bound.
+    @Test func hugeServerTimesLoadWithClampedMinutes() async throws {
+        let stats = try decodeStats(
+            #"{"totalTime":1e30,"days":{"2024-03-02":1e30,"2024-03-01":1.7976931348623157e308,"#
+                + #""2024-02-29":3630,"2024-02-28":-1e30}}"#)
+        #expect(stats.stats.totalTime == 1e30)
+        let now = try date("2024-03-02T12:00:00Z")
+        let model = StatsModel(
+            service: FakeStatsService(statsHandler: { stats }), calendar: try calendar("UTC"), now: { now })
+        await model.load()
+        #expect(model.totalTime == 1e30)
+        #expect(model.daysListened == 3)
+        #expect(!model.isEmpty)
+        let bound = TimeFormatting.maxMinutes
+        #expect(model.lastSevenDays.map(\.minutes) == [0, 0, 0, 0, 61, bound, bound])
+    }
+
     /// At 03:00 UTC on March 3 it is still March 2 in Toronto but already noon on March 3 in
     /// Tokyo. Each series ends on the device's today and reads the server's keys as is; days
     /// without an entry, including leap day, are 0.

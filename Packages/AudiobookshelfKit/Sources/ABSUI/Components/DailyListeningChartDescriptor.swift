@@ -1,3 +1,4 @@
+import ABSCore
 import Accessibility
 import Foundation
 import SwiftUI
@@ -9,6 +10,7 @@ public struct DailyListeningChartDescriptor: AXChartDescriptorRepresentable {
     public struct Day: Hashable, Sendable {
         /// The day as VoiceOver reads it, for example "Saturday, March 7". Labels must be unique.
         public var label: String
+        /// Whole minutes. Counts outside `0...TimeFormatting.maxMinutes` are clamped to it.
         public var minutes: Int
 
         public init(label: String, minutes: Int) {
@@ -25,16 +27,25 @@ public struct DailyListeningChartDescriptor: AXChartDescriptorRepresentable {
         self.locale = locale
     }
 
-    /// `minutes` spelled out, for example "75 minutes".
+    /// `minutes` spelled out, for example "75 minutes". Counts outside
+    /// `0...TimeFormatting.maxMinutes` are clamped to it.
     public static func minutesText(_ minutes: Int, locale: Locale) -> String {
-        Duration.seconds(minutes * 60).formatted(
+        let minutes = TimeFormatting.wholeMinutes(minutes: Double(minutes))
+        return Duration.seconds(minutes * 60).formatted(
             Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: .wide).locale(locale))
+    }
+
+    /// Each day's minutes within `0...TimeFormatting.maxMinutes`, so the sum, the average and
+    /// the axis maximum below stay in range whatever `Int` a caller passes.
+    private var clampedMinutes: [Int] {
+        days.map { TimeFormatting.wholeMinutes(minutes: Double($0.minutes)) }
     }
 
     /// The total minutes and the daily average, rounded like the legacy chart.
     var totals: (total: Int, average: Int) {
-        let total = days.reduce(0) { $0 + $1.minutes }
-        let average = days.isEmpty ? 0 : Int((Double(total) / Double(days.count)).rounded())
+        let minutes = clampedMinutes
+        let total = minutes.reduce(0, +)
+        let average = minutes.isEmpty ? 0 : TimeFormatting.wholeMinutes(minutes: Double(total) / Double(minutes.count))
         return (total, average)
     }
 
@@ -47,16 +58,17 @@ public struct DailyListeningChartDescriptor: AXChartDescriptorRepresentable {
             Self.minutesText(average, locale: locale), locale: locale)
         let xAxis = AXCategoricalDataAxisDescriptor(
             title: L10n.string("LabelStatsDays", locale: locale), categoryOrder: days.map(\.label))
-        let maximum = max(days.map(\.minutes).max() ?? 0, 1)
+        let minutes = clampedMinutes
+        let maximum = max(minutes.max() ?? 0, 1)
         let yAxis = AXNumericDataAxisDescriptor(
             title: L10n.string("LabelStatsMinutesListening", locale: locale), range: 0...Double(maximum),
             gridlinePositions: []
         ) { value in
-            Self.minutesText(Int(value.rounded()), locale: locale)
+            Self.minutesText(TimeFormatting.wholeMinutes(minutes: value), locale: locale)
         }
         let series = AXDataSeriesDescriptor(
             name: title, isContinuous: false,
-            dataPoints: days.map { AXDataPoint(x: $0.label, y: Double($0.minutes)) })
+            dataPoints: zip(days, minutes).map { AXDataPoint(x: $0.label, y: Double($1)) })
         return AXChartDescriptor(
             title: title, summary: summary, xAxis: xAxis, yAxis: yAxis, additionalAxes: [], series: [series])
     }
@@ -64,12 +76,15 @@ public struct DailyListeningChartDescriptor: AXChartDescriptorRepresentable {
 
 /// Spoken listening totals.
 public enum ListeningTimeText {
-    /// `seconds` in words for VoiceOver, never empty: "2 hours, 5 minutes", "20 seconds" for a
-    /// brief total, and "0 minutes" for none (where ``DurationStyle/elapsed(showSeconds:useDays:)``
-    /// returns an empty string).
+    /// The Minutes Listening tile's value in words for VoiceOver, never empty: "61 minutes" for
+    /// 3,630 seconds. It formats the tile's own whole-minute count
+    /// (``TimeFormatting/wholeMinutes(seconds:)``), so the spoken and the shown values agree;
+    /// ``DurationStyle/elapsed(showSeconds:useDays:)`` rounds differently and would read 3,630
+    /// seconds as "1 hour". A total that rounds to no minutes reads in seconds, as "20 seconds",
+    /// and as "0 minutes" for none (where `elapsed` returns an empty string).
     public static func spoken(_ seconds: TimeInterval, locale: Locale = .autoupdatingCurrent) -> String {
-        let minutes = DurationStyle.elapsed(showSeconds: false).accessibilityString(seconds, locale: locale)
-        if !minutes.isEmpty { return minutes }
+        let minutes = TimeFormatting.wholeMinutes(seconds: seconds)
+        if minutes > 0 { return DailyListeningChartDescriptor.minutesText(minutes, locale: locale) }
         let brief = DurationStyle.elapsed().accessibilityString(seconds, locale: locale)
         return brief.isEmpty ? DailyListeningChartDescriptor.minutesText(0, locale: locale) : brief
     }
