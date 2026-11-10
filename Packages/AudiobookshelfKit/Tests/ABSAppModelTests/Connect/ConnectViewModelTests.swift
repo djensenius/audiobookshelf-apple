@@ -563,6 +563,39 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.phase == .address && model.server == nil && model.failure == nil)
     }
 
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func queuedCancelledSignInDoesNotReachBackendOrDisturbAnotherFlow(openID: Bool) async {
+        backend.status.authMethods = [.local, .openID]
+        let model = await loginModel()
+        model.username = "david"
+        let newerModel = await loginModel()
+        newerModel.username = "root"
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        backend.signInGate = gate
+        let newerTask = Task { await newerModel.signIn() }
+        while backend.signInStarts == 0 { await Task.yield() }
+
+        let callerTask = Task {
+            if openID {
+                await model.signInWithOpenID(using: FakeAuthenticator())
+            } else {
+                await model.signIn()
+            }
+        }
+        // No actor suspension before cancelling: run's handler will cancel its queued task
+        // synchronously, before that task can invoke the backend and supersede account work.
+        callerTask.cancel()
+        await callerTask.value
+        #expect(backend.signInStarts == 1 && backend.openIDSignIns == 0)
+        #expect(model.phase == .login && model.failure == nil)
+        #expect(newerModel.phase == .signingIn(.password))
+
+        open.yield()
+        await newerTask.value
+        #expect(newerModel.phase == .done && newerModel.failure == nil)
+        #expect(backend.passwordSignIns == ["root:"])
+    }
+
     @Test(.timeLimit(.minutes(1)), arguments: [false, true], [false, true])
     func cancellingASignInReturnsToLogin(openID: Bool, cancelCaller: Bool) async {
         backend.status.authMethods = [.local, .openID]
