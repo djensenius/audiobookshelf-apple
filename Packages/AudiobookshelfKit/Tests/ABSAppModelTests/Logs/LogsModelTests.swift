@@ -20,6 +20,47 @@ private struct FailingSource: LogEntrySource {
     }
 }
 
+/// Each call announces itself on ``started``, waits until the test releases it, then returns
+/// the scripted outcome for that call (in call order).
+private actor ScriptedSource: LogEntrySource {
+    enum Outcome: Sendable {
+        case entries([LogEntry])
+        case failure
+    }
+
+    let started: AsyncStream<Int>
+    private let startedContinuation: AsyncStream<Int>.Continuation
+    private let outcomes: [Outcome]
+    private var callCount = 0
+    private var released: Set<Int> = []
+    private var waiting: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    init(_ outcomes: [Outcome]) {
+        let (stream, continuation) = AsyncStream.makeStream(of: Int.self)
+        started = stream
+        startedContinuation = continuation
+        self.outcomes = outcomes
+    }
+
+    func entries(subsystem: String, since: Date?) async throws -> [LogEntry] {
+        callCount += 1
+        let call = callCount
+        startedContinuation.yield(call)
+        if !released.contains(call) {
+            await withCheckedContinuation { waiting[call] = $0 }
+        }
+        switch outcomes[call - 1] {
+        case .entries(let entries): return entries
+        case .failure: throw FailingSource.Failure()
+        }
+    }
+
+    func release(_ call: Int) {
+        released.insert(call)
+        waiting.removeValue(forKey: call)?.resume()
+    }
+}
+
 private let start = Date(timeIntervalSince1970: 1_800_000_000)
 private let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiIxIn0.c2lnbmF0dXJl"
 
@@ -67,6 +108,34 @@ private func loadedModel(_ entries: [LogEntry], serverAddresses: [String] = []) 
         #expect(model.loadFailed)
         #expect(model.rows.isEmpty)
         #expect(!model.isLoading)
+    }
+
+    /// The first load and a pull to refresh overlap, and the older one finishes last.
+    @Test(arguments: [false, true])
+    func olderOverlappingLoadDoesNotOverwriteNewerOne(olderFails: Bool) async {
+        let source = ScriptedSource([
+            olderFails ? .failure : .entries([entry(0, .info, "api", "old")]),
+            .entries([entry(1, .info, "api", "new")]),
+        ])
+        let model = LogsModel(exporter: LogExporter(source: source), timeZone: .gmt)
+        var started = source.started.makeAsyncIterator()
+
+        let older = Task { await model.load() }
+        #expect(await started.next() == 1)
+        #expect(model.isLoading)
+        let newer = Task { await model.load() }
+        #expect(await started.next() == 2)
+
+        await source.release(2)
+        await newer.value
+        #expect(model.isLoading, "The older load is still running")
+        #expect(model.rows.map(\.entry.message) == ["new"])
+
+        await source.release(1)
+        await older.value
+        #expect(!model.isLoading)
+        #expect(model.rows.map(\.entry.message) == ["new"])
+        #expect(!model.loadFailed)
     }
 
     // MARK: Filters

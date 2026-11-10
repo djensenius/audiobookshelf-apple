@@ -35,6 +35,10 @@ public final class LogsModel {
     @ObservationIgnored private let exporter: LogExporter
     @ObservationIgnored private let serverAddresses: [String]
     @ObservationIgnored private let timeZone: TimeZone
+    /// Incremented by each ``load()``; only the latest load's result is applied.
+    @ObservationIgnored private var loadGeneration = 0
+    /// Loads still running, so ``isLoading`` stays on until the last one finishes.
+    @ObservationIgnored private var activeLoads = 0
 
     /// - Parameters:
     ///   - serverAddresses: Hosts (or full addresses) of the user's servers. Masking hides them
@@ -47,13 +51,25 @@ public final class LogsModel {
     }
 
     /// Reads this launch's entries. Reading the system log can take several seconds.
+    ///
+    /// Loads can overlap (the first load and a pull to refresh): the most recently started one
+    /// wins, so an older load finishing later never replaces newer entries or status.
     public func load() async {
+        loadGeneration += 1
+        let generation = loadGeneration
+        activeLoads += 1
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            activeLoads -= 1
+            isLoading = activeLoads > 0
+        }
         do {
-            entries = try await exporter.entries()
+            let loaded = try await exporter.entries()
+            guard generation == loadGeneration else { return }
+            entries = loaded
             loadFailed = false
         } catch {
+            guard generation == loadGeneration else { return }
             loadFailed = true
             Log.ui.error("Couldn't read the logs: \(String(describing: error), privacy: .public)")
         }
