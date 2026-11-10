@@ -38,28 +38,44 @@ public actor APIClient {
     private var refreshJoinObserver: (@Sendable () -> Void)?
     /// The clock for access token expiry; tests replace it with ``setNow(_:)``.
     private var now: @Sendable () -> Date = { Date() }
-    /// When each access token returned by a refresh arrived, keyed by that token. Order-independent
-    /// and never rolled back: a token with `iat` keeps its earliest arrival (its claims, so its
-    /// lifetime, never change), one without keeps its latest (see ``earlyRefreshExpiry(of:)``).
-    /// A receipt for a token that is never stored is harmless. Entries for tokens that are no
-    /// longer stored are pruned by ``accessToken(replacing:)``.
-    private var refreshReceipts: [String: Date] = [:]
-    /// Access tokens whose receipt is recorded but whose swap into the provider hasn't returned
-    /// (with how many such swaps), kept when receipts are pruned.
-    private var receiptsAwaitingSwap: [String: Int] = [:]
-    /// When each pair's latest early refresh failed transiently, so a server outage doesn't make
-    /// every ``accessToken(replacing:)`` call wait for another failing refresh. Keyed by pair, so a
-    /// late failure for an old pair can't replace the current pair's; pruned with the receipts.
-    private var earlyRefreshFailures: [AuthTokens: Date] = [:]
-    /// The pairs this client ended the session for because the server rejected their refresh
-    /// token, telling that apart from a local sign-out, with the refresh generation at the time.
-    /// Kept as long as a request that read at or before that generation may consult them.
-    private var serverExpiries: [(tokens: AuthTokens, generation: Int)] = []
+    /// What token access knows about each pair a refresh produced or rejected (see
+    /// ``PairState``). Written only for those pairs, and pruned only by ``pruneCompletedRefreshes()``.
+    private var pairStates: [AuthTokens: PairState] = [:]
+    private var nextSwapID = 0
     /// Server expirations whose provider call hasn't returned. The provider may clear the tokens
     /// before it returns, so a caller that finds them gone waits for these before deciding
     /// whether the server or a local sign-out ended the session.
     private var pendingExpiries: [Int: Task<Bool, Never>] = [:]
     private var nextExpiryID = 0
+
+    /// What ``accessToken(replacing:)`` knows about one pair.
+    ///
+    /// `pendingReceipts` are provisional: they belong to swaps into the provider that haven't
+    /// returned, and are removed when the swap returns. Everything else is adopted: written only
+    /// once a swap succeeded (or a refresh failed, or the server expired the pair), never rolled
+    /// back, and merged so the order refreshes finish in doesn't matter.
+    private struct PairState {
+        /// When the refresh responses whose swap stored this pair arrived: the earliest for a
+        /// token with `iat` (its claims, so its lifetime, never change), the latest for one without
+        /// (see ``earlyRefreshExpiry(of:)``).
+        var receivedAt: Date?
+        /// Arrivals by swap ID, used only while no receipt is adopted: the provider may expose the
+        /// pair before its swap returns.
+        var pendingReceipts: [Int: Date] = [:]
+        /// When a successful refresh last returned this pair's access token unchanged.
+        var unchangedAt: Date?
+        /// When an early refresh of this pair last failed transiently; dropped once too old to
+        /// pause anything.
+        var earlyFailureAt: Date?
+        /// The refresh generation when the server rejected this pair's refresh token; dropped
+        /// once no in-flight request read at or before it.
+        var expiredAt: Int?
+
+        var isEmpty: Bool {
+            receivedAt == nil && pendingReceipts.isEmpty && unchangedAt == nil && earlyFailureAt == nil
+                && expiredAt == nil
+        }
+    }
 
     private struct CompletedRefresh {
         let from: AuthTokens
@@ -249,17 +265,16 @@ public actor APIClient {
             try Task.checkCancellation()
             return outcome.tokens.accessToken
         }
-        // Receipts older than this read belong to pairs that are no longer stored.
-        if refreshGeneration == readGeneration {
-            refreshReceipts = refreshReceipts.filter {
-                $0.key == tokens.accessToken || receiptsAwaitingSwap[$0.key] != nil
-            }
-            earlyRefreshFailures = earlyRefreshFailures.filter { $0.key == tokens }
-        }
-        guard let expiry = earlyRefreshExpiry(of: tokens.accessToken),
+        guard let expiry = earlyRefreshExpiry(of: tokens),
             expiry.expiresAt.timeIntervalSince(now()) <= expiry.leeway
         else { return tokens.accessToken }
-        if let failedAt = earlyRefreshFailures[tokens], now() < expiry.validUntil,
+        // A refresh that returned the same token can't help again before it expires.
+        if let unchangedAt = pairStates[tokens]?.unchangedAt,
+            now() < max(expiry.expiresAt, unchangedAt.addingTimeInterval(Self.earlyRefreshRetryInterval))
+        {
+            return tokens.accessToken
+        }
+        if let failedAt = pairStates[tokens]?.earlyFailureAt, now() < expiry.validUntil,
             now().timeIntervalSince(failedAt) < min(Self.earlyRefreshRetryInterval, expiry.leeway / 4)
         {
             return tokens.accessToken
@@ -270,25 +285,28 @@ public actor APIClient {
             try Task.checkCancellation()
             return outcome.tokens.accessToken
         } catch let error as APIError where error.isTransient {
-            earlyRefreshFailures[tokens] = now()
+            pairStates[tokens, default: PairState()].earlyFailureAt = now()
             // The session may have ended or changed while the refresh was failing.
-            guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
+            guard let current = await tokenProvider.tokens() else {
+                throw await endedSessionError(of: tokens, readAt: readGeneration)
+            }
             try Task.checkCancellation()
             guard current == tokens else { return current.accessToken }
             guard now() < expiry.validUntil else { throw error }
             return current.accessToken
         } catch APIError.sessionExpired {
-            // An expiry may have cleared the tokens without having recorded itself yet.
-            while let pending = pendingExpiries.values.first { _ = await pending.value }
-            guard !serverExpiredSession(of: tokens, readAt: readGeneration) else { throw APIError.sessionExpired }
+            let error = await endedSessionError(of: tokens, readAt: readGeneration)
+            guard error == .notAuthenticated else { throw error }
             // The server didn't reject the refresh token of this pair or of any pair refreshed
             // from it, so the session was ended or replaced locally while the refresh ran.
-            guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
+            guard let current = await tokenProvider.tokens() else { throw error }
             try Task.checkCancellation()
             return current.accessToken
         } catch is CancellationError where !Task.isCancelled {
             // A sign-out or new sign-in replaced the session during the refresh.
-            guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
+            guard let current = await tokenProvider.tokens() else {
+                throw await endedSessionError(of: tokens, readAt: readGeneration)
+            }
             guard current != tokens else { throw CancellationError() }
             try Task.checkCancellation()
             return current.accessToken
@@ -299,9 +317,20 @@ public actor APIClient {
     /// `tokens` or of a pair refreshed from it after generation `generation` (for example by a
     /// request that retried the refreshed pair and got another 401).
     private func serverExpiredSession(of tokens: AuthTokens, readAt generation: Int) -> Bool {
-        serverExpiries.contains {
-            $0.tokens == tokens || outcome($0.tokens, after: tokens, since: generation, sentAt: generation).didRefresh
+        pairStates.contains { pair, state in
+            state.expiredAt != nil
+                && (pair == tokens || outcome(pair, after: tokens, since: generation, sentAt: generation).didRefresh)
         }
+    }
+
+    /// Why the session `tokens` started is gone for a `nil`-path caller that read it at
+    /// `generation`: ``APIError/sessionExpired`` if the server ended it (see
+    /// ``serverExpiredSession(of:readAt:)``), otherwise ``APIError/notAuthenticated`` (a local
+    /// sign-out). Waits first for expirations in progress, which may have cleared the tokens
+    /// without having recorded themselves yet.
+    private func endedSessionError(of tokens: AuthTokens, readAt generation: Int) async -> APIError {
+        while let pending = pendingExpiries.values.first { _ = await pending.value }
+        return serverExpiredSession(of: tokens, readAt: generation) ? .sessionExpired : .notAuthenticated
     }
 
     /// The most an access token is refreshed ahead of its expiry by ``accessToken(replacing:)``.
@@ -330,10 +359,12 @@ public actor APIClient {
     /// refresh after launch, and after a transient failure such a token counts as expired once
     /// its `exp` passes by this device's clock.
     private func earlyRefreshExpiry(
-        of accessToken: String
+        of tokens: AuthTokens
     ) -> (expiresAt: Date, validUntil: Date, leeway: TimeInterval)? {
-        guard let claims = AccessTokenExpiry(token: accessToken) else { return nil }
-        let receivedAt = refreshReceipts[accessToken]
+        guard let claims = AccessTokenExpiry(token: tokens.accessToken) else { return nil }
+        let state = pairStates[tokens]
+        let pending = state?.pendingReceipts.values
+        let receivedAt = state?.receivedAt ?? (claims.issuedAt == nil ? pending?.max() : pending?.min())
         let rawExpiry = Date(timeIntervalSince1970: claims.expiresAt)
         guard let issuedAt = claims.issuedAt else {
             if let receivedAt, rawExpiry.timeIntervalSince(receivedAt) <= Self.accessTokenExpiryLeeway {
@@ -449,17 +480,49 @@ public actor APIClient {
 
     /// Drops refreshes no in-flight request can consult: those completed at or before the oldest
     /// generation a request read its tokens at (or all of them when no request is in flight).
-    /// Server expiries go with them: a request only consults expiries of its own pair or of pairs
-    /// refreshed from it, all recorded at or after the generation it read at.
+    /// The one place ``pairStates`` is pruned. Server expiries go with the refreshes: a request
+    /// only consults expiries of its own pair or of pairs refreshed from it, all recorded at or
+    /// after the generation it read at. Early refresh failures go once too old to pause a retry.
+    /// A state with nothing left is dropped; the stored pair keeps its receipt until a refresh
+    /// replaces it (see ``adoptRefresh(from:to:receivedAt:)``).
     private func pruneCompletedRefreshes() {
         let oldest = requestGenerations.keys.min() ?? refreshGeneration
         completedRefreshes.removeAll { $0.generation <= oldest }
-        if requestGenerations.isEmpty {
-            serverExpiries.removeAll()
-        } else {
-            serverExpiries.removeAll { $0.generation < oldest }
+        let now = now()
+        for (pair, var state) in pairStates {
+            if let expiredAt = state.expiredAt, requestGenerations.isEmpty || expiredAt < oldest {
+                state.expiredAt = nil
+            }
+            if let failedAt = state.earlyFailureAt,
+                now.timeIntervalSince(failedAt) >= Self.earlyRefreshRetryInterval
+            {
+                state.earlyFailureAt = nil
+            }
+            pairStates[pair] = state.isEmpty ? nil : state
         }
     }
+
+    /// Adopts a refresh from `old` to `new` whose swap succeeded, with its response's arrival.
+    /// The same access token keeps its receipt even if the refresh token rotated, and is marked
+    /// unchanged; a replaced pair's adopted state is dropped.
+    private func adoptRefresh(from old: AuthTokens, to new: AuthTokens, receivedAt: Date) {
+        let unchanged = old.accessToken == new.accessToken
+        let hasIssuedAt = AccessTokenExpiry(token: new.accessToken)?.issuedAt != nil
+        let receipts = [pairStates[new]?.receivedAt, unchanged ? pairStates[old]?.receivedAt : nil, receivedAt]
+            .compactMap { $0 }
+        var state = pairStates[new] ?? PairState()
+        state.receivedAt = hasIssuedAt ? receipts.min() : receipts.max()
+        if unchanged { state.unchangedAt = receivedAt }
+        if old != new {
+            pairStates[old]?.receivedAt = nil
+            pairStates[old]?.unchangedAt = nil
+            pairStates[old]?.earlyFailureAt = nil
+        }
+        pairStates[new] = state
+    }
+
+    /// The number of pair states kept, for tests.
+    var pairStateCount: Int { pairStates.count }
 
     private func completedRefresh(of rejected: AuthTokens, since sent: Int) -> Bool {
         completedRefreshes.contains { $0.from == rejected && $0.generation > sent }
@@ -492,22 +555,18 @@ public actor APIClient {
                 accessToken: body.user.accessToken,
                 refreshToken: body.user.refreshToken ?? tokens.refreshToken
             )
-            // Recorded before the swap, which may make the new pair visible before it returns,
-            // so no lookup sees the new token without its receipt.
-            // Never rolled back, so overlapping refreshes returning the same token can't undo
-            // each other's receipts (see `refreshReceipts`).
-            let hasIssuedAt = AccessTokenExpiry(token: refreshed.accessToken)?.issuedAt != nil
-            refreshReceipts[refreshed.accessToken] =
-                refreshReceipts[refreshed.accessToken].map {
-                    hasIssuedAt ? min($0, receivedAt) : max($0, receivedAt)
-                } ?? receivedAt
-            receiptsAwaitingSwap[refreshed.accessToken, default: 0] += 1
+            // Recorded provisionally before the swap, which may make the new pair visible before
+            // it returns, so no lookup sees the new pair without a receipt; adopted only if the
+            // swap succeeds.
+            nextSwapID += 1
+            let swapID = nextSwapID
+            pairStates[refreshed, default: PairState()].pendingReceipts[swapID] = receivedAt
             let swapped = await tokenProvider.replaceTokens(expected: tokens, with: refreshed)
-            receiptsAwaitingSwap[refreshed.accessToken, default: 1] -= 1
-            if receiptsAwaitingSwap[refreshed.accessToken] == 0 { receiptsAwaitingSwap[refreshed.accessToken] = nil }
+            pairStates[refreshed]?.pendingReceipts[swapID] = nil
             // A sign-out or new sign-in during the refresh wins; this request belonged to the
             // session that ended, so it is cancelled rather than retried.
             guard swapped else { throw CancellationError() }
+            adoptRefresh(from: tokens, to: refreshed, receivedAt: receivedAt)
             // Recorded before the flight's task finishes, so no request can miss both the
             // flight and its result.
             refreshGeneration += 1
@@ -536,7 +595,7 @@ public actor APIClient {
         let expiry = Task {
             var expired = false
             if await tokenProvider.expireSession(ifCurrent: rejected) {
-                serverExpiries.append((rejected, refreshGeneration))
+                pairStates[rejected, default: PairState()].expiredAt = refreshGeneration
                 expired = true
             }
             pendingExpiries[id] = nil
