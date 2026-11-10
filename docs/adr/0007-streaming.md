@@ -307,7 +307,13 @@ Cons:
          - **Undecidable** (record not on the first page, values match neither case, or the lookup fails after the normal queue retries): drop the delta. This undercounts by at most one sync interval but never double-counts.
        - **Serialized, idempotent reporting.** Each session has one serial reporting queue, so at most one `/sync` or `/close` is in flight per session.
          - **Snapshot:** before a send, the engine moves the accumulated time into an immutable snapshot `{sessionId, seq, timeListened, currentTime}` and resets the accumulator. Time played afterwards accrues into the next snapshot.
-         - **Retries:** a retry, timeout re-send or replay after relaunch resends the **same** snapshot. It never re-reads the accumulator or merges new time into an unacknowledged snapshot.
+         - **Retries:** a resend always carries the **same** snapshot. It never re-reads the accumulator or merges new time into an unacknowledged snapshot.
+         - **No blind resend.** The pinned server applies every `/sync` body, with no `seq` check (`syncSession` → `addListeningTime`, `PlaybackSession.js:237-246` at v2.26.0). So a snapshot whose outcome is ambiguous (timeout, connection lost after send, relaunch with an unacknowledged send) is reconciled before any resend. A clear failure where the request never reached the server, such as a DNS or connect error, may be resent.
+         - **Reconciling an ambiguous `/sync`.** `GET /api/session/:id` returns the open session's live in-memory `timeListening` (`ApiRouter.js:236`, `SessionController.getOpenSession` → `toJSONForClient`, v2.26.0). Because the queue is serial, no other report can change it in between.
+           - **`timeListening ≥ ackedTotal + delta − 1 s`:** the snapshot was applied. Release it and add it to `ackedTotal`.
+           - **`timeListening ≈ ackedTotal`:** the snapshot was not applied. Resend it once, and treat that resend's outcome the same way.
+           - **404:** the session is gone. Use the stored-record reconciliation for `/close` above.
+           - **Anything else, or the lookup fails:** drop the snapshot and log it. Delivery is at most once, matching the undecidable `/close` case, because wall-clock listening time is advisory.
          - **One owner per interval:** a snapshot is released only by a 200, or by the reconciliation outcome below. Only then is the next snapshot sent. Every interval of listening time belongs to exactly one snapshot.
          - **Coalescing:** a second close request (rebuild plus app exit, for example) waits for the pending close and adds no delta.
        - **Final report through `/close`.** It uses `/close` with a body, not `/sync`, so a blind retry can never re-apply it: the retry gets 404 and goes through reconciliation.
@@ -421,6 +427,10 @@ Cons:
   - A `/close` whose 200 is lost (the server applied it), then retried and answered with 404: reconciliation finds the stored `timeListening` already includes the delta, and the delta is dropped rather than resent.
   - A `/close` that never reached the server (session lost on restart) has its delta carried once into the new session's `/sync`.
   - An undecidable reconciliation drops the delta, with no resend.
+  - Lost `/sync` responses:
+    - When the server applied the `/sync` but the 200 was lost, `GET /api/session/:id` shows the delta applied. The snapshot is released and not resent, and the server total equals the time played.
+    - When the request timed out before being applied, the snapshot is resent exactly once.
+    - When the lookup fails, the snapshot is dropped and logged.
 - **Position source:** the new session's server `currentTime` (deliberately older) is ignored, and the saved local position is used.
 - **Now Playing:** elapsed time never decreases during a rebuild.
 - **Serialized reporting:** two concurrent close or rebuild triggers for one session produce exactly one in-flight `/close`. A timed-out `/close` retried while playback continues resends the identical snapshot, and the time played meanwhile goes only into the new session. The server's total equals the time played.
