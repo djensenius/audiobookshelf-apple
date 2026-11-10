@@ -4,18 +4,20 @@ import SwiftUI
 
 /// The root of every window scene: shows what the session lifecycle's gate says (ADR 0004).
 ///
-/// Links reach the scene here, from `onOpenURL` and Handoff. A link waits in ``pendingLink`` until
-/// a signed-in host can open it, so a cold launch from a link, or a link that arrives while the
-/// session restores, isn't lost. Only a ready session's shell gets the binding: during an account
-/// switch the outgoing shell has none, so the incoming account's shell takes the link. Nothing
-/// waits while signed out, signing out or without a store (``SceneContent/holdsLinks``), so a link
-/// is never kept through a sign-in to open later, for whichever account signed in.
+/// Links reach the scene here, from `onOpenURL` and Handoff. A link waits in ``pendingLink``,
+/// tagged with ``SessionLifecycle/linkEpoch``, until a signed-in host can open it, so a cold launch
+/// from a link, or a link that arrives while the session restores, isn't lost. Only a ready
+/// session's shell gets the binding: during an account switch the outgoing shell has none, so the
+/// incoming account's shell takes the link. Nothing arriving while signed out, signing out or
+/// without a store is kept (``PendingLink/init(_:arrivingAt:epoch:)``), and the binding hands the
+/// host a link only while the epoch is the one it arrived in, so a link queued for one account
+/// never opens for another, even when this view didn't render the gates in between.
 struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
 
     @Environment(\.scenePhase) private var scenePhase
-    @State private var pendingLink: DeepLink?
+    @State private var pendingLink: PendingLink?
 
     var body: some View {
         content
@@ -23,8 +25,9 @@ struct RootView: View {
             .onChange(of: scenePhase) { _, phase in
                 Task { await lifecycle.handle(scenePhase: SessionScenePhase(phase)) }
             }
-            .onChange(of: lifecycle.gate) { _, gate in
-                if !SceneContent(gate).holdsLinks { pendingLink = nil }
+            // Only a stale link goes: one that arrived after the bump carries the new epoch.
+            .onChange(of: lifecycle.linkEpoch) { _, epoch in
+                if pendingLink?.link(atEpoch: epoch) == nil { pendingLink = nil }
             }
             .onOpenURL { url in
                 if let link = DeepLink(url: url) { receive(link) }
@@ -38,7 +41,16 @@ struct RootView: View {
     }
 
     private func receive(_ link: DeepLink) {
-        if SceneContent(lifecycle.gate).holdsLinks { pendingLink = link }
+        pendingLink = PendingLink(link, arrivingAt: lifecycle.gate, epoch: lifecycle.linkEpoch)
+    }
+
+    /// Checked when the host reads it, not only when the epoch changes: SwiftUI orders a new
+    /// host's `onAppear` and this view's `onChange` arbitrarily.
+    private var linkBinding: Binding<DeepLink?> {
+        Binding(
+            get: { pendingLink?.link(atEpoch: lifecycle.linkEpoch) },
+            set: { if $0 == nil { pendingLink = nil } }
+        )
     }
 
     @ViewBuilder private var content: some View {
@@ -52,7 +64,7 @@ struct RootView: View {
             // sign-in presented from it isn't torn down. It is the same case as a ready session,
             // so the shell, its router and its scene storage survive until the identity changes.
             SceneRouterHost(
-                identity: identity, player: player, pendingLink: opensLinks ? $pendingLink : .constant(nil)
+                identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil)
             )
             .id(identity)
         case .storeUnavailable:

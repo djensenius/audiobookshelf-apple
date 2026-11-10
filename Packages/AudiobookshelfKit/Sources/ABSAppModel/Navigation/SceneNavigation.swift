@@ -51,7 +51,8 @@ public enum SceneContent: Equatable, Sendable {
     case loading
     /// The session is ending. The root shows the same splash, but keeps no link: a sign-out can
     /// end at another account without the gate passing through ``connect`` long enough for a
-    /// view to see it, so a link kept here could open for that account.
+    /// view to see it, so a link that arrives here is dropped. One already waiting is dropped by
+    /// ``SessionLifecycle/linkEpoch``, which this gate advances.
     case signingOut
     /// Signed out: the connect flow.
     case connect
@@ -75,7 +76,8 @@ public enum SceneContent: Equatable, Sendable {
 
     /// Whether a link that arrives now may wait for a scene to open it. It may not when signed
     /// out, signing out, or without a store: a link kept through a sign-in would open later, for
-    /// whichever account signed in.
+    /// whichever account signed in. A link that is already waiting is a different case, handled
+    /// by ``PendingLink`` and ``SessionLifecycle/linkEpoch``.
     public var holdsLinks: Bool {
         switch self {
         case .loading, .shell: true
