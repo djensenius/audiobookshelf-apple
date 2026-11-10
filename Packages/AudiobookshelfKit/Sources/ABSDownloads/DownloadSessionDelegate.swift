@@ -43,22 +43,7 @@ struct DownloadTransferFailure: Sendable {
         isSessionLost =
             urlError?.code == .backgroundSessionWasDisconnected
             || urlError?.code == .backgroundSessionInUseByAnotherProcess
-        isOutOfSpace = Self.isOutOfSpace(error)
-    }
-
-    /// Whether `error`, or an error it wraps, is `NSFileWriteOutOfSpaceError` or `ENOSPC`.
-    static func isOutOfSpace(_ error: any Error) -> Bool {
-        var next: NSError? = error as NSError
-        for _ in 0..<8 {
-            guard let error = next else { return false }
-            if (error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError)
-                || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOSPC))
-            {
-                return true
-            }
-            next = error.userInfo[NSUnderlyingErrorKey] as? NSError
-        }
-        return false
+        isOutOfSpace = DownloadLocations.isOutOfSpace(error)
     }
 }
 
@@ -132,7 +117,7 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
         do {
             try DownloadLocations.moveFile(at: location, to: target.destination)
         } catch {
-            return .moveFailed(error.localizedDescription, isOutOfSpace: DownloadTransferFailure.isOutOfSpace(error))
+            return .moveFailed(error.localizedDescription, isOutOfSpace: DownloadLocations.isOutOfSpace(error))
         }
         return .moved(bytes: DownloadLocations.fileSize(at: target.destination) ?? task.countOfBytesReceived)
     }

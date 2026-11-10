@@ -64,4 +64,19 @@ public struct DownloadLocations: Sendable {
         (try? URL(filePath: url.path(percentEncoded: false)).resourceValues(forKeys: [.fileSizeKey]).fileSize)
             .map(Int64.init)
     }
+
+    /// Whether `error`, or an error it wraps, is `NSFileWriteOutOfSpaceError` or `ENOSPC`.
+    static func isOutOfSpace(_ error: any Error) -> Bool {
+        var next: NSError? = error as NSError
+        for _ in 0..<8 {
+            guard let error = next else { return false }
+            if (error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError)
+                || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOSPC))
+            {
+                return true
+            }
+            next = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
+    }
 }

@@ -44,9 +44,9 @@ import Testing
         let posix = NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))
         let wrapped = NSError(
             domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError, userInfo: [NSUnderlyingErrorKey: posix])
-        #expect(DownloadTransferFailure.isOutOfSpace(CocoaError(.fileWriteOutOfSpace)))
-        #expect(DownloadTransferFailure.isOutOfSpace(wrapped))
-        #expect(!DownloadTransferFailure.isOutOfSpace(CocoaError(.fileWriteNoPermission)))
-        #expect(!DownloadTransferFailure.isOutOfSpace(URLError(.networkConnectionLost)))
+        #expect(DownloadLocations.isOutOfSpace(CocoaError(.fileWriteOutOfSpace)))
+        #expect(DownloadLocations.isOutOfSpace(wrapped))
+        #expect(!DownloadLocations.isOutOfSpace(CocoaError(.fileWriteNoPermission)))
+        #expect(!DownloadLocations.isOutOfSpace(URLError(.networkConnectionLost)))
     }
 }

@@ -63,7 +63,7 @@ import Testing
     @Test func unreadableKeyKeepsBlob() throws {
         _ = try sealedVault()
         let locked = ResumeDataVault(directory: directory, keyStore: FailingKeyStore())
-        #expect(throws: TestError.self) { try locked.open(partID: partID, credentialTag: tag) }
+        #expect(throws: FailingKeyStore.locked) { try locked.open(partID: partID, credentialTag: tag) }
         #expect(blobExists)
     }
 
@@ -109,7 +109,10 @@ import Testing
     }
 }
 
+/// A Keychain that can't be read now, as while the device is locked before first unlock.
 private struct FailingKeyStore: ResumeDataKeyStore {
-    func loadKey() throws -> SymmetricKey? { throw TestError() }
-    func createKey() throws -> SymmetricKey { throw TestError() }
+    static let locked = KeychainResumeDataKeyStore.KeychainError(status: errSecInteractionNotAllowed)
+
+    func loadKey() throws -> SymmetricKey? { throw Self.locked }
+    func createKey() throws -> SymmetricKey { throw Self.locked }
 }

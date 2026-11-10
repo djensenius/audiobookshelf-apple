@@ -1,7 +1,6 @@
 import ABSAPI
 import ABSCore
 import ABSData
-import CryptoKit
 import Foundation
 import Synchronization
 
@@ -217,20 +216,6 @@ final class FakeCredentials: DownloadCredentialProviding {
         }
         if let hook = hook.withLock({ $0 }) { await hook() }
         return DownloadCredentials(configuration: configuration, accessToken: "token-\(token)")
-    }
-}
-
-final class MemoryKeyStore: ResumeDataKeyStore {
-    private let key = Mutex<SymmetricKey?>(nil)
-
-    func loadKey() throws -> SymmetricKey? { key.withLock { $0 } }
-
-    func createKey() throws -> SymmetricKey {
-        key.withLock { stored in
-            let created = stored ?? SymmetricKey(size: .bits256)
-            stored = created
-            return created
-        }
     }
 }
 
