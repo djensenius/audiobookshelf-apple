@@ -13,24 +13,25 @@ public enum LibraryEndpoints {
 
     /// `GET /api/libraries/:id?include=filterdata`: the library with its filter data.
     public static func library(id: String) -> Endpoint<LibraryWithFilterData> {
-        Endpoint(.get, "/api/libraries/\(id)", query: [URLQueryItem(name: "include", value: "filterdata")])
+        Endpoint(.get, "/api/libraries/\(pathSegment(id))", query: [URLQueryItem(name: "include", value: "filterdata")])
     }
 
-    /// `GET /api/libraries/:id/personalized`: the home page shelves.
+    /// `GET /api/libraries/:id/personalized`: the home page shelves, in server order. A shelf
+    /// that fails to decode is skipped; read them from `elements`.
     public static func personalized(libraryID: String) -> Endpoint<LossyArray<Shelf>> {
-        Endpoint(.get, "/api/libraries/\(libraryID)/personalized", query: minifiedQuery)
+        Endpoint(.get, "/api/libraries/\(pathSegment(libraryID))/personalized", query: minifiedQuery)
     }
 
     /// `GET /api/libraries/:id/search?q=`. The server defaults `limit` to 12.
     public static func search(libraryID: String, query: String, limit: Int? = nil) -> Endpoint<LibrarySearchResults> {
         var items = [URLQueryItem(name: "q", value: query)]
         if let limit { items.append(URLQueryItem(name: "limit", value: String(limit))) }
-        return Endpoint(.get, "/api/libraries/\(libraryID)/search", query: items)
+        return Endpoint(.get, "/api/libraries/\(pathSegment(libraryID))/search", query: items)
     }
 
     /// `GET /api/libraries/:id/authors`: every author, unpaged.
     public static func authors(libraryID: String) -> Endpoint<AuthorsResponse> {
-        Endpoint(.get, "/api/libraries/\(libraryID)/authors")
+        Endpoint(.get, "/api/libraries/\(pathSegment(libraryID))/authors")
     }
 
     /// `GET /api/libraries/:id/recent-episodes` (podcast libraries only).
@@ -38,7 +39,7 @@ public enum LibraryEndpoints {
         libraryID: String, page: Int = 0, limit: Int = 50
     ) -> Endpoint<RecentEpisodesPage> {
         Endpoint(
-            .get, "/api/libraries/\(libraryID)/recent-episodes",
+            .get, "/api/libraries/\(pathSegment(libraryID))/recent-episodes",
             query: [
                 URLQueryItem(name: "limit", value: String(limit)), URLQueryItem(name: "page", value: String(page)),
             ]
@@ -80,6 +81,6 @@ public enum LibraryEndpoints {
     private static func paged<Element>(
         _ libraryID: String, _ entity: String, _ query: LibraryQuery
     ) -> Endpoint<PagedResults<Element>> {
-        Endpoint(.get, "/api/libraries/\(libraryID)/\(entity)", query: query.queryItems + minifiedQuery)
+        Endpoint(.get, "/api/libraries/\(pathSegment(libraryID))/\(entity)", query: query.queryItems + minifiedQuery)
     }
 }

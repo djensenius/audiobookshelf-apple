@@ -319,13 +319,14 @@ public actor APIClient {
     // MARK: - Helpers
 
     /// Appends `path` to the base URL's path, so a server hosted under a subpath keeps it.
+    /// Existing `%XX` escapes in `path` (from ``pathSegment(_:)``) are kept, not encoded again.
     static func url(base: URL, path: String, query: [URLQueryItem]) throws -> URL {
         guard var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
             throw APIError.invalidURL
         }
-        var basePath = components.path
+        var basePath = components.percentEncodedPath
         while basePath.hasSuffix("/") { basePath.removeLast() }
-        components.path = basePath + (path.hasPrefix("/") ? path : "/" + path)
+        components.percentEncodedPath = basePath + percentEncodedPath(path.hasPrefix("/") ? path : "/" + path)
         if !query.isEmpty {
             components.queryItems = query
             // URLComponents leaves "+" alone, but servers decode it as a space.
@@ -334,6 +335,24 @@ public actor APIClient {
         }
         guard let url = components.url else { throw APIError.invalidURL }
         return url
+    }
+
+    /// Percent-encodes characters that aren't allowed in a path, keeping valid `%XX` escapes.
+    static func percentEncodedPath(_ path: String) -> String {
+        func encode(_ text: Substring) -> String {
+            text.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? ""
+        }
+        let parts = path.split(separator: "%", omittingEmptySubsequences: false)
+        var result = encode(parts[0])
+        for part in parts.dropFirst() {
+            let escape = part.prefix(2)
+            if escape.count == 2, escape.allSatisfy({ $0.isASCII && $0.isHexDigit }) {
+                result += "%" + escape + encode(part.dropFirst(2))
+            } else {
+                result += "%25" + encode(part)
+            }
+        }
+        return result
     }
 
     static func error(status: Int, data: Data) -> APIError {

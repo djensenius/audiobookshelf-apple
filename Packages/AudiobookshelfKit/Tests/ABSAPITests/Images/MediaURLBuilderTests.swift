@@ -44,6 +44,19 @@ private func makeBuilder(customHeaders: [String: String] = [:]) throws -> MediaU
                 == "https://abs.example/abs/api/items/li1/ebook/12345")
     }
 
+    @Test func idsAreEncodedAsOnePathSegment() throws {
+        let builder = try makeBuilder()
+        #expect(
+            builder.coverURL(itemID: "a/b?c", updatedAt: nil, width: .small)?.absoluteString
+                == "https://abs.example/abs/api/items/a%2Fb%3Fc/cover?width=300&format=webp")
+        #expect(
+            builder.authorImageURL(authorID: "..", updatedAt: nil, width: .small)?.absoluteString
+                == "https://abs.example/abs/api/authors/%2E%2E/image?width=300&format=webp")
+        #expect(
+            builder.ebookURL(itemID: "a#b", fileID: "%")?.absoluteString
+                == "https://abs.example/abs/api/items/a%23b/ebook/%25")
+    }
+
     @Test(arguments: [ImageKind.itemCover, .authorImage])
     func serverImageRequestSendsCustomHeadersButNoToken(kind: ImageKind) throws {
         let builder = try makeBuilder(customHeaders: ["CF-Access-Client-Id": "proxy-id"])

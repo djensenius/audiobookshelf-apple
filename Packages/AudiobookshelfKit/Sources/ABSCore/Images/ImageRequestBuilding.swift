@@ -42,6 +42,10 @@ public enum ImageSource: Sendable, Hashable {
 
 /// Turns an ``ImageSource`` into a request for one server connection.
 ///
+/// A builder belongs to a single server connection (in ABSAPI, one `MediaURLBuilder` per
+/// connection), so `ImageSource` carries no server. Mapping an `ImageKey` to an `ImageSource`
+/// is added by the image pipeline (#43) without changing this shape.
+///
 /// Implementations never add the Audiobookshelf access token: both image routes are
 /// unauthenticated on every supported server. They send the connection's custom headers to
 /// the server's origin only, and no cookies.

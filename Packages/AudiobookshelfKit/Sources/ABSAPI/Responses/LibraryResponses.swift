@@ -160,7 +160,8 @@ public struct RecentEpisode: Decodable, Sendable, Hashable, Identifiable {
     public init(from decoder: any Decoder) throws {
         episode = try PodcastEpisode(from: decoder)
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        podcast = try container.decodeIfPresent(Podcast.self, forKey: .podcast)
+        // A malformed podcast shouldn't drop the episode.
+        podcast = (try? container.decodeIfPresent(Podcast.self, forKey: .podcast)) ?? nil
         libraryId = try container.decodeIfPresent(String.self, forKey: .libraryId)
     }
 }

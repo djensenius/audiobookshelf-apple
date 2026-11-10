@@ -11,6 +11,9 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
 private let book = #"{"id":"li1","libraryId":"lib1","mediaType":"book","media":{"id":"b1","metadata":{"title":"One"}}}"#
 private let podcast =
     #"{"id":"li2","libraryId":"lib2","mediaType":"podcast","media":{"id":"p1","metadata":{"title":"Pod"}}}"#
+private let episodeMatch =
+    #"{"id":"li2","libraryId":"lib2","mediaType":"podcast","media":{"id":"p1","metadata":{"title":"Pod"}},"#
+    + #""recentEpisode":{"id":"ep7","libraryItemId":"li2","title":"Match"}}"#
 
 @Suite struct LibraryResponseDecodingTests {
     @Test func librariesSkipMalformedEntries() throws {
@@ -111,6 +114,13 @@ private let podcast =
         #expect(page.limit == 50)
     }
 
+    @Test func recentEpisodeKeepsEpisodeWhenPodcastIsMalformed() throws {
+        let page = try decode(
+            RecentEpisodesPage.self, #"{"episodes":[{"id":"ep1","title":"Ep 1","podcast":{"id":"p1"}}],"limit":50}"#)
+        #expect(page.episodes.map(\.id) == ["ep1"])
+        #expect(page.episodes.first?.podcast == nil)
+    }
+
     @Test func bookSearchResults() throws {
         let results = try decode(
             LibrarySearchResults.self,
@@ -132,10 +142,12 @@ private let podcast =
     @Test func podcastSearchResults() throws {
         let results = try decode(
             LibrarySearchResults.self,
-            #"{"podcast":[{"libraryItem":\#(podcast)}],"episodes":[{"libraryItem":\#(podcast)}],"tags":[],"genres":[]}"#
+            #"{"podcast":[{"libraryItem":\#(podcast)}],"episodes":[{"libraryItem":\#(episodeMatch)}],"tags":[],"genres":[]}"#
         )
         #expect(results.podcasts.map(\.id) == ["li2"])
         #expect(results.episodes.map(\.id) == ["li2"])
+        #expect(results.episodes.first?.recentEpisode?.id == "ep7")
+        #expect(results.episodes.first?.recentEpisode?.title == "Match")
         #expect(results.books.isEmpty)
         #expect(results.series.isEmpty)
     }

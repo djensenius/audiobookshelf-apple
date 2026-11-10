@@ -6,8 +6,12 @@ import Foundation
 /// Image requests never carry the Audiobookshelf access token (no `Authorization` header and
 /// no `?token=`): both image routes are unauthenticated on every supported server. They carry
 /// the connection's custom headers to the server only, and never cookies.
+///
+/// The builder is a value snapshot of one connection's address and custom headers. When either
+/// changes, `AppEnvironment` must build a new one and hand it to the image pipeline (the same
+/// moment it calls ``APIClient/setCustomHeaders(_:)``).
 public struct MediaURLBuilder: ImageRequestBuilding {
-    public let configuration: APIClientConfiguration
+    private let configuration: APIClientConfiguration
 
     public init(configuration: APIClientConfiguration) {
         self.configuration = configuration
@@ -17,22 +21,23 @@ public struct MediaURLBuilder: ImageRequestBuilding {
     public func coverURL(
         itemID: String, updatedAt: Int?, width: ImageWidthBucket, format: ImageFormat = .webp
     ) -> URL? {
-        imageURL(path: "/api/items/\(itemID)/cover", updatedAt: updatedAt, width: width, format: format)
+        imageURL(path: "/api/items/\(pathSegment(itemID))/cover", updatedAt: updatedAt, width: width, format: format)
     }
 
     /// `GET /api/authors/:id/image?width=&format=&ts=`.
     public func authorImageURL(
         authorID: String, updatedAt: Int?, width: ImageWidthBucket, format: ImageFormat = .webp
     ) -> URL? {
-        imageURL(path: "/api/authors/\(authorID)/image", updatedAt: updatedAt, width: width, format: format)
+        imageURL(
+            path: "/api/authors/\(pathSegment(authorID))/image", updatedAt: updatedAt, width: width, format: format)
     }
 
     /// `GET /api/items/:id/ebook[/:fileID]`: the item's primary ebook, or the ebook file with
-    /// inode `fileID`. The route requires the access token, so fetch it through ``APIClient``
-    /// or with an `Authorization` header, never a `?token=` query item.
+    /// inode `fileID`. The route requires the access token: read it with
+    /// ``ItemEndpoints/ebook(itemID:fileID:)`` through ``APIClient``, or have the downloader
+    /// add the `Authorization` header and the connection's custom headers. Never use `?token=`.
     public func ebookURL(itemID: String, fileID: String? = nil) -> URL? {
-        var path = "/api/items/\(itemID)/ebook"
-        if let fileID { path += "/\(fileID)" }
+        let path = ItemEndpoints.ebookPath(itemID: itemID, fileID: fileID)
         return try? APIClient.url(base: configuration.baseURL, path: path, query: [])
     }
 

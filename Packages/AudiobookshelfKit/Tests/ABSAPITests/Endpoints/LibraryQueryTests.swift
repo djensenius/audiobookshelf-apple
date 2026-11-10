@@ -47,6 +47,10 @@ import Testing
         #expect(LibraryQuery().queryItems.isEmpty)
     }
 
+    @Test func allFilterIsNotSent() {
+        #expect(LibraryQuery(filter: LibraryFilter(group: "all")).queryItems.isEmpty)
+    }
+
     @Test func descIsSentOnlyWithSort() {
         #expect(LibraryQuery(descending: true).queryItems.isEmpty)
         let items = LibraryQuery(sort: "name").queryItems

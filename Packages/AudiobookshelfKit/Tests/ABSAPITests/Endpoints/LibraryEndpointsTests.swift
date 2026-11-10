@@ -39,6 +39,27 @@ private let listSuffix = "minified=1&include=rssfeed,numEpisodesIncomplete"
                 == "\(server)/api/libraries/lib1/search?q=x&limit=5")
     }
 
+    @Test func searchOmitsLimitWhenNil() {
+        #expect(LibraryEndpoints.search(libraryID: "lib1", query: "x").query.map(\.name) == ["q"])
+    }
+
+    @Test(arguments: [
+        ("a/b?c#d%e f", "a%2Fb%3Fc%23d%25e%20f"), (".", "%2E"), ("..", "%2E%2E"), ("ok-1_2.3~", "ok-1_2.3~"),
+    ])
+    func idsAreEncodedAsOnePathSegment(id: String, encoded: String) throws {
+        #expect(try url(LibraryEndpoints.library(id: id)) == "\(server)/api/libraries/\(encoded)?include=filterdata")
+        #expect(
+            try url(LibraryEndpoints.items(libraryID: id))
+                == "\(server)/api/libraries/\(encoded)/items?\(listSuffix)")
+        #expect(
+            try url(ItemEndpoints.item(id: id)) == "\(server)/api/items/\(encoded)?expanded=1&include=rssfeed")
+        #expect(try url(ItemEndpoints.series(id: id)) == "\(server)/api/series/\(encoded)")
+        #expect(try url(ItemEndpoints.collection(id: id)) == "\(server)/api/collections/\(encoded)")
+        #expect(try url(ItemEndpoints.playlist(id: id)) == "\(server)/api/playlists/\(encoded)")
+        #expect(
+            try url(ItemEndpoints.ebook(itemID: id, fileID: id)) == "\(server)/api/items/\(encoded)/ebook/\(encoded)")
+    }
+
     @Test func authors() throws {
         #expect(try url(LibraryEndpoints.authors(libraryID: "lib1")) == "\(server)/api/libraries/lib1/authors")
     }
@@ -105,5 +126,12 @@ private let listSuffix = "minified=1&include=rssfeed,numEpisodesIncomplete"
         #expect(try url(ItemEndpoints.series(id: "ser1")) == "\(server)/api/series/ser1")
         #expect(try url(ItemEndpoints.collection(id: "col1")) == "\(server)/api/collections/col1")
         #expect(try url(ItemEndpoints.playlist(id: "pl1")) == "\(server)/api/playlists/pl1")
+    }
+
+    @Test func ebookIsAuthenticatedRawData() throws {
+        let primary = ItemEndpoints.ebook(itemID: "li1")
+        #expect(primary.requiresAuthentication)
+        #expect(try url(primary) == "\(server)/api/items/li1/ebook")
+        #expect(try url(ItemEndpoints.ebook(itemID: "li1", fileID: "123")) == "\(server)/api/items/li1/ebook/123")
     }
 }

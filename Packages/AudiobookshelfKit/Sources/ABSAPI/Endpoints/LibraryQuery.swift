@@ -51,6 +51,8 @@ public struct LibraryQuery: Sendable, Hashable {
     public var sort: String?
     /// Sent as `desc`, only together with `sort`.
     public var descending: Bool
+    /// The filter, or `nil` for the whole library. A filter whose group is `all` (the legacy
+    /// "no filter" setting) is not sent either.
     public var filter: LibraryFilter?
     /// Zero-based.
     public var page: Int?
@@ -73,7 +75,9 @@ public struct LibraryQuery: Sendable, Hashable {
     /// The query items in the legacy bookshelf's order.
     public var queryItems: [URLQueryItem] {
         var items: [URLQueryItem] = []
-        if let filter { items.append(URLQueryItem(name: "filter", value: filter.queryValue)) }
+        if let filter, filter.group != "all" {
+            items.append(URLQueryItem(name: "filter", value: filter.queryValue))
+        }
         if let sort {
             items.append(URLQueryItem(name: "sort", value: sort))
             items.append(URLQueryItem(name: "desc", value: descending ? "1" : "0"))
