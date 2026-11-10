@@ -1,5 +1,6 @@
 import ABSCore
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSAPI
@@ -34,6 +35,20 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
         case "/abs/login": loginResponse ?? .json(authResponseJSON())
         default: .text("Not Found", status: 404)
         }
+    }
+}
+
+/// Records the cookie jars a validator makes.
+private final class CookieJars: Sendable {
+    private let jars = Mutex<[HTTPCookieStorage]>([])
+
+    var last: HTTPCookieStorage? { jars.withLock { $0.last } }
+    var count: Int { jars.withLock { $0.count } }
+
+    @Sendable func make() -> HTTPCookieStorage? {
+        let jar = URLSessionConfiguration.ephemeral.httpCookieStorage
+        if let jar { jars.withLock { $0.append(jar) } }
+        return jar
     }
 }
 
@@ -183,6 +198,36 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
             server.requests.map { $0.url?.absoluteString } == [
                 "https://\(server.host)/abs/status", "https://\(server.host)\(location)",
             ])
+    }
+
+    /// A load balancer that sets a cookie on its redirect back to the same URL. Stub protocols
+    /// bypass the cookie jar (`Set-Cookie` isn't stored and `Cookie` isn't added), so the stub
+    /// plays that part with the latest jar the validator made.
+    @Test func redirectChainSharesOneCookieJar() async throws {
+        let jars = CookieJars()
+        let server = StubServer { request in
+            guard let url = request.url, let jar = jars.last else { return .failure(.badURL) }
+            if jar.cookies(for: url)?.contains(where: { $0.name == "lb" && $0.value == "1" }) == true {
+                return .json(statusLocal)
+            }
+            var redirect = StubResponse.redirect(to: url.absoluteString)
+            redirect.headers["Set-Cookie"] = "lb=1; Path=/"
+            jar.setCookies(
+                HTTPCookie.cookies(withResponseHeaderFields: redirect.headers, for: url), for: url,
+                mainDocumentURL: nil)
+            return redirect
+        }
+        let validator = ServerValidator(
+            sessionConfiguration: { server.sessionConfiguration() }, cookieStorage: jars.make)
+
+        _ = try await validator.validate(address: "https://\(server.host)/abs")
+        #expect(server.requests.count == 2)
+        #expect(jars.count == 1)
+
+        // A new validation starts with an empty jar, so it is redirected again.
+        _ = try await validator.validate(address: "https://\(server.host)/abs")
+        #expect(server.requests.count == 4)
+        #expect(jars.count == 2)
     }
 
     @Test(arguments: [401, 403])

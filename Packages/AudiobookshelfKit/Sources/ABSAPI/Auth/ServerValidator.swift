@@ -9,10 +9,21 @@ import Foundation
 /// `CancellationError`.
 public struct ServerValidator: Sendable {
     private let sessionConfiguration: @Sendable () -> URLSessionConfiguration
+    private let makeCookieStorage: @Sendable () -> HTTPCookieStorage?
 
     /// - Parameter sessionConfiguration: Tests return a configuration with stub protocol classes.
     public init(sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() }) {
+        self.init(sessionConfiguration: sessionConfiguration, cookieStorage: { nil })
+    }
+
+    /// - Parameter cookieStorage: Makes the cookie jar shared by one candidate's `/status`
+    ///   redirect chain; `nil` for a new in-memory jar. Tests use it to observe the jar.
+    init(
+        sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration,
+        cookieStorage: @escaping @Sendable () -> HTTPCookieStorage?
+    ) {
         self.sessionConfiguration = sessionConfiguration
+        self.makeCookieStorage = cookieStorage
     }
 
     /// Normalizes `input` and reads `GET /status`.
@@ -145,22 +156,25 @@ public struct ServerValidator: Sendable {
     static let maxStatusRedirects = 5
 
     /// Reads `/status` at `candidate`, following same-host redirects itself so that each hop is
-    /// checked before it is sent and keeps the custom headers. Returns the address the status was
-    /// finally served from.
+    /// checked before it is sent and keeps the custom headers. Every request of the chain shares
+    /// one new cookie jar, so a load balancer or proxy that sets a cookie on its redirect gets it
+    /// back; nothing is shared with other candidates or validations. Returns the address the
+    /// status was finally served from.
     /// - Throws: `APIError` only when the first request fails, so only that can fall back to
     ///   `http`; otherwise ``ServerValidationError``.
     private func status(
         at candidate: ServerAddress, customHeaders: [String: String]
     ) async throws -> (ServerAddress, ServerStatus) {
+        let jar = makeCookieStorage() ?? URLSessionConfiguration.ephemeral.httpCookieStorage
         let configuration = try Self.configuration(candidate, customHeaders: customHeaders)
-        let reply = try await client(configuration).response(for: Self.statusProbe())
+        let reply = try await client(configuration, cookieStorage: jar).response(for: Self.statusProbe())
         guard (300..<400).contains(reply.httpResponse.statusCode) else {
             return (candidate, try Self.decodeStatus(reply.value))
         }
         // The server answered on this scheme, so a later failure must not fall back to `http`.
         do {
             return try await followStatusRedirects(
-                from: reply.httpResponse, candidate: candidate, customHeaders: customHeaders)
+                from: reply.httpResponse, candidate: candidate, customHeaders: customHeaders, cookieStorage: jar)
         } catch let error as APIError {
             throw Self.statusError(error)
         }
@@ -170,14 +184,15 @@ public struct ServerValidator: Sendable {
     /// `Location` is requested as is (with its query and trailing slash); the server address is
     /// derived from the URL that finally answers.
     private func followStatusRedirects(
-        from first: HTTPURLResponse, candidate: ServerAddress, customHeaders: [String: String]
+        from first: HTTPURLResponse, candidate: ServerAddress, customHeaders: [String: String],
+        cookieStorage: HTTPCookieStorage?
     ) async throws -> (ServerAddress, ServerStatus) {
         var response = first
         var url = first.url ?? candidate.url
         for _ in 0..<Self.maxStatusRedirects {
             url = try Self.redirectTarget(of: response, from: url, candidate: candidate)
             let (configuration, endpoint) = try Self.statusRequest(for: url, customHeaders: customHeaders)
-            let reply = try await client(configuration).response(for: endpoint)
+            let reply = try await client(configuration, cookieStorage: cookieStorage).response(for: endpoint)
             response = reply.httpResponse
             guard (300..<400).contains(response.statusCode) else {
                 let status = try Self.decodeStatus(reply.value)
@@ -251,10 +266,13 @@ public struct ServerValidator: Sendable {
         }
     }
 
-    private func client(_ configuration: APIClientConfiguration) -> APIClient {
+    /// - Parameter cookieStorage: `nil` for a new cookie jar.
+    private func client(
+        _ configuration: APIClientConfiguration, cookieStorage: HTTPCookieStorage? = nil
+    ) -> APIClient {
         APIClient(
             configuration: configuration, tokenProvider: SignedOutTokenProvider(),
-            sessionConfiguration: sessionConfiguration())
+            sessionConfiguration: sessionConfiguration(), cookieStorage: cookieStorage)
     }
 
     private static func configuration(
