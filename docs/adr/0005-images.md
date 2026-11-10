@@ -307,6 +307,12 @@ static, unauthenticated remote images (none are planned).
   `requestCachePolicy = .reloadIgnoringLocalCacheData`. Our own file cache is
   authoritative, and versioned keys never need revalidation. The default
   per-host connection limit applies.
+- **No cookies:** header stripping isn't enough, because cookies are not scoped
+  by port and the cookie store would add them to, for example, a redirect from
+  `https://books.example` to `https://books.example:8443`. So the image session
+  configuration sets `httpCookieStorage = nil`, `httpShouldSetCookies = false`,
+  and `httpCookieAcceptPolicy = .never`. Every image request, including each
+  rebuilt redirect request, also sets `httpShouldHandleCookies = false`.
 
 **Keys and cache layers:**
 
@@ -328,8 +334,16 @@ static, unauthenticated remote images (none are planned).
   4. network.
 
   Steps 2–4 decode off the actor in a `@concurrent` function. Concurrent decodes
-  are capped at 4 on iPhone and at the active processor count on iPad and Mac
-  (see the memory budget below).
+  are capped at 4 on iPhone and at the active processor count on iPad and Mac,
+  with at most one 1200-bucket decode at a time (see the memory budget below).
+- **Stale offline fallback:** when step 2 uses a downloaded cover whose
+  `coverUpdatedAt` is older than the requested key's `updatedAt` (offline only),
+  the image is shown but is **not** stored in the memory LRU under the requested
+  key. It is cached under the fallback's own version key (the same key with
+  `updatedAt` = `coverUpdatedAt`), which step 2 checks before decoding the file
+  again. Nothing is written to `CoverFileStore`. Once the device is back
+  online, a load of the requested key misses the LRU, skips the stale file, and
+  fetches the new cover.
 - **Deduplication and cancellation:**
   - In-flight work is a `[ImageKey: Task]` entry with a waiter count.
   - When the last waiter cancels (a cell scrolls away), the network task is
@@ -461,12 +475,21 @@ Retained and peak memory are budgeted separately on iPhone:
 - **Retained** (what stays after loads settle): the 64 MiB LRU plus the
   5.5 MiB pinned artwork, so **≤ 70 MiB**.
 - **Transient** (live only while decoding): concurrent decodes are capped at
-  **4 on iPhone** (the processor count on iPad and Mac). Four grid decodes of
-  510 × 816 px are ≈ 6.4 MiB of output buffers. Allow the same again for
-  encoded data and ImageIO scratch space, so ≈ **13 MiB**. If a Now Playing
-  decode of the 1200 bucket (5.5 MiB) takes one of the slots, the output
-  buffers are ≈ 10.3 MiB, still inside that allowance.
-- **Peak** = retained + transient, so **≤ 83 MiB** on iPhone.
+  **4 on iPhone** (the processor count on iPad and Mac), and at most **one** of
+  them may be a 1200-bucket decode (only Now Playing uses that bucket). Each
+  decode is budgeted at 2× its output buffer, to cover encoded data and ImageIO
+  scratch space. With a grid image of 510 × 816 × 4 B = 1.59 MiB and a 1200 ×
+  1200 × 4 B = 5.49 MiB player image:
+  - four grid decodes: 4 × 1.59 = 6.35 MiB output, × 2 = 12.7 MiB;
+  - worst case, three grid decodes plus one player decode:
+    3 × 1.59 + 5.49 = 10.26 MiB output, × 2 = **20.5 MiB**.
+
+  The transient budget is the worst case, **≤ 20.5 MiB**.
+- **Peak** = retained + transient = 64 + 5.49 + 20.51 = 90.0 MiB, so the
+  budget is **≤ 91 MiB** on iPhone (1 MiB of rounding headroom). While a new
+  player image is being decoded, the old pinned image is still counted in
+  retained; it is released only after the swap, so this sum already covers
+  the overlap.
 
 The iPad and Mac peaks are their LRU size + 5.5 MiB + their transient
 allowance, with the same rule.
@@ -545,6 +568,15 @@ That fits under 256 MiB without eviction churn.
     - a cross-origin redirect arrives with no custom, `Authorization`, or
       `Cookie` headers, and this holds for a later hop back to the server
       origin as well;
+    - with a cookie stored for the server's host in `HTTPCookieStorage.shared`,
+      no request or redirect hop (including `https://books.example` →
+      `https://books.example:8443`) carries a `Cookie` header, a `Set-Cookie`
+      response stores nothing, and every request has
+      `httpShouldHandleCookies == false`;
+  - stale offline fallback, offline then online: with a downloaded v1 cover
+    and a key naming v2, the offline load shows v1 and leaves no LRU entry or
+    file under the v2 key; after going online, the next v2 load makes one
+    network request and returns v2;
   - `ensureCoverFile(for:)`:
     - after a memory hit and after a downloaded-cover hit, the file for that
       exact `ImageKey` exists in `CoverFileStore`;
@@ -564,7 +596,7 @@ That fits under 256 MiB without eviction churn.
   - Record Instruments Allocations and the VM tracker. Pass: retained image
     memory after scrolling stops stays within the retained budget (≤ 70 MiB on
     iPhone), peak image memory while flinging stays within the peak budget
-    (≤ 83 MiB on iPhone), and there are no hitches beyond one frame. If peak
+    (≤ 91 MiB on iPhone), and there are no hitches beyond one frame. If peak
     goes over, lower the decode cap before the LRU size.
   - Record real encoded sizes per bucket and adjust the disk numbers in a
     follow-up.
