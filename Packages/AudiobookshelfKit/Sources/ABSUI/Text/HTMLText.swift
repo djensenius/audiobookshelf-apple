@@ -89,7 +89,7 @@ private struct HTMLParser {
 
     /// Elements whose content is not text and is dropped.
     private static let rawTextElements: Set<String> = [
-        "script", "style", "template", "noscript", "iframe",
+        "script", "style", "noscript", "iframe",
     ]
     private static let paragraphElements: Set<String> = [
         "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "table",
@@ -168,9 +168,11 @@ private struct HTMLParser {
         return .open(name: name, attributes: attributes)
     }
 
+    /// Reads a tag name up to whitespace, `/` or `>`, so custom and namespaced elements
+    /// (`script-widget`, `svg:title`) are never mistaken for supported ones.
     private mutating func readName() -> String {
         var name = ""
-        while index < scalars.count, isLetter(scalars[index]) || ("0"..."9").contains(scalars[index]) {
+        while index < scalars.count, !isWhitespace(scalars[index]), scalars[index] != "/", scalars[index] != ">" {
             name.unicodeScalars.append(scalars[index])
             index += 1
         }
@@ -243,8 +245,9 @@ private struct HTMLParser {
         case "a": output.links.append(attributes["href"].flatMap(HTMLText.safeLink))
         case "ul", "ol": output.openList(ordered: name == "ol")
         case "li": output.listItem()
-        case _ where Self.paragraphElements.contains(name): output.ensureBreaks(2)
-        case _ where Self.lineElements.contains(name): output.ensureBreaks(1)
+        case "template": skipTemplate()
+        case _ where Self.paragraphElements.contains(name): output.openBlock(2)
+        case _ where Self.lineElements.contains(name): output.openBlock(1)
         case _ where Self.rawTextElements.contains(name): skipRawText(name)
         default: break
         }
@@ -269,18 +272,55 @@ private struct HTMLParser {
         let closing = Array("</\(name)".unicodeScalars)
         var position = index
         while position < scalars.count {
-            if matchesCaseInsensitive(closing, at: position) {
-                let after = position + closing.count
-                if after >= scalars.count || isWhitespace(scalars[after]) || scalars[after] == ">"
-                    || scalars[after] == "/"
-                {
-                    skipPast(">", from: after)
-                    return
-                }
+            if matchesTag(closing, at: position) {
+                skipPast(">", from: position + closing.count)
+                return
             }
             position += 1
         }
         index = scalars.count
+    }
+
+    /// Skips to after the matching `</template>`, counting nested templates. Whole tags
+    /// (including quoted attribute values) and comments are stepped over, so `<template>`
+    /// inside an attribute or comment doesn't count. An unclosed template, tag or comment
+    /// drops the rest of the input.
+    private mutating func skipTemplate() {
+        var depth = 1
+        while index < scalars.count {
+            guard scalars[index] == "<" else {
+                index += 1
+                continue
+            }
+            let start = index
+            if matches("<!--", at: start) {
+                guard let end = find("-->", from: start + 4) else { break }
+                index = end + 3
+            } else if start + 2 < scalars.count, scalars[start + 1] == "/", isLetter(scalars[start + 2]) {
+                index = start + 2
+                let name = readName()
+                skipPast(">", from: index)
+                if name == "template" {
+                    depth -= 1
+                    if depth == 0 { return }
+                }
+            } else if start + 1 < scalars.count, isLetter(scalars[start + 1]) {
+                index = start + 1
+                let name = readName()
+                guard readAttributes() != nil else { break }
+                if name == "template" { depth += 1 }
+            } else {
+                index = start + 1
+            }
+        }
+        index = scalars.count
+    }
+
+    /// Whether `tag` (such as `</script`) is at `position` and its name ends there.
+    private func matchesTag(_ tag: [Unicode.Scalar], at position: Int) -> Bool {
+        guard matchesCaseInsensitive(tag, at: position) else { return false }
+        let after = position + tag.count
+        return after >= scalars.count || isWhitespace(scalars[after]) || scalars[after] == ">" || scalars[after] == "/"
     }
 
     // MARK: Scanning helpers
@@ -357,6 +397,8 @@ private struct OutputBuilder {
     private var atLineStart = true
     private var trailingNewlines = 0
     private var pendingSpace = false
+    private var pendingBreaks = 0
+    private var listJustOpened = false
 
     private var style: Style {
         Style(bold: bold > 0, italic: italic > 0, link: links.last ?? nil)
@@ -380,13 +422,14 @@ private struct OutputBuilder {
                 pendingSpace = true
                 continue
             }
-            if pendingSpace, !chunk.isEmpty || (!isEmpty && !atLineStart) {
+            if pendingSpace, !chunk.isEmpty || (!isEmpty && !atLineStart && pendingBreaks == 0) {
                 chunk.append(" ")
             }
             pendingSpace = false
             chunk.append(character)
         }
         guard !chunk.isEmpty else { return }
+        flushBreaks()
         append(chunk, style: style)
         isEmpty = false
         atLineStart = false
@@ -397,20 +440,30 @@ private struct OutputBuilder {
     mutating func lineBreak() {
         pendingSpace = false
         guard !isEmpty else { return }
-        append("\n")
-        trailingNewlines += 1
-        atLineStart = true
+        flushBreaks()
+        appendNewline()
     }
 
-    /// Ends the current line or paragraph so that at least `count` line breaks precede the next text.
+    /// Ends the current line or paragraph so that at least `count` line breaks precede the
+    /// next text. Breaks are written lazily, so a list item can cap them.
     mutating func ensureBreaks(_ count: Int) {
         pendingSpace = false
-        guard !isEmpty else { return }
-        while trailingNewlines < count { lineBreak() }
+        pendingBreaks = max(pendingBreaks, count)
+    }
+
+    /// Opens a block element. Right after a list marker the break is skipped, so
+    /// `<li><p>One</p></li>` renders `• One`.
+    mutating func openBlock(_ count: Int) {
+        if !isEmpty, atLineStart, trailingNewlines == 0, pendingBreaks == 0 {
+            pendingSpace = false
+            return
+        }
+        ensureBreaks(count)
     }
 
     mutating func openList(ordered: Bool) {
         ensureBreaks(lists.isEmpty ? 2 : 1)
+        listJustOpened = true
         if lists.count < Self.maxListDepth {
             lists.append(List(ordered: ordered))
         } else {
@@ -428,7 +481,11 @@ private struct OutputBuilder {
     }
 
     mutating func listItem() {
-        ensureBreaks(1)
+        // Items are on consecutive lines even if the previous one ended with a paragraph;
+        // the first item keeps the break before its list.
+        pendingSpace = false
+        pendingBreaks = listJustOpened ? max(pendingBreaks, 1) : 1
+        flushBreaks()
         let indent = String(repeating: "    ", count: min(max(lists.count - 1, 0), Self.maxIndentLevel))
         let marker: String
         if let last = lists.indices.last, lists[last].ordered {
@@ -441,7 +498,27 @@ private struct OutputBuilder {
         isEmpty = false
         atLineStart = true
         trailingNewlines = 0
-        pendingSpace = false
+    }
+
+    private mutating func flushBreaks() {
+        defer {
+            pendingBreaks = 0
+            listJustOpened = false
+        }
+        guard !isEmpty else { return }
+        while trailingNewlines < pendingBreaks { appendNewline() }
+    }
+
+    private mutating func appendNewline() {
+        // A bare list marker keeps no trailing space.
+        if atLineStart, trailingNewlines == 0, text.unicodeScalars.last == " ", let last = runs.indices.last {
+            text.unicodeScalars.removeLast()
+            runs[last].scalarCount -= 1
+            if runs[last].scalarCount == 0 { runs.removeLast() }
+        }
+        append("\n")
+        trailingNewlines += 1
+        atLineStart = true
     }
 
     /// The result without trailing line breaks or spaces.
