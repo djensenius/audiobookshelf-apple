@@ -121,6 +121,7 @@ public struct DataStack: Sendable {
     private static func openOnDisk(at url: URL, schema: Schema, allowsSave: Bool, now: Date) throws -> ModelContainer {
         if allowsSave {
             prepareDirectory(url.deletingLastPathComponent())
+            try finishInterruptedMoves(for: url)
         }
         let configuration = ModelConfiguration(
             storeName,
@@ -133,7 +134,7 @@ public struct DataStack: Sendable {
             return try makeContainer(schema: schema, configuration: configuration)
         } catch let error as SwiftDataError {
             guard allowsSave, isIncompatible(error, storeURL: url) else { throw error }
-            // A downgrade or a corrupt store: start empty. The server still holds synced progress,
+            // A corrupt or unmigratable store: start empty. The server still holds synced progress,
             // and the orphan sweep removes downloads that are no longer referenced.
             logger.fault("Store is incompatible (\(String(describing: error), privacy: .public)); moving it aside")
             try moveStoreAside(at: url, now: now)
@@ -141,59 +142,122 @@ public struct DataStack: Sendable {
         }
     }
 
+    /// Resets only on confirmed corruption or a confirmed, non-transient incompatibility; anything
+    /// unsure is transient, so the error is rethrown and the store left alone.
     private static func isIncompatible(_ error: SwiftDataError, storeURL: URL) -> Bool {
-        if [.backwardMigration, .unknownSchema, .unknownDataStoreSchema].contains(error) { return true }
-        return error == .loadIssueModelContainer && isIncompatibleStore(at: storeURL)
+        switch sqliteHeaderMatches(at: storeURL) {
+        case nil: return false
+        case false?: return true
+        case true?: return isConfirmedIncompatibility(underlyingError(of: error))
+        }
     }
 
     private static let sqliteHeader = Data("SQLite format 3\u{0}".utf8)
 
-    /// Whether the store at `url` is corrupt, or was written by a schema missing from
-    /// ``ABSMigrationPlan`` (a downgrade). SwiftData reports both as `loadIssueModelContainer`,
-    /// which also covers transient failures, so anything else counts as compatible:
-    /// - a file that can't be read, including one whose data protection keeps it unreadable
-    ///   while the device is locked (a package can't ask `UIApplication` whether protected data
-    ///   is available, so reading the header is the check);
-    /// - a metadata error other than `SQLITE_CORRUPT` (11) or `SQLITE_NOTADB` (26).
-    static func isIncompatibleStore(at url: URL) -> Bool {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+    /// Whether the store's first 16 bytes are the SQLite header, or `nil` when they can't be read
+    /// (missing, no permission, or data protection keeping the file unreadable while the device is
+    /// locked; a package can't ask `UIApplication` whether protected data is available).
+    static func sqliteHeaderMatches(at url: URL) -> Bool? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard let header = try? handle.read(upToCount: sqliteHeader.count) else { return false }
-        guard header == sqliteHeader else { return true }
-
-        let metadata: [String: Any]
-        do {
-            metadata = try NSPersistentStoreCoordinator.metadataForPersistentStore(type: .sqlite, at: url)
-        } catch {
-            let sqliteCode = (error as NSError).userInfo[NSSQLiteErrorDomain] as? Int
-            return sqliteCode == 11 || sqliteCode == 26
-        }
-        return !ABSMigrationPlan.schemas.contains { version in
-            let model = NSManagedObjectModel.makeManagedObjectModel(for: Schema(versionedSchema: version))
-            return model?.isConfiguration(withName: nil, compatibleWithStoreMetadata: metadata) ?? true
-        }
+        guard let header = try? handle.read(upToCount: sqliteHeader.count) else { return nil }
+        return header == sqliteHeader
     }
 
-    /// Moves the store and its SQLite side files into `Broken/<epoch>-<uuid>/` next to it, side
-    /// files first, and deletes older broken copies so at most one is kept.
+    /// SwiftData keeps the Core Data error in a private field; `nil` (treated as transient) if a
+    /// later SDK moves it.
+    private static func underlyingError(of error: SwiftDataError) -> NSError? {
+        Mirror(reflecting: error).children.lazy.compactMap { $0.value as? any Error }.first.map { $0 as NSError }
+    }
+
+    /// Core Data incompatibility codes: 134100 incompatible version hash, 134110 migration
+    /// failed, 134130 missing source model, 134140 missing mapping model.
+    private static let incompatibilityCodes: Set<Int> = [134_100, 134_110, 134_130, 134_140]
+    /// `NSFileReadNoPermissionError`, `NSFileWriteNoPermissionError`, `NSFileWriteOutOfSpaceError`.
+    private static let transientCocoaCodes: Set<Int> = [257, 513, 640]
+    /// `SQLITE_PERM`, `BUSY`, `LOCKED`, `IOERR`, `FULL`, `CANTOPEN`; corrupt is `CORRUPT`, `NOTADB`.
+    private static let transientSQLiteCodes: Set<Int> = [3, 5, 6, 10, 13, 14]
+    private static let corruptSQLiteCodes: Set<Int> = [11, 26]
+
+    /// Whether a load error confirms the store can't be used: a Core Data incompatibility or
+    /// SQLite corruption somewhere in the chain (`NSUnderlyingErrorKey`, `NSDetailedErrors`), and
+    /// no transient failure (disk full, I/O, busy, locked, can't open, no permission, or any POSIX
+    /// error) anywhere in it.
+    static func isConfirmedIncompatibility(_ error: NSError?) -> Bool {
+        var chain: [NSError] = []
+        var pending = error.map { [$0] } ?? []
+        while let next = pending.popLast(), chain.count < 32 {
+            chain.append(next)
+            pending += [next.userInfo[NSUnderlyingErrorKey] as? NSError].compactMap { $0 }
+            pending += next.userInfo[NSDetailedErrorsKey] as? [NSError] ?? []
+            pending += next.userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError] ?? []
+        }
+        func sqliteCode(_ error: NSError) -> Int? {
+            let code = error.domain == NSSQLiteErrorDomain ? error.code : error.userInfo[NSSQLiteErrorDomain] as? Int
+            return code.map { $0 & 0xFF }  // Primary code of an extended result code.
+        }
+        let isTransient = chain.contains { error in
+            error.domain == NSPOSIXErrorDomain
+                || (error.domain == NSCocoaErrorDomain && transientCocoaCodes.contains(error.code))
+                || sqliteCode(error).map(transientSQLiteCodes.contains) == true
+        }
+        return !isTransient
+            && chain.contains { error in
+                (error.domain == NSCocoaErrorDomain && incompatibilityCodes.contains(error.code))
+                    || sqliteCode(error).map(corruptSQLiteCodes.contains) == true
+            }
+    }
+
+    static let incompleteMarker = "INCOMPLETE"
+
+    /// Moves the store and its SQLite side files into `Broken/<epoch>-<uuid>/` next to it, then
+    /// deletes older broken copies so at most one is kept. The move is journaled: an `INCOMPLETE`
+    /// marker listing the files is written first and removed last, and the main store moves
+    /// first, so a crash never leaves a stale WAL beside a missing or new store.
     static func moveStoreAside(at url: URL, now: Date) throws {
-        let fileManager = FileManager.default
         let brokenRoot = url.deletingLastPathComponent().appending(path: "Broken", directoryHint: .isDirectory)
         let destination = brokenRoot.appending(
             path: "\(Int(now.timeIntervalSince1970))-\(UUID().uuidString)",
             directoryHint: .isDirectory
         )
-        try fileManager.createDirectory(at: destination, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         let name = url.lastPathComponent
-        for fileName in ["\(name)-wal", "\(name)-shm", name] {
-            let source = url.deletingLastPathComponent().appending(path: fileName)
-            guard fileManager.fileExists(atPath: source.path(percentEncoded: false)) else { continue }
-            try fileManager.moveItem(at: source, to: destination.appending(path: fileName))
+        let names = [name, "\(name)-wal", "\(name)-shm"].joined(separator: "\n")
+        try Data(names.utf8).write(to: destination.appending(path: incompleteMarker), options: .atomic)
+        try finishMove(into: destination, from: url.deletingLastPathComponent())
+        for copy in brokenCopies(in: brokenRoot)
+        where copy.lastPathComponent != destination.lastPathComponent && !isIncomplete(copy) {
+            try? FileManager.default.removeItem(at: copy)
         }
-        let older = (try? fileManager.contentsOfDirectory(at: brokenRoot, includingPropertiesForKeys: nil)) ?? []
-        for copy in older where copy.lastPathComponent != destination.lastPathComponent {
-            try? fileManager.removeItem(at: copy)
+    }
+
+    /// Completes a move-aside interrupted by a crash or an error, before the store is opened.
+    static func finishInterruptedMoves(for url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        for copy in brokenCopies(in: directory.appending(path: "Broken", directoryHint: .isDirectory))
+        where isIncomplete(copy) {
+            try finishMove(into: copy, from: directory)
         }
+    }
+
+    private static func isIncomplete(_ copy: URL) -> Bool {
+        FileManager.default.fileExists(atPath: copy.appending(path: incompleteMarker).path(percentEncoded: false))
+    }
+
+    private static func brokenCopies(in root: URL) -> [URL] {
+        (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+    }
+
+    /// Moves each file listed in `destination`'s marker that is still in `directory`, in order,
+    /// then deletes the marker.
+    private static func finishMove(into destination: URL, from directory: URL) throws {
+        let marker = destination.appending(path: incompleteMarker)
+        for name in try String(contentsOf: marker, encoding: .utf8).split(separator: "\n").map(String.init) {
+            let source = directory.appending(path: name)
+            guard FileManager.default.fileExists(atPath: source.path(percentEncoded: false)) else { continue }
+            try FileManager.default.moveItem(at: source, to: destination.appending(path: name))
+        }
+        try FileManager.default.removeItem(at: marker)
     }
 
     /// Creates the store directory. On iOS the directory gets
