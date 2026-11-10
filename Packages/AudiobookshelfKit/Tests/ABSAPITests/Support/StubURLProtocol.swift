@@ -1,6 +1,8 @@
 import Foundation
 import Synchronization
 
+@testable import ABSAPI
+
 /// A canned response returned by ``StubURLProtocol``.
 struct StubResponse: Sendable {
     var status: Int
@@ -117,12 +119,49 @@ final class StubURLProtocol: URLProtocol {
                 next.httpMethod = "GET"
                 next.httpBody = nil
             }
-            // If the delegate follows the redirect, the session ignores the response below; if
-            // it declines, the 3xx response is what the task returns.
+            // A followed redirect stops this instance, and the session loads `next` with a new
+            // one. A declined redirect doesn't: the task waits for this instance to deliver the 3xx
+            // response. Delivering it before the redirect decision would race that decision (the
+            // session can complete the task with the 3xx before asking its delegate), so the
+            // response is delivered only once the task's delegate has declined the redirect. (It
+            // may still reach the session before the session applies the decline; either way the
+            // task completes with the 3xx, which is the declined outcome.)
+            guard let task else {
+                client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+                return
+            }
+            let box = UncheckedProtocol(value: self)
+            Self.awaitRedirectDecision(for: task) { followed in
+                if !followed { box.value.finish(with: response, body: stub.body) }
+            }
             client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
+            return
         }
+        finish(with: response, body: stub.body)
+    }
+
+    /// Pending redirect decisions, keyed by task. ABSAPI's redirect delegates report each decision
+    /// through ``RedirectDecisions``.
+    private static let pendingDecisions: Mutex<[ObjectIdentifier: @Sendable (Bool) -> Void]> = {
+        RedirectDecisions.observer.withLock { observer in
+            observer = { task, followed in
+                let decided = StubURLProtocol.pendingDecisions.withLock {
+                    $0.removeValue(forKey: ObjectIdentifier(task))
+                }
+                decided?(followed)
+            }
+        }
+        return Mutex([:])
+    }()
+
+    private static func awaitRedirectDecision(for task: URLSessionTask, _ decided: @escaping @Sendable (Bool) -> Void) {
+        pendingDecisions.withLock { $0[ObjectIdentifier(task)] = decided }
+    }
+
+    private func finish(with response: HTTPURLResponse, body: Data) {
+        guard !isStopped.withLock({ $0 }) else { return }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: stub.body)
+        client?.urlProtocol(self, didLoad: body)
         client?.urlProtocolDidFinishLoading(self)
     }
 
@@ -177,7 +216,8 @@ struct StubServer: Sendable {
 }
 
 // URLProtocol is not Sendable, but the URL loading system lets a protocol call its client
-// from any thread, and the delayed delivery is the only use after `startLoading` returns.
+// from any thread, and the delayed and declined-redirect deliveries are the only uses after
+// `startLoading` returns.
 private struct UncheckedProtocol: @unchecked Sendable {
     let value: StubURLProtocol
 }
