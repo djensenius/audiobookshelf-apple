@@ -169,6 +169,22 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
         #expect(server.requests.allSatisfy { $0.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret" })
     }
 
+    @Test(arguments: ["/abs/status/", "/abs/status?ready=1"])
+    func followsRedirectToTheExactStatusURL(location: String) async throws {
+        let server = StubServer { request in
+            guard request.url?.absoluteString.hasSuffix("/abs/status") == true, let host = request.url?.host() else {
+                return .json(statusLocal)
+            }
+            return .redirect(to: "https://\(host)\(location)")
+        }
+        let validated = try await validator(server).validate(address: "https://\(server.host)/abs")
+        #expect(validated.address.url.absoluteString == "https://\(server.host)/abs")
+        #expect(
+            server.requests.map { $0.url?.absoluteString } == [
+                "https://\(server.host)/abs/status", "https://\(server.host)\(location)",
+            ])
+    }
+
     @Test(arguments: [401, 403])
     func accessDeniedSuggestsCustomHeaders(status: Int) async throws {
         let server = StubServer { _ in .text("Forbidden", status: status) }
@@ -241,6 +257,17 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
         let validated = try await validator(server).validate(address: "\(server.host)/abs")
         #expect(server.requests.map { $0.url?.scheme } == ["https", "http"])
         #expect(validated.fellBackToHTTP)
+    }
+
+    @Test func failureAfterARedirectDoesNotFallBack() async throws {
+        let server = StubServer { request in
+            guard request.url?.scheme == "https", let host = request.url?.host() else { return .json(statusLocal) }
+            return request.url?.port == 8443 ? .failure(.timedOut) : .redirect(to: "https://\(host):8443/abs/status")
+        }
+        await #expect(throws: ServerValidationError.timedOut) {
+            try await validator(server).validate(address: "\(server.host)/abs")
+        }
+        #expect(server.requests.map { $0.url?.scheme } == ["https", "https"])
     }
 
     @Test func fallsBackAfterSecureConnectionFailure() async throws {
@@ -462,6 +489,22 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
             try await validator(server).authorize(with: client)
         }
         #expect(tokens.expiredCount == 0 && tokens.current != nil)
+    }
+
+    @Test func authorizeRefreshRedirectedToAnotherHost() async throws {
+        let other = StubServer { _ in .json(#"{"user":{"accessToken":"a","refreshToken":"r"}}"#) }
+        let server = StubServer { request in
+            request.url?.path() == "/abs/auth/refresh"
+                ? .redirect(to: "https://\(other.host)/abs/auth/refresh", status: 307)
+                : .text("Unauthorized", status: 401)
+        }
+        let client = APIClient(
+            configuration: try APIClientConfiguration(baseURL: server.baseURL),
+            tokenProvider: InMemoryTokenProvider(), sessionConfiguration: server.sessionConfiguration())
+        await #expect(throws: ServerValidationError.loginRedirected) {
+            try await validator(server).authorize(with: client)
+        }
+        #expect(other.requests.isEmpty)
     }
 
     @Test(arguments: [307, 302])
