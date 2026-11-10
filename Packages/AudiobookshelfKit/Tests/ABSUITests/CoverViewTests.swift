@@ -47,9 +47,9 @@ import Testing
         #expect(ImageFallback.resolve(hasKey: true, hasPipeline: true, failed: true) == .failed)
     }
 
-    @Test func memoryHitsAppearWithoutAFade() {
-        #expect(ImageReveal.animation(after: .milliseconds(2)) == nil)
-        #expect(ImageReveal.animation(after: .milliseconds(400)) != nil)
+    @Test func memoryHitsAppearWithoutATransitionAndLoadsFadeIn() {
+        #expect(ImageReveal.immediate.animation == nil)
+        #expect(ImageReveal.fade.animation == .easeIn(duration: 0.3))
     }
 
     @Test func voiceOverValueSpeaksProgressOrFinished() {
@@ -145,5 +145,84 @@ import Testing
         let loadsOther = state.begin(other, hasPipeline: true)
         #expect(loadsOther)
         #expect(state.image == nil)
+    }
+
+    @Test func memoryHitShowsAtOnceWithoutALoad() throws {
+        let cover = try request("li_1")
+        var state = ImageLoadState<String>()
+        var asked: [ImageLoadRequest] = []
+        let loads = state.begin(cover, hasPipeline: true) {
+            asked.append($0)
+            return "cached"
+        }
+        #expect(!loads)
+        #expect(asked == [cover])
+        #expect(state.image == "cached" && state.reveal == .immediate)
+        #expect(state.shown == cover && state.entity?.entityID == "li_1")
+    }
+
+    @Test func missLoadsAndTheLoadedImageFadesIn() throws {
+        let cover = try request("li_1")
+        var state = ImageLoadState<String>()
+        let loads = state.begin(cover, hasPipeline: true) { _ in nil }
+        #expect(loads)
+        #expect(state.image == nil)
+        state.finish(cover, result: .success("loaded"), isCancelled: false)
+        #expect(state.image == "loaded" && state.reveal == .fade)
+    }
+
+    @Test func shownRequestIsNeitherLookedUpNorLoadedAgain() throws {
+        let cover = try request("li_1")
+        var state = ImageLoadState<String>()
+        _ = state.begin(cover, hasPipeline: true) { _ in "cached" }
+        // The task's own begin, after the hit shown from `onAppear`.
+        var lookups = 0
+        let loadsAgain = state.begin(cover, hasPipeline: true) { _ in
+            lookups += 1
+            return nil
+        }
+        #expect(!loadsAgain && lookups == 0)
+        #expect(state.image == "cached")
+
+        // A new size of the same cover looks up its own box, keeping the old image on a miss.
+        let larger = try request("li_1", width: 300)
+        let loadsLarger = state.begin(larger, hasPipeline: true) { _ in
+            lookups += 1
+            return nil
+        }
+        #expect(loadsLarger && lookups == 1)
+        #expect(state.image == "cached")
+    }
+
+    @Test func returningViewShowsItsMemoryHitAtOnce() throws {
+        let cover = try request("li_1")
+        var state = ImageLoadState<String>()
+        _ = state.begin(cover, hasPipeline: true)
+        state.finish(cover, result: .success("loaded"), isCancelled: false)
+        state.disappear()
+        let reloads = state.begin(cover, hasPipeline: true) { _ in "cached" }
+        #expect(!reloads)
+        #expect(state.image == "cached" && state.reveal == .immediate)
+    }
+
+    @Test func memoryHitClearsAFailure() throws {
+        let cover = try request("li_1")
+        var state = ImageLoadState<String>()
+        _ = state.begin(cover, hasPipeline: true)
+        state.finish(cover, result: .failure(LoadFailed()), isCancelled: false)
+        #expect(state.failed)
+        _ = state.begin(cover, hasPipeline: true) { _ in "cached" }
+        #expect(!state.failed && state.image == "cached")
+    }
+
+    @Test func withoutAPipelineTheMemoryCacheIsNotAsked() throws {
+        let cover = try request("li_1")
+        var state = ImageLoadState<String>()
+        var lookups = 0
+        let loads = state.begin(cover, hasPipeline: false) { _ in
+            lookups += 1
+            return "cached"
+        }
+        #expect(!loads && lookups == 0 && state.image == nil)
     }
 }

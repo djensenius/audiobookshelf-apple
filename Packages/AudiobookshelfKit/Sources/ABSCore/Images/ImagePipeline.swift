@@ -77,8 +77,8 @@ public actor ImagePipeline {
     public func image(for key: ImageKey, pixelBox: PixelBox) async throws -> CoverImage {
         // Before any lookup, so a removed server's covers can't come back from a downloaded file.
         guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
+        if let hit = cachedImage(for: key, pixelBox: pixelBox) { return hit }
         let memoryKey = MemoryKey(key: key, box: pixelBox)
-        if let hit = memory.image(for: memoryKey) { return CoverImage(hit) }
         while true {
             try Task.checkCancellation()
             let flight: Flight<DecodedBitmap>
@@ -104,6 +104,15 @@ public actor ImagePipeline {
                 continue
             }
         }
+    }
+
+    /// The image for `key` at `pixelBox` if the memory LRU holds it, else `nil`, without
+    /// waiting for the actor or loading anything, so a view can show a memory hit on its first
+    /// frame. It reads the same LRU as ``image(for:pixelBox:)``: a hit counts as recently used
+    /// and is held like any other ``CoverImage``, so keep the wrapper while the image is shown.
+    /// A removed server's images were purged from the LRU, so they miss here too.
+    public nonisolated func cachedImage(for key: ImageKey, pixelBox: PixelBox) -> CoverImage? {
+        memory.coverImage(for: MemoryKey(key: key, box: pixelBox))
     }
 
     /// The image for `key` fitted into `size` pixels, for Now Playing and CarPlay.
