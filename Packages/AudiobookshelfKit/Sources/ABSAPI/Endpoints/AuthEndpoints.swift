@@ -67,10 +67,18 @@ public enum AuthEndpoints {
     /// instead of reporting a logout that never revoked anything. For the same reason a 301, 302
     /// or 303 that would turn the POST into a GET is refused (``RedirectPolicy``); a 307 or 308
     /// keeps the POST and is followed.
-    public static func logout(refreshToken: String) -> Endpoint<LogoutResponse> {
-        Endpoint(
-            .post, "/logout", headers: ["x-refresh-token": refreshToken], requiresAuthentication: false,
-            staysOnOrigin: true, withheldCookies: ["refresh_token"])
+    ///
+    /// For an OpenID session, pass the cookies saved at sign-in: they're added to the jar's in
+    /// the `Cookie` header (replacing any jar cookies of the same names), so the server returns
+    /// the identity provider's end-session URL in ``LogoutResponse/redirectURL``.
+    public static func logout(
+        refreshToken: String, openIDSession: OpenIDSessionCookies? = nil
+    ) -> Endpoint<LogoutResponse> {
+        var headers = ["x-refresh-token": refreshToken]
+        if let openIDSession { headers["Cookie"] = openIDSession.headerValue }
+        return Endpoint(
+            .post, "/logout", headers: headers, requiresAuthentication: false, staysOnOrigin: true,
+            withheldCookies: ["refresh_token"])
     }
 }
 
