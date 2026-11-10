@@ -34,6 +34,16 @@ private final class Harness {
         }
     }
 
+    /// Plays from `start` to `end`, ticking the last second in this job: the expiry's seek task can't run before
+    /// the test next suspends. (A tick task's tick can land while ``until`` is off the main actor.)
+    func playToExpiry(from start: Double, to end: Double) async {
+        await play(from: start, to: end - 1)
+        control.currentTime = end
+        clock.advance(by: .seconds(1))
+        timer.tick()
+        #expect(control.pauseCount == 1)
+    }
+
     /// Expires a running duration timer and checks it can restart.
     func expire() async {
         guard case .duration(let length) = timer.mode, let remaining = timer.remaining else {
@@ -55,7 +65,7 @@ private final class Harness {
         switch move {
         case .none: timer.itemDidChange("a")
         case .seek, .unreportedSeek: control.currentTime = 5000
-        case .pendingSeek: control.userSeekIsPending = true
+        case .pendingSeek: control.userSeekTarget = 5000
         case .anotherItem: timer.itemDidChange("b")
         }
         if move == .seek { timer.didSeek(to: 5000) }
@@ -260,8 +270,7 @@ struct SleepTimerTests {
         let harness = Harness(at: 100)
         harness.timer.itemDidChange("a")
         harness.timer.start(.duration(30))
-        await harness.play(from: 100, to: 130)
-        #expect(harness.control.pauseCount == 1)
+        await harness.playToExpiry(from: 100, to: 130)
         harness.apply(move)
         await Task { @MainActor in }.value  // Queued after the expiry's seek task, so that has run.
         #expect(harness.control.seeks == (move == .none ? [100] : []))
@@ -471,12 +480,12 @@ struct SleepTimerTests {
         let harness = Harness(timeline: chapters, at: end - 20)
         harness.timer.start(.endOfChapter)
         await harness.play(from: end - 20, to: end - 1)
-        harness.control.userSeekIsPending = true
+        harness.control.userSeekTarget = end - 30
         harness.control.isPlaying = end < 1800
         harness.control.currentTime = end
         await harness.advance(1)
         #expect(harness.control.pauseCount == 0)
-        harness.control.userSeekIsPending = false
+        harness.control.userSeekTarget = nil
         harness.control.currentTime = end - 30
         harness.timer.didSeek(to: end - 30)
         #expect(harness.timer.remaining == 30)
@@ -1089,8 +1098,22 @@ struct SleepTimerTests {
         #expect(harness.timer.isAutomatic, "And the next automatic timer starts")
     }
 
-    /// A play during the expiry's seek takes no automatic rewind; a manual start keeps it, as does a failed seek
-    /// unless a user's seek superseded it.
+    /// A seek of the user's before the expiry's seek task runs drops the automatic rewind, even onto where the fade
+    /// began.
+    @Test func aSeekBeforeTheExpirySeekDropsTheAutomaticRewind() async throws {
+        let harness = Harness(at: 1000, options: try autoOptions(mode: .duration(70)))
+        _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        await harness.playToExpiry(from: 1000, to: 1070)
+        harness.control.currentTime = 1010
+        harness.timer.didSeek(to: 1010)
+        await Task { @MainActor in }.value  // Queued after the expiry's seek task, so that has run.
+        #expect(harness.control.seeks.isEmpty)
+        await harness.endGrace()
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == 0)
+    }
+
+    /// A play during the expiry's seek takes the automatic rewind from where the seek lands; a manual start keeps
+    /// it, as does a failed seek unless a user's seek superseded it.
     @Test(arguments: ExpirySeek.allCases)
     func theAutomaticRewindAfterTheExpirySeek(_ event: ExpirySeek) async throws {
         let harness = Harness(at: 1000, options: try autoOptions(mode: .duration(70)))
@@ -1099,7 +1122,7 @@ struct SleepTimerTests {
         harness.control.seeksLand = event != .failure && event != .userSeek
         await harness.play(from: 1000, to: 1070)
         await until { harness.control.seeks == [1010] }
-        if event == .play { #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 0) }
+        if event == .play { #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 300) }
         if event == .manualStart { harness.timer.start(.duration(600)) }
         if event == .userSeek { harness.control.currentTime = 5000 }
         await harness.control.finishSeek()
@@ -1108,6 +1131,42 @@ struct SleepTimerTests {
         harness.timer.cancel()
         let rewind: TimeInterval = event == .play || event == .userSeek ? 0 : 300
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == rewind)
+    }
+
+    /// A reset during the expiry's own seek back to the fade resumes from there, after the automatic rewind; a seek
+    /// of the user's superseding it wins: no play, and the grace period comes back.
+    @Test(arguments: [false, true], [false, true])
+    func aResetDuringTheExpirySeek(automatic: Bool, userSeeks: Bool) async throws {
+        let harness = Harness(
+            timeline: chapters, at: 1000,
+            options: try automatic ? autoOptions(mode: .duration(70)) : SleepTimerOptions())
+        if automatic {
+            _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        } else {
+            harness.timer.start(.duration(70))
+        }
+        harness.control.holdsSeeks = true
+        await harness.play(from: 1000, to: 1070)
+        await until { harness.control.seeks == [1010] }
+        harness.control.holdsSeeks = false
+        #expect(harness.timer.reset())
+        if userSeeks {
+            harness.control.userSeekTarget = 5000
+            harness.control.seeksLand = false
+            await Task { @MainActor in }.value  // Queued after the reset's task, so that has run.
+            await harness.control.finishSeek()
+            #expect(harness.control.seeks == [1010])
+            #expect(harness.control.plays == 0)
+            #expect(harness.timer.isRunning == false)
+            #expect(harness.timer.canRestart)
+            return
+        }
+        await until { harness.control.plays == 1 }
+        await harness.control.finishSeek()
+        #expect(harness.control.seeks == (automatic ? [1010, 710] : [1010]))
+        #expect(harness.control.currentTime == (automatic ? 710 : 1010))
+        #expect(harness.timer.isRunning)
+        #expect(harness.feedback.resets == 1)
     }
 
     @Test func automaticChapterTimerRestartsFromTheRewoundPosition() async throws {
