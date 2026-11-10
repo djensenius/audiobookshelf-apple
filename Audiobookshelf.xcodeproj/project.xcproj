@@ -58,11 +58,12 @@
         },
       ],
       "build-settings": {
+        "ABS_MACOS_ENTITLEMENTS": "Audiobookshelf/Audiobookshelf.entitlements",
         "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon",
         "ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME": "AccentColor",
         "CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]": "Audiobookshelf/Audiobookshelf-iOS.entitlements",
         "CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]": "Audiobookshelf/Audiobookshelf-iOS.entitlements",
-        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": "Audiobookshelf/Audiobookshelf.entitlements",
+        "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": "$(ABS_MACOS_ENTITLEMENTS)",
         "CODE_SIGN_STYLE": "Automatic",
         "CURRENT_PROJECT_VERSION": "1",
         "ENABLE_HARDENED_RUNTIME": "YES",
