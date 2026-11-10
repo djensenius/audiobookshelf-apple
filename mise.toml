@@ -11,7 +11,7 @@ depends = ["lint:repo", "lint:swift"]
 
 [tasks."lint:repo"]
 description = "Lint shell scripts and workflows (no Xcode needed)"
-depends = ["lint:shell", "lint:actions"]
+depends = ["lint:shell", "lint:actions", "lint:nowplaying"]
 
 [tasks."lint:shell"]
 description = "Lint shell scripts with ShellCheck"
@@ -20,6 +20,10 @@ run = "shellcheck scripts/*.sh ci_scripts/*.sh"
 [tasks."lint:actions"]
 description = "Lint GitHub Actions workflows with actionlint"
 run = "actionlint"
+
+[tasks."lint:nowplaying"]
+description = "ADR 0006: NowPlaying only, in ABSPlayback/NowPlaying; no MediaPlayer"
+run = "scripts/lint-nowplaying.sh"
 
 [tasks."lint:swift"]
 description = "Lint Swift sources with swift format"

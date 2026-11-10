@@ -84,7 +84,7 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 
 | Command | What it does |
 | --- | --- |
-| `mise run lint` | ShellCheck, actionlint, and `swift format lint --strict` (`lint:repo` skips Swift) |
+| `mise run lint` | ShellCheck, actionlint, the ADR 0006 Now Playing import rule (`lint:nowplaying`), and `swift format lint --strict` (`lint:repo` skips Swift) |
 | `mise run format` | `swift format` Swift sources in place |
 | `mise run build:ios` / `build:macos` | Build the app (unsigned) into `.build/DerivedData` |
 | `mise run test` | Package tests (`test:kit`), tool tests (`test:tools`), and macOS app tests (`test:app`, signed ad hoc) |
