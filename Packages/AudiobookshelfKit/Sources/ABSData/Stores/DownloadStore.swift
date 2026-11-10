@@ -335,6 +335,21 @@ import SwiftData
         }
     }
 
+    /// Changes a record's state only while it is in one of `expecting`, so a failure cannot
+    /// overwrite a concurrent pause or resume.
+    @discardableResult
+    public func setState(
+        _ state: DownloadState, forRecord id: UUID, expecting: Set<DownloadState>, now: Date = .now
+    ) throws -> Bool {
+        try commit {
+            guard let model = try fetchRecord(id: id), let current = model.stateValue, expecting.contains(current)
+            else { return false }
+            model.state = state.rawValue
+            model.updatedAt = now
+            return true
+        }
+    }
+
     /// Deletes the record and, by cascade, its parts. Returns what was deleted, so the caller can
     /// remove resume-data blobs for its parts, or `nil` when it doesn't exist.
     @discardableResult

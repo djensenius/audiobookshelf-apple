@@ -578,9 +578,8 @@ import Testing
         #expect(harness.session?.resumedData == [Data("resume-b".utf8)])
     }
 
-    /// A resume while a part fails for good (its sibling's stop still under way) skips the
-    /// failing part, then starts it once the failure is settled.
-    @Test func resumeDuringAPermanentFailureRestartsTheFailingPart() async throws {
+    /// A resume can queue a record before its start reaches a part that is settling.
+    @Test func resumeBeforePermanentFailureSettlesRestartsTheFailingPart() async throws {
         let first = StubGate()
         let later = StubGate()
         let never = StubGate()
@@ -596,15 +595,29 @@ import Testing
         let failing = UUID()
         let sibling = UUID()
         let record = try await harness.addRecord(parts: [failing, sibling])
-        let (reading, readDone) = AsyncStream.makeStream(of: Void.self)
+        let (resumeReads, resumeReadStarted) = AsyncStream.makeStream(of: DownloadState?.self)
+        let releaseResumeRead = StubGate()
         let (cancelling, cancelStarted) = AsyncStream.makeStream(of: Void.self)
         let release = StubGate()
-        let isWatching = Mutex(false)
+        let (reads, readDone) = AsyncStream.makeStream(of: Int.self)
+        let readCount = Mutex(0)
         let engine = harness.makeEngine(
             readRecords: { store in
                 let records = try await store.allRecords()
-                if isWatching.withLock({ $0 }) { readDone.yield() }
+                let count = readCount.withLock {
+                    $0 += 1
+                    return $0
+                }
+                if count >= 3 { readDone.yield(count) }
                 return records
+            },
+            readRecord: { store, id in
+                let record = try await store.record(id: id)
+                resumeReadStarted.yield(record?.state)
+                await withCheckedContinuation { continuation in
+                    releaseResumeRead.run { continuation.resume() }
+                }
+                return record
             },
             cancel: { task in
                 cancelStarted.yield()
@@ -614,22 +627,28 @@ import Testing
         await engine.start(partIDs: [failing, sibling])
         await harness.waitForRequests(2)
 
-        // The 404 fails the record for good; the sibling's stop is held.
+        let resuming = Task { try await engine.resume(recordID: record.id) }
+        #expect(await resumeReads.first { _ in true } == .queued)
+
+        // The resume has saved `.queued` and read it, but can't start until released.
         first.open()
         _ = await cancelling.first { _ in true }
-        isWatching.withLock { $0 = true }
-        let resuming = Task { try await engine.resume(recordID: record.id) }
-        // The resume's start has read the downloads; a hop lets it find the failing part settling.
-        _ = await reading.first { _ in true }
-        _ = await engine.backgroundWaiterCount
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        releaseResumeRead.open()
+        _ = await reads.first { $0 >= 3 }
+        while await engine.startsAfterSettlingCount == 0 { await Task.yield() }
         release.open()
 
         #expect(try await resuming.value)
         await engine.processPendingEvents()
         try #require(try await harness.store.part(id: failing)?.state == .running)
+        #expect(try await harness.store.record(id: record.id)?.state == .downloading)
+        let task = try #require(
+            await harness.session?.session.allTasks.first { $0.taskDescription == failing.uuidString })
+        #expect(task.state == .running)
         later.open()
-        #expect(await engine.nextRecordComplete() != nil)
-        #expect(harness.requests.count == 4)
+        await harness.waitForCompletions(3)
+        await engine.processPendingEvents()
     }
 
     @Test(arguments: [DownloadState.paused, .failed])

@@ -167,6 +167,7 @@ public actor DownloadEngine {
     /// Parts a ``start(partIDs:)`` asked for while they were settling; one that was failing for
     /// good starts once that is settled.
     private var startsAfterSettling: Set<UUID> = []
+    var startsAfterSettlingCount: Int { startsAfterSettling.count }
     /// Moved files whose completion couldn't be saved yet, with their sizes. The part stays
     /// settling until ``saveCompletion(_:)`` succeeds.
     private var unsavedCompletions: [UUID: Int64] = [:]
@@ -1179,7 +1180,7 @@ public actor DownloadEngine {
     /// later ``reconcile()`` saves it.
     private func saveRecordFailure(_ recordID: UUID) async {
         do {
-            try await store.setState(.failed, forRecord: recordID)
+            _ = try await store.setState(.failed, forRecord: recordID, expecting: [.queued, .downloading])
             pendingRecordFailures.remove(recordID)
         } catch {
             logError("Couldn't record a failed download", error)
@@ -1283,6 +1284,15 @@ public actor DownloadEngine {
             .partFailed(partID: partID, recordID: context.recordID, code: code, message: message, willRetry: false))
         // A resume (or start) while the siblings were stopping skipped this part: start it now.
         if startsAfterSettling.remove(partID) != nil {
+            do {
+                guard
+                    try await store.setState(
+                        .queued, forRecord: context.recordID, expecting: [.queued, .downloading, .failed])
+                else { return }
+            } catch {
+                logError("Couldn't resume a download after its failure settled", error)
+                return
+            }
             await start(partIDs: [partID])
         }
     }

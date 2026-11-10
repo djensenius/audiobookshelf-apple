@@ -383,6 +383,15 @@ import Testing
         #expect(try await store.setState(.paused, forRecord: UUID()) == false)
     }
 
+    @Test func conditionalFailureStateDoesNotOverwritePause() async throws {
+        let (store, _) = try makeStore()
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [Self.part()]), now: now).record
+        #expect(try await store.setState(.paused, forRecord: created.id))
+
+        #expect(try await store.setState(.failed, forRecord: created.id, expecting: [.queued, .downloading]) == false)
+        #expect(try await store.record(id: created.id)?.state == .paused)
+    }
+
     @Test func upsertRejectsConflictsAndMissingConnection() async throws {
         let (store, container) = try makeStore()
         let part = Self.part()
