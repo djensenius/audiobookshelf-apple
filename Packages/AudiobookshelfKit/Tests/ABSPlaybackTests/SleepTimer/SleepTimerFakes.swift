@@ -18,6 +18,8 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
     private(set) var seeks: [Double] = []
     /// Whether seeks complete.
     var seeksLand = true
+    /// Whether a seek that doesn't complete stays pending, as the engine keeps one interrupted twice for its retry.
+    var retainsFailedSeeks = false
     /// Whether seeks wait for ``finishSeek()``.
     var holdsSeeks = false
     /// Where a seek of the user's in flight lands.
@@ -56,8 +58,11 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
             heldSeek = nil
         }
         guard generation == seeks.count else { return nil }
+        guard seeksLand else {
+            if !retainsFailedSeeks { seekTarget = nil }
+            return nil
+        }
         seekTarget = nil
-        guard seeksLand else { return nil }
         currentTime = time
         return time
     }

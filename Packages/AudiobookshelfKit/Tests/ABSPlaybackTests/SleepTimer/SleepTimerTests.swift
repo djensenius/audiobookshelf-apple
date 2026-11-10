@@ -89,10 +89,24 @@ private func gappedTimeline(_ ranges: [ClosedRange<Double>], chapterEnd: Double)
 enum GraceEnd: CaseIterable, Sendable { case graceTask, clockOnly, cancel, anotherItem, pause }
 /// What happens after a timer expires: nothing, a seek that landed (reported or not) or is in flight, or another item.
 enum Move: CaseIterable, Sendable { case none, seek, unreportedSeek, pendingSeek, anotherItem }
-/// What happens during the seek back to where an expired timer's fade began.
-enum ExpirySeek: CaseIterable, Sendable { case play, manualStart, failure, userSeek }
+/// What happens during the seek back to where an expired timer's fade began: `interruption` leaves it pending.
+enum ExpirySeek: CaseIterable, Sendable { case play, manualStart, failure, interruption, userSeek }
 /// What happens before a grace-period reset's rewind seek, or during it.
 enum ResetRace: CaseIterable, Sendable { case cancelBefore, startBefore, itemBefore, cancelDuring, itemDuring }
+
+/// A 70 s timer from 1000 on chapters, started automatically (rewinding 300 s on expiry) or by hand: its fade
+/// begins at 1010.
+@MainActor
+private func expiringHarness(automatic: Bool) throws -> Harness {
+    let harness = Harness(
+        timeline: chapters, at: 1000, options: try automatic ? autoOptions(mode: .duration(70)) : SleepTimerOptions())
+    if automatic {
+        _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+    } else {
+        harness.timer.start(.duration(70))
+    }
+    return harness
+}
 
 private func autoOptions(mode: SleepTimerMode = .duration(10), rewind: TimeInterval? = 300) throws -> SleepTimerOptions
 {
@@ -1113,38 +1127,73 @@ struct SleepTimerTests {
     }
 
     /// A play during the expiry's seek takes the automatic rewind from where the seek lands; a manual start keeps
-    /// it, as does a failed seek unless a user's seek superseded it.
+    /// it, as does a failed seek unless a user's seek superseded it, and one the engine keeps for its retry.
     @Test(arguments: ExpirySeek.allCases)
     func theAutomaticRewindAfterTheExpirySeek(_ event: ExpirySeek) async throws {
         let harness = Harness(at: 1000, options: try autoOptions(mode: .duration(70)))
         _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
-        harness.control.holdsSeeks = event != .failure
-        harness.control.seeksLand = event != .failure && event != .userSeek
+        harness.control.holdsSeeks = event != .failure && event != .interruption
+        harness.control.seeksLand = event == .play || event == .manualStart
+        harness.control.retainsFailedSeeks = event == .interruption
         await harness.play(from: 1000, to: 1070)
         await until { harness.control.seeks == [1010] }
         if event == .play { #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 300) }
         if event == .manualStart { harness.timer.start(.duration(600)) }
         if event == .userSeek { harness.control.currentTime = 5000 }
         await harness.control.finishSeek()
-        let position: Double = event == .failure ? 1070 : event == .userSeek ? 5000 : 1010
+        let position: Double = event == .failure || event == .interruption ? 1070 : event == .userSeek ? 5000 : 1010
         await until { harness.control.currentTime == position }
+        #expect(harness.control.pendingSeekTarget == (event == .interruption ? 1010 : nil))
         harness.timer.cancel()
         let rewind: TimeInterval = event == .play || event == .userSeek ? 0 : 300
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == rewind)
+    }
+
+    /// A reset before the expiry's seek back to the fade starts takes that seek over, after the automatic rewind,
+    /// and resumes; a seek of the user's still wins. The expiry's task stands down either way.
+    @Test(arguments: [false, true], [false, true])
+    func aResetBeforeTheExpirySeekTakesItOver(automatic: Bool, userSeeks: Bool) async throws {
+        let harness = try expiringHarness(automatic: automatic)
+        await harness.playToExpiry(from: 1000, to: 1070)
+        #expect(harness.timer.reset())
+        if userSeeks { harness.apply(.seek) }
+        await Task { @MainActor in }.value  // Queued after the expiry's and the reset's tasks, so they have run.
+        #expect(harness.control.seeks == (userSeeks ? [] : [automatic ? 710 : 1010]))
+        #expect(harness.control.plays == (userSeeks ? 0 : 1))
+        #expect(harness.timer.isRunning == !userSeeks)
+        #expect(harness.feedback.resets == (userSeeks ? 0 : 1))
+    }
+
+    /// A reset that took over the expiry's seek back to the fade, and whose seek fails, gives it back with the grace
+    /// period and the automatic rewind: the next play reaches back past both.
+    @Test func aFailedResetGivesTheExpirySeekBack() async throws {
+        let harness = try expiringHarness(automatic: true)
+        await harness.playToExpiry(from: 1000, to: 1070)
+        harness.control.seeksLand = false
+        #expect(harness.timer.reset())
+        await Task { @MainActor in }.value  // Queued after the expiry's and the reset's tasks, so they have run.
+        #expect(harness.control.seeks == [710])
+        #expect(harness.timer.canRestart)
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 360)
+    }
+
+    /// A play before the expiry's seek back to the fade starts takes that seek over: the rewind it returns reaches
+    /// back there, past the automatic rewind, and the expiry's task stands down.
+    @Test(arguments: [false, true])
+    func aPlayBeforeTheExpirySeekTakesItOver(automatic: Bool) async throws {
+        let harness = try expiringHarness(automatic: automatic)
+        await harness.playToExpiry(from: 1000, to: 1070)
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == (automatic ? 360 : 60))
+        await Task { @MainActor in }.value  // Queued after the expiry's task, so that has run.
+        #expect(harness.control.seeks.isEmpty)
+        #expect(harness.timer.isRunning)
     }
 
     /// A reset during the expiry's own seek back to the fade resumes from there, after the automatic rewind; a seek
     /// of the user's superseding it wins: no play, and the grace period comes back.
     @Test(arguments: [false, true], [false, true])
     func aResetDuringTheExpirySeek(automatic: Bool, userSeeks: Bool) async throws {
-        let harness = Harness(
-            timeline: chapters, at: 1000,
-            options: try automatic ? autoOptions(mode: .duration(70)) : SleepTimerOptions())
-        if automatic {
-            _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
-        } else {
-            harness.timer.start(.duration(70))
-        }
+        let harness = try expiringHarness(automatic: automatic)
         harness.control.holdsSeeks = true
         await harness.play(from: 1000, to: 1070)
         await until { harness.control.seeks == [1010] }
