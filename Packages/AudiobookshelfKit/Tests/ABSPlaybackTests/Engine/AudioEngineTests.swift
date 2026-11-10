@@ -68,8 +68,9 @@ struct AudioEngineTests {
         await #expect {
             try await engine.load(AudioEngineSource(timeline: fixture.timeline, trackURLs: [missing]), at: 0)
         } throws: { error in
-            guard case .itemFailed(trackIndex: 0, _) = error as? AudioEngineError else { return false }
-            return true
+            guard case .itemFailed(trackIndex: 0, let failure) = error as? AudioEngineError else { return false }
+            // Observed on macOS 27.2: AVFoundationErrorDomain -11800 over NSOSStatusErrorDomain -17913.
+            return failure.domain == AVFoundationErrorDomain && failure.underlyingDomain != nil
         }
         guard case .failed = engine.state else {
             Issue.record("Expected failed state, got \(engine.state)")
@@ -139,7 +140,7 @@ struct AudioEngineTests {
         try await engine.load(fixture.source, at: 0)
 
         let first = Task { await engine.seek(to: 4) }
-        while engine.pendingSeekTarget != 4 { await Task.yield() }
+        try await waitUntil { engine.pendingSeekTarget == 4 }
         let second = await engine.seek(to: 7)
 
         #expect(await first.value == .superseded)
@@ -349,6 +350,8 @@ struct AudioEngineTests {
 
         #expect(await eventually { if case .failed(.playerFailed) = engine.state { true } else { false } })
         #expect(events.contains { if case .failed(.playerFailed) = $0 { true } else { false } })
+        // The forced failure has no `player.error`.
+        #expect(engine.state == .failed(.playerFailed(PlaybackFailure(error: nil))))
         #expect(!engine.isPlaybackRequested)
 
         #expect(await engine.seek(to: 4) == .completed)
@@ -383,7 +386,7 @@ struct AudioEngineTests {
         let fixture = try AudioFixture()
         let engine = makeEngine()
         let load = Task { try await engine.load(fixture.source, at: 4) }
-        while engine.state != .loading { await Task.yield() }
+        try await waitUntil { engine.state == .loading }
 
         engine.play()
         #expect(engine.player.rate == 0)

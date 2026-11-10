@@ -61,11 +61,11 @@ public enum AudioEngineError: Error, Sendable, Hashable {
     /// ``AudioEngineSource/trackURLs`` does not have one URL per timeline track.
     case trackURLMismatch(expected: Int, actual: Int)
     /// The item for `tracks[trackIndex]` failed to load or play.
-    case itemFailed(trackIndex: Int, description: String)
+    case itemFailed(trackIndex: Int, PlaybackFailure)
     /// Another `load` or `stop` replaced this load before it finished.
     case superseded
     /// The player itself failed (`AVPlayer.status == .failed`). A seek or load replaces it.
-    case playerFailed(description: String)
+    case playerFailed(PlaybackFailure)
     /// The audio session could not be activated, so playback did not start. Not a sticky failure.
     case audioSessionActivationFailed(description: String)
 }
