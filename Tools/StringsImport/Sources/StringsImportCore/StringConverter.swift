@@ -9,7 +9,8 @@ public enum StringConverter {
 
     /// Converts a value:
     /// - `{N}` becomes the positional format specifier `%<N+1>$@`;
-    /// - `<strong>x</strong>` and `<b>x</b>` become Markdown `**x**`;
+    /// - `<strong>x</strong>` and `<b>x</b>` become `^[**x**]()`: Markdown bold inside an
+    ///   extended-attribute span (see `bold(_:)`);
     /// - `<br>` becomes a newline.
     ///
     /// When `isFormat` is true, a literal `%` is escaped as `%%`, as Xcode does for strings
@@ -49,12 +50,19 @@ public enum StringConverter {
         return nil
     }
 
-    /// Markdown bold, with surrounding whitespace moved outside the delimiters.
+    /// Markdown bold wrapped in an empty extended-attribute span, `^[**x**]()`, with
+    /// surrounding whitespace moved outside.
+    ///
+    /// Plain `**x**` can't close when `x` ends in punctuation and a letter follows, as in
+    /// `**重要提示！**此应用`. Inside the brackets the delimiters always sit next to `[`/`]`,
+    /// so CommonMark's flanking rules hold. `L10n.attributed` parses with
+    /// `allowsExtendedAttributes`.
     private static func bold(_ text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return text }
         let leading = text.prefix { $0.isWhitespace }
         let trailing = String(text.reversed().prefix { $0.isWhitespace }.reversed())
-        return "\(leading)**\(trimmed)**\(trailing)"
+        let escaped = trimmed.replacing("[", with: "\\[").replacing("]", with: "\\]")
+        return "\(leading)^[**\(escaped)**]()\(trailing)"
     }
 }

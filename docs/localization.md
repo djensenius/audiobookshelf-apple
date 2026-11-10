@@ -49,8 +49,9 @@ asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
 
 ## Using strings in Swift
 
-- `L10n.string` returns plain text. `L10n.attributed` renders the localized value's inline
-  Markdown (`**bold**`, line breaks kept) and inserts the arguments as plain text.
+- `L10n.string` returns plain text, with any markup (bold) removed. `L10n.attributed`
+  renders the localized value's inline Markdown (bold, line breaks kept). Both insert the
+  arguments as plain text.
 - Never run Markdown over formatted output (`AttributedString(markdown: L10n.string(…))`
   or `Text(LocalizedStringKey(…))`): arguments are often server data such as user names or
   titles, and would be parsed as links or formatting.
@@ -65,7 +66,11 @@ asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
 - `{0}`, `{1}`, … become positional specifiers `%1$@`, `%2$@`, …, so translations can
   reorder arguments. Pass every argument as a `String`.
 - In strings with placeholders, a literal `%` becomes `%%`.
-- `<strong>x</strong>` and `<b>x</b>` become Markdown `**x**`; `<br>` becomes a newline.
+- `<strong>x</strong>` and `<b>x</b>` become `^[**x**]()`, Markdown bold inside an empty
+  extended-attribute span; `<br>` becomes a newline. Plain `**x**` can't close when `x`
+  ends in punctuation and a letter follows (`**重要提示！**此应用` renders literal
+  asterisks); inside the brackets it always can. `L10n.attributed` parses with
+  `allowsExtendedAttributes`.
   The importer warns about any other tag. Render it with `L10n.attributed`.
 - Empty translations are skipped. So is a translation that uses a placeholder its English
   string doesn't have, or a malformed one such as `{0`; the importer prints a warning.

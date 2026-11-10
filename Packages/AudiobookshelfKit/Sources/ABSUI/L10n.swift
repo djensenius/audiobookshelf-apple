@@ -15,11 +15,14 @@ public enum L10n {
     /// fills untranslated keys with English; if a lookup still returns the key itself, this
     /// falls back to the English table.
     ///
-    /// Values may contain Markdown such as `**bold**`. Use ``attributed(_:_:locale:)`` to
-    /// render it; never parse this method's formatted result as Markdown, because the
-    /// arguments (often server data) would be parsed too.
+    /// Markup in the value (e.g. bold, written `^[**x**]()`) is dropped: the result is the
+    /// plain text of ``attributed(_:_:locale:)``. Never parse this result as Markdown,
+    /// because the arguments (often server data) would be parsed too.
     public static func string(_ key: String, _ arguments: String..., locale: Locale? = nil) -> String {
         let format = lookup(key, locale: locale)
+        if format.contains(where: markupCharacters.contains), let rendered = render(format, arguments: arguments) {
+            return String(rendered.characters)
+        }
         guard !arguments.isEmpty else { return format }
         return String(format: format, locale: locale ?? .current, arguments: arguments)
     }
@@ -30,7 +33,21 @@ public enum L10n {
     /// as plain text with the attributes around their placeholder (e.g. bold), so they can't
     /// add links or formatting.
     public static func attributed(_ key: String, _ arguments: String..., locale: Locale? = nil) -> AttributedString {
-        var format = lookup(key, locale: locale)
+        let format = lookup(key, locale: locale)
+        if let rendered = render(format, arguments: arguments) {
+            return rendered
+        }
+        guard !arguments.isEmpty else { return AttributedString(format) }
+        return AttributedString(String(format: format, locale: locale ?? .current, arguments: arguments))
+    }
+
+    /// Characters that can start inline Markdown; values without any skip the parser.
+    private static let markupCharacters: Set<Character> = ["*", "_", "`", "[", "]", "^", "\\", "~", "<", "&"]
+
+    /// Parses `format` as inline Markdown and inserts `arguments` as plain text, or returns
+    /// `nil` if the format isn't valid Markdown.
+    private static func render(_ format: String, arguments: [String]) -> AttributedString? {
+        var format = format
         // Each specifier becomes a private-use sentinel that Markdown leaves alone.
         var values: [String] = []
         if !arguments.isEmpty {
@@ -41,8 +58,10 @@ public enum L10n {
                 return "\u{E000}\(values.count - 1)\u{E001}"
             }
         }
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        let parsed = (try? AttributedString(markdown: format, options: options)) ?? AttributedString(format)
+        // Extended attributes: the importer writes bold as `^[**x**]()` (see docs/localization.md).
+        var options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        options.allowsExtendedAttributes = true
+        guard let parsed = try? AttributedString(markdown: format, options: options) else { return nil }
         guard !values.isEmpty else { return parsed }
         // Rebuild run by run so inserted arguments are never scanned for sentinels again.
         var result = AttributedString()

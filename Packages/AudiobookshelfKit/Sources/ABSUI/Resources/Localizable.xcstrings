@@ -23282,241 +23282,241 @@
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "مرحبا, **%1$@**"
+            "value" : "مرحبا, ^[**%1$@**]()"
           }
         },
         "be" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Вітаем, **%1$@**"
+            "value" : "Вітаем, ^[**%1$@**]()"
           }
         },
         "bg" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Добре дошли, **%1$@**"
+            "value" : "Добре дошли, ^[**%1$@**]()"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "স্বাগতম, **%1$@**"
+            "value" : "স্বাগতম, ^[**%1$@**]()"
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Benvingut, **%1$@**"
+            "value" : "Benvingut, ^[**%1$@**]()"
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Vítejte, **%1$@**"
+            "value" : "Vítejte, ^[**%1$@**]()"
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Velkommen, **%1$@**"
+            "value" : "Velkommen, ^[**%1$@**]()"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Willkommen, **%1$@**"
+            "value" : "Willkommen, ^[**%1$@**]()"
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Καλωσήρθες, **%1$@**"
+            "value" : "Καλωσήρθες, ^[**%1$@**]()"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bienvenido/a, **%1$@**"
+            "value" : "Bienvenido/a, ^[**%1$@**]()"
           }
         },
         "et" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bienvenue, **%1$@**"
+            "value" : "Bienvenue, ^[**%1$@**]()"
           }
         },
         "gu" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dobrodošao, **%1$@**"
+            "value" : "Dobrodošao, ^[**%1$@**]()"
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Üdv, **%1$@**"
+            "value" : "Üdv, ^[**%1$@**]()"
           }
         },
         "is" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Benvenuto, **%1$@**"
+            "value" : "Benvenuto, ^[**%1$@**]()"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ようこそ **%1$@**"
+            "value" : "ようこそ ^[**%1$@**]()"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "lt" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sveiki, **%1$@**"
+            "value" : "Sveiki, ^[**%1$@**]()"
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Velkommen, **%1$@**"
+            "value" : "Velkommen, ^[**%1$@**]()"
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Welkom, **%1$@**"
+            "value" : "Welkom, ^[**%1$@**]()"
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Witaj, **%1$@**"
+            "value" : "Witaj, ^[**%1$@**]()"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Olá, **%1$@**"
+            "value" : "Olá, ^[**%1$@**]()"
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Bun venit, **%1$@**"
+            "value" : "Bun venit, ^[**%1$@**]()"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Добро пожаловать,**%1$@**"
+            "value" : "Добро пожаловать,^[**%1$@**]()"
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Vitajte, **%1$@**"
+            "value" : "Vitajte, ^[**%1$@**]()"
           }
         },
         "sl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Dobrodošel, **%1$@**"
+            "value" : "Dobrodošel, ^[**%1$@**]()"
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Välkommen, **%1$@**"
+            "value" : "Välkommen, ^[**%1$@**]()"
           }
         },
         "ta" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "வரவேற்கிறோம், **%1$@**"
+            "value" : "வரவேற்கிறோம், ^[**%1$@**]()"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ласкаво просимо, **%1$@**"
+            "value" : "Ласкаво просимо, ^[**%1$@**]()"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Welcome, **%1$@**"
+            "value" : "Welcome, ^[**%1$@**]()"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "欢迎，**%1$@**"
+            "value" : "欢迎，^[**%1$@**]()"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "歡迎，**%1$@**"
+            "value" : "歡迎，^[**%1$@**]()"
           }
         }
       }
@@ -72772,241 +72772,241 @@
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**مهم!** هذا التطبيق مصمم للعمل مع خادم Audiobookshelf تستضيفه أنت أو شخص تعرفه. هذا التطبيق لا يقدم أي محتوى."
+            "value" : "^[**مهم!**]() هذا التطبيق مصمم للعمل مع خادم Audiobookshelf تستضيفه أنت أو شخص تعرفه. هذا التطبيق لا يقدم أي محتوى."
           }
         },
         "be" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Важна!** Гэта праграма прызначана для працы з серверам Audiobookshelf, які вы ці хтосьці іншы абслугоўваеце. Праграма не змяшчае ўласнага кантэнту."
+            "value" : "^[**Важна!**]() Гэта праграма прызначана для працы з серверам Audiobookshelf, які вы ці хтосьці іншы абслугоўваеце. Праграма не змяшчае ўласнага кантэнту."
           }
         },
         "bg" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**ВАЖНО!** Това приложение е създадено да работи с Audiobookshelf сървър, който вие или някой, когото познавате, хоства. Това приложение не предоставя никакво съдържание."
+            "value" : "^[**ВАЖНО!**]() Това приложение е създадено да работи с Audiobookshelf сървър, който вие или някой, когото познавате, хоства. Това приложение не предоставя никакво съдържание."
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**গুরুত্বপূর্ণ!** এই অ্যাপটি এমন একটি অডিওবুকশেল্ফ সার্ভারের সাথে কাজ করার জন্য ডিজাইন করা হয়েছে যা আপনি বা আপনার পরিচিত কেউ হোস্ট করছেন৷ এই অ্যাপ্লিকেশনটি নিজে থেকে কোন বিষয়বস্তু প্রদান করে না।"
+            "value" : "^[**গুরুত্বপূর্ণ!**]() এই অ্যাপটি এমন একটি অডিওবুকশেল্ফ সার্ভারের সাথে কাজ করার জন্য ডিজাইন করা হয়েছে যা আপনি বা আপনার পরিচিত কেউ হোস্ট করছেন৷ এই অ্যাপ্লিকেশনটি নিজে থেকে কোন বিষয়বস্তু প্রদান করে না।"
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Důležité!** Tato aplikace je navržena, aby pracovala se serverem Audiobookshelf, který hostuje buď vy, nebo někdo, koho znáte. Tato aplikace neposkytuje žádný obsah."
+            "value" : "^[**Důležité!**]() Tato aplikace je navržena, aby pracovala se serverem Audiobookshelf, který hostuje buď vy, nebo někdo, koho znáte. Tato aplikace neposkytuje žádný obsah."
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Vigtigt!** Denne app er designet til at fungere med en Audiobookshelf-server, som du eller en du kender hoster. Denne app leverer ikke noget indhold."
+            "value" : "^[**Vigtigt!**]() Denne app er designet til at fungere med en Audiobookshelf-server, som du eller en du kender hoster. Denne app leverer ikke noget indhold."
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Wichtig!** Diese App wurde entwickelt, um mit einem Audiobookshelf-Server zu arbeiten, den du oder jemand, den du kennst, hostet. Diese App stellt keine Inhalte zur Verfügung."
+            "value" : "^[**Wichtig!**]() Diese App wurde entwickelt, um mit einem Audiobookshelf-Server zu arbeiten, den du oder jemand, den du kennst, hostet. Diese App stellt keine Inhalte zur Verfügung."
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**¡Importante!** Esta aplicación está diseñada para trabajar con un servidor Audiobookshelf que tú o alguien que tú conozcas es el host. Esta aplicación no proporciona ningún contenido."
+            "value" : "^[**¡Importante!**]() Esta aplicación está diseñada para trabajar con un servidor Audiobookshelf que tú o alguien que tú conozcas es el host. Esta aplicación no proporciona ningún contenido."
           }
         },
         "et" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Tärkeää!** Tämä sovellus on suunniteltu toimimaan sinun tai tuttavasi Audiobookshelf-palvelimen kanssa. Tämä sovellus ei tarjoa sisältöä."
+            "value" : "^[**Tärkeää!**]() Tämä sovellus on suunniteltu toimimaan sinun tai tuttavasi Audiobookshelf-palvelimen kanssa. Tämä sovellus ei tarjoa sisältöä."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Important !** Cette application est faite pour fonctionner avec un serveur Audiobookshelf. L'application ne fournit aucun contenu."
+            "value" : "^[**Important !**]() Cette application est faite pour fonctionner avec un serveur Audiobookshelf. L'application ne fournit aucun contenu."
           }
         },
         "gu" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**חשוב!** אפליקציה זו מתוכננת לעבוד עם שרת Audiobookshelf שאת/ה או מישהו שאת/ה מכיר/ה מארח/ת. האפליקציה בפני עצמה לא מספקת שום תוכן."
+            "value" : "^[**חשוב!**]() אפליקציה זו מתוכננת לעבוד עם שרת Audiobookshelf שאת/ה או מישהו שאת/ה מכיר/ה מארח/ת. האפליקציה בפני עצמה לא מספקת שום תוכן."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Važno!** Ova je aplikacija predviđena za rad s poslužiteljem Audiobookshelf na vašem poslužitelju kojim upravljate vi ili netko koga znate. Ova aplikacija ne nudi nikakav sadržaj."
+            "value" : "^[**Važno!**]() Ova je aplikacija predviđena za rad s poslužiteljem Audiobookshelf na vašem poslužitelju kojim upravljate vi ili netko koga znate. Ova aplikacija ne nudi nikakav sadržaj."
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Fontos!** Ez az alkalmazás egy Audiobookshelf szervert igényel, amit Ön vagy valaki, akit ismer, üzemeltet. Ez az alkalmazás nem biztosít tartalmat."
+            "value" : "^[**Fontos!**]() Ez az alkalmazás egy Audiobookshelf szervert igényel, amit Ön vagy valaki, akit ismer, üzemeltet. Ez az alkalmazás nem biztosít tartalmat."
           }
         },
         "is" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Importante!** Questa app è progettata per funzionare con un server Audiobookshelf ospitato da te o da qualcuno che conosci. Questa app non fornisce alcun contenuto."
+            "value" : "^[**Importante!**]() Questa app è progettata per funzionare con un server Audiobookshelf ospitato da te o da qualcuno che conosci. Questa app non fornisce alcun contenuto."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "**Important!** This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
+            "value" : "^[**Important!**]() This app is designed to work with an Audiobookshelf server that you or someone you know is hosting. This app does not provide any content."
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**중요!** 이 앱은 본인이나 아는 사람이 호스팅하는 Audiobookshelf 서버와 함께 사용하도록 설계되었습니다. 이 앱은 어떠한 콘텐츠도 제공하지 않습니다."
+            "value" : "^[**중요!**]() 이 앱은 본인이나 아는 사람이 호스팅하는 Audiobookshelf 서버와 함께 사용하도록 설계되었습니다. 이 앱은 어떠한 콘텐츠도 제공하지 않습니다."
           }
         },
         "lt" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Important!** Ši programa skirta naudoti su Audiobookshelf serveriu, kurį valdote jūs arba jūsų pažįstamas asmuo. Programa neteikia jokio turinio."
+            "value" : "^[**Important!**]() Ši programa skirta naudoti su Audiobookshelf serveriu, kurį valdote jūs arba jūsų pažįstamas asmuo. Programa neteikia jokio turinio."
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Viktig!** Programmet fungerer kun med en Audiobookshelf-tjener som du eller noen annen vertstjener. Programmet tilbyr ikke innhold."
+            "value" : "^[**Viktig!**]() Programmet fungerer kun med en Audiobookshelf-tjener som du eller noen annen vertstjener. Programmet tilbyr ikke innhold."
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Important!** Deze app is ontworpen om te werken met een Audiobookshelf-server die u of iemand die u kent host. Deze app biedt geen content."
+            "value" : "^[**Important!**]() Deze app is ontworpen om te werken met een Audiobookshelf-server die u of iemand die u kent host. Deze app biedt geen content."
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Important!** Ta aplikacja jest przeznaczona do współpracy z serwerem Audiobookshelf, który dostarczasz Ty lub ktoś, kogo znasz. Ta aplikacja nie dostarcza żadnych treści.."
+            "value" : "^[**Important!**]() Ta aplikacja jest przeznaczona do współpracy z serwerem Audiobookshelf, który dostarczasz Ty lub ktoś, kogo znasz. Ta aplikacja nie dostarcza żadnych treści.."
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Importante!** Esse aplicativo foi desenvolvido para funcionar com um servidor Audiobookshelf que você ou algum conhecido seu está mantendo. Esse aplicativo não oferece qualquer conteúdo."
+            "value" : "^[**Importante!**]() Esse aplicativo foi desenvolvido para funcionar com um servidor Audiobookshelf que você ou algum conhecido seu está mantendo. Esse aplicativo não oferece qualquer conteúdo."
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Important!** Această aplicație este proiectată să funcționeze cu un server Audiobookshelf găzduit de tine sau de cineva cunoscut. Aplicația nu oferă conținut propriu."
+            "value" : "^[**Important!**]() Această aplicație este proiectată să funcționeze cu un server Audiobookshelf găzduit de tine sau de cineva cunoscut. Aplicația nu oferă conținut propriu."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Важно!** Это приложение предназначено для работы с сервером Audiobookshelf, который размещаете вы или кто-то из ваших знакомых. Это приложение не предоставляет никакого контента."
+            "value" : "^[**Важно!**]() Это приложение предназначено для работы с сервером Audiobookshelf, который размещаете вы или кто-то из ваших знакомых. Это приложение не предоставляет никакого контента."
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Dôležité!** Táto aplikácia je navrhnutá na fungovanie so Audiobookshelf serverom, ktorý patrí vám alebo niekomu inému. Táto aplikácia sama o sebe neposkytuje žiadny obsah."
+            "value" : "^[**Dôležité!**]() Táto aplikácia je navrhnutá na fungovanie so Audiobookshelf serverom, ktorý patrí vám alebo niekomu inému. Táto aplikácia sama o sebe neposkytuje žiadny obsah."
           }
         },
         "sl" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Pomembno!** Ta aplikacija je zasnovana za delo s strežnikom Audiobookshelf, ki ga gostite vi ali nekdo, ki ga poznate. Ta aplikacija ne ponuja nobene vsebine."
+            "value" : "^[**Pomembno!**]() Ta aplikacija je zasnovana za delo s strežnikom Audiobookshelf, ki ga gostite vi ali nekdo, ki ga poznate. Ta aplikacija ne ponuja nobene vsebine."
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Viktigt!** Appen måste användas tillsammans med en Audiobookshelf-server som du eller någon du känner är värd för. Appen tillhandahåller inget eget innehåll."
+            "value" : "^[**Viktigt!**]() Appen måste användas tillsammans med en Audiobookshelf-server som du eller någon du känner är värd för. Appen tillhandahåller inget eget innehåll."
           }
         },
         "ta" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**முக்கியம்!** இந்த ஆப்ச் நீங்கள் அல்லது உங்களுக்குத் தெரிந்த ஒருவர் புரவலன் செய்யும் ஆடியோபுக் செல்ஃப் சர்வருடன் வேலை செய்ய வடிவமைக்கப்பட்டுள்ளது. இந்த ஆப்ச் எந்த உள்ளடக்கத்தையும் வழங்காது."
+            "value" : "^[**முக்கியம்!**]() இந்த ஆப்ச் நீங்கள் அல்லது உங்களுக்குத் தெரிந்த ஒருவர் புரவலன் செய்யும் ஆடியோபுக் செல்ஃப் சர்வருடன் வேலை செய்ய வடிவமைக்கப்பட்டுள்ளது. இந்த ஆப்ச் எந்த உள்ளடக்கத்தையும் வழங்காது."
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Önemli!** Bu uygulama, sizin veya bir tanıdığınızın barındırdığı bir Audiobookshelf sunucusu ile çalışmak üzere tasarlanmıştır. Bu uygulama herhangi bir içerik sağlamaz."
+            "value" : "^[**Önemli!**]() Bu uygulama, sizin veya bir tanıdığınızın barındırdığı bir Audiobookshelf sunucusu ile çalışmak üzere tasarlanmıştır. Bu uygulama herhangi bir içerik sağlamaz."
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Важливо!** Цей додаток розроблений для роботи з сервером Audiobookshelf, яким володієте ви або ваші знайомі. Цей додаток не надає жодного контенту."
+            "value" : "^[**Важливо!**]() Цей додаток розроблений для роботи з сервером Audiobookshelf, яким володієте ви або ваші знайомі. Цей додаток не надає жодного контенту."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**Quan trọng!** Ứng dụng này được thiết kế để hoạt động với một máy chủ Audiobookshelf mà bạn hoặc ai đó bạn biết đang lưu trữ. Ứng dụng này không cung cấp bất kỳ nội dung nào."
+            "value" : "^[**Quan trọng!**]() Ứng dụng này được thiết kế để hoạt động với một máy chủ Audiobookshelf mà bạn hoặc ai đó bạn biết đang lưu trữ. Ứng dụng này không cung cấp bất kỳ nội dung nào."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**重要提示！**此应用旨在与你或你认识的人托管的 Audiobookshelf 服务器配合使用。此应用不提供任何内容。"
+            "value" : "^[**重要提示！**]()此应用旨在与你或你认识的人托管的 Audiobookshelf 服务器配合使用。此应用不提供任何内容。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "**重要！**此應用程式需搭配您或您認識的人所架設的 Audiobookshelf 伺服器使用。本應用程式不提供任何內容。"
+            "value" : "^[**重要！**]()此應用程式需搭配您或您認識的人所架設的 Audiobookshelf 伺服器使用。本應用程式不提供任何內容。"
           }
         }
       }
