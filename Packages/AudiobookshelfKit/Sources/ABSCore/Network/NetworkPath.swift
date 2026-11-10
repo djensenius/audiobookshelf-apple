@@ -10,9 +10,12 @@ public enum NetworkInterface: String, CaseIterable, Sendable {
 
 /// A value snapshot of the device's current network path.
 public struct NetworkPath: Sendable, Hashable {
-    /// Whether the path can be used. A path that needs a connection to be established
-    /// first (such as VPN on demand) counts as online. As in the legacy iOS app, a local
-    /// network without internet access is online, so servers on the LAN keep working.
+    /// Whether the system reports the path as usable. Only an unsatisfied path is offline;
+    /// a path that needs a connection to be established first (such as VPN on demand)
+    /// counts as online. The system decides whether a network without internet access is
+    /// satisfied, so this is for display (an offline banner), not for gating requests: a
+    /// server on the LAN may still be reachable. ``NetworkPolicy`` doesn't deny offline
+    /// paths.
     public var isOnline: Bool
     /// Whether the path uses an interface the system considers expensive, such as
     /// cellular or a personal hotspot.

@@ -6,8 +6,9 @@ import Foundation
 /// ``CellularPolicy/always`` and ``CellularPolicy/ask`` allow every network: with `ask`,
 /// the user is asked before the task is created. ``CellularPolicy/never`` disallows
 /// cellular and constrained (Low Data Mode) paths and, where expensive paths count as
-/// cellular (macOS), expensive paths too. On iOS an expensive Wi-Fi path (a personal
-/// hotspot) stays allowed, matching ``NetworkPolicy``.
+/// cellular (macOS), expensive paths too. On iOS expensive access stays allowed so a
+/// personal-hotspot Wi-Fi works, matching ``NetworkPolicy``; the flags can't tell an
+/// expensive non-Wi-Fi path apart, so ``NetworkPolicy`` is what denies that case.
 ///
 /// A request's flags can only narrow its session's: a session that disallows a network
 /// wins over a request that allows it.

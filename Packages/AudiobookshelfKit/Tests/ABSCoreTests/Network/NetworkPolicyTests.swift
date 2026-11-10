@@ -5,64 +5,71 @@ import Testing
 
 @Suite struct NetworkPolicyTableTests {
     struct Case: Sendable, CustomTestStringConvertible {
-        let path: NetworkPath?
-        let policy: CellularPolicy
-        let treatsExpensiveAsCellular: Bool
-        let expected: NetworkDecision
         let name: String
+        let path: NetworkPath?
+        let treatsExpensiveAsCellular: Bool
+        /// Why the path is metered, or `nil` if it is always allowed.
+        let reason: MeteredReason?
 
-        var testDescription: String { "\(name), \(policy) -> \(expected)" }
+        var testDescription: String { name }
     }
 
     static let hotspot = NetworkPath(isOnline: true, isExpensive: true, interface: .wifi)
     static let lowDataWifi = NetworkPath(isOnline: true, isConstrained: true, interface: .wifi)
+    static let other = NetworkPath(isOnline: true, interface: .other)
+    static let expensiveOther = NetworkPath(isOnline: true, isExpensive: true, interface: .other)
+    static let expensiveWired = NetworkPath(isOnline: true, isExpensive: true, interface: .wired)
+    static let offlineFlagged = NetworkPath(isOnline: false, isExpensive: true, isConstrained: true, interface: nil)
 
-    static let cases: [Case] = CellularPolicy.allCases.flatMap { policy -> [Case] in
-        let metered: NetworkDecision =
-            switch policy {
-            case .always: .allowed
-            case .ask: .askUser
-            case .never: .denied
+    static let paths: [Case] = [
+        Case(name: "unknown", path: nil, treatsExpensiveAsCellular: false, reason: nil),
+        Case(name: "offline", path: .offline, treatsExpensiveAsCellular: false, reason: nil),
+        Case(name: "mac offline", path: .offline, treatsExpensiveAsCellular: true, reason: nil),
+        Case(name: "offline with stale flags", path: offlineFlagged, treatsExpensiveAsCellular: true, reason: nil),
+        Case(name: "wifi", path: .wifi, treatsExpensiveAsCellular: false, reason: nil),
+        Case(name: "mac wifi", path: .wifi, treatsExpensiveAsCellular: true, reason: nil),
+        Case(name: "wired", path: .wired, treatsExpensiveAsCellular: false, reason: nil),
+        Case(name: "mac wired", path: .wired, treatsExpensiveAsCellular: true, reason: nil),
+        Case(name: "other", path: other, treatsExpensiveAsCellular: false, reason: nil),
+        Case(name: "mac other", path: other, treatsExpensiveAsCellular: true, reason: nil),
+        Case(name: "cellular", path: .cellular, treatsExpensiveAsCellular: false, reason: .cellular),
+        Case(
+            name: "inexpensive cellular", path: NetworkPath(isOnline: true, interface: .cellular),
+            treatsExpensiveAsCellular: false, reason: .cellular),
+        Case(name: "ios hotspot", path: hotspot, treatsExpensiveAsCellular: false, reason: nil),
+        Case(name: "mac hotspot", path: hotspot, treatsExpensiveAsCellular: true, reason: .expensive),
+        Case(name: "ios expensive other", path: expensiveOther, treatsExpensiveAsCellular: false, reason: .expensive),
+        Case(name: "mac expensive other", path: expensiveOther, treatsExpensiveAsCellular: true, reason: .expensive),
+        Case(name: "ios expensive wired", path: expensiveWired, treatsExpensiveAsCellular: false, reason: .expensive),
+        Case(name: "mac expensive wired", path: expensiveWired, treatsExpensiveAsCellular: true, reason: .expensive),
+        Case(name: "low data wifi", path: lowDataWifi, treatsExpensiveAsCellular: false, reason: .lowDataMode),
+        Case(
+            name: "low data cellular",
+            path: NetworkPath(isOnline: true, isExpensive: true, isConstrained: true, interface: .cellular),
+            treatsExpensiveAsCellular: false, reason: .cellular),
+        Case(
+            name: "low data hotspot",
+            path: NetworkPath(isOnline: true, isExpensive: true, isConstrained: true, interface: .wifi),
+            treatsExpensiveAsCellular: true, reason: .lowDataMode),
+    ]
+
+    @Test(arguments: paths, CellularPolicy.allCases)
+    func decision(_ testCase: Case, policy: CellularPolicy) {
+        let expected: NetworkDecision =
+            switch (testCase.reason, policy) {
+            case (nil, _), (_, .always): .allowed
+            case (let reason?, .ask): .askUser(reason)
+            case (let reason?, .never): .denied(reason)
             }
-        return [
-            Case(path: .offline, policy: policy, treatsExpensiveAsCellular: false, expected: .denied, name: "offline"),
-            Case(
-                path: .offline, policy: policy, treatsExpensiveAsCellular: true, expected: .denied, name: "mac offline"),
-            Case(path: .wifi, policy: policy, treatsExpensiveAsCellular: false, expected: .allowed, name: "wifi"),
-            Case(path: .wifi, policy: policy, treatsExpensiveAsCellular: true, expected: .allowed, name: "mac wifi"),
-            Case(path: .wired, policy: policy, treatsExpensiveAsCellular: true, expected: .allowed, name: "mac wired"),
-            Case(
-                path: .cellular, policy: policy, treatsExpensiveAsCellular: false, expected: metered, name: "cellular"),
-            Case(
-                path: NetworkPath(isOnline: true, interface: .cellular), policy: policy,
-                treatsExpensiveAsCellular: false, expected: metered, name: "inexpensive cellular"),
-            Case(
-                path: hotspot, policy: policy, treatsExpensiveAsCellular: false, expected: .allowed, name: "ios hotspot"
-            ),
-            Case(
-                path: hotspot, policy: policy, treatsExpensiveAsCellular: true, expected: metered, name: "mac hotspot"),
-            Case(
-                path: NetworkPath(isOnline: true, isExpensive: true, interface: .wired), policy: policy,
-                treatsExpensiveAsCellular: true, expected: metered, name: "mac expensive wired"),
-            Case(
-                path: lowDataWifi, policy: policy, treatsExpensiveAsCellular: false, expected: metered, name: "low data"
-            ),
-            Case(path: nil, policy: policy, treatsExpensiveAsCellular: false, expected: .allowed, name: "unknown"),
-        ]
-    }
-
-    @Test(arguments: cases)
-    func decision(_ testCase: Case) {
         let decision = NetworkPolicy.decision(
-            for: testCase.path, cellularPolicy: testCase.policy,
-            treatsExpensiveAsCellular: testCase.treatsExpensiveAsCellular)
-        #expect(decision == testCase.expected)
+            for: testCase.path, cellularPolicy: policy, treatsExpensiveAsCellular: testCase.treatsExpensiveAsCellular)
+        #expect(decision == expected)
     }
 
-    @Test func expensivePathsAreCellularOnlyOnMacOS() {
+    @Test func expensiveWifiIsCellularOnlyOnMacOS() {
         #if os(macOS)
             #expect(NetworkPolicy.treatsExpensiveAsCellularByDefault)
-            #expect(NetworkPolicy.decision(for: Self.hotspot, cellularPolicy: .never) == .denied)
+            #expect(NetworkPolicy.decision(for: Self.hotspot, cellularPolicy: .never) == .denied(.expensive))
         #else
             #expect(!NetworkPolicy.treatsExpensiveAsCellularByDefault)
             #expect(NetworkPolicy.decision(for: Self.hotspot, cellularPolicy: .never) == .allowed)
@@ -71,27 +78,30 @@ import Testing
 }
 
 @MainActor
-@Suite struct NetworkPolicyTests {
-    @Test func streamAndDownloadUseTheirOwnSettings() async throws {
+@Suite(.timeLimit(.minutes(1)))
+struct NetworkPolicyTests {
+    private func makeSettings(stream: CellularPolicy, download: CellularPolicy) throws -> (AppSettings, () -> Void) {
         let suiteName = "ABSCoreTests.NetworkPolicy.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
         let settings = AppSettings(defaults: defaults)
-        settings.streamingUsingCellular = .ask
-        settings.downloadUsingCellular = .never
+        settings.streamingUsingCellular = stream
+        settings.downloadUsingCellular = download
+        return (settings, { defaults.removePersistentDomain(forName: suiteName) })
+    }
 
+    @Test func streamAndDownloadUseTheirOwnSettings() async throws {
+        let (settings, cleanUp) = try makeSettings(stream: .ask, download: .never)
+        defer { cleanUp() }
         let source = FakeNetworkPathSource()
         let monitor = NetworkMonitor(source: source)
         let policy = NetworkPolicy(monitor: monitor, settings: settings, treatsExpensiveAsCellular: false)
-        #expect(policy.canStream() == .allowed)
-        #expect(policy.canDownload() == .allowed)
 
         monitor.start()
         var updates = monitor.paths().makeAsyncIterator()
         source.send(.cellular)
         _ = await updates.next()
-        #expect(policy.canStream() == .askUser)
-        #expect(policy.canDownload() == .denied)
+        #expect(policy.canStream() == .askUser(.cellular))
+        #expect(policy.canDownload() == .denied(.cellular))
 
         settings.downloadUsingCellular = .always
         #expect(policy.canDownload() == .allowed)
@@ -102,8 +112,30 @@ import Testing
 
         source.send(.offline)
         _ = await updates.next()
-        #expect(policy.canStream() == .denied)
-        #expect(policy.canDownload() == .denied)
+        #expect(policy.canStream() == .allowed)
+        #expect(policy.canDownload() == .allowed)
+        #expect(!monitor.isOnline)
+    }
+
+    /// Pins the unknown-path behaviour under `ask`: the synchronous check allows, the
+    /// waiting check decides on the first path, and allows if none arrives in time.
+    @Test func unknownPathUnderAsk() async throws {
+        let (settings, cleanUp) = try makeSettings(stream: .ask, download: .ask)
+        defer { cleanUp() }
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        let policy = NetworkPolicy(monitor: monitor, settings: settings, treatsExpensiveAsCellular: false)
+        monitor.start()
+
+        #expect(policy.canStream() == .allowed)
+        #expect(policy.canDownload() == .allowed)
+        #expect(await policy.canStream(waitingUpTo: .zero) == .allowed)
+        #expect(await policy.canDownload(waitingUpTo: .zero) == .allowed)
+
+        let waiting = Task { await policy.canStream(waitingUpTo: .seconds(3600)) }
+        source.send(.cellular)
+        #expect(await waiting.value == .askUser(.cellular))
+        #expect(await policy.canDownload(waitingUpTo: .zero) == .askUser(.cellular))
     }
 }
 

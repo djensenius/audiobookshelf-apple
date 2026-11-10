@@ -1,14 +1,17 @@
 import Foundation
 import Observation
+import Synchronization
 
 /// Watches the device's network path and publishes it through Observation and
 /// `AsyncStream`s. Replaces the legacy Capacitor Network listener
 /// (`store/index.js` `setupNetworkListener`).
 ///
-/// ``path`` is `nil` until the source reports the first path. Each ``paths()`` stream
-/// yields the current path (when known) and then every change; equal consecutive paths
-/// are dropped. Streams keep only the newest unread path. All streams finish when the
-/// monitor stops, its source ends, or it is deallocated.
+/// ``path`` is `nil` until the source reports a path, and again after the source ends.
+/// Each ``paths()`` stream yields the current path (when known) and then every change;
+/// equal consecutive paths are dropped and a stream keeps only the newest unread path.
+/// Streams outlive ``stop()`` and ``start()``: a subscriber keeps receiving across
+/// restarts, and its stream finishes only when the monitor is deallocated or the
+/// subscriber cancels.
 @MainActor
 @Observable
 public final class NetworkMonitor {
@@ -19,20 +22,32 @@ public final class NetworkMonitor {
     public private(set) var isRunning = false
 
     @ObservationIgnored private let source: any NetworkPathSource
-    @ObservationIgnored private var task: Task<Void, Never>?
-    @ObservationIgnored private var subscribers: [UUID: AsyncStream<NetworkPath>.Continuation] = [:]
+    @ObservationIgnored private let clock: any Clock<Duration>
+    /// The task reading the source. Internal so tests can await a stopped run.
+    @ObservationIgnored private(set) var task: Task<Void, Never>?
+    /// Guarded by a mutex so a cancelled subscriber is removed synchronously from its
+    /// stream's termination handler, which runs on whatever thread cancels it.
+    @ObservationIgnored private let subscribers = Subscribers()
 
-    public init(source: any NetworkPathSource = SystemNetworkPathSource()) {
+    public init(
+        source: any NetworkPathSource = SystemNetworkPathSource(), clock: any Clock<Duration> = ContinuousClock()
+    ) {
         self.source = source
+        self.clock = clock
     }
 
     isolated deinit {
         task?.cancel()
-        finishSubscribers()
+        let continuations = subscribers.state.withLock { subscribers in
+            defer { subscribers.removeAll() }
+            return Array(subscribers.values)
+        }
+        for continuation in continuations {
+            continuation.finish()
+        }
     }
 
-    /// Whether the device is online. `true` while the path is unknown, so callers don't
-    /// block requests before the first update.
+    /// Whether the device is online, for display. `true` while the path is unknown.
     public var isOnline: Bool { path?.isOnline ?? true }
 
     /// Starts reading from the source. Does nothing if already running.
@@ -51,14 +66,13 @@ public final class NetworkMonitor {
         }
     }
 
-    /// Stops reading from the source and finishes every ``paths()`` stream. The last path
-    /// is kept. The monitor can be started again.
+    /// Stops reading from the source. The last path is kept and ``paths()`` streams stay
+    /// open. The monitor can be started again.
     public func stop() {
         guard let task else { return }
         task.cancel()
         self.task = nil
         isRunning = false
-        finishSubscribers()
     }
 
     /// Returns a stream of paths for one subscriber.
@@ -66,23 +80,43 @@ public final class NetworkMonitor {
         let (stream, continuation) = AsyncStream.makeStream(
             of: NetworkPath.self, bufferingPolicy: .bufferingNewest(1))
         let id = UUID()
-        subscribers[id] = continuation
-        continuation.onTermination = { [weak self] _ in
-            Task { @MainActor in self?.subscribers[id] = nil }
+        continuation.onTermination = { [subscribers] _ in
+            _ = subscribers.state.withLock { $0.removeValue(forKey: id) }
         }
+        subscribers.state.withLock { $0[id] = continuation }
         if let path {
             continuation.yield(path)
         }
         return stream
     }
 
+    /// The current path, waiting up to `timeout` for the source's first report when it is
+    /// still unknown (for example at a cold launch into CarPlay or auto-resume). Returns
+    /// `nil` if no path arrives in time.
+    public func currentPath(timeout: Duration = .milliseconds(500)) async -> NetworkPath? {
+        if let path { return path }
+        let updates = paths()
+        let clock = clock
+        let first = await withTaskGroup(of: NetworkPath?.self) { group in
+            group.addTask { await updates.first { _ in true } }
+            group.addTask {
+                try? await clock.sleep(for: timeout)
+                return nil
+            }
+            let result = await group.next() ?? nil
+            group.cancelAll()
+            return result
+        }
+        return first ?? path
+    }
+
     /// The number of live ``paths()`` streams. For tests.
-    var subscriberCount: Int { subscribers.count }
+    var subscriberCount: Int { subscribers.state.withLock { $0.count } }
 
     private func receive(_ newPath: NetworkPath) {
         guard newPath != path else { return }
         path = newPath
-        for continuation in subscribers.values {
+        for continuation in subscribers.state.withLock({ Array($0.values) }) {
             continuation.yield(newPath)
         }
     }
@@ -91,14 +125,11 @@ public final class NetworkMonitor {
         guard task != nil else { return }
         task = nil
         isRunning = false
-        finishSubscribers()
+        path = nil
     }
+}
 
-    private func finishSubscribers() {
-        let continuations = subscribers.values
-        subscribers.removeAll()
-        for continuation in continuations {
-            continuation.finish()
-        }
-    }
+/// A reference to the subscriber table, so termination handlers can capture it.
+private final class Subscribers: Sendable {
+    let state = Mutex<[UUID: AsyncStream<NetworkPath>.Continuation]>([:])
 }

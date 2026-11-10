@@ -8,44 +8,40 @@ import Testing
 /// A path source driven by the test. Each `paths()` call opens a new stream.
 final class FakeNetworkPathSource: NetworkPathSource {
     private let continuations = Mutex<[AsyncStream<NetworkPath>.Continuation]>([])
-    private let terminations = Mutex(0)
+    private let terminationContinuation: AsyncStream<Void>.Continuation
+    /// Yields once each time a stream returned by `paths()` terminates.
+    let terminations: AsyncStream<Void>
+
+    init() {
+        (terminations, terminationContinuation) = AsyncStream.makeStream()
+    }
 
     var openedStreams: Int { continuations.withLock { $0.count } }
-    var terminatedStreams: Int { terminations.withLock { $0 } }
 
     func paths() -> AsyncStream<NetworkPath> {
         let (stream, continuation) = AsyncStream.makeStream(of: NetworkPath.self)
-        continuation.onTermination = { [weak self] _ in self?.terminations.withLock { $0 += 1 } }
+        continuation.onTermination = { [terminationContinuation] _ in terminationContinuation.yield() }
         continuations.withLock { $0.append(continuation) }
         return stream
     }
 
+    /// Sends `path` on every open stream.
     func send(_ path: NetworkPath) {
         for continuation in continuations.withLock({ $0 }) {
             continuation.yield(path)
         }
     }
 
-    func finish() {
-        for continuation in continuations.withLock({ $0 }) {
-            continuation.finish()
-        }
+    /// Ends the most recent stream, as if the system stopped monitoring.
+    func finishLatest() {
+        continuations.withLock { $0.last }?.finish()
     }
 }
 
-/// Polls `condition` on the main actor until it holds or about two seconds pass.
 @MainActor
-private func eventually(_ condition: () -> Bool) async -> Bool {
-    for _ in 0..<200 {
-        if condition() { return true }
-        try? await Task.sleep(for: .milliseconds(10))
-    }
-    return condition()
-}
-
-@MainActor
-@Suite struct NetworkMonitorTests {
-    @Test func pathIsUnknownUntilTheSourceReports() async {
+@Suite(.timeLimit(.minutes(1)))
+struct NetworkMonitorTests {
+    @Test func pathIsUnknownUntilTheSourceReports() {
         let source = FakeNetworkPathSource()
         let monitor = NetworkMonitor(source: source)
         #expect(monitor.path == nil)
@@ -113,6 +109,63 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
         #expect(source.openedStreams == 1)
     }
 
+    @Test func slowSubscriberGetsTheLatestPath() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        monitor.start()
+        var fast = monitor.paths().makeAsyncIterator()
+        var slow = monitor.paths().makeAsyncIterator()
+
+        source.send(.wifi)
+        #expect(await fast.next() == .wifi)
+        source.send(.cellular)
+        #expect(await fast.next() == .cellular)
+        source.send(.wired)
+        #expect(await fast.next() == .wired)
+
+        #expect(await slow.next() == .wired)
+    }
+
+    @Test func subscriberBeforeStartReceivesTheFirstPath() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        var updates = monitor.paths().makeAsyncIterator()
+
+        monitor.start()
+        source.send(.wifi)
+        #expect(await updates.next() == .wifi)
+    }
+
+    @Test func subscribeStopStartStillReceives() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        var updates = monitor.paths().makeAsyncIterator()
+        monitor.start()
+        source.send(.wifi)
+        #expect(await updates.next() == .wifi)
+
+        monitor.stop()
+        monitor.start()
+        source.send(.cellular)
+        #expect(await updates.next() == .cellular)
+    }
+
+    @Test func subscriberAfterStopGetsTheLastPathAndLaterUpdates() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        monitor.start()
+        var first = monitor.paths().makeAsyncIterator()
+        source.send(.wifi)
+        #expect(await first.next() == .wifi)
+        monitor.stop()
+
+        var updates = monitor.paths().makeAsyncIterator()
+        #expect(await updates.next() == .wifi)
+        monitor.start()
+        source.send(.cellular)
+        #expect(await updates.next() == .cellular)
+    }
+
     @Test func cancellingASubscriberRemovesItOnly() async {
         let source = FakeNetworkPathSource()
         let monitor = NetworkMonitor(source: source)
@@ -126,14 +179,48 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
 
         task.cancel()
         await task.value
-        #expect(await eventually { monitor.subscriberCount == 1 })
+        #expect(monitor.subscriberCount == 1)
         #expect(monitor.isRunning)
 
         source.send(.wired)
         #expect(await kept.next() == .wired)
     }
 
-    @Test func stopFinishesSubscribersAndCancelsTheSource() async {
+    @Test func stopCancelsTheSourceAndKeepsSubscribers() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        var terminations = source.terminations.makeAsyncIterator()
+        monitor.start()
+        var updates = monitor.paths().makeAsyncIterator()
+        source.send(.wifi)
+        #expect(await updates.next() == .wifi)
+
+        monitor.stop()
+        #expect(await terminations.next() != nil)
+        #expect(!monitor.isRunning)
+        #expect(monitor.path == .wifi)
+        #expect(monitor.subscriberCount == 1)
+    }
+
+    @Test func anEarlierRunEndingDoesNotStopARestartedMonitor() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        monitor.start()
+        let firstRun = monitor.task
+        monitor.stop()
+        monitor.start()
+        #expect(source.openedStreams == 2)
+
+        await firstRun?.value
+        #expect(monitor.isRunning)
+        #expect(monitor.task != nil)
+
+        var updates = monitor.paths().makeAsyncIterator()
+        source.send(.cellular)
+        #expect(await updates.next() == .cellular)
+    }
+
+    @Test func sourceEndingClearsThePathAndKeepsSubscribers() async {
         let source = FakeNetworkPathSource()
         let monitor = NetworkMonitor(source: source)
         monitor.start()
@@ -141,44 +228,21 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
         source.send(.wifi)
         #expect(await updates.next() == .wifi)
 
-        monitor.stop()
-        #expect(await updates.next() == nil)
+        let run = monitor.task
+        source.finishLatest()
+        await run?.value
         #expect(!monitor.isRunning)
-        #expect(monitor.path == .wifi)
-        #expect(monitor.subscriberCount == 0)
-        #expect(await eventually { source.terminatedStreams == 1 })
-    }
+        #expect(monitor.path == nil)
+        #expect(monitor.subscriberCount == 1)
 
-    @Test func restartsAfterStop() async {
-        let source = FakeNetworkPathSource()
-        let monitor = NetworkMonitor(source: source)
         monitor.start()
-        monitor.stop()
-        monitor.start()
-        #expect(monitor.isRunning)
-        #expect(source.openedStreams == 2)
-
-        var updates = monitor.paths().makeAsyncIterator()
         source.send(.cellular)
         #expect(await updates.next() == .cellular)
-        // The first run's task must not stop the second run when it winds down.
-        try? await Task.sleep(for: .milliseconds(20))
-        #expect(monitor.isRunning)
     }
 
-    @Test func sourceEndingFinishesSubscribers() async {
+    @Test func deallocationFinishesSubscribersAndCancelsTheSource() async {
         let source = FakeNetworkPathSource()
-        let monitor = NetworkMonitor(source: source)
-        monitor.start()
-        var updates = monitor.paths().makeAsyncIterator()
-
-        source.finish()
-        #expect(await updates.next() == nil)
-        #expect(await eventually { !monitor.isRunning })
-    }
-
-    @Test func deallocationFinishesSubscribers() async {
-        let source = FakeNetworkPathSource()
+        var terminations = source.terminations.makeAsyncIterator()
         var updates = { () -> AsyncStream<NetworkPath>.Iterator in
             let monitor = NetworkMonitor(source: source)
             monitor.start()
@@ -186,7 +250,35 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
         }()
 
         #expect(await updates.next(isolation: #isolation) == nil)
-        #expect(await eventually { source.terminatedStreams == 1 })
+        #expect(await terminations.next() != nil)
+    }
+
+    @Test func currentPathReturnsAKnownPathAtOnce() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        monitor.start()
+        var updates = monitor.paths().makeAsyncIterator()
+        source.send(.wired)
+        #expect(await updates.next() == .wired)
+
+        #expect(await monitor.currentPath(timeout: .zero) == .wired)
+    }
+
+    @Test func currentPathWaitsForTheFirstPath() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        monitor.start()
+        let waiter = Task { await monitor.currentPath(timeout: .seconds(3600)) }
+        source.send(.cellular)
+        #expect(await waiter.value == .cellular)
+    }
+
+    @Test func currentPathTimesOutWithoutAPath() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        monitor.start()
+        #expect(await monitor.currentPath(timeout: .zero) == nil)
+        #expect(monitor.subscriberCount == 0)
     }
 }
 
