@@ -113,7 +113,7 @@ Pros:
 - It is the server's documented "preferred method" (v2.22.0 release notes).
 
 Cons:
-- The URL only works while the server-side session is open. It breaks on a server restart, a 36-hour idle period, or a new session from the same `deviceId`. The client must detect 404 and re-open the session.
+- The URL only works while the server-side session is open. It breaks on a server restart, a 36-hour idle period, or a new session from the same `deviceId`. The client must detect a lost session (confirmed with `GET /api/session/{id}`) and re-open it.
 - The session id is a bearer capability. Anyone who sees the URL can fetch the track until the session closes.
 - The URL has no file extension, so the app must pass the MIME type explicitly.
 - Does not help header-gated proxies.
@@ -173,16 +173,25 @@ Cons:
 
 ## Decision
 
-1. **Minimum server version: 2.26.0.** It includes:
+1. **Minimum server version: 2.26.0.** **Provisional: pending owner (@djensenius) sign-off, tracked in #48.** Implementation proceeds against 2.26.0, because lowering the floor later only adds code paths; it removes none. The rest of this ADR (the streaming and auth design) is Accepted. 2.26.0 includes:
    - the public session track route (≥ 2.22.0)
    - unauthenticated HLS (≥ 2.22.0)
-   - JWT access and refresh tokens (≥ 2.26.0), which the auth design relies on and which the legacy app already gates on (`ServerConnectForm.vue:176-178`, `layouts/default.vue:180`)
+   - JWT access and refresh tokens (≥ 2.26.0), which the auth design relies on
+
+   **Compatibility break.** The legacy app has no minimum version; its `requiredServerVersion` check is commented out (`ServerConnectForm.vue:100,740-741`). It still supports servers below 2.26.0:
+   - It keeps using the old non-expiring `user.token` (`ServerConnectForm.vue:870-872`).
+   - It only shows a non-blocking "old server auth" warning (`ServerConnectForm.vue:24-27,176-178`).
+   - It forces a re-login only on servers **≥ 2.26.0** that still hold an old token (`layouts/default.vue:180-195`).
+   - It streams with `?token=` below 2.22.0 (`AudioPlayer.swift:565-569`).
+
+   So this floor **drops servers the legacy app still supports**: everyone on 2.25.x or older (2.26.0 shipped 2025-07-12). Those users see a clear "server too old" message at sign-in (below) and must upgrade the server to 2.26.0 or newer before they can use the native app. The legacy app keeps working for them.
 
    **Gating:**
    - **Before sign-in:** read `GET /status` `serverVersion`. If it is below 2.26.0 or unparseable, block sign-in with a localised "This server runs Audiobookshelf X. Version 2.26.0 or newer is required." message and a link to the server upgrade docs.
    - **After every login or authorize:** re-check `serverSettings.version`. If the server has been downgraded, show a blocking banner and disable playback.
    - **Finer gates** live in `ServerFeatures` (ABSCore, P1-03 #26), derived from the version. There is only one today:
-     - **Below 2.26.3:** a podcast episode track whose `index` is `null` cannot be addressed on the public route. For that case only, use Option 2 (`/api/items/{id}/file/{ino}?token=`). Refresh the access token immediately before creating the item, and accept the 1-hour limit, because episodes are usually short.
+     - **Below 2.26.3:** a podcast episode track whose `index` is `null` cannot be addressed on the public route, because `getTrack` matched `t.index === index`. For that case only, use Option 2 (`/api/items/{id}/file/{ino}?token=`). Refresh the access token immediately before creating the item, and accept the 1-hour limit, because episodes are usually short.
+     - **2.26.3 and newer:** use the public route with `track.index ?? 0`. See point 2.
 2. **Direct play (the default) uses Option 1.**
    - Start the session with this JSON body:
      - `deviceInfo`:
@@ -197,17 +206,27 @@ Cons:
      - `forceDirectPlay: false`
      - `forceTranscode: false`
    - Unlike the legacy app, we do **not** force direct play. The server decides from `supportedMimeTypes`.
-   - For each `audioTracks[i]`, build `AVURLAsset(url: <server>/public/session/{id}/track/{track.index}, options: [AVURLAssetOverrideMIMETypeKey: track.mimeType, AVURLAssetHTTPUserAgentKey: …])`.
+   - For each `audioTracks[i]`, build `AVURLAsset(url: <server>/public/session/{id}/track/{track.index ?? 0}, options: [AVURLAssetOverrideMIMETypeKey: track.mimeType, AVURLAssetHTTPUserAgentKey: …])`.
+     - **Never interpolate a `nil` index.** `getTrack` parses the path with `toNumber(req.params.index, null)` and returns `400` for a non-numeric value such as `"null"` (`SessionController.js:280-284`; `server/utils/index.js:168-171`).
+     - **Why a track index can be null.** `AudioTrack.toJSON()` serialises `index` as-is (`server/objects/files/AudioTrack.js:3,15`). Since 2.26.3, `PodcastEpisode.getAudioTrack` sets `index = 1` on new sessions (`server/models/PodcastEpisode.js:188`, commit `8c38987d`). The client still treats `index` as optional, for older stored episodes, open sessions and other payloads.
+     - **Why `0` works** on ≥ 2.26.3: for podcasts, route index `0` falls back to `audioTracks[0]`. A stored `null` also matches route index `1` through `toNumber(t.index, 1)` (`SessionController.js:292-297`).
+     - Below 2.26.3, `ServerFeatures` routes null-index tracks to the token fallback in point 1.
      - `AVURLAssetOverrideMIMETypeKey` is public on iOS 17 and macOS 14.
      - It is needed because the path has no extension and X-Accel deployments may send a generic type.
 3. **HLS fallback.**
    - **Planned fallback:** if the session comes back with `playMethod == 2`, play `<server> + audioTracks[0].contentUrl` with a plain `AVURLAsset`. That single item covers the whole book.
-   - **Reactive fallback:** if a direct-play `AVPlayerItem` fails with a decode or format error (not a network error or HTTP 404), close the session and re-open it once with `forceTranscode: true`, resuming at the current position. This matches legacy behaviour.
-   - **Session loss:** HTTP 404 on any track or segment means the session was lost. Re-open the session in the same mode and resume at the last known position.
+   - **Recovery on any item failure, stall, or HTTP error.** `GET /api/session/{id}` is **authoritative**: `openSessionMiddleware` returns 404 only when the session is no longer open (`SessionController.js:338-349`).
+     1. **Session gone (404).** Session loss. Re-open the session in the same mode and resume at the last known position.
+     2. **Session exists, HLS segment 404.** The segment is not ready yet. That happens while ffmpeg is still producing it, or after an unbuffered seek makes the server reset the transcode: `HlsRouter` returns 404 for a missing `.ts` and may restart ffmpeg at the requested segment, emitting socket `stream_reset {startTime, streamId}` (`server/routers/HlsRouter.js:74-94`).
+        - Retry segment readiness with exponential backoff: 0.5 s, 1 s, 2 s, 4 s, 8 s. That is at most 5 retries and about 15.5 s in total, then the attempt is abandoned. Retry by re-seeking the current item to the current time. The playlist URL and session stay unchanged.
+        - If a `stream_reset` for this session arrives, seek to its `startTime` and restart the backoff once.
+        - After the bounds are exhausted, re-check the session. If it still exists, close it and re-open it in the same mode at the last known position. Do this at most once, then surface an error.
+     3. **Session exists, direct-play decode or format error.** Examples: `AVError.fileFormatNotRecognized`, `.decodeFailed`. Close the session and re-open it once with `forceTranscode: true`, resuming at the current position. This matches legacy behaviour.
+     4. **Session exists, other network errors** on direct play: retry with the same bounded backoff, then surface an error. Never transcode because of a network error.
    - **Detecting the failure on a plain `AVURLAsset`.** AVFoundation does not hand the app the HTTP response:
      - Observe `AVPlayerItem.status == .failed` and `AVPlayerItemFailedToPlayToEndTime` (`AVPlayerItemFailedToPlayToEndTimeErrorKey`).
      - On a failure or a stall (`AVPlayerItemPlaybackStalled`), read the `AVPlayerItem.errorLog()` events (`AVPlayerItemNewErrorLogEntry`). For HTTP failures, `errorStatusCode` and `errorComment` usually carry the HTTP status, for example `404` with "HTTP 404: File Not Found" in `CoreMediaErrorDomain`. This is typical for HLS. Whether progressive items fill the error log is unverified.
-     - Whenever the status is 404, ambiguous or missing, confirm with `GET /api/session/{id}` (also 404 when the session is gone) before choosing between "session lost" and "decode error". Treat `AVError.fileFormatNotRecognized`, `.decodeFailed` and similar codes as decode errors.
+     - The HTTP status is only a hint for choosing the branch above. The session lookup always decides between session loss and the other cases.
      - The resource-loader path sees the `HTTPURLResponse` directly and maps 404 the same way.
 4. **`supportedMimeTypes` are computed at runtime, not hard-coded.**
    - Take the server's audio MIME set: `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/flac`, `audio/x-caf`, `audio/x-aiff`, `audio/ogg`, `audio/webm`, `audio/x-matroska`, `audio/x-ms-wma`, `audio/amr-wb`.
@@ -245,8 +264,11 @@ Cons:
    - A downloaded item never falls back to streaming silently. A missing file is shown as an error with a "Stream instead" action, which starts a normal server session.
    - **Downloads themselves** (fetching files for offline use) do **not** use `?token=`. That differs from the legacy app (`AbsDownloader.swift:454`):
      - Request `/api/items/{id}/file/{ino}/download` with an `Authorization: Bearer` header plus any custom headers.
-     - Refresh the access token before creating or resuming each background `URLSession` task, because a task can sit queued longer than the 1-hour token lifetime.
-     - On HTTP 401, refresh the token and recreate the task. Use resume data when available; the new request carries the new header.
+     - Refresh the access token before **creating** each background `URLSession` task, because a task can sit queued longer than the 1-hour token lifetime.
+     - **Resume data keeps the old request.** `downloadTask(withResumeData:)` restores the original request, including its old `Authorization` header, and cannot take a replacement `URLRequest`. Resume data is therefore only usable while the credentials it was created with are still valid.
+     - **On HTTP 401 or a credential change** (token refresh, re-login, edited custom headers), discard any stale resume data. Recreate the task from a fresh `URLRequest` that carries the current headers.
+     - This is a **full restart** of that file. A `Range`-based partial restart is not adopted, because range support on the `/download` route was not verified. Revisit it if #49 or the downloads work proves `206` responses there.
+     - An already-running task is not cancelled when the token refreshes. The server authenticates a request once, when it starts.
      - Store only token-free server paths and local file paths in SwiftData. Never store signed or tokenised URLs.
 8. **Streaming sessions:**
    - Sync with `POST /api/session/{id}/sync` `{currentTime, timeListened, duration}`.
@@ -256,7 +278,11 @@ Cons:
 ## Consequences
 
 - **No private API.** Playback adds no App Review exposure beyond the CarPlay and audio entitlements.
-- **Old servers are refused.** Servers below 2.26.0 cannot be used, so their users must upgrade (2.26.0 shipped 2025-07-12; the current release is v2.37.2). The legacy app already forces a re-login on these versions, so the extra support burden is low.
+- **Old servers are refused. This is a deliberate compatibility break with the legacy app.**
+  - **Who:** users on servers below 2.26.0. The legacy app still supports them with the old non-expiring token and only a soft warning.
+  - **What they see:** a blocking "This server runs Audiobookshelf X. Version 2.26.0 or newer is required." message at sign-in, with upgrade guidance.
+  - **What they must do:** upgrade the server (2.26.0 shipped 2025-07-12; the current release is v2.37.2).
+  - **Not yet settled:** the floor is provisional until the owner signs off (#48).
 - **New failure mode.** Expired access tokens can no longer cause mid-playback 401s, because streaming URLs carry no user token. Losing the session (restart, 36-hour idle, same-device takeover) is now the main failure mode, and the engine must handle it.
 - **Session ids are capabilities.** Never log full track URLs at info level.
 - **Header-gated proxies.** Users get direct play through a resource loader that we must maintain and test, but no transcode. This is a documented limitation, and still better than the legacy app, whose streaming ignored custom headers entirely.
@@ -265,7 +291,10 @@ Cons:
 
 ## Validation
 
-**Acceptance.** This ADR is Accepted with a minimum server version of 2.26.0. The coordinator signed it off in autopilot. The owner may supersede it with a new ADR.
+**Acceptance.**
+- **Accepted:** the streaming and auth design (decisions 2–8).
+- **Provisional:** the minimum server version (decision 1, 2.26.0), pending the owner's (@djensenius) sign-off, tracked in #48. Issue #48 requires that sign-off, and coordinator approval does not replace it.
+- **Meanwhile:** implementation targets 2.26.0. If the owner chooses a lower floor, a follow-up ADR adds the older code paths (`?token=` streaming, the old non-expiring token); nothing built against 2.26.0 has to be removed.
 
 **Device validation is performed in #49 (P2-03).** It is part of that issue's acceptance criteria. The matrix below is the expected behaviour, derived from the server source. #49 records the observed results on a physical iPhone (iOS 27) and a Mac (macOS 27) against real servers. For each cell, #49 checks:
   - start
