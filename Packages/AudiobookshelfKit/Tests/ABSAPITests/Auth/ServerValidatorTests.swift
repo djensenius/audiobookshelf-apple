@@ -375,6 +375,43 @@ private final class CookieJars: Sendable {
 }
 
 @Suite struct ServerValidatorLoginTests {
+    /// A proxy that sets `lb=1` on a redirect from `/status` and lets `/login` through only with
+    /// it. The stub plays the cookie jar's part (see `redirectChainSharesOneCookieJar`).
+    @Test func loginSendsTheValidationCookies() async throws {
+        let jars = CookieJars()
+        let server = StubServer { request in
+            guard let url = request.url, let jar = jars.last else { return .failure(.badURL) }
+            let hasCookie = jar.cookies(for: url)?.contains { $0.name == "lb" && $0.value == "1" } == true
+            switch (url.path(), hasCookie) {
+            case ("/abs/status", false):
+                var redirect = StubResponse.redirect(to: url.absoluteString)
+                redirect.headers["Set-Cookie"] = "lb=1; Path=/"
+                jar.setCookies(
+                    HTTPCookie.cookies(withResponseHeaderFields: redirect.headers, for: url), for: url,
+                    mainDocumentURL: nil)
+                return redirect
+            case ("/abs/status", true): return .json(statusLocal)
+            case ("/abs/login", true): return .json(authResponseJSON())
+            default: return .redirect(to: "https://\(url.host() ?? "")/challenge", status: 302)
+            }
+        }
+        let validator = ServerValidator(
+            sessionConfiguration: { server.sessionConfiguration() }, cookieStorage: jars.make)
+        let validated = try await validator.validate(address: "https://\(server.host)/abs")
+        #expect(validated.cookieStorage === jars.last)
+        #expect(validator.client(for: validated).cookieStorage === validated.cookieStorage)
+
+        let result = try await validator.login(to: validated, username: "david", password: "pw")
+        #expect(result.tokens.accessToken == "access-new")
+        #expect(jars.count == 1)
+
+        // A new validation starts with an empty jar and its own redirect.
+        let again = try await validator.validate(address: "https://\(server.host)/abs")
+        #expect(again.cookieStorage !== validated.cookieStorage)
+        #expect(jars.count == 2)
+        #expect(server.requests(path: "/abs/status").count == 4)
+    }
+
     @Test func loginMapsTokensAndFeatures() async throws {
         let server = stubServer(login: .json(authResponseJSON(version: "2.37.2")))
         let validator = validator(server)

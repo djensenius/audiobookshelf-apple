@@ -17,7 +17,8 @@ public struct ServerValidator: Sendable {
     }
 
     /// - Parameter cookieStorage: Makes the cookie jar shared by one candidate's `/status`
-    ///   redirect chain; `nil` for a new in-memory jar. Tests use it to observe the jar.
+    ///   redirect chain and the sign-in after it; `nil` for a new in-memory jar. Tests use it
+    ///   to observe the jar.
     init(
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration,
         cookieStorage: @escaping @Sendable () -> HTTPCookieStorage?
@@ -55,8 +56,10 @@ public struct ServerValidator: Sendable {
             if index > 0, !customHeaders.isEmpty { throw ServerValidationError.httpsUnavailable(candidate) }
             let address: ServerAddress
             let status: ServerStatus
+            let jar = makeCookieStorage() ?? URLSessionConfiguration.ephemeral.httpCookieStorage
             do {
-                (address, status) = try await self.status(at: candidate, customHeaders: customHeaders)
+                (address, status) = try await self.status(
+                    at: candidate, customHeaders: customHeaders, cookieStorage: jar)
             } catch let error as APIError {
                 if index < candidates.count - 1, Self.allowsHTTPFallback(after: error) { continue }
                 throw Self.statusError(error)
@@ -66,7 +69,7 @@ public struct ServerValidator: Sendable {
             return ValidatedServer(
                 configuration: try Self.configuration(address, customHeaders: customHeaders),
                 address: address, status: status, features: features,
-                fellBackToHTTP: index > 0 && address.url.scheme == "http")
+                fellBackToHTTP: index > 0 && address.url.scheme == "http", cookieStorage: jar)
         }
         // `candidates` is not empty, so the loop always returns or throws.
         throw ServerValidationError.invalidAddress
@@ -75,8 +78,13 @@ public struct ServerValidator: Sendable {
     /// Signs in with `POST /login` and returns the user, the token pair to store, and the
     /// server's version gates. If the response is refused (unsupported version, no tokens, or a
     /// body that doesn't decode), the session the server just created is logged out, best effort.
+    ///
+    /// The request uses the cookie jar validation filled, so a cookie a proxy or load balancer
+    /// in front of the server set during validation (a sticky session or a challenge) is sent
+    /// with the password. The jar only ever holds that host's cookies: validation refuses other
+    /// hosts, and `/status` creates no Audiobookshelf session.
     public func login(to server: ValidatedServer, username: String, password: String) async throws -> LoginResult {
-        let client = client(server.configuration)
+        let client = client(for: server)
         let reply: APIResponse<Data>
         do {
             reply = try await client.response(
@@ -158,15 +166,14 @@ public struct ServerValidator: Sendable {
 
     /// Reads `/status` at `candidate`, following same-host redirects itself so that each hop is
     /// checked before it is sent and keeps the custom headers. Every request of the chain shares
-    /// one new cookie jar, so a load balancer or proxy that sets a cookie on its redirect gets it
-    /// back; nothing is shared with other candidates or validations. Returns the address the
-    /// status was finally served from.
+    /// `jar`, new for each candidate, so a load balancer or proxy that sets a cookie on its
+    /// redirect gets it back; nothing is shared with other candidates or validations. Returns the
+    /// address the status was finally served from.
     /// - Throws: `APIError` only when the first request fails, so only that can fall back to
     ///   `http`; otherwise ``ServerValidationError``.
     private func status(
-        at candidate: ServerAddress, customHeaders: [String: String]
+        at candidate: ServerAddress, customHeaders: [String: String], cookieStorage jar: HTTPCookieStorage?
     ) async throws -> (ServerAddress, ServerStatus) {
-        let jar = makeCookieStorage() ?? URLSessionConfiguration.ephemeral.httpCookieStorage
         let configuration = try Self.configuration(candidate, customHeaders: customHeaders)
         let reply = try await client(configuration, cookieStorage: jar).response(for: Self.statusProbe())
         guard (300..<400).contains(reply.httpResponse.statusCode) else {
@@ -265,6 +272,11 @@ public struct ServerValidator: Sendable {
         } catch {
             throw .unexpected(.decoding("AuthResponse"))
         }
+    }
+
+    /// The client that signs in to `server`, with the cookie jar from its validation.
+    func client(for server: ValidatedServer) -> APIClient {
+        client(server.configuration, cookieStorage: server.cookieStorage)
     }
 
     /// - Parameter cookieStorage: `nil` for a new cookie jar.
@@ -376,6 +388,9 @@ public struct ValidatedServer: Sendable {
     /// The user typed no scheme, `https` couldn't connect, and the server is used over `http`.
     /// Warn before sign-in.
     public let fellBackToHTTP: Bool
+    /// The cookie jar of the validation's `/status` requests, reused by
+    /// ``ServerValidator/login(to:username:password:)``. A new validation has a new jar.
+    let cookieStorage: HTTPCookieStorage?
 
     /// Whether credentials would be sent unencrypted.
     public var isInsecure: Bool { address.url.scheme == "http" }
