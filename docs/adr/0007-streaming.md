@@ -254,7 +254,7 @@ Cons:
        - **Item failed** (`AVPlayerItem.status == .failed`, which a seek cannot recover): create a new `AVURLAsset` and `AVPlayerItem` for the same playlist URL, replace the current item, and seek to the saved position.
        - **Player failed** (`AVPlayer.status == .failed`): also create a new player before inserting the item. Re-attach observers and the rate.
        - Re-seeks and item or player recreations all draw on the same budget.
-     - **On `stream_reset`:** if one arrives for this session, apply it with the same item-state rule, seeking to the saved position (see "Playback position across rebuilds"; the server's `startTime` is only used to know the reset happened), and restart the backoff once.
+     - **On `stream_reset`:** if one arrives for this session, apply it with the same item-state rule, seeking to the recovery target (see "Playback position across rebuilds"; the server's `startTime` is only used to know the reset happened), and restart the backoff once.
      - **When the budget is exhausted:** re-check the session. If it is gone, run a session rebuild. If it is still alive, escalate to a session rebuild too; the old session is closed in step 1 of the rebuild.
      - Direct play uses the same budget and item-state rule for 5xx, 408, 429 and stalls.
    - **Session rebuild** (session gone, readiness budget exhausted, or the direct-play to HLS fallback). The old `sessionId` is never reused.
@@ -281,6 +281,11 @@ Cons:
        - Seeks set it when they complete.
        - It is **never** taken from the new session's `currentTime`. The server derives that from `mediaProgress`, which can be older than local playback.
        - The cold-start "newer progress wins" rule in point 7 applies only when a session starts fresh, not to a rebuild.
+     - **Recovery target is the latest user intent.** Every seek gets an increasing `seekGeneration`, and the engine stores its target as `pendingSeekTarget` until the seek completes.
+       - **Target:** a rebuild, re-seek or `stream_reset` targets `pendingSeekTarget` if a user seek is pending or in flight, and the saved position otherwise.
+       - **Cancelled seeks:** a user seek cancelled by recovery (its completion returns `finished == false`, or the item is replaced) is not lost. `pendingSeekTarget` stays set until a seek to it completes.
+       - **Seek during recovery:** a user seek issued during recovery replaces the recovery target. The recovery seeks there instead, and any recovery seek completion with an older generation is ignored and never writes the saved position.
+       - The saved position and Now Playing elapsed time follow the latest target, never an older one.
      - **Final sync before close.** Before step 2 of a rebuild, the old session gets one `POST /api/session/{old}/close` with `{currentTime: savedPosition, timeListened: unsyncedDelta, duration}`.
        - The server applies that body through `syncSession` before removing the session (`PlaybackSessionManager.js:421-426`).
        - Doing this first also moves the user's progress forward. A new HLS `Stream` starts transcoding at the user's progress (`PlaybackSessionManager.js:345`, `Stream.js:241-263`), so this avoids a needless transcode reset.
@@ -300,6 +305,11 @@ Cons:
          - **Record found and `timeListening ≥ ackedTotal + delta − 1 s`:** the delta was applied, so drop it.
          - **Record found with `timeListening ≈ ackedTotal`, or no record because nothing was ever saved:** the delta was not applied, so carry it into the new session's next `/sync`.
          - **Undecidable** (record not on the first page, values match neither case, or the lookup fails after the normal queue retries): drop the delta. This undercounts by at most one sync interval but never double-counts.
+       - **Serialized, idempotent reporting.** Each session has one serial reporting queue, so at most one `/sync` or `/close` is in flight per session.
+         - **Snapshot:** before a send, the engine moves the accumulated time into an immutable snapshot `{sessionId, seq, timeListened, currentTime}` and resets the accumulator. Time played afterwards accrues into the next snapshot.
+         - **Retries:** a retry, timeout re-send or replay after relaunch resends the **same** snapshot. It never re-reads the accumulator or merges new time into an unacknowledged snapshot.
+         - **One owner per interval:** a snapshot is released only by a 200, or by the reconciliation outcome below. Only then is the next snapshot sent. Every interval of listening time belongs to exactly one snapshot.
+         - **Coalescing:** a second close request (rebuild plus app exit, for example) waits for the pending close and adds no delta.
        - **Final report through `/close`.** It uses `/close` with a body, not `/sync`, so a blind retry can never re-apply it: the retry gets 404 and goes through reconciliation.
      - **Now Playing and CarPlay.** During a rebuild, the Now Playing session (`ABSPlayback/NowPlaying/`, which also feeds CarPlay) keeps publishing the saved position as elapsed time, with a buffering or paused state.
        - The new item's time is not published until its seek has completed.
@@ -413,6 +423,11 @@ Cons:
   - An undecidable reconciliation drops the delta, with no resend.
 - **Position source:** the new session's server `currentTime` (deliberately older) is ignored, and the saved local position is used.
 - **Now Playing:** elapsed time never decreases during a rebuild.
+- **Serialized reporting:** two concurrent close or rebuild triggers for one session produce exactly one in-flight `/close`. A timed-out `/close` retried while playback continues resends the identical snapshot, and the time played meanwhile goes only into the new session. The server's total equals the time played.
+- **Seek during recovery:**
+  - A `stream_reset` or rebuild that arrives while a user seek is in flight ends at that seek's target, not at the older saved position.
+  - A user seek issued mid-recovery wins over the recovery target.
+  - A stale recovery seek completion does not overwrite the position.
 - **Direct play to HLS fallback:** the fallback keeps the position and rate, and sends the old session's final `/close` before the transcode `/play`.
 
 **Verified from source and SDK:**
