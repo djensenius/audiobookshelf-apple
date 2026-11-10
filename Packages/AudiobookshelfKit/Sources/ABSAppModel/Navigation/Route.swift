@@ -14,8 +14,10 @@ public enum Route: Hashable, Codable, Sendable {
     case narrator(name: String)
     case collection(id: String)
     case playlist(id: String)
-    /// An item's listening history (legacy `pages/media/_id/history`).
-    case history(itemID: String)
+    /// The playback history of a book, or of one podcast episode when `episodeID` is set
+    /// (legacy `pages/media/_id/history`). Without an episode it stores as before, so saved
+    /// scenes still decode.
+    case history(itemID: String, episodeID: String? = nil)
     case localFolder(id: String)
     case localItem(id: String)
     case downloadQueue
