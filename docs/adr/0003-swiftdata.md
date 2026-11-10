@@ -203,7 +203,9 @@ Model notes:
   - `finishedDirty`: `isFinished`, `finishedAt`;
   - `ebookDirty`: `ebookLocation`, `ebookProgress`.
 
-  A local change to a group also sets that group's `<group>EditedAt` to now.
+  A local change to a group also sets that group's `<group>EditedAt` to now, or
+  just after its previous value if the clock repeats or steps back: the edit time
+  identifies the edit, so an acknowledgement never clears a newer edit.
   `needsServerSync` is kept equal to "any dirty flag is set" by the store and is
   the indexed pending-sync query. `serverBaseline` is a `Codable, Sendable` struct
   owned by `ABSData` (`currentTime`, `progress`, `duration`, `isFinished`,
@@ -247,7 +249,11 @@ Model notes:
     applied, a row whose generation has advanced since that capture is skipped; the
     next fetch picks up any real server change. The counter can be in memory
     because no fetch outlives the process. In addition, server values whose
-    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped. Server
+    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped, and socket
+    values whose `lastUpdate` equals it too: server times are milliseconds, so
+    another write in that millisecond may have been emitted before the one the
+    baseline holds (a fetch applied after it is ordered by the generation check;
+    a later write with the same time arrives by the next fetch). Server
     progress always carries `lastUpdate` (`MediaProgress.getOldMediaProgress`,
     `updatedAt`); the network layer drops a payload without one rather than
     inventing a time.
@@ -754,7 +760,14 @@ Ongoing checks:
   is in flight survives its echo on existing and on created progress; a seeded
   random simulation of the 2.26.0 server (#53 side effects, creation defaults,
   another device, relaunches, stale fetches) keeps every dirty group unless the
-  server's value is newer or is what sending it would store, and converges; deleting a connection with dirty progress and then logging in
+  server's value is newer or is what sending it would store, and converges; a
+  seeded random interleaving of `LocalProgressStore` calls (edits, sends acked
+  with or without a server time, failures, socket events delivered in order,
+  stale and confirming fetches, writes sharing a millisecond) never loses an
+  unconfirmed edit to anything but a later write by another device, never leaves
+  a clean row older than its acknowledged write, never lets a held socket value
+  become the row's value, keeps `needsConfirmationFetch` equal to the hold, and
+  converges (25 seeds by default, `ABS_PROGRESS_SEEDS` for more); deleting a connection with dirty progress and then logging in
   again to the same address and user returns the same connection `id`, and
   `pendingSync(for:)` returns the retained progress.
 - #72 (P4-01): a sealed resume-data file on disk contains no plaintext bearer

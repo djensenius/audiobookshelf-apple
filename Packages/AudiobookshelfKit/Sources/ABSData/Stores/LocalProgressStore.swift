@@ -126,7 +126,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Merges server progress (from `/api/me`, an expanded item, `/api/me/progress/:id` or a
     /// socket event) into existing rows; media without a row is skipped. Values for a row edited
     /// or settled since `capturedAt` are dropped, and groups carried by a PATCH in flight aren't
-    /// merged. Returns the keys whose rows were merged.
+    /// merged, nor are socket values whose `lastUpdate` isn't later than the baseline's (another
+    /// write in the same millisecond may predate it). Returns the keys whose rows were merged.
     ///
     /// A PATCH's 200 carries no server time, so after an acknowledgement a socket event may have
     /// been emitted before the PATCH was applied, with any `lastUpdate`. Until a fetch issued
@@ -147,7 +148,7 @@ public enum SessionUploadResult: Sendable, Equatable {
                 let raw = key.rawValue
                 if let edited = rowGenerations[raw], edited > capturedAt.value { continue }
                 guard let awaiting = awaitingFetch[raw] else {
-                    if try merge(server, into: key) { merged.insert(key) }
+                    if try merge(server, into: key, source: source) { merged.insert(key) }
                     continue
                 }
                 guard source == .fetch else {
@@ -156,12 +157,12 @@ public enum SessionUploadResult: Sendable, Equatable {
                 }
                 // Passing the generation check, the fetch was issued after the acknowledgement.
                 confirmed.insert(raw)
-                if try merge(server, into: key) { merged.insert(key) }
+                if try merge(server, into: key, source: .fetch) { merged.insert(key) }
                 // Server times are milliseconds, so a pre-PATCH snapshot can tie the fetch; only a
                 // strictly newer one can have been emitted after it.
                 if let latest = awaiting.latest, rowGenerations[raw] ?? 0 <= latest.capturedAt,
                     latest.server.lastUpdate > server.lastUpdate,
-                    try merge(latest.server, into: key)
+                    try merge(latest.server, into: key, source: .socket)
                 {
                     merged.insert(key)
                 }
@@ -421,9 +422,13 @@ public enum SessionUploadResult: Sendable, Equatable {
     }
 
     /// Merges `server` into the row (except groups in flight); `false` when there is no row or the
-    /// values are stale.
-    private func merge(_ server: ProgressBaseline, into key: MediaKey) throws -> Bool {
+    /// values are stale. Server times are milliseconds, so a socket value with the baseline's time
+    /// may be another write emitted before the one the baseline holds; it counts as stale.
+    private func merge(_ server: ProgressBaseline, into key: MediaKey, source: ServerProgressSource) throws -> Bool {
         guard let row = try fetchRow(key) else { return false }
+        if source == .socket, let baseline = row.serverBaseline, server.lastUpdate <= baseline.lastUpdate {
+            return false
+        }
         var state = ProgressSyncState(row)
         guard state.merge(server, excluding: inFlight[key.rawValue]?.groups ?? []) else { return false }
         state.write(to: row)

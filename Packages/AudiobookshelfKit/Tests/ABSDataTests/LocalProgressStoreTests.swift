@@ -296,6 +296,44 @@ import Testing
         #expect(row.serverBaseline?.currentTime == 200)
     }
 
+    /// Another write in the millisecond of our acknowledged one may have been emitted before it, so
+    /// once the row's server time is known (a timed acknowledgement or the confirming fetch), a
+    /// socket value with that time is ignored.
+    @Test(arguments: [true, false])
+    func socketValueTyingTheAcknowledgedWriteIsIgnored(_ timed: Bool) async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.completeSend(patch, serverLastUpdate: timed ? Self.at(2) : nil)
+        if !timed {
+            try await store.applyServerProgress(
+                [key: Self.server(currentTime: 200, lastUpdate: Self.at(2))],
+                capturedAt: await store.captureGeneration(), source: .fetch)
+        }
+
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 700, lastUpdate: Self.at(2))], capturedAt: await store.captureGeneration(),
+            source: .socket)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 200)
+        #expect(row.dirtyGroups.isEmpty)
+    }
+
+    /// Two edits with the same clock reading are still told apart: acknowledging the first leaves
+    /// the second dirty.
+    @Test func editWithTheSameTimeAsTheSentOneStaysDirty() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.recordEdit(Self.seek(300), for: key, now: Self.at(1))
+        try await store.completeSend(patch, serverLastUpdate: nil)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 300)
+        #expect(row.audioDirty)
+    }
+
     /// A socket value equal to the acknowledged one doesn't prove it was emitted after the PATCH:
     /// queued pre-PATCH events of 200 and then 100 leave the row at 200 until a fetch.
     @Test func equalSocketValueDoesNotReleaseTheHold() async throws {

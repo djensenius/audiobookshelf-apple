@@ -140,27 +140,28 @@ struct ProgressSyncState: Sendable, Equatable {
 
     // MARK: - Local edits
 
-    /// Applies a local change: marks each changed group dirty and sets its edit time to `now`.
+    /// Applies a local change: marks each changed group dirty and sets its edit time to `now`
+    /// (or just after the group's previous edit time, if that isn't earlier).
     mutating func apply(_ edit: ProgressEdit, now: Date) {
         if let audio = edit.audio {
             currentTime = audio.currentTime
             duration = audio.duration
             progress = audio.progress
             dirty.insert(.audio)
-            audioEditedAt = now
+            audioEditedAt = Self.edit(after: audioEditedAt, now: now)
         }
         if let finished = edit.isFinished {
             isFinished = finished
             // Whole milliseconds, as the server stores it, so its echo compares equal.
             finishedAt = finished ? Self.wholeMilliseconds(now) : nil
             dirty.insert(.finished)
-            finishedEditedAt = now
+            finishedEditedAt = Self.edit(after: finishedEditedAt, now: now)
         }
         if let ebook = edit.ebook {
             ebookLocation = ebook.location
             ebookProgress = ebook.progress
             dirty.insert(.ebook)
-            ebookEditedAt = now
+            ebookEditedAt = Self.edit(after: ebookEditedAt, now: now)
         }
         lastUpdate = max(lastUpdate, now)
     }
@@ -458,6 +459,14 @@ struct ProgressSyncState: Sendable, Equatable {
     /// The nearest whole millisecond, absorbing floating-point error in already-whole values.
     private static func milliseconds(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 * 1000).rounded())
+    }
+
+    /// An edit time identifies the edit (an acknowledgement clears a group only if it wasn't
+    /// edited since the send), so it is later than the group's previous one even when the clock
+    /// repeats a value or steps back.
+    private static func edit(after previous: Date?, now: Date) -> Date {
+        guard let previous, now <= previous else { return now }
+        return Date(timeIntervalSinceReferenceDate: previous.timeIntervalSinceReferenceDate.nextUp)
     }
 
     /// `date` truncated to whole milliseconds, as the server stores it.
