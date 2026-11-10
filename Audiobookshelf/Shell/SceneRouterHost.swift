@@ -39,8 +39,10 @@ struct SceneRouterHost: View {
         .onAppear(perform: restoreOnce)
         .onChange(of: pendingLink) { openPendingLink() }
         .onChange(of: scenePhase) { _, phase in
-            // Written when the scene goes to the background, not on every push (ADR 0004).
-            if phase == .background, isRestored {
+            // Written when the scene leaves the foreground, not on every push. `.inactive` counts
+            // too, because macOS may quit a scene without passing through `.background`. Never
+            // before the restore, which would replace the saved snapshot with the defaults.
+            if phase != .active, isRestored {
                 snapshot = router.snapshotData
             }
         }
