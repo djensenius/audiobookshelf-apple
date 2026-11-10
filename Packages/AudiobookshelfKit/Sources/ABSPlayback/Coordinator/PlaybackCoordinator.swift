@@ -412,10 +412,11 @@ public final class PlaybackCoordinator {
         pendingStartTime = nil
         let jumpOffset = pendingJumpOffset
         pendingJumpOffset = 0
+        awaitingSeekLanding = true
         var seekTarget: Double?
         if let pending, pending != plannedStart { seekTarget = pending }  // A seek while loading.
         // Jumps while loading are relative to the resolved resume position (or the seek above).
-        if jumpOffset != 0 { seekTarget = (seekTarget ?? engine.currentTime) + jumpOffset }
+        if jumpOffset != 0 { seekTarget = (seekTarget ?? position) + jumpOffset }
         if let seekTarget {
             await engine.seek(to: engine.timeline?.clamp(seekTarget) ?? seekTarget)
             guard current == generation, phase == .loaded else { return }
@@ -423,10 +424,13 @@ public final class PlaybackCoordinator {
         // An interrupted initial seek stays pending with the engine paused at 0: `.loaded` carries
         // its target, and `.didSeek` waits for the landing (see `handle(_:)`).
         let landed = engine.pendingSeekTarget == nil
-        awaitingSeekLanding = !landed
         emit(.loaded(time: position))
         guard current == generation, phase == .loaded else { return }
-        if landed { emit(.didSeek(time: engine.currentTime)) }
+        // A newer seek or a tick may already have reported the landing during the catch-up seek.
+        if landed, awaitingSeekLanding {
+            awaitingSeekLanding = false
+            emit(.didSeek(time: engine.currentTime))
+        }
         guard current == generation, phase == .loaded else { return }
         saveLastPlayed()
         // A pause or resume during the seek above takes over.
@@ -869,14 +873,16 @@ public final class PlaybackCoordinator {
         return Self.clamp(unloadedPosition + pendingJumpOffset, to: unloadedDuration)
     }
 
-    /// Adds a jump so the position shown stays within the item, and it and the resume agree.
+    /// Adds a clamped jump relative to a pending absolute seek, otherwise the unloaded position.
     ///
     /// While a restored item is still resolving its start, the jump is clamped against the saved
     /// record's position, not the position eventually resolved. For example, with a record at 3590
     /// of 3600, +30 keeps only +10, so a resolved 1000 becomes 1010. This is intentional: the
     /// position shown and the result stay consistent with what the user saw.
     private func addClampedJump(_ offset: Double) {
-        pendingJumpOffset = Self.clamp(unloadedPositionAfterJumps + offset, to: unloadedDuration) - unloadedPosition
+        let base = pendingStartTime ?? unloadedPosition
+        let position = Self.clamp(base + pendingJumpOffset, to: unloadedDuration)
+        pendingJumpOffset = Self.clamp(position + offset, to: unloadedDuration) - base
     }
 
     /// `time` within `0...duration`, or only at 0 when the duration is unknown (0).

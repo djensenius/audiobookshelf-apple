@@ -42,8 +42,8 @@ public typealias NowPlayingCoverProvider = @Sendable (NowPlayingCover) async -> 
 ///   owns the controller, whose command handler (this bridge) is weak.
 /// - **Threading.** Main actor only. Artwork loads run off the main actor.
 ///
-/// **What the composition root must do** (`AppEnvironment`, P3-04 #44, which also owns the device
-/// gate: Lock Screen, Control Center, AirPods, Mac media keys, CarPlay):
+/// **What the composition root must do** (`AppEnvironment`, P3-04 #44). Runtime gates remain on
+/// parent #54 (Lock Screen, Control Center, AirPods, Mac media keys) and #79/#81 (CarPlay):
 /// 1. Construct one with ``init(coordinator:settings:coverProvider:entityIdentifiers:)`` right after
 ///    the coordinator, passing the app's `AppSettings`, a cover provider (download, else the
 ///    server's cover endpoint) and the App Intents entity mapping.

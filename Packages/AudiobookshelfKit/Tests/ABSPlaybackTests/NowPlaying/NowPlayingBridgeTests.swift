@@ -370,6 +370,8 @@ struct BridgeHarness {
         gate.open()
         try await first.value
         #expect(b.h.engine.seeks == [130, 160])
+        #expect(b.coordinator.currentTime == 160)
+        #expect(try b.session.snapshot == b.snapshot(.playing(rate: 1), at: 160))
     }
 
     @Test func toggleWhileStartingLoadsPaused() async throws {
@@ -476,19 +478,74 @@ struct BridgeHarness {
         #expect(session.snapshot == b.snapshot(.paused, at: 0))
 
         let seekGate = Gate()
-        b.h.engine.seekGates = [seekGate]
+        let resumeGate = Gate()
+        b.h.engine.seekGates = [seekGate, resumeGate]
         let controller = b.controller
         let skip = Task { try await controller.perform(.skipForward(30)) }
         await yieldUntil { b.h.engine.seeks == [30] }
-        try await b.controller.perform(.play)
-        #expect(b.h.engine.isPlaybackRequested)
-        #expect(b.h.engine.state == .buffering)
+        // Main retries the pending target before playing. Hold that replacement seek too.
+        let resume = Task { try await controller.perform(.play) }
+        await yieldUntil { b.h.engine.seeks == [30, 30] }
+        #expect(b.coordinator.isPlaybackRequested)
+        #expect(!b.h.engine.isPlaybackRequested)
         #expect(!b.wasShownPlaying(session))
         #expect(session.applicationPrimaryRequests == 0)
 
+        resumeGate.open()
+        try await resume.value
         seekGate.open()
         try await skip.value
         await yieldUntil { session.snapshot == b.snapshot(.playing(rate: 1), at: 30) }
+        await b.controller.activationTask?.value
+        #expect(session.applicationPrimaryRequests == 1)
+    }
+
+    @Test func interruptedLoadAndRemoteJumpPublishThePendingTargetUntilLanding() async throws {
+        let b = try BridgeHarness()
+        b.h.engine.interruptedLoads = 1
+        await b.coordinator.play(itemID: "a", startTime: 1500)
+        let session = try b.session
+        #expect(session.book?.chapter?.current == 2)
+        #expect(session.snapshot == b.snapshot(.paused, at: 1500))
+        #expect(session.applicationPrimaryRequests == 0)
+
+        b.h.engine.seekResults = [.interrupted]
+        try await b.controller.perform(.nextTrack)
+        #expect(b.coordinator.currentTime == 1530)
+        #expect(session.snapshot == b.snapshot(.paused, at: 1530))
+        #expect(session.applicationPrimaryRequests == 0)
+        b.h.engine.landPendingSeek()
+        #expect(session.snapshot == b.snapshot(.playing(rate: 1), at: 1530))
+        await b.controller.activationTask?.value
+        #expect(session.applicationPrimaryRequests == 1)
+        #expect(
+            b.h.events.events.filter { if case .didSeek = $0 { true } else { false } } == [.didSeek(time: 1530)])
+    }
+
+    @Test func refusedEarlyPlayAndSilentRetryStayPausedAndPreserveTheError() async throws {
+        let b = try BridgeHarness()
+        let (play, gate) = await b.playHeld("a")
+        try await b.controller.perform(.nextTrack)
+        b.h.engine.failingPlays = 1
+        gate.open()
+        await play.value
+        let failure = try #require(b.coordinator.error)
+        let session = try b.session
+        #expect(!b.coordinator.isPlaybackRequested)
+        #expect(session.snapshot == b.snapshot(.paused, at: 30))
+        #expect(session.applicationPrimaryRequests == 0)
+
+        b.h.engine.silentlyRefusingPlays = 1
+        try await b.controller.perform(.play)
+        #expect(b.coordinator.error == failure)
+        #expect(!b.coordinator.isPlaybackRequested)
+        #expect(session.snapshot == b.snapshot(.paused, at: 30))
+        #expect(session.applicationPrimaryRequests == 0)
+        #expect(!b.h.events.events.contains(.playbackStarted))
+
+        try await b.controller.perform(.togglePlayPause)
+        #expect(b.coordinator.error == nil)
+        #expect(session.snapshot == b.snapshot(.playing(rate: 1), at: 30))
         await b.controller.activationTask?.value
         #expect(session.applicationPrimaryRequests == 1)
     }

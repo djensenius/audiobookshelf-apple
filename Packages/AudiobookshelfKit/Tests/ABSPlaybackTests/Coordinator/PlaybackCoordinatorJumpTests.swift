@@ -88,6 +88,29 @@ struct PlaybackCoordinatorJumpTests {
         #expect(coordinator.isPlaying)
     }
 
+    @Test func jumpAfterASeekDuringEngineLoadUsesThePendingTarget() async throws {
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let coordinator = coordinator
+        let play = Task { await coordinator.play(itemID: "a") }
+        await yieldUntil { engine.loads.count == 1 }
+        #expect(engine.loads.last?.time == 0)
+        #expect(coordinator.phase == .starting)
+
+        // The resume position is already resolved; hold the engine load, not the session start.
+        #expect(await coordinator.seek(to: 1000) == nil)
+        #expect(await coordinator.jump(by: -15) == nil)
+        gate.open()
+        await play.value
+
+        #expect(engine.seeks == [985])
+        #expect(coordinator.currentTime == 985, "Landed at \(coordinator.currentTime), expected 985")
+        #expect(h.events.events.contains(.loaded(time: 985)))
+        #expect(h.events.events.filter { if case .didSeek = $0 { true } else { false } } == [.didSeek(time: 985)])
+        #expect(h.lastPlayed.record?.position == 985)
+        #expect(coordinator.isPlaying)
+    }
+
     @Test func jumpsWhileANewItemStartsShowOnlyOnceLoaded() async throws {
         h.setServerProgress("a", time: 500, updated: h.clock.ago(10))
         let (play, gate) = await playHeld("a")
@@ -118,6 +141,43 @@ struct PlaybackCoordinatorJumpTests {
         #expect(engine.loads.last?.time == 3590)
         #expect(engine.seeks == [3570])
         #expect(coordinator.currentTime == 3570)
+    }
+
+    @Test(arguments: [false, true])
+    func jumpAfterAnInterruptedLoadUsesItsPendingPosition(interruptJump: Bool) async throws {
+        h.setServerProgress("a", time: 500, updated: h.clock.ago(10))
+        engine.interruptedLoads = 1
+        if interruptJump { engine.seekResults = [.interrupted] }
+        let (play, gate) = await playHeld("a")
+        await coordinator.jump(by: 30)
+        gate.open()
+        await play.value
+
+        #expect(engine.loads.last?.time == 500)
+        #expect(engine.seeks == [530])
+        #expect(coordinator.currentTime == 530)
+        #expect(h.events.events.contains(.loaded(time: 530)))
+        #expect(h.lastPlayed.record?.position == 530)
+        if interruptJump {
+            #expect(!h.events.events.contains { if case .didSeek = $0 { true } else { false } })
+            engine.landPendingSeek()
+        }
+        engine.onEvent?(.tick(530))
+        #expect(h.events.events.filter { if case .didSeek = $0 { true } else { false } } == [.didSeek(time: 530)])
+    }
+
+    @Test func aNewJumpSupersedesTheCatchUpSeekAndReportsOneLanding() async throws {
+        let (play, seekGate) = await playHeldInCatchUpSeek()
+        #expect(await coordinator.jump(by: 30) == 60)
+        seekGate.open()
+        await play.value
+
+        #expect(engine.seeks == [30, 60])
+        #expect(engine.currentTime == 60)
+        #expect(coordinator.currentTime == 60)
+        #expect(h.events.events.contains(.loaded(time: 60)))
+        #expect(h.events.events.filter { if case .didSeek = $0 { true } else { false } } == [.didSeek(time: 60)])
+        #expect(startCount == 1)
     }
 
     // MARK: - Play intent

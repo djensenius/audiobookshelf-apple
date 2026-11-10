@@ -74,6 +74,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     /// How many plays are silently refused while a prior engine failure remains sticky.
     var silentlyRefusingPlays = 0
     private var generation = 0
+    private var seekGeneration = 0
 
     func load(_ source: AudioEngineSource, at time: Double) async throws(AudioEngineError) {
         generation += 1
@@ -134,15 +135,19 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func seek(to time: Double) async -> SeekResult {
+        seekGeneration += 1
+        let request = seekGeneration
+        let current = generation
         seeks.append(time)
         pendingSeekTarget = time
-        if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
         let result = seekResults.isEmpty ? SeekResult.completed : seekResults.removeFirst()
+        if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
+        // A late seek never overwrites a newer seek, load or stop (including the same target).
+        guard current == generation, request == seekGeneration else { return .superseded }
         if result == .completed {
-            if pendingSeekTarget == time { pendingSeekTarget = nil }
+            pendingSeekTarget = nil
             currentTime = time
-            if state == .ended { state = isPlaybackRequested ? .playing : .paused }
-            if state == .buffering, isPlaybackRequested, pendingSeekTarget == nil { state = .playing }
+            if state == .ended || state == .buffering { state = isPlaybackRequested ? .playing : .paused }
         } else {
             state = isPlaybackRequested ? .buffering : .paused
         }
