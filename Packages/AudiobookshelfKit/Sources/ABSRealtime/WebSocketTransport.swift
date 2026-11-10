@@ -33,7 +33,7 @@ public struct URLSessionWebSocketTransport: WebSocketTransport {
 
     public func connect(url: URL, headers: [String: String]) async throws -> any WebSocketConnection {
         var request = URLRequest(url: url)
-        for (name, value) in headers {
+        for (name, value) in SocketEndpoint.filteredHeaders(headers) {
             request.setValue(value, forHTTPHeaderField: name)
         }
         let task = session.webSocketTask(with: request)

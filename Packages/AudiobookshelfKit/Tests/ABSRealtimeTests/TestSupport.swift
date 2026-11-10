@@ -18,6 +18,7 @@ final class ManualClock: Clock, Sendable {
     }
 
     private struct Waiter {
+        let id: Int
         let delays: [Duration]
         let continuation: CheckedContinuation<Void, Never>
     }
@@ -90,16 +91,28 @@ final class ManualClock: Clock, Sendable {
         waiters.forEach { $0.continuation.resume() }
     }
 
-    /// Suspends until exactly these sleeps (relative to now, in any order) are pending.
+    /// Suspends until exactly these sleeps (relative to now, in any order) are pending, or the
+    /// task is cancelled (e.g. by a test's time limit).
     func waitUntilPending(_ delays: [Duration]) async {
         let expected = delays.sorted()
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let ready = state.withLock { state in
-                if state.pendingDelays == expected { return true }
-                state.waiters.append(Waiter(delays: expected, continuation: continuation))
-                return false
+        let id = state.withLock { state in
+            state.nextID += 1
+            return state.nextID
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let ready = state.withLock { state in
+                    if Task.isCancelled || state.pendingDelays == expected { return true }
+                    state.waiters.append(Waiter(id: id, delays: expected, continuation: continuation))
+                    return false
+                }
+                if ready { continuation.resume() }
             }
-            if ready { continuation.resume() }
+        } onCancel: {
+            let waiter = state.withLock { state in
+                state.waiters.firstIndex { $0.id == id }.map { state.waiters.remove(at: $0) }
+            }
+            waiter?.continuation.resume()
         }
     }
 }
@@ -116,16 +129,31 @@ final class FakeTransport: WebSocketTransport {
     let connections: AsyncStream<FakeConnection>
     private let continuation: AsyncStream<FakeConnection>.Continuation
     private let recorded = Mutex<[Request]>([])
+    private let failuresLeft = Mutex(0)
+    private let deliversAfterClose: Bool
 
-    init() {
+    /// - Parameter deliversAfterClose: Connections keep delivering pushed frames after `close()`.
+    init(deliversAfterClose: Bool = false) {
+        self.deliversAfterClose = deliversAfterClose
         (connections, continuation) = AsyncStream.makeStream()
     }
 
     var requests: [Request] { recorded.withLock { $0 } }
 
+    /// Makes the next `count` connection attempts throw.
+    func failNextConnects(_ count: Int) {
+        failuresLeft.withLock { $0 = count }
+    }
+
     func connect(url: URL, headers: [String: String]) async throws -> any WebSocketConnection {
         recorded.withLock { $0.append(Request(url: url, headers: headers)) }
-        let connection = FakeConnection()
+        let shouldFail = failuresLeft.withLock { left in
+            guard left > 0 else { return false }
+            left -= 1
+            return true
+        }
+        if shouldFail { throw FakeTransportError() }
+        let connection = FakeConnection(deliversAfterClose: deliversAfterClose)
         continuation.yield(connection)
         return connection
     }
@@ -138,8 +166,12 @@ final class FakeConnection: WebSocketConnection {
     let sent: AsyncStream<String>
     private let sentContinuation: AsyncStream<String>.Continuation
     private let closed = Mutex(false)
+    private let deliversAfterClose: Bool
+    /// While `isHeld`, `send` records the frame and then suspends until `releaseSends()`.
+    private let sendGate = Mutex<(isHeld: Bool, waiters: [CheckedContinuation<Void, Never>])>((false, []))
 
-    init() {
+    init(deliversAfterClose: Bool = false) {
+        self.deliversAfterClose = deliversAfterClose
         (messages, messageContinuation) = AsyncThrowingStream.makeStream()
         (sent, sentContinuation) = AsyncStream.makeStream()
     }
@@ -150,17 +182,42 @@ final class FakeConnection: WebSocketConnection {
         messageContinuation.yield(.text(text))
     }
 
+    func push(_ data: Data) {
+        messageContinuation.yield(.data(data))
+    }
+
     func fail() {
         messageContinuation.finish(throwing: FakeTransportError())
     }
 
+    func holdSends() {
+        sendGate.withLock { $0.isHeld = true }
+    }
+
+    func releaseSends() {
+        let waiters = sendGate.withLock { gate in
+            gate.isHeld = false
+            defer { gate.waiters = [] }
+            return gate.waiters
+        }
+        waiters.forEach { $0.resume() }
+    }
+
     func send(_ text: String) async throws {
         sentContinuation.yield(text)
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let proceed = sendGate.withLock { gate in
+                guard gate.isHeld else { return true }
+                gate.waiters.append(continuation)
+                return false
+            }
+            if proceed { continuation.resume() }
+        }
     }
 
     func close() {
         closed.withLock { $0 = true }
-        messageContinuation.finish()
         sentContinuation.finish()
+        if !deliversAfterClose { messageContinuation.finish() }
     }
 }

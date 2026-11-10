@@ -27,14 +27,21 @@ public enum RealtimeError: Error, Sendable, Equatable {
 /// reconnects with backoff after errors and ping timeouts. `auth_failed` stops reconnecting until
 /// ``updateToken(_:)`` or ``connect()`` is called.
 public actor SocketClient {
-    /// Before the open packet arrives there's no `pingInterval`; socket.io-client's default
-    /// connect timeout applies.
-    static let handshakeTimeout: Duration = .seconds(20)
+    /// The namespace connection (`40`) must be accepted within this time of opening the socket,
+    /// as socket.io-client's default `timeout`; server pings alone don't keep it alive.
+    static let connectTimeout: Duration = .seconds(20)
 
     private enum Mode {
         case idle
         case active
         case haltedByAuthFailure
+    }
+
+    private enum Deadline {
+        /// Until the namespace connection is accepted.
+        case connect
+        /// Until the next Engine.IO ping.
+        case liveness
     }
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "realtime")
@@ -58,8 +65,8 @@ public actor SocketClient {
     private var isConnected = false
     private var livenessTimeout: Duration?
     private var receiveTask: Task<Void, Never>?
-    private var watchdogTask: Task<Void, Never>?
-    private var watchdogID = 0
+    private var deadlines: [Deadline: (id: Int, task: Task<Void, Never>)] = [:]
+    private var nextDeadlineID = 0
     private var reconnectTask: Task<Void, Never>?
     private var reconnectID = 0
     private var attempt = 0
@@ -87,27 +94,36 @@ public actor SocketClient {
 
     deinit {
         receiveTask?.cancel()
-        watchdogTask?.cancel()
+        for deadline in deadlines.values { deadline.task.cancel() }
         reconnectTask?.cancel()
         connection?.close()
         continuation.finish()
     }
 
     /// Connects, or reconnects immediately if already connected. Resets the backoff and resumes
-    /// after an `auth_failed`.
+    /// after an `auth_failed`. Without a token the client opens no socket and connects as soon
+    /// as ``updateToken(_:)`` supplies one.
     public func connect() async {
         mode = .active
         await reconnectNow(reason: .clientRequested)
     }
 
     /// Closes the socket and stops reconnecting.
-    public func disconnect() async {
+    public func disconnect() {
         mode = .idle
         cancelReconnect()
-        if isConnected, let connection {
-            try? await connection.send(Self.wrap(.disconnect()))
-        }
+        // All state changes happen before anything is awaited, so a `connect()` can't interleave
+        // with a half-finished disconnect. The farewell `41` is sent off the actor.
+        let farewell = isConnected ? connection : nil
+        if farewell != nil { connection = nil }
         tearDown(reason: .clientRequested)
+        if let farewell {
+            let packet = Self.wrap(.disconnect())
+            Task.detached {
+                try? await farewell.send(packet)
+                farewell.close()
+            }
+        }
     }
 
     /// Reconnects immediately with a reset backoff, unless the client is idle or halted by
@@ -136,6 +152,10 @@ public actor SocketClient {
     }
 
     private func open() async {
+        guard token != nil else {
+            Self.logger.notice("No token; the socket connects once one is set")
+            return
+        }
         generation += 1
         let generation = generation
         let connection: any WebSocketConnection
@@ -152,7 +172,7 @@ public actor SocketClient {
             return
         }
         self.connection = connection
-        restartWatchdog(Self.handshakeTimeout)
+        startDeadline(.connect, after: Self.connectTimeout)
         receiveTask = Task { [weak self] in
             do {
                 for try await message in connection.messages {
@@ -165,21 +185,26 @@ public actor SocketClient {
         }
     }
 
-    /// Closes the current connection without scheduling a reconnect.
+    /// Closes the current connection without scheduling a reconnect, and reports `reason` if the
+    /// namespace was connected.
     private func tearDown(reason: RealtimeDisconnectReason) {
+        if closeConnection() {
+            continuation.yield(.disconnected(reason))
+        }
+    }
+
+    /// Returns whether the namespace was connected.
+    private func closeConnection() -> Bool {
         generation += 1
-        watchdogID += 1
         receiveTask?.cancel()
         receiveTask = nil
-        watchdogTask?.cancel()
-        watchdogTask = nil
+        for deadline in deadlines.values { deadline.task.cancel() }
+        deadlines = [:]
         connection?.close()
         connection = nil
         livenessTimeout = nil
-        if isConnected {
-            isConnected = false
-            continuation.yield(.disconnected(reason))
-        }
+        defer { isConnected = false }
+        return isConnected
     }
 
     private func connectionEnded(generation: Int) {
@@ -214,21 +239,34 @@ public actor SocketClient {
         reconnectTask = nil
     }
 
-    private func restartWatchdog(_ timeout: Duration) {
-        watchdogTask?.cancel()
-        watchdogID += 1
-        let id = watchdogID
+    /// Starts or restarts a deadline.
+    private func startDeadline(_ deadline: Deadline, after timeout: Duration) {
+        deadlines[deadline]?.task.cancel()
+        nextDeadlineID += 1
+        let id = nextDeadlineID
         let clock = clock
-        watchdogTask = Task { [weak self] in
+        let task = Task { [weak self] in
             do { try await clock.sleep(for: timeout) } catch { return }
-            await self?.watchdogFired(id: id)
+            await self?.deadlinePassed(deadline, id: id)
         }
+        deadlines[deadline] = (id, task)
     }
 
-    private func watchdogFired(id: Int) {
-        guard id == watchdogID, connection != nil else { return }
-        Self.logger.notice("Socket heartbeat timed out")
-        tearDown(reason: .pingTimeout)
+    private func cancelDeadline(_ deadline: Deadline) {
+        deadlines.removeValue(forKey: deadline)?.task.cancel()
+    }
+
+    private func deadlinePassed(_ deadline: Deadline, id: Int) {
+        guard deadlines[deadline]?.id == id else { return }
+        deadlines[deadline] = nil
+        switch deadline {
+        case .connect:
+            Self.logger.notice("Socket namespace connection timed out")
+            _ = closeConnection()
+        case .liveness:
+            Self.logger.notice("Socket heartbeat timed out")
+            tearDown(reason: .pingTimeout)
+        }
         scheduleReconnect()
     }
 
@@ -247,15 +285,13 @@ public actor SocketClient {
             Self.logger.error("Dropping undecodable Engine.IO packet: \(String(describing: error), privacy: .public)")
             return
         }
-        if case .open(let handshake) = packet {
-            livenessTimeout = handshake.livenessTimeout
-        }
-        restartWatchdog(livenessTimeout ?? Self.handshakeTimeout)
-
         switch packet {
-        case .open:
+        case .open(let handshake):
+            livenessTimeout = handshake.livenessTimeout
+            startDeadline(.liveness, after: handshake.livenessTimeout)
             await send(Self.wrap(.connect()), generation: generation)
         case .ping(let data):
+            if let livenessTimeout { startDeadline(.liveness, after: livenessTimeout) }
             await send(EngineIOPacket.pong(data).encoded, generation: generation)
         case .close:
             tearDown(reason: .serverClosed)
@@ -277,13 +313,15 @@ public actor SocketClient {
         }
         switch packet {
         case .connect(SocketIOPacket.mainNamespace, _):
+            cancelDeadline(.connect)
             isConnected = true
             attempt = 0
             continuation.yield(.connected)
             await sendAuth(generation: generation)
         case .connectError(SocketIOPacket.mainNamespace, let message):
             Self.logger.error("Socket connect error: \(message ?? "unknown", privacy: .public)")
-            tearDown(reason: .connectError(message: message))
+            _ = closeConnection()
+            continuation.yield(.disconnected(.connectError(message: message)))
             scheduleReconnect()
         case .disconnect(SocketIOPacket.mainNamespace):
             tearDown(reason: .serverClosed)
@@ -316,10 +354,7 @@ public actor SocketClient {
     }
 
     private func sendAuth(generation: Int) async {
-        guard let token else {
-            Self.logger.error("Socket connected without a token; not authenticating")
-            return
-        }
+        guard let token else { return }
         do {
             await send(Self.wrap(try .event("auth", token)), generation: generation)
         } catch {

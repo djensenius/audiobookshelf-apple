@@ -9,9 +9,10 @@ public enum RealtimeDisconnectReason: Sendable, Equatable {
     case transportClosed
     /// The server sent an Engine.IO close or a Socket.IO disconnect.
     case serverClosed
-    /// No packet arrived within `pingInterval + pingTimeout`.
+    /// No Engine.IO ping arrived within `pingInterval + pingTimeout`.
     case pingTimeout
-    /// The server rejected the namespace connection (`44`).
+    /// The server rejected the namespace connection (`44`). Reported even when `.connected` was
+    /// never emitted for this connection.
     case connectError(message: String?)
     case authFailed
     case networkChanged

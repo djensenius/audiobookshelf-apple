@@ -1,7 +1,7 @@
 import Foundation
 
 /// Errors from decoding Engine.IO or Socket.IO text packets.
-public enum RealtimeCodecError: Error, Sendable, Equatable {
+enum RealtimeCodecError: Error, Sendable, Equatable {
     case emptyPacket
     case unknownPacketType(Character)
     case invalidPayload
@@ -10,17 +10,17 @@ public enum RealtimeCodecError: Error, Sendable, Equatable {
 }
 
 /// The open packet's payload: `0{"sid":…,"upgrades":[],"pingInterval":25000,"pingTimeout":20000,…}`.
-public struct EngineIOHandshake: Sendable, Equatable, Codable {
-    public var sid: String
-    public var upgrades: [String]
+struct EngineIOHandshake: Sendable, Equatable, Codable {
+    var sid: String
+    var upgrades: [String]
     /// Milliseconds between server pings.
-    public var pingInterval: Int
+    var pingInterval: Int
     /// Milliseconds the server waits for a pong.
-    public var pingTimeout: Int
+    var pingTimeout: Int
     /// Polling only; optional for a WebSocket-only client.
-    public var maxPayload: Int?
+    var maxPayload: Int?
 
-    public init(sid: String, upgrades: [String] = [], pingInterval: Int, pingTimeout: Int, maxPayload: Int? = nil) {
+    init(sid: String, upgrades: [String] = [], pingInterval: Int, pingTimeout: Int, maxPayload: Int? = nil) {
         self.sid = sid
         self.upgrades = upgrades
         self.pingInterval = pingInterval
@@ -28,7 +28,7 @@ public struct EngineIOHandshake: Sendable, Equatable, Codable {
         self.maxPayload = maxPayload
     }
 
-    public init(from decoder: any Decoder) throws {
+    init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sid = try container.decode(String.self, forKey: .sid)
         upgrades = try container.decodeIfPresent([String].self, forKey: .upgrades) ?? []
@@ -37,14 +37,15 @@ public struct EngineIOHandshake: Sendable, Equatable, Codable {
         maxPayload = try container.decodeIfPresent(Int.self, forKey: .maxPayload)
     }
 
-    /// No packet within `pingInterval + pingTimeout` means the connection is dead.
-    public var livenessTimeout: Duration {
+    /// No ping within `pingInterval + pingTimeout` of the open packet or the last ping means the
+    /// connection is dead. Other packets don't reset this timer (as in engine.io-client).
+    var livenessTimeout: Duration {
         .milliseconds(pingInterval + pingTimeout)
     }
 }
 
 /// An Engine.IO v4 text packet. Over WebSocket each frame carries exactly one packet.
-public enum EngineIOPacket: Sendable, Equatable {
+enum EngineIOPacket: Sendable, Equatable {
     case open(EngineIOHandshake)
     case close
     case ping(String)
@@ -53,7 +54,7 @@ public enum EngineIOPacket: Sendable, Equatable {
     case upgrade
     case noop
 
-    public init(decoding text: String) throws(RealtimeCodecError) {
+    init(decoding text: String) throws(RealtimeCodecError) {
         guard let type = text.first else { throw .emptyPacket }
         let data = String(text.dropFirst())
         switch type {
@@ -72,7 +73,7 @@ public enum EngineIOPacket: Sendable, Equatable {
         }
     }
 
-    public var encoded: String {
+    var encoded: String {
         switch self {
         case .open(let handshake):
             let json = (try? JSONEncoder().encode(handshake)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
@@ -90,8 +91,8 @@ public enum EngineIOPacket: Sendable, Equatable {
 /// A Socket.IO v4 packet, carried inside an Engine.IO `message` packet.
 ///
 /// JSON payloads are kept as raw bytes so callers decode them straight into their own types.
-public enum SocketIOPacket: Sendable, Equatable {
-    public static let mainNamespace = "/"
+enum SocketIOPacket: Sendable, Equatable {
+    static let mainNamespace = "/"
 
     case connect(namespace: String = mainNamespace, payload: Data? = nil)
     case disconnect(namespace: String = mainNamespace)
@@ -101,14 +102,14 @@ public enum SocketIOPacket: Sendable, Equatable {
     case connectError(namespace: String = mainNamespace, message: String?)
 
     /// Builds an event packet, e.g. `["auth","<token>"]`.
-    public static func event(_ name: String, _ argument: some Encodable & Sendable) throws -> SocketIOPacket {
+    static func event(_ name: String, _ argument: some Encodable & Sendable) throws -> SocketIOPacket {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.withoutEscapingSlashes]
         let arguments = try encoder.encode(EventArgumentsEncoding(name: name, argument: argument))
         return .event(name: name, arguments: arguments)
     }
 
-    public init(decoding text: String) throws(RealtimeCodecError) {
+    init(decoding text: String) throws(RealtimeCodecError) {
         var rest = Substring(text)
         guard let typeCharacter = rest.popFirst() else { throw .emptyPacket }
         guard let type = typeCharacter.wholeNumberValue, ("0"..."6").contains(typeCharacter) else {
@@ -154,7 +155,7 @@ public enum SocketIOPacket: Sendable, Equatable {
         }
     }
 
-    public var encoded: String {
+    var encoded: String {
         switch self {
         case .connect(let namespace, let payload):
             Self.encode(type: 0, namespace: namespace, ackID: nil, payload: payload)

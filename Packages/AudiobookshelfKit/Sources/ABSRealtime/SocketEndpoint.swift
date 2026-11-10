@@ -1,11 +1,11 @@
 import Foundation
 
 /// Builds the Socket.IO WebSocket endpoint for a server address.
-public enum SocketEndpoint {
+enum SocketEndpoint {
     /// `https://host/abs` → `wss://host/abs/socket.io/?EIO=4&transport=websocket`. Keeps the
     /// port and any subpath (the server also listens on `<RouterBasePath>/socket.io`). Returns
     /// `nil` for schemes other than http, https, ws and wss, or an address without a host.
-    public static func url(forServerAddress address: URL) -> URL? {
+    static func url(forServerAddress address: URL) -> URL? {
         guard var components = URLComponents(url: address, resolvingAgainstBaseURL: false),
             let host = components.host, !host.isEmpty
         else { return nil }
@@ -27,12 +27,22 @@ public enum SocketEndpoint {
         return components.url
     }
 
-    /// Custom headers for the upgrade request, without `Authorization` or `Cookie`: the socket
-    /// authenticates with the `auth` event, and those headers are never user-configurable.
-    public static func filteredHeaders(_ headers: [String: String]) -> [String: String] {
-        headers.filter { name, _ in
+    /// Custom headers for the upgrade request. Drops `Authorization` and `Cookie` (the socket
+    /// authenticates with the `auth` event, and those headers are never user-configurable) and
+    /// the headers that belong to the WebSocket handshake. Names are case-insensitive; of names
+    /// that differ only in case, the one that sorts first wins.
+    static func filteredHeaders(_ headers: [String: String]) -> [String: String] {
+        var result: [String: String] = [:]
+        var seen: Set<String> = []
+        for name in headers.keys.sorted() {
             let lowercased = name.lowercased()
-            return lowercased != "authorization" && lowercased != "cookie"
+            guard !deniedHeaders.contains(lowercased), !lowercased.hasPrefix("sec-websocket-"),
+                seen.insert(lowercased).inserted
+            else { continue }
+            result[name] = headers[name]
         }
+        return result
     }
+
+    private static let deniedHeaders: Set<String> = ["authorization", "cookie", "host", "connection", "upgrade"]
 }

@@ -1,6 +1,7 @@
-import ABSRealtime
 import Foundation
 import Testing
+
+@testable import ABSRealtime
 
 @Suite struct SocketEndpointTests {
     @Test(arguments: [
@@ -28,5 +29,19 @@ import Testing
             "CF-Access-Client-Id": "id",
         ])
         #expect(headers == ["CF-Access-Client-Id": "id"])
+    }
+
+    @Test func dropsWebSocketHandshakeHeadersAndDeduplicatesNames() {
+        let headers = SocketEndpoint.filteredHeaders([
+            "Host": "evil.example.com",
+            "connection": "close",
+            "Upgrade": "h2c",
+            "Sec-WebSocket-Key": "k",
+            "sec-websocket-protocol": "p",
+            "X-Token": "upper",
+            "x-token": "lower",
+            "X-Other": "o",
+        ])
+        #expect(headers == ["X-Other": "o", "X-Token": "upper"])
     }
 }
