@@ -182,4 +182,33 @@ enum Fixtures {
         "libraryId":"lib-pods","mediaType":"podcast","media":{"id":"pod-1","metadata":{"title":"The Show"},\
         "episodes":[\(nullIndexEpisode)]}}}
         """
+
+    /// A session started by the Android app, as the server returns it: `sdkVersion` is a string.
+    static let androidSession = """
+        {"id":"ps-4","userId":"user-1","libraryItemId":"li-book-1","mediaType":"book","playMethod":0,\
+        "deviceInfo":{"id":"dev-2","userId":"user-1","deviceId":"android-1","ipAddress":"192.0.2.2",\
+        "clientVersion":"0.9.81","manufacturer":"Google","model":"Pixel 9","sdkVersion":"35",\
+        "clientName":"Abs Android","deviceName":"Google Pixel 9"}}
+        """
+
+    /// A session whose device info has a numeric `sdkVersion`, as older servers stored it.
+    static let numericSDKVersionSession = """
+        {"id":"ps-5","libraryItemId":"li-book-1","mediaType":"book","deviceInfo":{"deviceId":"android-2",\
+        "sdkVersion":34,"clientName":"Abs Android"}}
+        """
+
+    /// An expanded book whose file-system times have fractional milliseconds, at the top level and in
+    /// nested file metadata.
+    static let fractionalTimestampsItem = """
+        {"id":"li-book-6","libraryId":"lib-books","path":"/audiobooks/Six","isFile":false,\
+        "mtimeMs":1650621074299.0059,"ctimeMs":1650621074299.5,"birthtimeMs":1650621070000.25,\
+        "addedAt":1700000003000,"mediaType":"book","media":{"id":"book-6","metadata":{"title":"Six"},\
+        "audioFiles":[{"index":1,"ino":"61","metadata":{"filename":"01.mp3","ext":".mp3","path":\
+        "/audiobooks/Six/01.mp3","relPath":"01.mp3","size":1000,"mtimeMs":1650621074299.0059,\
+        "ctimeMs":1650621074299.0059,"birthtimeMs":1650621070000.123},"duration":60}],"tracks":[{"index":1,\
+        "startOffset":0,"duration":60,"metadata":{"filename":"01.mp3","path":"/audiobooks/Six/01.mp3",\
+        "mtimeMs":1650621074299.0059}}]},"libraryFiles":[{"ino":"61","metadata":{"filename":"01.mp3",\
+        "path":"/audiobooks/Six/01.mp3","size":1000,"mtimeMs":1650621074299.0059,"ctimeMs":1650621074299.0059,\
+        "birthtimeMs":1650621070000.123}}]}
+        """
 }

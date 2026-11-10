@@ -17,12 +17,12 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
     public let path: String?
     public let relPath: String?
     public let isFile: Bool?
-    /// Epoch milliseconds.
-    public let mtimeMs: Int?
-    /// Epoch milliseconds.
-    public let ctimeMs: Int?
-    /// Epoch milliseconds.
-    public let birthtimeMs: Int?
+    /// Epoch milliseconds; may be fractional (file-system times).
+    public let mtimeMs: Double?
+    /// Epoch milliseconds; may be fractional (file-system times).
+    public let ctimeMs: Double?
+    /// Epoch milliseconds; may be fractional (file-system times).
+    public let birthtimeMs: Double?
     /// Epoch milliseconds.
     public let addedAt: Int?
     /// Epoch milliseconds.
@@ -50,8 +50,9 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
 
     public init(
         id: String, ino: String? = nil, oldLibraryItemId: String? = nil, libraryId: String, folderId: String? = nil,
-        path: String? = nil, relPath: String? = nil, isFile: Bool? = nil, mtimeMs: Int? = nil, ctimeMs: Int? = nil,
-        birthtimeMs: Int? = nil, addedAt: Int? = nil, updatedAt: Int? = nil, lastScan: Int? = nil,
+        path: String? = nil, relPath: String? = nil, isFile: Bool? = nil, mtimeMs: Double? = nil,
+        ctimeMs: Double? = nil,
+        birthtimeMs: Double? = nil, addedAt: Int? = nil, updatedAt: Int? = nil, lastScan: Int? = nil,
         scanVersion: String? = nil, isMissing: Bool = false, isInvalid: Bool = false, mediaType: MediaType,
         media: LibraryItemMedia? = nil, libraryFiles: [LibraryFile]? = nil, numFiles: Int? = nil, size: Int? = nil,
         recentEpisode: PodcastEpisode? = nil, numEpisodesIncomplete: Int? = nil, progressLastUpdate: Int? = nil,
@@ -103,9 +104,9 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
         path = try container.decodeIfPresent(String.self, forKey: .path)
         relPath = try container.decodeIfPresent(String.self, forKey: .relPath)
         isFile = try container.decodeIfPresent(Bool.self, forKey: .isFile)
-        mtimeMs = try container.decodeIfPresent(Int.self, forKey: .mtimeMs)
-        ctimeMs = try container.decodeIfPresent(Int.self, forKey: .ctimeMs)
-        birthtimeMs = try container.decodeIfPresent(Int.self, forKey: .birthtimeMs)
+        mtimeMs = try container.decodeIfPresent(Double.self, forKey: .mtimeMs)
+        ctimeMs = try container.decodeIfPresent(Double.self, forKey: .ctimeMs)
+        birthtimeMs = try container.decodeIfPresent(Double.self, forKey: .birthtimeMs)
         addedAt = try container.decodeIfPresent(Int.self, forKey: .addedAt)
         updatedAt = try container.decodeIfPresent(Int.self, forKey: .updatedAt)
         lastScan = try container.decodeIfPresent(Int.self, forKey: .lastScan)
@@ -195,16 +196,16 @@ public struct FileMetadata: Sendable, Hashable, Codable, Identifiable {
     public let relPath: String?
     /// Bytes.
     public let size: Int?
-    /// Epoch milliseconds.
-    public let mtimeMs: Int?
-    /// Epoch milliseconds.
-    public let ctimeMs: Int?
-    /// Epoch milliseconds.
-    public let birthtimeMs: Int?
+    /// Epoch milliseconds; may be fractional (file-system times).
+    public let mtimeMs: Double?
+    /// Epoch milliseconds; may be fractional (file-system times).
+    public let ctimeMs: Double?
+    /// Epoch milliseconds; may be fractional (file-system times).
+    public let birthtimeMs: Double?
 
     public init(
         filename: String, ext: String? = nil, path: String, relPath: String? = nil, size: Int? = nil,
-        mtimeMs: Int? = nil, ctimeMs: Int? = nil, birthtimeMs: Int? = nil
+        mtimeMs: Double? = nil, ctimeMs: Double? = nil, birthtimeMs: Double? = nil
     ) {
         self.filename = filename
         self.ext = ext
