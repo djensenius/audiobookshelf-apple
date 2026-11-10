@@ -137,6 +137,8 @@ public final class SleepTimer {
     isolated deinit {
         tickTask?.cancel()
         graceTask?.cancel()
+        // Torn down mid-fade, the volume would otherwise stay attenuated.
+        if appliedVolume != 1 { control.setVolume(1) }
     }
 
     // MARK: - Commands
@@ -320,7 +322,7 @@ public final class SleepTimer {
         lastTick = tickTime
         // A jump playback can't explain is a seek that wasn't reported (yet): retarget instead of expiring.
         if let lastPosition {
-            let advance = time - lastPosition
+            let advance = Self.played(in: control.timeline, from: lastPosition, to: time)
             if advance < -Self.seekThreshold || advance > rate * interval + Self.seekThreshold {
                 didSeek(to: time)
                 guard let seeked = self.run else { return }
@@ -379,6 +381,8 @@ public final class SleepTimer {
         pendingRewind = rewind.map { ($0, fadeStart) }
         let item = itemID
         Task { [weak self, control] in
+            // Another item may load before this runs, or during the seek.
+            guard self.map({ $0.itemID == item }) == true else { return }
             let landed = await control.seek(to: fadeStart)
             guard let self, itemID == item else { return }
             pendingRewind?.at = landed ?? control.currentTime
@@ -485,6 +489,13 @@ public final class SleepTimer {
 
     private func time(rewoundBy seconds: TimeInterval) -> Double {
         control.timeline?.jumpBackward(from: control.currentTime, by: seconds) ?? control.currentTime
+    }
+
+    /// Media seconds that play moving forward from `start` to `end`, less the gaps between tracks, so playback
+    /// naturally crossing a gap isn't a seek. Moving back, the plain distance.
+    private static func played(in timeline: PlaybackTimeline?, from start: Double, to end: Double) -> Double {
+        guard let timeline, end > start else { return end - start }
+        return timeline.tracks.reduce(0) { $0 + max(min($1.playbackEnd, end) - max($1.start, start), 0) }
     }
 
     /// The end of the chapter playing at `time` (or of the gap before the next chapter; of the track without

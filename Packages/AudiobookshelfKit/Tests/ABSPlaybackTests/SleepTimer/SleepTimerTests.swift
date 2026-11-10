@@ -198,6 +198,16 @@ struct SleepTimerTests {
         #expect(harness.timer.isRunning, "Restarted within the grace period")
     }
 
+    @Test func anItemLoadedBeforeTheExpirySeekIsntSought() async {
+        let harness = Harness(at: 100)
+        harness.timer.start(.duration(30))
+        await harness.play(from: 100, to: 130)
+        #expect(harness.control.pauseCount == 1)
+        harness.timer.itemDidChange("other")
+        await Task { @MainActor in }.value  // Queued after the expiry's seek task, so that has run.
+        #expect(harness.control.seeks.isEmpty)
+    }
+
     @Test func aSeekDuringTheFadeRewindsOnlyToTheSeek() async {
         let harness = Harness(at: 100)
         harness.timer.start(.duration(30))
@@ -290,6 +300,17 @@ struct SleepTimerTests {
         await harness.advance(1)
         #expect(harness.control.pauseCount == 0)
         #expect(harness.timer.remaining == 550)
+    }
+
+    @Test func playingAcrossAGapBetweenTracksIsntASeek() async {
+        let harness = Harness(timeline: TimelineFixture.gappedTracks.timeline, at: 90)
+        harness.timer.start(.endOfChapter)
+        await harness.play(from: 90, to: 99)
+        #expect(harness.timer.remaining == 1)
+        harness.control.currentTime = 110.5
+        await harness.advance(1)
+        #expect(harness.control.pauseCount == 1, "At the end of the first track")
+        #expect(harness.timer.isRunning == false)
     }
 
     @Test func aSeekDuringTheChapterFadeRestoresTheVolume() {
@@ -557,18 +578,20 @@ struct SleepTimerTests {
         #expect(harness.timer.remaining == 598)
     }
 
-    @Test func deinitStopsTicking() async {
+    @Test func deinitStopsTickingAndRestoresTheVolume() async {
         let clock = ManualClock()
+        let control = FakePlaybackControl()
         var timer: SleepTimer? = SleepTimer(
-            control: FakePlaybackControl(), feedback: FakeFeedback(), clock: clock, calendar: .gregorianUTC,
+            control: control, feedback: FakeFeedback(), clock: clock, calendar: .gregorianUTC,
             tickInterval: .seconds(1))
         weak let weakTimer = timer
-        timer?.start(.duration(600))
+        timer?.start(.duration(30))
+        #expect(control.volume == 0.5)
         await until { clock.sleeperCount == 1 }
 
         timer = nil
         #expect(weakTimer == nil)
-        await until { clock.sleeperCount == 0 }
+        await until { clock.sleeperCount == 0 && control.volume == 1 }
     }
 
     // MARK: - Automatic timer
