@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Synchronization
 import Testing
 import UniformTypeIdentifiers
 
@@ -50,6 +51,53 @@ import UniformTypeIdentifiers
         #expect(await store.size == 0)
     }
 
+    @Test func oversizeStoredFileIsRejectedUnread() async throws {
+        let (pipeline, store) = await harness.make()
+        let key = harness.key()
+        let file = store.directory.appending(path: "\(key.serverID.uuidString)/\(key.fileStem).png")
+        try FileManager.default.createDirectory(
+            at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(count: ImageCacheLimits.maxInputBytes + 1).write(to: file)
+        await #expect(throws: ImagePipelineError.tooLarge) {
+            try await pipeline.image(for: key, pixelBox: gridBox)
+        }
+        #expect(await pipeline.networkFetchCount == 0)
+    }
+
+    @Test func oversizeDownloadedCoverIsSkippedForTheServerCover() async throws {
+        let host = PipelineHarness.pngRoute()
+        let original = directory.appending(path: "original.jpg")
+        try Data(count: ImageCacheLimits.maxInputBytes + 1).write(to: original)
+        let (pipeline, _) = await harness.make(host: host, local: original)
+        let image = try await pipeline.image(for: harness.key(), pixelBox: gridBox)
+        #expect(image.pixelWidth > 0)
+        #expect(ImageStubProtocol.route(host)?.requests.count == 1)
+
+        let (offline, _) = await harness.make(host: host, local: original, isOnline: { false })
+        await #expect(throws: ImagePipelineError.offline) {
+            try await offline.image(for: harness.key("never-fetched"), pixelBox: gridBox)
+        }
+    }
+
+    @Test func failedFinalRenameStillShowsTheDownloadOnce() async throws {
+        let host = PipelineHarness.pngRoute()
+        let (pipeline, store) = await harness.make(host: host)
+        let key = harness.key()
+        // A non-empty folder where the cover belongs makes the store's final rename fail.
+        let folder = store.directory.appending(path: key.serverID.uuidString)
+        let blocker = folder.appending(path: "\(key.fileStem).png")
+        try FileManager.default.createDirectory(at: blocker.appending(path: "x"), withIntermediateDirectories: true)
+        var image: CoverImage? = try await pipeline.image(for: key, pixelBox: gridBox)
+        #expect((image?.pixelWidth ?? 0) > 0)
+        #expect(ImageStubProtocol.route(host)?.requests.count == 1)
+        #expect(await store.size == 0)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path) == [blocker.lastPathComponent])
+        image = nil
+        await pipeline.trimMemory(toFraction: 0)
+        let temporary = pipeline.temporaryFolder.path
+        try await yieldUntil { ((try? FileManager.default.contentsOfDirectory(atPath: temporary)) ?? []).isEmpty }
+    }
+
     @Test func nonImageSuccessIsNotCached() async throws {
         let host = ImageStubProtocol.register(.init(body: Data("<html>Sign in</html>".utf8), mimeType: "text/html"))
         let (pipeline, store) = await harness.make(host: host)
@@ -98,6 +146,26 @@ import UniformTypeIdentifiers
         #expect(!FileManager.default.fileExists(atPath: folder.path))
         await pipeline.setRequestBuilder(TestRequestBuilder(host: host), for: harness.serverID)
         _ = try await pipeline.image(for: harness.key(), pixelBox: gridBox)
+    }
+
+    @Test func removedServerSkipsDownloadedCoversUntilItsBuilderIsSetAgain() async throws {
+        let covers = CountingCovers(file: try TestImages.file(width: 100, height: 160, in: directory))
+        let store = CoverFileStore(directory: directory.appending(path: "Images"), limit: 1 << 20)
+        let pipeline = ImagePipeline(
+            limits: .iPhone, fileStore: store, downloadedCovers: covers,
+            sessionConfiguration: ImageStubProtocol.configuration())
+        await pipeline.removeServer(harness.serverID)
+        await #expect(throws: ImagePipelineError.noRequest) {
+            try await pipeline.image(for: harness.key(), pixelBox: gridBox)
+        }
+        await #expect(throws: ImagePipelineError.noRequest) {
+            try await pipeline.cgImage(for: harness.key(), size: CGSize(width: 100, height: 160))
+        }
+        #expect(covers.calls.withLock { $0 } == 0)
+        #expect(await pipeline.memoryCost.lru == 0)
+        await pipeline.setRequestBuilder(TestRequestBuilder(host: "unused.images.test"), for: harness.serverID)
+        _ = try await pipeline.image(for: harness.key(), pixelBox: gridBox)
+        #expect(covers.calls.withLock { $0 } == 1)
     }
 
     @Test func removingAServerCancelsItsFetchesAndPurgesItsImages() async throws {
@@ -170,5 +238,20 @@ import UniformTypeIdentifiers
         let (pipeline, _) = await harness.make(local: file)
         let image = try await pipeline.image(for: harness.key(), pixelBox: gridBox)
         #expect(image.pixelWidth == 1 && image.pixelHeight == 1)
+    }
+}
+
+/// Returns one downloaded cover for every key, counting the lookups.
+private final class CountingCovers: DownloadedCoverLookup {
+    let file: URL
+    let calls = Mutex(0)
+
+    init(file: URL) {
+        self.file = file
+    }
+
+    func downloadedCover(for key: ImageKey) async -> DownloadedCover? {
+        calls.withLock { $0 += 1 }
+        return DownloadedCover(fileURL: file, updatedAt: 1)
     }
 }

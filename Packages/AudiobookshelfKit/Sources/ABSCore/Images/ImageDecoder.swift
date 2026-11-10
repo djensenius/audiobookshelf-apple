@@ -35,6 +35,8 @@ enum ImageDecoder {
     }
 
     @concurrent static func inspect(_ url: URL) async throws -> SourceInfo {
+        // Every input, not just network downloads: stored and downloaded files too.
+        guard !isOverInputCap(url) else { throw ImagePipelineError.tooLarge }
         let options = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else {
             throw FileManager.default.fileExists(atPath: url.path) ? ImagePipelineError.unsupportedImage : .fileMissing
@@ -57,6 +59,13 @@ enum ImageDecoder {
         return SourceInfo(
             url: url, width: swapsSides ? height : width, height: swapsSides ? width : height, depth: depth,
             isRGB: model == nil || model == (kCGImagePropertyColorModelRGB as String))
+    }
+
+    /// Whether the file is over ``ImageCacheLimits/maxInputBytes``; `false` if it is missing.
+    /// Measured with `stat`, so never from a stale `URL` resource-value cache.
+    static func isOverInputCap(_ url: URL) -> Bool {
+        var info = stat()
+        return stat(url.path, &info) == 0 && info.st_size > ImageCacheLimits.maxInputBytes
     }
 
     /// Whether ImageIO recognises the file's format.

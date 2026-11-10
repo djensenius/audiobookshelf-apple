@@ -75,6 +75,8 @@ public actor ImagePipeline {
     /// The image for `key`, downsampled to fit `pixelBox`. Keep the returned wrapper for as long
     /// as the image is shown.
     public func image(for key: ImageKey, pixelBox: PixelBox) async throws -> CoverImage {
+        // Before any lookup, so a removed server's covers can't come back from a downloaded file.
+        guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
         let memoryKey = MemoryKey(key: key, box: pixelBox)
         if let hit = memory.image(for: memoryKey) { return CoverImage(hit) }
         while true {
@@ -281,7 +283,9 @@ public actor ImagePipeline {
     }
 
     private func fetch(_ key: ImageKey, skipsDownloaded: Bool) async throws -> FetchedFile {
-        let downloaded = skipsDownloaded ? nil : await downloadedCovers?.downloadedCover(for: key)
+        var downloaded = skipsDownloaded ? nil : await downloadedCovers?.downloadedCover(for: key)
+        // A downloaded cover over the input cap is unusable, as if missing (ADR 0005, "Input cap").
+        if let cover = downloaded, ImageDecoder.isOverInputCap(cover.fileURL) { downloaded = nil }
         if let downloaded, Self.isFresh(downloaded, for: key) {
             return FetchedFile(url: downloaded.fileURL, updatedAt: key.updatedAt)
         }
@@ -344,7 +348,8 @@ public actor ImagePipeline {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
-            // The store isn't writable (a full disk or a missing container): decode the download.
+            // The store isn't writable (a full disk or a missing container): decode the download,
+            // which a failed insert leaves in place.
             keepsTemporary = true
             let lease = FileLease { try? FileManager.default.removeItem(at: temporary) }
             return FetchedFile(url: temporary, updatedAt: key.updatedAt, lease: lease)

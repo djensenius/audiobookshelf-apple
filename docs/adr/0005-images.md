@@ -364,6 +364,13 @@ static, unauthenticated remote images (none are planned).
       from `urlSession(_:downloadTask:didWriteData:…)` once 4 MiB is passed.
       Server WebP and downloaded JPEG covers are far smaller (see the disk
       estimates); only external covers can hit the cap.
+    - Every local file is also checked with `stat` before ImageIO opens it:
+      a stored file over 4 MiB fails with `tooLarge`. A downloaded cover
+      over 4 MiB (an original the server kept unresized) is treated as
+      missing, so the server's resized cover is fetched and cached instead;
+      offline, the placeholder shows. There is no separate, larger cap for
+      downloaded covers, because the peak below counts 4 MiB of input per
+      concurrent decode.
     - **Source cap:** sources over 4096 × 4096 px (the server's own clamp) are
       rejected after reading their properties, before any pixels are decoded.
   - **Decode:** decoding is a `[MemoryKey: Task]` entry, where the memory key is
