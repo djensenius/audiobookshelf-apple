@@ -466,7 +466,8 @@ private enum SupersetSchemaV2: VersionedSchema {
         let copy = directory.appending(path: "Broken/5-CRASHED")
         try fileManager.createDirectory(at: copy, withIntermediateDirectories: true)
         let names = ["Audiobookshelf.store", "Audiobookshelf.store-wal", "Audiobookshelf.store-shm"]
-        try Data(names.joined(separator: "\n").utf8).write(to: copy.appending(path: DataStack.incompleteMarker))
+        // An undecodable marker still resumes: its contents are never trusted.
+        try Data([0xFF, 0xFE, 0x00]).write(to: copy.appending(path: DataStack.incompleteMarker))
         try fileManager.moveItem(at: url, to: copy.appending(path: names[0]))
         for name in names.dropFirst() where !exists(directory.appending(path: name)) {
             try Data("stale".utf8).write(to: directory.appending(path: name))
@@ -497,7 +498,7 @@ private enum SupersetSchemaV2: VersionedSchema {
         #expect(!exists(url))
     }
 
-    @Test func pruningKeepsIncompleteCopies() throws {
+    @Test func pruningIsSkippedWhileAnyCopyIsIncomplete() throws {
         let directory = Fixtures.temporaryDirectory()
         defer { try? fileManager.removeItem(at: directory) }
         let marked = directory.appending(path: "Broken/1-MARKED")
@@ -510,8 +511,33 @@ private enum SupersetSchemaV2: VersionedSchema {
 
         try DataStack.moveStoreAside(at: url, now: Date(timeIntervalSince1970: 3))
         #expect(exists(marked.appending(path: DataStack.incompleteMarker)))
-        #expect(!exists(unmarked))
-        #expect(brokenCopies(in: directory).count == 2)
+        #expect(exists(unmarked))
+        #expect(brokenCopies(in: directory).count == 3)
         #expect(!exists(url))
+    }
+
+    /// A marker that can't be checked (no permission, I/O, locked) might hide a split store, so
+    /// nothing is opened, moved or pruned.
+    @Test func inaccessibleMarkerPreventsOpeningAndPruning() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let older = directory.appending(path: "Broken/1-OLDER")
+        let locked = directory.appending(path: "Broken/5-LOCKED")
+        try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: locked, withIntermediateDirectories: true)
+        try Data().write(to: locked.appending(path: DataStack.incompleteMarker))
+        let wal = directory.appending(path: "Audiobookshelf.store-wal")
+        try Data("stale".utf8).write(to: wal)
+        let lockedPath = locked.path(percentEncoded: false)
+        try fileManager.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedPath)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedPath) }
+
+        #expect(throws: (any Error).self) { _ = try DataStack.itemExists(at: locked.appending(path: "INCOMPLETE")) }
+        #expect(throws: (any Error).self) { _ = try openURL(directory.appending(path: "Audiobookshelf.store")) }
+        #expect(!exists(directory.appending(path: "Audiobookshelf.store")))
+        #expect(exists(wal))
+        #expect(exists(older))
+        #expect(try !DataStack.itemExists(at: directory.appending(path: "Missing")))
+        #expect(try DataStack.itemExists(at: wal))
     }
 }

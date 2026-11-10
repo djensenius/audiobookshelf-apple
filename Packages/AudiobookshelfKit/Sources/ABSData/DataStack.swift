@@ -228,10 +228,16 @@ public struct DataStack: Sendable {
 
     static let incompleteMarker = "INCOMPLETE"
 
+    /// The store and its SQLite side files, main store first.
+    private static func storeFileNames(_ url: URL) -> [String] {
+        let name = url.lastPathComponent
+        return [name, "\(name)-wal", "\(name)-shm"]
+    }
+
     /// Moves the store and its SQLite side files into `Broken/<epoch>-<uuid>/` next to it, then
     /// deletes older broken copies so at most one is kept. The move is journaled: an `INCOMPLETE`
-    /// marker listing the files is written first and removed last, and the main store moves
-    /// first, so a crash never leaves a stale WAL beside a missing or new store.
+    /// marker is written first and removed last, and the main store moves first, so a crash never
+    /// leaves a stale WAL beside a missing or new store.
     static func moveStoreAside(at url: URL, now: Date) throws {
         let brokenRoot = url.deletingLastPathComponent().appending(path: "Broken", directoryHint: .isDirectory)
         let destination = brokenRoot.appending(
@@ -239,38 +245,49 @@ public struct DataStack: Sendable {
             directoryHint: .isDirectory
         )
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        let name = url.lastPathComponent
-        let names = [name, "\(name)-wal", "\(name)-shm"].joined(separator: "\n")
+        let names = storeFileNames(url).joined(separator: "\n")
         try Data(names.utf8).write(to: destination.appending(path: incompleteMarker), options: .atomic)
-        try finishMove(into: destination, from: url.deletingLastPathComponent())
+        try finishMove(into: destination, storeURL: url)
         pruneBrokenCopies(in: brokenRoot, keeping: destination.lastPathComponent)
     }
 
-    /// Deletes completed copies except `keeping` (default: the newest by epoch); incomplete copies
-    /// are kept. Best effort.
+    /// Deletes completed copies except `keeping` (default: the newest by epoch). Best effort, and
+    /// skipped entirely when any copy is incomplete or its state can't be read.
     private static func pruneBrokenCopies(in root: URL, keeping: String? = nil) {
-        let completed = ((try? brokenCopies(in: root)) ?? []).filter { !isIncomplete($0) }
+        guard let copies = try? brokenCopies(in: root), let states = try? copies.map(isIncomplete),
+            !states.contains(true)
+        else { return }
         let epoch = { (copy: URL) in Int(copy.lastPathComponent.prefix { $0.isNumber }) ?? 0 }
-        let kept = keeping ?? completed.max { epoch($0) < epoch($1) }?.lastPathComponent
-        for copy in completed where copy.lastPathComponent != kept {
+        let kept = keeping ?? copies.max { epoch($0) < epoch($1) }?.lastPathComponent
+        for copy in copies where copy.lastPathComponent != kept {
             try? FileManager.default.removeItem(at: copy)
         }
     }
 
     /// Completes a move-aside interrupted by a crash or an error, before the store is opened, then
-    /// applies the retention policy. Throws if `Broken/` exists but can't be read.
+    /// applies the retention policy. Throws, opening nothing, if `Broken/` or a marker can't be read.
     static func finishInterruptedMoves(for url: URL) throws {
-        let directory = url.deletingLastPathComponent()
-        let brokenRoot = directory.appending(path: "Broken", directoryHint: .isDirectory)
+        let brokenRoot = url.deletingLastPathComponent().appending(path: "Broken", directoryHint: .isDirectory)
         let incomplete = try brokenCopies(in: brokenRoot).filter(isIncomplete)
         for copy in incomplete {
-            try finishMove(into: copy, from: directory)
+            try finishMove(into: copy, storeURL: url)
         }
         if !incomplete.isEmpty { pruneBrokenCopies(in: brokenRoot) }
     }
 
-    private static func isIncomplete(_ copy: URL) -> Bool {
-        FileManager.default.fileExists(atPath: copy.appending(path: incompleteMarker).path(percentEncoded: false))
+    private static func isIncomplete(_ copy: URL) throws -> Bool {
+        try itemExists(at: copy.appending(path: incompleteMarker))
+    }
+
+    /// Whether `url` exists. Only `ENOENT` or `ENOTDIR` (a stray file in `Broken/`) confirm
+    /// absence; any other error, such as no permission or I/O, is thrown. `lstat` reads metadata
+    /// only, so it works on protected files while the device is locked.
+    static func itemExists(at url: URL) throws -> Bool {
+        var info = stat()
+        guard lstat(url.path(percentEncoded: false), &info) != 0 else { return true }
+        let code = errno
+        guard code != ENOENT, code != ENOTDIR else { return false }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSURLErrorKey: url])
     }
 
     /// The copies in `root`; a missing `root` has none, and any other error is thrown.
@@ -285,16 +302,16 @@ public struct DataStack: Sendable {
         }
     }
 
-    /// Moves each file listed in `destination`'s marker that is still in `directory`, in order,
-    /// then deletes the marker.
-    private static func finishMove(into destination: URL, from directory: URL) throws {
-        let marker = destination.appending(path: incompleteMarker)
-        for name in try String(contentsOf: marker, encoding: .utf8).split(separator: "\n").map(String.init) {
-            let source = directory.appending(path: name)
-            guard FileManager.default.fileExists(atPath: source.path(percentEncoded: false)) else { continue }
+    /// Moves the store's files still next to it into `destination`, main store first, then deletes
+    /// the marker. The marker's contents are informational and never trusted, so a damaged marker
+    /// still resumes the same move.
+    private static func finishMove(into destination: URL, storeURL: URL) throws {
+        for name in storeFileNames(storeURL) {
+            let source = storeURL.deletingLastPathComponent().appending(path: name)
+            guard try itemExists(at: source) else { continue }
             try FileManager.default.moveItem(at: source, to: destination.appending(path: name))
         }
-        try FileManager.default.removeItem(at: marker)
+        try FileManager.default.removeItem(at: destination.appending(path: incompleteMarker))
     }
 
     /// Creates the store directory. On iOS the directory gets

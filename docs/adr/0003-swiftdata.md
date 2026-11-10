@@ -397,9 +397,11 @@ Model notes:
   else, including an unreadable file (protected data while the device is locked),
   is rethrown and the store left alone. A reset logs a fault and moves the store,
   then `-wal` and `-shm`, into `Broken/<epoch>-<uuid>/` (keeping only the newest
-  copy). An `INCOMPLETE` marker listing the files is written first and removed
-  last; the next open finishes any marked move (then prunes) before opening, fails
-  if `Broken/` can't be read, and pruning skips marked copies. Downloaded files that are no longer referenced are removed
+  copy). An `INCOMPLETE` marker is written first and removed last; the next open
+  finishes any marked move (moving the store's fixed file set, never trusting the
+  marker's contents) before opening. Only `ENOENT` confirms a missing marker or
+  file; if `Broken/` or a marker can't be checked, the open fails and nothing is
+  moved or pruned. Pruning is skipped while any copy is incomplete. Downloaded files that are no longer referenced are removed
   by the orphan sweep in #73 (P4-02). The server still holds synced progress.
 
 ### Store location and container
