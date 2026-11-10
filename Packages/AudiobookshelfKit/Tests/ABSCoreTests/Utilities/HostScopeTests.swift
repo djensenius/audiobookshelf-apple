@@ -20,6 +20,11 @@ import Testing
         ("2001:db8::1", .publicNetwork), ("local.example.com", .publicNetwork),
         ("example.localhost.com", .publicNetwork),
         ("abs.local.example", .publicNetwork), ("xn--bcher-kva.example", .publicNetwork),
+        // Dotless and hexadecimal IPv4, which the system connects to as the address.
+        ("134744072", .publicNetwork), ("0x08080808", .publicNetwork), ("2130706433", .loopback),
+        ("0x7f.1", .loopback), ("3232235777", .localNetwork),
+        // IPv4-compatible (deprecated, not routed to the IPv4 address) and unique-local IPv6.
+        ("::a00:1", .publicNetwork), ("::7f00:1", .publicNetwork), ("fc00::1", .localNetwork),
     ])
     func classifies(host: String, expected: HostScope) {
         #expect(HostScope(host: host) == expected)
@@ -35,6 +40,18 @@ import Testing
     func warnsAboutPlainHTTPOnlyOnPublicHosts(address: String, warns: Bool) throws {
         let address = try #require(ServerAddress(address))
         #expect(address.isPlainHTTPOnPublicHost == warns)
+    }
+
+    @Test(arguments: [
+        // Names may resolve to a local address (split DNS), so they're checked.
+        ("abs.example.com", true), ("nas.lan", true), ("abs.home.arpa", true), ("abs.internal", true),
+        ("nas", true), ("nas.local", true), ("192.168.1.20", true), ("[fe80::1%25en0]", true), ("fd00::1", true),
+        // Loopback and public addresses can't be.
+        ("localhost", false), ("127.0.0.1", false), ("::1", false), ("8.8.8.8", false), ("134744072", false),
+        ("2001:db8::1", false), ("::a00:1", false),
+    ])
+    func mayUseLocalNetwork(host: String, expected: Bool) {
+        #expect(HostScope.mayUseLocalNetwork(host: host) == expected)
     }
 
     @Test func isLocalCoversLoopbackAndLocalNetwork() {

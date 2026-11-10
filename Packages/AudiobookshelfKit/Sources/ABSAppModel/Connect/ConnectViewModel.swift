@@ -29,7 +29,7 @@ public struct CustomHeader: Sendable, Hashable, Identifiable {
             return .reservedHeader(name: name)
         }
         guard !name.isEmpty, name.unicodeScalars.allSatisfy(Self.tokenCharacters.contains),
-            !trimmedValue.unicodeScalars.contains(where: Self.lineBreaks.contains)
+            !trimmedValue.unicodeScalars.contains(where: Self.invalidValueCharacters.contains)
         else { return .invalidCustomHeader }
         return nil
     }
@@ -37,7 +37,9 @@ public struct CustomHeader: Sendable, Hashable, Identifiable {
     /// HTTP field name characters (RFC 9110 `token`).
     private static let tokenCharacters = CharacterSet(
         charactersIn: "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
-    private static let lineBreaks = CharacterSet.newlines.union(CharacterSet(charactersIn: "\0"))
+    /// Control characters other than tab, and line breaks such as U+2028.
+    private static let invalidValueCharacters = CharacterSet.controlCharacters.union(.newlines)
+        .subtracting(CharacterSet(charactersIn: "\t"))
 }
 
 /// The server connect and sign-in flow, a port of `pages/connect.vue` and
@@ -51,7 +53,8 @@ public struct CustomHeader: Sendable, Hashable, Identifiable {
 ///
 /// A failure returns to the step the user can fix it from (``Phase/address``, ``Phase/login``
 /// or ``Phase/servers``) with ``failure`` set; a cancelled OpenID sign-in returns to
-/// ``Phase/login`` without one. Selecting a saved server first reads its status with its saved
+/// ``Phase/login`` without one. ``goBack()`` and ``cancel()`` stop the work in progress and drop
+/// its result. Selecting a saved server first reads its status with its saved
 /// custom headers, as the legacy app pinged it, so an unreachable server or a denied local
 /// network permission shows here rather than after going offline.
 @MainActor @Observable
@@ -88,6 +91,9 @@ public final class ConnectViewModel {
     public private(set) var server: ConnectServer?
     /// The saved server being resumed or signed in to again.
     public private(set) var savedConnection: ServerConnectionDTO?
+    /// Whether the saved session is being resumed, which can't be cancelled: ``AccountManager``
+    /// would take a cancelled request for an offline server.
+    public private(set) var isResumingSession = false
 
     private enum Action {
         case validate
@@ -100,6 +106,8 @@ public final class ConnectViewModel {
     @ObservationIgnored private var attempt = 0
     /// The action ``retry()`` repeats.
     @ObservationIgnored private var lastAction: Action?
+    /// The check or sign-in in progress, which ``cancel()`` cancels.
+    @ObservationIgnored private var task: Task<Void, Never>?
 
     public init(backend: any ConnectBackend, localNetwork: any LocalNetworkAccessChecking = SystemLocalNetworkAccess())
     {
@@ -127,10 +135,12 @@ public final class ConnectViewModel {
         }
     }
 
+    /// Whether ``goBack()`` does anything. While busy, it cancels.
     public var canGoBack: Bool {
         switch phase {
         case .address: !savedServers.isEmpty
         case .validating, .login: true
+        case .signingIn(.savedSession): !isResumingSession
         case .servers, .signingIn, .done: false
         }
     }
@@ -178,13 +188,12 @@ public final class ConnectViewModel {
 
     public func goBack() {
         guard canGoBack else { return }
+        guard !isBusy else { return cancel() }
         next()
         failure = nil
         switch phase {
         case .address:
             phase = .servers
-        case .validating:
-            phase = .address
         case .login:
             server = nil
             password = ""
@@ -194,7 +203,31 @@ public final class ConnectViewModel {
             } else {
                 phase = .address
             }
-        case .servers, .signingIn, .done:
+        case .servers, .validating, .signingIn, .done:
+            break
+        }
+    }
+
+    /// Stops the check or sign-in in progress, for example when the flow is dismissed, and returns
+    /// to the step it started from. A sign-in cancelled before it finished leaves the active
+    /// account unchanged. A saved session that's being resumed isn't stopped, but its result is
+    /// dropped.
+    public func cancel() {
+        guard isBusy else { return }
+        next()
+        task?.cancel()
+        task = nil
+        isResumingSession = false
+        failure = nil
+        switch phase {
+        case .validating:
+            phase = .address
+        case .signingIn(.savedSession):
+            savedConnection = nil
+            phase = .servers
+        case .signingIn(.password), .signingIn(.openID):
+            phase = .login
+        case .servers, .address, .login, .done:
             break
         }
     }
@@ -202,7 +235,8 @@ public final class ConnectViewModel {
     /// Reads the typed server's status with the custom headers, then moves to ``Phase/login``.
     public func submitAddress() async {
         guard phase == .address else { return }
-        await validate(attempt: next())
+        let attempt = next()
+        await run { await self.validate(attempt: attempt) }
     }
 
     /// After ``ConnectFailure/httpsUnavailable(_:)``, connects to the `http` address, sending the
@@ -210,7 +244,8 @@ public final class ConnectViewModel {
     public func connectWithoutEncryption() async {
         guard phase == .address, case .httpsUnavailable(let fallback)? = failure else { return }
         address = fallback.description
-        await validate(attempt: next())
+        let attempt = next()
+        await run { await self.validate(attempt: attempt) }
     }
 
     /// Resumes a saved server's session. Its status is read first with its saved custom headers;
@@ -223,13 +258,20 @@ public final class ConnectViewModel {
         server = nil
         savedConnection = connection
         phase = .signingIn(.savedSession)
+        await run { await self.resume(connection, attempt: attempt) }
+    }
+
+    private func resume(_ connection: ServerConnectionDTO, attempt: Int) async {
         do {
             let headers = try await backend.customHeaders(for: connection.id)
             try ensureCurrent(attempt)
             let server = try await backend.validate(address: connection.address, customHeaders: headers)
             try ensureCurrent(attempt)
-            let resumed = try await backend.resume(connection.id)
+            isResumingSession = true
+            // Not cancelled with the flow; see `isResumingSession`.
+            let resumed = try await Task { try await self.backend.resume(connection.id) }.value
             try ensureCurrent(attempt)
+            isResumingSession = false
             guard !resumed else { return finish() }
             address = connection.address
             customHeaders = headers.sorted { $0.key < $1.key }.map { CustomHeader(name: $0.key, value: $0.value) }
@@ -239,6 +281,7 @@ public final class ConnectViewModel {
             phase = .login
         } catch {
             guard isCurrent(attempt) else { return }
+            isResumingSession = false
             let failure = await failure(for: error, address: connection.address)
             guard isCurrent(attempt) else { return }
             self.failure = failure
@@ -320,19 +363,34 @@ public final class ConnectViewModel {
         }
     }
 
-    private func signIn(_ method: SignInMethod, _ body: @MainActor () async throws -> Void) async {
+    private func signIn(_ method: SignInMethod, _ body: @escaping @MainActor () async throws -> Void) async {
         let attempt = next()
         failure = nil
         phase = .signingIn(method)
-        do {
-            try await body()
-            guard isCurrent(attempt) else { return }
-            finish()
-        } catch {
-            guard isCurrent(attempt) else { return }
-            failure = ConnectFailure(error)
-            phase = .login
+        await run {
+            do {
+                try await body()
+                guard self.isCurrent(attempt) else { return }
+                self.finish()
+            } catch {
+                guard self.isCurrent(attempt) else { return }
+                self.failure = ConnectFailure(error)
+                self.phase = .login
+            }
         }
+    }
+
+    /// Runs `work` as the cancellable ``task``, cancelled also if the caller is.
+    private func run(_ work: @escaping @MainActor () async -> Void) async {
+        task?.cancel()
+        let task = Task { await work() }
+        self.task = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if self.task == task { self.task = nil }
     }
 
     private func finish() {
@@ -341,11 +399,11 @@ public final class ConnectViewModel {
         phase = .done
     }
 
-    /// Maps `error`, and for a local host that couldn't be reached, checks whether the local
-    /// network permission is off (ADR 0002).
+    /// Maps `error`, and for a host that couldn't be reached and may be on the local network,
+    /// checks whether the local network permission is off (ADR 0002).
     private func failure(for error: any Error, address: String) async -> ConnectFailure? {
         let failure = ConnectFailure(error)
-        guard failure == .cannotConnect, let server = ServerAddress(address), server.hostScope == .localNetwork,
+        guard failure == .cannotConnect, let server = ServerAddress(address), server.mayUseLocalNetwork,
             let host = server.url.host(percentEncoded: false)
         else { return failure }
         let port = server.url.port ?? (server.url.scheme == "https" ? 443 : 80)

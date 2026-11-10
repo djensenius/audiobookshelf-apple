@@ -69,6 +69,13 @@ struct PreviewLocalNetworkAccess: LocalNetworkAccessChecking {
     func isDenied(host: String, port: Int) async -> Bool { denied }
 }
 
+/// A browser session that's never shown: ``PreviewConnectBackend`` doesn't open one.
+struct PreviewWebAuthenticator: WebAuthenticator {
+    func authenticate(_ url: URL, callbackScheme: String) async throws -> URL {
+        throw OIDCLoginError.cancelled
+    }
+}
+
 /// The connect flow with a preview backend, driven to a state by `drive`.
 struct ConnectPreview: View {
     @State private var model: ConnectViewModel
@@ -85,7 +92,7 @@ struct ConnectPreview: View {
     }
 
     var body: some View {
-        ConnectFlowView(model: model)
+        ConnectFlowStack(model: model)
             .task { await drive(model) }
     }
 

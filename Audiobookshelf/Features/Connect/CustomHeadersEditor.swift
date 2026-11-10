@@ -24,6 +24,7 @@ struct CustomHeadersEditor: View {
                     } label: {
                         Text(verbatim: L10n.string("ButtonRemove"))
                     }
+                    .accessibilityLabel(Text(verbatim: removeLabel(header)))
                 } footer: {
                     if let problem = header.problem {
                         Text(verbatim: problem.message)
@@ -47,6 +48,12 @@ struct CustomHeadersEditor: View {
         }
         .formStyle(.grouped)
         .navigationTitle(Text(verbatim: L10n.string("HeaderCustomHeaders")))
+    }
+
+    private func removeLabel(_ header: CustomHeader) -> String {
+        let name = header.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty
+            ? L10n.string("LabelRemoveUnnamedCustomHeader") : L10n.string("LabelRemoveCustomHeader", name)
     }
 
     private func field(_ label: String, text: Binding<String>) -> some View {

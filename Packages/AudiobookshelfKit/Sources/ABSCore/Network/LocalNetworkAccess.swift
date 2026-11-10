@@ -3,8 +3,9 @@ import Network
 
 /// Tells whether the user has turned off local network access for the app (ADR 0002).
 ///
-/// Call it only after a request to a ``HostScope/localNetwork`` host failed to connect: the
-/// check opens a connection to the host, and the system asks for permission on the first one.
+/// Call it only after a request to a host that may be local
+/// (``HostScope/mayUseLocalNetwork(host:)``) failed to connect: the check opens a connection to
+/// the host, and the system asks for permission on the first one.
 public protocol LocalNetworkAccessChecking: Sendable {
     /// Whether a connection to `host` on `port` is refused because local network access is off.
     func isDenied(host: String, port: Int) async -> Bool

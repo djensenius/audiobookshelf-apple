@@ -146,7 +146,8 @@ public final class AccountManager {
     ///
     /// If the sign-in fails, the state is unchanged. It throws `CancellationError` if a newer call
     /// superseded it, including a ``logout()`` while it runs, even of another connection, which
-    /// also signs out of the session it saved. A new connection whose session couldn't be saved
+    /// also signs out of the session it saved, or if its task was cancelled, which keeps the
+    /// session as a superseded sign-in does. A new connection whose session couldn't be saved
     /// stays in ``connections`` without one; switching to it throws ``AccountError/notSignedIn``.
     public func connect(local server: ValidatedServer, username: String, password: String) async throws {
         let logouts = self.logouts
@@ -190,10 +191,12 @@ public final class AccountManager {
                 _ = await serverLogout(replaced, client: makeClient(server.configuration, credentials: nil))
             }
             try ensureCurrent(operation)
+            try Task.checkCancellation()
             // Removed since it was saved; the catch deletes the session.
             guard try await store.markUsed(id: connection.id, at: now()) else { throw AccountError.connectionNotFound }
             await reloadConnections()
             try ensureCurrent(operation)
+            try Task.checkCancellation()
             Log.auth.info("Signed in with \(method.rawValue, privacy: .public)")
             setActive(connection, client: makeClient(server.configuration, credentials: credentials))
             didAuthorize(result.response, features: result.features, connection: connection)

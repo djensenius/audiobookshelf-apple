@@ -655,6 +655,27 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(manager.state.user?.connectionID == firstID)
     }
 
+    @Test func cancelledSignInKeepsItsSessionAndTheActiveConnection() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let first = FakeServer()
+        let firstID = try await signIn(manager, to: first)
+        let secondID = try await signIn(manager, to: FakeServer(userId: "usr-2"))
+        let lastUsed = try await harness.store.connection(id: firstID)?.lastUsedAt
+        let validated = try await validate(first)
+        // Signing in again to the first server holds while ending the replaced session.
+        let logout = first.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        signingIn.cancel()
+        logout.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(manager.state.user?.connectionID == secondID)
+        #expect(try harness.session(firstID)?.refreshToken == "refresh-2")
+        #expect(try await harness.store.connection(id: firstID)?.lastUsedAt == lastUsed)
+    }
+
     @Test func logoutSignsOutOfASignInThatIsSaving() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()

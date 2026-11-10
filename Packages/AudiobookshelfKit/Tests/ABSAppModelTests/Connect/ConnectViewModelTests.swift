@@ -16,8 +16,13 @@ private final class FakeBackend: ConnectBackend {
     var signInError: (any Error)?
     var resumed = false
     var savedHeaders: [UUID: [String: String]] = [:]
+    /// Answers a schemeless address over `http`, as the validator does when `https` can't connect.
+    var fallsBackToHTTP = false
     /// When set, validation waits for a value.
     var validationGate: AsyncStream<Void>?
+    /// When set, resuming waits for a value.
+    var resumeGate: AsyncStream<Void>?
+    private(set) var resumeCalls = 0
     private(set) var validated: [(address: String, headers: [String: String])] = []
     private(set) var passwordSignIns: [String] = []
     private(set) var openIDSignIns = 0
@@ -27,7 +32,10 @@ private final class FakeBackend: ConnectBackend {
         validated.append((address, customHeaders))
         if let validationGate { for await _ in validationGate { break } }
         if let validateError { throw validateError }
-        guard let server = ServerAddress(address) else { throw ServerValidationError.invalidAddress }
+        guard var server = ServerAddress(address) else { throw ServerValidationError.invalidAddress }
+        if fallsBackToHTTP, server.isSchemeInferred, let fallback = ServerAddress("http://" + address) {
+            server = fallback
+        }
         return ConnectServer(address: server, status: status)
     }
 
@@ -41,7 +49,11 @@ private final class FakeBackend: ConnectBackend {
         openIDSignIns += 1
     }
 
-    func resume(_ id: UUID) async throws -> Bool { resumed }
+    func resume(_ id: UUID) async throws -> Bool {
+        resumeCalls += 1
+        if let resumeGate { for await _ in resumeGate { break } }
+        return resumed
+    }
     func customHeaders(for id: UUID) async throws -> [String: String] { savedHeaders[id] ?? [:] }
 
     func remove(_ id: UUID) async throws {
@@ -52,12 +64,18 @@ private final class FakeBackend: ConnectBackend {
 
 private final class FakeLocalNetwork: LocalNetworkAccessChecking {
     let denied: Bool
+    /// When set, the check waits for a value.
+    let gate: AsyncStream<Void>?
     let checked = Mutex<[String]>([])
 
-    init(denied: Bool) { self.denied = denied }
+    init(denied: Bool, gate: AsyncStream<Void>? = nil) {
+        self.denied = denied
+        self.gate = gate
+    }
 
     func isDenied(host: String, port: Int) async -> Bool {
         checked.withLock { $0.append("\(host):\(port)") }
+        if let gate { for await _ in gate { break } }
         return denied
     }
 }
@@ -80,8 +98,8 @@ private func connection(username: String = "david", address: String = "https://a
 @MainActor @Suite struct ConnectViewModelTests {
     private let backend = FakeBackend()
 
-    private func model(denied: Bool = false) -> (ConnectViewModel, FakeLocalNetwork) {
-        let localNetwork = FakeLocalNetwork(denied: denied)
+    private func model(denied: Bool = false, gate: AsyncStream<Void>? = nil) -> (ConnectViewModel, FakeLocalNetwork) {
+        let localNetwork = FakeLocalNetwork(denied: denied, gate: gate)
         return (ConnectViewModel(backend: backend, localNetwork: localNetwork), localNetwork)
     }
 
@@ -191,8 +209,20 @@ private func connection(username: String = "david", address: String = "https://a
 
     @Test(arguments: [
         (CustomHeader(name: "authorization", value: "Bearer x"), ConnectFailure.reservedHeader(name: "authorization")),
+        (CustomHeader(name: "AUTHORIZATION", value: "x"), .reservedHeader(name: "AUTHORIZATION")),
+        (CustomHeader(name: " Cookie ", value: "a=b"), .reservedHeader(name: "Cookie")),
         (CustomHeader(name: "X Token", value: "x"), .invalidCustomHeader),
         (CustomHeader(name: "", value: "x"), .invalidCustomHeader),
+        // Line breaks and control characters, in a value and in a name.
+        (CustomHeader(name: "X-Token", value: "a\rb"), .invalidCustomHeader),
+        (CustomHeader(name: "X-Token", value: "a\nb"), .invalidCustomHeader),
+        (CustomHeader(name: "X-Token", value: "a\0b"), .invalidCustomHeader),
+        (CustomHeader(name: "X-Token", value: "a\u{2028}b"), .invalidCustomHeader),
+        (CustomHeader(name: "X-Token", value: "a\u{7F}b"), .invalidCustomHeader),
+        (CustomHeader(name: "X\rToken", value: "x"), .invalidCustomHeader),
+        (CustomHeader(name: "X\nToken", value: "x"), .invalidCustomHeader),
+        (CustomHeader(name: "X\0Token", value: "x"), .invalidCustomHeader),
+        (CustomHeader(name: "X\u{2028}Token", value: "x"), .invalidCustomHeader),
     ])
     func invalidCustomHeaderIsRejectedBeforeConnecting(header: CustomHeader, expected: ConnectFailure) async {
         let (model, _) = model()
@@ -201,6 +231,29 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(header.problem == expected)
         await model.submitAddress()
         #expect(model.failure == expected && model.phase == .address && backend.validated.isEmpty)
+    }
+
+    @Test func tabInAValueIsAllowed() async {
+        let (model, _) = model()
+        model.address = "abs.example.com"
+        model.customHeaders = [CustomHeader(name: "X-Token", value: "a\tb")]
+        await model.submitAddress()
+        #expect(backend.validated.map(\.headers) == [["X-Token": "a\tb"]])
+    }
+
+    /// The editor and ABSAPI's validator reject the same names.
+    @Test(arguments: [
+        "authorization", "cookie", "x-refresh-token", "connection", "host", "proxy-authorization",
+        "proxy-authenticate", "www-authenticate", "transfer-encoding", "content-length", "te", "upgrade",
+        "keep-alive",
+    ])
+    func reservedNamesMatchTheValidator(name: String) {
+        #expect(APIClientConfiguration.reservedHeaderNames.contains(name))
+        let header = CustomHeader(name: name.uppercased(), value: "x")
+        #expect(header.problem == .reservedHeader(name: name.uppercased()))
+        #expect(throws: CustomHeaderError.reserved(name: name.uppercased())) {
+            try APIClientConfiguration.validate(customHeaders: [name.uppercased(): "x"])
+        }
     }
 
     @Test(arguments: [
@@ -217,6 +270,20 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.showsPlainHTTPWarning == warns)
     }
 
+    /// A schemeless address isn't warned about until the server is found to answer only `http`.
+    @Test(arguments: [
+        ("abs.example.com", true), ("203.0.113.5:13378", true), ("nas.local", false), ("192.168.1.20", false),
+    ])
+    func plainHTTPWarningAfterFallingBackToHTTP(address: String, warns: Bool) async {
+        backend.fallsBackToHTTP = true
+        let (model, _) = model()
+        model.address = address
+        #expect(!model.showsPlainHTTPWarning)
+        await model.submitAddress()
+        #expect(model.server?.address.url.scheme == "http")
+        #expect(model.showsPlainHTTPWarning == warns)
+    }
+
     @Test func deniedLocalNetworkOffersRecoveryAndRetries() async {
         backend.validateError = ServerValidationError.cannotConnect(.notConnectedToInternet)
         let (model, localNetwork) = model(denied: true)
@@ -230,7 +297,12 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.phase == .login && model.failure == nil)
     }
 
-    @Test(arguments: [("https://abs.example.com", false), ("http://localhost:3333", false), ("http://nas.local", true)])
+    /// Names may resolve to a local address; loopback and public addresses can't be.
+    @Test(arguments: [
+        ("https://abs.example.com", true), ("http://nas.lan", true), ("http://nas.local", true),
+        ("http://192.168.1.20", true), ("http://localhost:3333", false), ("http://127.0.0.1", false),
+        ("http://8.8.8.8", false), ("http://134744072", false),
+    ])
     func unreachableServerWithLocalNetworkAllowedCannotConnect(address: String, checks: Bool) async {
         backend.validateError = ServerValidationError.cannotConnect(.cannotConnectToHost)
         let (model, localNetwork) = model(denied: false)
@@ -238,6 +310,58 @@ private func connection(username: String = "david", address: String = "https://a
         await model.submitAddress()
         #expect(model.failure == .cannotConnect)
         #expect(localNetwork.checked.withLock { $0.count } == (checks ? 1 : 0))
+    }
+
+    /// Split DNS: a public-looking name that resolves to a LAN address.
+    @Test func deniedLocalNetworkIsFoundForANamedServer() async {
+        backend.validateError = ServerValidationError.cannotConnect(.cannotConnectToHost)
+        let (model, localNetwork) = model(denied: true)
+        model.address = "abs.example.com"
+        await model.submitAddress()
+        #expect(model.failure == .localNetworkDenied)
+        #expect(localNetwork.checked.withLock { $0 } == ["abs.example.com:443"])
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func goingBackDuringTheLocalNetworkCheckDropsItsResult() async {
+        backend.validateError = ServerValidationError.cannotConnect(.cannotConnectToHost)
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        let (model, localNetwork) = model(denied: true, gate: gate)
+        model.address = "http://192.168.1.20:13378"
+        let task = Task { await model.submitAddress() }
+        while localNetwork.checked.withLock({ $0.isEmpty }) { await Task.yield() }
+        #expect(model.phase == .validating)
+        model.goBack()
+        open.yield()
+        await task.value
+        #expect(model.phase == .address && model.failure == nil)
+    }
+
+    @Test func retryRepeatsASavedServerCheck() async {
+        let saved = connection(address: "http://192.168.1.20:13378")
+        backend.connections = [saved]
+        backend.validateError = ServerValidationError.cannotConnect(.cannotConnectToHost)
+        let (model, _) = model(denied: true)
+        await model.select(saved)
+        #expect(model.phase == .servers && model.failure == .localNetworkDenied)
+
+        backend.validateError = nil
+        backend.resumed = true
+        await model.retry()
+        #expect(model.phase == .done && backend.validated.count == 2)
+    }
+
+    @Test func retryDoesNothingAfterLeavingTheFailedStep() async {
+        let saved = connection()
+        backend.connections = [saved]
+        backend.validateError = ServerValidationError.cannotConnect(.cannotConnectToHost)
+        let (model, _) = model()
+        await model.retry()
+        #expect(backend.validated.isEmpty)
+        await model.select(saved)
+        model.addServer()
+        await model.retry()
+        #expect(model.phase == .address && backend.validated.count == 1)
     }
 
     @Test func savedServerWithSessionIsResumed() async {
@@ -283,7 +407,8 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.phase == .address && !model.canGoBack)
     }
 
-    @Test func goingBackDropsAValidationInProgress() async {
+    @Test(.timeLimit(.minutes(1)))
+    func goingBackDropsAValidationInProgress() async {
         let (gate, open) = AsyncStream<Void>.makeStream()
         backend.validationGate = gate
         let (model, _) = model()
@@ -296,51 +421,56 @@ private func connection(username: String = "david", address: String = "https://a
         await task.value
         #expect(model.phase == .address && model.server == nil)
     }
-}
 
-/// The app's backend against a stub server: the custom headers reach `/status` and `/login`, are
-/// saved with the connection, and a saved session is resumed.
-@MainActor @Suite struct AccountConnectBackendTests {
-    @Test func signsInWithCustomHeadersAndResumes() async throws {
-        let host = "\(UUID().uuidString.lowercased()).stub.test"
-        StubURLProtocol.register(host: host) { request in
-            switch request.url?.path() {
-            case "/status":
-                .json(#"{"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"authMethods":["local"]}"#)
-            case "/login":
-                .json(
-                    #"{"user":{"id":"usr-1","username":"david","type":"admin","token":null,"#
-                        + #""accessToken":"access","refreshToken":"refresh"},"#
-                        + #""userDefaultLibraryId":"lib1","serverSettings":{"version":"2.26.0"}}"#)
-            default:
-                .json("{}", status: 404)
-            }
-        }
-        let validator = ServerValidator(sessionConfiguration: { StubURLProtocol.sessionConfiguration() })
-        let accounts = AccountManager(
-            store: ServerConnectionStore(modelContainer: try DataStack(location: .inMemory).container),
-            keychain: InMemoryKeychain(), validator: validator,
-            sessionConfiguration: { StubURLProtocol.sessionConfiguration() })
-        let model = ConnectViewModel(
-            accounts: accounts, validator: validator, localNetwork: FakeLocalNetwork(denied: false))
-        model.address = "https://\(host)"
-        model.customHeaders = [CustomHeader(name: "X-Proxy", value: "secret")]
-        await model.submitAddress()
-        model.username = "david"
-        model.password = "pw"
-        await model.signIn()
-        #expect(model.phase == .done)
+    @Test(.timeLimit(.minutes(1)))
+    func savedServerCanBeLeftUntilItsSessionIsResumed() async {
+        let saved = connection()
+        backend.connections = [saved]
+        let (validation, openValidation) = AsyncStream<Void>.makeStream()
+        backend.validationGate = validation
+        let (model, _) = model()
+        let task = Task { await model.select(saved) }
+        while backend.validated.isEmpty { await Task.yield() }
+        #expect(model.phase == .signingIn(.savedSession) && model.canGoBack)
+        model.goBack()
+        #expect(model.phase == .servers && model.savedConnection == nil)
+        openValidation.yield()
+        await task.value
+        #expect(model.phase == .servers && model.failure == nil && backend.resumeCalls == 0)
+    }
 
-        let paths = StubURLProtocol.requests(host: host).map { $0.url?.path() ?? "" }
-        #expect(paths == ["/status", "/login"])
-        #expect(StubURLProtocol.requests(host: host).allSatisfy { $0.value(forHTTPHeaderField: "X-Proxy") == "secret" })
-        let saved = try #require(accounts.activeConnection)
-        #expect(try await accounts.customHeaders(for: saved.id) == ["X-Proxy": "secret"])
+    @Test(.timeLimit(.minutes(1)))
+    func resumingASavedSessionCantBeLeftButCancellingDropsIt() async {
+        let saved = connection()
+        backend.connections = [saved]
+        backend.resumed = true
+        let (resume, openResume) = AsyncStream<Void>.makeStream()
+        backend.resumeGate = resume
+        let (model, _) = model()
+        let task = Task { await model.select(saved) }
+        while backend.resumeCalls == 0 { await Task.yield() }
+        #expect(model.isResumingSession && !model.canGoBack)
+        model.goBack()
+        #expect(model.phase == .signingIn(.savedSession))
+        model.cancel()
+        #expect(model.phase == .servers && !model.isResumingSession)
+        openResume.yield()
+        await task.value
+        #expect(model.phase == .servers)
+    }
 
-        let next = ConnectViewModel(
-            accounts: accounts, validator: validator, localNetwork: FakeLocalNetwork(denied: false))
-        #expect(next.phase == .servers && next.savedServers.map(\.id) == [saved.id])
-        await next.select(saved)
-        #expect(next.phase == .done)
+    @Test(.timeLimit(.minutes(1)))
+    func cancellingValidationReturnsToTheAddress() async {
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        backend.validationGate = gate
+        let (model, _) = model()
+        model.address = "abs.example.com"
+        let task = Task { await model.submitAddress() }
+        while backend.validated.isEmpty { await Task.yield() }
+        model.cancel()
+        #expect(model.phase == .address)
+        open.yield()
+        await task.value
+        #expect(model.phase == .address && model.server == nil && model.failure == nil)
     }
 }

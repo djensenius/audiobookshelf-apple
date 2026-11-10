@@ -88,6 +88,7 @@ struct ServerListView: View {
                 Image(systemName: "trash")
             }
         }
+        .disabled(model.isBusy)
     }
 }
 

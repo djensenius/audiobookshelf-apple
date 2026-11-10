@@ -120,6 +120,13 @@ struct LoginView: View {
     }
 }
 
+#Preview("Signing in with OpenID") {
+    ConnectPreview(PreviewConnectBackend(authMethods: [.openID], hangsOn: .signingIn(.openID))) { model in
+        await ConnectPreview.connect(to: "abs.example.com")(model)
+        await model.signInWithOpenID(using: PreviewWebAuthenticator())
+    }
+}
+
 #Preview("Invalid credentials") {
     ConnectPreview(PreviewConnectBackend(signInError: ServerValidationError.invalidCredentials)) { model in
         await ConnectPreview.connect(to: "abs.example.com")(model)

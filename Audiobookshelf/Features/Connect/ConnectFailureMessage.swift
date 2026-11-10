@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSUI
@@ -31,8 +32,31 @@ extension ConnectFailure {
         case .tooManyAttempts: L10n.string("MessageConnectTooManyAttempts")
         case .sessionExpired: L10n.string("MessageFailedToRefreshToken")
         case .keychainUnavailable: L10n.string("MessageConnectKeychainUnavailable")
+        case .serverNotSaved: L10n.string("MessageConnectServerNotSaved")
+        case .openID(let error): Self.message(for: error)
         case .unexpected: L10n.string("MessageConnectUnexpected")
-        case .message(let message): message.isEmpty ? L10n.string("MessageConnectUnexpected") : message
+        }
+    }
+
+    private static func message(for error: OIDCLoginError) -> String {
+        switch error {
+        case .notEnabled: L10n.string("MessageConnectOpenIDNotEnabled")
+        case .authorizationFailed(let status): L10n.string("MessageConnectOpenIDAuthorizationFailed", String(status))
+        case .invalidAuthorizationURL: L10n.string("MessageConnectOpenIDInvalidAuthorizationURL")
+        case .insecureAuthorizationURL: L10n.string("MessageConnectOpenIDInsecureAuthorizationURL")
+        case .browserFailed: L10n.string("MessageConnectOpenIDBrowserFailed")
+        case .invalidCallback, .stateMismatch: L10n.string("MessageConnectOpenIDInvalidCallback")
+        case .identityProvider(let error, let description?):
+            L10n.string("MessageConnectOpenIDProviderErrorDescription", description, error)
+        case .identityProvider(let error, nil): L10n.string("MessageConnectOpenIDProviderError", error)
+        case .missingCode: L10n.string("MessageConnectOpenIDMissingCode")
+        case .sessionLost: L10n.string("MessageConnectOpenIDSessionLost")
+        case .rejected: L10n.string("MessageConnectOpenIDRejected")
+        case .serverRefused(let message?): L10n.string("MessageConnectOpenIDServerRefused", message)
+        case .serverRefused(nil): L10n.string("MessageConnectOpenIDServerRefusedNoReason")
+        case .callbackFailed(let status): L10n.string("MessageConnectOpenIDCallbackFailed", String(status))
+        // ConnectFailure never holds a cancellation.
+        case .cancelled: L10n.string("MessageConnectUnexpected")
         }
     }
 

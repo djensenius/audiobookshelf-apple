@@ -5,11 +5,11 @@ import Foundation
 /// Why connecting or signing in failed, for the connect screen to show as a localized message.
 ///
 /// ABSAppModel doesn't import ABSUI, so the app maps each case to its `L10n` string.
-public enum ConnectFailure: Error, Sendable, Hashable {
+public enum ConnectFailure: Error, Sendable, Equatable {
     case invalidAddress
     /// A custom header has no name or an invalid one, or a value on more than one line.
     case invalidCustomHeader
-    /// `Authorization` and `Cookie` can't be custom headers.
+    /// One of ``APIClientConfiguration/reservedHeaderNames``, such as `Authorization` or `Host`.
     case reservedHeader(name: String)
     case cannotConnect
     /// The host is on the local network and the user turned off local network access. Recover
@@ -40,9 +40,11 @@ public enum ConnectFailure: Error, Sendable, Hashable {
     case sessionExpired
     /// The saved sign-in can't be read while the device is locked.
     case keychainUnavailable
+    /// The saved server was removed meanwhile.
+    case serverNotSaved
+    /// OpenID sign-in failed. Never ``OIDCLoginError/cancelled``.
+    case openID(OIDCLoginError)
     case unexpected
-    /// A message from ABSAPI that has no localized string yet (OpenID errors).
-    case message(String)
 
     /// The failure for `error`, or `nil` when the user cancelled.
     init?(_ error: any Error) {
@@ -52,15 +54,18 @@ public enum ConnectFailure: Error, Sendable, Hashable {
         case let error as ServerValidationError:
             self.init(error)
         case let error as OIDCLoginError:
-            self = .message(error.errorDescription ?? "")
+            self = .openID(error)
         case CustomHeaderError.reserved(let name):
             self = .reservedHeader(name: name)
+        case let error as KeychainError:
+            self = error.isUnavailable ? .keychainUnavailable : .unexpected
         case let error as AccountError:
             switch error {
             case .server(let error): self.init(error)
             case .keychain(let error) where error.isUnavailable: self = .keychainUnavailable
             case .notSignedIn: self = .sessionExpired
-            case .keychain, .connectionNotFound: self = .unexpected
+            case .connectionNotFound: self = .serverNotSaved
+            case .keychain: self = .unexpected
             }
         default:
             self = .unexpected

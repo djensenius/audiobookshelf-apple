@@ -2,6 +2,10 @@ import ABSAppModel
 import ABSUI
 import SwiftUI
 
+#if os(macOS)
+    import AppKit
+#endif
+
 /// The server connect and sign-in flow (#40): saved servers, a new server's address and custom
 /// headers, then password or OpenID sign-in. A port of `pages/connect.vue`.
 ///
@@ -9,14 +13,31 @@ import SwiftUI
 /// show it to add or switch servers:
 ///
 /// ```swift
-/// ConnectFlowView(model: ConnectViewModel(accounts: accounts)) {
+/// ConnectFlowView(accounts: accounts) {
 ///     // Signed in: `accounts.activeConnection` and `accounts.client` are set.
 /// }
 /// ```
 ///
-/// `onFinish` runs once, when the model reaches ``ConnectViewModel/Phase/done``. The flow saves
-/// nothing itself: ``AccountManager`` stores the connection, session and custom headers.
+/// The view owns its ``ConnectViewModel`` for as long as it's shown, so a parent's update
+/// doesn't restart the flow, and cancels the work in progress when it disappears. `onFinish`
+/// runs once, when the model reaches ``ConnectViewModel/Phase/done``. The flow saves nothing
+/// itself: ``AccountManager`` stores the connection, session and custom headers.
 struct ConnectFlowView: View {
+    @State private var model: ConnectViewModel
+    private let onFinish: () -> Void
+
+    init(accounts: AccountManager, onFinish: @escaping () -> Void = {}) {
+        _model = State(initialValue: ConnectViewModel(accounts: accounts))
+        self.onFinish = onFinish
+    }
+
+    var body: some View {
+        ConnectFlowStack(model: model, onFinish: onFinish)
+    }
+}
+
+/// The flow for a model owned elsewhere: ``ConnectFlowView`` and previews.
+struct ConnectFlowStack: View {
     let model: ConnectViewModel
     var onFinish: () -> Void = {}
     @Environment(\.scenePhase) private var scenePhase
@@ -31,7 +52,7 @@ struct ConnectFlowView: View {
                             Button {
                                 model.goBack()
                             } label: {
-                                Text(verbatim: L10n.string("ButtonBack"))
+                                Text(verbatim: L10n.string(model.isBusy ? "ButtonCancel" : "ButtonBack"))
                             }
                         }
                     }
@@ -40,12 +61,22 @@ struct ConnectFlowView: View {
         .onChange(of: model.phase, initial: true) { _, phase in
             if phase == .done { onFinish() }
         }
+        .onDisappear { model.cancel() }
         // Back from Settings after turning local network access on.
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active, model.failure == .localNetworkDenied {
-                Task { await model.retry() }
-            }
+            if phase == .active { retryAfterLocalNetworkDenied() }
         }
+        #if os(macOS)
+            // The scene phase may stay active while System Settings is in front.
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                retryAfterLocalNetworkDenied()
+            }
+        #endif
+    }
+
+    private func retryAfterLocalNetworkDenied() {
+        guard model.failure == .localNetworkDenied else { return }
+        Task { await model.retry() }
     }
 
     @ViewBuilder private var content: some View {
