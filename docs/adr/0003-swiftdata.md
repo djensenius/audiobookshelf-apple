@@ -167,7 +167,7 @@ General rules:
 | `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date` (latest change, for display and ordering only), `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `audioEditedAt: Date?`, `finishedEditedAt: Date?`, `ebookEditedAt: Date?`, `@Attribute(.codable) serverBaseline: ProgressBaseline?`, `@Attribute(.codable) unacknowledgedSends: [ProgressSend]` (oldest first, at most 8), `audioHistoryTruncated: Bool`, `finishedHistoryTruncated: Bool`, `ebookHistoryTruncated: Bool` (all default `false`), `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
 | `DownloadRecord` | `id: UUID`, `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `mediaType`, `title`, `state` (`queued`/`downloading`/`paused`/`failed`), `relativeDirectory`, `createdAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) parts: [DownloadPart]` | `#Unique([\.id], [\.key])`; `#Index([\.state])` |
 | `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `hasResumeData: Bool` (flag only; the sealed blob lives outside the store), `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
-| `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?` | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
+| `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?`, `lastUploadFailureAt: Date?`, `missingUploadResults: Int` (default 0) | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
 | `PlaybackHistoryEvent` | `id: UUID` | `serverConnectionID: UUID?`, `mediaKey`, `libraryItemId`, `episodeId: String?`, `mediaDisplayTitle`, `name` (`Play`/`Pause`/`Stop`/`Seek`/`Save`/`Finished`/`Sync`), `type` (`Playback`/`Sync`), `details: String?`, `currentTime: Double?`, `serverSyncAttempted: Bool`, `serverSyncSuccess: Bool?`, `serverSyncMessage: String?`, `timestamp: Date` | `#Unique([\.id])`; `#Index([\.mediaKey, \.timestamp])` |
 
 Model notes:
@@ -210,7 +210,9 @@ Model notes:
   - `finishedDirty`: `isFinished`, `finishedAt`;
   - `ebookDirty`: `ebookLocation`, `ebookProgress`.
 
-  A local change to a group also sets that group's `<group>EditedAt` to now.
+  A local change to a group also sets that group's `<group>EditedAt` to now, or
+  just after its previous value if the clock repeats or steps back: the edit time
+  identifies the edit, so an acknowledgement never clears a newer edit.
   `needsServerSync` is kept equal to "any dirty flag is set" by the store and is
   the indexed pending-sync query. `serverBaseline` is a `Codable, Sendable` struct
   owned by `ABSData` (`currentTime`, `progress`, `duration`, `isFinished`,
@@ -227,16 +229,77 @@ Model notes:
   - **PATCH.** `PATCH /api/me/progress/:id` sends only the fields of dirty groups.
     An ebook-only save never sends `currentTime`, `progress`, `duration` or
     `isFinished`, so it can't wipe audio progress made on another device, and
-    vice versa.
+    vice versa. Each PATCH carries one dirty group, in the order audio, finished,
+    ebook (#53: the server mishandles audio and finished in one body, and audio
+    must go before finished). Once a server baseline exists, ebook doesn't depend
+    on the others: when the newest unacknowledged send carried audio or finished
+    (it failed or its response was lost) and ebook is dirty, ebook goes next, so a
+    PATCH that keeps failing can't block it; the send after an ebook one goes back
+    to audio or finished, even when the ebook send succeeded (leaving no entry)
+    while a newer ebook edit is pending, so neither side starves. The store tracks
+    that in memory; after a relaunch the entries decide. Without a baseline, ebook waits for
+    audio and finished, because an ebook PATCH for media the server has no
+    progress for creates it with zero audio and unfinished (#53). The body never
+    carries `lastUpdate` (the server would store it as `updatedAt`, a device-clock
+    time that can be older than the baseline, so the echo would be dropped as
+    stale), and an ebook PATCH always sends `ebookProgress`, 0 when unknown: an
+    omitted key leaves the old value on existing progress, and a `null` is stored
+    as `null` on existing progress but as 0 when the PATCH creates it
+    (`User.createUpdateMediaProgressFromPayload`). Without a baseline the device
+    can't know which applies (another device may have created the row), so it
+    sends 0 and the server stores 0 either way. Other clients see 0% rather than
+    "unknown".
   - **Stale server values are dropped before any merge.** `LocalProgressStore`
     keeps an in-memory generation counter and, per row, the generation of its last
     local edit or PATCH settlement. Every fetch (`/api/me`, an expanded item,
     `/api/me/progress/:id`) captures the counter when it is issued, and every socket
-    `user_item_progress_updated` captures it when received. When the values are
+    event (`user_updated`, which the server emits for each PATCH, and
+    `user_item_progress_updated`, which it emits for playback-session syncs)
+    captures it when received. When the values are
     applied, a row whose generation has advanced since that capture is skipped; the
     next fetch picks up any real server change. The counter can be in memory
     because no fetch outlives the process. In addition, server values whose
-    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped.
+    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped, and so are
+    values whose `lastUpdate` equals it, unless they come from a fetch issued
+    after the row last merged server values. Server times are milliseconds, so
+    another write in that millisecond may predate the one the baseline holds: a
+    socket event may have been emitted before it, and of two overlapping fetches
+    the one applied second may have been read first. A fetch issued after the
+    merge was read after the server held the baseline's values, so its value at
+    the same time is that write or a later one; the next such fetch brings a
+    later write made in the same millisecond. Server
+    progress always carries `lastUpdate` (`MediaProgress.getOldMediaProgress`,
+    `updatedAt`); the network layer drops a payload without one rather than
+    inventing a time.
+  - **Socket values after an acknowledgement.** The PATCH's 200 has no body
+    (`MeController.createUpdateMediaProgress`, 2.26.0 to master), so the ack
+    can't advance `serverBaseline.lastUpdate` to the server's time of the write.
+    A socket event received after the ack may have been emitted before the PATCH
+    was applied, with a `lastUpdate` equal to, later than or earlier than the
+    baseline's, and the generation check can't catch it because it is captured on
+    receipt. A value equal to the acknowledged one doesn't prove it came after the
+    PATCH either (a queued pre-PATCH event can hold the same value). So, in memory
+    (a new process has a new socket connection, which only carries later events), a
+    row acknowledged without a server time waits for a confirming fetch: its socket
+    values aren't merged, only the latest is kept. The first fetch applied for the
+    row afterwards (it passed the generation check, so it was issued after the ack
+    and includes the write, as the server applies the PATCH before its 200) is
+    merged normally, including the server's normalizations such as an auto-finish;
+    then the kept socket value is merged, unless it was captured before a later
+    local edit or settlement, and only if its `lastUpdate` is strictly later than
+    the fetch's: server times are milliseconds, so a snapshot emitted before the
+    PATCH can tie the fetch, and on a tie the fetch wins. Callers say which source
+    values came from (`.fetch` or `.socket`).
+    `LocalProgressStore.needsConfirmationFetch` lists the waiting rows: after an
+    ack without a server time, the progress syncer (P2-06d, #158) must capture the
+    generation and issue `GET /api/me/progress/:id` for the row, then apply it with
+    `.fetch`. If that fetch never comes, the row keeps the acknowledged values,
+    which the server holds unless it normalized them; the next fetch (at the
+    latest `/api/me` at launch) brings any normalization or newer write. Socket
+    updates for a waiting row, other groups included, are deferred until then:
+    merging them would advance `serverBaseline.lastUpdate` past the confirming
+    fetch, which the stale check would then drop. Nothing is marked dirty, because
+    the server already holds the acknowledged value.
   - **Merge** (replaces the row-wide rule in
     `ApiClient.syncLocalSessionsWithServer`), for each group when server progress
     arrives:
@@ -244,15 +307,26 @@ Model notes:
     - dirty, and the server's values for the group equal the baseline's: the
       server hasn't changed that group since we last saw it, so the local values
       are kept and stay dirty;
-    - dirty, and the server's group equals that group in any entry of
+    - dirty, while that group's `<group>HistoryTruncated` is set: the server
+      value may be one of our dropped sends (or a side effect of our PATCH), so
+      the local group wins and stays dirty. This holds even when it matches an
+      entry we still hold: a dropped send may have carried the same value, and
+      the held one may never have reached the server. No echo, fetch or socket
+      update clears the flag or acknowledges the edit; only the response to a
+      send we hold (the acknowledgement) settles the group. Re-sending is safe;
+    - dirty, not truncated, and the server's group equals that group in any entry of
       `unacknowledgedSends` (newest checked first): it is the echo of our own
-      PATCH whose response was lost. The baseline advances to those values, that
-      entry and every older entry are removed, and the flag clears only if
+      PATCH whose response was lost. The group takes the server's form of those
+      values, the baseline advances to them, that group is removed from that entry and every older one (entries left empty
+      are dropped; other groups keep their evidence), and the flag clears only if
       `<group>EditedAt` still equals the entry's. A newer local edit stays dirty
-      and is never rolled back;
-    - dirty, matching neither the baseline nor any entry, while that group's
-      `<group>HistoryTruncated` is set: the server value may be one of our dropped
-      sends, so the local group wins and stays dirty;
+      and is never rolled back. When an older entry matches too, the echo may be
+      that older send's and the newest may never have reached the server: unless
+      sending the newest would leave the server with the same value regardless
+      (no other value of the group sent in between, and not matched through
+      normalization such as an auto-finished un-finish), only the evidence up to
+      the oldest match is settled and the group stays dirty, to be sent again.
+      Re-sending is safe; acknowledging an undelivered edit loses it;
     - dirty, and the server's group differs from the baseline (or there is no
       baseline): a real conflict. The local group wins only if its
       `<group>EditedAt` is later than the server's `lastUpdate`; otherwise the
@@ -260,30 +334,78 @@ Model notes:
       server's `lastUpdate` is row-wide, so it is an upper bound on when that group
       changed, and ambiguous cases favour the server.
 
+    When the server wins a conflict, that group is also removed from every
+    `unacknowledgedSends` entry, so an old send can't later match another device's
+    value.
+
     Afterwards `serverBaseline` becomes the server's values. Comparisons allow 1 s
-    for `currentTime` and `duration`, 0.001 for `progress` and `ebookProgress`,
-    and are exact otherwise.
+    for `currentTime` and `duration` and 0.001 for `ebookProgress`, and are exact
+    otherwise. Audio `progress` isn't compared, because the server normalizes it
+    (`MediaProgress.applyProgressUpdate`, 2.26.0 to master): finishing or
+    auto-finishing stores 1, un-finishing stores 0, and a sent value equal to its
+    old `currentTime / duration` is ignored. `finishedAt` is stored and compared
+    in whole milliseconds, as the server keeps it, so the echo of a local "mark
+    finished" compares equal. Two more server forms of our values also match a
+    send (`ProgressSyncState.matches`):
+    - a "not finished" sent fewer than 10 s from the end is auto-finished, so a
+      finished server value matches it when its `finishedAt` isn't earlier than
+      the send's edit (an earlier finish isn't this send's echo). The ack keeps
+      such an un-finish send as evidence while a newer finished edit is pending,
+      so that edit survives the finished echo; an unchanged edit takes it;
+    - a missing `ebookProgress` is sent as 0 (above), so its echo matches
+      exactly; a baseline of 0 never stands for a sent `nil`. Only the ack that
+      creates progress records 0 for an unsent `ebookProgress` the device had as
+      `nil`, which is what creation stores.
+
+    Other normalizations need nothing: the server clamps `progress` (not
+    compared); creation defaults `currentTime` and `duration` to 0, which only
+    affects unsent groups, shielded below; `hideFromContinueListening` isn't
+    synced.
+
+    Conflicts compare the device clock (`<group>EditedAt`) with the server clock
+    (`lastUpdate`). A device whose clock runs ahead wins conflicts it should lose,
+    and one running behind loses them. This is accepted: the server's per-group
+    edit times aren't available, and the baseline and send history settle every
+    case that doesn't involve another device.
   - **Clearing.** The PATCH is built from a snapshot of the dirty groups' values
     and their `<group>EditedAt`, taken when it is sent; a retry always takes a new
     snapshot of the current values, never the earlier one. Before sending, the
-    store appends the snapshot to `unacknowledgedSends`. Sends for a row are
+    store appends the snapshot to `unacknowledgedSends`; an identical earlier
+    entry (a retry of the same values and edit time) is replaced rather than
+    repeated, so retries don't fill the list. Sends for a row are
     serialised, and a failure or lost response leaves the list, the flags and the
     baseline unchanged, so an earlier send that may have committed stays
     recognisable after later retries fail. When the list already holds 8 entries,
     the oldest is dropped and `<group>HistoryTruncated` is set for each group it
-    carried (`ProgressSend` groups are optional, so entries can be pruned per
-    group). After it succeeds, the store always copies the sent
-    snapshot values into `serverBaseline` for every sent group, because the server
-    now holds them, sets `serverBaseline.lastUpdate` from the response when the
-    server returns one, and empties `unacknowledgedSends` and clears all three
-    `<group>HistoryTruncated` flags, because the server now holds the newest send. It then
-    clears a group's flag only if its `<group>EditedAt` still equals the
-    snapshot's. A group edited during the request stays dirty with its newer local values, and the next fetch sees the
+    carried, and for each dirty group its PATCH could have changed as a side
+    effect (below), since that PATCH may have committed (`ProgressSend` groups are
+    optional, so entries can be pruned per group). After it succeeds, the store always copies the sent
+    snapshot values into `serverBaseline` for the sent group, because the server
+    now holds them, and sets `serverBaseline.lastUpdate` to the later of its
+    current value and the response's, so it never moves backwards. It removes the
+    sent group from every `unacknowledgedSends` entry (dropping entries left empty)
+    and clears only that group's `<group>HistoryTruncated` flag; other groups keep
+    their evidence and flags. It then clears the group's dirty flag only if its
+    `<group>EditedAt` still equals the snapshot's. Each send carries a token, and
+    an outcome whose token isn't the row's send in flight (a late or duplicate
+    one) is ignored, so acknowledging twice changes nothing. The send also records
+    the row's `persistentModelID`: if the row was deleted (sign-out, reset) and
+    recreated for the same key while the request ran, the outcome settles the send
+    without acknowledging the new row (still dirty, no baseline change, no hold).
+    The old PATCH may still have committed after the new row's edits, and the new
+    row holds no evidence of it, so the outcome sets the truncation flag of each of
+    its dirty groups: their echoes can't replace the edits, which keep their values
+    until their own sends are acknowledged. The flags and the settlement are saved
+    together: if that save, or the lookup telling the rows apart, fails, the old
+    send stays in flight (its groups still excluded from merges) and the outcome
+    throws, so the sync coordinator retries it. Server progress is merged with
+    one lookup of the connection's rows per batch, not one per entry, since a
+    snapshot may list thousands of items with no local row. A group edited during the request stays dirty with its newer local values, and the next fetch sees the
     server matching the advanced baseline, so the edit is kept and sent rather
     than treated as a conflict.
   - **Merges during an in-flight PATCH.** While a PATCH for a row is in flight,
-    server progress for that row (a fetch, `/api/me`, or a socket
-    `user_item_progress_updated` echo of the PATCH itself) is not merged into any
+    server progress for that row (a fetch, `/api/me`, or the socket
+    `user_updated` echo of the PATCH itself) is not merged into any
     group the PATCH carries. Groups the PATCH doesn't carry merge immediately.
     Values for the carried groups may be held until the PATCH settles, but they
     keep their original capture and still go through the stale check. Settlement
@@ -291,6 +413,61 @@ Model notes:
     fetch brings the server state after the PATCH. So a server update can never
     overwrite a local edit made during the request, clear its dirty flag before
     the acknowledgement, or roll a group back to its value before the PATCH.
+
+  - **Truncation flags and #53 side effects.** A `<group>HistoryTruncated` flag
+    means "the server's value for this group may come from our own sends, so the
+    dirty local value wins". Besides overflow, it guards against the server's side
+    effects (`MediaProgress.applyProgressUpdate` and
+    `User.createUpdateMediaProgressFromPayload`, 2.26.0 to master):
+    - an audio PATCH un-finishes the item when it moves `currentTime` away from
+      the end;
+    - a finished PATCH sets `progress` to 1 when finishing, and resets
+      `currentTime` and `progress` to 0 when un-finishing;
+    - every PATCH to existing progress, ebook-only too, auto-finishes it when
+      fewer than 10 s are left (`progress` becomes 1);
+    - a PATCH for media the server has no progress for creates it with defaults
+      for the other groups and no auto-finish check.
+
+    So audio affects finished, finished affects audio, and ebook affects both
+    (or, only when one of our sends went out while the row had no baseline, any
+    group affects every other). When a group has been sent, the flags of the
+    dirty groups it affects are set, so the server's side effect can't overwrite
+    the pending local edit, at four points (a plain fetch with nothing sent
+    shields nothing):
+    - when the send is acknowledged;
+    - when a fetch matches it as the echo of a lost send (the side-effect flag
+      is set before the affected group is resolved, so the same echo can't
+      settle that group either);
+    - when server progress is merged while it is in flight;
+    - when its entry is dropped from the full list.
+
+    A flag clears only when its group's own send is acknowledged. While it is
+    set, merges never settle the group: neither an echo matching a held entry nor
+    a newer server value (a conflict) clears its dirty flag.
+
+    Known gaps, accepted:
+    - After a relaunch, the in-flight send is forgotten but its entry stays, so
+      ebook can go once ahead of an old, lost audio entry.
+    - A dirty group can still lose to our own side effect once another device
+      writes the row later than both: the server's `lastUpdate` is then later
+      than the edit, and the time rule lets the server win.
+    - On a row with no baseline, once one of our sends has gone out, another
+      device's value can lose to ours until the first acknowledgement or echo.
+    - The server auto-finishes unfinished progress within 10 s of the end on any
+      PATCH, including one that un-finishes, so a "not finished" sent there
+      doesn't stick; the server's finished value is taken. The match uses the
+      default 10 s threshold and compares the server's `finishedAt` with the
+      device's edit time, so clock skew can misjudge it. It can also match an
+      auto-finish caused by a different PATCH (our ebook or audio PATCH, or
+      another device's position), which is harmless for an unchanged un-finish
+      (sending it would be auto-finished too). If the other device explicitly
+      finished there after our edit while a newer un-finish is pending, ours is
+      kept and sent, and the server's un-finish resets `currentTime` to 0.
+    - The ack of a send on a row with no baseline copies the unsent groups'
+      local values into the baseline, as if the PATCH created the row. If
+      another device had already created it, a later local edit of such a group
+      can lose a conflict to that device's older value with a later
+      `lastUpdate`.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
@@ -332,9 +509,17 @@ Model notes:
   per session, never from the batch's HTTP status: the server answers with
   `results[]` (`id`, `success`, `error`), and only a session whose own result is
   `success: true` may be deleted. Sessions with a failed or missing result stay
-  pending and are retried on later syncs; after 5 failed results (e.g. `Media item
+  pending and are retried on later syncs; after 5 counted failures (e.g. `Media item
   not found` for an item deleted on the server) the session is discarded and logged,
-  so it can't stay pending forever. Each upload records the `updatedAt` it sent for every session; a session
+  so it can't stay pending forever. A failure is counted only when the session
+  wasn't changed during the upload (newer data may succeed) and no failure was
+  counted in the last hour (`lastUploadFailureAt`), so a burst of retries can't
+  discard it. Three consecutive uploads without a result for an unchanged session
+  (`missingUploadResults`) count as one failure. The latest error is kept in
+  `lastUploadError` even when it isn't counted, and a success resets
+  `uploadAttempts`, `lastUploadError`, `lastUploadFailureAt` and
+  `missingUploadResults`, including for an active session that is kept. Only the
+  upload settlement changes these fields; saving a session never does. Each upload records the `updatedAt` it sent for every session; a session
   changed while the upload was in flight (its `updatedAt` no longer matches) is
   kept and sent again on the next sync. Within those rules the legacy rule applies:
   only sessions that are not `isActive` are deleted (all acknowledged ones on the
@@ -603,10 +788,36 @@ Ongoing checks:
   sends the newer seek; PATCH A commits but loses its response after a newer
   seek, retry B fails before reaching the server, and a fresh fetch returning A's
   values keeps the newer seek dirty (A is still recognised); overflowing the
-  8-entry list sets `<group>HistoryTruncated` for the dropped entry's groups, and
+  8-entry list sets `<group>HistoryTruncated` for the dropped entry's groups and
+  the dirty groups its PATCH could have changed, and
   an unmatched server value for such a group then keeps the local value dirty; a server echo of an in-flight PATCH (newer `lastUpdate`, older
   values) arriving after a newer local seek is deferred and leaves the seek dirty
-  and unchanged, on both PATCH success and failure; deleting a connection with dirty progress and then logging in
+  and unchanged, on both PATCH success and failure; a socket value received after
+  an acknowledgement without a server time doesn't roll the acknowledged value
+  back, whether its `lastUpdate` equals, follows or precedes the baseline's, and
+  pre-PATCH events holding the acknowledged value and then an older one don't
+  release the hold; the confirming fetch takes the server's auto-finish of an
+  un-finish sent near the end and then a newer socket value kept meanwhile, while
+  one captured before a later edit is dropped; another device's later value
+  arrives by the fetch, or at once by socket when the ack had a server time; a newer edit survives the
+  server's normalized echo (an un-finish auto-finished near the end, a created
+  `ebookProgress` of 0) after an ack or a lost response, and an unchanged edit
+  takes it; the echo of an older lost send with the same value (a seek back to
+  200 after 300, or an earlier auto-finished un-finish) doesn't acknowledge a
+  newer undelivered edit, nor does one matching only the newest after the older
+  send was dropped from the full list (the group stays truncated and dirty until
+  its own send is acknowledged); a missing `ebookProgress` is sent as 0, so a page turn made while it
+  is in flight survives its echo on existing and on created progress; a seeded
+  random simulation of the 2.26.0 server (#53 side effects, creation defaults,
+  another device, relaunches, stale fetches) keeps every dirty group unless the
+  server's value is newer or is what sending it would store, and converges; a
+  seeded random interleaving of `LocalProgressStore` calls (edits, sends acked
+  with or without a server time, failures, socket events delivered in order,
+  stale, overlapping and confirming fetches, writes sharing a millisecond) never loses an
+  unconfirmed edit to anything but a later write by another device, never leaves
+  a clean row older than its acknowledged write or a write it already held, never lets a held socket value
+  become the row's value, keeps `needsConfirmationFetch` equal to the hold, and
+  converges (25 seeds by default, `ABS_PROGRESS_SEEDS` for more); deleting a connection with dirty progress and then logging in
   again to the same address and user returns the same connection `id`, and
   `pendingSync(for:)` returns the retained progress.
 - #72 (P4-01): a sealed resume-data file on disk contains no plaintext bearer

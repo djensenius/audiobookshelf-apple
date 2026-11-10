@@ -131,10 +131,20 @@ import Testing
         let routes: [Route] = [
             .item(id: "a"), .episode(itemID: "a", episodeID: "b"), .series(id: "c"), .author(id: "d"),
             .narrator(name: "e"), .collection(id: "f"), .playlist(id: "g"), .history(itemID: "h"),
-            .localFolder(id: "i"), .localItem(id: "j"), .downloadQueue, .stats, .logs, .servers, .settings,
+            .history(itemID: "h", episodeID: "ep"), .localFolder(id: "i"), .localItem(id: "j"), .downloadQueue, .stats,
+            .logs, .servers, .settings,
         ]
         let data = try JSONEncoder().encode(routes)
         #expect(try JSONDecoder().decode([Route].self, from: data) == routes)
+    }
+
+    /// A book's history route keeps the wire format it had before episodes were added.
+    @Test func historyRouteOmitsAMissingEpisode() throws {
+        let book = String(decoding: try JSONEncoder().encode(Route.history(itemID: "h")), as: UTF8.self)
+        #expect(book == #"{"history":{"itemID":"h"}}"#)
+        let episode = try JSONDecoder().decode(
+            Route.self, from: Data(#"{"history":{"itemID":"h","episodeID":"e"}}"#.utf8))
+        #expect(episode == .history(itemID: "h", episodeID: "e"))
     }
 
     /// Pins the stored wire format of `Snapshot`, `AppTab` and `Route`. Changing a case name or

@@ -441,8 +441,13 @@ public enum SchemaV1: VersionedSchema {
         public var timeListening: Double
         public var currentTime: Double
         public var isActive: Bool
+        /// Failed upload results counted toward discarding the session, at most one per hour.
         public var uploadAttempts: Int
         public var lastUploadError: String?
+        /// When a failure was last counted in ``uploadAttempts``.
+        public var lastUploadFailureAt: Date?
+        /// Consecutive uploads whose results didn't mention the session.
+        public var missingUploadResults: Int = 0
 
         /// The server's `playMethod` for local playback.
         public static let localPlayMethod = 3
@@ -465,7 +470,9 @@ public enum SchemaV1: VersionedSchema {
             currentTime: Double,
             isActive: Bool = true,
             uploadAttempts: Int = 0,
-            lastUploadError: String? = nil
+            lastUploadError: String? = nil,
+            lastUploadFailureAt: Date? = nil,
+            missingUploadResults: Int = 0
         ) {
             self.id = id
             self.serverConnectionID = serverConnectionID
@@ -485,6 +492,8 @@ public enum SchemaV1: VersionedSchema {
             self.isActive = isActive
             self.uploadAttempts = uploadAttempts
             self.lastUploadError = lastUploadError
+            self.lastUploadFailureAt = lastUploadFailureAt
+            self.missingUploadResults = missingUploadResults
         }
 
         public var mediaTypeValue: MediaType { MediaType(rawValue: mediaType) }

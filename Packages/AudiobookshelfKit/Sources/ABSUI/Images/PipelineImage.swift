@@ -34,14 +34,35 @@ enum ImageFallback: Hashable {
     }
 }
 
-/// How a newly loaded image appears.
-enum ImageReveal {
-    /// The fade for an image that took `elapsed` to load: none when it arrived almost at once,
-    /// as for a memory-cache hit when a cell scrolls back into view, so cached covers don't
-    /// flash. The pipeline is an actor, so even a hit is asynchronous; the elapsed time tells
-    /// them apart.
-    static func animation(after elapsed: Duration) -> Animation? {
-        elapsed < .milliseconds(50) ? nil : .easeIn(duration: 0.3)
+/// How a newly shown image appears. Only images fade: an image is removed without a transition,
+/// and the placeholder and failure views appear at once.
+enum ImageReveal: Hashable {
+    /// A memory-cache hit, read synchronously before the frame renders: at full opacity with no
+    /// transition, so cached covers don't flash when a cell scrolls back into view.
+    case immediate
+    /// An image the pipeline loaded from disk or the network: a 0.3 s fade, like the legacy
+    /// covers.
+    case fade
+
+    var animation: Animation? {
+        switch self {
+        case .immediate: nil
+        case .fade: .easeIn(duration: 0.3)
+        }
+    }
+
+    var transition: AnyTransition {
+        switch self {
+        case .immediate: .identity
+        case .fade: .asymmetric(insertion: .opacity, removal: .identity)
+        }
+    }
+
+    /// The animation that publishes a load's result: a loaded image fades in, and a failure
+    /// replaces the placeholder or image at once.
+    static func animation<Image>(for result: Result<Image, any Error>) -> Animation? {
+        guard case .success = result else { return nil }
+        return fade.animation
     }
 }
 
@@ -63,16 +84,29 @@ struct CoverIdentity: Hashable {
 /// so it can be tested without decoding.
 struct ImageLoadState<Image> {
     private(set) var image: Image?
+    /// How `image` appeared, which picks its transition.
+    private(set) var reveal = ImageReveal.fade
     /// The cover `image` shows; a different one clears it rather than showing a stale cover,
     /// while a new size or version of the same one keeps it until the new image arrives.
     private(set) var entity: CoverIdentity?
+    /// The request `image` is exactly for: its size, bucket and version.
+    private(set) var shown: ImageLoadRequest?
     private(set) var failed = false
 
-    /// Starts a load and returns whether to run it. With no request or no pipeline it clears
-    /// everything, so the no-image fallback shows instead of an old bitmap.
-    mutating func begin(_ request: ImageLoadRequest?, hasPipeline: Bool) -> Bool {
+    /// Starts showing `request` and returns whether it still has to be loaded. An image already
+    /// shown for it needs no load; otherwise `memoryHit` (the pipeline's synchronous lookup) is
+    /// asked, and a hit is shown at once with ``ImageReveal/immediate``. With no request or no
+    /// pipeline it clears everything, so the no-image fallback shows instead of an old bitmap.
+    mutating func begin(
+        _ request: ImageLoadRequest?, hasPipeline: Bool, memoryHit: (ImageLoadRequest) -> Image? = { _ in nil }
+    ) -> Bool {
         guard let request, hasPipeline else {
             self = Self()
+            return false
+        }
+        if image != nil, shown == request { return false }
+        if let hit = memoryHit(request) {
+            show(hit, for: request, reveal: .immediate)
             return false
         }
         if entity != CoverIdentity(request.key) {
@@ -82,32 +116,41 @@ struct ImageLoadState<Image> {
         return true
     }
 
-    /// Publishes a load's result, unless its task was cancelled (the key changed or the view
-    /// went away) in which case it is dropped, even if the load succeeded.
+    /// Publishes a load's result, which fades in, unless its task was cancelled (the key changed
+    /// or the view went away) in which case it is dropped, even if the load succeeded.
     mutating func finish(_ request: ImageLoadRequest, result: Result<Image, any Error>, isCancelled: Bool) {
         guard !isCancelled else { return }
         switch result {
         case .success(let loaded):
-            image = loaded
-            entity = CoverIdentity(request.key)
-            failed = false
+            show(loaded, for: request, reveal: .fade)
         case .failure:
             image = nil
+            shown = nil
             failed = true
         }
     }
 
     /// Releases the image when the view goes off screen, so lazy cells don't hold bitmaps the
     /// pipeline counts against its memory cap. The entity is kept, so the reload when the view
-    /// returns doesn't reset a failure, and its memory-cache hit appears without a fade.
+    /// returns doesn't reset a failure.
     mutating func disappear() {
         image = nil
+        shown = nil
+    }
+
+    private mutating func show(_ loaded: Image, for request: ImageLoadRequest, reveal: ImageReveal) {
+        image = loaded
+        self.reveal = reveal
+        entity = CoverIdentity(request.key)
+        shown = request
+        failed = false
     }
 }
 
 /// Loads `key` from the environment's pipeline at the rendered size and shows it, filling its
-/// frame. Loading starts in `.task(id:)`, so it is cancelled when the view scrolls away, and
-/// the image is released then too.
+/// frame. A memory-cache hit shows on the first frame with no transition; an image loaded from
+/// disk or the network fades in. Loading runs in `.task(id:)`, so it is cancelled when the view
+/// scrolls away, and the image is released then too.
 ///
 /// When the image's aspect ratio differs from the frame's by more than 0.15, it is shown
 /// aspect-fit over a blurred fill of itself, like the legacy covers.
@@ -122,12 +165,13 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
     @State private var state = ImageLoadState<CoverImage>()
 
     var body: some View {
-        let request = ImageLoadRequest(key: key, size: size, scale: displayScale)
+        // `nil` without a pipeline too, so one injected later starts the load.
+        let request = pipeline == nil ? nil : ImageLoadRequest(key: key, size: size, scale: displayScale)
         Color.clear
             .overlay {
                 if let image = state.image {
                     content(image)
-                        .transition(.opacity)
+                        .transition(state.reveal.transition)
                 } else if let fallback = ImageFallback.resolve(
                     hasKey: key != nil, hasPipeline: pipeline != nil, failed: state.failed)
                 {
@@ -142,8 +186,14 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
             } action: {
                 size = $0
             }
-            // Keyed on the pipeline's presence too, so one injected later starts the load.
-            .task(id: pipeline == nil ? nil : request) { await load(request) }
+            // On first appearance `size` is zero and `request` nil, so `onAppear` has nothing to
+            // look up; `onGeometryChange` then sets the size during the first layout, and
+            // `onChange` reads the memory cache in that same update, so a hit is on the first
+            // frame (PipelineImageHostingTests checks this on macOS and iOS). `onAppear` covers a
+            // view that returns with its size kept. `.task` loads only what missed.
+            .onAppear { begin(request) }
+            .onChange(of: request) { _, newRequest in begin(newRequest) }
+            .task(id: request) { await load(request) }
             .onDisappear { state.disappear() }
     }
 
@@ -161,9 +211,19 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
         }
     }
 
+    /// Starts showing `request`, at once if the pipeline's memory cache has it, and returns
+    /// whether it still has to be loaded.
+    @discardableResult private func begin(_ request: ImageLoadRequest?) -> Bool {
+        let pipeline = pipeline
+        return withAnimation(ImageReveal.immediate.animation) {
+            state.begin(request, hasPipeline: pipeline != nil) {
+                pipeline?.cachedImage(for: $0.key, pixelBox: $0.box)
+            }
+        }
+    }
+
     private func load(_ request: ImageLoadRequest?) async {
-        guard state.begin(request, hasPipeline: pipeline != nil), let request, let pipeline else { return }
-        let start = ContinuousClock.now
+        guard begin(request), let request, let pipeline else { return }
         let result: Result<CoverImage, any Error>
         do {
             result = .success(try await pipeline.image(for: request.key, pixelBox: request.box))
@@ -173,7 +233,7 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
         // Checked after the await: a memory hit doesn't check cancellation, and the task can be
         // cancelled between a successful load and resuming here.
         let isCancelled = Task.isCancelled
-        withAnimation(ImageReveal.animation(after: ContinuousClock.now - start)) {
+        withAnimation(ImageReveal.animation(for: result)) {
             state.finish(request, result: result, isCancelled: isCancelled)
         }
     }
