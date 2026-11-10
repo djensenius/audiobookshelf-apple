@@ -17,6 +17,12 @@ private let logger = Log.playback
 ///   load finishing late) is dropped, and a session it opened is closed. Policy checks have their
 ///   own token, so a later play or stop discards a pending one, and a blocked play leaves the
 ///   current item (and its seeks and resumes) untouched.
+/// - **Session starts are serialized.** The server keeps one open session per user and device, so
+///   a `/play` that reached it after a newer one would close the newer session, whatever the
+///   generations say. Starts therefore take turns, in arrival order: each waits for the previous
+///   start to return and for the closes in flight (its stale session's too) before sending
+///   anything, and a play superseded while it waits sends no request. A request that hangs delays
+///   the next start until it fails (the API client's timeout is 30 s): correctness over latency.
 /// - **Closing.** A session is owned by exactly one place: the start continuation until it becomes
 ///   current, then the coordinator. Whoever drops it closes it once, in the background. The next
 ///   `/play` waits up to ``closeWaitTimeout`` for closes in flight, so the server normally sees the
@@ -115,6 +121,7 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var resumingIntent: Int?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private let startGate = StartGate()
     @ObservationIgnored private var observers: [PlaybackObserverToken: @MainActor (PlaybackCoordinatorEvent) -> Void] =
         [:]
     @ObservationIgnored private var queuedEvents: [PlaybackCoordinatorEvent] = []
@@ -247,17 +254,17 @@ public final class PlaybackCoordinator {
         }
         guard current == generation else { return }
 
-        await waitForCloses()
-        guard current == generation else { return }
-
-        let sessions = self.sessions
-        async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
-        let session: PlaybackSession
+        let started: StartedSession
         do {
-            session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
+            guard
+                let result = try await startSessionSerially(
+                    itemID: itemID, episodeID: episodeID, generation: current)
+            else { return }
+            started = result
         } catch {
             return fail(Self.sessionError(error), generation: current)
         }
+        let session = started.session
         guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
 
         let source: AudioEngineSource
@@ -280,7 +287,7 @@ public final class PlaybackCoordinator {
         emit(.sessionStarted(sessionID: session.id, key: key))
 
         let local = try? await progressStore.progress(for: key)
-        let server = await serverProgress
+        let server = started.serverProgress
         guard current == generation else { return }
         var candidates: [ProgressCandidate] = []
         if let local {
@@ -619,10 +626,33 @@ public final class PlaybackCoordinator {
         timer.cancel()
     }
 
+    /// Takes this start's turn (see the class doc): the previous start has returned and the closes
+    /// in flight have finished or timed out. Returns `nil`, having sent nothing, when a newer play,
+    /// stop or restore superseded `generation` while it queued. The gate is released as this
+    /// returns, before the caller registers the close of a stale session, so the next start's
+    /// ``waitForCloses()`` sees it.
+    private func startSessionSerially(
+        itemID: String, episodeID: String?, generation: Int
+    ) async throws -> StartedSession? {
+        await startGate.acquire()
+        defer { startGate.release() }
+        guard self.generation == generation else { return nil }
+        await waitForCloses()
+        guard self.generation == generation else { return nil }
+        let sessions = self.sessions
+        // Read only, but after the closes: a restart must see the previous session's final report.
+        async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
+        let session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
+        return StartedSession(session: session, serverProgress: await serverProgress)
+    }
+
     /// Waits for the background closes started so far (tests).
     func waitForPendingCloses() async {
         for task in closeTasks.values { await task.value }
     }
+
+    /// The plays queued behind a session start (tests).
+    var queuedSessionStarts: Int { startGate.waiterCount }
 
     private func makeSource(session: PlaybackSession, stream: ResolvedStream) throws(StreamResolutionError)
         -> AudioEngineSource
@@ -681,6 +711,39 @@ public final class PlaybackCoordinator {
 
     private static func date(ms: Int) -> Date {
         Date(timeIntervalSince1970: Double(ms) / 1000)
+    }
+}
+
+/// A session the server opened, with the progress fetched alongside it.
+private struct StartedSession {
+    let session: PlaybackSession
+    let serverProgress: Result<MediaProgress?, any Error>
+}
+
+/// Admits one session start at a time, in arrival order, with no timeout.
+@MainActor
+private final class StartGate {
+    private var isHeld = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    var waiterCount: Int { waiters.count }
+
+    /// Returns at once when the gate is free, else once every earlier waiter has released it.
+    func acquire() async {
+        guard isHeld else {
+            isHeld = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// Hands the gate to the longest waiter, or frees it.
+    func release() {
+        if waiters.isEmpty {
+            isHeld = false
+        } else {
+            waiters.removeFirst().resume()
+        }
     }
 }
 
