@@ -266,6 +266,11 @@ public final class PlaybackCoordinator {
             source = try makeSource(session: session, stream: stream)
         } catch {
             closeInBackground(sessionID: session.id, report: nil)
+            // A cancelled caller abandons the start; that isn't a failure.
+            if error is CancellationError {
+                if current == generation, phase == .starting { phase = .unloaded }
+                return
+            }
             return fail(Self.streamError(error), generation: current)
         }
         guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }

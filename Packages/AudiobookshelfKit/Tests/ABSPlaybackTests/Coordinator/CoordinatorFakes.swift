@@ -131,6 +131,7 @@ final class StubSessionService: PlaybackSessionService {
         var startGates: [String: Gate] = [:]
         var closeGates: [String: Gate] = [:]
         var startError: APIError?
+        var resolveError: (any Error)?
         var closeError: APIError?
         var starts: [String] = []
         var closes: [String] = []
@@ -181,6 +182,7 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
+        if let error = state.withLock({ $0.resolveError }) { throw error }
         let tracks = session.audioTracks.map { track in
             PlayableTrack(
                 url: URL(filePath: "/\(session.id)/\(track.index ?? 0)"), mimeType: track.mimeType,

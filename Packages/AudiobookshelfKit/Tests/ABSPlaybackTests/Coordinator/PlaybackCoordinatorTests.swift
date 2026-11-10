@@ -780,6 +780,37 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.mediaKey == h.key("A"))
     }
 
+    @Test func streamResolutionFailureIsSurfacedAndClosesTheSession() async {
+        service.state.withLock { $0.resolveError = StreamResolutionError.missingAccessToken }
+        await coordinator.play(itemID: "A")
+        await coordinator.waitForPendingCloses()
+
+        #expect(coordinator.error == .streamUnavailable(.missingAccessToken))
+        #expect(coordinator.phase == .unloaded)
+        #expect(service.closes == ["A-1"])
+        #expect(h.events.events.last == .failed(.streamUnavailable(.missingAccessToken)))
+    }
+
+    @Test func cancelledStreamResolutionIsNotAFailure() async {
+        service.state.withLock { $0.resolveError = CancellationError() }
+        await coordinator.play(itemID: "A")
+        await coordinator.waitForPendingCloses()
+
+        #expect(coordinator.error == nil)
+        #expect(coordinator.phase == .unloaded)
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(service.closes == ["A-1"])
+        #expect(engine.loads.isEmpty)
+        #expect(h.events.events == [.itemChanged(h.key("A"))])
+
+        // The abandoned start doesn't leave the item stuck: playing again starts a new session.
+        service.state.withLock { $0.resolveError = nil }
+        await coordinator.play(itemID: "A")
+        #expect(coordinator.phase == .loaded)
+        #expect(coordinator.error == nil)
+        #expect(service.starts == ["A", "A"])
+    }
+
     @Test func engineLoadFailureClosesSessionAndSurfacesPlaybackFailure() async {
         let failure = PlaybackFailure(
             kind: .http(status: 404), domain: "CoreMediaErrorDomain", code: -12938, description: "404")
