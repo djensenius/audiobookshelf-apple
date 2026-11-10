@@ -459,8 +459,10 @@ Model notes:
   before returning an identifier, so it is never temporary
   (`PersistentIdentifier.isTemporary`, iOS/macOS 27).
 - `ModelContext` and `@Model` instances never leave the actor that owns them. Every
-  mutating store method ends with `try modelContext.save()`; changes to several
-  objects use `modelContext.transaction { }`.
+  store write goes through `StoreActor.commit`: it applies the changes, saves once,
+  and rolls the context back if anything throws, so a failed write is never
+  committed by a later save. Bulk deletes go one row at a time, because a batch
+  `delete(model:where:)` can't be rolled back.
 - `mainContext` is read-only by convention. App-target views use `@Query`;
   `@MainActor` view models in `ABSAppModel` use `ResultsObserver` or
   `HistoryObserver`, so `ABSAppModel` may `import SwiftData` (it still defines no

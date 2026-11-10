@@ -128,14 +128,20 @@ import Testing
         let later = now.addingTimeInterval(3)
         #expect(try await store.setPartState(.failed, partID: part.id, taskIdentifier: nil, error: "timed out"))
         #expect(
+            try await store.updateProgress(
+                partID: part.id, bytesWritten: 20, expectedBytes: 20, now: now.addingTimeInterval(1)))
+        #expect(try await store.part(id: part.id)?.state == .failed)
+        #expect(
             try await store.setPartState(
                 .completed, partID: part.id, taskIdentifier: 7, hasResumeData: true, now: later))
-        // A late, throttled progress write after completion.
-        #expect(try await store.updateProgress(partID: part.id, bytesWritten: 10, expectedBytes: 20, now: later))
+        // A late, throttled progress write after completion is ignored.
+        #expect(
+            try await store.updateProgress(
+                partID: part.id, bytesWritten: 10, expectedBytes: 20, now: later.addingTimeInterval(1)) == false)
 
         let updated = try #require(try await store.part(id: part.id))
         #expect(updated.state == .completed)
-        #expect(updated.bytesWritten == 10)
+        #expect(updated.bytesWritten == 20)
         #expect(updated.expectedBytes == 20)
         #expect(updated.retryCount == 1)
         #expect(updated.hasResumeData)
