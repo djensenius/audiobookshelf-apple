@@ -26,7 +26,7 @@ are listed in the [ADR index](adr/README.md).
 ```mermaid
 flowchart TD
     App["Audiobookshelf app target"]
-    AppModel["ABSAppModel (planned, P0-02)"]
+    AppModel["ABSAppModel"]
     UI["ABSUI"]
     Playback["ABSPlayback"]
     Downloads["ABSDownloads"]
@@ -54,9 +54,6 @@ flowchart TD
     Data --> Core
     API --> Core
     UI --> Core
-
-    classDef planned stroke-dasharray: 5 5
-    class AppModel planned
 ```
 
 Arrows point from a module to the modules it may import. The app target may also
@@ -72,7 +69,7 @@ models in a view).
 | `ABSPlayback` | Playback engine, `PlaybackCoordinator`, progress sync, sleep timer, Now Playing adapter (`ABSPlayback/NowPlaying/`) | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSDownloads` | Background `URLSession` downloads | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSUI` | Design system, shared components, covers, localized strings | `ABSCore` |
-| `ABSAppModel` (planned) | Account and library state, routing (`Router`, `Route`, `DeepLink`, `AppTab` in `ABSAppModel/Navigation/`), feature view models, realtime bridge, `DownloadedCoverLookup` implementation | everything above except `ABSUI` |
+| `ABSAppModel` | Account and library state, routing (`Router`, `Route`, `DeepLink`, `AppTab` in `ABSAppModel/Navigation/`), feature view models, realtime bridge, `DownloadedCoverLookup` implementation | everything above except `ABSUI` |
 
 Rules:
 
@@ -86,8 +83,7 @@ Rules:
   `Observation` and `SwiftData` (to observe stores). Prefer no SwiftUI import;
   use SwiftUI value types only if unavoidable. Navigation paths are plain
   `Codable` values (`[AppTab: [Route]]`).
-- Every module is declared in `Package.swift` already. `ABSAppModel` (P0-02) is the
-  only planned target addition; adding another needs an ADR.
+- Every module is declared in `Package.swift`. Adding another target needs an ADR.
 - Every new dependency edge must be declared in `Package.swift` in the same PR and
   match the table above. Changing the table needs an ADR.
 - Built-in frameworks come first. Any SPM dependency must be justified in the PR;

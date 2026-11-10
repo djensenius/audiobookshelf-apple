@@ -7,6 +7,7 @@ import PackageDescription
 // umbrella product and imports the individual modules it needs.
 let package = Package(
     name: "AudiobookshelfKit",
+    defaultLocalization: "en",
     platforms: [
         .iOS(.v27),
         .macOS(.v27),
@@ -14,17 +15,20 @@ let package = Package(
     products: [
         .library(
             name: "AudiobookshelfKit",
-            targets: ["ABSCore", "ABSAPI", "ABSRealtime", "ABSData", "ABSPlayback", "ABSDownloads", "ABSUI"]
+            targets: [
+                "ABSCore", "ABSAPI", "ABSRealtime", "ABSData", "ABSPlayback", "ABSDownloads", "ABSUI",
+                "ABSAppModel",
+            ]
         )
     ],
     targets: [
         // Models and shared utilities.
         .target(name: "ABSCore"),
-        .testTarget(name: "ABSCoreTests", dependencies: ["ABSCore"]),
+        .testTarget(name: "ABSCoreTests", dependencies: ["ABSCore"], resources: [.copy("Fixtures")]),
 
         // HTTP client, authentication, and endpoints.
         .target(name: "ABSAPI", dependencies: ["ABSCore"]),
-        .testTarget(name: "ABSAPITests", dependencies: ["ABSAPI"]),
+        .testTarget(name: "ABSAPITests", dependencies: ["ABSAPI"], resources: [.copy("Fixtures")]),
 
         // Socket.IO real-time updates.
         .target(name: "ABSRealtime", dependencies: ["ABSCore", "ABSAPI"]),
@@ -36,15 +40,23 @@ let package = Package(
 
         // Audio playback and progress sync.
         .target(name: "ABSPlayback", dependencies: ["ABSCore", "ABSAPI", "ABSData"]),
-        .testTarget(name: "ABSPlaybackTests", dependencies: ["ABSPlayback"]),
+        .testTarget(name: "ABSPlaybackTests", dependencies: ["ABSPlayback"], resources: [.copy("Fixtures")]),
 
         // Offline downloads.
         .target(name: "ABSDownloads", dependencies: ["ABSCore", "ABSAPI", "ABSData"]),
         .testTarget(name: "ABSDownloadsTests", dependencies: ["ABSDownloads"]),
 
         // Shared SwiftUI components and design system.
-        .target(name: "ABSUI", dependencies: ["ABSCore"]),
+        .target(name: "ABSUI", dependencies: ["ABSCore"], resources: [.process("Resources")]),
         .testTarget(name: "ABSUITests", dependencies: ["ABSUI"]),
+
+        // Account and library state, routing, feature view models, and the realtime
+        // bridge. Sits above every module except ABSUI and never imports ABSUI.
+        .target(
+            name: "ABSAppModel",
+            dependencies: ["ABSCore", "ABSAPI", "ABSRealtime", "ABSData", "ABSPlayback", "ABSDownloads"]
+        ),
+        .testTarget(name: "ABSAppModelTests", dependencies: ["ABSAppModel"]),
     ],
     swiftLanguageModes: [.v6]
 )

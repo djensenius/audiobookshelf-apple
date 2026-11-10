@@ -32,6 +32,10 @@ files, don't add targets without need):
 | `ABSPlayback` | Playback and progress sync | ABSCore, ABSAPI, ABSData |
 | `ABSDownloads` | Offline downloads | ABSCore, ABSAPI, ABSData |
 | `ABSUI` | Shared SwiftUI components and design system | ABSCore |
+| `ABSAppModel` | Account and library state, routing, feature view models, realtime bridge | ABSCore, ABSAPI, ABSRealtime, ABSData, ABSPlayback, ABSDownloads |
+
+`ABSUI` never imports `ABSAppModel`, and `ABSAppModel` never imports `ABSUI`. See
+[the package README](Packages/AudiobookshelfKit/README.md).
 
 Each module has a `<Module>Tests` target. Package tests run with `swift test`
 (`mise run test:kit`); they cannot be added to the app scheme.
