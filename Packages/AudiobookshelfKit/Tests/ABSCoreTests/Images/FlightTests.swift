@@ -46,6 +46,7 @@ import Testing
         #expect(flight.isAbandoned)
         var iterator = finished.makeAsyncIterator()
         #expect(await iterator.next() == true)
-        await #expect(throws: CancellationError.self) { try await flight.join() }
+        // `Abandoned` or the task's `CancellationError`, depending on whether `finish` has run yet.
+        await #expect(throws: (any Error).self) { try await flight.join() }
     }
 }
