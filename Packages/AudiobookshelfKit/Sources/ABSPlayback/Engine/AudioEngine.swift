@@ -1,3 +1,4 @@
+import ABSCore
 import AVFoundation
 import Observation
 import os
@@ -30,10 +31,15 @@ public final class AudioEngine: AudioEngineProtocol {
     /// Activated before playback and deactivated on ``stop()``. `nil` on macOS.
     @ObservationIgnored public var audioSession: (any AudioSessionActivating)?
 
-    let player = AVQueuePlayer()
-    /// The player, for output routing only (for example `RoutePicker` on macOS). Control playback
-    /// through the engine.
+    /// Replaced after `AVPlayer.status` becomes `.failed` (ADR 0007 recovery), so it is observed:
+    /// views reading ``routingPlayer`` follow the replacement.
+    private(set) var player: AVQueuePlayer
+    /// The current player, for output routing only (for example `RoutePicker` on macOS). It
+    /// changes when a failed player is replaced. Control playback through the engine.
     public var routingPlayer: AVPlayer { player }
+    /// Creates players; replaced in tests.
+    @ObservationIgnored private let makePlayer: @MainActor () -> AVQueuePlayer
+    @ObservationIgnored private let timeObserverInterval: Double
 
     private struct QueuedItem {
         let item: AVPlayerItem
@@ -44,6 +50,9 @@ public final class AudioEngine: AudioEngineProtocol {
     @ObservationIgnored private var source: AudioEngineSource?
     @ObservationIgnored private var assets: [Int: AVURLAsset] = [:]
     @ObservationIgnored private var queued: [ObjectIdentifier: QueuedItem] = [:]
+    /// Error log entries per queued item, refreshed on each new entry, so a failure can carry the
+    /// HTTP status (ADR 0007). An entry that arrives after the failure is not included.
+    @ObservationIgnored private var errorLogs: [ObjectIdentifier: [PlaybackFailure.ErrorLogEntry]] = [:]
     @ObservationIgnored private var readyWaiters: [ObjectIdentifier: [CheckedContinuation<Void, Never>]] = [:]
     @ObservationIgnored private var seekGeneration = 0
     @ObservationIgnored private var loadGeneration = 0
@@ -58,11 +67,22 @@ public final class AudioEngine: AudioEngineProtocol {
     /// - Parameters:
     ///   - audioSession: Activated around playback; pass `AudioSessionController` on iOS.
     ///   - timeObserverInterval: Seconds between periodic time updates.
-    public init(audioSession: (any AudioSessionActivating)? = nil, timeObserverInterval: Double = 0.5) {
+    public convenience init(audioSession: (any AudioSessionActivating)? = nil, timeObserverInterval: Double = 0.5) {
+        self.init(
+            audioSession: audioSession, timeObserverInterval: timeObserverInterval, makePlayer: { AVQueuePlayer() })
+    }
+
+    init(
+        audioSession: (any AudioSessionActivating)?, timeObserverInterval: Double,
+        makePlayer: @escaping @MainActor () -> AVQueuePlayer
+    ) {
         self.audioSession = audioSession
+        self.timeObserverInterval = timeObserverInterval
+        self.makePlayer = makePlayer
+        player = makePlayer()
         player.actionAtItemEnd = .advance
         player.automaticallyWaitsToMinimizeStalling = true
-        observePlayer(interval: timeObserverInterval)
+        observePlayer()
     }
 
     isolated deinit {
@@ -80,6 +100,7 @@ public final class AudioEngine: AudioEngineProtocol {
             throw .trackURLMismatch(expected: trackCount, actual: source.trackURLs.count)
         }
         reset()
+        replacePlayerIfFailed()
         loadGeneration += 1
         let generation = loadGeneration
         self.source = source
@@ -107,8 +128,16 @@ public final class AudioEngine: AudioEngineProtocol {
         // flight starts the player when it completes, and an interrupted seek is retried first.
         if isLoading || isSeeking {
             refreshState()
-        } else if let pendingSeekTarget {
-            Task { await seek(to: pendingSeekTarget) }
+        } else if pendingSeekTarget != nil {
+            // Retry the interrupted seek, unless a seek, load or stop or a pause happens first: the
+            // retry must never overwrite a newer position.
+            let generation = seekGeneration
+            Task { [weak self] in
+                guard let self, generation == seekGeneration, isPlaybackRequested,
+                    let target = pendingSeekTarget
+                else { return }
+                await seek(to: target)
+            }
             refreshState()
         } else {
             startPlayer()
@@ -150,6 +179,7 @@ public final class AudioEngine: AudioEngineProtocol {
         if failure != nil {
             failure = nil
             clearQueue()
+            replacePlayerIfFailed()
         }
 
         var result = await performSeek(to: position, target: target, generation: generation)
@@ -185,9 +215,10 @@ public final class AudioEngine: AudioEngineProtocol {
         guard let item = player.currentItem else { return .failed }
         await waitUntilReady(item)
         guard generation == seekGeneration else { return .superseded }
+        guard failure == nil else { return .failed }
         // A failed item may already have been dropped from the queue, so check it first.
         guard item.status != .failed else {
-            fail(trackIndex: position.trackIndex, error: item.error)
+            fail(trackIndex: position.trackIndex, item: item)
             return .failed
         }
         guard item === player.currentItem, item.status == .readyToPlay else { return .interrupted }
@@ -211,8 +242,15 @@ public final class AudioEngine: AudioEngineProtocol {
 
     /// Sets the precise-timing key only when wanted. Passing an explicit `false` is not the same as
     /// leaving the key out: on macOS 27.2 it made local WAV items fail with -11800 / -17770.
-    static func assetOptions(prefersPreciseTiming: Bool) -> [String: Any] {
-        prefersPreciseTiming ? [AVURLAssetPreferPreciseDurationAndTimingKey: true] : [:]
+    /// `mimeType` overrides the type for URLs without a usable extension (ADR 0007 §2), and
+    /// `networkAccess` adds the transport's cellular / expensive / constrained flags.
+    static func assetOptions(
+        prefersPreciseTiming: Bool, mimeType: String? = nil, networkAccess: NetworkAccess? = nil
+    ) -> [String: Any] {
+        var options: [String: Any] = networkAccess?.urlAssetOptions ?? [:]
+        if prefersPreciseTiming { options[AVURLAssetPreferPreciseDurationAndTimingKey] = true }
+        if let mimeType, !mimeType.isEmpty { options[AVURLAssetOverrideMIMETypeKey] = mimeType }
+        return options
     }
 
     private func rebuildQueue(from start: Int) {
@@ -237,7 +275,10 @@ public final class AudioEngine: AudioEngineProtocol {
             assets[trackIndex]
             ?? AVURLAsset(
                 url: source.trackURLs[trackIndex],
-                options: Self.assetOptions(prefersPreciseTiming: source.prefersPreciseTiming))
+                options: Self.assetOptions(
+                    prefersPreciseTiming: source.prefersPreciseTiming,
+                    mimeType: source.mimeType(trackIndex: trackIndex),
+                    networkAccess: source.networkAccess))
         assets[trackIndex] = asset
         let item = AVPlayerItem(asset: asset)
         item.audioTimePitchAlgorithm = .timeDomain
@@ -252,6 +293,7 @@ public final class AudioEngine: AudioEngineProtocol {
         player.removeAllItems()
         for entry in queued.values { entry.statusObservation.invalidate() }
         queued = [:]
+        errorLogs = [:]
         resumeReadyWaiters()
     }
 
@@ -347,14 +389,19 @@ public final class AudioEngine: AudioEngineProtocol {
         onEvent?(.trackChanged(index))
     }
 
-    private func fail(trackIndex: Int, error: (any Error)?) {
+    /// `error` defaults to `item.error`; the item's error log adds the HTTP status.
+    private func fail(trackIndex: Int, item: AVPlayerItem, error: (any Error)? = nil) {
         guard failure == nil else { return }
-        let error = AudioEngineError.itemFailed(
-            trackIndex: trackIndex, description: error?.localizedDescription ?? "Unknown error")
-        logger.error("Playback failed: \(String(describing: error), privacy: .public)")
-        failure = error
         // A failed asset stays failed; the retry seek must create a new one.
         assets[trackIndex] = nil
+        let failure = PlaybackFailure(error: error ?? item.error, errorLog: errorLogs[ObjectIdentifier(item)] ?? [])
+        fail(.itemFailed(trackIndex: trackIndex, failure))
+    }
+
+    private func fail(_ error: AudioEngineError) {
+        guard failure == nil else { return }
+        logger.error("Playback failed: \(String(describing: error), privacy: .public)")
+        failure = error
         isPlaybackRequested = false
         player.pause()
         refreshState()
@@ -363,8 +410,46 @@ public final class AudioEngine: AudioEngineProtocol {
 
     // MARK: - Observation
 
-    private func observePlayer(interval: Double) {
+    private func playerStatusChanged() {
+        guard player.status == .failed else { return }
+        fail(.playerFailed(PlaybackFailure(error: player.error)))
+        // Items of a failed player may never become ready; let a waiting seek finish.
+        resumeReadyWaiters()
+    }
+
+    /// A failed `AVPlayer` stays failed, so recovery (a seek or load after the failure) needs a new
+    /// one with the same observers and settings (ADR 0007).
+    private func replacePlayerIfFailed() {
+        guard player.status == .failed else { return }
+        clearQueue()
+        let old = player
+        stopObservingPlayer()
+        let replacement = makePlayer()
+        replacement.actionAtItemEnd = old.actionAtItemEnd
+        replacement.automaticallyWaitsToMinimizeStalling = old.automaticallyWaitsToMinimizeStalling
+        replacement.volume = old.volume
+        replacement.isMuted = old.isMuted
+        replacement.sourceClock = old.sourceClock
+        replacement.defaultRate = defaultRate
+        player = replacement
+        observePlayer()
+        logger.info("Replaced the failed player")
+    }
+
+    private func stopObservingPlayer() {
+        for observation in playerObservations { observation.invalidate() }
+        playerObservations = []
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
+        timeObserver = nil
+        for token in notificationTokens { NotificationCenter.default.removeObserver(token) }
+        notificationTokens = []
+    }
+
+    private func observePlayer() {
         playerObservations = [
+            player.observe(\.status, options: [.new]) { [weak self] _, _ in
+                Task { @MainActor [weak self] in self?.playerStatusChanged() }
+            },
             player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
                 Task { @MainActor [weak self] in self?.refreshState() }
             },
@@ -372,7 +457,7 @@ public final class AudioEngine: AudioEngineProtocol {
                 Task { @MainActor [weak self] in self?.currentItemChanged() }
             },
         ]
-        let interval = CMTime(seconds: max(interval, 0.01), preferredTimescale: 1000)
+        let interval = CMTime(seconds: max(timeObserverInterval, 0.01), preferredTimescale: 1000)
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -390,6 +475,12 @@ public final class AudioEngine: AudioEngineProtocol {
                 let reason = notification.userInfo?[reasonKey] as? AVPlayer.RateDidChangeReason
                 MainActor.assumeIsolated { self?.rateDidChange(reason: reason) }
             },
+            center.addObserver(forName: AVPlayerItem.newErrorLogEntryNotification, object: nil, queue: .main) {
+                [weak self] notification in
+                guard let object = notification.object else { return }
+                let id = ObjectIdentifier(object as AnyObject)
+                MainActor.assumeIsolated { self?.errorLogChanged(id) }
+            },
             center.addObserver(
                 forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: nil, queue: .main
             ) { [weak self] notification in
@@ -402,7 +493,10 @@ public final class AudioEngine: AudioEngineProtocol {
     }
 
     private func tick() {
-        guard !isSeeking, !hasEnded, failure == nil, let timeline, let item = player.currentItem,
+        // While a seek runs or its target is still pending, the item is not at the requested
+        // position, so its time must not be published.
+        guard !isSeeking, pendingSeekTarget == nil, !hasEnded, failure == nil, let timeline,
+            let item = player.currentItem,
             item.status == .readyToPlay, let entry = queued[ObjectIdentifier(item)]
         else { return }
         if entry.trackIndex != currentTrackIndex {
@@ -434,16 +528,18 @@ public final class AudioEngine: AudioEngineProtocol {
         // a track, so fail on the first skipped one instead.
         if failure == nil, let previous = currentTrackIndex,
             let skipped = queued.values
-                .filter({ $0.item.status == .failed && $0.trackIndex > previous })
+                // `>=`: the previously current item may have failed and been dropped before its
+                // status change was handled.
+                .filter({ $0.item.status == .failed && $0.trackIndex >= previous })
                 .filter({ $0.trackIndex < entry?.trackIndex ?? Int.max })
                 .min(by: { $0.trackIndex < $1.trackIndex })
         {
-            fail(trackIndex: skipped.trackIndex, error: skipped.item.error)
+            fail(trackIndex: skipped.trackIndex, item: skipped.item)
             return
         }
         guard let item, let entry else { return }
         setCurrentTrack(entry.trackIndex)
-        if item.status == .failed { fail(trackIndex: entry.trackIndex, error: item.error) }
+        if item.status == .failed { fail(trackIndex: entry.trackIndex, item: item) }
         if isPlaybackRequested, player.rate > 0, player.rate != defaultRate { player.rate = defaultRate }
     }
 
@@ -451,7 +547,7 @@ public final class AudioEngine: AudioEngineProtocol {
         guard let entry = queued[id], entry.item.status != .unknown else { return }
         for waiter in readyWaiters.removeValue(forKey: id) ?? [] { waiter.resume() }
         if entry.item.status == .failed, entry.item === player.currentItem {
-            fail(trackIndex: entry.trackIndex, error: entry.item.error)
+            fail(trackIndex: entry.trackIndex, item: entry.item)
         }
     }
 
@@ -467,8 +563,17 @@ public final class AudioEngine: AudioEngineProtocol {
         onEvent?(.endOfMedia)
     }
 
+    private func errorLogChanged(_ id: ObjectIdentifier) {
+        guard let item = queued[id]?.item else { return }
+        Task { [weak self] in
+            let entries = await PlaybackFailure.errorLogEntries(of: item)
+            guard let self, queued[id] != nil else { return }
+            errorLogs[id] = entries
+        }
+    }
+
     private func itemFailedToPlayToEnd(_ id: ObjectIdentifier, error: NSError?) {
         guard let entry = queued[id] else { return }
-        fail(trackIndex: entry.trackIndex, error: error)
+        fail(trackIndex: entry.trackIndex, item: entry.item, error: error)
     }
 }

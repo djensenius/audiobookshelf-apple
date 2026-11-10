@@ -52,16 +52,38 @@ final class AudioFixture: Sendable {
     }
 }
 
-/// Polls `condition` on the main actor until it holds or `timeout` passes.
+/// Polls `condition` on the main actor every 10 ms until it holds, `timeout` passes or the task
+/// is cancelled (both return `false`).
 @MainActor
 func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async -> Bool {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
     while !condition() {
         guard clock.now < deadline else { return false }
-        try? await Task.sleep(for: .milliseconds(10))
+        do { try await Task.sleep(for: .milliseconds(10)) } catch { return false }
     }
     return true
+}
+
+struct WaitTimedOut: Error {}
+
+/// Yields to other main-actor work until `condition` holds, checking it between every job so a
+/// short-lived state is not missed. Records an issue and throws after `timeout`; throws
+/// `CancellationError` if the task is cancelled.
+@MainActor
+func waitUntil(
+    timeout: Duration = .seconds(5), sourceLocation: SourceLocation = #_sourceLocation, _ condition: () -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !condition() {
+        try Task.checkCancellation()
+        guard clock.now < deadline else {
+            Issue.record("Timed out after \(timeout)", sourceLocation: sourceLocation)
+            throw WaitTimedOut()
+        }
+        await Task.yield()
+    }
 }
 
 /// Records `activate` / `deactivate` calls; throws ``activationError`` when set.

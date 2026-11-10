@@ -1,3 +1,4 @@
+import ABSCore
 import Foundation
 import Observation
 
@@ -13,14 +14,29 @@ public struct AudioEngineSource: Sendable, Hashable {
     public let prefersPreciseTiming: Bool
     /// Seek tolerance in seconds: `0` for direct play, up to `0.5` for HLS (ADR 0007).
     public let seekTolerance: Double
+    /// Optional MIME type per entry of ``trackURLs`` (same order), passed as
+    /// `AVURLAssetOverrideMIMETypeKey` for extensionless direct-play URLs (ADR 0007 §2). Empty, or a
+    /// `nil` entry, means no override.
+    public let trackMIMETypes: [String?]
+    /// Network access flags for streamed tracks (``NetworkAccess/urlAssetOptions``), from the
+    /// user's streaming cellular setting, so the transport enforces it after a path change.
+    /// `nil` leaves AVFoundation's defaults; local files ignore them.
+    public let networkAccess: NetworkAccess?
 
     public init(
-        timeline: PlaybackTimeline, trackURLs: [URL], prefersPreciseTiming: Bool = false, seekTolerance: Double = 0
+        timeline: PlaybackTimeline, trackURLs: [URL], trackMIMETypes: [String?] = [],
+        networkAccess: NetworkAccess? = nil, prefersPreciseTiming: Bool = false, seekTolerance: Double = 0
     ) {
         self.timeline = timeline
         self.trackURLs = trackURLs
+        self.trackMIMETypes = trackMIMETypes
+        self.networkAccess = networkAccess
         self.prefersPreciseTiming = prefersPreciseTiming
         self.seekTolerance = seekTolerance.isFinite ? max(seekTolerance, 0) : 0
+    }
+
+    func mimeType(trackIndex: Int) -> String? {
+        trackMIMETypes.indices.contains(trackIndex) ? trackMIMETypes[trackIndex] : nil
     }
 }
 
@@ -45,9 +61,11 @@ public enum AudioEngineError: Error, Sendable, Hashable {
     /// ``AudioEngineSource/trackURLs`` does not have one URL per timeline track.
     case trackURLMismatch(expected: Int, actual: Int)
     /// The item for `tracks[trackIndex]` failed to load or play.
-    case itemFailed(trackIndex: Int, description: String)
+    case itemFailed(trackIndex: Int, PlaybackFailure)
     /// Another `load` or `stop` replaced this load before it finished.
     case superseded
+    /// The player itself failed (`AVPlayer.status == .failed`). A seek or load replaces it.
+    case playerFailed(PlaybackFailure)
     /// The audio session could not be activated, so playback did not start. Not a sticky failure.
     case audioSessionActivationFailed(description: String)
 }
