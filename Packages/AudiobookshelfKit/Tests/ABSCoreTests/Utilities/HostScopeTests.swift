@@ -43,12 +43,14 @@ import Testing
     }
 
     @Test(arguments: [
-        // Names may resolve to a local address (split DNS), so they're checked.
+        // Names may resolve to a local address (split DNS), and a network may use a public range
+        // locally, so everything but loopback is checked.
         ("abs.example.com", true), ("nas.lan", true), ("abs.home.arpa", true), ("abs.internal", true),
         ("nas", true), ("nas.local", true), ("192.168.1.20", true), ("[fe80::1%25en0]", true), ("fd00::1", true),
-        // Loopback and public addresses can't be.
-        ("localhost", false), ("127.0.0.1", false), ("::1", false), ("8.8.8.8", false), ("134744072", false),
-        ("2001:db8::1", false), ("::a00:1", false),
+        ("8.8.8.8", true), ("134744072", true), ("2001:db8::1", true), ("::a00:1", true),
+        // Loopback can't be.
+        ("localhost", false), ("LOCALHOST.", false), ("127.0.0.1", false), ("2130706433", false), ("::1", false),
+        ("[::1]", false), ("::ffff:127.0.0.1", false),
     ])
     func mayUseLocalNetwork(host: String, expected: Bool) {
         #expect(HostScope.mayUseLocalNetwork(host: host) == expected)

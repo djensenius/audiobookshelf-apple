@@ -142,10 +142,11 @@ notes and the App Store description say so.
 - Local network permission denied: the system prompts on the first connection to a local
   host, so the app doesn't connect to local hosts before the user asks it to. When a
   request fails with a connectivity error, the app checks a Network framework path to that
-  host, unless it's a loopback or public IP address; an unsatisfied path with reason
-  `localNetworkDenied` means the permission is off. Names are checked too, since split DNS,
-  `.lan`, `.home.arpa` or `.internal` names can resolve to a local address; the path
-  reports a denial only when the resolved destination is local.
+  host, unless it's a loopback address; an unsatisfied path with reason
+  `localNetworkDenied` means the permission is off. Names and public addresses are checked
+  too, since split DNS, `.lan`, `.home.arpa` or `.internal` names can resolve to a local
+  address and a network can use a public range locally; the path's reason is
+  authoritative, and it reports a denial only when the destination is local.
   The app then explains this and links to Settings (iOS) or System Settings › Privacy &
   Security › Local Network (macOS), and retries when the app becomes active again.
   Detection belongs to the network monitor in
