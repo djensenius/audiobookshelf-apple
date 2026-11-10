@@ -307,7 +307,14 @@ Model notes:
     - dirty, and the server's values for the group equal the baseline's: the
       server hasn't changed that group since we last saw it, so the local values
       are kept and stay dirty;
-    - dirty, and the server's group equals that group in any entry of
+    - dirty, while that group's `<group>HistoryTruncated` is set: the server
+      value may be one of our dropped sends (or a side effect of our PATCH), so
+      the local group wins and stays dirty. This holds even when it matches an
+      entry we still hold: a dropped send may have carried the same value, and
+      the held one may never have reached the server. No echo, fetch or socket
+      update clears the flag or acknowledges the edit; only the response to a
+      send we hold (the acknowledgement) settles the group. Re-sending is safe;
+    - dirty, not truncated, and the server's group equals that group in any entry of
       `unacknowledgedSends` (newest checked first): it is the echo of our own
       PATCH whose response was lost. The group takes the server's form of those
       values, the baseline advances to them, that group is removed from that entry and every older one (entries left empty
@@ -320,9 +327,6 @@ Model notes:
       normalization such as an auto-finished un-finish), only the evidence up to
       the oldest match is settled and the group stays dirty, to be sent again.
       Re-sending is safe; acknowledging an undelivered edit loses it;
-    - dirty, matching neither the baseline nor any entry, while that group's
-      `<group>HistoryTruncated` is set: the server value may be one of our dropped
-      sends, so the local group wins and stays dirty;
     - dirty, and the server's group differs from the baseline (or there is no
       baseline): a real conflict. The local group wins only if its
       `<group>EditedAt` is later than the server's `lastUpdate`; otherwise the
@@ -431,12 +435,15 @@ Model notes:
     the pending local edit, at four points (a plain fetch with nothing sent
     shields nothing):
     - when the send is acknowledged;
-    - when a fetch matches it as the echo of a lost send;
+    - when a fetch matches it as the echo of a lost send (the side-effect flag
+      is set before the affected group is resolved, so the same echo can't
+      settle that group either);
     - when server progress is merged while it is in flight;
     - when its entry is dropped from the full list.
 
-    A flag clears when its group's own send is acknowledged, or when the group
-    stops being dirty (an echo settles it or the server wins a conflict).
+    A flag clears only when its group's own send is acknowledged. While it is
+    set, merges never settle the group: neither an echo matching a held entry nor
+    a newer server value (a conflict) clears its dirty flag.
 
     Known gaps, accepted:
     - After a relaunch, the in-flight send is forgotten but its entry stays, so
@@ -790,7 +797,9 @@ Ongoing checks:
   `ebookProgress` of 0) after an ack or a lost response, and an unchanged edit
   takes it; the echo of an older lost send with the same value (a seek back to
   200 after 300, or an earlier auto-finished un-finish) doesn't acknowledge a
-  newer undelivered edit; a missing `ebookProgress` is sent as 0, so a page turn made while it
+  newer undelivered edit, nor does one matching only the newest after the older
+  send was dropped from the full list (the group stays truncated and dirty until
+  its own send is acknowledged); a missing `ebookProgress` is sent as 0, so a page turn made while it
   is in flight survives its echo on existing and on created progress; a seeded
   random simulation of the 2.26.0 server (#53 side effects, creation defaults,
   another device, relaunches, stale fetches) keeps every dirty group unless the

@@ -106,7 +106,8 @@ extension ProgressSend {
 /// audio, any PATCH can auto-finish, and one without server progress creates defaults): when
 /// that PATCH is acknowledged, when an echo matches it after its response was lost, when server
 /// progress is merged while it is in flight, and when its entry is dropped from the full list.
-/// A group's flag clears when its own send is acknowledged or it stops being dirty.
+/// While a group's flag is set, no echo settles it, even one matching a send we hold: the flag
+/// clears only when the group's own send is acknowledged (the response to a PATCH we hold).
 struct ProgressSyncState: Sendable, Equatable {
     var currentTime: Double = 0
     var progress: Double = 0
@@ -319,6 +320,10 @@ struct ProgressSyncState: Sendable, Equatable {
         }
         // The server hasn't changed the group since we last saw it: keep the local edit.
         if let baseline = serverBaseline, Self.matches(server, baseline, group) { return }
+        // The server value may be one of our dropped sends, or a side effect of our PATCH. Even
+        // one matching a send we hold may be the echo of a dropped send with the same value, the
+        // held one never delivered: only an acknowledgement (``acknowledge``) settles the group.
+        if truncated.contains(group) { return }
         // The echo of one of our PATCHes whose response was lost. Only this group's evidence is
         // settled and pruned (from that entry and every older one); other groups keep theirs.
         if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }),
@@ -345,8 +350,6 @@ struct ProgressSyncState: Sendable, Equatable {
             }
             return
         }
-        // The server value may be one of our dropped sends, or a side effect of our PATCH.
-        if truncated.contains(group) { return }
         // A real conflict. `server.lastUpdate` is row-wide, an upper bound on when the group
         // changed, so ties and unknown edit times favour the server.
         if let edited = editedAt(group), edited > server.lastUpdate { return }

@@ -716,6 +716,31 @@ import Testing
         #expect(try Self.send(&state).audio?.currentTime == 200)
     }
 
+    /// The same, with A evicted from the history: its echo matches only C, but while the group is
+    /// truncated an echo can be an evicted send's, so it neither acknowledges C nor clears the flag.
+    @Test func echoOfAnEvictedSendDoesNotAcknowledgeANewerEdit() throws {
+        var state = Self.seeded()
+        let positions = [200.0, 300] + (1...(ProgressSend.historyLimit - 2)).map { 300 + Double($0) } + [200]
+        for (index, position) in positions.enumerated() {
+            state.apply(Self.seek(position), now: Self.at(Double(index + 1)))
+            try Self.send(&state)
+        }
+        #expect(state.truncated == .audio)
+        let echoAt = Double(positions.count + 1)
+        state.merge(Self.server(currentTime: 200, lastUpdate: Self.at(echoAt)))  // A's echo.
+        #expect(state.currentTime == 200)
+        #expect(state.dirty == .audio)
+        #expect(state.truncated == .audio)
+        state.merge(Self.server(currentTime: 300, lastUpdate: Self.at(echoAt + 1)))  // B's echo.
+        #expect(state.currentTime == 200)
+        #expect(state.dirty == .audio)
+        #expect(try Self.send(&state).audio?.currentTime == 200)
+        // Only the response to a send we hold clears the flag.
+        state.acknowledge(try #require(state.unacknowledgedSends.last), serverLastUpdate: Self.at(echoAt + 2))
+        #expect(state.dirty.isEmpty)
+        #expect(state.truncated.isEmpty)
+    }
+
     /// An un-finish (U1) at 995 s was auto-finished, its response lost; the user finished and
     /// un-finished again (U2), which failed before reaching the server. U1's echo (finished after
     /// U2's edit) can't acknowledge U2, which would un-finish the item: U2 is sent again.
