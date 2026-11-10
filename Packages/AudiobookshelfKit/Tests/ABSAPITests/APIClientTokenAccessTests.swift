@@ -762,3 +762,100 @@ private final class HeldFirstSwapProvider: TokenProvider {
         #expect(server.requests(path: refreshPath).count == 2)
     }
 }
+
+/// Wraps an ``InMemoryTokenProvider`` and holds a read made by a task tagged with
+/// ``isHeldReader`` once a swap has succeeded, until ``release()``, then reads the stored pair.
+private final class HeldReadAfterSwapProvider: TokenProvider {
+    @TaskLocal static var isHeldReader = false
+
+    let inner: InMemoryTokenProvider
+    private let swapped = Mutex(false)
+    private let holding = Checkpoint()
+    private let released = Checkpoint()
+
+    init(_ tokens: AuthTokens) {
+        inner = InMemoryTokenProvider(tokens)
+    }
+
+    func held() async { await holding.reached() }
+    func release() { released.pass() }
+
+    func tokens() async -> AuthTokens? {
+        if Self.isHeldReader, swapped.withLock({ $0 }) {
+            holding.pass()
+            await released.reached()
+        }
+        return await inner.tokens()
+    }
+
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
+        guard await inner.replaceTokens(expected: expected, with: new) else { return false }
+        swapped.withLock { $0 = true }
+        return true
+    }
+
+    func expireSession(ifCurrent rejected: AuthTokens) async -> Bool {
+        await inner.expireSession(ifCurrent: rejected)
+    }
+}
+
+@Suite struct APIClientTokenLineageTests {
+    /// A `nil` caller joins A→B; a request retries B, gets another 401 and expires B before the
+    /// caller reads the provider. The server ended the session, so the caller gets
+    /// `.sessionExpired`, not the local sign-out's `.notAuthenticated`.
+    @Test func expiryOfRefreshedDescendantIsSessionExpired() async throws {
+        let gate = StubGate()
+        let server = StubServer { request in
+            request.url?.path == refreshPath
+                ? .json(refreshJSON(freshToken), gate: gate) : .text("Unauthorized", status: 401)
+        }
+        let tokens = HeldReadAfterSwapProvider(AuthTokens(accessToken: expiringToken, refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+        await client.setNow { now }
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
+
+        let request = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await gate.arrived()
+        let caller = Task {
+            try await HeldReadAfterSwapProvider.$isHeldReader.withValue(true) {
+                try await client.accessToken(replacing: nil)
+            }
+        }
+        await joins.reached()
+        gate.open()
+        await tokens.held()
+        await #expect(throws: APIError.sessionExpired) { try await request.value }
+        tokens.release()
+
+        await #expect(throws: APIError.sessionExpired) { try await caller.value }
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
+    /// A lookup while a refresh's swap has stored the new pair but not returned sees the new
+    /// token with its receipt: a token from a server clock an hour behind isn't refreshed again.
+    @Test func lookupDuringHeldSwapUsesNewTokensReceipt() async throws {
+        let t = Int(now.timeIntervalSince1970)
+        let tokenB = makeJWT(claims: #"{"n":"B","iat":\#(t - 3600),"exp":\#(t)}"#)
+        let tokenC = makeJWT(claims: #"{"n":"C","iat":\#(t - 3600),"exp":\#(t)}"#)
+        let server = StubServer { request in
+            switch request.value(forHTTPHeaderField: "x-refresh-token") {
+            case "refresh-1": .json(#"{"user":{"accessToken":"\#(tokenB)","refreshToken":"refresh-2"}}"#)
+            case "refresh-2": .json(#"{"user":{"accessToken":"\#(tokenC)","refreshToken":"refresh-3"}}"#)
+            default: .text("Unexpected", status: 500)
+            }
+        }
+        let tokens = HeldFirstSwapProvider(AuthTokens(accessToken: expiringToken, refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+        await client.setNow { now }
+
+        let first = Task { try await client.accessToken(replacing: nil) }
+        await tokens.held()
+        #expect(try await client.accessToken(replacing: nil) == tokenB)
+        tokens.release()
+        #expect(try await first.value == tokenB)
+
+        #expect(try await client.accessToken(replacing: nil) == tokenB)
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+}
