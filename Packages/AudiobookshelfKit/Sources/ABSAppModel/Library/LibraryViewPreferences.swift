@@ -107,13 +107,15 @@ public struct LibraryViewPreferences: Sendable, Hashable, Codable {
     public var sort: LibrarySortKey
     public var descending: Bool
     public var filter: Filter?
+    /// Grid or list. Stored per library and used for every library type (legacy had one global
+    /// `bookshelfListView` flag, for books only). It is unrelated to ``AppSettings/enableAltView``,
+    /// which only sets the card style.
     public var viewMode: LibraryViewMode
     /// Shows each series as one item. Book libraries only.
     public var collapseSeries: Bool
 
-    /// The legacy defaults (`store/user.js`): newest first, no filter, series not collapsed.
-    /// `enableAltView` (``AppSettings/enableAltView``) is the legacy "not bookshelf view": text
-    /// rows (`.list`); the bookshelf view of covers is `.grid`.
+    /// The legacy defaults (`store/user.js`, `store/globals.js`): newest first, no filter, grid,
+    /// series not collapsed.
     public init(
         sort: LibrarySortKey = .addedAt, descending: Bool = true, filter: Filter? = nil,
         viewMode: LibraryViewMode = .grid, collapseSeries: Bool = false
@@ -123,10 +125,6 @@ public struct LibraryViewPreferences: Sendable, Hashable, Codable {
         self.filter = filter
         self.viewMode = viewMode
         self.collapseSeries = collapseSeries
-    }
-
-    public static func defaults(enableAltView: Bool) -> LibraryViewPreferences {
-        LibraryViewPreferences(viewMode: enableAltView ? .list : .grid)
     }
 
     /// Chooses `key`: the same key flips the direction; another key sorts ascending, except that
@@ -233,7 +231,7 @@ public struct LibraryViewPreferences: Sendable, Hashable, Codable {
 
 extension AppSettings {
     /// The preferences saved for a library, or `nil` if there are none or they can't be read; the
-    /// caller then uses ``LibraryViewPreferences/defaults(enableAltView:)``.
+    /// caller then uses `LibraryViewPreferences()`, the defaults.
     public func libraryViewPreferences(for key: LibraryConnectionKey, libraryID: String) -> LibraryViewPreferences? {
         libraryViewPreferencesJSON(serverID: key.serverID, userID: key.userID, libraryID: libraryID)
             .flatMap(LibraryViewPreferences.init(json:))

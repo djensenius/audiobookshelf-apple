@@ -31,8 +31,11 @@ private struct GatedWriter: ProgressWriting {
     let gate = GatedCalls<Write, Void>()
     /// The most requests in flight at once, for the per-key serialization.
     let concurrency = Concurrency()
+    /// Each write as it arrives, and the test's own markers, in order.
+    let log = Locked<[String]>([])
 
     func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        log.value.append("write \(update)")
         concurrency.enter()
         defer { concurrency.leave() }
         try await gate.call(Write(itemID: itemID, episodeID: episodeID, update: update))
@@ -212,10 +215,14 @@ private func makeActions(_ cache: ProgressCache, _ writer: GatedWriter) -> Progr
         let target = ItemActionTarget(libraryItemID: "item")
 
         let finish = Task { try await actions.markFinished(target) }
-        let finishWrite = try #require(await writes.next())
         let unfinish = Task { try await actions.markNotFinished(target) }
+        // Both tasks have started by the time the first write arrives; unchained, the second
+        // would write too, before the first reply is released.
+        let finishWrite = try #require(await writes.next())
+        #expect(finishWrite.request.update == .finished(true, at: clock))
         #expect(cache.progress(libraryItemID: "item")?.isFinished == true)
 
+        writer.log.value.append("release")
         finishWrite.reply.resume(returning: ())
         try await finish.value
         let unfinishWrite = try #require(await writes.next())
@@ -223,6 +230,7 @@ private func makeActions(_ cache: ProgressCache, _ writer: GatedWriter) -> Progr
         #expect(cache.progress(libraryItemID: "item")?.isFinished == false)
         unfinishWrite.reply.resume(returning: ())
         try await unfinish.value
+        #expect(writer.log.value.map { $0.hasPrefix("write") ? "write" : $0 } == ["write", "release", "write"])
         #expect(writer.concurrency.peak == 1)
     }
 

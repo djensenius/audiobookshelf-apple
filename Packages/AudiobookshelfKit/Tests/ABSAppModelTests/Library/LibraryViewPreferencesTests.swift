@@ -63,14 +63,23 @@ import Testing
         #expect(issues?.value == nil)
     }
 
-    @Test func defaultsFollowLegacy() {
-        let preferences = LibraryViewPreferences.defaults(enableAltView: true)
+    @MainActor
+    @Test func defaultsFollowLegacyAndAreGridWhateverEnableAltViewSays() async throws {
+        let preferences = LibraryViewPreferences()
         #expect(preferences.sort == .addedAt)
         #expect(preferences.descending)
         #expect(preferences.filter == nil)
         #expect(!preferences.collapseSeries)
-        #expect(preferences.viewMode == .list)
-        #expect(LibraryViewPreferences.defaults(enableAltView: false).viewMode == .grid)
+        #expect(preferences.viewMode == .grid)
+
+        try await withLibrarySettings { settings in
+            let key = LibraryConnectionKey(connectionID: UUID(), userID: "u")
+            for altView in [true, false] {
+                settings.enableAltView = altView
+                #expect(settings.libraryViewPreferences(for: key, libraryID: "books") == nil)
+                #expect(LibraryViewPreferences().viewMode == .grid)
+            }
+        }
     }
 
     @MainActor

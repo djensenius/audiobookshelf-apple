@@ -65,6 +65,8 @@ extension APIClient: ProgressWriting {
 ///   playback) is newer and stays.
 /// - An action runs to completion even if its caller is cancelled, so the cache and the server
 ///   don't end up disagreeing about a half-done action.
+/// - The optimistic progress is stamped with the device clock, so a server update for the item
+///   may be ignored until the next seed if the clock runs ahead (see `later(than:_:)`).
 /// - The local playback database isn't touched; reconciling it with a newer server value is the
 ///   syncer's job (P2-06d, #158).
 @MainActor
@@ -131,6 +133,11 @@ public final class ProgressItemActions: ItemActionPerforming {
     }
 
     /// `date` in epoch milliseconds, or one more than the existing update, so the cache accepts it.
+    ///
+    /// Known limitation: this is the device clock. If it runs ahead of the server's, the cache
+    /// ignores a later server update (`user_updated`) for the item until the next seed, because
+    /// ``ProgressCache/apply(_:)`` drops anything not newer. Reconciliation belongs with the
+    /// progress sync.
     private static func later(than existing: MediaProgress?, _ date: Date) -> Int {
         let milliseconds = Int((date.timeIntervalSince1970 * 1000).rounded())
         return max(milliseconds, (existing?.lastUpdate ?? Int.min) + 1)

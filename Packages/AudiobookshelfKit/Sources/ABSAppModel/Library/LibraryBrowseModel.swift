@@ -47,7 +47,7 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
 
     /// - Parameters:
     ///   - stored: The library's saved preferences, if any.
-    ///   - defaults: Used when nothing is saved (``LibraryViewPreferences/defaults(enableAltView:)``).
+    ///   - defaults: Used when nothing is saved.
     ///   - map: Turns a loaded item into the display value; runs off the main actor.
     ///
     /// Nothing loads until ``load()``.

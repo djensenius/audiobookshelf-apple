@@ -36,6 +36,9 @@ public final class ProgressCache {
         /// The cache ``ProgressCache/revision`` of the last ``ProgressCache/apply(_:)`` that
         /// stored a value here or ``ProgressCache/remove(libraryItemID:episodeID:)``, or 0.
         @ObservationIgnored var revision = 0
+        /// The `revision` this entry had before its last ``ProgressCache/apply(_:)``; restored by
+        /// ``ProgressCache/rollback(_:to:)``.
+        @ObservationIgnored var revisionBeforeApply = 0
     }
 
     /// Identifies one request for the full list; see ``beginSeed()``.
@@ -141,6 +144,7 @@ public final class ProgressCache {
         let entry = entry(for: progress.progressKey)
         if let existing = entry.value, !Self.isNewer(progress, than: existing) { return false }
         revision += 1
+        entry.revisionBeforeApply = entry.revision
         entry.revision = revision
         entry.value = progress
         return true
@@ -149,12 +153,15 @@ public final class ProgressCache {
     /// Puts `previous` back (or removes the entry when it is `nil`), but only while the entry
     /// still holds `applied`: an update that arrived since (the socket, local playback, another
     /// action) is newer and stays. Returns whether the entry was restored.
+    ///
+    /// The entry gets the revision it had before `applied`, so the rollback doesn't count as a
+    /// local change: a seed requested before the optimistic apply still applies when it arrives
+    /// after the rollback.
     @discardableResult
     public func rollback(_ applied: MediaProgress, to previous: MediaProgress?) -> Bool {
         let entry = entry(for: applied.progressKey)
         guard entry.value == applied else { return false }
-        revision += 1
-        entry.revision = revision
+        entry.revision = entry.revisionBeforeApply
         entry.value = previous
         return true
     }

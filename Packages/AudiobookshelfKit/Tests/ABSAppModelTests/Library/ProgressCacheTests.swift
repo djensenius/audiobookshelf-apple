@@ -271,6 +271,18 @@ private func progress(
         #expect(cache.progress(libraryItemID: "x")?.currentTime == 1)
     }
 
+    @Test func aSeedRequestedBeforeAnOptimisticApplyStillAppliesAfterItsRollback() {
+        let cache = ProgressCache()
+        let token = cache.beginSeed()
+        let optimistic = progress("x", currentTime: 9, lastUpdate: 90)
+        cache.apply(optimistic)
+        #expect(cache.rollback(optimistic, to: nil))
+
+        // The server has the progress the action failed to change.
+        cache.seed([progress("x", currentTime: 1, lastUpdate: 10)], token: token)
+        #expect(cache.progress(libraryItemID: "x")?.currentTime == 1)
+    }
+
     @Test func clearKeepsObserversOfMissingProgressAttached() {
         let cache = ProgressCache()
         cache.apply(progress("a", lastUpdate: 1))
