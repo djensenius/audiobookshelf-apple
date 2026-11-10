@@ -15,7 +15,8 @@ public struct ItemProgress: Sendable, Hashable {
 
     public init(_ progress: MediaProgress) {
         self.init(
-            fraction: progress.progress, isFinished: progress.isFinished,
+            fraction: progress.progress == 0 ? progress.ebookProgress ?? 0 : progress.progress,
+            isFinished: progress.isFinished,
             isHiddenFromContinue: progress.hideFromContinueListening)
     }
 

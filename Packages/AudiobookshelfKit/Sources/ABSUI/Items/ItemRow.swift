@@ -65,7 +65,7 @@ public struct ItemRow: View {
         .buttonStyle(.plain)
         .itemHover()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(verbatim: ItemPresentation.accessibilityLabel(item)))
+        .accessibilityLabel(Text(verbatim: ItemPresentation.rowAccessibilityLabel(item, locale: locale)))
         .accessibilityValue(
             Text(verbatim: ItemPresentation.accessibilityValue(item, progress: progress, locale: locale))
         )

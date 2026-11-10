@@ -29,6 +29,15 @@ private final class FakeProgressEntry {
         )
     }
 
+    @Test func itemRowAccessibilityLabelSpeaksDuration() {
+        let item = ItemSummary(
+            id: "li_1", itemID: "li_1", kind: .book, title: "Dune", subtitle: "Frank Herbert",
+            seriesText: "Dune Chronicles #1", duration: 3_690)
+        #expect(
+            ItemPresentation.rowAccessibilityLabel(item, locale: Locale(identifier: "en_US"))
+                == "Dune, Frank Herbert, Dune Chronicles #1, 1 hour, 2 minutes")
+    }
+
     @Test func collapsedSeriesLabelSpeaksTheBookCount() {
         let item = ItemSummary(
             id: "series-s", itemID: "li", seriesID: "s", kind: .series, title: "Barsoom", bookCount: 3)

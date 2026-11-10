@@ -31,6 +31,13 @@ import Testing
                 == [.play, .markFinished, .hideFromContinueListening, .share, .openDetails])
     }
 
+    @Test func ebookOnlyProgressCanBeHiddenFromContinueListening() {
+        let progress = ItemProgress(
+            MediaProgress(id: "p", libraryItemId: "i", progress: 0, ebookProgress: 0.7))
+        #expect(progress.fraction == 0.7 && progress.isInProgress)
+        #expect(kinds(summary(), progress).contains(.hideFromContinueListening))
+    }
+
     @Test func hiddenBookOffersNoSecondHide() {
         let hidden = ItemProgress(fraction: 0.4, isHiddenFromContinue: true)
         #expect(kinds(summary(), hidden) == [.play, .markFinished, .share, .openDetails])

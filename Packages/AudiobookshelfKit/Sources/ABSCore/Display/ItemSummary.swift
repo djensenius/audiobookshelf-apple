@@ -175,10 +175,10 @@ public struct ItemSummary: Sendable, Hashable, Identifiable {
         return nonEmpty(metadata.seriesName)
     }
 
-    /// Minified items carry counts; expanded ones carry files. With neither, a duration decides,
-    /// and an item that says nothing is assumed playable.
+    /// Prefer track counts from minified items or expanded playable tracks. Raw file counts and
+    /// duration are fallbacks only when no authoritative track count is present.
     private static func hasAudio(_ book: Book) -> Bool {
-        if let count = book.numTracks ?? book.numAudioFiles ?? book.audioFiles?.count ?? book.tracks?.count {
+        if let count = book.numTracks ?? book.tracks?.count ?? book.numAudioFiles ?? book.audioFiles?.count {
             return count > 0
         }
         return book.duration.map { $0 > 0 } ?? true

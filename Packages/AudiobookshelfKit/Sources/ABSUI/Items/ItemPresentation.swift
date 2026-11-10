@@ -49,6 +49,15 @@ enum ItemPresentation {
         .compactMap(\.self).joined(separator: ", ")
     }
 
+    /// The row is one accessibility element, so include its spoken duration in the label.
+    static func rowAccessibilityLabel(_ item: ItemSummary, locale: Locale) -> String {
+        let label = accessibilityLabel(item)
+        guard let duration = item.duration else { return label }
+        let spokenDuration = DurationStyle.elapsed(showSeconds: false).accessibilityString(duration, locale: locale)
+        guard !spokenDuration.isEmpty else { return label }
+        return "\(label), \(spokenDuration)"
+    }
+
     /// The progress a cell shows: the explicit one, else the reader's. A collapsed series has none:
     /// its `itemID` is its first book, whose progress isn't the series'.
     @MainActor

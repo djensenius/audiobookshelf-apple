@@ -7,14 +7,15 @@ import Testing
     private func book(
         id: String = "li_1", title: String = "Dune", metadata: (String) -> BookMetadata = { BookMetadata(title: $0) },
         coverPath: String? = "/metadata/items/li_1/cover.jpg", duration: Double? = 3_600, numTracks: Int? = 1,
+        numAudioFiles: Int? = nil, tracks: [AudioTrack]? = nil, audioFiles: [AudioFile]? = nil,
         series: Series? = nil, collapsed: CollapsedSeries? = nil, isMissing: Bool = false, isInvalid: Bool = false
     ) -> LibraryItem {
         LibraryItem(
             id: id, libraryId: "lib", updatedAt: 99, isMissing: isMissing, isInvalid: isInvalid, mediaType: .book,
             media: .book(
                 Book(
-                    id: "b", metadata: metadata(title), coverPath: coverPath, duration: duration,
-                    numTracks: numTracks)),
+                    id: "b", metadata: metadata(title), coverPath: coverPath, audioFiles: audioFiles, tracks: tracks,
+                    duration: duration, numTracks: numTracks, numAudioFiles: numAudioFiles)),
             series: series, collapsedSeries: collapsed)
     }
 
@@ -93,6 +94,17 @@ import Testing
         #expect(!ItemSummary(item: book(duration: 0, numTracks: nil)).hasAudio)
         #expect(ItemSummary(item: book(duration: 10, numTracks: nil)).hasAudio)
         #expect(ItemSummary(item: book(duration: nil, numTracks: nil)).hasAudio)
+    }
+
+    @Test func trackCountsTakePrecedenceOverRawAudioFileCounts() {
+        let excludedFile = AudioFile(ino: "excluded", exclude: true)
+        let minified = book(duration: nil, numTracks: 0, numAudioFiles: 1)
+        let expanded = book(duration: nil, numTracks: nil, numAudioFiles: 1, tracks: [], audioFiles: [excludedFile])
+        #expect(!ItemSummary(item: minified).hasAudio)
+        #expect(!ItemSummary(item: expanded).hasAudio)
+
+        #expect(ItemSummary(item: book(duration: nil, numTracks: nil, numAudioFiles: 1)).hasAudio)
+        #expect(ItemSummary(item: book(duration: nil, numTracks: nil, audioFiles: [excludedFile])).hasAudio)
     }
 
     private let podcastMetadata = PodcastMetadata(title: "Classic Tales", author: "Players", explicit: true)
