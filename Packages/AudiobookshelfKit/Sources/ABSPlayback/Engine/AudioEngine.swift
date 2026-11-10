@@ -22,6 +22,8 @@ public final class AudioEngine: AudioEngineProtocol {
     public private(set) var currentTime: Double = 0
     public private(set) var currentTrackIndex: Int?
     public private(set) var defaultRate: Float = 1
+    /// Output volume, `0...1` (the sleep timer fade). A replacement player gets it too.
+    public private(set) var volume: Float = 1
     public private(set) var isPlaybackRequested = false
     public private(set) var pendingSeekTarget: Double?
     public private(set) var timeline: PlaybackTimeline?
@@ -162,6 +164,13 @@ public final class AudioEngine: AudioEngineProtocol {
         defaultRate = rate
         player.defaultRate = rate
         if player.rate > 0 { player.rate = rate }
+    }
+
+    /// Sets ``volume``, clamped to `0...1`, on the current player. Ignores non-finite values.
+    public func setVolume(_ volume: Float) {
+        guard volume.isFinite else { return }
+        self.volume = min(max(volume, 0), 1)
+        player.volume = self.volume
     }
 
     /// Seeks to `time`. An interrupted seek is retried once; if it is interrupted again, the player
@@ -427,7 +436,7 @@ public final class AudioEngine: AudioEngineProtocol {
         let replacement = makePlayer()
         replacement.actionAtItemEnd = old.actionAtItemEnd
         replacement.automaticallyWaitsToMinimizeStalling = old.automaticallyWaitsToMinimizeStalling
-        replacement.volume = old.volume
+        replacement.volume = volume
         replacement.isMuted = old.isMuted
         replacement.sourceClock = old.sourceClock
         replacement.defaultRate = defaultRate

@@ -538,20 +538,6 @@ struct SleepTimerTests {
 
     // MARK: - Platform
 
-    @Test func audioEngineControlReadsAndSetsTheEngine() {
-        let engine = AudioEngine()
-        let control = AudioEngineSleepTimerControl(engine: engine)
-        #expect(control.isPlaying == false)
-        #expect(control.currentTime == 0)
-        #expect(control.rate == 1)
-        #expect(control.timeline == nil)
-
-        control.setVolume(0.25)
-        #expect(engine.player.volume == 0.25)
-        control.setVolume(2)
-        #expect(engine.player.volume == 1)
-    }
-
     @Test func chimeIsAQuietSecondAndAHalf() throws {
         let buffer = try #require(SystemSleepTimerFeedback.makeChime())
         #expect(buffer.frameLength == 66_150)

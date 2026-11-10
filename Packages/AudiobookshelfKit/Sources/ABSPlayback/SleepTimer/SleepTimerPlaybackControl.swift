@@ -19,7 +19,8 @@ public protocol SleepTimerPlaybackControl: AnyObject {
     func setVolume(_ volume: Float)
 }
 
-/// Controls an ``AudioEngine`` directly. The volume goes to the engine's player, which only the sleep timer changes.
+/// Controls an ``AudioEngine`` directly. The engine keeps the volume on whichever player is current, including one
+/// that replaced a failed player mid-fade.
 @MainActor
 public final class AudioEngineSleepTimerControl: SleepTimerPlaybackControl {
     private weak var engine: AudioEngine?
@@ -52,6 +53,6 @@ public final class AudioEngineSleepTimerControl: SleepTimerPlaybackControl {
     }
 
     public func setVolume(_ volume: Float) {
-        engine?.player.volume = min(max(volume, 0), 1)
+        engine?.setVolume(volume)
     }
 }
