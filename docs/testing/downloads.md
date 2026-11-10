@@ -92,11 +92,12 @@ app. The app must recover the next time it opens.
    - if there was no resume data, the part starts again from 0%;
    - the part completes and its file is in `Downloads/` as in (a).
 
-Repeat (b) after signing out and back in, after changing the server's custom headers, or
-after changing the cellular or Low Data Mode download settings. The old resume data was
-made with other credentials or network settings, so the engine must throw it away and
-start the part from 0%. The engine always gets current credentials (refreshing the token
-if needed) before it resumes a part, so a refreshed token also means a fresh start.
+Repeat (b) after signing out and back in, or after changing the cellular or Low Data
+Mode download settings (once #145 allows custom headers, also after changing them). The
+old resume data was made with other credentials or network settings, so the engine must
+throw it away and start the part from 0%. The engine always gets current credentials
+(refreshing the token if needed) before it resumes a part, so a refreshed token also
+means a fresh start.
 
 The system can also cancel transfers because Background App Refresh is off
 (`backgroundUpdatesDisabled`) or the device is short of resources
@@ -131,11 +132,14 @@ iOS.
 ## Failures
 
 - The engine only accepts a 200 or 206 response. Another status, an HTML, text, JSON or
-  XML body (an error page or message), or a file whose size differs from the expected
-  length never reaches `Downloads/`. The exception is a size that matches the length the
-  server declared (`Content-Length`, or the total in a 206's `Content-Range`): the file
-  changed since the download was planned, so the engine keeps it and records the new size
-  as the expected size.
+  XML body (an error page or message), an empty file, or a file whose size differs from
+  the expected length never reaches `Downloads/`. The exception is a size that matches
+  the length the server declared (`Content-Length`, or the total in a 206's
+  `Content-Range`): the file changed since the download was planned, so the engine keeps
+  it and records the new size as the expected size. When the planned size is unknown, the
+  declared length is the expected length. After a 206 the file must always be the whole
+  file the `Content-Range` total describes; a 206 that covers only part of it is a size
+  mismatch.
 - A 401 triggers one token refresh and one new task for the part. A second 401 in a row
   fails the part. The count starts over once the part gets a successful response, and a
   401 for a token that was already replaced doesn't count.
@@ -160,13 +164,30 @@ iOS.
 - If the resume data can't be read (the Keychain or the file is unavailable, for
   example while the device is locked), the part starts from 0% without counting a
   failure, and the resume data is kept for a later attempt.
+- If a finished file can't be recorded (the store write fails), the file stays in
+  `Downloads/` and the engine tries to record it again after the retry delays above, then
+  on each `activate()`. A download whose parts are all recorded but that couldn't be
+  added to the library is added again on each `activate()`.
+- If a part's state can't be saved after a failure, the part stays "downloading" in the
+  store without a task; the engine still retries it (or restarts it on the next
+  `activate()`).
+- A transfer that survived a relaunch is adopted only if its download is still meant to
+  run. If its download was paused or failed, a file it finished meanwhile doesn't
+  complete the part: the part is queued, and its next transfer replaces the file.
+- Resuming a download waits for a pause that is still cancelling its transfers, so the
+  download continues.
 
 ## Known limits
 
+- Until #145 adds a foreground redirect check, the engine refuses to download from a
+  server connection that has custom headers (for example `CF-Access-Client-Id` and
+  `CF-Access-Client-Secret`): the part fails for good with the
+  `customHeadersUnsupported` code, without a request. A background session follows
+  redirects without asking the app, so these headers could reach another host.
 - Background sessions follow redirects without asking the app. `URLSession` drops
-  `Authorization` on a redirect, so the bearer token never reaches the target, but the
-  server's custom headers may. If the final response comes from a different origin, the
-  engine fails the part for good and never moves the body into `Downloads/`. A 401 after
-  a redirect fails the part as "redirected, credentials not forwarded" without a token
-  refresh. If a server you support redirects downloads to another host, test with it. A
-  follow-up issue tracks a foreground redirect check before the background task starts.
+  `Authorization` on a redirect, so the bearer token never reaches the target. If the
+  final response comes from a different origin, the engine fails the part for good and
+  never moves the body into `Downloads/`. A 401 after a redirect fails the part as
+  "redirected, credentials not forwarded" without a token refresh. If a server you
+  support redirects downloads to another host, test with it. #145 tracks a foreground
+  redirect check before the background task starts.

@@ -14,8 +14,8 @@ final class FakeCredentials: DownloadCredentialProviding {
     /// Runs before ``credentials(for:replacing:)`` returns.
     let hook = Mutex<(@Sendable () async -> Void)?>(nil)
 
-    init(baseURL: URL) {
-        configuration = try! APIClientConfiguration(baseURL: baseURL, customHeaders: ["X-Proxy": "proxy-secret"])
+    init(baseURL: URL, customHeaders: [String: String] = [:]) {
+        configuration = try! APIClientConfiguration(baseURL: baseURL, customHeaders: customHeaders)
     }
 
     /// The `rejectedAccessToken` of each ``credentials(for:replacing:)`` call.
@@ -131,7 +131,8 @@ final class DownloadHarness: Sendable {
     private let completionContinuation: AsyncStream<Void>.Continuation
 
     init(
-        keyStore: any ResumeDataKeyStore = MemoryKeyStore(), handler: @escaping StubDownloadProtocol.Handler
+        keyStore: any ResumeDataKeyStore = MemoryKeyStore(), customHeaders: [String: String] = [:],
+        handler: @escaping StubDownloadProtocol.Handler
     ) async throws {
         self.keyStore = keyStore
         (completionStream, completionContinuation) = AsyncStream.makeStream()
@@ -142,7 +143,7 @@ final class DownloadHarness: Sendable {
         connectionID = connection.id
         store = DownloadStore(modelContainer: container)
         localItems = LocalItemStore(modelContainer: container)
-        credentials = FakeCredentials(baseURL: URL(string: "https://\(host)/abs")!)
+        credentials = FakeCredentials(baseURL: URL(string: "https://\(host)/abs")!, customHeaders: customHeaders)
         let (stream, continuation) = AsyncStream.makeStream(of: URLRequest.self)
         requestStream = stream
         StubDownloadProtocol.register(host: host) { request in
@@ -178,20 +179,30 @@ final class DownloadHarness: Sendable {
         }
     }
 
-    /// - Parameter prepare: runs on the new session before the engine sees it, to leave tasks
-    ///   behind as a previous launch would.
+    /// - Parameters:
+    ///   - prepare: runs on the new session before the engine sees it, to leave tasks behind as
+    ///     a previous launch would.
+    ///   - listing: awaited before the session lists its tasks.
     func makeEngine(
         retryPolicy: RetryPolicy = .default,
         clock: (any Clock<Duration>)? = nil,
         registry: DownloadEngineRegistry? = nil,
         readRecords: (@Sendable (DownloadStore) async throws -> [DownloadRecordDTO])? = nil,
+        cancel: (@Sendable (URLSessionDownloadTask) async -> Data?)? = nil,
+        listing: (@Sendable () async -> Void)? = nil,
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
-        DownloadEngine(
+        let stubFactory = sessionFactory(prepare: prepare)
+        var factory = stubFactory
+        if let listing {
+            factory = { ListingSession(base: stubFactory($0), listing: listing) }
+        }
+        return DownloadEngine(
             store: store, localItems: localItems, credentials: credentials, vault: vault, locations: locations,
             retryPolicy: retryPolicy, networkAccess: { NetworkAccess(policy: .always) }, clock: clock ?? self.clock,
-            now: { .now }, random: { 0.5 }, makeSession: sessionFactory(prepare: prepare),
-            registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() })
+            now: { .now }, random: { 0.5 }, makeSession: factory,
+            registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() },
+            cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() })
     }
 
     func sessionFactory(
@@ -234,6 +245,33 @@ final class DownloadHarness: Sendable {
     func fileExists(_ relativePath: String) -> Bool {
         FileManager.default.fileExists(atPath: fileURL(relativePath).path(percentEncoded: false))
     }
+}
+
+/// A session that awaits `listing` before it lists its tasks, as a relaunch's slow
+/// `getAllTasks` would.
+final class ListingSession: DownloadSession {
+    let base: any DownloadSession
+    let listing: @Sendable () async -> Void
+
+    init(base: any DownloadSession, listing: @escaping @Sendable () async -> Void) {
+        self.base = base
+        self.listing = listing
+    }
+
+    func downloadTask(with request: URLRequest) -> URLSessionDownloadTask { base.downloadTask(with: request) }
+
+    func downloadTask(withResumeData resumeData: Data) -> URLSessionDownloadTask {
+        base.downloadTask(withResumeData: resumeData)
+    }
+
+    var allTasks: [URLSessionTask] {
+        get async {
+            await listing()
+            return await base.allTasks
+        }
+    }
+
+    func finishTasksAndInvalidate() { base.finishTasksAndInvalidate() }
 }
 
 extension DownloadEngine {

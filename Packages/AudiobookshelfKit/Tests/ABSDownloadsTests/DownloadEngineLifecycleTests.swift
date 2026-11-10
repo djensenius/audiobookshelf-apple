@@ -1,10 +1,10 @@
 import ABSAPI
 import ABSCore
-import ABSData
 import Foundation
 import Synchronization
 import Testing
 
+@testable import ABSData
 @testable import ABSDownloads
 
 /// Activation, relaunch, background wakes, session loss and stopping.
@@ -499,6 +499,37 @@ import Testing
         #expect(!harness.fileExists("li_1/1.mp3"))
     }
 
+    @Test(arguments: [DownloadState.paused, .failed], [false, true])
+    func survivorFinishingDuringAdoptionDoesNotCompleteStoppedRecords(
+        state: DownloadState, finishesFirst: Bool
+    ) async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: state, partState: .running)
+        let base = harness.base
+        // The leftover finishes at once: before, during or after the adoption's store write; or,
+        // with `finishesFirst`, before the engine lists its tasks.
+        var listing: (@Sendable () async -> Void)?
+        if finishesFirst {
+            listing = { await harness.waitForCompletions(1) }
+        }
+        let engine = harness.makeEngine(
+            listing: listing,
+            prepare: { stub in
+                let url = URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!
+                stub.leaveTask(URLRequest(url: url), description: partID.uuidString)
+            })
+
+        #expect(await engine.activate())
+        await harness.waitForCompletions(1)
+        await engine.waitForRestart()
+
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
+        #expect(try await harness.store.record(id: record.id)?.state == state)
+        #expect(harness.credentials.calls.isEmpty)
+    }
+
     @Test func pauseStopsAndResumeContinues() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(200, gate: gate) : .status(200) }
@@ -522,6 +553,47 @@ import Testing
         #expect(try await engine.pause(recordID: UUID()) == false)
     }
 
+    @Test func resumeWaitsForAPauseUnderWay() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(200, gate: never) : .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let (reads, readCount) = AsyncStream.makeStream(of: Int.self)
+        let (cancelling, cancelStarted) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let count = Mutex(0)
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                let records = try await store.allRecords()
+                readCount.yield(
+                    count.withLock {
+                        $0 += 1; return $0
+                    })
+                return records
+            },
+            cancel: { task in
+                cancelStarted.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+                return await task.cancelByProducingResumeData()
+            })
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+
+        // The pause's cancellation is held while the resume reads the downloads and launches.
+        let pausing = Task { try await engine.pause(recordID: record.id) }
+        _ = await cancelling.first { _ in true }
+        let resuming = Task { try await engine.resume(recordID: record.id) }
+        // The activation and the first start read twice; the resume's start reads the third time.
+        _ = await reads.first { $0 >= 3 }
+        await engine.processPendingEvents()
+        release.open()
+
+        #expect(try await pausing.value)
+        #expect(try await resuming.value)
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 2)
+    }
+
     @Test func activationFinalisesCompletedRecords() async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let record = try await harness.addRecord(parts: [UUID()], state: .downloading, partState: .completed)
@@ -534,5 +606,29 @@ import Testing
         let item = try await harness.localItems.item(serverConnectionID: harness.connectionID, libraryItemId: "li_1")
         #expect(item?.files.map(\.size) == [11])
         #expect(harness.requests.isEmpty)
+    }
+
+    @Test func failedFinalisationIsRetriedOnActivate() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        await harness.localItems.failNextCommit(with: TestError())
+
+        await engine.start(partIDs: [partID])
+        #expect(
+            await engine.next {
+                if case .partCompleted = $0 { true } else { false }
+            } != nil)
+        await engine.processPendingEvents()
+        #expect(try await harness.store.record(id: record.id) != nil)
+
+        #expect(await engine.activate())
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(try await harness.store.record(id: record.id) == nil)
+        let item = try await harness.localItems.item(serverConnectionID: harness.connectionID, libraryItemId: "li_1")
+        #expect(item?.files.map(\.size) == [11])
+        #expect(harness.requests.count == 1)
     }
 }

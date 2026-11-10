@@ -1,8 +1,8 @@
 import ABSAPI
-import ABSData
 import Foundation
 import Testing
 
+@testable import ABSData
 @testable import ABSDownloads
 
 /// Transfers: completion, response checks, retries, 401 recovery and resume data.
@@ -29,7 +29,6 @@ import Testing
         #expect(harness.requests.count == 1)
         #expect(request.url?.absoluteString == "\(harness.base)/api/items/li_1/file/1/download")
         #expect(request.authorization == "Bearer token-1")
-        #expect(request.value(forHTTPHeaderField: "X-Proxy") == "proxy-secret")
         #expect(harness.credentials.calls == [nil])
         let progress = await engine.progress.first { _ in true }
         #expect(progress == DownloadProgress(partID: partID, recordID: record.id, bytesWritten: 11, expectedBytes: 11))
@@ -55,6 +54,26 @@ import Testing
         #expect(part.lastError == message)
         #expect(try await harness.store.record(id: record.id)?.state == .failed)
         #expect(harness.requests.count == 1)
+    }
+
+    @Test func customHeadersFailWithoutARequest() async throws {
+        let harness = try await DownloadHarness(customHeaders: ["CF-Access-Client-Secret": "secret"]) { _ in
+            .status(200)
+        }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        #expect(
+            await engine.nextPermanentFailure()
+                == .partFailed(
+                    partID: partID, recordID: record.id, code: .customHeadersUnsupported,
+                    message: "Downloads from a server that needs custom headers aren't supported yet.",
+                    willRetry: false))
+        #expect(harness.requests.isEmpty)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
     }
 
     @Test(arguments: [408, 429, 500, 503])
@@ -86,6 +105,61 @@ import Testing
         #expect(harness.clock.sleeps == [.milliseconds(1500), .seconds(3)])
         #expect(harness.requests.count == 3)
         #expect(harness.credentials.calls == [nil, nil, nil])
+    }
+
+    @Test func failedRetryStateWriteDoesNotStrandThePart() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(503, gate: gate) : .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        // The `.failed` write after the 503 fails, so the store still has the part running.
+        await harness.store.failNextCommit(with: TestError())
+
+        gate.open()
+
+        #expect(await engine.nextFailure(willRetry: true) != nil)
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 2)
+    }
+
+    /// Posts a finished file for the part, as the delegate does once it has moved it, while
+    /// the part's transfer is still running.
+    private func postMovedFile(_ partID: UUID, harness: DownloadHarness, engine: DownloadEngine) async throws {
+        try FileManager.default.createDirectory(at: harness.fileURL("li_1"), withIntermediateDirectories: true)
+        try Data("audio-bytes".utf8).write(to: harness.fileURL("li_1/1.mp3"))
+        let session = try #require(harness.session).session
+        let task = session.downloadTask(with: URLRequest(url: URL(string: harness.base)!))
+        task.taskDescription = partID.uuidString
+        await engine.delegate.post(.completed(task, .moved(bytes: 11)))
+    }
+
+    @Test(arguments: [true, false])
+    func failedCompletionSaveIsRetried(withBackoff: Bool) async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let policy = withBackoff ? RetryPolicy.default : RetryPolicy(baseDelay: .zero, maxDelay: .zero, maxRetries: 0)
+        let engine = harness.makeEngine(retryPolicy: policy)
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        await harness.store.failNextCommit(with: TestError())
+
+        try await postMovedFile(partID, harness: harness, engine: engine)
+
+        if !withBackoff {
+            // No retries left: the completion waits for the next activation.
+            await engine.processPendingEvents()
+            #expect(try await harness.store.part(id: partID)?.state == .running)
+            #expect(await engine.activate())
+        }
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.clock.sleeps == (withBackoff ? [.milliseconds(1500)] : []))
+        #expect(try await harness.store.record(id: record.id) == nil)
+        #expect(harness.requests.count == 1)
     }
 
     @Test func htmlBodyIsRetried() async throws {

@@ -36,6 +36,9 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     /// The background session kept disconnecting; downloads wait for the next
     /// ``DownloadEngine/activate()``.
     case sessionLost
+    /// The connection sends custom headers, which a background session could forward to
+    /// another server on a redirect. Refused until a foreground redirect check exists (#145).
+    case customHeadersUnsupported
 }
 
 /// A durable change the engine reports. Every update is delivered; live progress is on
@@ -121,7 +124,9 @@ public actor DownloadEngine {
     private let makeSession: DownloadSessionFactory
     private let registry: DownloadEngineRegistry
     private let readRecords: @Sendable (DownloadStore) async throws -> [DownloadRecordDTO]
-    private let delegate = DownloadSessionDelegate()
+    private let cancelKeepingResumeData: @Sendable (URLSessionDownloadTask) async -> Data?
+    /// Internal so tests can post events.
+    let delegate = DownloadSessionDelegate()
 
     private var activation: Task<Bool, Never>?
     private var session: (any DownloadSession)?
@@ -145,6 +150,20 @@ public actor DownloadEngine {
     /// Parts being completed or failed for good; they keep their context (so a concurrent
     /// read doesn't bring back their old state) but can't launch.
     private var settling: Set<UUID> = []
+    /// Moved files whose completion couldn't be saved yet, with their sizes. The part stays
+    /// settling until ``saveCompletion(_:)`` succeeds.
+    private var unsavedCompletions: [UUID: Int64] = [:]
+    /// Parts the store still has as `running` because writing their idle state failed. No
+    /// transfer of this engine has them, so their next launch accepts `running`.
+    private var strandedRunning: Set<UUID> = []
+    /// Stops under way: until one has queued its part, the store still has it `running`.
+    private var stopping: [UUID: Task<Void, Never>] = [:]
+    /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the sizes of
+    /// the files they finished meanwhile: those complete only once the transfer is adopted.
+    private var adopting: Set<Int> = []
+    private var heldCompletions: [Int: Int64] = [:]
+    /// Records being finalised, so a completion and ``activate()`` don't finalise one twice.
+    private var finalising: Set<UUID> = []
     private var retries: [UUID: Task<Void, Never>] = [:]
     private var failures: [UUID: Int] = [:]
     private var authRetried: Set<UUID> = []
@@ -177,7 +196,8 @@ public actor DownloadEngine {
         self.init(
             store: store, localItems: localItems, credentials: credentials, vault: vault, locations: locations,
             retryPolicy: retryPolicy, networkAccess: networkAccess, clock: clock, now: now, random: random,
-            makeSession: makeSession, registry: .shared, readRecords: { try await $0.allRecords() })
+            makeSession: makeSession, registry: .shared, readRecords: { try await $0.allRecords() },
+            cancelKeepingResumeData: { await $0.cancelByProducingResumeData() })
     }
 
     init(
@@ -193,7 +213,8 @@ public actor DownloadEngine {
         random: @escaping @Sendable () -> Double,
         makeSession: @escaping DownloadSessionFactory,
         registry: DownloadEngineRegistry,
-        readRecords: @escaping @Sendable (DownloadStore) async throws -> [DownloadRecordDTO]
+        readRecords: @escaping @Sendable (DownloadStore) async throws -> [DownloadRecordDTO],
+        cancelKeepingResumeData: @escaping @Sendable (URLSessionDownloadTask) async -> Data?
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
         (progress, progressContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(100))
@@ -210,6 +231,7 @@ public actor DownloadEngine {
         self.makeSession = makeSession
         self.registry = registry
         self.readRecords = readRecords
+        self.cancelKeepingResumeData = cancelKeepingResumeData
         registry.register(self)
     }
 
@@ -258,7 +280,8 @@ public actor DownloadEngine {
             logError("Couldn't read downloads", error)
             return
         }
-        for partID in partIDs where tasks[partID] == nil {
+        // A settling part is being completed or failed; its retry may be saving its completion.
+        for partID in partIDs where tasks[partID] == nil && !settling.contains(partID) {
             retries.removeValue(forKey: partID)?.cancel()
             failures[partID] = nil
             freeRestarts[partID] = nil
@@ -271,29 +294,46 @@ public actor DownloadEngine {
     /// the transfer's resume data is sealed so a later ``start(partIDs:)`` continues it;
     /// otherwise any resume data is deleted. Set the record's state first (for example
     /// `paused`): then ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses to start
-    /// its parts again, from a relaunch or a launch already under way.
+    /// its parts again, from a relaunch or a launch already under way. A launch of a part
+    /// waits for its stop to finish. Parts being completed or failed are left alone.
     public func stop(partIDs: [UUID], keepingResumeData: Bool) async {
-        for partID in partIDs {
+        for partID in partIDs where !settling.contains(partID) {
             retries.removeValue(forKey: partID)?.cancel()
             launching[partID] = nil
             deferredLaunches.remove(partID)
             failures[partID] = nil
             authRetried.remove(partID)
             throttle.reset(partID)
-            var hasResumeData: Bool? = keepingResumeData ? contexts[partID]?.hasResumeData : false
-            if let task = tasks.removeValue(forKey: partID) {
-                ignoredTasks.insert(task.taskIdentifier)
-                if keepingResumeData, let data = await task.cancelByProducingResumeData() {
-                    hasResumeData = seal(data, partID: partID, task: task)
-                } else {
-                    task.cancel()
-                }
+            let task = tasks.removeValue(forKey: partID)
+            if let task { ignoredTasks.insert(task.taskIdentifier) }
+            // Until the cancellation returns, the store still has the part running: stops of a
+            // part run in order, and its launches wait for them.
+            let previous = stopping[partID]
+            let stop = Task {
+                await previous?.value
+                await finishStopping(partID, task: task, keepingResumeData: keepingResumeData)
             }
-            if !keepingResumeData { vault.delete(partID: partID) }
-            if let hasResumeData { contexts[partID]?.hasResumeData = hasResumeData }
-            await persist {
-                try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
+            stopping[partID] = stop
+            await stop.value
+            if stopping[partID] == stop { stopping[partID] = nil }
+        }
+    }
+
+    private func finishStopping(_ partID: UUID, task: URLSessionDownloadTask?, keepingResumeData: Bool) async {
+        var hasResumeData: Bool? = keepingResumeData ? contexts[partID]?.hasResumeData : false
+        if let task {
+            // A finished task has no resume data to give.
+            let isLive = task.state == .running || task.state == .suspended
+            if keepingResumeData, isLive, let data = await cancelKeepingResumeData(task) {
+                hasResumeData = seal(data, partID: partID, task: task)
+            } else {
+                task.cancel()
             }
+        }
+        if !keepingResumeData { vault.delete(partID: partID) }
+        if let hasResumeData { contexts[partID]?.hasResumeData = hasResumeData }
+        await persistIdle(partID) {
+            try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
         }
     }
 
@@ -397,7 +437,9 @@ public actor DownloadEngine {
         isInvalidatingSession = false
         ignoredTasks.removeAll()
         startEventLoop()
-        for task in await session.allTasks {
+        // A task that finished on the way is left to its completion, which adopts it first.
+        for task in await session.allTasks where task.state != .completed {
+            if let partID = task.partID, tasks[partID] === task { continue }
             guard let partID = task.partID, contexts[partID] != nil, tasks[partID] == nil,
                 let download = task as? URLSessionDownloadTask
             else {
@@ -413,7 +455,7 @@ public actor DownloadEngine {
         where part.state == .running && tasks[part.id] == nil && launching[part.id] == nil
             && !settling.contains(part.id)
         {
-            await persist { try await $0.setPartState(.queued, partID: part.id, taskIdentifier: nil) }
+            await persistIdle(part.id) { try await $0.setPartState(.queued, partID: part.id, taskIdentifier: nil) }
         }
         return true
     }
@@ -434,8 +476,19 @@ public actor DownloadEngine {
     /// ``DownloadStore/beginRunning(partID:expecting:now:)`` allows it. If the record was
     /// stopped or failed for good, the transfer is cancelled keeping its resume data, as
     /// ``stop(partIDs:keepingResumeData:)`` does; if the part completed or was deleted, it is
-    /// cancelled. When the store can't be written, the transfer is adopted.
+    /// cancelled. When the store can't be written, the transfer is adopted. A file it finished
+    /// meanwhile completes the part only once the transfer is adopted; otherwise it stays where
+    /// it was moved, for the part's next transfer to replace.
     private func reattach(_ task: URLSessionDownloadTask, partID: UUID) async {
+        adopting.insert(task.taskIdentifier)
+        await decideAdoption(of: task, partID: partID)
+        adopting.remove(task.taskIdentifier)
+        if let bytes = heldCompletions.removeValue(forKey: task.taskIdentifier) {
+            await handleCompletion(task, .moved(bytes: bytes))
+        }
+    }
+
+    private func decideAdoption(of task: URLSessionDownloadTask, partID: UUID) async {
         // Adopted before the write, so its events are handled while the write is under way.
         tasks[partID] = task
         var adopts = true
@@ -547,7 +600,8 @@ public actor DownloadEngine {
             return
         }
         let candidates = records.filter { $0.state == .queued || $0.state == .downloading }
-            .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed }.map(\.id)
+            .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed || strandedRunning.contains($0.id) }
+            .map(\.id)
         for partID in candidates {
             await launch(partID)
         }
@@ -561,6 +615,7 @@ public actor DownloadEngine {
     ///
     /// - Parameter rejectedAccessToken: after a 401, the token that was rejected.
     private func launch(_ partID: UUID, rejectedAccessToken: String? = nil) async {
+        if let stop = stopping[partID] { await stop.value }
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
             !settling.contains(partID)
         else { return }
@@ -575,12 +630,16 @@ public actor DownloadEngine {
         let token = UUID()
         launching[partID] = token
         defer { if launching[partID] == token { launching[partID] = nil } }
+        // A part whose idle state couldn't be written is still running in the store.
+        let startable: Set<DownloadPartState> =
+            strandedRunning.contains(partID) ? [.queued, .failed, .running] : [.queued, .failed]
         do {
-            guard try await store.beginRunning(partID: partID, expecting: [.queued, .failed], now: now()) else {
+            guard try await store.beginRunning(partID: partID, expecting: startable, now: now()) else {
                 // Completed, stopped, failed for good or deleted since it was read.
                 if launching[partID] == token { forget(partID) }
                 return
             }
+            strandedRunning.remove(partID)
         } catch {
             logError("Couldn't start a download", error)
             if launching[partID] == token {
@@ -597,6 +656,13 @@ public actor DownloadEngine {
                 accessToken: credentials.accessToken)
             fresh.apply(await networkAccess())
             request = fresh
+        } catch DownloadRequestError.customHeadersRequireRedirectCheck {
+            if launching[partID] == token {
+                await failPermanently(
+                    partID, code: .customHeadersUnsupported,
+                    message: "Downloads from a server that needs custom headers aren't supported yet.")
+            }
+            return
         } catch {
             if launching[partID] == token {
                 await retry(
@@ -610,7 +676,7 @@ public actor DownloadEngine {
         guard let session, !isInvalidatingSession else {
             // The session went away meanwhile: start again once it is back.
             deferredLaunches.insert(partID)
-            await persist { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
+            await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
             return
         }
         var resumeData: Data?
@@ -676,6 +742,9 @@ public actor DownloadEngine {
         case .sessionInvalidated:
             sessionInvalidated()
         case .restartQueued:
+            // Handled here, between completions: saves that failed and records left complete
+            // but not finalised are done before parts restart.
+            await reconcile()
             restart = Task { [weak self] in await self?.restartQueuedParts() }
         case .barrier(let continuation):
             continuation.resume()
@@ -724,6 +793,16 @@ public actor DownloadEngine {
         guard let partID = task.partID, contexts[partID] != nil else { return }
         let current = tasks[partID]
         if case .moved(let bytes) = result {
+            if adopting.contains(task.taskIdentifier) {
+                heldCompletions[task.taskIdentifier] = bytes
+                return
+            }
+            // A surviving transfer that finished before it was adopted is adopted first.
+            if current == nil, !settling.contains(partID), let download = task as? URLSessionDownloadTask {
+                heldCompletions[task.taskIdentifier] = bytes
+                await reattach(download, partID: partID)
+                return
+            }
             // A finished file wins even from a stale task; drop any newer transfer.
             if let current, current.taskIdentifier != task.taskIdentifier {
                 ignoredTasks.insert(current.taskIdentifier)
@@ -759,7 +838,11 @@ public actor DownloadEngine {
         case .unexpectedContent(let type):
             await retry(partID, code: .unexpectedContent, message: "The server sent \(type) instead of the file.")
         case .sizeMismatch(let expected, let actual):
-            await retry(partID, code: .sizeMismatch, message: "The file has \(actual) bytes instead of \(expected).")
+            let message =
+                expected > 0
+                ? "The file has \(actual) bytes instead of \(expected)."
+                : "The server didn't send the whole file (\(actual) bytes)."
+            await retry(partID, code: .sizeMismatch, message: message)
         case .moveFailed(let message, let isOutOfSpace):
             if isOutOfSpace {
                 await failPermanently(partID, code: .outOfSpace, message: message)
@@ -810,7 +893,7 @@ public actor DownloadEngine {
     /// Queues the part again without counting a failure.
     private func requeue(_ partID: UUID) async {
         let hasResumeData = contexts[partID]?.hasResumeData
-        await persist {
+        await persistIdle(partID) {
             try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
         }
     }
@@ -831,7 +914,7 @@ public actor DownloadEngine {
             await failPermanently(partID, code: .unauthorized, message: message)
             return
         }
-        await persist {
+        await persistIdle(partID) {
             try await $0.setPartState(
                 .queued, partID: partID, taskIdentifier: nil, error: message, hasResumeData: false)
         }
@@ -842,24 +925,44 @@ public actor DownloadEngine {
     /// A size other than the expected one is the length the server declared (the file changed
     /// since the download was planned), so it becomes the part's expected size.
     private func complete(_ partID: UUID, bytes: Int64) async {
-        guard let context = contexts[partID], settling.insert(partID).inserted else { return }
+        guard contexts[partID] != nil, settling.insert(partID).inserted else { return }
         tasks[partID] = nil
         retries.removeValue(forKey: partID)?.cancel()
         vault.delete(partID: partID)
+        failures[partID] = nil
+        unsavedCompletions[partID] = bytes
+        await saveCompletion(partID)
+    }
+
+    /// Saves an unsaved completion. When the store can't be written, the part stays settling,
+    /// so no transfer replaces its file, and the save is retried after the ``RetryPolicy``'s
+    /// delays, then on each ``activate()``.
+    private func saveCompletion(_ partID: UUID) async {
+        guard let context = contexts[partID], let bytes = unsavedCompletions[partID] else { return }
         let date = now()
-        if context.expectedBytes > 0, bytes != context.expectedBytes {
-            Log.downloads.info("A file's size changed on the server since its download was planned")
-            await persist {
-                try await $0.updateProgress(partID: partID, bytesWritten: bytes, expectedBytes: bytes, now: date)
-            }
-        }
         let completed: Bool
         do {
+            if context.expectedBytes > 0, bytes != context.expectedBytes {
+                Log.downloads.info("A file's size changed on the server since its download was planned")
+                try await store.updateProgress(partID: partID, bytesWritten: bytes, expectedBytes: bytes, now: date)
+            }
             completed = try await store.completePart(partID: partID, finalBytes: bytes, now: date)
         } catch {
             logError("Couldn't record a finished download", error)
-            completed = false
+            // Another save may have succeeded meanwhile.
+            guard unsavedCompletions[partID] != nil else { return }
+            let failure = failures[partID, default: 0] + 1
+            failures[partID] = failure
+            guard let delay = retryPolicy.delay(beforeRetry: failure, random: random()) else { return }
+            let clock = clock
+            retries.removeValue(forKey: partID)?.cancel()
+            retries[partID] = Task { [weak self] in
+                guard (try? await clock.sleep(for: delay)) != nil else { return }
+                await self?.retrySavingCompletion(partID)
+            }
+            return
         }
+        guard unsavedCompletions.removeValue(forKey: partID) != nil else { return }
         forget(partID)
         settling.remove(partID)
         guard completed else { return }
@@ -869,9 +972,26 @@ public actor DownloadEngine {
         }
     }
 
+    private func retrySavingCompletion(_ partID: UUID) async {
+        guard !Task.isCancelled, retries.removeValue(forKey: partID) != nil else { return }
+        await saveCompletion(partID)
+    }
+
+    /// Saves the completions that failed and finalises the complete records that weren't.
+    private func reconcile() async {
+        for partID in unsavedCompletions.keys {
+            retries.removeValue(forKey: partID)?.cancel()
+            failures[partID] = nil
+            await saveCompletion(partID)
+        }
+        await finaliseCompletedRecords()
+    }
+
     /// Makes a complete record a local item, then deletes it. A failure is logged; the next
     /// activation repeats it.
     private func finalise(_ record: DownloadRecordDTO) async {
+        guard finalising.insert(record.id).inserted else { return }
+        defer { finalising.remove(record.id) }
         do {
             let item = try await localItems.upsertFromDownload(record, now: now())
             try await store.deleteRecord(record.id)
@@ -901,7 +1021,7 @@ public actor DownloadEngine {
             await failPermanently(partID, code: code, message: message)
             return
         }
-        await persist {
+        await persistIdle(partID) {
             try await $0.setPartState(
                 .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData)
         }
@@ -931,7 +1051,7 @@ public actor DownloadEngine {
         tasks[partID] = nil
         retries.removeValue(forKey: partID)?.cancel()
         await persist { try await $0.setState(.failed, forRecord: context.recordID) }
-        await persist {
+        await persistIdle(partID) {
             try await $0.setPartState(
                 .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData)
         }
@@ -977,6 +1097,18 @@ public actor DownloadEngine {
             try await write(store)
         } catch {
             logError("Couldn't update a download", error)
+        }
+    }
+
+    /// Runs the write that moves a part out of `running` (to queued or failed). When it fails,
+    /// the store still has the part running with no transfer, so its next launch accepts that.
+    private func persistIdle(_ partID: UUID, _ write: (DownloadStore) async throws -> Void) async {
+        do {
+            try await write(store)
+            strandedRunning.remove(partID)
+        } catch {
+            logError("Couldn't update a download", error)
+            strandedRunning.insert(partID)
         }
     }
 
