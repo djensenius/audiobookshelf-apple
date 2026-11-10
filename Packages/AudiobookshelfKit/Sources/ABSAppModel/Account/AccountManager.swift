@@ -356,6 +356,12 @@ public final class AccountManager {
         return await serverLogout(session, client: logoutClient)
     }
 
+    /// The custom headers saved for a connection, kept after sign-out, for signing in again.
+    /// - Throws: The ``KeychainError`` if they can't be read.
+    public func customHeaders(for id: UUID) async throws -> [String: String] {
+        try await credentials(for: id).load().customHeaders
+    }
+
     // MARK: - Private
 
     private func begin() -> Int {

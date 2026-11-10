@@ -103,6 +103,7 @@ Audiobookshelf/
     ├── ItemDetail/
     ├── Player/
     ├── Downloads/
+    ├── Connect/
     ├── Account/
     └── Settings/
 ```
