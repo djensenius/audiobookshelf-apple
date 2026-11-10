@@ -193,8 +193,9 @@ public final class SleepTimer {
 
     /// Resets the timer, for a gesture such as shake to reset. A running timer restarts while audio plays (a
     /// duration only after ``resetGuard`` seconds); during the grace period the expired timer restarts and playback
-    /// resumes after the pending rewind, with the reset feedback once it plays. If that rewind fails, the grace
-    /// period and the rewind come back, unless another item loaded meanwhile. Returns whether it reset.
+    /// resumes after the pending rewind, with the reset feedback once it plays. A cancel, a start or another item
+    /// before that rewind lands wins: nothing resumes (another item keeps the restarted timer). If the rewind fails,
+    /// the grace period and the rewind come back. Returns whether it reset.
     @discardableResult
     public func reset() -> Bool {
         if let run {
@@ -215,8 +216,7 @@ public final class SleepTimer {
         let target = time < control.currentTime ? time : nil
         let id = runID, item = itemID
         Task { [weak self] in
-            await self?.resume(rewindingTo: target, runID: id) {
-                guard $0.itemID == item else { return }
+            await self?.resume(rewindingTo: target, runID: id, item: item) {
                 $0.startGrace(for: expiredRun, until: graceEnd)
                 $0.pendingRewind = rewind
             }
@@ -381,21 +381,21 @@ public final class SleepTimer {
         pendingRewind = rewind.map { ($0, fadeStart) }
         let item = itemID
         Task { [weak self, control] in
-            // Another item may load before this runs, or during the seek.
-            guard self.map({ $0.itemID == item }) == true else { return }
+            guard self?.isCurrent(item) == true else { return }
             let landed = await control.seek(to: fadeStart)
-            guard let self, itemID == item else { return }
+            guard let self, isCurrent(item) else { return }
             pendingRewind?.at = landed ?? control.currentTime
             if let landed { didSeek(to: landed) }
         }
     }
 
-    /// Plays after a grace-period reset, rewinding to `time` first, unless the run changed meanwhile (a cancel
-    /// wins). When the rewind doesn't land, `undo` reopens the grace period and the run stops.
-    private func resume(rewindingTo time: Double?, runID id: Int, undo: (SleepTimer) -> Void) async {
+    /// Plays after a grace-period reset, rewinding to `time` first, unless the run or the item changed before or
+    /// during the seek. When the rewind doesn't land, `undo` reopens the grace period and the run stops.
+    private func resume(rewindingTo time: Double?, runID id: Int, item: String?, undo: (SleepTimer) -> Void) async {
+        guard isCurrent(item, runID: id) else { return }
         var landed: Double? = control.currentTime
         if let time { landed = await control.seek(to: time) }
-        guard runID == id else { return }
+        guard isCurrent(item, runID: id) else { return }
         guard let landed else {
             undo(self)
             stopRun()
@@ -404,6 +404,12 @@ public final class SleepTimer {
         if time != nil { didSeek(to: landed) }
         control.play()
         if options.playsResetFeedback { feedback?.playResetFeedback() }
+    }
+
+    /// Whether work begun on `item`, and during run `id` if given, still applies. Checked before and after a seek,
+    /// so another item loading, or a cancel or start, before it or during it wins.
+    private func isCurrent(_ item: String?, runID id: Int? = nil) -> Bool {
+        itemID == item && (id == nil || id == runID)
     }
 
     /// The pending rewind, consumed; nothing once playback moved away from where it was set.
