@@ -105,7 +105,7 @@ marker) are ignored. Consequences:
    | `pages/`, `components/`, `layouts/` | SwiftUI screens and views |
    | `store/`, `plugins/`, `mixins/`, `utils/`, `objects/`, `middleware/` | App state, services, and helpers |
    | `assets/`, `static/` | Asset catalog (only if the asset is still used) |
-   | `strings/*.json` | String Catalog — re-import translations |
+   | `strings/*.json` | String Catalog — run `mise run strings` after syncing `strings/` |
    | `android/` | Usually not applicable; check whether a server/API fix also affects us |
    | `.github/`, `fastlane/`, Node/Capacitor config | Not applicable |
 

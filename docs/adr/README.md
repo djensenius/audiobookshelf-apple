@@ -30,7 +30,10 @@ Write an ADR when a decision:
 
 Accepted ADRs are not rewritten. To change a decision, write a new ADR, set the old
 one's status to `Superseded by [NNNN](NNNN-slug.md)`, and update the index. Typo
-and link fixes are fine.
+and link fixes are fine. The pull request that implements an ADR may also update it
+to record findings it verified (for example, an assumption the ADR lists as still to
+be tested) and to refine details that don't change the decision; that pull request's
+description lists those edits.
 
 ## Index
 
@@ -44,9 +47,9 @@ topic ADR PRs for a reserved number don't edit it).
 | [0000](0000-template.md) | Template | [#21](https://github.com/djensenius/audiobookshelf-apple/issues/21) (P0-05) | — |
 | [0001](0001-architecture.md) | Architecture: modules, app layout, and concurrency | [#21](https://github.com/djensenius/audiobookshelf-apple/issues/21) (P0-05) | Accepted |
 | [0002](0002-identity-and-no-migration.md) | App identity and no data migration | [#18](https://github.com/djensenius/audiobookshelf-apple/issues/18) (P0-03) | Accepted |
-| [0003](0003-swiftdata.md) | SwiftData schema, versioning, and actor boundaries | [#35](https://github.com/djensenius/audiobookshelf-apple/issues/35) (P1-12) | Reserved |
-| [0004](0004-navigation.md) | Navigation architecture for iPhone, iPad, iPhone Duo and Mac | [#41](https://github.com/djensenius/audiobookshelf-apple/issues/41) (P3-01) | Reserved |
-| [0005](0005-images.md) | Cover and image loading and caching | [#42](https://github.com/djensenius/audiobookshelf-apple/issues/42) (P3-02) | Reserved |
-| [0006](0006-now-playing.md) | Now Playing API | [#47](https://github.com/djensenius/audiobookshelf-apple/issues/47) (P2-01) | Reserved |
-| [0007](0007-streaming.md) | Streaming strategy and minimum server version | [#48](https://github.com/djensenius/audiobookshelf-apple/issues/48) (P2-02) | Reserved |
-| [0008](0008-readers.md) | EPUB engine, MOBI/AZW3, and CBR support | [#100](https://github.com/djensenius/audiobookshelf-apple/issues/100) (P6-10) | Reserved |
+| [0003](0003-swiftdata.md) | SwiftData schema, versioning, and actor boundaries | [#35](https://github.com/djensenius/audiobookshelf-apple/issues/35) (P1-12) | Accepted |
+| [0004](0004-navigation.md) | Navigation architecture for iPhone, iPad, iPhone Duo and Mac | [#41](https://github.com/djensenius/audiobookshelf-apple/issues/41) (P3-01) | Accepted |
+| [0005](0005-images.md) | Cover and image loading and caching | [#42](https://github.com/djensenius/audiobookshelf-apple/issues/42) (P3-02) | Accepted |
+| [0006](0006-now-playing.md) | Now Playing API | [#47](https://github.com/djensenius/audiobookshelf-apple/issues/47) (P2-01) | Accepted |
+| [0007](0007-streaming.md) | Streaming strategy and minimum server version | [#48](https://github.com/djensenius/audiobookshelf-apple/issues/48) (P2-02) | Accepted |
+| [0008](0008-readers.md) | EPUB engine, MOBI/AZW3, and CBR support | [#100](https://github.com/djensenius/audiobookshelf-apple/issues/100) (P6-10) | Accepted |
