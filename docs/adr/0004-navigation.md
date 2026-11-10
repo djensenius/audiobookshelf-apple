@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-09
-- Issue: #TBD
+- Issue: #41 (P3-01)
 
 ## Context
 
@@ -69,6 +69,7 @@ The `TabView` shows a tab bar in compact width and a sidebar in regular width an
   - Gives us `tabViewBottomAccessory` for the mini player on iOS, and the search tab role.
   - `.defaultTabBarPlacement(.sidebar)` gives the iPhone Duo inner display and iPad a sidebar by default (27.0, iOS only).
   - The same code runs on macOS 15+ as a sidebar.
+  - Each `NavigationStack(path:)` can bind to a plain typed `[Route]` array. The navigation state is ordinary `Codable` data with no SwiftUI import, so it can be inspected and tested directly.
 - Cons
   - Sidebar-only tabs for library sections need a rule for which tab is selected when the window becomes compact.
   - There is no third column. Item detail is pushed onto the stack rather than shown beside the list.
@@ -117,21 +118,22 @@ WindowGroup(id: "main")                       // iOS + macOS, one Router per win
 └─ RootView
    ├─ no session and no downloads → ConnectFlow (port of pages/connect.vue)
    └─ TabView(selection: $router.selectedTab).tabViewStyle(.sidebarAdaptable)
-      ├─ Tab "Home"       NavigationStack(path: router.path(.home))
-      ├─ Tab "Library"    NavigationStack(path: router.path(.library))
+      ├─ Tab "Home"       NavigationStack(path: $router[path: .home])      // [Route]
+      ├─ Tab "Library"    NavigationStack(path: $router[path: .library])
       ├─ TabSection "Browse" .defaultVisibility(.hidden, for: .tabBar)   // sidebar only
       │    Series · Collections · Authors · Playlists   (books)
       │    Latest · Add podcast                         (podcasts)
-      ├─ Tab "Downloads"  NavigationStack(path: router.path(.downloads))
-      ├─ Tab "Account"    NavigationStack(path: router.path(.account))
+      ├─ Tab "Downloads"  NavigationStack(path: $router[path: .downloads])
+      ├─ Tab "Account"    NavigationStack(path: $router[path: .account])
       └─ Tab(role: .search) "Search" NavigationStack(...).searchable(...)
       .tabViewSidebarHeader { LibraryPicker }
       iOS:   .defaultTabBarPlacement(.sidebar) .tabBarMinimizeBehavior(.onScrollDown)
-             .tabViewBottomAccessory(isEnabled: player.hasSession) { MiniPlayer }
-             .fullScreenCover(isPresented: $player.isFullPlayerPresented) { PlayerScreen }
+             .tabViewBottomAccessory(isEnabled: playerVM.hasSession) { MiniPlayer }
+             .fullScreenCover(isPresented: $router.isFullPlayerPresented) { PlayerScreen }
       macOS: .safeAreaInset(edge: .bottom) { MiniPlayer }
-      both:  .inspector(isPresented: $player.isQueueInspectorPresented) { QueuePanel }
+      both:  .inspector(isPresented: $router.isQueueInspectorPresented) { QueuePanel }
              .focusedSceneValue(router) .onOpenURL .onContinueUserActivity
+      // Presentation flags live on the per-scene Router; playerVM is the shared PlayerViewModel.
 WindowGroup("Item", id: "item", for: Route.self)   // "Open in New Window" (iPad, Duo inner, Mac)
 Window("Now Playing", id: "now-playing")           // macOS only, single instance
 Settings { SettingsView }                          // macOS only
@@ -150,7 +152,7 @@ CarPlay scene (UIKit, CPTemplateApplicationSceneDelegate) // no Router, shares A
 
 #### Compact-width rule
 
-The sidebar-only section tabs need a fallback. If the size class becomes compact while a sidebar-only section is selected, `Router.normalize(for: .compact)` selects `.library` and sets that section as the Library root's selected section. If the size class becomes regular again, nothing changes.
+The sidebar-only section tabs need a fallback. If the size class becomes compact while a sidebar-only section is selected, `Router.normalize(isCompact: true)` selects `.library` and sets that section as the Library root's selected section. If the size class becomes regular again, nothing changes.
 
 #### Unauthenticated and offline states
 
@@ -160,7 +162,11 @@ The sidebar-only section tabs need a fallback. If the size class becomes compact
 ### Library switching
 
 - The current library is **per scene**: `Router.libraryID`. Two Mac or iPad windows can show different libraries.
-- The last-used library for each server and user is saved through ABSData. New windows and CarPlay start from it.
+- The last-used library for each server and user is saved in `AppSettings` (App Group `UserDefaults`, P1-05 #28), not in SwiftData. New windows and CarPlay start from it.
+  - A library switch in any window updates it.
+  - CarPlay's own library switch also updates it.
+  - CarPlay's switch never changes an open window's `Router.libraryID`.
+- `LibraryStore` (P3-05 #45) is shared by all scenes and keyed by library ID. It holds the libraries list, filter data and caches, and owns **no** "current library". Each scene passes its `Router.libraryID` to it.
 - The picker appears in three places:
   - `tabViewSidebarHeader` in sidebar mode.
   - A toolbar `Menu` item on the Home and Library roots in tab-bar mode. This is a `Label` with an icon and the library name, and it replaces the button in `Appbar.vue`.
@@ -187,22 +193,29 @@ enum Route: Hashable, Codable, Sendable {
     case settings                                      // iOS only; Mac uses the Settings scene
 }
 
+// ABSAppModel/Navigation/Router.swift — imports Foundation and Observation only, no SwiftUI
 @MainActor @Observable final class Router {
     var selectedTab: AppTab
     var libraryID: String?
-    var paths: [AppTab: NavigationPath]   // one NavigationPath per tab
-    func path(for tab: AppTab) -> Binding<NavigationPath>
+    var paths: [AppTab: [Route]]          // one typed path per tab
+    var isFullPlayerPresented = false     // per-scene presentation state,
+    var isQueueInspectorPresented = false // never stored on the shared player
+    subscript(path tab: AppTab) -> [Route] { get set }  // NavigationStack binds $router[path: tab]
+    var snapshot: Snapshot { get set }    // Codable: tab, libraryID, paths, inspector flag
     func open(_ link: DeepLink)           // the only entry point for external navigation
-    func normalize(for sizeClass: UserInterfaceSizeClass?)
+    func normalize(isCompact: Bool)       // the view passes horizontalSizeClass == .compact
 }
 ```
 
 **Routes**
 
 - A `Route` carries only server IDs (or ID wrappers from ABSCore). It never carries a model, so routes stay `Codable`, `Sendable` and safe to restore.
-- Each `NavigationStack` registers a single `.navigationDestination(for: Route.self)`.
-- We use `NavigationPath` rather than `[Route]` because it is what `NavigationStack(path:)` and restoration (`NavigationPath.CodableRepresentation`) expect.
-- Only `Route` values may be appended, so `path.codable` is never `nil`.
+- Each `NavigationStack(path:)` binds to that tab's `[Route]` and registers a single `.navigationDestination(for: Route.self)`.
+- We use a typed `[Route]` per tab instead of `NavigationPath` for three reasons:
+  - It is plain `Codable` data, so `ABSAppModel` needs no SwiftUI import.
+  - Tests can inspect and compare it element by element.
+  - Restoration is plain JSON, with no `CodableRepresentation`.
+- The subscript is needed because `$router.paths[tab, default: []]` does not compile: the `default:` autoclosure is not a `Hashable` key-path index.
 
 **Presentations are not routes.** These are owned by the feature that presents them, as sheets, popovers or the inspector:
 
@@ -214,19 +227,28 @@ enum Route: Hashable, Codable, Sendable {
 
 **Where the code lives**
 
-- `AppTab`, `Route`, `Router` and `DeepLink` live in `ABSUI` (folder `Navigation/`), so feature screens can use them and `ABSUITests` can test them with `swift test`.
+- `AppTab`, `Route`, `Router` and `DeepLink` live in **ABSAppModel**, in `ABSAppModel/Navigation/` (for example `Router.swift`, per P3-04 #44). They are tested with `swift test` in its test target.
+- `DuoArrangement` and the other navigation-related views and modifiers stay in **ABSUI**.
 - `RootView`, the scenes, `Commands` and CarPlay live in the app target.
 
 ### Deep links and Handoff
 
 The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.plist`). We keep it.
 
+**Scheme collision.** The legacy Capacitor app registers the same scheme. If both apps are installed on one device, iOS does not define which app receives `audiobookshelf://` URLs, and that includes the OIDC callback.
+
+- OIDC is not affected, because `ASWebAuthenticationSession` with `.customScheme("audiobookshelf")` delivers the callback to the session that started it.
+- For other links, the legacy app may open instead of the new one.
+- We accept this, because the new app replaces the legacy one under the same scheme.
+- The onboarding and release notes (P3-04 #44) state that the legacy app should be removed.
+- We do not add a second scheme.
+
 **URLs**
 
 | URL | Opens |
 | --- | --- |
 | `audiobookshelf://item/{itemID}[?episode={episodeID}]` | Library tab, then the item (and episode) |
-| `audiobookshelf://play/{itemID}[?episode=…&t={seconds}]` | Same as above, then starts playback through `AppEnvironment.player` |
+| `audiobookshelf://play/{itemID}[?episode=…&t={seconds}]` | Opens the item, then follows the play-link rules below. Playback goes through `PlayerViewModel` / `PlaybackCoordinator` |
 | `audiobookshelf://series/{id}`, `/author/{id}`, `/collection/{id}`, `/playlist/{id}` | The matching route |
 | `audiobookshelf://library/{libraryID}` | Switches library |
 | `audiobookshelf://search?q=` | Search tab |
@@ -241,20 +263,33 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 - In the scene that receives the URL, `RootView.onOpenURL` calls `router.open(_:)`.
 - `.handlesExternalEvents(preferring:allowing:)` sends links to an existing window instead of creating a new one.
 
+**Play links never start playback silently.** Any app or web page can open a URL, so `play/` links are limited:
+
+- If the link targets the item (and episode) that is already loaded, it only resumes. It never seeks, even when the link carries `t=`.
+- Otherwise the item screen opens with a confirmation: "Play *title*?", which shows `t=` as "from 1:23:45" if present.
+  - Nothing replaces the current session, and nothing seeks, until the user confirms.
+- Siri, Shortcuts and widgets start playback through App Intents (P5-09 #86, P5-10 #87), not through URLs, so they do not need this confirmation.
+
 **Handoff**
 
 - Item, episode and player screens publish `.userActivity("org.davidjensenius.Audiobookshelf.item")` with server, library, item, episode and position.
-- `.onContinueUserActivity` turns the activity into the same `DeepLink`. The type must be added to `NSUserActivityTypes`.
+- `.onContinueUserActivity` turns the activity into the same `DeepLink`.
+- The activity type must be added to `NSUserActivityTypes` in the app's `Info.plist`. This is a follow-up in P3-04 #44.
+- The intents and entities side of Handoff is in P5-10 #87.
 - App Intents and Spotlight, added later, also produce a `DeepLink`.
 
 ### State restoration
 
 **Per scene (`@SceneStorage`)**
 
+`Router.snapshot` is stored as JSON `Data` under the key `nav.snapshot`. It is a `Codable` struct of:
+
 - The selected tab.
 - `libraryID`.
-- Whether the inspector is shown.
-- `nav.paths`: JSON-encoded `[AppTab: NavigationPath.CodableRepresentation]`.
+- The `[AppTab: [Route]]` paths.
+- Whether the queue inspector is shown.
+
+`isFullPlayerPresented` is deliberately left out.
 
 **Restore rules**
 
@@ -264,7 +299,7 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 
 **App-wide state**
 
-- The last-used library per server and user is saved through ABSData.
+- The last-used library per server and user is saved in `AppSettings`.
 - The playback session is restored by ABSPlayback, not by navigation.
 - The full player is not restored as presented. After a relaunch it comes back as the mini player.
 - The Mac Now Playing window uses `.restorationBehavior(.disabled)`.
@@ -285,7 +320,13 @@ The issue suggested an inspector for the full player on iPad. We deliberately us
 - Wide layouts are handled inside `PlayerScreen` with `ArrangementView`.
 - The inspector is still used, for the queue panel next to browsing content.
 
-The player model (`AppEnvironment.player`) lives outside every view. Every scene and CarPlay observe it.
+**Shared player, per-scene presentation**
+
+- The playback object is `PlaybackCoordinator` (ABSPlayback, P2-06a #52). It lives in `AppEnvironment`, outside every view.
+- Views observe it through a shared `@MainActor @Observable` `PlayerViewModel` in ABSAppModel, which wraps it. Every window scene and CarPlay see the same playback state.
+- Whether the full player or the queue inspector is shown is **per scene**: `Router.isFullPlayerPresented` and `Router.isQueueInspectorPresented`. It is never on `PlaybackCoordinator` or `PlayerViewModel`.
+  - Opening the player in one window, or from CarPlay, does not present it in other windows.
+  - The Mac Now Playing window is a scene of its own, opened with `openWindow`.
 
 ### iPhone Duo: outer, flat, book and laptop
 
@@ -464,7 +505,8 @@ ArrangementView { primary } secondary: { secondary }
 **How commands reach state**
 
 - Navigation commands use `@FocusedValue(Router.self)`, which reads the key window's router published with `.focusedSceneValue(router)`.
-- Playback commands talk to `AppEnvironment.player` directly.
+- Playback commands call `PlayerViewModel` / `PlaybackCoordinator` from `AppEnvironment`.
+- "Show Now Playing" sets the focused router's `isFullPlayerPresented` on iOS, and calls `openWindow(id: "now-playing")` on the Mac.
 
 ### CarPlay and `AppEnvironment`
 
@@ -476,13 +518,12 @@ ArrangementView { primary } secondary: { secondary }
 It owns these services:
 
 - Session and account.
-- The library repository and cache.
-- The last-used library.
-- `PlayerModel`.
+- `LibraryStore` (P3-05 #45): shared, keyed by library ID, and owning no current library.
+- `AppSettings` (P1-05 #28), which includes the last-used library per server and user.
+- `PlaybackCoordinator` (P2-06a #52) and the `PlayerViewModel` that wraps it.
 - Downloads.
-- Settings.
 
-It does **not** own a `Router`. Navigation is per window scene.
+It does **not** own a `Router` or any presentation state. Navigation and presentation are per window scene.
 
 **CarPlay templates**
 
@@ -490,7 +531,8 @@ It does **not** own a `Router`. Navigation is per window scene.
   - `CPTabBarTemplate` with at most 4 tabs, for example Continue, Library and Downloads.
   - `CPListTemplate`s up to a depth of 5.
   - `CPNowPlayingTemplate.shared`.
-- CarPlay starts playback through `PlayerModel`. Every window's mini player appears because it observes the same model.
+- CarPlay keeps its own current library. It starts from the `AppSettings` last-used library, and its library switch writes back to `AppSettings`.
+- CarPlay starts playback through `PlaybackCoordinator`. Every window's mini player appears because each window observes the same `PlayerViewModel`.
 - CarPlay never changes window routers, and windows never push CarPlay templates.
 - No `Route` or `DeepLink` type is used in CarPlay.
 
@@ -518,7 +560,7 @@ All entries were checked in the Xcode 27.2 iPhoneOS and MacOSX SDK `SwiftUI.swif
 | `View.inspector(isPresented:content:)`, `InspectorCommands` | iOS 17.0, macOS 14.0 | Queue panel |
 | `focusedSceneValue(_:)` (Observable), `@FocusedValue(_: Type)` | iOS 17.0, macOS 14.0 | Commands |
 | `restorationBehavior(_:)` | iOS 18.0, macOS 15.0 | Now Playing window |
-| `NavigationPath.CodableRepresentation`, `WindowGroup(id:for:)`, `openWindow(id:value:)`, `SceneStorage`, `onOpenURL`, `userActivity` / `onContinueUserActivity`, `handlesExternalEvents` | ≤ iOS 16, macOS 13 | Routing and restoration |
+| `WindowGroup(id:for:)`, `openWindow(id:value:)`, `SceneStorage`, `onOpenURL`, `userActivity` / `onContinueUserActivity`, `handlesExternalEvents` | ≤ iOS 16, macOS 13 | Routing and restoration |
 
 **Minimum version per API**
 
@@ -533,7 +575,9 @@ All entries were checked in the Xcode 27.2 iPhoneOS and MacOSX SDK `SwiftUI.swif
 - One root view tree works on every platform. Folding, unfolding, window resizing and Slide Over keep tab selection, per-tab paths and the player presentation.
 - iPhone Duo vertical bars, Liquid Glass and Mac toolbars come from the system.
 - Routing, deep links, Handoff and restoration share one `DeepLink → Router.open` path that can be unit tested.
+- Navigation state is a plain `Codable` `[AppTab: [Route]]` in ABSAppModel, with no SwiftUI. Tests can assert exact paths after deep links, restoration, normalization and library or server switches.
 - CarPlay stays decoupled and reuses services through `AppEnvironment`.
+- Presentation state is per scene, so one window, or CarPlay, never presents the player in another window.
 
 **Negative and risks**
 
@@ -541,15 +585,20 @@ All entries were checked in the Xcode 27.2 iPhoneOS and MacOSX SDK `SwiftUI.swif
   - Mitigations: "Open in New Window" and the inspector.
   - Revisit if users ask for a column layout. That would be a new ADR, and the detail column could not host `ArrangementView`.
 - The Mac mini player is custom (`safeAreaInset`), and its placement differs from iOS.
-- Sidebar-only section tabs need `Router.normalize(for:)` and tests.
+- Sidebar-only section tabs need `Router.normalize(isCompact:)` and tests.
 - Two code paths exist below 27.1 for arrangement and toolbar axis behavior. They should be removed when the minimum OS moves to 27.1.
-- A `NavigationPath` cannot be inspected element by element. Tests check `DeepLink` parsing (to `[Route]`) and the `Router` restoration round trip, not the internals of the path.
+- Only `Route` can be pushed onto a tab's stack. A future destination type must become a `Route` case, which is intended.
+- `Router` needs a `subscript(path:)` to bind each `NavigationStack`.
+- If the legacy app is still installed, it may receive `audiobookshelf://` links.
 
 **Follow-ups**
 
-- Add `NSUserActivityTypes` to the app's `Info.plist`.
-- The shell issue implements `AppTab`, `Route`, `Router`, `DeepLink` and `DuoArrangement` in ABSUI, with tests.
-- The player UI, Mac and CarPlay issues follow the placements above.
+- **P3-04 #44**:
+  - Add `NSUserActivityTypes` (`org.davidjensenius.Audiobookshelf.item`) to the app's `Info.plist`.
+  - Implement `AppTab`, `Route`, `Router` and `DeepLink` in `ABSAppModel/Navigation/`, including the play-link confirmation rule.
+  - Note the legacy-app scheme collision in the onboarding and release notes.
+- **P5-07 #84**: `DuoArrangement` in ABSUI.
+- The player UI (P2-09 #56), iPad (P5-06 #83), Mac (P5-05 #82) and CarPlay (P5-02 #79, P5-03 #80) issues follow the placements above.
 
 ## Validation
 
@@ -558,30 +607,39 @@ All entries were checked in the Xcode 27.2 iPhoneOS and MacOSX SDK `SwiftUI.swif
 - **SDK check.** Every API in the table was looked up in the Xcode 27.2 `iPhoneOS27.2.sdk` and `MacOSX27.2.sdk` swiftinterfaces, with its `@available` attributes.
 - **Throwaway spike** (`/tmp/abs-spike-nav`, deleted afterwards).
   - The spike contained the proposed `RootView`: `TabView`, `TabSection`, search role, sidebar header, bottom accessory, `fullScreenCover`, inspector, `focusedSceneValue`, `onOpenURL`, `onContinueUserActivity` and `SceneStorage`.
-  - It also contained `Router` with `NavigationPath.CodableRepresentation` restoration, `DeepLink`, the `DuoArrangement` wrapper, a fold-aware grid and 27.1 toolbar modifiers.
+  - It also contained `Router`, `DeepLink`, the `DuoArrangement` wrapper, a fold-aware grid and 27.1 toolbar modifiers.
   - The app scenes were included as well: `WindowGroup(for: Route.self)`, `Window`, `Settings`, `commands` with `@FocusedValue(Router.self)`, and `restorationBehavior`.
+- **Router spike.** A follow-up spike also typechecked, with no errors, for both targets below.
+  - Its `Router` imported only Foundation and Observation, and held `[AppTab: [Route]]` paths and per-scene presentation flags.
+  - `NavigationStack(path: $router[path: tab])`, `fullScreenCover` and `inspector` bound to the router's flags.
+  - `@SceneStorage` held a JSON `Data` snapshot.
+  - The first attempt bound `$router.paths[tab, default: []]`, which fails with "subscript index of type '() -> [Route]' in a key path must be Hashable". That is why `Router` has a subscript.
 - **Typecheck results.** The spike typechecked with no errors in Swift 6 mode:
   - `xcrun --sdk iphonesimulator swiftc -typecheck -parse-as-library -swift-version 6 -target arm64-apple-ios27.0-simulator`;
   - `xcrun --sdk macosx swiftc -typecheck -parse-as-library -swift-version 6 -target arm64-apple-macos27.0`.
 - **`ArrangementView` without a gate fails.** Using it without `if #available` at a 27.0 target fails with "'ArrangementView' is only available in iOS 27.1 or newer". This confirms the gating requirement.
 - **Gated toolbar items typecheck.** `if #available(iOS 27.1, *)` inside a `@ToolbarContentBuilder` around `.axisBehavior(.verticalPreferred)` typechecks at a 27.0 target.
 
-**Assumed (not yet verified at runtime)**
+**Runtime and device validation (performed in the implementing issues)**
 
-These must be checked in the iPhone Duo simulator (Xcode 27.2) and on iPad and Mac when the shell is implemented:
+None of this was run for this ADR. Each item is an acceptance criterion of the issue that implements it:
 
-- `tabViewBottomAccessory` behaves well with vertical tab bars on the iPhone Duo outer display and in sidebar mode.
-- `splitArrangementAxis` is `nil` when `ArrangementView` shows the primary pane only.
-- `.split.axes(.horizontal)` shows primary-only in laptop pose.
-- `.defaultVisibility(.hidden, for: .tabBar)` section tabs behave as described when the window becomes compact.
-- iPhone Duo always runs iOS 27.1 or later, so the 27.0 fallback is only seen on iPad and iPhone.
+- **Performed in #44 (P3-04):**
+  - `Router` and `DeepLink` tests in the ABSAppModel test target. They cover parsing, `oauth` being rejected, the play-link confirmation and resume-only rule, the snapshot JSON round trip, `normalize(isCompact:)`, path resets on library and server switches, and presentation flags staying per scene.
+  - Sidebar-only section tabs (`.defaultVisibility(.hidden, for: .tabBar)`) behave as described when the window becomes compact.
+  - The mini-player slot (`tabViewBottomAccessory`) works in tab-bar and sidebar modes.
+  - These are checked on iPhone, iPad and Mac.
+- **Performed in #56 (P2-09):** mini player and full-player presentation on iPhone, iPad and Mac, including the Mac Now Playing window.
+- **Performed in #84 (P5-07):**
+  - On the iPhone Duo simulator (Xcode 27.2), `splitArrangementAxis` is `nil` when only the primary pane shows.
+  - `.split.axes(.horizontal)` shows primary-only in laptop pose, with controls below the `.division` region.
+  - The player is checked in flat, book, laptop, tent and outer forms.
+  - The 27.0 fallback works, on the assumption that iPhone Duo always runs 27.1 or later.
+- **Performed in #85 (P5-08):** iPhone Duo vertical bars (including the bottom accessory on the outer display), `toolbarVerticalEdge` insets, and even, fold-aware grid columns.
+- **Performed in #66 (P3-11):** the detail `ArrangementView` shows inline secondary content when not split.
+- **Performed in #83 (P5-06) and #82 (P5-05):** multiple windows, menus and commands, and `supportsMultipleWindows` on iPad, iPhone Duo inner and Mac.
+- **Performed in #79 and #80 (P5-02, P5-03):** CarPlay starts from, and writes back, the `AppSettings` last-used library.
 - **Simulator caveats.** Black screenshots appear for minutes after boot. VoiceOver is unavailable on iPhone Duo in 27.2.
-
-**Planned checks**
-
-- `ABSUITests` covers `DeepLink` parsing, including `oauth` being rejected.
-- `ABSUITests` covers the `Router` paths round trip through `CodableRepresentation`, `normalize(for:)`, and path resets on library and server switches.
-- A manual pass covers iPhone, iPad and iPhone Duo (outer, flat, book, laptop and tent) and Mac against the sketches above.
 
 ## References
 
