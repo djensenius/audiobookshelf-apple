@@ -143,7 +143,7 @@ Cons:
 ### Option 4: `AVAssetResourceLoaderDelegate` with a custom URL scheme
 
 - Rewrite `https://…` to a custom scheme such as `abs-https://…`.
-- The delegate re-issues each request with `URLSession`, adding headers, and feeds the bytes back to AVFoundation.
+- The delegate re-issues each request with `URLSession`, adding the server's custom proxy headers (never `Authorization` or `Cookie`; see Decision 6), and feeds the bytes back to AVFoundation.
 - A throwaway spike in `/tmp` was typechecked with Swift 6 and Xcode 27.2 for `arm64-apple-ios27.0` and `arm64-apple-macos27.0`, then deleted. It confirmed the API shape:
   - `shouldWaitForLoadingOfRequestedResource`
   - `contentInformationRequest`: `contentType` via `UTType(mimeType:)`, `contentLength` from `Content-Range`, `isByteRangeAccessSupported`
@@ -152,7 +152,7 @@ Cons:
   - Under Swift 6 strict concurrency, an `@unchecked Sendable` class confined to a serial queue.
 
 Pros:
-- Public API. Allows arbitrary headers on every byte-range request of a progressive file, so it is the only public option that satisfies header-gated proxies.
+- Public API. Allows custom headers on every byte-range request of a progressive file, so it is the only public option that satisfies header-gated proxies.
 - Headers are read from the live server config, so they can change without rebuilding the asset.
 
 Cons:
@@ -248,10 +248,14 @@ Cons:
    - HLS sessions always have exactly one track.
    - Engine details belong to the playback-engine issue.
 6. **Custom-header servers.**
-   - When a server config has custom headers, the app sends them on **all** `URLSession` API and download requests. That is broader than the legacy app, which sends them only on ping and login. Header values are secrets and live in the Keychain.
-   - **Direct play** uses Option 4: a custom-scheme resource loader, used only for that server. It adds the custom headers and nothing else, because `/public/session` needs no Bearer token.
-   - If the only custom header is `Cookie`, pass it with the public `AVURLAssetHTTPCookiesKey` on a plain asset instead. We assume that key also covers HLS segment requests; validation must confirm it.
-   - **HLS with non-cookie custom headers is not supported** (Option 4 cannot cover segments, and Options 3 and 5 are rejected).
+   - **Reserved names.** User custom headers may **not** be named `Authorization` or `Cookie` (case-insensitive).
+     - The API client rejects them when the server is configured, with `CustomHeaderError.reserved` (PR #128). The connect UI shows the reason.
+     - The guidance tells the user to give the proxy a distinct header or a service token, for example Cloudflare Access `CF-Access-Client-Id` / `CF-Access-Client-Secret`.
+     - `Authorization` always carries the Audiobookshelf `Bearer` token, so it can never conflict with a proxy's `Basic` or other scheme.
+     - Custom headers never add or replace cookies, so `AVURLAssetHTTPCookiesKey` is not used.
+   - When a server config has custom headers, the app sends them on **all** `URLSession` API and download requests, next to the app's own `Authorization: Bearer`. That is broader than the legacy app, which sends them only on ping and login. Header values are secrets and live in the Keychain.
+   - **Direct play** uses Option 4: a custom-scheme resource loader, used only for that server. It adds the custom headers and nothing else. `/public/session` needs no Bearer token, and the loader never sends `Authorization` or `Cookie`.
+   - **HLS with custom headers is not supported** (Option 4 cannot cover segments, and Options 3 and 5 are rejected). A plain `AVURLAsset` has no public option for adding custom headers.
      - If such a server returns `playMethod == 2`, show "This file needs server transcoding, which isn't available when custom headers are configured."
      - Add a hint to let `/public/session/*` and `/hls/*` through the proxy without the header. On the Audiobookshelf side those paths are already protected only by unguessable session ids.
 7. **Local (downloaded) playback.**
@@ -322,11 +326,10 @@ Cons:
 - `curl -r 1000-1999` on the public track URL returns `206` with `Content-Range`, both with and without X-Accel (nginx).
 - After a server restart, the track URL returns 404, and the app re-opens the session.
 - Uploading the same local session (same UUID) twice does not create a duplicate.
-- `AVURLAssetHTTPCookiesKey` cookies reach HLS segment requests.
 
 **Verified from source and SDK:**
 - Every server behaviour cited in Context, with file paths at the commits listed.
-- SDK header facts: no published header-fields key; `AVURLAssetOverrideMIMETypeKey` is available from iOS 17; `AVURLAssetHTTPCookiesKey` and `AVURLAssetHTTPUserAgentKey` are public.
+- SDK header facts: no published header-fields key; `AVURLAssetOverrideMIMETypeKey` is available from iOS 17; `AVURLAssetHTTPUserAgentKey` is public. `AVURLAssetHTTPCookiesKey` is public too, but this ADR does not use it.
 - The resource-loader API shape typechecks under Swift 6 for iOS and macOS 27.
 - The MIME probe ran on macOS 27.2 only.
 
@@ -334,7 +337,6 @@ Cons:
 - `AVPlayer` seek and range behaviour against the public route.
 - iOS results from `isPlayableExtendedMIMEType`.
 - Resource-loader limits for HLS segments.
-- Cookie propagation to HLS segments.
 - HTTP status reporting through `AVPlayerItem.errorLog()` for progressive (non-HLS) items.
 - Express `sendFile` range support (the documented default of the `send` module, not re-read).
 
