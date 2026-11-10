@@ -104,6 +104,8 @@ public final class ConnectViewModel {
     @ObservationIgnored private let localNetwork: any LocalNetworkAccessChecking
     /// Bumped by every action, so the result of one the user has left is dropped.
     @ObservationIgnored private var attempt = 0
+    /// The last non-removal action; overlapping removals may reconcile the same list.
+    @ObservationIgnored private var flow = 0
     /// The action ``retry()`` repeats.
     @ObservationIgnored private var lastAction: Action?
     /// The check or sign-in in progress, which ``cancel()`` cancels.
@@ -300,7 +302,8 @@ public final class ConnectViewModel {
     /// Forgets a saved server, its session and its custom headers.
     public func remove(_ connection: ServerConnectionDTO) async {
         guard !isBusy else { return }
-        let attempt = next()
+        let attempt = next(removing: true)
+        let flow = self.flow
         failure = nil
         do {
             try await backend.remove(connection.id)
@@ -308,8 +311,9 @@ public final class ConnectViewModel {
             guard attempt == self.attempt else { return }
             failure = ConnectFailure(error)
         }
-        // Removal can finish after the user has started a different flow.
-        guard attempt == self.attempt else { return }
+        // Any removal in this flow may empty the list, even if a later removal finished first.
+        // A different flow still owns its phase and failure.
+        guard flow == self.flow else { return }
         if phase == .servers, savedServers.isEmpty { phase = .address }
     }
 
@@ -460,8 +464,9 @@ public final class ConnectViewModel {
     }
 
     @discardableResult
-    private func next() -> Int {
+    private func next(removing: Bool = false) -> Int {
         attempt += 1
+        if !removing { flow = attempt }
         return attempt
     }
 

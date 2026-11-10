@@ -462,6 +462,64 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.savedServers == [saved])
     }
 
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true], [false, true])
+    func overlappingRemovalsReconcileTheList(firstFinishesLast: Bool, newerFails: Bool) async {
+        let first = connection()
+        let second = connection(username: "root")
+        backend.connections = [first, second]
+        let (model, _) = model()
+        let firstGate = StubGate()
+        backend.removeGate = firstGate
+        let firstTask = Task { await model.remove(first) }
+        await firstGate.arrived()
+        let secondGate = StubGate()
+        backend.removeGate = secondGate
+        let secondTask = Task { await model.remove(second) }
+        await secondGate.arrived()
+
+        if firstFinishesLast {
+            backend.removeError = newerFails ? AccountError.connectionNotFound : nil
+            secondGate.open()
+            await secondTask.value
+            #expect(model.savedServers.contains(first) && model.phase == .servers)
+            backend.removeError = nil
+            firstGate.open()
+            await firstTask.value
+        } else {
+            firstGate.open()
+            await firstTask.value
+            #expect(model.savedServers == [second] && model.phase == .servers)
+            backend.removeError = newerFails ? AccountError.connectionNotFound : nil
+            secondGate.open()
+            await secondTask.value
+        }
+
+        #expect(backend.removed == [first.id, second.id])
+        #expect(model.savedServers == (newerFails ? [second] : []))
+        #expect(model.phase == (newerFails ? .servers : .address))
+        #expect(model.failure == (newerFails ? .serverNotSaved : nil))
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func staleSuccessfulRemovalDoesNotReplaceNewerSelectionFailure() async {
+        let saved = connection()
+        backend.connections = [saved]
+        let gate = StubGate()
+        backend.removeGate = gate
+        let (model, _) = model()
+        let removal = Task { await model.remove(saved) }
+        await gate.arrived()
+
+        backend.validateError = ServerValidationError.notAudiobookshelf
+        await model.select(saved)
+        #expect(model.phase == .servers && model.failure == .notAudiobookshelf)
+        gate.open()
+        await removal.value
+
+        #expect(model.savedServers.isEmpty)
+        #expect(model.phase == .servers && model.failure == .notAudiobookshelf)
+    }
+
     @Test(.timeLimit(.minutes(1)), arguments: [false, true])
     func staleRemovalFailureDoesNotReplaceNewerFlow(selectSaved: Bool) async {
         let removed = connection()
