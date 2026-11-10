@@ -296,8 +296,10 @@ def run(version, test):
                  "--scratch-path", ".build/swiftpm", "--filter", "SeriesDetailContractTests"],
                 env=environment, check=True)
     finally:
-        command("docker", "rm", "-f", container)
-        shutil.rmtree(work)
+        try:
+            command("docker", "rm", "-f", container)
+        finally:
+            shutil.rmtree(work)
         print(f"CLEANUP {version}: removed {container} and {work}", flush=True)
 
 
