@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-09
-- Issue: #TBD
+- Issue: [#21](https://github.com/djensenius/audiobookshelf-apple/issues/21) (P0-05)
 
 ## Context
 

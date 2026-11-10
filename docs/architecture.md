@@ -17,6 +17,9 @@ are listed in the [ADR index](adr/README.md).
   templates, and the `AppEnvironment` that wires services together.
 - The server holds all user progress. The app has no data migration from the
   legacy app (see [ADR 0002](adr/0002-identity-and-no-migration.md)).
+- The minimum supported server is Audiobookshelf 2.26.0
+  ([ADR 0007](adr/0007-streaming.md)). Version gates go through `ServerFeatures`
+  in `ABSCore`; code needed only for older servers is not written.
 
 ## Modules
 
@@ -62,14 +65,14 @@ models in a view).
 
 | Module | Owns | May import |
 | --- | --- | --- |
-| `ABSCore` | Models (Sendable DTOs), utilities, logging, settings, network reachability, Keychain | Apple frameworks only |
-| `ABSAPI` | HTTP client, authentication (local and OIDC), endpoints, custom headers | `ABSCore` |
+| `ABSCore` | Shared models and value types, utilities, logging, settings, network reachability, Keychain, `ServerFeatures`, `ImagePipeline` actor and `ImageKey`, `DownloadedCoverLookup` protocol | Apple frameworks only |
+| `ABSAPI` | HTTP client, authentication (local and OIDC), endpoints, custom headers, API DTOs, image request building | `ABSCore` |
 | `ABSRealtime` | Socket.IO client over `URLSessionWebSocketTask` | `ABSCore`, `ABSAPI` |
-| `ABSData` | SwiftData schema and `@ModelActor` stores | `ABSCore` |
-| `ABSPlayback` | Playback engine, coordinator, progress sync, sleep timer, Now Playing | `ABSCore`, `ABSAPI`, `ABSData` |
+| `ABSData` | SwiftData schema, `@ModelActor` stores, and `<Model>DTO` types for persisted models | `ABSCore` |
+| `ABSPlayback` | Playback engine, `PlaybackCoordinator`, progress sync, sleep timer, Now Playing adapter (`ABSPlayback/NowPlaying/`) | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSDownloads` | Background `URLSession` downloads | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSUI` | Design system, shared components, covers, localized strings | `ABSCore` |
-| `ABSAppModel` (planned) | Account and library state, routing, feature view models, realtime bridge | everything above except `ABSUI` |
+| `ABSAppModel` (planned) | Account and library state, routing (`Router`, `Route`, `DeepLink`, `AppTab` in `ABSAppModel/Navigation/`), feature view models, realtime bridge, `DownloadedCoverLookup` implementation | everything above except `ABSUI` |
 
 Rules:
 
@@ -79,7 +82,10 @@ Rules:
 - `ABSUI` imports only `ABSCore`; in particular it never imports `ABSAppModel`.
   Shared components take plain values and closures, so they work in previews and
   in any feature.
-- `ABSAppModel` never imports `ABSUI` and defines no views.
+- `ABSAppModel` never imports `ABSUI` and defines no views. It may import
+  `Observation` and `SwiftData` (to observe stores). Prefer no SwiftUI import;
+  use SwiftUI value types only if unavoidable. Navigation paths are plain
+  `Codable` values (`[AppTab: [Route]]`).
 - Every module is declared in `Package.swift` already. `ABSAppModel` (P0-02) is the
   only planned target addition; adding another needs an ADR.
 - Every new dependency edge must be declared in `Package.swift` in the same PR and
@@ -150,7 +156,8 @@ target.
   Exceptions are types bound to the main thread by Apple frameworks (the
   `AVPlayer`-based engine, CarPlay templates); those are `@MainActor`.
 - **Only `Sendable` values cross actor boundaries.** API and service types exchange
-  `Sendable` structs and enums from `ABSCore` (DTOs).
+  `Sendable` structs and enums (DTOs) from `ABSCore` or the owning module: API DTOs
+  in `ABSAPI`, `<Model>DTO` types for persisted models in `ABSData`.
 - **No `@Model` object crosses an actor.** SwiftData access goes through
   `@ModelActor` stores in `ABSData`, which accept and return DTOs or
   `PersistentIdentifier`. Views may use `@Query` on the main context.
