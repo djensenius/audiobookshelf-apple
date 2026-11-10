@@ -163,6 +163,32 @@ public actor APIClient {
         }
     }
 
+    // MARK: - Token access
+
+    /// The stored access token, or `nil` when signed out. Never makes a network request.
+    public func currentAccessToken() async -> String? {
+        await tokenProvider.tokens()?.accessToken
+    }
+
+    /// An access token for a request made outside this client (downloads, streaming).
+    ///
+    /// - Parameter rejected: `nil` for the stored token. After a 401, the token the server
+    ///   rejected: if it is still the stored token, the tokens are refreshed through the same
+    ///   single refresh 401s use (joining one already in flight); if the stored token has
+    ///   changed since, that newer token is returned without refreshing.
+    /// - Throws: ``APIError/notAuthenticated`` when signed out, and the errors a 401's refresh
+    ///   throws (such as ``APIError/sessionExpired``) when the refresh fails.
+    public func accessToken(replacing rejected: String?) async throws -> String {
+        let readGeneration = refreshGeneration
+        requestGenerations[readGeneration, default: 0] += 1
+        defer { endRequest(readAt: readGeneration) }
+        guard let tokens = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
+        guard let rejected, rejected == tokens.accessToken else { return tokens.accessToken }
+        // The caller's rejection is treated as if the pair was sent when it was read here.
+        let outcome = try await refreshedTokens(replacing: tokens, readAt: readGeneration, sentAt: readGeneration)
+        return outcome.tokens.accessToken
+    }
+
     // MARK: - Token refresh
 
     /// Returns the tokens to retry with after `rejected` got a 401, where `rejected` was read at
