@@ -94,6 +94,64 @@ import Testing
 
     // MARK: - Sends
 
+    @Test(
+        arguments: ["unseeded", "known-null", "known-location"].flatMap { seed in
+            [ProgressGroups(), .audio, .finished, [.audio, .finished]].map { (seed, $0) }
+        }, ["ackBeforeEdit", "ackAfterEdit", "lostResponse"])
+    func omittedEbookLocationPreservesNewerEdit(
+        setup: (seed: String, preceding: ProgressGroups), outcome: String
+    ) async throws {
+        let (store, _) = try makeStore()
+        let seeded = setup.seed != "unseeded"
+        var server = Self.server(ebookLocation: setup.seed == "known-null" ? nil : "retained", lastUpdate: Self.t0)
+        server.ebookProgress = 0.2
+        try await store.recordEdit(
+            ProgressEdit(
+                audio: setup.preceding.contains(.audio) ? Self.seek(100).audio : nil,
+                isFinished: setup.preceding.contains(.finished) ? false : nil,
+                ebook: .init(location: nil, progress: 0.4)), for: key,
+            serverProgress: seeded ? server : nil, now: Self.at(1))
+        for group in [ProgressGroups.audio, .finished] where setup.preceding.contains(group) {
+            let preceding = try #require(try await store.beginSend(for: key))
+            #expect(preceding.values.groups == group)
+            try await store.completeSend(preceding, serverLastUpdate: nil)
+            #expect(try await store.progress(for: key)?.serverBaseline?.ebookLocationIsUnknown == (seeded ? nil : true))
+        }
+        let patch = try #require(try await store.beginSend(for: key))
+        #expect(patch.values.ebook?.ebookLocation == nil)
+        if outcome == "ackBeforeEdit" { try await store.completeSend(patch, serverLastUpdate: nil) }
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "newer", progress: 0.8)), for: key, now: Self.at(2))
+        if outcome != "lostResponse" {
+            if outcome == "ackAfterEdit" { try await store.completeSend(patch, serverLastUpdate: nil) }
+            let baseline = try #require(try await store.progress(for: key)?.serverBaseline)
+            #expect(try JSONDecoder().decode(ProgressBaseline.self, from: JSONEncoder().encode(baseline)) == baseline)
+            if seeded {
+                #expect(baseline.ebookLocation == server.ebookLocation)
+                #expect(baseline.ebookLocationIsUnknown == nil)
+            }
+        } else {
+            try await store.failSend(patch, error: "lost response")
+        }
+        // The PATCH omitted location: the server retains it, even with a later row timestamp.
+        server.ebookProgress = 0.4
+        server.lastUpdate = Self.at(3)
+        let generation = await store.captureGeneration()
+        try await store.applyServerProgress([key: server], capturedAt: generation, source: .fetch)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.ebookLocation == "newer")
+        #expect(row.ebookProgress == 0.8)
+        #expect(row.ebookDirty)
+        #expect(row.serverBaseline?.ebookLocation == server.ebookLocation)
+        #expect(row.serverBaseline?.ebookLocationIsUnknown != true)
+        let next = try #require(try await store.beginSend(for: key))
+        #expect(next.values.ebook?.ebookLocation == "newer")
+        try await store.completeSend(next, serverLastUpdate: Self.at(4))
+        #expect(try await store.progress(for: key)?.needsServerSync == false)
+        #expect(try await store.progress(for: key)?.serverBaseline?.ebookLocation == "newer")
+        #expect(try await store.progress(for: key)?.serverBaseline?.ebookLocationIsUnknown == nil)
+    }
+
     @Test func onePatchInFlightPerRow() async throws {
         let (store, _) = try makeStore()
         try await store.recordEdit(Self.seek(200), for: key, now: Self.at(1))

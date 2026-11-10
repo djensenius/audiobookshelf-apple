@@ -194,6 +194,7 @@ final class StubSessionService: PlaybackSessionService {
         var closeError: APIError?
         var starts: [String] = []
         var closes: [String] = []
+        var closeReports: [String: PlaybackSyncReport] = [:]
         var log: [String] = []
         var count = 0
         var openSessions: [String] = []
@@ -271,6 +272,7 @@ final class StubSessionService: PlaybackSessionService {
     func closeSession(id: String, report: PlaybackSyncReport?) async throws {
         let (gate, error) = state.withLock { state in
             state.closes.append(id)
+            state.closeReports[id] = report
             state.log.append("close \(id)")
             return (state.closeGates.removeValue(forKey: id), state.closeError)
         }

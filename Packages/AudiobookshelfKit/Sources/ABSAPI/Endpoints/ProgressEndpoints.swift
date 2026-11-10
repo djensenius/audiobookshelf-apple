@@ -67,8 +67,9 @@ public struct MediaProgressUpdate: Encodable, Sendable, Hashable {
         return Self(isFinished: isFinished, finishedAt: finishedAt)
     }
 
-    /// The ebook group.
-    public static func ebook(location: String, progress: Double) -> Self {
+    /// The ebook group. `ebookProgress` is always sent; a `nil` location is left out, so the
+    /// server keeps its stored one.
+    public static func ebook(location: String?, progress: Double) -> Self {
         Self(ebookLocation: location, ebookProgress: progress)
     }
 
