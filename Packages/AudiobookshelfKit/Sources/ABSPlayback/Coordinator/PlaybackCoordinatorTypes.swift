@@ -79,6 +79,8 @@ public enum PlaybackCoordinatorError: Error, Sendable, Equatable {
 public enum SessionCloseReason: Sendable, Hashable {
     /// Another item was played.
     case itemChanged
+    /// The same item was played again from the start of a new session.
+    case restarted
     /// ``PlaybackCoordinator/stop()``.
     case stopped
     /// The engine couldn't load the session's media.
@@ -89,9 +91,13 @@ public enum SessionCloseReason: Sendable, Hashable {
 public struct ClosingSession: Sendable, Hashable {
     public let sessionID: String
     public let key: MediaKey
-    /// The last confirmed global position.
+    /// The last confirmed global position: the engine's when loaded, else the position the load
+    /// was going to start from.
     public let currentTime: Double
     public let duration: Double
+    /// Whether the engine loaded the media. A session that never loaded never played, so the
+    /// coordinator closes it without asking ``PlaybackCoordinator/finalCloseReport``.
+    public let wasLoaded: Bool
     public let reason: SessionCloseReason
 }
 

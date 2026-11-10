@@ -80,4 +80,16 @@ struct UserDefaultsLastPlayedStoreTests {
         defaults.set(Data("junk".utf8), forKey: UserDefaultsLastPlayedStore.defaultKey)
         #expect(store.load() == nil)
     }
+
+    @Test func decodesRecordsWithoutNewerFields() throws {
+        let json = """
+            {"serverConnectionID":"6F1C1A52-4C83-4C38-9C5B-0D1E2F3A4B5C","libraryItemID":"li","position":5,\
+            "timestamp":0}
+            """
+        let record = try JSONDecoder().decode(LastPlayedRecord.self, from: Data(json.utf8))
+        #expect(record.position == 5)
+        #expect(!record.isFinished)
+        #expect(record.title == nil)
+        #expect(record.duration == nil)
+    }
 }

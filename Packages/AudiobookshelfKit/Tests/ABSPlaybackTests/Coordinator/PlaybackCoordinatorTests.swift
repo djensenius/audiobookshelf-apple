@@ -7,39 +7,51 @@ import Testing
 @testable import ABSPlayback
 
 @MainActor
-struct PlaybackCoordinatorTests {
-    let connectionID = UUID()
+final class EventLog {
+    var events: [PlaybackCoordinatorEvent] = []
+    var count: Int { events.count }
+
+    func since(_ start: Int) -> [PlaybackCoordinatorEvent] { Array(events[start...]) }
+}
+
+/// One coordinator with fakes for every dependency.
+@MainActor
+struct CoordinatorHarness {
+    let connectionID: UUID
     let clock = TestClock()
     let engine = CoordinatorTestEngine()
     let service: StubSessionService
     let settings = StubPlaybackSettings()
     let policy = StubStreamingPolicy()
-    let lastPlayed = InMemoryLastPlayedStore()
+    let lastPlayed: InMemoryLastPlayedStore
     let progressStore: LocalProgressStore
+    let sleep = TestSleep()
     let coordinator: PlaybackCoordinator
-    let events: EventLog
+    let events = EventLog()
 
-    final class EventLog {
-        var events: [PlaybackCoordinatorEvent] = []
-    }
-
-    init() throws {
+    init(
+        lastPlayed: InMemoryLastPlayedStore = InMemoryLastPlayedStore(), progressStore: LocalProgressStore? = nil,
+        connectionID: UUID = UUID()
+    ) throws {
+        self.connectionID = connectionID
         service = StubSessionService(serverConnectionID: connectionID)
-        progressStore = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
+        self.lastPlayed = lastPlayed
+        self.progressStore =
+            try progressStore ?? LocalProgressStore(modelContainer: DataStack(location: .inMemory).container)
         let clock = clock
+        let sleep = sleep
         coordinator = PlaybackCoordinator(
-            engine: engine, sessions: service, progressStore: progressStore, settings: settings, policy: policy,
-            lastPlayedStore: lastPlayed, now: { clock.now })
-        let events = EventLog()
-        coordinator.addObserver { events.events.append($0) }
-        self.events = events
+            engine: engine, sessions: service, progressStore: self.progressStore, settings: settings, policy: policy,
+            lastPlayedStore: lastPlayed, now: { clock.now }, sleep: { await sleep.sleep($0) })
+        let events = events
+        _ = coordinator.addObserver { events.events.append($0) }
     }
 
-    private func key(_ itemID: String) -> MediaKey {
+    func key(_ itemID: String) -> MediaKey {
         MediaKey(serverConnectionID: connectionID, libraryItemId: itemID)
     }
 
-    private func setServerProgress(_ itemID: String, time: Double, updated: Date, finished: Bool = false) {
+    func setServerProgress(_ itemID: String, time: Double, updated: Date, finished: Bool = false) {
         service.state.withLock {
             $0.serverTime[itemID] = time
             $0.progress[itemID] = MediaProgress(
@@ -48,23 +60,46 @@ struct PlaybackCoordinatorTests {
         }
     }
 
-    private func setLocalProgress(_ itemID: String, time: Double, updated: Date) async throws {
+    func setLocalProgress(_ itemID: String, time: Double, updated: Date) async throws {
         try await progressStore.recordEdit(
             ProgressEdit(audio: .init(currentTime: time, duration: 3600, progress: time / 3600)), for: key(itemID),
             now: updated)
     }
 
-    /// Yields until `condition` holds (a suspended task reached a gate).
-    private func waitUntil(_ condition: () -> Bool) async {
-        for _ in 0..<1000 where !condition() { await Task.yield() }
+    func record(_ itemID: String, position: Double, age: TimeInterval) -> LastPlayedRecord {
+        LastPlayedRecord(
+            serverConnectionID: connectionID, libraryItemID: itemID, episodeID: nil, position: position,
+            duration: 3600, timestamp: clock.ago(age), title: "Saved \(itemID)")
+    }
+}
+
+/// Yields until `condition` holds (a suspended task reached a gate); records an issue if it never does.
+@MainActor
+func yieldUntil(_ condition: () -> Bool, sourceLocation: SourceLocation = #_sourceLocation) async {
+    for _ in 0..<1000 {
+        if condition() { return }
+        await Task.yield()
+    }
+    if !condition() { Issue.record("Condition never became true", sourceLocation: sourceLocation) }
+}
+
+@MainActor
+struct PlaybackCoordinatorTests {
+    let h: CoordinatorHarness
+    var coordinator: PlaybackCoordinator { h.coordinator }
+    var engine: CoordinatorTestEngine { h.engine }
+    var service: StubSessionService { h.service }
+
+    init() throws {
+        h = try CoordinatorHarness()
     }
 
     // MARK: - Start and resume
 
     @Test func playStartsSessionAtNewestProgressWithRewindAndSavedRate() async throws {
-        settings.playbackRate = 1.5
-        setServerProgress("A", time: 300, updated: clock.ago(3600))
-        try await setLocalProgress("A", time: 500, updated: clock.ago(120))
+        h.settings.playbackRate = 1.5
+        h.setServerProgress("A", time: 300, updated: h.clock.ago(3600))
+        try await h.setLocalProgress("A", time: 500, updated: h.clock.ago(120))
 
         await coordinator.play(itemID: "A")
 
@@ -74,8 +109,8 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.rate == 1.5)
         #expect(coordinator.phase == .loaded)
         #expect(coordinator.isPlaying)
-        #expect(coordinator.mediaKey == key("A"))
-        #expect(coordinator.session?.id == StubSessionService.sessionID(for: "A"))
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(coordinator.session?.id == "A-1")
         #expect(coordinator.currentTime == 490)
         #expect(coordinator.duration == 3600)
         #expect(coordinator.chapterIndex == 0)
@@ -87,53 +122,117 @@ struct PlaybackCoordinatorTests {
         #expect(source.seekTolerance == 0)
         #expect(source.networkAccess == NetworkAccess(policy: .always))
         #expect(
-            events.events == [
-                .itemChanged(key("A")),
-                .sessionStarted(sessionID: StubSessionService.sessionID(for: "A"), key: key("A")),
+            h.events.events == [
+                .itemChanged(h.key("A")), .sessionStarted(sessionID: "A-1", key: h.key("A")),
                 .loaded(time: 490), .didSeek(time: 490), .playbackStarted,
             ])
-        #expect(lastPlayed.record?.position == 490)
+        let saved = try #require(h.lastPlayed.record)
+        #expect(saved.position == 490)
+        #expect(saved.title == "Title A")
+        #expect(saved.author == "Author")
+        #expect(saved.coverPath == "/covers/A.jpg")
+        #expect(saved.chapterTitle == "One")
+        #expect(!saved.isFinished)
     }
 
     @Test func newerServerProgressWinsWithLongPauseRewind() async throws {
-        setServerProgress("A", time: 800, updated: clock.ago(2 * 3600))
-        try await setLocalProgress("A", time: 500, updated: clock.ago(3 * 3600))
+        h.setServerProgress("A", time: 800, updated: h.clock.ago(2 * 3600))
+        try await h.setLocalProgress("A", time: 500, updated: h.clock.ago(3 * 3600))
 
         await coordinator.play(itemID: "A")
 
         #expect(engine.loads.map(\.time) == [770])
     }
 
+    @Test func ebookEditDoesNotMakeLocalAudioProgressNewer() async throws {
+        h.setServerProgress("A", time: 800, updated: h.clock.ago(3600))
+        try await h.setLocalProgress("A", time: 500, updated: h.clock.ago(3 * 3600))
+        try await h.progressStore.recordEdit(
+            ProgressEdit(ebook: .init(location: "epubcfi(/6/2)", progress: 0.5)), for: h.key("A"),
+            now: h.clock.ago(60))
+
+        await coordinator.play(itemID: "A")
+
+        #expect(engine.loads.map(\.time) == [770])
+    }
+
+    @Test func failedServerProgressFallsBackToSessionDate() async throws {
+        let updated = h.clock.ago(120)
+        service.state.withLock {
+            $0.serverTime["A"] = 800
+            $0.progressError = .network(.notConnectedToInternet)
+            $0.sessionUpdatedAt = updated
+        }
+        try await h.setLocalProgress("A", time: 500, updated: h.clock.ago(3600))
+
+        await coordinator.play(itemID: "A")
+
+        #expect(engine.loads.map(\.time) == [790])
+    }
+
     @Test func explicitStartTimeAndDisabledAutoRewindSkipRewind() async throws {
-        setServerProgress("A", time: 800, updated: clock.ago(3600))
+        h.setServerProgress("A", time: 800, updated: h.clock.ago(3600))
         await coordinator.play(itemID: "A", startTime: 1234)
         #expect(engine.loads.last?.time == 1234)
 
-        settings.disableAutoRewind = true
+        h.settings.disableAutoRewind = true
         await coordinator.play(itemID: "B")
-        setServerProgress("A", time: 800, updated: clock.ago(3600))
+        h.lastPlayed.clear()
         await coordinator.play(itemID: "A")
         #expect(engine.loads.last?.time == 800)
     }
 
-    @Test func finishedItemStartsFromBeginning() async throws {
-        setServerProgress("A", time: 3600, updated: clock.ago(60), finished: true)
+    @Test func finishedServerItemStartsFromBeginning() async throws {
+        h.setServerProgress("A", time: 3600, updated: h.clock.ago(60), finished: true)
         await coordinator.play(itemID: "A")
         #expect(engine.loads.map(\.time) == [0])
+    }
+
+    @Test(arguments: [false, true])
+    func playingAgainAfterTheEndRestartsFromZero(serverFinished: Bool) async throws {
+        h.setServerProgress("A", time: 3000, updated: h.clock.ago(3600), finished: serverFinished)
+        await coordinator.play(itemID: "A", startTime: 3500)
+        engine.finish()
+        #expect(h.lastPlayed.record?.isFinished == true)
+        #expect(h.events.events.last == .ended)
+
+        await coordinator.play(itemID: "A")
+
+        #expect(engine.seeks == [0])
+        #expect(coordinator.currentTime == 0)
+        #expect(coordinator.isPlaying)
+        #expect(engine.loads.count == 1)
+        #expect(h.lastPlayed.record?.isFinished == false)
+    }
+
+    @Test func finishedRecordRestartsFromZeroAfterRelaunch() async throws {
+        h.setServerProgress("A", time: 3000, updated: h.clock.ago(3600))
+        try await h.setLocalProgress("A", time: 3000, updated: h.clock.ago(3600))
+        await coordinator.play(itemID: "A", startTime: 3500)
+        engine.finish()
+
+        let relaunched = try CoordinatorHarness(
+            lastPlayed: h.lastPlayed, progressStore: h.progressStore, connectionID: h.connectionID)
+        relaunched.setServerProgress("A", time: 3000, updated: h.clock.ago(3600))
+        #expect(relaunched.coordinator.restoreLastPlayed())
+        #expect(relaunched.coordinator.currentTime == 3600)
+        await relaunched.coordinator.resume()
+
+        #expect(relaunched.engine.loads.map(\.time) == [0])
     }
 
     @Test func resumeAfterPauseRewindsForPauseLength() async throws {
         await coordinator.play(itemID: "A", startTime: 1000)
         coordinator.pause()
         #expect(!coordinator.isPlaying)
-        #expect(events.events.last == .paused(time: 1000))
-        clock.advance(by: 6 * 60)
+        #expect(h.events.events.last == .paused(time: 1000))
+        h.clock.advance(by: 6 * 60)
 
         await coordinator.resume()
 
         #expect(engine.seeks == [980])
         #expect(coordinator.isPlaying)
-        #expect(Array(events.events.suffix(2)) == [.didSeek(time: 980), .playbackStarted])
+        #expect(Array(h.events.events.suffix(2)) == [.didSeek(time: 980), .playbackStarted])
         #expect(engine.loads.count == 1)
     }
 
@@ -150,16 +249,87 @@ struct PlaybackCoordinatorTests {
 
         #expect(seeksWhenAsked == [])
         #expect(engine.seeks == [970])
-        #expect(Array(events.events.suffix(2)) == [.didSeek(time: 970), .playbackStarted])
+        #expect(Array(h.events.events.suffix(2)) == [.didSeek(time: 970), .playbackStarted])
+    }
+
+    @Test func pauseDuringResumeSeekCancelsPlay() async throws {
+        await coordinator.play(itemID: "A", startTime: 1000)
+        coordinator.pause()
+        h.clock.advance(by: 120)
+        let gate = Gate()
+        engine.seekGates = [gate]
+        let start = h.events.count
+
+        let resume = Task { await coordinator.resume() }
+        await yieldUntil { engine.seeks.count == 1 }
+        coordinator.pause()
+        gate.open()
+        await resume.value
+
+        #expect(!coordinator.isPlaying)
+        #expect(!h.events.since(start).contains(.playbackStarted))
+    }
+
+    @Test func secondResumeWhileOneIsInFlightIsIgnored() async throws {
+        await coordinator.play(itemID: "A", startTime: 1000)
+        coordinator.pause()
+        h.clock.advance(by: 120)
+        var asked = 0
+        coordinator.willResume = {
+            asked += 1
+            return 0
+        }
+        let gate = Gate()
+        engine.seekGates = [gate]
+        let start = h.events.count
+
+        let first = Task { await coordinator.resume() }
+        await yieldUntil { engine.seeks.count == 1 }
+        await coordinator.resume()
+        gate.open()
+        await first.value
+
+        #expect(asked == 1)
+        #expect(engine.seeks.count == 1)
+        #expect(h.events.since(start).filter { $0 == .playbackStarted }.count == 1)
+        #expect(coordinator.isPlaying)
+    }
+
+    @Test func playSameItemWithStartTimeSeeksInSameSession() async throws {
+        await coordinator.play(itemID: "A")
+        await coordinator.play(itemID: "A", startTime: 2000)
+
+        #expect(service.starts == ["A"])
+        #expect(engine.seeks == [2000])
+        #expect(coordinator.currentTime == 2000)
+        #expect(coordinator.isPlaying)
+        #expect(service.closes.isEmpty)
+    }
+
+    @Test func startTimeOrSeekWhileStartingIsAppliedOnLoad() async throws {
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let first = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { engine.loads.count == 1 }
+        await coordinator.play(itemID: "A", startTime: 2500)
+        #expect(await coordinator.seek(to: 2400) == nil)
+        gate.open()
+        await first.value
+
+        #expect(service.starts == ["A"])
+        #expect(coordinator.currentTime == 2400)
+        #expect(coordinator.isPlaying)
+        #expect(h.events.events.contains(.loaded(time: 2400)))
     }
 
     @Test func seekReturnsLandingAndSetRateSaves() async throws {
         await coordinator.play(itemID: "A")
         #expect(await coordinator.seek(to: 5000) == 3600)
-        #expect(events.events.last == .didSeek(time: 3600))
+        #expect(h.events.events.last == .didSeek(time: 3600))
 
         coordinator.setRate(2)
-        #expect(settings.playbackRate == 2)
+        #expect(h.settings.playbackRate == 2)
+        #expect(coordinator.rate == 2)
         #expect(engine.defaultRate == 2)
         coordinator.setRate(-1)
         #expect(coordinator.rate == 2)
@@ -168,22 +338,22 @@ struct PlaybackCoordinatorTests {
     // MARK: - Cellular policy
 
     @Test func deniedStreamingPolicyBlocksWithoutSession() async {
-        policy.decision = .denied(.cellular)
+        h.policy.decision = .denied(.cellular)
 
         await coordinator.play(itemID: "A")
 
         #expect(coordinator.error == .streamingNotAllowed(.cellular))
         #expect(service.starts.isEmpty)
         #expect(engine.loads.isEmpty)
-        #expect(coordinator.phase == .unloaded)
-        #expect(events.events.last == .failed(.streamingNotAllowed(.cellular)))
+        #expect(coordinator.phase == .idle)
+        #expect(h.events.events == [.failed(.streamingNotAllowed(.cellular))])
 
         await coordinator.play(itemID: "A", allowingMeteredNetwork: true)
         #expect(service.starts.isEmpty)
     }
 
     @Test func askPolicyNeedsConfirmationThenPlays() async {
-        policy.decision = .askUser(.lowDataMode)
+        h.policy.decision = .askUser(.lowDataMode)
 
         await coordinator.play(itemID: "A")
         #expect(coordinator.error == .streamingNeedsConfirmation(.lowDataMode))
@@ -195,6 +365,40 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.isPlaying)
     }
 
+    @Test func blockedPolicyLeavesCurrentItemPlaying() async {
+        await coordinator.play(itemID: "A")
+        h.policy.decision = .askUser(.cellular)
+
+        await coordinator.play(itemID: "B")
+        await coordinator.waitForPendingCloses()
+
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(coordinator.isPlaying)
+        #expect(coordinator.session?.id == "A-1")
+        #expect(service.closes.isEmpty)
+        #expect(service.starts == ["A"])
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular))
+        #expect(h.events.events.last == .failed(.streamingNeedsConfirmation(.cellular)))
+    }
+
+    @Test func stalePolicyDecisionIsDiscarded() async {
+        h.policy.decision = .denied(.cellular)
+        let gate = Gate()
+        h.policy.gate = gate
+        let first = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { h.policy.checks == 1 }
+        h.policy.decision = .allowed
+
+        await coordinator.play(itemID: "B")
+        gate.open()
+        await first.value
+
+        #expect(coordinator.error == nil)
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(coordinator.isPlaying)
+        #expect(service.starts == ["B"])
+    }
+
     // MARK: - Closing
 
     @Test func switchingItemsClosesPreviousSessionOnce() async {
@@ -202,25 +406,60 @@ struct PlaybackCoordinatorTests {
         await coordinator.play(itemID: "B")
         await coordinator.waitForPendingCloses()
 
-        #expect(service.closes == [StubSessionService.sessionID(for: "A")])
-        #expect(coordinator.mediaKey == key("B"))
+        #expect(service.closes == ["A-1"])
+        #expect(coordinator.mediaKey == h.key("B"))
         #expect(coordinator.isPlaying)
-        #expect(
-            events.events.contains(
-                .sessionWillClose(
-                    ClosingSession(
-                        sessionID: StubSessionService.sessionID(for: "A"), key: key("A"), currentTime: 0,
-                        duration: 3600, reason: .itemChanged))))
+        #expect(h.events.events.contains(.sessionWillClose(closingA)))
 
         coordinator.stop()
         await coordinator.waitForPendingCloses()
-        #expect(service.closes == ["A", "B"].map(StubSessionService.sessionID(for:)))
+        #expect(service.closes == ["A-1", "B-2"])
         #expect(coordinator.phase == .idle)
-        #expect(lastPlayed.record == nil)
-        #expect(events.events.last == .itemChanged(nil))
+        #expect(h.lastPlayed.record == nil)
+        #expect(h.events.events.last == .itemChanged(nil))
     }
 
-    @Test func finalCloseReportIsSent() async {
+    @Test func eachSessionOfTheSameItemIsClosed() async {
+        await coordinator.play(itemID: "A")
+        await coordinator.play(itemID: "B")
+        await coordinator.play(itemID: "A")
+        coordinator.stop()
+        await coordinator.waitForPendingCloses()
+
+        #expect(service.closes == ["A-1", "B-2", "A-3"])
+    }
+
+    @Test func nextPlayWaitsForPreviousClose() async {
+        await coordinator.play(itemID: "A")
+        let gate = Gate()
+        service.state.withLock { $0.closeGates["A-1"] = gate }
+
+        let next = Task { await coordinator.play(itemID: "B") }
+        await yieldUntil { service.closes == ["A-1"] }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(service.starts == ["A"])
+        gate.open()
+        await next.value
+
+        #expect(service.log == ["start A", "close A-1", "start B"])
+        #expect(coordinator.isPlaying)
+    }
+
+    @Test func slowCloseTimesOutWithoutBlocking() async {
+        await coordinator.play(itemID: "A")
+        let gate = Gate()
+        service.state.withLock { $0.closeGates["A-1"] = gate }
+        h.sleep.elapsesImmediately = true
+
+        await coordinator.play(itemID: "B")
+
+        #expect(service.starts == ["A", "B"])
+        #expect(coordinator.isPlaying)
+        gate.open()
+        await coordinator.waitForPendingCloses()
+    }
+
+    @Test func finalCloseReportIsAskedOnlyForLoadedSessions() async {
         var closing: [ClosingSession] = []
         coordinator.finalCloseReport = {
             closing.append($0)
@@ -230,6 +469,22 @@ struct PlaybackCoordinatorTests {
         coordinator.stop()
         #expect(closing.map(\.currentTime) == [42])
         #expect(closing.map(\.reason) == [.stopped])
+
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let first = Task { await coordinator.play(itemID: "B", startTime: 77) }
+        await yieldUntil { engine.loads.count == 2 }
+        await coordinator.play(itemID: "C")
+        gate.open()
+        await first.value
+
+        #expect(closing.count == 1)
+        #expect(
+            h.events.events.contains(
+                .sessionWillClose(
+                    ClosingSession(
+                        sessionID: "B-2", key: h.key("B"), currentTime: 77, duration: 3600, wasLoaded: false,
+                        reason: .itemChanged))))
     }
 
     @Test func failedCloseDoesNotBlockNextPlay() async {
@@ -238,35 +493,60 @@ struct PlaybackCoordinatorTests {
         await coordinator.play(itemID: "B")
         await coordinator.waitForPendingCloses()
 
-        #expect(service.closes == [StubSessionService.sessionID(for: "A")])
-        #expect(coordinator.mediaKey == key("B"))
+        #expect(service.closes == ["A-1"])
+        #expect(coordinator.mediaKey == h.key("B"))
         #expect(coordinator.isPlaying)
         #expect(coordinator.error == nil)
     }
+
+    @Test func retryingAFailedStartUsesTheRestartedReason() async {
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let first = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { engine.loads.count == 1 }
+        engine.loadError = .emptyTimeline
+        gate.open()
+        await first.value
+        #expect(coordinator.error == .engine(.emptyTimeline))
+        #expect(
+            h.events.events.contains { event in
+                if case .sessionWillClose(let closing) = event { return closing.reason == .loadFailed }
+                return false
+            })
+        engine.loadError = nil
+
+        await coordinator.resume()
+
+        #expect(service.starts == ["A", "A"])
+        #expect(coordinator.isPlaying)
+        #expect(coordinator.session?.id == "A-2")
+    }
+
+    // MARK: - Races
 
     @Test func lateSessionStartIsClosedAndDiscarded() async {
         let gate = Gate()
         service.state.withLock { $0.startGates["A"] = gate }
         let first = Task { await coordinator.play(itemID: "A") }
-        await waitUntil { service.starts == ["A"] }
+        await yieldUntil { service.starts == ["A"] }
 
         await coordinator.play(itemID: "B")
         gate.open()
         await first.value
         await coordinator.waitForPendingCloses()
 
-        #expect(coordinator.mediaKey == key("B"))
-        #expect(coordinator.session?.id == StubSessionService.sessionID(for: "B"))
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(coordinator.session?.id == "B-2")
         #expect(coordinator.isPlaying)
         #expect(engine.loads.count == 1)
-        #expect(service.closes == [StubSessionService.sessionID(for: "A")])
+        #expect(service.closes == ["A-1"])
     }
 
     @Test func lateEngineLoadIsSupersededAndSessionClosedOnce() async {
         let gate = Gate()
         engine.loadGates = [gate]
         let first = Task { await coordinator.play(itemID: "A") }
-        await waitUntil { engine.loads.count == 1 }
+        await yieldUntil { engine.loads.count == 1 }
         #expect(coordinator.isBuffering)
 
         await coordinator.play(itemID: "B")
@@ -274,23 +554,79 @@ struct PlaybackCoordinatorTests {
         await first.value
         await coordinator.waitForPendingCloses()
 
-        #expect(coordinator.mediaKey == key("B"))
+        #expect(coordinator.mediaKey == h.key("B"))
         #expect(coordinator.phase == .loaded)
         #expect(coordinator.isPlaying)
-        #expect(service.closes == [StubSessionService.sessionID(for: "A")])
+        #expect(service.closes == ["A-1"])
+    }
+
+    @Test func stopDuringEngineLoad() async {
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let first = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { engine.loads.count == 1 }
+
+        coordinator.stop()
+        gate.open()
+        await first.value
+        await coordinator.waitForPendingCloses()
+
+        #expect(service.closes == ["A-1"])
+        #expect(coordinator.phase == .idle)
+        #expect(coordinator.mediaKey == nil)
+        #expect(h.lastPlayed.record == nil)
+    }
+
+    @Test func stopDuringSessionStart() async {
+        let gate = Gate()
+        service.state.withLock { $0.startGates["A"] = gate }
+        let first = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { service.starts == ["A"] }
+
+        coordinator.stop()
+        gate.open()
+        await first.value
+        await coordinator.waitForPendingCloses()
+
+        #expect(service.closes == ["A-1"])
+        #expect(coordinator.phase == .idle)
+        #expect(engine.loads.isEmpty)
+        #expect(h.events.events.last == .itemChanged(nil))
     }
 
     @Test func pauseWhileStartingLoadsPaused() async {
         let gate = Gate()
         engine.loadGates = [gate]
         let first = Task { await coordinator.play(itemID: "A") }
-        await waitUntil { engine.loads.count == 1 }
+        await yieldUntil { engine.loads.count == 1 }
         coordinator.pause()
         gate.open()
         await first.value
 
         #expect(coordinator.phase == .loaded)
         #expect(!coordinator.isPlaying)
+    }
+
+    @Test func observerMayStopFromAHandler() async {
+        await coordinator.play(itemID: "A")
+        let coordinator = coordinator
+        _ = coordinator.addObserver { [weak coordinator] event in
+            if case .sessionWillClose = event { coordinator?.stop() }
+        }
+
+        await coordinator.play(itemID: "B")
+        await coordinator.waitForPendingCloses()
+
+        #expect(coordinator.phase == .idle)
+        #expect(coordinator.mediaKey == nil)
+        #expect(service.starts == ["A"])
+        #expect(service.closes == ["A-1"])
+        #expect(Array(h.events.events.suffix(2)) == [.sessionWillClose(closingA), .itemChanged(nil)])
+    }
+
+    private var closingA: ClosingSession {
+        ClosingSession(
+            sessionID: "A-1", key: h.key("A"), currentTime: 0, duration: 3600, wasLoaded: true, reason: .itemChanged)
     }
 
     // MARK: - Errors
@@ -300,7 +636,7 @@ struct PlaybackCoordinatorTests {
         await coordinator.play(itemID: "A")
         #expect(coordinator.error == .sessionStartFailed(.forbidden(message: nil)))
         #expect(coordinator.phase == .unloaded)
-        #expect(coordinator.mediaKey == key("A"))
+        #expect(coordinator.mediaKey == h.key("A"))
     }
 
     @Test func engineLoadFailureClosesSessionAndSurfacesPlaybackFailure() async {
@@ -313,7 +649,7 @@ struct PlaybackCoordinatorTests {
 
         #expect(coordinator.error == .playback(failure))
         #expect(coordinator.phase == .unloaded)
-        #expect(service.closes == [StubSessionService.sessionID(for: "A")])
+        #expect(service.closes == ["A-1"])
     }
 
     @Test func engineFailureEventIsSurfaced() async {
@@ -322,27 +658,26 @@ struct PlaybackCoordinatorTests {
         engine.onEvent?(.failed(.playerFailed(failure)))
 
         #expect(coordinator.error == .playback(failure))
-        #expect(events.events.last == .failed(.playback(failure)))
+        #expect(h.events.events.last == .failed(.playback(failure)))
     }
 
     // MARK: - Restore
 
     @Test func restoreIsLazyAndFirstPlayResumesFromRecord() async {
-        lastPlayed.record = LastPlayedRecord(
-            serverConnectionID: connectionID, libraryItemID: "A", episodeID: nil, position: 600, duration: 3600,
-            timestamp: clock.ago(10 * 60))
-        setServerProgress("A", time: 100, updated: clock.ago(86_400))
+        h.lastPlayed.record = h.record("A", position: 600, age: 10 * 60)
+        h.setServerProgress("A", time: 100, updated: h.clock.ago(86_400))
 
         #expect(coordinator.restoreLastPlayed())
 
         #expect(coordinator.phase == .unloaded)
-        #expect(coordinator.mediaKey == key("A"))
+        #expect(coordinator.mediaKey == h.key("A"))
         #expect(coordinator.currentTime == 600)
         #expect(coordinator.duration == 3600)
+        #expect(coordinator.restoredRecord?.title == "Saved A")
         #expect(!coordinator.isPlaying)
         #expect(service.starts.isEmpty)
         #expect(engine.loads.isEmpty)
-        #expect(events.events == [.itemChanged(key("A"))])
+        #expect(h.events.events == [.itemChanged(h.key("A"))])
 
         await coordinator.resume()
 
@@ -350,43 +685,71 @@ struct PlaybackCoordinatorTests {
         #expect(service.starts == ["A"])
         #expect(engine.loads.map(\.time) == [580])
         #expect(coordinator.isPlaying)
+        #expect(coordinator.restoredRecord == nil)
     }
 
-    @Test func seekWhileRestoredSetsExplicitStart() async {
-        lastPlayed.record = LastPlayedRecord(
-            serverConnectionID: connectionID, libraryItemID: "A", episodeID: nil, position: 600, duration: 3600,
-            timestamp: clock.ago(3600))
+    @Test func seekWhileRestoredMovesTheNewestPosition() async {
+        h.lastPlayed.record = h.record("A", position: 600, age: 3600)
         coordinator.restoreLastPlayed()
 
         #expect(await coordinator.seek(to: 1200) == 1200)
+        #expect(coordinator.currentTime == 1200)
         await coordinator.resume()
 
-        #expect(engine.loads.map(\.time) == [1200])
+        // The record is newest: its position moved by the seek, then rewound 30 s.
+        #expect(engine.loads.map(\.time) == [1170])
+    }
+
+    @Test func seekWhileRestoredDoesNotOverrideNewerServerProgress() async {
+        h.lastPlayed.record = h.record("A", position: 600, age: 3600)
+        h.setServerProgress("A", time: 900, updated: h.clock.ago(10 * 60))
+        coordinator.restoreLastPlayed()
+
+        await coordinator.seek(to: 630)
+        await coordinator.resume()
+
+        // Server progress is newer: 900, moved 30 s by the seek, rewound 20 s.
+        #expect(engine.loads.map(\.time) == [910])
+    }
+
+    @Test func restoreThenPlayAnotherItem() async {
+        h.lastPlayed.record = h.record("A", position: 600, age: 60)
+        coordinator.restoreLastPlayed()
+
+        await coordinator.play(itemID: "B")
+        await coordinator.waitForPendingCloses()
+
+        #expect(service.starts == ["B"])
+        #expect(service.closes.isEmpty)
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(coordinator.restoredRecord == nil)
+        #expect(engine.loads.map(\.time) == [0])
+        #expect(Array(h.events.events.prefix(2)) == [.itemChanged(h.key("A")), .itemChanged(h.key("B"))])
     }
 
     @Test func restoreIgnoresOtherConnectionsAndLoadedState() async {
-        lastPlayed.record = LastPlayedRecord(
+        h.lastPlayed.record = LastPlayedRecord(
             serverConnectionID: UUID(), libraryItemID: "A", episodeID: nil, position: 600, duration: nil,
-            timestamp: clock.now)
+            timestamp: h.clock.now)
         #expect(!coordinator.restoreLastPlayed())
         #expect(coordinator.phase == .idle)
 
         await coordinator.play(itemID: "B")
-        lastPlayed.record?.serverConnectionID = connectionID
+        h.lastPlayed.record?.serverConnectionID = h.connectionID
         #expect(!coordinator.restoreLastPlayed())
-        #expect(coordinator.mediaKey == key("B"))
+        #expect(coordinator.mediaKey == h.key("B"))
     }
 
     @Test func lastPlayedIsSavedOnPauseAndThrottledTicks() async {
         await coordinator.play(itemID: "A", episodeID: "E", startTime: 100)
-        #expect(lastPlayed.record?.episodeID == "E")
+        #expect(h.lastPlayed.record?.episodeID == "E")
         engine.onEvent?(.tick(105))
-        #expect(lastPlayed.record?.position == 100)
-        clock.advance(by: 20)
+        #expect(h.lastPlayed.record?.position == 100)
+        h.clock.advance(by: 20)
         engine.onEvent?(.tick(120))
-        #expect(lastPlayed.record?.timestamp == clock.now)
+        #expect(h.lastPlayed.record?.timestamp == h.clock.now)
         coordinator.pause()
-        #expect(lastPlayed.record?.timestamp == clock.now)
-        #expect(events.events.contains(.tick(time: 105)))
+        #expect(h.lastPlayed.record?.timestamp == h.clock.now)
+        #expect(h.events.events.contains(.tick(time: 105)))
     }
 }

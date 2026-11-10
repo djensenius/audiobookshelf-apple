@@ -11,7 +11,9 @@ public protocol PlaybackSessionService: Sendable {
     /// `POST /api/items/:id/play[/:episodeId]`.
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession
     /// The user's server progress for the media, or `nil` when there is none. The coordinator uses
-    /// its `lastUpdate` and `isFinished`: a new session's own `updatedAt` is its creation time.
+    /// its `lastUpdate` and `isFinished`: a new session's own `updatedAt` is its creation time
+    /// (used only as a fallback when this fails). Server timestamps are compared with device ones,
+    /// so clock skew between them can pick the older position.
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress?
     /// The URLs to load for `session`. Throws ``StreamResolutionError``.
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream
@@ -76,7 +78,8 @@ public protocol LocalProgressReading: Sendable {
 
 extension LocalProgressStore: LocalProgressReading {}
 
-/// The last item played on this device, restored paused at launch.
+/// The last item played on this device, restored paused at launch. Fields added after the first
+/// release decode as absent, so older records still load.
 public struct LastPlayedRecord: Sendable, Hashable, Codable {
     public var serverConnectionID: UUID
     public var libraryItemID: String
@@ -87,10 +90,19 @@ public struct LastPlayedRecord: Sendable, Hashable, Codable {
     public var duration: Double?
     /// When the position was saved; drives auto-rewind and the newest-progress choice.
     public var timestamp: Date
+    /// The media played to its end; the next play starts from the beginning.
+    public var isFinished: Bool
+    /// Display metadata for the restored, not yet loaded item. The cover is `coverPath` on
+    /// `libraryItemID`.
+    public var title: String?
+    public var author: String?
+    public var coverPath: String?
+    public var chapterTitle: String?
 
     public init(
         serverConnectionID: UUID, libraryItemID: String, episodeID: String?, position: Double, duration: Double?,
-        timestamp: Date
+        timestamp: Date, isFinished: Bool = false, title: String? = nil, author: String? = nil,
+        coverPath: String? = nil, chapterTitle: String? = nil
     ) {
         self.serverConnectionID = serverConnectionID
         self.libraryItemID = libraryItemID
@@ -98,6 +110,26 @@ public struct LastPlayedRecord: Sendable, Hashable, Codable {
         self.position = position
         self.duration = duration
         self.timestamp = timestamp
+        self.isFinished = isFinished
+        self.title = title
+        self.author = author
+        self.coverPath = coverPath
+        self.chapterTitle = chapterTitle
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        serverConnectionID = try container.decode(UUID.self, forKey: .serverConnectionID)
+        libraryItemID = try container.decode(String.self, forKey: .libraryItemID)
+        episodeID = try container.decodeIfPresent(String.self, forKey: .episodeID)
+        position = try container.decode(Double.self, forKey: .position)
+        duration = try container.decodeIfPresent(Double.self, forKey: .duration)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        isFinished = try container.decodeIfPresent(Bool.self, forKey: .isFinished) ?? false
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        author = try container.decodeIfPresent(String.self, forKey: .author)
+        coverPath = try container.decodeIfPresent(String.self, forKey: .coverPath)
+        chapterTitle = try container.decodeIfPresent(String.self, forKey: .chapterTitle)
     }
 
     public var key: MediaKey {

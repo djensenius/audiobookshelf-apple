@@ -3,6 +3,7 @@ import ABSCore
 import ABSData
 import Foundation
 import Observation
+import Synchronization
 import os
 
 private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "PlaybackCoordinator")
@@ -13,14 +14,16 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///
 /// - **Races.** Every ``play(itemID:episodeID:startTime:allowingMeteredNetwork:)``, ``stop()`` and
 ///   ``restoreLastPlayed()`` takes a new generation. A continuation from an older generation (a
-///   session start or engine load finishing late) is dropped, and a session it opened is closed.
+///   policy check, session start or engine load finishing late) is dropped, and a session it
+///   opened is closed. A blocked streaming policy leaves the current item playing.
 /// - **Closing.** A session is owned by exactly one place: the start continuation until it becomes
-///   current, then the coordinator. Whoever drops it closes it once, in the background, so a slow
-///   or failed close never delays the next play. Closes are best effort; P2-06b's final report is
-///   plugged in through ``finalCloseReport``.
-/// - **Restore is lazy.** ``restoreLastPlayed()`` only publishes the item and position from the
-///   ``LastPlayedRecord``; the session starts and the engine loads on the first ``resume(rewindingBy:)``
-///   or play, so opening the app never creates a server session.
+///   current, then the coordinator. Whoever drops it closes it once, in the background. The next
+///   `/play` waits up to ``closeWaitTimeout`` for closes in flight, so the server normally sees the
+///   old session closed first; a slow or failed close never blocks it. Closes are best effort;
+///   P2-06b's final report is plugged in through ``finalCloseReport``.
+/// - **Restore is lazy.** ``restoreLastPlayed()`` only publishes the item, position and display
+///   metadata from the ``LastPlayedRecord``; the session starts and the engine loads on the first
+///   ``resume(rewindingBy:)`` or play, so opening the app never creates a server session.
 @MainActor
 @Observable
 public final class PlaybackCoordinator {
@@ -43,11 +46,13 @@ public final class PlaybackCoordinator {
     /// Its id is a capability (ADR 0007); never log it.
     public private(set) var session: PlaybackSession?
     public private(set) var error: PlaybackCoordinatorError?
-    /// The saved playback rate, applied to every load.
-    public private(set) var rate: Double
+    /// The restored record, for display (title, author, cover, chapter) until the item loads.
+    public private(set) var restoredRecord: LastPlayedRecord?
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
 
+    /// The saved playback rate, applied on every load and play.
+    public var rate: Double { settings.playbackRate }
     public var timeline: PlaybackTimeline? { phase == .loaded ? engine.timeline : nil }
     /// Global seconds: the engine's while loaded, else the position play will resume from.
     public var currentTime: Double { phase == .loaded ? engine.currentTime : unloadedPosition }
@@ -70,12 +75,13 @@ public final class PlaybackCoordinator {
     public var chapterElapsed: Double? { chapterRange?.elapsed(at: currentTime) }
     public var chapterRemaining: Double? { chapterRange?.remaining(at: currentTime) }
 
-    /// The P2-06b seam: the body of the final `/close` for a session (position and unsynced
-    /// listening time). `nil`, the default, closes without a body.
+    /// The P2-06b seam: the body of the final `/close` for a session that loaded (position and
+    /// unsynced listening time). Not called for sessions that never loaded; `nil` closes without
+    /// a body.
     @ObservationIgnored public var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackSyncReport?)?
     /// Called once before playback starts or resumes, before the resume seek; returns extra
     /// seconds to rewind (the sleep timer's `playbackWillStart`, P2-08). The extra rewind is
-    /// ignored when a play has an explicit start time.
+    /// ignored for an explicit start time and for a restart from the end.
     @ObservationIgnored public var willResume: (@MainActor () -> TimeInterval)?
 
     // MARK: Dependencies
@@ -87,28 +93,45 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private let policy: any StreamingPolicyChecking
     @ObservationIgnored private let lastPlayedStore: any LastPlayedStoring
     @ObservationIgnored private let now: @Sendable () -> Date
+    @ObservationIgnored private let sleep: @Sendable (Duration) async -> Void
 
     // MARK: Bookkeeping
 
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var playWhenLoaded = true
-    /// An explicit position chosen while unloaded (a seek before the first play).
+    /// A position chosen while starting (a seek, or a play with a start time), applied on load.
     @ObservationIgnored private var pendingStartTime: Double?
+    /// The unloaded position before any seeks while unloaded. Such seeks move every progress
+    /// candidate by the same distance, so newer server progress still wins.
+    @ObservationIgnored private var unloadedBase: Double = 0
     /// When playback was last seen playing; drives auto-rewind on resume.
     @ObservationIgnored private var lastPlayedAt: Date?
     @ObservationIgnored private var lastPlayedSavedAt: Date?
+    /// The media played to its end; the next play starts again from 0.
+    @ObservationIgnored private var reachedEnd = false
+    /// Bumped by every resume and pause; a resume plays only if it's still the latest.
+    @ObservationIgnored private var resumeIntent = 0
+    @ObservationIgnored private var resumingIntent: Int?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var observers: [PlaybackObserverToken: @MainActor (PlaybackCoordinatorEvent) -> Void] =
         [:]
+    @ObservationIgnored private var queuedEvents: [PlaybackCoordinatorEvent] = []
+    @ObservationIgnored private var isEmitting = false
 
     /// The last-played record is saved at most this often from time updates.
     static let lastPlayedSaveInterval: TimeInterval = 15
+    /// How long a play waits for the previous session's close before starting the next one.
+    public static let closeWaitTimeout: Duration = .seconds(2)
+    /// Within this many seconds of the end, playing again starts from the beginning.
+    static let endTolerance: Double = 1
 
+    /// - Parameter sleep: Times the wait for closes in flight (tests replace it).
     public init(
         engine: any AudioEngineProtocol, sessions: any PlaybackSessionService, progressStore: any LocalProgressReading,
         settings: any PlaybackSettingsProviding, policy: any StreamingPolicyChecking,
-        lastPlayedStore: any LastPlayedStoring, now: @escaping @Sendable () -> Date = { .now }
+        lastPlayedStore: any LastPlayedStoring, now: @escaping @Sendable () -> Date = { .now },
+        sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
     ) {
         self.engine = engine
         self.sessions = sessions
@@ -117,14 +140,16 @@ public final class PlaybackCoordinator {
         self.policy = policy
         self.lastPlayedStore = lastPlayedStore
         self.now = now
-        rate = settings.playbackRate
+        self.sleep = sleep
         engine.onEvent = { [weak self] event in self?.handle(event) }
     }
 
     // MARK: Observers
 
-    /// Adds an observer for ``PlaybackCoordinatorEvent``s; events are delivered synchronously.
-    @discardableResult
+    /// Adds an observer for ``PlaybackCoordinatorEvent``s, delivered on the main actor in order.
+    /// Capture the coordinator `[weak self]`-style: it keeps the handler until
+    /// ``removeObserver(_:)``. A handler may call back into the coordinator (even ``stop()``);
+    /// events that causes are delivered after the current one.
     public func addObserver(_ handler: @escaping @MainActor (PlaybackCoordinatorEvent) -> Void)
         -> PlaybackObserverToken
     {
@@ -138,16 +163,25 @@ public final class PlaybackCoordinator {
     }
 
     private func emit(_ event: PlaybackCoordinatorEvent) {
-        for handler in observers.values { handler(event) }
+        queuedEvents.append(event)
+        guard !isEmitting else { return }
+        isEmitting = true
+        defer { isEmitting = false }
+        while !queuedEvents.isEmpty {
+            let event = queuedEvents.removeFirst()
+            for handler in observers.values { handler(event) }
+        }
     }
 
     // MARK: Commands
 
     /// Plays an item or podcast episode from the server.
     ///
-    /// The same media, already loaded and with no `startTime`, just resumes. Otherwise the current
-    /// session is closed and a new one started at `startTime`, or else at the newest of server
-    /// progress, local progress and the last-played record, rewound by ``AutoRewind``.
+    /// The same media, already loaded, resumes in the same session (from `startTime` when given).
+    /// Otherwise the streaming policy is checked first (a block leaves the current item as it is),
+    /// then the current session is closed and a new one started at `startTime`, or else at the
+    /// newest of server progress, local audio progress and the last-played record, rewound by
+    /// ``AutoRewind``. Finished media starts from the beginning.
     /// - Parameter allowingMeteredNetwork: The user agreed to stream on a metered network after
     ///   ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:)``. Never overrides "never".
     public func play(
@@ -155,48 +189,54 @@ public final class PlaybackCoordinator {
     ) async {
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
-        if key == mediaKey, startTime == nil {
+        if key == mediaKey {
             switch phase {
             case .loaded:
-                await resume()
-                return
+                return await resumeLoaded(rewindingBy: nil, startingAt: startTime)
             case .starting:
                 playWhenLoaded = true
+                if let startTime { pendingStartTime = startTime }
                 return
             case .idle, .unloaded:
                 break
             }
         }
-        let explicitStart = startTime ?? (key == mediaKey && phase == .unloaded ? pendingStartTime : nil)
 
         generation += 1
         let current = generation
-        if key != mediaKey {
-            tearDown(reason: .itemChanged)
-            mediaKey = key
-            unloadedPosition = 0
-            unloadedDuration = 0
-            emit(.itemChanged(key))
-        } else {
-            tearDown(reason: .itemChanged)
-        }
-        error = nil
-        pendingStartTime = nil
-        lastPlayedAt = nil
-        playWhenLoaded = true
-        phase = .starting
-
         switch await policy.streamingDecision() {
         case .allowed: break
         case .askUser(let reason) where allowingMeteredNetwork:
-            logger.info("Streaming on a metered path (\(String(describing: reason)))")
-        case .askUser(let reason): return fail(.streamingNeedsConfirmation(reason), generation: current)
-        case .denied(let reason): return fail(.streamingNotAllowed(reason), generation: current)
+            logger.info("Streaming on a metered path (\(String(describing: reason), privacy: .public))")
+        case .askUser(let reason): return block(.streamingNeedsConfirmation(reason), generation: current)
+        case .denied(let reason): return block(.streamingNotAllowed(reason), generation: current)
         }
         guard current == generation else { return }
 
+        let restarting = key == mediaKey
+        let offset = restarting && phase == .unloaded ? unloadedPosition - unloadedBase : 0
+        tearDown(reason: restarting ? .restarted : .itemChanged)
+        guard current == generation else { return }
+        error = nil
+        pendingStartTime = startTime
+        lastPlayedAt = nil
+        reachedEnd = false
+        playWhenLoaded = true
+        phase = .starting
+        if !restarting {
+            mediaKey = key
+            restoredRecord = nil
+            unloadedPosition = 0
+            unloadedDuration = 0
+            emit(.itemChanged(key))
+        }
+        guard current == generation else { return }
+
+        await waitForCloses()
+        guard current == generation else { return }
+
         let sessions = self.sessions
-        async let serverProgress = try? sessions.mediaProgress(itemID: itemID, episodeID: episodeID)
+        async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
         let session: PlaybackSession
         do {
             session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
@@ -224,39 +264,62 @@ public final class PlaybackCoordinator {
         guard current == generation else { return }
         var candidates: [ProgressCandidate] = []
         if let local {
+            // Ebook edits bump `lastUpdate`; only the audio position's own date counts here.
+            let date = local.audioEditedAt ?? local.serverBaseline?.lastUpdate ?? local.lastUpdate
             candidates.append(
-                ProgressCandidate(
-                    currentTime: local.currentTime, updatedAt: local.lastUpdate, isFinished: local.isFinished))
+                ProgressCandidate(currentTime: local.currentTime, updatedAt: date, isFinished: local.isFinished))
         }
         if let record = lastPlayedStore.load(), record.key == key {
-            candidates.append(ProgressCandidate(currentTime: record.position, updatedAt: record.timestamp))
+            candidates.append(
+                ProgressCandidate(
+                    currentTime: record.position, updatedAt: record.timestamp, isFinished: record.isFinished))
         }
-        candidates.append(
-            ProgressCandidate(
-                currentTime: session.currentTime, updatedAt: server?.lastUpdate.map(Self.date(ms:)),
-                isFinished: server?.isFinished ?? false))
+        let serverDate: Date?
+        switch server {
+        case .success(let progress):
+            serverDate = progress?.lastUpdate.map(Self.date(ms:))
+            candidates.append(
+                ProgressCandidate(
+                    currentTime: session.currentTime, updatedAt: serverDate, isFinished: progress?.isFinished ?? false))
+        case .failure(let error):
+            logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public)); using the session's")
+            candidates.append(
+                ProgressCandidate(currentTime: session.currentTime, updatedAt: session.updatedAt.map(Self.date(ms:))))
+        }
+        candidates = candidates.map {
+            ProgressCandidate(currentTime: $0.currentTime + offset, updatedAt: $0.updatedAt, isFinished: $0.isFinished)
+        }
+        let explicitStart = pendingStartTime
+        pendingStartTime = nil
         let extra = playWhenLoaded ? Self.nonNegative(willResume?() ?? 0) : 0
         let resumeTime = ResumePosition.startTime(
             explicit: explicitStart, candidates: candidates, duration: source.timeline.duration, now: now(),
             autoRewind: !settings.disableAutoRewind)
         let target = explicitStart == nil ? max(resumeTime - extra, 0) : resumeTime
 
-        engine.setRate(Float(settings.playbackRate))
-        rate = settings.playbackRate
+        engine.setRate(Float(rate))
+        unloadedPosition = target
         do {
             try await engine.load(source, at: target)
         } catch .superseded {
             return
         } catch {
             guard current == generation else { return }
-            unloadedPosition = target
             tearDown(reason: .loadFailed)
             return fail(PlaybackCoordinatorError(engineError: error), generation: current)
         }
         guard current == generation else { return }
         phase = .loaded
+        restoredRecord = nil
+        if let pending = pendingStartTime {
+            // A seek while loading.
+            pendingStartTime = nil
+            await engine.seek(to: engine.timeline?.clamp(pending) ?? pending)
+            guard current == generation, phase == .loaded else { return }
+        }
         emit(.loaded(time: engine.currentTime))
         emit(.didSeek(time: engine.currentTime))
+        guard current == generation, phase == .loaded else { return }
         saveLastPlayed()
         if playWhenLoaded { startEngine() }
     }
@@ -268,30 +331,47 @@ public final class PlaybackCoordinator {
         switch phase {
         case .idle: return
         case .starting: playWhenLoaded = true
-        case .unloaded: await play(itemID: key.libraryItemId, episodeID: key.episodeId, startTime: pendingStartTime)
-        case .loaded: await resumeLoaded(rewindingBy: seconds)
+        case .unloaded: await play(itemID: key.libraryItemId, episodeID: key.episodeId)
+        case .loaded: await resumeLoaded(rewindingBy: seconds, startingAt: nil)
         }
     }
 
-    /// The single resume path for loaded media: ``willResume`` first, then one awaited seek back
-    /// (which emits ``PlaybackCoordinatorEvent/didSeek(time:)`` with where it landed), then play.
-    private func resumeLoaded(rewindingBy seconds: Double?) async {
-        guard !engine.isPlaybackRequested else { return }
-        let current = generation
-        let extra = Self.nonNegative(willResume?() ?? 0)
+    /// The single place loaded media resumes. In order: ``willResume``; one awaited seek (to
+    /// `startTime`, to 0 after the end, or back by `seconds` or ``AutoRewind``), which emits
+    /// ``PlaybackCoordinatorEvent/didSeek(time:)`` with where it landed; then play. A pause during
+    /// the seek cancels the play, and a resume while one is in flight is ignored (a `startTime`
+    /// replaces it).
+    private func resumeLoaded(rewindingBy seconds: Double?, startingAt startTime: Double?) async {
         let time = engine.currentTime
-        let rewound =
-            if let seconds {
-                time - Self.nonNegative(seconds)
-            } else {
-                AutoRewind.resumeTime(
-                    currentTime: time, lastPlayed: lastPlayedAt, now: now(), isEnabled: !settings.disableAutoRewind)
-            }
-        let target = max(rewound - extra, 0)
-        if target < time {
-            _ = await seek(to: target)
-            guard current == generation, phase == .loaded, !engine.isPlaybackRequested else { return }
+        let atEnd = reachedEnd || engine.state == .ended || (duration > 0 && duration - time < Self.endTolerance)
+        guard startTime != nil || (resumingIntent == nil && (atEnd || !engine.isPlaybackRequested)) else { return }
+        resumeIntent += 1
+        let intent = resumeIntent
+        let current = generation
+        resumingIntent = intent
+        defer { if resumingIntent == intent { resumingIntent = nil } }
+
+        let extra = Self.nonNegative(willResume?() ?? 0)
+        let target: Double?
+        if let startTime {
+            target = startTime
+        } else if atEnd {
+            target = 0
+        } else {
+            let rewound =
+                if let seconds {
+                    time - Self.nonNegative(seconds)
+                } else {
+                    AutoRewind.resumeTime(
+                        currentTime: time, lastPlayed: lastPlayedAt, now: now(), isEnabled: !settings.disableAutoRewind)
+                }
+            let rewoundTarget = max(rewound - extra, 0)
+            target = rewoundTarget < time ? rewoundTarget : nil
         }
+        if let target {
+            await seek(to: target)
+        }
+        guard intent == resumeIntent, current == generation, phase == .loaded else { return }
         startEngine()
     }
 
@@ -299,6 +379,8 @@ public final class PlaybackCoordinator {
         switch phase {
         case .starting: playWhenLoaded = false
         case .loaded:
+            resumeIntent += 1
+            resumingIntent = nil
             guard engine.isPlaybackRequested else { return }
             engine.pause()
             lastPlayedAt = now()
@@ -309,13 +391,19 @@ public final class PlaybackCoordinator {
     }
 
     /// Seeks to a global time and returns where playback landed, or `nil` when a later seek
-    /// replaced it or it failed. While unloaded, moves the position the next play starts from.
+    /// replaced it or it failed. While starting, the target is applied once loaded (`nil`). While
+    /// unloaded, moves the position shown; the next play shifts the resume position by the same
+    /// distance rather than overriding newer progress.
     @discardableResult
     public func seek(to time: Double) async -> Double? {
         switch phase {
         case .loaded:
+            let current = generation
             let target = engine.timeline?.clamp(time) ?? max(time, 0)
-            guard await engine.seek(to: target) == .completed, phase == .loaded else { return nil }
+            guard await engine.seek(to: target) == .completed, current == generation, phase == .loaded else {
+                return nil
+            }
+            reachedEnd = false
             let landed = engine.currentTime
             emit(.didSeek(time: landed))
             saveLastPlayed()
@@ -323,10 +411,11 @@ public final class PlaybackCoordinator {
         case .unloaded:
             let finite = time.isFinite ? max(time, 0) : 0
             unloadedPosition = unloadedDuration > 0 ? min(finite, unloadedDuration) : finite
-            pendingStartTime = unloadedPosition
-            saveLastPlayed()
             return unloadedPosition
-        case .idle, .starting:
+        case .starting:
+            pendingStartTime = time
+            return nil
+        case .idle:
             return nil
         }
     }
@@ -334,7 +423,6 @@ public final class PlaybackCoordinator {
     /// Sets and saves the playback rate. Rates the settings reject are ignored.
     public func setRate(_ rate: Double) {
         settings.playbackRate = rate
-        self.rate = settings.playbackRate
         engine.setRate(Float(self.rate))
     }
 
@@ -345,16 +433,20 @@ public final class PlaybackCoordinator {
         tearDown(reason: .stopped)
         mediaKey = nil
         error = nil
+        restoredRecord = nil
         pendingStartTime = nil
+        reachedEnd = false
         unloadedPosition = 0
+        unloadedBase = 0
         unloadedDuration = 0
         phase = .idle
         lastPlayedStore.clear()
         if hadItem { emit(.itemChanged(nil)) }
     }
 
-    /// Publishes the last-played item for this connection, paused at its saved position, without
-    /// starting a session or loading the engine. Returns whether an item was restored.
+    /// Publishes the last-played item for this connection, paused at its saved position, with
+    /// its display metadata in ``restoredRecord``, without starting a session or loading the
+    /// engine. Returns whether an item was restored.
     @discardableResult
     public func restoreLastPlayed() -> Bool {
         guard phase == .idle, let record = lastPlayedStore.load(),
@@ -362,7 +454,9 @@ public final class PlaybackCoordinator {
         else { return false }
         generation += 1
         mediaKey = record.key
+        restoredRecord = record
         unloadedPosition = record.position.isFinite ? max(record.position, 0) : 0
+        unloadedBase = unloadedPosition
         unloadedDuration = record.duration ?? 0
         lastPlayedAt = record.timestamp
         phase = .unloaded
@@ -370,17 +464,18 @@ public final class PlaybackCoordinator {
         return true
     }
 
-    /// Saves the current position as the last-played record. Call when the app moves to the
-    /// background; pauses, seeks and loads save it already.
+    /// Saves the loaded item's position as the last-played record. Call when the app moves to
+    /// the background; pauses, seeks, loads and the end save it already.
     public func saveLastPlayed() {
-        guard let key = mediaKey, phase == .loaded || phase == .unloaded else { return }
+        guard let key = mediaKey, phase == .loaded else { return }
         let date = now()
         lastPlayedSavedAt = date
         lastPlayedStore.save(
             LastPlayedRecord(
                 serverConnectionID: key.serverConnectionID, libraryItemID: key.libraryItemId,
                 episodeID: key.episodeId, position: currentTime, duration: duration > 0 ? duration : nil,
-                timestamp: date))
+                timestamp: date, isFinished: reachedEnd, title: session?.displayTitle, author: session?.displayAuthor,
+                coverPath: session?.coverPath, chapterTitle: chapter?.title))
     }
 
     // MARK: Engine events
@@ -400,6 +495,7 @@ public final class PlaybackCoordinator {
         case .trackChanged:
             break
         case .endOfMedia:
+            reachedEnd = true
             lastPlayedAt = now()
             saveLastPlayed()
             emit(.ended)
@@ -425,22 +521,36 @@ public final class PlaybackCoordinator {
         emit(.failed(error))
     }
 
+    /// A streaming-policy block: the current item keeps playing. A start this play superseded
+    /// can no longer finish, so that item is left unloaded.
+    private func block(_ error: PlaybackCoordinatorError, generation blocked: Int) {
+        guard blocked == generation else { return }
+        if phase == .starting { tearDown(reason: .itemChanged) }
+        self.error = error
+        emit(.failed(error))
+    }
+
     /// Closes the current session (if any) and unloads the engine.
     private func tearDown(reason: SessionCloseReason) {
-        if phase == .loaded {
+        let wasLoaded = phase == .loaded
+        if wasLoaded {
             unloadedPosition = engine.currentTime
             unloadedDuration = engine.duration
         }
+        unloadedBase = unloadedPosition
+        resumeIntent += 1
+        resumingIntent = nil
+        if phase == .loaded || phase == .starting { engine.stop() }
+        if phase != .idle { phase = .unloaded }
         if let session, let key = mediaKey {
             self.session = nil
             let closing = ClosingSession(
                 sessionID: session.id, key: key, currentTime: unloadedPosition, duration: unloadedDuration,
-                reason: reason)
+                wasLoaded: wasLoaded, reason: reason)
+            let report = wasLoaded ? finalCloseReport?(closing) : nil
+            closeInBackground(sessionID: session.id, report: report)
             emit(.sessionWillClose(closing))
-            closeInBackground(sessionID: session.id, report: finalCloseReport?(closing))
         }
-        if phase == .loaded || phase == .starting { engine.stop() }
-        if phase != .idle { phase = .unloaded }
     }
 
     private func closeInBackground(sessionID: String, report: PlaybackSyncReport?) {
@@ -451,10 +561,32 @@ public final class PlaybackCoordinator {
             do {
                 try await sessions.closeSession(id: sessionID, report: report)
             } catch {
-                logger.info("Closing a playback session failed: \(String(describing: error), privacy: .public)")
+                logger.info(
+                    "Closing a playback session failed: \(Self.caseName(error), privacy: .public) \(String(describing: error), privacy: .private)"
+                )
             }
             self?.closeTasks[id] = nil
+            self?.closingSessionIDs.remove(sessionID)
         }
+    }
+
+    /// Waits up to ``closeWaitTimeout`` for the closes in flight, so the server normally sees
+    /// the old session closed before the next `/play`.
+    private func waitForCloses() async {
+        let closes = Array(closeTasks.values)
+        guard !closes.isEmpty else { return }
+        let first = FirstFinish()
+        let sleep = self.sleep
+        let timer = Task {
+            await sleep(Self.closeWaitTimeout)
+            first.finish()
+        }
+        Task {
+            for close in closes { await close.value }
+            first.finish()
+        }
+        await first.wait()
+        timer.cancel()
     }
 
     /// Waits for the background closes started so far (tests).
@@ -491,11 +623,51 @@ public final class PlaybackCoordinator {
         return .unexpected(String(describing: error))
     }
 
+    private nonisolated static func serverProgress(
+        _ sessions: any PlaybackSessionService, itemID: String, episodeID: String?
+    ) async -> Result<MediaProgress?, any Error> {
+        do {
+            return .success(try await sessions.mediaProgress(itemID: itemID, episodeID: episodeID))
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// The error's case without associated values (which can carry server messages), for logs.
+    private nonisolated static func caseName(_ error: any Error) -> String {
+        String(String(describing: error).prefix { $0 != "(" })
+    }
+
     private static func nonNegative(_ value: Double) -> Double {
         value.isFinite ? max(value, 0) : 0
     }
 
     private static func date(ms: Int) -> Date {
         Date(timeIntervalSince1970: Double(ms) / 1000)
+    }
+}
+
+/// Resumes one waiter when the first of several racing tasks finishes.
+private final class FirstFinish: Sendable {
+    private let state = Mutex<(isDone: Bool, waiter: CheckedContinuation<Void, Never>?)>((false, nil))
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let isDone = state.withLock { state in
+                if !state.isDone { state.waiter = continuation }
+                return state.isDone
+            }
+            if isDone { continuation.resume() }
+        }
+    }
+
+    func finish() {
+        let waiter = state.withLock { state -> CheckedContinuation<Void, Never>? in
+            guard !state.isDone else { return nil }
+            state.isDone = true
+            defer { state.waiter = nil }
+            return state.waiter
+        }
+        waiter?.resume()
     }
 }

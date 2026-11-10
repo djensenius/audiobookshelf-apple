@@ -58,8 +58,9 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     private(set) var loads: [(source: AudioEngineSource, time: Double)] = []
     private(set) var seeks: [Double] = []
     private(set) var stopCount = 0
-    /// Gates for the next loads, in order; a load without one completes immediately.
+    /// Gates for the next loads and seeks, in order; without one they complete immediately.
     var loadGates: [Gate] = []
+    var seekGates: [Gate] = []
     var loadError: AudioEngineError?
     private var generation = 0
 
@@ -100,23 +101,38 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
 
     func seek(to time: Double) async -> SeekResult {
         seeks.append(time)
+        if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
         currentTime = time
+        if state == .ended { state = isPlaybackRequested ? .playing : .paused }
         return .completed
+    }
+
+    /// Plays to the end, as the real engine does: play stays requested.
+    func finish() {
+        currentTime = duration
+        state = .ended
+        onEvent?(.endOfMedia)
     }
 
     func setRate(_ rate: Float) { defaultRate = rate }
 }
 
-/// Sessions per item, with optional gates on start and a log of starts and closes.
+/// Sessions per item (ids `<item>-<n>`, unique per start), with optional gates on starts and
+/// closes and a log of both in order.
 final class StubSessionService: PlaybackSessionService {
     struct State {
         var progress: [String: MediaProgress] = [:]
+        var progressError: APIError?
         var serverTime: [String: Double] = [:]
+        var sessionUpdatedAt: Date?
         var startGates: [String: Gate] = [:]
+        var closeGates: [String: Gate] = [:]
         var startError: APIError?
         var closeError: APIError?
         var starts: [String] = []
         var closes: [String] = []
+        var log: [String] = []
+        var count = 0
     }
 
     let serverConnectionID: UUID
@@ -128,20 +144,26 @@ final class StubSessionService: PlaybackSessionService {
 
     var starts: [String] { state.withLock { $0.starts } }
     var closes: [String] { state.withLock { $0.closes } }
-
-    static func sessionID(for itemID: String) -> String { "session-\(itemID)" }
+    var log: [String] { state.withLock { $0.log } }
 
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
-        let (gate, error, time) = state.withLock { state in
+        let (gate, error, time, id, updatedAt) = state.withLock { state in
             state.starts.append(itemID)
-            return (state.startGates.removeValue(forKey: itemID), state.startError, state.serverTime[itemID] ?? 0)
+            state.log.append("start \(itemID)")
+            state.count += 1
+            return (
+                state.startGates.removeValue(forKey: itemID), state.startError, state.serverTime[itemID] ?? 0,
+                "\(itemID)-\(state.count)", state.sessionUpdatedAt
+            )
         }
         await gate?.wait()
         if let error { throw error }
         return PlaybackSession(
-            id: Self.sessionID(for: itemID), libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
-            chapters: [Chapter(id: 0, start: 0, end: 1000), Chapter(id: 1, start: 1000, end: 3600)], duration: 3600,
-            currentTime: time,
+            id: id, libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
+            chapters: [Chapter(id: 0, start: 0, end: 1000, title: "One"), Chapter(id: 1, start: 1000, end: 3600)],
+            displayTitle: "Title \(itemID)", displayAuthor: "Author", coverPath: "/covers/\(itemID).jpg",
+            duration: 3600, currentTime: time,
+            updatedAt: updatedAt.map { Int($0.timeIntervalSince1970 * 1000) },
             audioTracks: [
                 AudioTrack(index: 1, startOffset: 0, duration: 1800, mimeType: "audio/mpeg"),
                 AudioTrack(index: 2, startOffset: 1800, duration: 1800, mimeType: "audio/mpeg"),
@@ -149,7 +171,10 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
-        state.withLock { $0.progress[itemID] }
+        try state.withLock { state in
+            if let error = state.progressError { throw error }
+            return state.progress[itemID]
+        }
     }
 
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
@@ -163,10 +188,12 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func closeSession(id: String, report: PlaybackSyncReport?) async throws {
-        let error = state.withLock { state in
+        let (gate, error) = state.withLock { state in
             state.closes.append(id)
-            return state.closeError
+            state.log.append("close \(id)")
+            return (state.closeGates.removeValue(forKey: id), state.closeError)
         }
+        await gate?.wait()
         if let error { throw error }
     }
 }
@@ -184,8 +211,20 @@ final class StubPlaybackSettings: PlaybackSettingsProviding {
 @MainActor
 final class StubStreamingPolicy: StreamingPolicyChecking {
     var decision = NetworkDecision.allowed
+    /// Holds the next check until opened; the decision is read when it returns.
+    var gate: Gate?
+    private(set) var checks = 0
 
-    func streamingDecision() async -> NetworkDecision { decision }
+    func streamingDecision() async -> NetworkDecision {
+        checks += 1
+        if let gate {
+            self.gate = nil
+            let decision = decision
+            await gate.wait()
+            return decision
+        }
+        return decision
+    }
 }
 
 @MainActor
@@ -195,4 +234,20 @@ final class InMemoryLastPlayedStore: LastPlayedStoring {
     func load() -> LastPlayedRecord? { record }
     func save(_ record: LastPlayedRecord) { self.record = record }
     func clear() { record = nil }
+}
+
+/// A sleep for the close-wait timeout: never elapses in tests (it is cancelled when the closes
+/// finish) unless `elapsesImmediately` is set.
+final class TestSleep: Sendable {
+    private let immediate = Mutex(false)
+
+    var elapsesImmediately: Bool {
+        get { immediate.withLock { $0 } }
+        set { immediate.withLock { $0 = newValue } }
+    }
+
+    func sleep(_ duration: Duration) async {
+        if elapsesImmediately { return }
+        try? await Task.sleep(for: .seconds(3600))
+    }
 }
