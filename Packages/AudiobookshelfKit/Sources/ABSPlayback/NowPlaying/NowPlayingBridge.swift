@@ -27,8 +27,8 @@ public typealias NowPlayingCoverProvider = @Sendable (NowPlayingCover) async -> 
 /// - **State.** Every ``PlaybackCoordinatorEvent`` (item, session, load, play, pause, seek, tick,
 ///   end, failure, close) rebuilds a ``NowPlayingState`` from the coordinator's properties and
 ///   passes it to ``NowPlayingController/update(_:)``, which publishes only what changed. The rate
-///   and play state (which change without an event) and the Now Playing settings are observed with
-///   Observation, so a change in the app's settings applies at runtime. No item clears the session.
+///   and play state, unloaded position (which can change without an event) and Now Playing settings
+///   are observed with Observation, so changes apply at runtime. No item clears the session.
 ///   Title, author, narrator, release date and cover are cached per item, so a closing session, a
 ///   restart or a failed load keeps them; a new item shows blank until its session starts.
 /// - **Commands.** Remote commands arrive through the controller, which refuses them without an
@@ -144,14 +144,15 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
         controller.update(state)
     }
 
-    /// Reads the settings and the coordinator's rate and play state under observation; any of them
-    /// changing republishes. (A stall or a rate change emits no coordinator event.)
+    /// Observes settings, rate, play state and unloaded position, which can change without events.
+    /// Loaded position follows coordinator events instead, avoiding observation work for every tick.
     private func trackSettingsAndRate() {
         guard !isInvalidated else { return }
         let settings = withObservationTracking {
             _ = coordinator?.rate
             _ = coordinator?.isPlaying
             _ = coordinator?.isBuffering
+            if let coordinator, coordinator.phase != .loaded { _ = coordinator.currentTime }
             return readSettings()
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in self?.settingsOrRateChanged() }

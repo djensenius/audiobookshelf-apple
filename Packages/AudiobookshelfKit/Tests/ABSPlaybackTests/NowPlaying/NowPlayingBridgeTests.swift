@@ -142,6 +142,52 @@ struct BridgeHarness {
         #expect(session.applicationPrimaryRequests == 1)
     }
 
+    @Test func directUnloadedPositionChangesPublishAfterObservationRegisters() async throws {
+        let b = try BridgeHarness()
+        b.h.lastPlayed.record = b.h.record("a", position: 120, age: 5)
+        b.coordinator.restoreLastPlayed()
+        let session = try b.session
+        // This is applied by the observation callback, after it re-registers for the restored phase.
+        b.settings.value.jumpForwardTime = 45
+        await yieldUntil { b.controller.publishedCommands?.skipForwardInterval == 45 }
+        await b.controller.artworkTask?.value
+        let events = b.h.events.events
+
+        await b.coordinator.jump(by: 30)
+        await yieldUntil { session.snapshot == b.snapshot(.paused, at: 150) }
+        await b.coordinator.seek(to: 600)
+        await yieldUntil { session.snapshot == b.snapshot(.paused, at: 600) }
+        await b.coordinator.jump(by: -15)
+        await yieldUntil { session.snapshot == b.snapshot(.paused, at: 585) }
+
+        #expect(b.controller.state?.elapsed == 585, "Published elapsed: \(b.controller.state?.elapsed ?? -1)")
+        #expect(b.h.events.events == events)
+        #expect(b.h.service.starts.isEmpty)
+        #expect(b.h.engine.loads.isEmpty)
+        #expect(session.applicationPrimaryRequests == 0)
+    }
+
+    @Test func loadedTicksMatchingExtrapolationDoNotRepublishSnapshots() async throws {
+        let b = try BridgeHarness()
+        await b.coordinator.play(itemID: "a", startTime: 120)
+        let session = try b.session
+        b.settings.value.jumpForwardTime = 45
+        await yieldUntil { b.controller.publishedCommands?.skipForwardInterval == 45 }
+        await b.controller.artworkTask?.value
+        await b.controller.activationTask?.value
+        let snapshots = session.snapshots.count
+
+        for time in 121...140 {
+            b.h.clock.advance(by: 1)
+            b.h.engine.currentTime = Double(time)
+            b.h.engine.onEvent?(.tick(Double(time)))
+            await Task.yield()
+        }
+        #expect(b.controller.state?.elapsed == 140)
+        #expect(session.snapshots.count == snapshots)
+        #expect(session.applicationPrimaryRequests == 1)
+    }
+
     @Test func itemAndChapterChangesRepublishTheContent() async throws {
         let b = try BridgeHarness()
         await b.coordinator.play(itemID: "a")

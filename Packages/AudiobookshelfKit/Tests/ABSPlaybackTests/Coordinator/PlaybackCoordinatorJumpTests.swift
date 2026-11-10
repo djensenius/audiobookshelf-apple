@@ -111,6 +111,85 @@ struct PlaybackCoordinatorJumpTests {
         #expect(coordinator.isPlaying)
     }
 
+    @Test(
+        arguments: [false, true],
+        [
+            (4000.0, -15.0, 3585.0), (-100.0, 15.0, 15.0), (Double.nan, 15.0, 15.0),
+            (Double.infinity, 15.0, 15.0), (-Double.infinity, 15.0, 15.0),
+        ])
+    func jumpsDuringEngineLoadNormalizeAbsoluteTargets(
+        supersedingSeek: Bool, sample: (target: Double, jump: Double, landing: Double)
+    ) async throws {
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let coordinator = coordinator
+        let play = Task { await coordinator.play(itemID: "a", startTime: supersedingSeek ? nil : sample.target) }
+        await yieldUntil { engine.loads.count == 1 }
+        #expect(engine.loads.last?.time == (supersedingSeek || sample.target != 4000 ? 0 : 3600))
+
+        if supersedingSeek { await coordinator.seek(to: sample.target) }
+        await coordinator.jump(by: sample.jump)
+        // Invalid jumps must neither replace nor corrupt the finite offset.
+        for offset in [Double.nan, Double.infinity, -Double.infinity] {
+            #expect(await coordinator.jump(by: offset) == nil)
+        }
+        gate.open()
+        await play.value
+
+        #expect(engine.seeks == [sample.landing])
+        #expect(
+            coordinator.currentTime == sample.landing,
+            "Landed at \(coordinator.currentTime), expected \(sample.landing)")
+        #expect(h.events.events.contains(.loaded(time: sample.landing)))
+        #expect(
+            h.events.events.filter { if case .didSeek = $0 { true } else { false } }
+                == [.didSeek(time: sample.landing)])
+        #expect(h.lastPlayed.record?.position == sample.landing)
+    }
+
+    @Test(arguments: [(10.0, false), (120.0, false), (120.0, true)])
+    func jumpDuringReconciledLoadUsesTheResolvedAnchor(recordAge: TimeInterval, retry: Bool) async throws {
+        h.lastPlayed.record = h.record("a", position: 120, age: recordAge)
+        h.setServerProgress("a", time: 1000, updated: h.clock.ago(1))
+        coordinator.restoreLastPlayed()
+        await coordinator.seek(to: 3600)
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let coordinator = coordinator
+        let play = Task { await coordinator.resume() }
+        await yieldUntil { engine.loads.count == 1 }
+        // A 9-second date difference stays inside the skew window; 119 seconds is foreign progress.
+        let resolved = recordAge > 60 ? 1000.0 : 3600.0
+        #expect(engine.loads.last?.time == resolved)
+        #expect(coordinator.currentTime == resolved)
+
+        await coordinator.jump(by: 30)
+        let jumped = min(resolved + 30, 3600)
+        #expect(coordinator.currentTime == jumped, "Shown at \(coordinator.currentTime), expected \(jumped)")
+        if retry { engine.loadError = .emptyTimeline }
+        gate.open()
+        await play.value
+
+        if retry {
+            #expect(coordinator.phase == .unloaded)
+            engine.loadError = nil
+            // With progress unavailable on retry, retain the resolved start, not the discarded
+            // seek to 3600 or the last-played record at 120. Failed starts drop their jump offset.
+            h.service.state.withLock {
+                $0.progressError = .forbidden(message: nil)
+                $0.serverTime["a"] = 0
+            }
+            await coordinator.resume()
+            #expect(engine.loads.map(\.time) == [resolved, resolved])
+        }
+        let landing = retry ? resolved : jumped
+        #expect(coordinator.currentTime == landing, "Landed at \(coordinator.currentTime), expected \(landing)")
+        #expect(engine.seeks == (!retry && resolved < 3600 ? [jumped] : []))
+        #expect(
+            h.events.events.filter { if case .didSeek = $0 { true } else { false } } == [.didSeek(time: landing)])
+        #expect(h.lastPlayed.record?.position == landing)
+    }
+
     @Test func jumpsWhileANewItemStartsShowOnlyOnceLoaded() async throws {
         h.setServerProgress("a", time: 500, updated: h.clock.ago(10))
         let (play, gate) = await playHeld("a")

@@ -376,7 +376,7 @@ public final class PlaybackCoordinator {
                     currentTime: record.position, updatedAt: record.timestamp, isFinished: record.isFinished))
         }
         // Kept until the load succeeds, so a retry after a failure starts there again.
-        let plannedStart = pendingStartTime
+        var plannedStart = pendingStartTime
         var explicitStart = plannedStart
         if let unloadedSeek, explicitStart == unloadedSeek, let record,
             candidates.contains(where: { Self.isFromElsewhere($0, than: record) })
@@ -389,6 +389,12 @@ public final class PlaybackCoordinator {
             autoRewind: !settings.disableAutoRewind)
         let target = explicitStart == nil ? max(resumeTime - extra, 0) : resumeTime
 
+        if plannedStart != nil, explicitStart == nil {
+            // Foreign progress superseded the unloaded seek. Keep the resolved anchor for jumps
+            // and load-failure retries; an absolute seek during the load can still replace it.
+            plannedStart = target
+            pendingStartTime = target
+        }
         engine.setRate(Float(rate))
         unloadedPosition = target
         isResolvingStart = false
@@ -414,7 +420,10 @@ public final class PlaybackCoordinator {
         pendingJumpOffset = 0
         awaitingSeekLanding = true
         var seekTarget: Double?
-        if let pending, pending != plannedStart { seekTarget = pending }  // A seek while loading.
+        if let pending, pending != plannedStart {
+            // A seek while loading: normalize before adding jumps, just as the initial load does.
+            seekTarget = Self.clamp(pending, to: unloadedDuration)
+        }
         // Jumps while loading are relative to the resolved resume position (or the seek above).
         if jumpOffset != 0 { seekTarget = (seekTarget ?? position) + jumpOffset }
         if let seekTarget {
@@ -880,7 +889,8 @@ public final class PlaybackCoordinator {
     /// of 3600, +30 keeps only +10, so a resolved 1000 becomes 1010. This is intentional: the
     /// position shown and the result stay consistent with what the user saw.
     private func addClampedJump(_ offset: Double) {
-        let base = pendingStartTime ?? unloadedPosition
+        // The load and catch-up seek use normalized positions, so offsets must use that same base.
+        let base = Self.clamp(pendingStartTime ?? unloadedPosition, to: unloadedDuration)
         let position = Self.clamp(base + pendingJumpOffset, to: unloadedDuration)
         pendingJumpOffset = Self.clamp(position + offset, to: unloadedDuration) - base
     }
