@@ -7,9 +7,9 @@ public struct TimelineRange: Sendable, Hashable {
 
     public var duration: Double { end - start }
 
-    /// Seconds played inside the range, clamped to `0...duration`.
+    /// Seconds played inside the range, clamped to `0...duration`; NaN counts as the range start.
     public func elapsed(at time: Double) -> Double {
-        min(max((PlaybackTimeline.finite(time) ?? start) - start, 0), duration)
+        min(max((time.isNaN ? start : time) - start, 0), duration)
     }
 
     /// Seconds left in the range, clamped to `0...duration`.
@@ -22,9 +22,10 @@ public struct TimelineRange: Sendable, Hashable {
         duration > 0 ? elapsed(at: time) / duration : 0
     }
 
-    /// Global time for a position inside the range (scrubbing, remote seek), clamped to the range.
+    /// Global time for a position inside the range (scrubbing, remote seek), clamped to the range;
+    /// NaN counts as `0`.
     public func time(forElapsed elapsed: Double) -> Double {
-        start + min(max(PlaybackTimeline.finite(elapsed) ?? 0, 0), duration)
+        start + min(max(elapsed.isNaN ? 0 : elapsed, 0), duration)
     }
 }
 
@@ -33,20 +34,23 @@ extension PlaybackTimeline {
     public static let previousChapterRestartThreshold: Double = 3
 
     /// Player clocks land slightly before a seek target (e.g. 1800.2499 after seeking to 1800.25).
-    /// Chapter lookups treat a time this close to a chapter start as inside that chapter, like the
-    /// legacy player's two-decimal rounding of chapter starts.
+    /// Chapter lookups treat a time this close before a chapter *start* as inside that chapter, like
+    /// the legacy player's two-decimal rounding of chapter starts. Chapter ends are compared exactly,
+    /// so only an adjacent chapter's start (not the end itself) moves the boundary.
     static let chapterBoundaryTolerance: Double = 0.01
 
-    /// Index into ``chapters`` of the chapter playing at `time`, or `nil` in a gap, before the first
-    /// chapter, or without chapters. At the very end the last chapter stays current when it reaches
-    /// the end of the media.
+    /// Index into ``chapters`` (the normalised list, not `session.chapters`) of the chapter playing
+    /// at `time`, or `nil` in a gap, before the first chapter, or without chapters. UI and Now Playing
+    /// "chapter n of N" must count ``chapters`` or match by `Chapter.id`.
+    ///
+    /// The last chapter stays current from its start to the end of the media, even when its end is
+    /// short of the duration.
     public func currentChapterIndex(at time: Double) -> Int? {
         let time = clamp(time)
-        let shifted = time + Self.chapterBoundaryTolerance
-        guard let index = chapters.lastIndex(where: { $0.start <= shifted }) else { return nil }
-        if shifted < chapters[index].end { return index }
-        let isLast = index == chapters.count - 1
-        return isLast && duration > 0 && chapters[index].end >= duration && time >= duration ? index : nil
+        guard let index = chapters.lastIndex(where: { $0.start <= time + Self.chapterBoundaryTolerance }) else {
+            return nil
+        }
+        return time < chapters[index].end || index == chapters.count - 1 ? index : nil
     }
 
     public func currentChapter(at time: Double) -> Chapter? {
@@ -76,17 +80,24 @@ extension PlaybackTimeline {
     }
 
     /// The end of the chapter playing at `time`, for the end-of-chapter sleep timer; `nil` without a
-    /// current chapter.
+    /// current chapter. For the last chapter this is the end of the media, so it is never in the past.
     public func endOfChapter(at time: Double) -> Double? {
-        currentChapter(at: time)?.end
+        currentChapterRange(at: time)?.end
     }
 
-    /// The scrubber range at `time`: the current chapter in chapter-track mode, otherwise (or with
-    /// no current chapter) the whole timeline.
+    /// The scrubber range at `time`: the current chapter in chapter-track mode (the last chapter
+    /// extends to the end of the media), otherwise, or with no current chapter, the whole timeline.
     public func progressRange(at time: Double, chapterTrack: Bool) -> TimelineRange {
-        if chapterTrack, let chapter = currentChapter(at: time) {
-            return TimelineRange(start: chapter.start, end: chapter.end)
+        if chapterTrack, let range = currentChapterRange(at: time) {
+            return range
         }
         return TimelineRange(start: 0, end: duration)
+    }
+
+    private func currentChapterRange(at time: Double) -> TimelineRange? {
+        guard let index = currentChapterIndex(at: time) else { return nil }
+        let chapter = chapters[index]
+        let end = index == chapters.count - 1 ? max(chapter.end, duration) : chapter.end
+        return TimelineRange(start: chapter.start, end: end)
     }
 }

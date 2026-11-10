@@ -12,6 +12,8 @@ public enum AutoRewind {
     /// | 1 min to under 5 min | 10 s |
     /// | 5 min to under 30 min | 20 s |
     /// | 30 min or more | 30 s |
+    ///
+    /// NaN returns `0`; the legacy code fell through to 30 s.
     public static func interval(sinceLastPlayed: TimeInterval?) -> TimeInterval {
         guard let sinceLastPlayed, !sinceLastPlayed.isNaN else { return 0 }
         switch sinceLastPlayed {

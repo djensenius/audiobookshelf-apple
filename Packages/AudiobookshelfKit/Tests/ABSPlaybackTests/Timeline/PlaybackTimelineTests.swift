@@ -27,6 +27,8 @@ import Testing
         .init(.m4b, 40_000, 0, 36_000),
         .init(.m4b, -5, 0, 0),
         .init(.m4b, .nan, 0, 0),
+        .init(.m4b, .infinity, 0, 36_000),
+        .init(.m4b, -.infinity, 0, 0),
         // 30-file mp3: track boundaries belong to the track that starts there.
         .init(.mp3, 0, 0, 0),
         .init(.mp3, 999.5, 0, 999.5),
@@ -37,6 +39,13 @@ import Testing
         .init(.mp3, 29_406, 29, 0),
         .init(.mp3, 30_435, 29, 1029),
         .init(.mp3, 31_000, 29, 1029),
+        // Chapters crossing file boundaries.
+        .init(.crossingChapters, 450, 0, 450),
+        .init(.crossingChapters, 599.5, 0, 599.5),
+        .init(.crossingChapters, 600, 1, 0),
+        .init(.crossingChapters, 1000, 1, 400),
+        .init(.crossingChapters, 1200, 2, 0),
+        .init(.crossingChapters, 1800, 2, 600),
         // Podcast without chapters.
         .init(.podcast, 0, 0, 0),
         .init(.podcast, 1350.5, 0, 1350.5),
@@ -50,6 +59,7 @@ import Testing
         // Overlaps: the later-starting track wins.
         .init(.overlappingTracks, 94, 0, 94),
         .init(.overlappingTracks, 97, 1, 2),
+        .init(.overlappingTracks, 200, 1, 105),
         // Zero-length tracks are skipped; missing offsets continue from the previous track.
         .init(.degenerateTracks, 0, 1, 0),
         .init(.degenerateTracks, 50, 3, 0),
@@ -73,11 +83,30 @@ import Testing
         #expect(timeline.time(at: position) == time)
     }
 
+    static let floatSamples: [Double] = {
+        let timeline = TimelineFixture.floatTracks.timeline
+        return (0...1000).map { timeline.duration * Double($0) / 1000 } + TimelineFixture.floatStarts
+    }()
+
+    @Test(arguments: floatSamples)
+    func floatRoundTrips(_ time: Double) throws {
+        let timeline = TimelineFixture.floatTracks.timeline
+        let position = try #require(timeline.position(at: time))
+        let track = timeline.tracks[position.trackIndex]
+        #expect(position.offset >= 0 && position.offset <= track.duration)
+        #expect(track.start <= time && (time < track.end || position.trackIndex == timeline.tracks.count - 1))
+        let roundTrip = try #require(timeline.time(at: position))
+        #expect(abs(roundTrip - time) <= 1e-6)
+    }
+
     @Test func timeForTrackOffsetIsClamped() {
         let timeline = TimelineFixture.mp3.timeline
         #expect(timeline.time(trackIndex: 1, offset: 500) == 1500)
         #expect(timeline.time(trackIndex: 1, offset: -10) == 1000)
         #expect(timeline.time(trackIndex: 1, offset: 5000) == 2001)
+        #expect(timeline.time(trackIndex: 1, offset: .infinity) == 2001)
+        #expect(timeline.time(trackIndex: 1, offset: -.infinity) == 1000)
+        #expect(timeline.time(trackIndex: 1, offset: .nan) == 1000)
         #expect(timeline.time(trackIndex: 30, offset: 0) == nil)
         #expect(timeline.time(trackIndex: -1, offset: 0) == nil)
         #expect(TimelineFixture.empty.timeline.time(trackIndex: 0, offset: 0) == nil)
@@ -101,10 +130,34 @@ import Testing
             ],
             chapters: [])
         #expect(unsorted.tracks.map(\.audioTrack.index) == [1, 2])
+        #expect(unsorted.tracks.map(\.sourceIndex) == [1, 0])
         #expect(unsorted.position(at: 120) == .init(trackIndex: 1, offset: 20))
 
         #expect(TimelineFixture.empty.timeline.duration == 0)
         #expect(TimelineFixture.zeroLength.timeline.duration == 0)
+    }
+
+    @Test(arguments: [
+        (TimelineFixture.overlappingTracks, [95.0, 200]),
+        (.gappedTracks, [100, 200]),
+        (.degenerateTracks, [0, 50, 50, 100]),
+        (.mp3, (1...30).map { TimelineFixture.mp3Start($0) }),
+    ])
+    func playbackEndStopsAtNextTrack(_ fixture: TimelineFixture, _ expected: [Double]) {
+        #expect(fixture.timeline.tracks.map(\.playbackEnd) == expected)
+    }
+
+    @Test func clampsInfinity() {
+        let timeline = TimelineFixture.m4b.timeline
+        #expect(timeline.clamp(.infinity) == 36_000)
+        #expect(timeline.clamp(-.infinity) == 0)
+        #expect(timeline.clamp(.nan) == 0)
+        #expect(timeline.currentChapterIndex(at: .infinity) == 4)
+        #expect(timeline.currentChapterIndex(at: -.infinity) == 0)
+        let range = timeline.progressRange(at: 2000, chapterTrack: true)
+        #expect(range.elapsed(at: .infinity) == range.duration)
+        #expect(range.time(forElapsed: .infinity) == 5400)
+        #expect(range.elapsed(at: .nan) == 0)
     }
 
     @Test func buildsFromSession() {
@@ -142,6 +195,18 @@ import Testing
         .init(fixture: .m4b, time: 35_999, current: 4, next: nil, previous: 30_000, end: 36_000),
         .init(fixture: .m4b, time: 36_000, current: 4, next: nil, previous: 30_000, end: 36_000),
         .init(fixture: .m4b, time: 50_000, current: 4, next: nil, previous: 30_000, end: 36_000),
+        // Last chapter ends short of the duration: it stays current to the end of the media.
+        .init(fixture: .m4bShortChapters, time: 36_000.25, current: 1, next: nil, previous: 18_000, end: 36_000.25),
+        .init(fixture: .m4bShortChapters, time: 36_000.125, current: 1, next: nil, previous: 18_000, end: 36_000.25),
+        // Within 0.01 s before an adjacent chapter: that chapter's start tolerance applies.
+        .init(fixture: .m4bShortChapters, time: 17_999.995, current: 1, next: nil, previous: 0, end: 36_000.25),
+        .init(fixture: .m4bShortChapters, time: 17_999.98, current: 0, next: 18_000, previous: 0, end: 18_000),
+        // Chapters crossing file boundaries.
+        .init(fixture: .crossingChapters, time: 450, current: 1, next: 1000, previous: 0, end: 1000),
+        .init(fixture: .crossingChapters, time: 600, current: 1, next: 1000, previous: 450, end: 1000),
+        .init(fixture: .crossingChapters, time: 1000, current: 2, next: nil, previous: 450, end: 1800),
+        .init(fixture: .crossingChapters, time: 1200, current: 2, next: nil, previous: 1000, end: 1800),
+        .init(fixture: .crossingChapters, time: 1800, current: 2, next: nil, previous: 1000, end: 1800),
         // 30-file mp3, one chapter per file.
         .init(fixture: .mp3, time: 999.995, current: 1, next: 2001, previous: 0, end: 2001),
         .init(fixture: .mp3, time: 1000, current: 1, next: 2001, previous: 0, end: 2001),
@@ -154,6 +219,10 @@ import Testing
         // Gaps and overlaps: chapters 10–100, 150–190 (trimmed), 190–300.
         .init(fixture: .chapterGaps, time: 5, current: nil, next: 10, previous: 0, end: nil),
         .init(fixture: .chapterGaps, time: 10, current: 0, next: 150, previous: 10, end: 100),
+        // Within 0.01 s before a chapter end: exact before a gap.
+        .init(fixture: .chapterGaps, time: 99.995, current: 0, next: 150, previous: 10, end: 100),
+        .init(fixture: .chapterGaps, time: 100, current: nil, next: 150, previous: 10, end: nil),
+        .init(fixture: .chapterGaps, time: 189.995, current: 2, next: nil, previous: 150, end: 300),
         .init(fixture: .chapterGaps, time: 120, current: nil, next: 150, previous: 10, end: nil),
         .init(fixture: .chapterGaps, time: 189, current: 1, next: 190, previous: 150, end: 190),
         .init(fixture: .chapterGaps, time: 190, current: 2, next: nil, previous: 150, end: 300),
@@ -180,6 +249,28 @@ import Testing
         #expect(gaps.chapters.map(\.end) == [100, 190, 300])
     }
 
+    @Test func duplicateChapterStartKeepsTheLast() {
+        let timeline = PlaybackTimeline(
+            tracks: [AudioTrack(index: 1, startOffset: 0, duration: 200)],
+            chapters: [
+                Chapter(id: 0, start: 0, end: 100), Chapter(id: 1, start: 0, end: 50),
+                Chapter(id: 2, start: 100, end: 200),
+            ])
+        #expect(timeline.chapters.map(\.id) == [1, 2])
+        #expect(timeline.chapters.map(\.end) == [50, 200])
+        #expect(timeline.currentChapter(at: 25)?.id == 1)
+        #expect(timeline.currentChapter(at: 75) == nil)
+    }
+
+    @Test func zeroDurationTimelineHasNoChapters() {
+        let chapters = [Chapter(id: 0, start: 0, end: 10)]
+        #expect(PlaybackTimeline(tracks: [], chapters: chapters).chapters.isEmpty)
+        let zeroLength = PlaybackTimeline(
+            tracks: [AudioTrack(index: 1, startOffset: 0, duration: 0)], chapters: chapters)
+        #expect(zeroLength.chapters.isEmpty)
+        #expect(zeroLength.currentChapter(at: 0) == nil)
+    }
+
     // MARK: - Chapter track
 
     struct RangeCase: Sendable, CustomTestStringConvertible {
@@ -198,6 +289,10 @@ import Testing
         .init(fixture: .m4b, time: 2000, chapterTrack: false, start: 0, end: 36_000, elapsed: 2000),
         .init(fixture: .mp3, time: 1000, chapterTrack: true, start: 1000, end: 2001, elapsed: 0),
         .init(fixture: .mp3, time: 30_435, chapterTrack: true, start: 29_406, end: 30_435, elapsed: 1029),
+        .init(
+            fixture: .m4bShortChapters, time: 36_000.25, chapterTrack: true, start: 18_000, end: 36_000.25,
+            elapsed: 18_000.25),
+        .init(fixture: .crossingChapters, time: 600, chapterTrack: true, start: 450, end: 1000, elapsed: 150),
         .init(fixture: .podcast, time: 100, chapterTrack: true, start: 0, end: 2700, elapsed: 100),
         .init(fixture: .chapterGaps, time: 120, chapterTrack: true, start: 0, end: 300, elapsed: 120),
         .init(fixture: .empty, time: 120, chapterTrack: true, start: 0, end: 0, elapsed: 0),
@@ -235,6 +330,11 @@ import Testing
         (.mp3, 999, 10, 1009, 989),
         (.podcast, 2690, 30, 2700, 2660),
         (.empty, 10, 30, 0, 0),
+        (.m4b, 100, .infinity, 36_000, 0),
+        (.m4b, .infinity, 30, 36_000, 35_970),
+        (.m4b, -.infinity, 30, 30, 0),
+        (.m4b, 100, .nan, 100, 100),
+        (.m4b, 100, -.infinity, 100, 100),
     ])
     func jumps(_ fixture: TimelineFixture, _ time: Double, _ interval: Double, _ forward: Double, _ backward: Double) {
         let timeline = fixture.timeline

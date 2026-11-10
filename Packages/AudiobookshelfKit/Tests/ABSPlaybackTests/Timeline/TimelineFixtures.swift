@@ -6,8 +6,14 @@ import Testing
 enum TimelineFixture: String, CaseIterable, Sendable, CustomTestStringConvertible {
     /// Single 10 h m4b; chapters arrive unsorted, one ends past the media and one starts after it.
     case m4b
+    /// Single m4b of 36000.25 s whose last chapter ends at 36000, short of the duration.
+    case m4bShortChapters
     /// 30 mp3 files, file `i` lasting `1000 + i` s, with one chapter per file.
     case mp3
+    /// Three 600 s files with chapters 0–450, 450–1000 and 1000–1800 crossing the file boundaries.
+    case crossingChapters
+    /// 40 files of 1234.567891 s each (not representable in binary), start offsets summed.
+    case floatTracks
     /// A podcast episode: one track with a `null` index and no chapters.
     case podcast
     /// Tracks 5–100 and 110–200 (leading gap and a gap between tracks).
@@ -39,6 +45,23 @@ enum TimelineFixture: String, CaseIterable, Sendable, CustomTestStringConvertibl
                     Chapter(id: 5, start: 40_000, end: 41_000, title: "Ghost"),
                     Chapter(id: 3, start: 12_000, end: 30_000, title: "Four"),
                 ])
+        case .m4bShortChapters:
+            PlaybackTimeline(
+                tracks: [AudioTrack(index: 1, startOffset: 0, duration: 36_000.25)],
+                chapters: [Chapter(id: 0, start: 0, end: 18_000), Chapter(id: 1, start: 18_000, end: 36_000)])
+        case .crossingChapters:
+            PlaybackTimeline(
+                tracks: (0..<3).map { AudioTrack(index: $0 + 1, startOffset: Double($0) * 600, duration: 600) },
+                chapters: [
+                    Chapter(id: 0, start: 0, end: 450), Chapter(id: 1, start: 450, end: 1000),
+                    Chapter(id: 2, start: 1000, end: 1800),
+                ])
+        case .floatTracks:
+            PlaybackTimeline(
+                tracks: (0..<40).map {
+                    AudioTrack(index: $0 + 1, startOffset: Self.floatStarts[$0], duration: Self.floatDuration)
+                },
+                chapters: [])
         case .mp3:
             PlaybackTimeline(
                 tracks: (0..<30).map {
@@ -87,6 +110,12 @@ enum TimelineFixture: String, CaseIterable, Sendable, CustomTestStringConvertibl
                     Chapter(id: 1, start: 150, end: 200),
                 ])
         }
+    }
+
+    static let floatDuration = 1234.567891
+
+    static let floatStarts: [Double] = (0..<40).reduce(into: [0]) { starts, _ in
+        starts.append(starts[starts.count - 1] + floatDuration)
     }
 
     /// Start of mp3 file `index`: the sum of `1000 + k` for `k < index`.
