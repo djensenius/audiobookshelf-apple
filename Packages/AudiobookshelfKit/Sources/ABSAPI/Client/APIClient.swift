@@ -75,10 +75,23 @@ public actor APIClient {
         tokenProvider: any TokenProvider,
         sessionConfiguration: URLSessionConfiguration = .absConnection()
     ) {
+        self.init(
+            configuration: configuration, tokenProvider: tokenProvider, sessionConfiguration: sessionConfiguration,
+            cookieStorage: nil)
+    }
+
+    /// - Parameter cookieStorage: The cookie jar to use, for example one shared by the clients
+    ///   for the hops of one redirect chain; `nil` for a new jar.
+    init(
+        configuration: APIClientConfiguration,
+        tokenProvider: any TokenProvider,
+        sessionConfiguration: URLSessionConfiguration,
+        cookieStorage: HTTPCookieStorage?
+    ) {
         self.configuration = configuration
         self.tokenProvider = tokenProvider
         let sessionConfiguration = sessionConfiguration.copy() as? URLSessionConfiguration ?? .absConnection()
-        sessionConfiguration.httpCookieStorage = URLSessionConfiguration.ephemeral.httpCookieStorage
+        sessionConfiguration.httpCookieStorage = cookieStorage ?? URLSessionConfiguration.ephemeral.httpCookieStorage
         sessionConfiguration.timeoutIntervalForRequest = configuration.timeout
         session = URLSession(
             configuration: sessionConfiguration, delegate: RedirectPolicyDelegate(), delegateQueue: nil)
@@ -108,9 +121,12 @@ public actor APIClient {
     public func response<Response>(for endpoint: Endpoint<Response>) async throws -> APIResponse<Response> {
         let request = try makeRequest(for: endpoint)
         let followsRedirects = endpoint.followsRedirects
+        let staysOnOrigin = endpoint.staysOnOrigin
+        let cookies = writtenCookies(for: endpoint)
 
         guard endpoint.requiresAuthentication else {
-            let reply = try await perform(request, followsRedirects: followsRedirects)
+            let reply = try await perform(
+                request, followsRedirects: followsRedirects, staysOnOrigin: staysOnOrigin, cookies: cookies)
             return try handle(reply.data, reply.http, for: endpoint)
         }
 
@@ -132,7 +148,9 @@ public actor APIClient {
             // A refresh that returned the same pair says nothing about the pair's rejection unless it
             // completed after this send.
             let sendGeneration = refreshGeneration
-            let reply = try await perform(authorized(request, tokens.accessToken), followsRedirects: followsRedirects)
+            let reply = try await perform(
+                authorized(request, tokens.accessToken), followsRedirects: followsRedirects,
+                staysOnOrigin: staysOnOrigin, cookies: cookies)
             // A 401 from a hop that never received the token says nothing about the token.
             guard reply.http.statusCode == 401, !reply.credentialsStripped else {
                 return try handle(reply.data, reply.http, for: endpoint)
@@ -490,6 +508,7 @@ public actor APIClient {
         )
         request.httpMethod = endpoint.method.rawValue
         request.timeoutInterval = endpoint.timeout ?? configuration.timeout
+        request.httpShouldHandleCookies = endpoint.sendsCookies && endpoint.withheldCookies.isEmpty
         for (name, value) in configuration.customHeaders {
             request.setValue(value, forHTTPHeaderField: name)
         }
@@ -504,7 +523,34 @@ public actor APIClient {
         for (name, value) in endpoint.headers {
             request.setValue(value, forHTTPHeaderField: name)
         }
+        if let cookies = writtenCookies(for: endpoint), let url = request.url {
+            // The client writes the cookies itself: the jar's, then the endpoint's own `Cookie`
+            // header (custom headers can't set one).
+            request.setValue(cookies.header(for: url), forHTTPHeaderField: "Cookie")
+        }
         return request
+    }
+
+    /// The rule for an endpoint whose cookies the client writes itself (one that withholds some),
+    /// or `nil` when `URLSession` handles them (or none are sent).
+    private func writtenCookies<Response>(for endpoint: Endpoint<Response>) -> WrittenCookies? {
+        guard endpoint.sendsCookies, !endpoint.withheldCookies.isEmpty else { return nil }
+        let explicit = endpoint.headers.first { $0.key.lowercased() == "cookie" }?.value
+        return WrittenCookies(jar: cookieStorage, withheld: endpoint.withheldCookies, explicit: explicit)
+    }
+
+    /// One `Cookie` header from the jar's cookies, minus `withheld` and any named in `explicit`
+    /// (so an endpoint's value wins without a duplicate), followed by `explicit`; `nil` if empty.
+    static func cookieHeader(jar: [HTTPCookie], withholding withheld: Set<String>, explicit: String?) -> String? {
+        let explicitNames = Set(
+            (explicit ?? "").split(separator: ";").compactMap { pair in
+                pair.split(separator: "=", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces)
+            })
+        let cookies = jar.filter { !withheld.contains($0.name) && !explicitNames.contains($0.name) }
+        let parts = [HTTPCookie.requestHeaderFields(with: cookies)["Cookie"], explicit]
+            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: "; ")
     }
 
     private func authorized(_ request: URLRequest, _ accessToken: String) -> URLRequest {
@@ -523,10 +569,12 @@ public actor APIClient {
 
     /// - Parameter staysOnOrigin: Declines any redirect that would leave the origin (and so be
     ///   stripped of credentials) instead of following it without them.
+    /// - Parameter cookies: For a request whose cookies the client writes, the rule that
+    ///   rewrites them on each followed same-origin hop.
     private func perform(
-        _ request: URLRequest, followsRedirects: Bool, staysOnOrigin: Bool = false
+        _ request: URLRequest, followsRedirects: Bool, staysOnOrigin: Bool = false, cookies: WrittenCookies? = nil
     ) async throws -> Reply {
-        let chain = followsRedirects ? RedirectChainDelegate(staysOnOrigin: staysOnOrigin) : nil
+        let chain = followsRedirects ? RedirectChainDelegate(staysOnOrigin: staysOnOrigin, cookies: cookies) : nil
         let delegate: any URLSessionTaskDelegate = chain ?? RedirectSuppressingDelegate()
         let data: Data
         let response: URLResponse

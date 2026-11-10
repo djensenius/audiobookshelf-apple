@@ -111,6 +111,50 @@ import Testing
         #expect(try ModelContext(container).fetchCount(FetchDescriptor<LocalFile>()) == 1)
     }
 
+    @Test func upsertFallsBackToTheSnapshotCoverTime() async throws {
+        let (store, _) = try makeStore()
+        var download = bookDownload(parts: bookParts)
+        download.media.coverUpdatedAt = now
+        let item = try await store.upsertFromDownload(download, now: now)
+
+        #expect(item.coverUpdatedAt == now)
+    }
+
+    @Test func explicitCoverTimeWinsOverTheSnapshot() async throws {
+        let (store, _) = try makeStore()
+        var download = bookDownload(parts: bookParts)
+        download.media.coverUpdatedAt = now
+        let explicit = now.addingTimeInterval(60)
+        let item = try await store.upsertFromDownload(download, coverUpdatedAt: explicit, now: now)
+
+        #expect(item.coverUpdatedAt == explicit)
+    }
+
+    @Test func noCoverTimeKeepsTheStoredOne() async throws {
+        let (store, _) = try makeStore()
+        var download = bookDownload(parts: bookParts)
+        download.media.coverUpdatedAt = now
+        try await store.upsertFromDownload(download, now: now)
+        download.media.coverUpdatedAt = nil
+        let item = try await store.upsertFromDownload(download, now: now)
+
+        #expect(item.coverUpdatedAt == now)
+    }
+
+    @Test func episodeWithoutCoverTimeKeepsTheItemsCoverTime() async throws {
+        let (store, _) = try makeStore()
+        let episode1 = Fixtures.podcastSnapshot.episodes[0]
+        var episode2 = episode1
+        episode2.id = "ep_2"
+        var first = episodeDownload(episode1)
+        first.media.coverUpdatedAt = now
+        try await store.upsertFromDownload(first, now: now)
+        let second = try await store.upsertFromDownload(episodeDownload(episode2), now: now)
+
+        #expect(second.coverUpdatedAt == now)
+        #expect(second.media.coverUpdatedAt == now)
+    }
+
     @Test func concurrentUpsertsOfTheSameItemCreateOneRow() async throws {
         let (store, container) = try makeStore()
         let download = bookDownload(parts: bookParts)
