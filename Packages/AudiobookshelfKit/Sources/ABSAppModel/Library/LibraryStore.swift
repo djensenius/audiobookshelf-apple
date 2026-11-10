@@ -184,7 +184,7 @@ public final class LibraryStore {
     /// The model requests through the store's current ``client``, so reconnecting the same
     /// account with a new client (new tokens or server address) retargets it without recreating
     /// it. While the store is cleared or serves another account, its requests fail with
-    /// `CancellationError`.
+    /// `CancellationError`, and so do responses to requests started before a ``clear()``.
     public func makeShelves(libraryID: String) -> PersonalizedShelvesModel? {
         guard client != nil, let connectionKey else { return nil }
         return PersonalizedShelvesModel(
@@ -192,10 +192,19 @@ public final class LibraryStore {
             connectionKey: connectionKey)
     }
 
-    /// The store's current client while it still serves `connectionKey`.
-    fileprivate func client(for connectionKey: LibraryConnectionKey) throws -> any LibraryService {
+    /// The store's current client and ``clear()`` generation while it still serves
+    /// `connectionKey`.
+    fileprivate func client(
+        for connectionKey: LibraryConnectionKey
+    ) throws -> (client: any LibraryService, generation: Int) {
         guard connectionKey == self.connectionKey, let client else { throw CancellationError() }
-        return client
+        return (client, generation)
+    }
+
+    /// Throws unless the store still serves `connectionKey` in `generation`: no ``clear()``,
+    /// logout or account switch happened since.
+    fileprivate func checkServing(_ connectionKey: LibraryConnectionKey, generation: Int) throws {
+        guard connectionKey == self.connectionKey, generation == self.generation else { throw CancellationError() }
     }
 
     // MARK: Last-used library
@@ -228,21 +237,31 @@ public final class LibraryStore {
 }
 
 /// Forwards to the client a ``LibraryStore`` holds for one account when each request starts.
+/// A response that arrives after the store was cleared or switched accounts throws
+/// `CancellationError`, so the model doesn't apply it.
 private struct StoreClient: LibraryService {
     weak var store: LibraryStore?
     let connectionKey: LibraryConnectionKey
 
-    private func client() async throws -> any LibraryService {
+    private func send<Response: Sendable>(
+        _ request: (any LibraryService) async throws -> Response
+    ) async throws -> Response {
         guard let store else { throw CancellationError() }
-        return try await store.client(for: connectionKey)
+        let (client, generation) = try await store.client(for: connectionKey)
+        let response = try await request(client)
+        guard let store = self.store else { throw CancellationError() }
+        try await store.checkServing(connectionKey, generation: generation)
+        return response
     }
 
-    func libraries() async throws -> [Library] { try await client().libraries() }
-    func library(id: String) async throws -> LibraryWithFilterData { try await client().library(id: id) }
+    func libraries() async throws -> [Library] { try await send { try await $0.libraries() } }
+    func library(id: String) async throws -> LibraryWithFilterData {
+        try await send { try await $0.library(id: id) }
+    }
     func personalizedShelves(libraryID: String) async throws -> [Shelf] {
-        try await client().personalizedShelves(libraryID: libraryID)
+        try await send { try await $0.personalizedShelves(libraryID: libraryID) }
     }
     func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
-        try await client().items(libraryID: libraryID, query: query)
+        try await send { try await $0.items(libraryID: libraryID, query: query) }
     }
 }

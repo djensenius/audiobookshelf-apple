@@ -402,6 +402,51 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func modelResponsesFromBeforeAClearAreDropped() async throws {
+        enum Lifecycle: CaseIterable { case clear, switchAccount, signOutAndIn }
+        for lifecycle in Lifecycle.allCases {
+            try await withLibrarySettings { settings in
+                let shelvesGate = GatedCalls<String, [Shelf]>()
+                let itemsGate = GatedCalls<Int, PagedResults<LibraryItem>>()
+                var slow = service([makeLibrary("books")])
+                slow.shelvesHandler = { id in try await shelvesGate.call(id) }
+                slow.itemsHandler = { _, query in try await itemsGate.call(query.page ?? 0) }
+                var shelfCalls = shelvesGate.calls.makeAsyncIterator()
+                var itemCalls = itemsGate.calls.makeAsyncIterator()
+                let store = LibraryStore(settings: settings)
+                await store.connect(client: slow, connectionKey: serverA)
+                let shelves = try #require(store.makeShelves(libraryID: "books"))
+                let itemList = try #require(store.makeItemList(libraryID: "books"))
+
+                let shelvesLoad = Task { await shelves.load() }
+                let shelfCall = try #require(await shelfCalls.next())
+                let itemsLoad = try #require(itemList.loadNextPage())
+                let itemCall = try #require(await itemCalls.next())
+
+                switch lifecycle {
+                case .clear:
+                    store.clear()
+                case .switchAccount:
+                    await store.connect(client: service([]), connectionKey: serverB)
+                case .signOutAndIn:
+                    store.clear()
+                    await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+                }
+                shelfCall.reply.resume(returning: [makeShelf("stale")])
+                itemCall.reply.resume(returning: PagedResults(results: [], total: 5, limit: 20, page: 0))
+                await shelvesLoad.value
+                await itemsLoad.value
+
+                #expect(shelves.shelves.isEmpty, "\(lifecycle)")
+                #expect(!shelves.hasLoaded, "\(lifecycle)")
+                #expect(shelves.error == nil, "\(lifecycle)")
+                #expect(itemList.total == nil, "\(lifecycle)")
+                #expect(!itemList.reachedEnd, "\(lifecycle)")
+                #expect(itemList.error == nil, "\(lifecycle)")
+            }
+        }
+    }
+
     @Test func progressRequestedForThePreviousAccountIsDropped() async throws {
         try await withLibrarySettings { settings in
             let store = LibraryStore(settings: settings)
