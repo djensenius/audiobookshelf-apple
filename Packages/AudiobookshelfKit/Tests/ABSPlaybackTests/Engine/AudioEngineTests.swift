@@ -327,6 +327,58 @@ struct AudioEngineTests {
         #expect(engine.pendingSeekTarget == 4.5)
     }
 
+    private func makeEngine(players: FailablePlayers) -> AudioEngine {
+        let engine = AudioEngine(audioSession: nil, timeObserverInterval: 0.05, makePlayer: players.make)
+        engine.player.isMuted = true
+        engine.player.sourceClock = CMClockGetHostTimeClock()
+        return engine
+    }
+
+    @Test(.tags(.realtimeAudio)) func playerFailureIsReportedAndSeekReplacesThePlayer() async throws {
+        let fixture = try AudioFixture()
+        let players = FailablePlayers()
+        let engine = makeEngine(players: players)
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        try await engine.load(fixture.source, at: 1)
+        engine.setRate(2)
+        engine.play()
+        #expect(await eventually { engine.state == .playing })
+
+        players.created[0].forceFailure()
+
+        #expect(await eventually { if case .failed(.playerFailed) = engine.state { true } else { false } })
+        #expect(events.contains { if case .failed(.playerFailed) = $0 { true } else { false } })
+        #expect(!engine.isPlaybackRequested)
+
+        #expect(await engine.seek(to: 4) == .completed)
+        #expect(players.created.count == 2)
+        #expect(engine.routingPlayer === players.created[1])
+        #expect(engine.player.isMuted)
+        #expect(engine.state == .paused)
+        #expect(engine.currentTrackIndex == 1)
+
+        engine.play()
+        #expect(await eventually { engine.state == .playing && engine.currentTime > 4 })
+        #expect(engine.player.rate == 2)
+    }
+
+    @Test func loadAfterPlayerFailureUsesAFreshPlayer() async throws {
+        let fixture = try AudioFixture()
+        let players = FailablePlayers()
+        let engine = makeEngine(players: players)
+        try await engine.load(fixture.source, at: 0)
+
+        players.created[0].forceFailure()
+        #expect(await eventually { if case .failed(.playerFailed) = engine.state { true } else { false } })
+
+        try await engine.load(fixture.source, at: 2)
+        #expect(players.created.count == 2)
+        #expect(engine.routingPlayer === players.created[1])
+        #expect(engine.state == .paused)
+        #expect(engine.currentTime == 2)
+    }
+
     @Test(.tags(.realtimeAudio)) func playDuringLoadStartsAfterTheSeek() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()
@@ -434,6 +486,23 @@ struct AudioEngineTests {
         #expect(AudioEngine.assetOptions(prefersPreciseTiming: false).isEmpty)
     }
 
+    @Test func networkAccessAddsTransportFlags() {
+        let access = NetworkAccess(policy: .never, treatsExpensiveAsCellular: true)
+        let options = AudioEngine.assetOptions(
+            prefersPreciseTiming: true, mimeType: "audio/mp4", networkAccess: access)
+
+        #expect(options[AVURLAssetAllowsCellularAccessKey] as? Bool == false)
+        #expect(options[AVURLAssetAllowsExpensiveNetworkAccessKey] as? Bool == false)
+        #expect(options[AVURLAssetAllowsConstrainedNetworkAccessKey] as? Bool == false)
+        #expect(options[AVURLAssetOverrideMIMETypeKey] as? String == "audio/mp4")
+        #expect(options[AVURLAssetPreferPreciseDurationAndTimingKey] as? Bool == true)
+
+        let always = AudioEngine.assetOptions(
+            prefersPreciseTiming: false, networkAccess: NetworkAccess(policy: .always))
+        #expect(always[AVURLAssetAllowsCellularAccessKey] as? Bool == true)
+        #expect(AudioEngine.assetOptions(prefersPreciseTiming: false, networkAccess: nil).isEmpty)
+    }
+
     @Test func mimeTypeOverridesAssetType() {
         let options = AudioEngine.assetOptions(prefersPreciseTiming: false, mimeType: "audio/mp4")
         #expect(options[AVURLAssetOverrideMIMETypeKey] as? String == "audio/mp4")
@@ -463,5 +532,31 @@ extension [AudioEngineEvent] {
             if case .tick = $0 { return false }
             return true
         }
+    }
+}
+
+/// An `AVQueuePlayer` whose `status` can be forced to `.failed`.
+final class FailablePlayer: AVQueuePlayer {
+    // `status` is nonisolated in AVFoundation; tests only touch this on the main actor.
+    nonisolated(unsafe) private var isForcedFailed = false
+
+    override var status: AVPlayer.Status { isForcedFailed ? .failed : super.status }
+
+    func forceFailure() {
+        willChangeValue(forKey: "status")
+        isForcedFailed = true
+        didChangeValue(forKey: "status")
+    }
+}
+
+/// Creates ``FailablePlayer``s for the engine and keeps them.
+@MainActor
+final class FailablePlayers {
+    private(set) var created: [FailablePlayer] = []
+
+    func make() -> AVQueuePlayer {
+        let player = FailablePlayer()
+        created.append(player)
+        return player
     }
 }
