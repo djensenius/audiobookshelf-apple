@@ -195,6 +195,45 @@ import Testing
         #expect(snapshot.paths == [.home: [.item(id: "a")], .account: [.stats]])
     }
 
+    @Test func unknownLibrarySectionFallsBackToTheGridAndKeepsOtherPaths() {
+        let json = """
+            {"serverID": "s", "userID": "u", "selectedTab": "library", "libraryID": "books",
+             "libraryKind": "book", "librarySection": "genres", "isQueueInspectorPresented": false,
+             "paths": {
+               "library": [{"item": {"id": "from-genres"}}],
+               "home": [{"item": {"id": "a"}}],
+               "downloads": [{"downloadQueue": {}}],
+               "account": [{"stats": {}}]
+             }}
+            """
+        let router = Router(serverID: "s", userID: "u")
+        router.restore(from: Data(json.utf8))
+
+        #expect(router.selectedTab == .library)
+        #expect(router.libraryID == "books")
+        #expect(router.libraryKind == .book)
+        #expect(router.librarySection == nil)
+        #expect(
+            router.paths == [.home: [.item(id: "a")], .downloads: [.downloadQueue], .account: [.stats]]
+        )
+    }
+
+    @Test func unknownSelectedTabAndLibraryKindFallBack() {
+        let json = """
+            {"serverID": "s", "userID": "u", "selectedTab": "radio", "libraryID": "music",
+             "libraryKind": "music", "isQueueInspectorPresented": true,
+             "paths": {"home": [{"item": {"id": "a"}}], "account": [{"stats": {}}]}}
+            """
+        let router = Router(serverID: "s", userID: "u")
+        router.restore(from: Data(json.utf8))
+
+        #expect(router.selectedTab == .home)
+        #expect(router.libraryID == "music")
+        #expect(router.libraryKind == nil)
+        #expect(router.paths == [.home: [.item(id: "a")], .account: [.stats]])
+        #expect(router.isQueueInspectorPresented == true)
+    }
+
     @Test func snapshotDataRestores() throws {
         let original = populatedRouter()
         let data = try #require(original.snapshotData)
@@ -205,7 +244,7 @@ import Testing
         #expect(restored.snapshot == original.snapshot)
     }
 
-    @Test(arguments: [nil, Data("not json".utf8), Data(#"{"selectedTab": "radio"}"#.utf8)])
+    @Test(arguments: [nil, Data("not json".utf8), Data(#"{"serverID": "s", "userID": "u"}"#.utf8)])
     func unreadableDataStartsFromDefaults(data: Data?) {
         let router = Router(serverID: "s", userID: "u")
         router.selectLibrary(id: "books", kind: .book, supportedSections: AppTab.sections(for: .book))

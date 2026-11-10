@@ -31,17 +31,22 @@ extension Router {
             self.isQueueInspectorPresented = isQueueInspectorPresented
         }
 
-        /// Decodes `paths` leniently, so a snapshot from a newer build still restores: tabs this
-        /// build doesn't know are skipped, and each path is cut at its first route that doesn't
-        /// decode, keeping the screens before it.
+        /// Decodes leniently, so a snapshot from a newer build still restores. Tabs this build
+        /// doesn't know are skipped in `paths`, and each path is cut at its first route that
+        /// doesn't decode, keeping the screens before it. An unknown `selectedTab` becomes Home
+        /// and an unknown `libraryKind` becomes `nil`. An unknown `librarySection` becomes the
+        /// default grid, and the Library path, which belonged to that section, is dropped.
         public init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             serverID = try container.decodeIfPresent(String.self, forKey: .serverID)
             userID = try container.decodeIfPresent(String.self, forKey: .userID)
-            selectedTab = try container.decode(AppTab.self, forKey: .selectedTab)
+            selectedTab = AppTab(rawValue: try container.decode(String.self, forKey: .selectedTab)) ?? .home
             libraryID = try container.decodeIfPresent(String.self, forKey: .libraryID)
-            libraryKind = try container.decodeIfPresent(LibraryKind.self, forKey: .libraryKind)
-            librarySection = try container.decodeIfPresent(AppTab.self, forKey: .librarySection)
+            libraryKind = try container.decodeIfPresent(String.self, forKey: .libraryKind).flatMap {
+                LibraryKind(rawValue: $0)
+            }
+            let sectionName = try container.decodeIfPresent(String.self, forKey: .librarySection)
+            librarySection = sectionName.flatMap { AppTab(rawValue: $0) }
             isQueueInspectorPresented = try container.decode(Bool.self, forKey: .isQueueInspectorPresented)
 
             paths = [:]
@@ -55,6 +60,9 @@ extension Router {
                     path.append(route)
                 }
                 if !path.isEmpty { paths[tab] = path }
+            }
+            if sectionName != nil, librarySection == nil {
+                paths[.library] = nil
             }
         }
 
