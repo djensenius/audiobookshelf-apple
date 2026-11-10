@@ -22,7 +22,7 @@ public struct SeriesCard: View {
                     name: series.name,
                     keys: serverID.map { id in series.covers.map { $0.key(serverID: id) } } ?? []
                 )
-                .aspectRatio(1 / CoverShape.book.aspectRatio, contentMode: .fit)
+                .aspectRatio(1.25, contentMode: .fit)
                 Text(verbatim: series.name)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(2, reservesSpace: true)

@@ -134,11 +134,17 @@ private final class FakeProgressEntry {
         #expect(full.height > empty.height + 200)
     }
 
-    @Test func seriesAndAuthorCardsAreTallerThanTheirCover() throws {
+    @Test func seriesCardKeepsGroupedCoversVisibleAndAuthorCardIsTallerThanItsCover() throws {
         let serverID = UUID()
+        let seriesCoverSize = CGSize(width: 160, height: 128)
+        let groupedCovers = GroupCoverView.layout(
+            count: 3, size: seriesCoverSize, aspectRatio: CoverShape.book.aspectRatio)
+        #expect(groupedCovers.step > 0)
+        #expect(groupedCovers.coverWidth + groupedCovers.step * 2 == seriesCoverSize.width)
+
         let series = try renderedSize(
             SeriesCard(series: SeriesSummary(series: SampleLibrary.series[0]), serverID: serverID) {}, width: 160)
-        #expect(series.height > 256)
+        #expect(series.height > seriesCoverSize.height + 20 && series.height < 256)
         let author = try renderedSize(
             AuthorCard(author: AuthorSummary(author: SampleLibrary.authors[0]), serverID: serverID) {}, width: 120)
         #expect(author.height > 150)
