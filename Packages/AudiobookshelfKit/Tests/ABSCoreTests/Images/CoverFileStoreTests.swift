@@ -83,4 +83,44 @@ import Testing
         _ = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: current)
         #expect(await store.size == 16_384)
     }
+
+    @Test func replacingALeasedCopyKeepsItReadableUntilReleased() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
+        var webp: LeasedFile? = try await store.insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: 0)
+        let webpURL = try #require(webp?.url)
+        let jpg = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "jpg", generation: 0)
+
+        #expect(try Data(contentsOf: webpURL).count == 16_384)
+        #expect(await store.lookup(key("a"))?.url == jpg.url)
+        #expect(await store.size == 16_384)
+        webp = nil
+        #expect(!FileManager.default.fileExists(atPath: webpURL.path))
+        #expect(FileManager.default.fileExists(atPath: jpg.url.path))
+    }
+
+    @Test func failedReplacementKeepsTheOldCopy() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
+        let old = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: 0)
+        let missing = directory.url.appending(path: "missing")
+        await #expect(throws: (any Error).self) {
+            try await store.insert(moving: missing, for: key("a"), pathExtension: "jpg", generation: 0)
+        }
+        #expect(await store.lookup(key("a"))?.url == old.url)
+        #expect(try Data(contentsOf: old.url).count == 16_384)
+        #expect(await store.size == 16_384)
+    }
+
+    @Test func discardedLeasedFileIsSkippedThenReplacedInPlace() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
+        let bad = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "png", generation: 0)
+        await store.discard(bad.url)
+        #expect(await store.lookup(key("a")) == nil)
+        #expect(await store.size == 0)
+        let good = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "png", generation: 0)
+        withExtendedLifetime(bad) {}
+        #expect(FileManager.default.fileExists(atPath: good.url.path))
+        #expect(await store.lookup(key("a"))?.url == good.url)
+        #expect(await store.size == 16_384)
+    }
 }

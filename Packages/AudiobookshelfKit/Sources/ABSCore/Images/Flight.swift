@@ -31,7 +31,13 @@ final class Flight<Value: Sendable>: Sendable {
                 finish(.failure(error))
             }
         }
-        state.withLock { $0.task = task }
+        // Publish the handle under the lock: if the flight was abandoned while the task was
+        // being created, nobody else can cancel it.
+        let isAbandoned = state.withLock { state in
+            if !state.isAbandoned, state.result == nil { state.task = task }
+            return state.isAbandoned
+        }
+        if isAbandoned { task.cancel() }
     }
 
     func join() async throws -> Value {

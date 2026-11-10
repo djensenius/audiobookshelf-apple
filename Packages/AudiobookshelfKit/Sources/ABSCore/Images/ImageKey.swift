@@ -84,7 +84,8 @@ public struct PixelBox: Sendable, Hashable {
 
     private static func rounded(_ value: Double) -> Int {
         guard value.isFinite, value > 0 else { return 32 }
-        return min(Int((value / 32).rounded(.up)) * 32, 1200)
+        // Clamp before converting, so a huge finite value can't trap in `Int(_:)`.
+        return min(Int((min(value, 1200) / 32).rounded(.up)) * 32, 1200)
     }
 }
 

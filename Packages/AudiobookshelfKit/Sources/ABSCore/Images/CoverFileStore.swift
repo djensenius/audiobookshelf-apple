@@ -14,20 +14,49 @@ final class FileLease: Sendable {
     }
 }
 
-/// Per-file lease counts, readable from any thread.
+/// Per-file lease counts, readable from any thread, and the files waiting for their last lease
+/// to be released before they are deleted.
 private final class LeaseCounts: Sendable {
-    private let counts = Mutex<[String: Int]>([:])
+    private struct State {
+        var counts: [String: Int] = [:]
+        var pendingDeletion: Set<String> = []
+    }
 
-    var leasedPaths: Set<String> { counts.withLock { Set($0.keys) } }
+    private let state = Mutex(State())
+
+    var leasedPaths: Set<String> { state.withLock { Set($0.counts.keys) } }
+
+    func isPendingDeletion(_ path: String) -> Bool {
+        state.withLock { $0.pendingDeletion.contains(path) }
+    }
 
     func lease(_ path: String) -> FileLease {
-        counts.withLock { $0[path, default: 0] += 1 }
-        return FileLease { [counts = self] in
-            counts.counts.withLock { counts in
-                counts[path, default: 1] -= 1
-                if counts[path] == 0 { counts.removeValue(forKey: path) }
+        state.withLock { $0.counts[path, default: 0] += 1 }
+        return FileLease { [self] in
+            state.withLock { state in
+                state.counts[path, default: 1] -= 1
+                guard state.counts[path] == 0 else { return }
+                state.counts.removeValue(forKey: path)
+                // Deleted under the lock, so an insert can't publish a new file here first.
+                if state.pendingDeletion.remove(path) != nil { try? FileManager.default.removeItem(atPath: path) }
             }
         }
+    }
+
+    /// Deletes `path` now, or once its last lease is released.
+    func deleteWhenUnleased(_ path: String) {
+        state.withLock { state in
+            if state.counts[path] != nil {
+                state.pendingDeletion.insert(path)
+            } else {
+                try? FileManager.default.removeItem(atPath: path)
+            }
+        }
+    }
+
+    /// Keeps `path` from a pending deletion; returns whether one was pending.
+    func cancelDeletion(_ path: String) -> Bool {
+        state.withLock { $0.pendingDeletion.remove(path) != nil }
     }
 }
 
@@ -100,7 +129,9 @@ public actor CoverFileStore {
         let folder = folder(for: key.serverID)
         for ext in Self.extensions {
             let url = folder.appending(path: "\(key.fileStem).\(ext)")
-            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]) else { continue }
+            guard !leases.isPendingDeletion(Self.leaseKey(url)),
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+            else { continue }
             if let modified = values.contentModificationDate, now().timeIntervalSince(modified) > 86_400 {
                 try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: url.path)
             }
@@ -116,6 +147,9 @@ public actor CoverFileStore {
 
     /// Moves `file` into the store as `key`'s file and returns it leased. Throws
     /// `CancellationError` if the server was removed since `generation` was read.
+    ///
+    /// The new file replaces the old one atomically, and only once it is complete; copies under
+    /// other extensions are deleted afterwards, each once its last lease is released.
     func insert(moving file: URL, for key: ImageKey, pathExtension: String, generation: Int) throws -> LeasedFile {
         guard generation == self.generation(for: key.serverID) else { throw CancellationError() }
         scanIfNeeded()
@@ -123,13 +157,29 @@ public actor CoverFileStore {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let ext = Self.extensions.contains(pathExtension) ? pathExtension : "img"
         let destination = folder.appending(path: "\(key.fileStem).\(ext)")
-        for other in Self.extensions {
-            remove(folder.appending(path: "\(key.fileStem).\(other)"))
+        // Staged beside the destination, so the final rename is atomic.
+        let staging = folder.appending(path: ".\(UUID().uuidString).partial")
+        do {
+            try FileManager.default.moveItem(at: file, to: staging)
+        } catch {
+            try? FileManager.default.removeItem(at: staging)
+            throw error
         }
-        try FileManager.default.moveItem(at: file, to: destination)
+        // A retired copy at the destination is replaced rather than deleted on release.
+        let wasRetired = leases.cancelDeletion(Self.leaseKey(destination))
+        let replacedBytes = wasRetired ? 0 : Self.allocatedSize(destination)
+        guard rename(staging.path, destination.path) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            try? FileManager.default.removeItem(at: staging)
+            if wasRetired { leases.deleteWhenUnleased(Self.leaseKey(destination)) }
+            throw error
+        }
         try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: destination.path)
         let leased = LeasedFile(url: destination, lease: lease(destination))
-        totalBytes += Self.allocatedSize(destination)
+        totalBytes += Self.allocatedSize(destination) - replacedBytes
+        for other in Self.extensions where other != ext {
+            retire(folder.appending(path: "\(key.fileStem).\(other)"))
+        }
         if totalBytes > limit, evictionTask == nil {
             evictionCount += 1
             evictionTask = Task(priority: .background) {
@@ -150,13 +200,13 @@ public actor CoverFileStore {
         totalBytes = max(0, totalBytes - removed)
     }
 
-    /// Deletes a stored file that turned out not to decode.
+    /// Deletes a stored file that turned out not to decode, once its readers are done.
     func discard(_ url: URL) {
         guard
             url.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path
                 == directory.standardizedFileURL.path
         else { return }
-        remove(url)
+        retire(url)
     }
 
     /// Waits for a running background eviction, for tests.
@@ -177,6 +227,15 @@ public actor CoverFileStore {
             guard !leased.contains(Self.leaseKey(file.url)) else { continue }
             remove(file.url)
         }
+    }
+
+    /// Deletes `url` now, or once its last lease is released. Lookups skip it meanwhile, and it
+    /// no longer counts towards the cap.
+    private func retire(_ url: URL) {
+        let path = Self.leaseKey(url)
+        guard FileManager.default.fileExists(atPath: path), !leases.isPendingDeletion(path) else { return }
+        totalBytes = max(0, totalBytes - Self.allocatedSize(url))
+        leases.deleteWhenUnleased(path)
     }
 
     private func remove(_ url: URL) {
