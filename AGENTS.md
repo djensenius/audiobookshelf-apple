@@ -70,7 +70,8 @@ not built:
 | `android/` | Android app — ignore |
 | `strings/` | Translations for 42 locales — the source for localization |
 
-Repository tooling lives in `scripts/`, `.github/workflows/`, and `mise.toml`.
+Repository tooling lives in `scripts/`, `Tools/` (Swift tool packages, e.g. the strings
+importer), `.github/workflows/`, and `mise.toml`.
 
 ## Toolchain
 
@@ -85,7 +86,9 @@ Repository tooling lives in `scripts/`, `.github/workflows/`, and `mise.toml`.
 | `mise run lint` | ShellCheck, actionlint, and `swift format lint --strict` (`lint:repo` skips Swift) |
 | `mise run format` | `swift format` Swift sources in place |
 | `mise run build:ios` / `build:macos` | Build the app (unsigned) into `.build/DerivedData` |
-| `mise run test` | Package tests (`test:kit`) and macOS app tests (`test:app`, signed ad hoc) |
+| `mise run test` | Package tests (`test:kit`), tool tests (`test:tools`), and macOS app tests (`test:app`, signed ad hoc) |
+| `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer) |
+| `mise run strings` / `strings:check` | Generate or verify ABSUI's `Localizable.xcstrings` from `strings/*.json`; see [docs/localization.md](docs/localization.md) |
 | `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
 

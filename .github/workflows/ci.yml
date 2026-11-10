@@ -50,6 +50,12 @@ jobs:
       - name: Check project.xcproj is canonical
         run: mise run xcproj:check
 
+      - name: Check Localizable.xcstrings is up to date
+        run: mise run strings:check
+
+      - name: Test repository tools
+        run: mise run test:tools
+
       - name: Test AudiobookshelfKit
         run: mise run test:kit
 
