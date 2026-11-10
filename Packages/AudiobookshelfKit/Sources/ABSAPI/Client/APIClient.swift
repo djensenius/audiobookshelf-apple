@@ -353,9 +353,19 @@ public actor APIClient {
         )
         request.httpMethod = endpoint.method.rawValue
         request.timeoutInterval = endpoint.timeout ?? configuration.timeout
-        request.httpShouldHandleCookies = endpoint.sendsCookies
+        request.httpShouldHandleCookies = endpoint.sendsCookies && endpoint.withheldCookies.isEmpty
         for (name, value) in configuration.customHeaders {
             request.setValue(value, forHTTPHeaderField: name)
+        }
+        if endpoint.sendsCookies, !endpoint.withheldCookies.isEmpty, let url = request.url {
+            let cookies = (cookieStorage?.cookies(for: url) ?? []).filter {
+                !endpoint.withheldCookies.contains($0.name)
+            }
+            if !cookies.isEmpty {
+                for (name, value) in HTTPCookie.requestHeaderFields(with: cookies) {
+                    request.setValue(value, forHTTPHeaderField: name)
+                }
+            }
         }
         if let body = endpoint.body {
             do {
