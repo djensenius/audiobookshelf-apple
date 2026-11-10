@@ -136,6 +136,45 @@ import Testing
         #expect(try await store.events(for: other) == [otherEvent])
     }
 
+    @Test func theCapEvictsSavesBeforePlaybackEvents() async throws {
+        let store = try makeStore()
+        // 620 events a second apart: 600 saves, with a play or pause every 31st event.
+        var playback: [PlaybackHistoryEventDTO] = []
+        var saves: [PlaybackHistoryEventDTO] = []
+        for index in 0..<620 {
+            let date = now.addingTimeInterval(Double(index))
+            if index % 31 == 0 {
+                let item = event(name: playback.count.isMultiple(of: 2) ? .play : .pause, at: date)
+                playback.append(item)
+                try await store.record(item)
+            } else {
+                let item = event(name: .save, at: date)
+                saves.append(item)
+                try await store.record(item)
+            }
+        }
+        #expect(playback.count == 20)
+        #expect(saves.count == 600)
+
+        let kept = try await store.events(for: key, limit: 1_000)
+        #expect(kept.count == PlaybackHistoryStore.maxEventsPerMedia)
+        #expect(Set(playback.map(\.id)).isSubset(of: Set(kept.map(\.id))))
+        let keptSaves = kept.filter { $0.name == .save }.map(\.id)
+        #expect(Set(keptSaves) == Set(saves.suffix(480).map(\.id)))
+    }
+
+    @Test func pruneEvictsOtherEventsOnceNoSaveOrSyncIsLeft() async throws {
+        let store = try makeStore()
+        let names: [PlaybackHistoryEventName] = [.save, .play, .sync, .seek, .save, .pause, .stop]
+        let events = names.enumerated().map { event(name: $1, at: now.addingTimeInterval(Double($0))) }
+        for item in events {
+            try await store.record(item)
+        }
+        // Three saves and syncs go first, then the oldest other event (the play).
+        #expect(try await store.pruneEvents(for: key, keeping: 3) == 4)
+        #expect(try await store.events(for: key).map(\.name) == [.stop, .pause, .seek])
+    }
+
     @Test func pruneEventsKeepsTheNewest() async throws {
         let store = try makeStore()
         let events = (0..<4).map { event(at: now.addingTimeInterval(Double($0))) }

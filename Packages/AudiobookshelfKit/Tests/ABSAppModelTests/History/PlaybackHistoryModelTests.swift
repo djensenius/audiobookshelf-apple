@@ -8,6 +8,25 @@ import Testing
 private let connectionID = UUID(uuidString: "6F1E2A4B-1C2D-4E5F-8A9B-0C1D2E3F4A5B")!
 private let mediaKey = MediaKey(serverConnectionID: connectionID, libraryItemId: "li_1")
 
+/// Every model in these tests formats with this locale and a calendar with a fixed time zone.
+/// Expected times and dates come from the same format styles as the model, so CLDR updates in
+/// a new OS don't break the tests.
+private let usEnglish = Locale(identifier: "en_US")
+
+private func timeText(_ date: Date, _ calendar: Calendar) -> String {
+    date.formatted(
+        Date.FormatStyle(
+            date: .omitted, time: .shortened, locale: usEnglish, calendar: calendar, timeZone: calendar.timeZone)
+    )
+}
+
+private func dateText(_ date: Date, _ calendar: Calendar) -> String {
+    date.formatted(
+        Date.FormatStyle(
+            date: .abbreviated, time: .omitted, locale: usEnglish, calendar: calendar, timeZone: calendar.timeZone)
+    )
+}
+
 private func calendar(_ timeZone: String) throws -> Calendar {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = try #require(TimeZone(identifier: timeZone))
@@ -48,12 +67,11 @@ private func event(
 private func makeModel(
     calendar: Calendar,
     now: Date,
-    locale: Locale = Locale(identifier: "en_US"),
     source: @escaping PlaybackHistoryModel.EventSource = { _ in AsyncStream { $0.finish() } },
     play: @escaping PlaybackHistoryModel.PlayFromTime = { _, _ in }
 ) -> PlaybackHistoryModel {
     PlaybackHistoryModel(
-        mediaKey: mediaKey, source: source, playFromTime: play, calendar: calendar, locale: locale, now: { now }
+        mediaKey: mediaKey, source: source, playFromTime: play, calendar: calendar, locale: usEnglish, now: { now }
     )
 }
 
@@ -135,7 +153,9 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
         tokyoModel.apply([first, second])
         #expect(tokyoModel.sections.map(\.day) == [.today, .yesterday])
         #expect(tokyoModel.sections.map { $0.rows.map(\.id) } == [[second.id], [first.id]])
-        #expect(tokyoModel.sections.first?.rows.first?.timeText == "12:30\u{202F}AM")
+        #expect(tokyoModel.sections.first?.rows.first?.timeText == timeText(second.timestamp, tokyo))
+        // 00:30 in Tokyo, not 15:30 as in UTC.
+        #expect(timeText(second.timestamp, tokyo) == timeText(try date(utc, 2026, 11, 9, 0, 30), utc))
     }
 
     @Test func yesterdayIsTheCalendarDayBeforeAcrossSpringForward() throws {
@@ -151,7 +171,7 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
 
         #expect(model.sections.map(\.day) == [.yesterday, .earlier])
         #expect(model.sections.first?.rows.map(\.id) == [lateYesterday.id, earlyYesterday.id])
-        #expect(model.sections.last?.dateText == "Mar 7, 2026")
+        #expect(model.sections.last?.dateText == dateText(dayBefore.timestamp, newYork))
     }
 
     @Test func aFallBackDayIsOneGroup() throws {
@@ -169,10 +189,11 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
         #expect(model.sections.count == 1)
         #expect(model.sections.first?.day == .today)
         #expect(model.sections.first?.rows.map(\.id) == events.map(\.id))
-        #expect(
-            model.sections.first?.rows.map(\.timeText) == [
-                "11:59\u{202F}PM", "1:30\u{202F}AM", "1:30\u{202F}AM", "12:00\u{202F}AM",
-            ])
+        let times = try #require(model.sections.first?.rows.map(\.timeText))
+        #expect(times == events.map { timeText($0.timestamp, newYork) })
+        // Both 1:30s read the same; the hour repeats.
+        #expect(times[1] == times[2])
+        #expect(times[0] != times[3])
     }
 
     // MARK: Collapsing (legacy `groupedMediaEvents`)
@@ -217,7 +238,7 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
     @Test func formatsRows() throws {
         let utc = try calendar("UTC")
         let now = try date(utc, 2026, 11, 10, 15, 45)
-        let model = makeModel(calendar: utc, now: now, locale: Locale(identifier: "en_GB"))
+        let model = makeModel(calendar: utc, now: now)
         model.apply([
             event(.pause, at: now, position: 3723.6),
             event(.stop, at: try date(utc, 2026, 11, 2, 7, 5), position: nil),
@@ -227,12 +248,12 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
         #expect(pause.name == .pause)
         #expect(pause.position == 3723.6)
         #expect(pause.positionText == "01:02:04")
-        #expect(pause.timeText == "15:45")
+        #expect(pause.timeText == timeText(now, utc))
         let stop = try #require(model.sections.last?.rows.first)
         #expect(stop.position == nil)
         #expect(stop.positionText == nil)
-        #expect(stop.timeText == "7:05")
-        #expect(model.sections.map(\.dateText) == ["10 Nov 2026", "2 Nov 2026"])
+        #expect(stop.timeText == timeText(stop.timestamp, utc))
+        #expect(model.sections.map(\.dateText) == [dateText(now, utc), dateText(stop.timestamp, utc)])
     }
 
     // MARK: Live updates
@@ -264,7 +285,7 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
         let now = try date(utc, 2026, 11, 10, 12)
         let store = PlaybackHistoryStore(modelContainer: try DataStack(location: .inMemory).container)
         let model = PlaybackHistoryModel(
-            mediaKey: mediaKey, store: store, playFromTime: { _, _ in }, calendar: utc, now: { now }
+            mediaKey: mediaKey, store: store, playFromTime: { _, _ in }, calendar: utc, locale: usEnglish, now: { now }
         )
         let task = Task { await model.observe() }
         defer { task.cancel() }
@@ -278,6 +299,28 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
 
         try await store.deleteEvents(for: mediaKey)
         #expect(await eventually { model.isEmpty })
+    }
+
+    @Test func anEpisodeShowsOnlyItsOwnHistory() async throws {
+        let utc = try calendar("UTC")
+        let now = try date(utc, 2026, 11, 10, 12)
+        let store = PlaybackHistoryStore(modelContainer: try DataStack(location: .inMemory).container)
+        let episode = MediaKey(serverConnectionID: connectionID, libraryItemId: "li_1", episodeId: "ep_1")
+        let otherEpisode = MediaKey(serverConnectionID: connectionID, libraryItemId: "li_1", episodeId: "ep_2")
+        let model = PlaybackHistoryModel(
+            mediaKey: episode, store: store, playFromTime: { _, _ in }, calendar: utc, locale: usEnglish, now: { now }
+        )
+        let task = Task { await model.observe() }
+        defer { task.cancel() }
+
+        let recorder = PlaybackHistoryRecorder(store: store) { now }
+        await recorder.record(.play, for: PlaybackHistoryMedia(key: otherEpisode, displayTitle: "Episode 2"), at: 1)
+        await recorder.record(.play, for: PlaybackHistoryMedia(key: mediaKey, displayTitle: "The Show"), at: 2)
+        await recorder.record(.pause, for: PlaybackHistoryMedia(key: episode, displayTitle: "Episode 1"), at: 3)
+        #expect(await eventually { model.sections.first?.rows.count == 1 })
+        #expect(model.sections.first?.rows.first?.position == 3)
+        #expect(model.title == "Episode 1")
+        #expect(model.mediaKey == episode)
     }
 
     @Test func reportsASourceFailure() async throws {

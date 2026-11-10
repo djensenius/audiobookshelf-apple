@@ -57,6 +57,8 @@ public final class PlaybackHistoryModel {
         public internal(set) var collapsedCount = 0
     }
 
+    /// The book, or the podcast episode (`episodeId` set), whose history this is; build it from
+    /// `Route.history(itemID:episodeID:)` and the scene's server connection.
     public let mediaKey: MediaKey
     /// The media's title as recorded with its newest event; `nil` until there is one.
     public private(set) var title: String?

@@ -6,7 +6,7 @@ import SwiftUI
 
 /// The playback history recorded on this device for one item, grouped by day; tap an event to
 /// play from its position. Port of `pages/media/_id/history.vue`, the destination of
-/// `Route.history(itemID:)`.
+/// `Route.history(itemID:episodeID:)`, for a book or one podcast episode.
 struct PlaybackHistoryView: View {
     @State private var model: PlaybackHistoryModel
     @State private var tapCount = 0

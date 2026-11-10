@@ -18,9 +18,12 @@ import SwiftData
     /// How long events are kept; older ones are deleted at launch by ``pruneExpired(now:)``.
     public static let retention: TimeInterval = 90 * 24 * 60 * 60
 
-    /// The most events kept per media. The legacy app kept every event forever; a busy book
-    /// saves every 15 seconds, so ``record(_:)`` drops the oldest beyond this. The history page
-    /// collapses runs of saves, so 500 events still cover several listening days.
+    /// The most events kept per media; the legacy app kept every event forever.
+    ///
+    /// Beyond the cap, ``record(_:)`` evicts the oldest save and sync events first: playback
+    /// saves every 15 seconds, so they would otherwise push out the play, pause, seek, stop and
+    /// finished events people look for. Only when no save or sync event is left are the oldest
+    /// other events evicted. ``retention`` applies to every event regardless.
     public static let maxEventsPerMedia = 500
 
     /// Inserts the event, or updates the row with the same `id` in place, then drops the media's
@@ -116,8 +119,9 @@ import SwiftData
         return try delete(#Predicate { $0.mediaKey == raw })
     }
 
-    /// Deletes every event recorded for media on the connection, for when the user removes the
-    /// account. Returns the number of events deleted.
+    /// Deletes every event recorded for media on the connection, for a future "clear history"
+    /// action. Removing an account keeps its history (see `ServerConnectionStore.remove(id:now:)`),
+    /// so account removal doesn't call this. Returns the number of events deleted.
     @discardableResult
     public func deleteEvents(serverConnectionID: UUID) throws -> Int {
         // Matches on the media key (`<connection>|<item>|<episode>`), which unlike
@@ -133,7 +137,8 @@ import SwiftData
         return try delete(#Predicate { $0.timestamp < cutoff })
     }
 
-    /// Deletes the media's events beyond the newest `count`. Returns the number deleted.
+    /// Deletes the media's events beyond `count`, oldest save and sync events first (see
+    /// ``maxEventsPerMedia``). Returns the number deleted.
     @discardableResult
     public func pruneEvents(for mediaKey: MediaKey, keeping count: Int = maxEventsPerMedia) throws -> Int {
         try pruneEvents(for: mediaKey, keeping: count, notify: true)
@@ -144,18 +149,33 @@ import SwiftData
     @discardableResult
     private func pruneEvents(for mediaKey: MediaKey, keeping count: Int, notify: Bool) throws -> Int {
         let raw = mediaKey.rawValue
-        var descriptor = FetchDescriptor<PlaybackHistoryEvent>(
-            predicate: #Predicate { $0.mediaKey == raw },
-            sortBy: [SortDescriptor(\.timestamp, order: .reverse)]
-        )
-        descriptor.fetchOffset = max(count, 0)
+        let save = PlaybackHistoryEventName.save.rawValue
+        let sync = PlaybackHistoryEventName.sync.rawValue
         return try commit(notify: notify) {
-            let events = try modelContext.fetch(descriptor)
-            for event in events {
+            let total = try modelContext.fetchCount(
+                FetchDescriptor<PlaybackHistoryEvent>(predicate: #Predicate { $0.mediaKey == raw })
+            )
+            let excess = total - max(count, 0)
+            guard excess > 0 else { return 0 }
+            // Two disjoint sets, so the second fetch never sees rows the first deleted.
+            let routine = try oldest(
+                excess, #Predicate { $0.mediaKey == raw && ($0.name == save || $0.name == sync) }
+            )
+            let others = try oldest(
+                excess - routine.count, #Predicate { $0.mediaKey == raw && $0.name != save && $0.name != sync }
+            )
+            for event in routine + others {
                 modelContext.delete(event)
             }
-            return events.count
+            return routine.count + others.count
         }
+    }
+
+    private func oldest(_ limit: Int, _ predicate: Predicate<PlaybackHistoryEvent>) throws -> [PlaybackHistoryEvent] {
+        guard limit > 0 else { return [] }
+        var descriptor = FetchDescriptor(predicate: predicate, sortBy: [SortDescriptor(\.timestamp)])
+        descriptor.fetchLimit = limit
+        return try modelContext.fetch(descriptor)
     }
 
     private func delete(_ predicate: Predicate<PlaybackHistoryEvent>) throws -> Int {
