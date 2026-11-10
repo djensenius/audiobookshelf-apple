@@ -27,8 +27,11 @@ private final class FakeBackend: ConnectBackend {
     var signInGate: AsyncStream<Void>?
     /// Holds removal while a newer flow starts.
     var removeGate: StubGate?
+    /// Cancels the caller synchronously just before a successful response.
+    var beforeResponse: (() -> Void)?
     private(set) var signInStarts = 0
     private(set) var resumeCalls = 0
+    private(set) var resumeWasCancelled: Bool?
     private(set) var validated: [(address: String, headers: [String: String])] = []
     private(set) var passwordSignIns: [String] = []
     private(set) var openIDSignIns = 0
@@ -42,6 +45,7 @@ private final class FakeBackend: ConnectBackend {
         if fallsBackToHTTP, server.isSchemeInferred, let fallback = ServerAddress("http://" + address) {
             server = fallback
         }
+        beforeResponse?()
         return ConnectServer(address: server, status: status)
     }
 
@@ -50,6 +54,7 @@ private final class FakeBackend: ConnectBackend {
         if let signInGate { for await _ in signInGate { break } }
         passwordSignIns.append("\(username):\(password)")
         if let signInError { throw signInError }
+        beforeResponse?()
     }
 
     func signIn(openIDTo server: ConnectServer, authenticator: any WebAuthenticator) async throws {
@@ -57,11 +62,13 @@ private final class FakeBackend: ConnectBackend {
         if let signInGate { for await _ in signInGate { break } }
         _ = try await authenticator.authenticate(server.address.url, callbackScheme: OIDCLoginService.callbackScheme)
         openIDSignIns += 1
+        beforeResponse?()
     }
 
     func resume(_ id: UUID) async throws -> Bool {
         resumeCalls += 1
         if let resumeGate { for await _ in resumeGate { break } }
+        resumeWasCancelled = Task.isCancelled
         return resumed
     }
     func customHeaders(for id: UUID) async throws -> [String: String] { savedHeaders[id] ?? [:] }
@@ -537,23 +544,27 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.phase == .servers)
     }
 
-    @Test(.timeLimit(.minutes(1)))
-    func cancellingValidationReturnsToTheAddress() async {
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func cancellingValidationReturnsToTheAddress(cancelCaller: Bool) async {
         let (gate, open) = AsyncStream<Void>.makeStream()
         backend.validationGate = gate
         let (model, _) = model()
         model.address = "abs.example.com"
         let task = Task { await model.submitAddress() }
         while backend.validated.isEmpty { await Task.yield() }
-        model.cancel()
-        #expect(model.phase == .address)
+        if cancelCaller {
+            task.cancel()
+        } else {
+            model.cancel()
+            #expect(model.phase == .address)
+        }
         open.yield()
         await task.value
         #expect(model.phase == .address && model.server == nil && model.failure == nil)
     }
 
-    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
-    func cancellingASignInReturnsToLogin(openID: Bool) async {
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true], [false, true])
+    func cancellingASignInReturnsToLogin(openID: Bool, cancelCaller: Bool) async {
         backend.status.authMethods = [.local, .openID]
         let model = await loginModel()
         model.username = "david"
@@ -568,10 +579,93 @@ private func connection(username: String = "david", address: String = "https://a
         }
         while backend.signInStarts == 0 { await Task.yield() }
         #expect(model.phase == .signingIn(openID ? .openID : .password))
-        model.cancel()
-        #expect(model.phase == .login && !model.isBusy)
+        if cancelCaller {
+            task.cancel()
+        } else {
+            model.cancel()
+            #expect(model.phase == .login && !model.isBusy)
+        }
         open.yield()
         await task.value
         #expect(model.phase == .login && model.failure == nil && model.server != nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true], [false, true])
+    func callerCancellationDropsSavedResumeWithoutCancellingTheAccount(resumed: Bool, releaseImmediately: Bool) async {
+        let saved = connection()
+        backend.connections = [saved]
+        backend.resumed = resumed
+        let (resume, openResume) = AsyncStream<Void>.makeStream()
+        backend.resumeGate = resume
+        let (model, _) = model()
+        let callerTask = Task { await model.select(saved) }
+        while backend.resumeCalls == 0 { await Task.yield() }
+
+        callerTask.cancel()
+        if !releaseImmediately {
+            while model.isBusy { await Task.yield() }
+            #expect(model.phase == .servers && !model.isResumingSession)
+            #expect(backend.resumeWasCancelled == nil)
+        }
+        openResume.yield()
+        await callerTask.value
+
+        #expect(backend.resumeWasCancelled == false)
+        #expect(model.phase == .servers && model.failure == nil)
+        #expect(!model.isResumingSession && model.savedConnection == nil && model.server == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)))
+    func staleCallerCancellationDoesNotCancelANewerBusyFlow() async {
+        let saved = connection()
+        backend.connections = [saved]
+        backend.resumed = true
+        let (resume, openResume) = AsyncStream<Void>.makeStream()
+        backend.resumeGate = resume
+        let (model, _) = model()
+        let callerTask = Task { await model.select(saved) }
+        while backend.resumeCalls == 0 { await Task.yield() }
+        model.cancel()
+        model.addServer()
+        model.address = "https://new.example.com"
+        let (validation, openValidation) = AsyncStream<Void>.makeStream()
+        backend.validationGate = validation
+        let newerTask = Task { await model.submitAddress() }
+        while backend.validated.count < 2 { await Task.yield() }
+
+        callerTask.cancel()
+        openResume.yield()
+        await callerTask.value
+        #expect(backend.resumeWasCancelled == false)
+        #expect(model.phase == .validating && model.failure == nil)
+        openValidation.yield()
+        await newerTask.value
+        #expect(model.phase == .login && model.server?.address.description == "https://new.example.com")
+    }
+
+    /// Cancellation happens in the callback's actor turn, before a queued cancellation handler
+    /// can run. Neither a fast success nor cleanup may leave the cancelled flow finished/busy.
+    @Test(arguments: [
+        ConnectViewModel.Phase.validating, .signingIn(.password), .signingIn(.openID),
+    ])
+    func callerCancellationInSuccessfulCallbackDropsTheResult(phase: ConnectViewModel.Phase) async {
+        backend.status.authMethods = [.local, .openID]
+        let (model, _) = model()
+        model.address = "abs.example.com"
+        if phase != .validating { await model.submitAddress() }
+        model.username = "david"
+        let callerTask = Task {
+            switch phase {
+            case .validating: await model.submitAddress()
+            case .signingIn(.password): await model.signIn()
+            default: await model.signInWithOpenID(using: FakeAuthenticator())
+            }
+        }
+        backend.beforeResponse = { callerTask.cancel() }
+        await callerTask.value
+        backend.beforeResponse = nil
+        #expect(model.phase == (phase == .validating ? .address : .login))
+        #expect(model.failure == nil)
+        if phase == .validating { #expect(model.server == nil) }
     }
 }
