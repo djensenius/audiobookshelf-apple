@@ -18,7 +18,7 @@ scripts/test-server.sh test --filter ProgressContractTests   # swift test argume
 ```
 
 You need Docker (OrbStack or Docker Desktop), `ffmpeg` (`brew install ffmpeg`) and Xcode. A run
-takes about 15 seconds once the server image is pulled and the package is built.
+takes about 20 seconds once the server image is pulled and the package is built.
 
 | Variable | Meaning |
 | --- | --- |
