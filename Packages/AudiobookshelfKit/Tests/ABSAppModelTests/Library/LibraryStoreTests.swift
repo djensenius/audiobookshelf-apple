@@ -364,6 +364,44 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func modelsUseTheCurrentClientOfTheirAccount() async throws {
+        try await withLibrarySettings { settings in
+            func client(_ shelf: String, itemCalls: Locked<[String]>? = nil) -> FakeLibraryService {
+                var fake = service([makeLibrary("books")])
+                fake.shelvesHandler = { _ in [makeShelf(shelf)] }
+                fake.itemsHandler = { _, _ in
+                    itemCalls?.value.append(shelf)
+                    return PagedResults(results: [], total: 0, limit: 0, page: 0)
+                }
+                return fake
+            }
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: client("old"), connectionKey: serverA)
+            let shelves = try #require(store.makeShelves(libraryID: "books"))
+            let itemList = try #require(store.makeItemList(libraryID: "books"))
+            await shelves.load()
+            #expect(shelves.shelves.map(\.id) == ["old"])
+
+            // The same account reconnects with a new client (new tokens or server address).
+            let itemCalls = Locked<[String]>([])
+            await store.connect(client: client("new", itemCalls: itemCalls), connectionKey: serverA)
+            await shelves.load()
+            #expect(shelves.shelves.map(\.id) == ["new"])
+            await itemList.loadNextPage()?.value
+            #expect(itemCalls.value == ["new"])
+
+            // Signed out, or another account: requests are cancelled and change nothing.
+            store.clear()
+            await shelves.load()
+            #expect(shelves.shelves.map(\.id) == ["new"])
+            #expect(shelves.error == nil)
+            await store.connect(client: client("other"), connectionKey: serverB)
+            await shelves.load()
+            #expect(shelves.shelves.map(\.id) == ["new"])
+            #expect(shelves.error == nil)
+        }
+    }
+
     @Test func progressRequestedForThePreviousAccountIsDropped() async throws {
         try await withLibrarySettings { settings in
             let store = LibraryStore(settings: settings)

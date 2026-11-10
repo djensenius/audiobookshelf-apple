@@ -169,17 +169,33 @@ public final class LibraryStore {
     // MARK: Models
 
     /// The paged items of a library for the connected account, or `nil` when none is connected.
+    /// The model requests through the store's current ``client`` (see ``makeShelves(libraryID:)``).
     public func makeItemList(
         libraryID: String, query: LibraryQuery = LibraryQuery()
     ) -> ItemListModel<LibraryQuery, LibraryItem>? {
-        guard let client, let connectionKey else { return nil }
-        return ItemListModel(client: client, libraryID: libraryID, query: query, connectionKey: connectionKey)
+        guard client != nil, let connectionKey else { return nil }
+        return ItemListModel(
+            client: StoreClient(store: self, connectionKey: connectionKey), libraryID: libraryID, query: query,
+            connectionKey: connectionKey)
     }
 
     /// The home shelves of a library for the connected account, or `nil` when none is connected.
+    ///
+    /// The model requests through the store's current ``client``, so reconnecting the same
+    /// account with a new client (new tokens or server address) retargets it without recreating
+    /// it. While the store is cleared or serves another account, its requests fail with
+    /// `CancellationError`.
     public func makeShelves(libraryID: String) -> PersonalizedShelvesModel? {
-        guard let client, let connectionKey else { return nil }
-        return PersonalizedShelvesModel(client: client, libraryID: libraryID, connectionKey: connectionKey)
+        guard client != nil, let connectionKey else { return nil }
+        return PersonalizedShelvesModel(
+            client: StoreClient(store: self, connectionKey: connectionKey), libraryID: libraryID,
+            connectionKey: connectionKey)
+    }
+
+    /// The store's current client while it still serves `connectionKey`.
+    fileprivate func client(for connectionKey: LibraryConnectionKey) throws -> any LibraryService {
+        guard connectionKey == self.connectionKey, let client else { throw CancellationError() }
+        return client
     }
 
     // MARK: Last-used library
@@ -208,5 +224,25 @@ public final class LibraryStore {
             if let candidate, libraries.contains(where: { $0.id == candidate }) { return candidate }
         }
         return libraries.first?.id
+    }
+}
+
+/// Forwards to the client a ``LibraryStore`` holds for one account when each request starts.
+private struct StoreClient: LibraryService {
+    weak var store: LibraryStore?
+    let connectionKey: LibraryConnectionKey
+
+    private func client() async throws -> any LibraryService {
+        guard let store else { throw CancellationError() }
+        return try await store.client(for: connectionKey)
+    }
+
+    func libraries() async throws -> [Library] { try await client().libraries() }
+    func library(id: String) async throws -> LibraryWithFilterData { try await client().library(id: id) }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] {
+        try await client().personalizedShelves(libraryID: libraryID)
+    }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
+        try await client().items(libraryID: libraryID, query: query)
     }
 }

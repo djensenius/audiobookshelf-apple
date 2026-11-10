@@ -79,6 +79,11 @@ public final class ProgressCache {
     /// Replaces the cache with the server's full list, requested with `token`. Returns whether it
     /// was applied.
     ///
+    /// Pass only a complete list: the `mediaProgress` of `GET /api/me` or of the login response,
+    /// which the server sends whole and unpaged. `User` decodes a missing `mediaProgress` as
+    /// empty, and seeding an empty list removes every entry not changed during the request, so
+    /// don't seed from payloads that may omit it (the minimal users of `GET /api/users`).
+    ///
     /// The response is dropped when ``clear()`` ran since ``beginSeed()`` (logout or another
     /// account), or when a response to a later request was already applied: an older snapshot
     /// never overwrites a newer one. A response that arrives first is applied even if a later

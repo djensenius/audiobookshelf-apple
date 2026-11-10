@@ -436,9 +436,9 @@ private func makeLossyModel(
             #expect(!model.reachedEnd)
 
             await model.loadNextPage()?.value
-            // The empty page started the next load by itself; this awaits it.
-            #expect(model.isLoading)
-            await model.loadNextPage()?.value
+            // The empty page started the next load by itself, which may already have finished;
+            // this awaits it without starting another.
+            while model.isLoading, let task = model.loadNextPage() { await task.value }
             #expect(requests.value == [0, 1, 2])
             #expect(model.items == items(1...3) + items(9...12))
             if total != nil { #expect(model.reachedEnd) }

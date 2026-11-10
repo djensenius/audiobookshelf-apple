@@ -23,6 +23,11 @@ private let episodeMatch =
         #expect(response.libraries.map(\.id) == ["lib1"])
     }
 
+    @Test func librariesRequireTheList() throws {
+        #expect(throws: DecodingError.self) { try decode(LibrariesResponse.self, #"{}"#) }
+        #expect(try decode(LibrariesResponse.self, #"{"libraries":[]}"#).libraries.isEmpty)
+    }
+
     @Test func libraryWithFilterData() throws {
         let response = try decode(
             LibraryWithFilterData.self,
