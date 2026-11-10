@@ -586,6 +586,9 @@ public final class PlaybackCoordinator {
     private func startEngine() {
         engine.setRate(Float(rate))
         engine.play()
+        // The engine can refuse at once (the audio session won't activate): it has then cleared
+        // the request and reported `.failed`.
+        guard engine.isPlaybackRequested else { return }
         emit(.playbackStarted)
     }
 

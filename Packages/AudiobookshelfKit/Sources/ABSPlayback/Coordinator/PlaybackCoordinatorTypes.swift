@@ -112,6 +112,9 @@ public enum PlaybackCoordinatorEvent: Sendable, Equatable {
     /// The engine loaded the media at `time`, after the resume seek (including auto-rewind). When
     /// that seek was interrupted, `time` is its target and ``didSeek(time:)`` follows once it lands.
     case loaded(time: Double)
+    /// The engine accepted the request to play (it may still be buffering, or waiting for a seek
+    /// to land). Not sent when it refuses, such as when the audio session won't activate:
+    /// ``failed(_:)`` is sent instead.
     case playbackStarted
     case paused(time: Double)
     /// A seek completed and playback is at `time`. For a load whose initial seek was interrupted,
