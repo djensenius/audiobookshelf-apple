@@ -5,7 +5,8 @@ import Testing
 
 @Suite struct ProgressThrottleTests {
     private let partID = UUID()
-    private let start = Date(timeIntervalSinceReferenceDate: 0)
+    /// A fixed instant; the throttle never reads the clock, so the tests advance it by hand.
+    private let start = ContinuousClock.now
 
     @Test func publishesEveryPercentOrSecondAndPersistsEveryTwoSeconds() {
         var throttle = ProgressThrottle()
@@ -17,7 +18,10 @@ import Testing
             (bytes: 12, seconds: 2.0),  // 2 s since the last write
             (bytes: 1000, seconds: 2.1),  // 100%
             (bytes: 1000, seconds: 2.2),  // already at 100%
-        ].map { throttle.record(partID, bytesWritten: Int64($0.bytes), expectedBytes: 1000, at: start + $0.seconds) }
+        ].map {
+            throttle.record(
+                partID, bytesWritten: Int64($0.bytes), expectedBytes: 1000, at: start + .seconds($0.seconds))
+        }
 
         #expect(decisions.map(\.publishes) == [true, false, true, true, false, true, false])
         #expect(decisions.map(\.persists) == [true, false, false, false, true, false, false])
@@ -26,7 +30,8 @@ import Testing
     @Test func unknownLengthPublishesBySecond() {
         var throttle = ProgressThrottle()
         let decisions = [0.0, 0.5, 1.0].map {
-            throttle.record(partID, bytesWritten: Int64($0 * 1000), expectedBytes: -1, at: start + $0).publishes
+            throttle.record(partID, bytesWritten: Int64($0 * 1000), expectedBytes: -1, at: start + .seconds($0))
+                .publishes
         }
         #expect(decisions == [true, false, true])
     }
@@ -36,7 +41,7 @@ import Testing
         _ = throttle.record(partID, bytesWritten: 0, expectedBytes: 1000, at: start)
         throttle.reset(partID)
         #expect(
-            throttle.record(partID, bytesWritten: 1, expectedBytes: 1000, at: start + 0.1)
+            throttle.record(partID, bytesWritten: 1, expectedBytes: 1000, at: start + .milliseconds(100))
                 == .init(publishes: true, persists: true))
     }
 }

@@ -703,14 +703,15 @@ public actor DownloadEngine {
         else { return }
         authRetried.remove(partID)
         let expected = expectedBytes > 0 ? expectedBytes : context.expectedBytes
-        let date = now()
-        let decision = throttle.record(partID, bytesWritten: bytesWritten, expectedBytes: expected, at: date)
+        let decision = throttle.record(
+            partID, bytesWritten: bytesWritten, expectedBytes: expected, at: ContinuousClock.now)
         if decision.publishes {
             progressContinuation.yield(
                 DownloadProgress(
                     partID: partID, recordID: context.recordID, bytesWritten: bytesWritten, expectedBytes: expected))
         }
         if decision.persists {
+            let date = now()
             await persist {
                 try await $0.updateProgress(
                     partID: partID, bytesWritten: bytesWritten, expectedBytes: expected, now: date)
