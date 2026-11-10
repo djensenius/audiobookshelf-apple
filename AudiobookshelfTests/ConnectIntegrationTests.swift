@@ -31,6 +31,8 @@ final class ConnectTestKeychain: KeychainStoring {
 }
 
 private final class ConnectTestProtocol: URLProtocol {
+    static let requests = Mutex<[String: [URLRequest]]>([:])
+
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.host()?.hasSuffix(".connect-ui.test") == true
     }
@@ -38,12 +40,19 @@ private final class ConnectTestProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let url = request.url else { return }
+        guard let url = request.url, let host = url.host() else { return }
+        Self.requests.withLock { $0[host, default: []].append(request) }
         let json: String
+        var status = 200
+        var headers = ["Content-Type": "application/json"]
         switch url.path() {
         case "/status":
-            json = #"{"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"authMethods":["local"]}"#
-        case "/login", "/api/authorize":
+            json = #"{"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"authMethods":["local","openid"]}"#
+        case "/auth/openid":
+            status = 302
+            headers["Location"] = "https://idp.example.com/authorize?state=test-state"
+            json = ""
+        case "/login", "/api/authorize", "/auth/openid/callback":
             json = """
                 {"user":{"id":"user-1","username":"reader","type":"admin","token":null,
                 "accessToken":"test-access","refreshToken":"test-refresh"},
@@ -53,7 +62,7 @@ private final class ConnectTestProtocol: URLProtocol {
             json = "{}"
         }
         let response = HTTPURLResponse(
-            url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            url: url, statusCode: status, httpVersion: nil, headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(json.utf8))
         client?.urlProtocolDidFinishLoading(self)
@@ -70,8 +79,8 @@ private final class ConnectTestProtocol: URLProtocol {
 
 @MainActor @Suite struct ConnectIntegrationTests {
     /// The signed-out root and the sign-in flow share the exact AccountManager the gate observes.
-    @Test(.timeLimit(.minutes(1)))
-    func signInOpensTheShellAndSignOutReturnsToConnect() async throws {
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func signInOpensTheShellAndSignOutReturnsToConnect(openID: Bool) async throws {
         let suiteName = "ConnectIntegrationTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -85,13 +94,33 @@ private final class ConnectTestProtocol: URLProtocol {
         let model = ConnectViewModel(
             accounts: accounts, validator: ServerValidator(sessionConfiguration: ConnectTestProtocol.configuration),
             localNetwork: PreviewLocalNetworkAccess())
-        model.address = "https://\(UUID().uuidString.lowercased()).connect-ui.test"
+        let host = "\(UUID().uuidString.lowercased()).connect-ui.test"
+        defer { ConnectTestProtocol.requests.withLock { $0[host] = nil } }
+        model.address = "https://\(host)"
         await model.submitAddress()
         #expect(model.phase == .login)
-        model.username = "reader"
-        await model.signIn()
+        if openID {
+            let browserCalls = Mutex(0)
+            let browser = WebAuthenticationSessionAuthenticator { url, scheme in
+                browserCalls.withLock { $0 += 1 }
+                #expect(url.absoluteString == "https://idp.example.com/authorize?state=test-state")
+                #expect(scheme == OIDCLoginService.callbackScheme)
+                await MainActor.run { #expect(environment.lifecycle.gate == .connect) }
+                return URL(string: "audiobookshelf://oauth?code=test-code&state=test-state")!
+            }
+            await model.signInWithOpenID(using: browser)
+            #expect(browserCalls.withLock { $0 } == 1)
+            let requests = ConnectTestProtocol.requests.withLock { $0[host] ?? [] }
+            #expect(requests.compactMap(\.url?.path) == ["/status", "/auth/openid", "/auth/openid/callback"])
+            #expect(requests.allSatisfy { $0.httpMethod == "GET" })
+        } else {
+            model.username = "reader"
+            await model.signIn()
+        }
+        #expect(model.failure == nil)
         #expect(model.phase == .done)
         let saved = try #require(accounts.activeConnection)
+        #expect(saved.authMethod == (openID ? .openid : .local))
         let identity = SessionIdentity(connectionID: saved.id, userID: saved.userId)
         let adapter = AccountSessionAdapter(accounts: accounts)
         #expect(adapter.phase == .active(identity, isOffline: false))

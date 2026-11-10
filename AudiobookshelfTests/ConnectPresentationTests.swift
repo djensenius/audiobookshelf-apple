@@ -40,10 +40,12 @@ import Testing
 
         private nonisolated static func textRecognitionRequest() throws -> VNRecognizeTextRequest {
             let request = VNRecognizeTextRequest()
+            // Revision 3's TextRecognition models request ANE on CI even with CPU stages.
+            // Pin the older, still-supported accurate engine for these English fixtures.
+            request.revision = VNRecognizeTextRequestRevision2
             request.recognitionLevel = .accurate
             request.recognitionLanguages = ["en-US"]
-            // CI's virtual Mac has no Neural Engine. Automatic selection fails in the
-            // OCR detector before any form assertion runs, so use CPU for every stage.
+            // CI's virtual Mac has no Neural Engine; don't use automatic device selection.
             for (stage, devices) in try request.supportedComputeStageDevices {
                 let cpu = try #require(
                     devices.first {
@@ -57,6 +59,8 @@ import Testing
 
         @Test func textRecognitionUsesOnlyCPU() throws {
             let request = try Self.textRecognitionRequest()
+            #expect(request.revision == VNRecognizeTextRequestRevision2)
+            #expect(request.recognitionLevel == .accurate)
             let stages = try request.supportedComputeStageDevices
             #expect(!stages.isEmpty)
             #expect(

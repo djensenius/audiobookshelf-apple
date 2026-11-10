@@ -41,6 +41,7 @@ final class AppEnvironment {
             let manager = AccountManager(
                 store: ServerConnectionStore(modelContainer: stack.container), keychain: keychain,
                 validator: ServerValidator(sessionConfiguration: sessionConfiguration),
+                openID: OIDCLoginService(sessionConfiguration: sessionConfiguration),
                 sessionConfiguration: sessionConfiguration)
             dataStack = stack
             accounts = manager
