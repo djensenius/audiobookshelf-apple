@@ -28,6 +28,11 @@ public protocol WebAuthenticator: Sendable {
 /// The server keeps the OpenID state in its session cookie, so steps 1 and 4 go through one
 /// ``APIClient`` and its cookie jar. The code, verifier, state and tokens are never logged.
 ///
+/// That jar starts with a copy of the validation's cookies (``ValidatedServer``), so a cookie a
+/// proxy or load balancer set during `/status` is sent to `/auth/openid`. It is a copy, not the
+/// validation jar itself, so the flow's server session cookie never reaches the account client
+/// that ``ValidatedServer/makeClient(tokenProvider:sessionConfiguration:)`` builds.
+///
 /// The server's `auth_method=openid-mobile` and `openid_id_token` cookies live only in that
 /// jar, which is discarded after sign-in, so the main client never receives them.
 /// `POST /logout` reads the auth method and ID token only from those cookies to build the
@@ -47,20 +52,20 @@ public struct OIDCLoginService: Sendable {
     static let callbackHost = "oauth"
     static let clientID = "Audiobookshelf-App"
 
-    private let makeClient: @Sendable (APIClientConfiguration) -> APIClient
+    private let makeClient: @Sendable (APIClientConfiguration, HTTPCookieStorage?) -> APIClient
 
     /// - Parameter sessionConfiguration: Tests return a configuration with stub protocol classes.
     public init(sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() }) {
-        self.init { configuration in
+        self.init { configuration, cookieStorage in
             APIClient(
                 configuration: configuration, tokenProvider: SignedOutTokenProvider(),
-                sessionConfiguration: sessionConfiguration())
+                sessionConfiguration: sessionConfiguration(), cookieStorage: cookieStorage)
         }
     }
 
-    /// - Parameter makeClient: Creates the unauthenticated client for one sign-in. Tests use it to
-    ///   reach the client's cookie jar.
-    init(makeClient: @escaping @Sendable (APIClientConfiguration) -> APIClient) {
+    /// - Parameter makeClient: Creates the unauthenticated client for one sign-in with the given
+    ///   cookie jar. Tests use it to reach the jar.
+    init(makeClient: @escaping @Sendable (APIClientConfiguration, HTTPCookieStorage?) -> APIClient) {
         self.makeClient = makeClient
     }
 
@@ -71,7 +76,7 @@ public struct OIDCLoginService: Sendable {
     {
         guard server.status.supportsOpenID else { throw OIDCLoginError.notEnabled }
         // One client, and so one cookie jar, for the whole flow.
-        let client = makeClient(server.configuration)
+        let client = makeClient(server.configuration, Self.flowCookieStorage(copying: server.cookieStorage))
         let pkce = PKCE()
 
         let authorizationURL = try await authorizationURL(client: client, server: server, pkce: pkce)
@@ -190,6 +195,15 @@ public struct OIDCLoginService: Sendable {
         // as the string "undefined" (`encodeURIComponent(undefined)`).
         guard let code = try value("code"), code != "undefined" else { throw .missingCode }
         return code
+    }
+
+    /// A new in-memory cookie jar holding a copy of `validation`'s cookies.
+    static func flowCookieStorage(copying validation: HTTPCookieStorage?) -> HTTPCookieStorage? {
+        let jar = URLSessionConfiguration.ephemeral.httpCookieStorage
+        for cookie in validation?.cookies ?? [] {
+            jar?.setCookie(cookie)
+        }
+        return jar
     }
 
     /// The error for a redirect from `/auth/openid/callback`.
