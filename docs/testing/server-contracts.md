@@ -54,11 +54,12 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `TokenRefreshContractTests` | Refresh and rotation, the old refresh token, concurrent refreshes, refresh before expiry, logout |
 | `LibraryContractTests` | Libraries, minified and expanded books and podcasts, chapters, audio files, tracks, shelves, search, authors, series |
 | `CollectionWriteContractTests` | Five collection writes; ordered two-book lifecycle and empty reads; permissions, atomic invalid create, no-ops/errors, version differences and failure teardown |
+| `PlaylistWriteContractTests` | Five owner-only writes; book/episode lifecycles, strict raw membership checks, ownership/access denials, atomic invalid add, safe characterization and exact-ID failure teardown |
 | `PlaybackSessionContractTests` | Start, sync and close; resume; same-device takeover; track URLs and ranges; downloads; local session upload |
 | `ProgressContractTests` | Each progress group, `lastUpdate`, finished and auto-finish, ebook progress, batch update, delete |
 | `LocalProgressContractTests` | `LocalProgressStore` sending to the server and settling on what it holds |
 
-Not covered yet: bookmarks, playlists, listening stats, Socket.IO events
+Not covered yet: bookmarks, listening stats, Socket.IO events
 (`ABSRealtime`) and OpenID sign-in (see [oidc.md](oidc.md) for the manual check).
 
 ## Differences between versions
@@ -197,6 +198,126 @@ package filter, then `scripts/test-server.sh test --filter CollectionWriteContra
 non-skipped live test counts and cleanup, not default-suite skips. Also run `mise run lint`,
 `mise run xcproj:check` and `mise run test`, with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
 and `MISE_TRUSTED_CONFIG_PATHS=$PWD`. These checks do not constitute VM, UI or device acceptance.
+
+## Playlist write contract and captures
+
+| Factory | Request | Success |
+| --- | --- | --- |
+| `PlaylistEndpoints.create` | `POST /api/playlists`: `name`, `libraryId`, `items`, optional `description` | 200 expanded `Playlist` |
+| `update` | `PATCH /api/playlists/:id`: optional `name`, `description`, `items` | 200 expanded playlist, including no-ops |
+| `delete` | `DELETE /api/playlists/:id`, no body | 200 plain `OK` (`EmptyResponse`) |
+| `addItems` | `POST /api/playlists/:id/batch/add`: `{items: [...]}` | 200 expanded playlist |
+| `removeItems` | `POST /api/playlists/:id/batch/remove`: `{items: [...]}` | 200 expanded playlist, even when removing the last member |
+
+Playlists are **user-owned**, unlike collections. Ordinary owners need no update/delete permission.
+Every ID route, including GET, returns 403 to a second ordinary user **and administrators**.
+Unknown IDs return 404. Removing the last member deletes the playlist: the mutation returns 200
+with `items: []`, then GET returns 404. Empty add/remove batches return 400.
+
+`PlaylistItemReference` uses `libraryItemId` for a book and both `libraryItemId` and the correct
+`episodeId` for a podcast episode. Requests are plain `Encodable & Sendable`; nil is omitted.
+Callers must enforce valid kind, known references, same-library membership, uniqueness and a full
+reorder permutation using metadata. `itemsInOrder` encodes as `items`: it reorders membership,
+never replaces it. Nil/empty lists leave order unchanged. Empty name/description strings are
+ignored, not clearing operations. Length-mismatched and unknown-library-item reorders return 400.
+Adding an unknown library-item ID rejects the **whole batch**, even alongside a valid new book;
+existing members are no-ops. Removing unknown/nonmembers is a no-op.
+
+Both pins passed the ordinary-owner two-book lifecycle: full reorder, text no-op/persistence,
+tail removal and re-add in order, remove-all/GET 404 and explicit delete. One podcast episode
+passed create, re-add no-op and remove-last/GET 404. Head removal followed by append can leave
+order-number ties, so that case asserts membership, not invented ordering.
+
+Observed safe characterization on **both** 2.26.0 and 2.37.2:
+
+- Empty and omitted create items return 200 empty playlists; subsequent owner GET is also 200.
+  This differs from removing the last member of an existing playlist.
+- Duplicate **book create** retains two entries, including on GET. This is characterization,
+  not a recommended request policy; callers should supply unique references.
+- A list primed before create is fresh immediately after create, metadata update, batch remove,
+  batch add and explicit delete. No sleeps, cache-busting parameters or mutation replay were used.
+- 2.37.2 strips name tags, denies restricted-library create with 403, and returns 404 on all owner
+  ID routes after that owner's library access is removed. 2.26.0 preserves tags and permits these
+  operations. Neither version's non-owner restriction is bypassed by admin privileges.
+
+**Source-only hazards, deliberately not live-tested:** podcast batch adds without episode IDs,
+bogus episode IDs on books, mixed/cross-library adds, duplicate entries within one add, and
+nonmember reorders. The server does not safely validate all combinations and can leave dangling
+rows or fail asynchronously. Duplicate episode create rejection is source-derived, not exercised.
+The one-episode seed cannot establish multi-episode order or mismatched-episode identity behavior.
+No single-item, create-from-collection or deprecated global list route is added or exercised.
+
+Immutable canonical source evidence (not inferred from a version string):
+
+| Contract | 2.26.0 (`264ae928a9c1af620487488110eec816b14e23ec`) | 2.37.2 (`edb1f7efc92ecacdef51aafb4d9d5054ce10604f`) |
+| --- | --- | --- |
+| Routes | [157–168](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/routers/ApiRouter.js#L157-L168) | [157–168](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/routers/ApiRouter.js#L157-L168) |
+| Create | [28–119](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/PlaylistController.js#L28-L119) | [29–125](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/PlaylistController.js#L29-L125) |
+| Update/delete | [159–261](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/PlaylistController.js#L159-L261) | [166–272](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/PlaylistController.js#L166-L272) |
+| Batch membership | [383–491](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/PlaylistController.js#L383-L491) | [394–502](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/PlaylistController.js#L394-L502) |
+| Ownership/access | [560–574](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/PlaylistController.js#L560-L574) | [575–593](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/PlaylistController.js#L575-L593) |
+| Serialization | [335–376](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/models/Playlist.js#L335-L376) | [335–376](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/models/Playlist.js#L335-L376) |
+| User-delete cascade | [365–407](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/UserController.js#L365-L407) | [363–406](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/UserController.js#L363-L406) |
+| Library list | [855–872](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/LibraryController.js#L855-L872) | [853–870](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/LibraryController.js#L853-L870) |
+
+### Playlist ownership and reproduction
+
+`PlaylistContractFixture` creates unique ordinary users, registers every playlist's exact ID from
+the raw successful response **before decoding**, then attempts deletion through its owner session.
+404 is acceptable after auto-deletion or loss of library access. It then admin-deletes its users
+and verifies **every registered playlist and user ID** is 404. Admin GET 403 is a cleanup failure,
+not evidence of absence. User deletion's playlist cascade is explicitly live-tested and is the
+fallback for inaccessible playlists. A deliberate body failure verifies teardown and preservation
+of the primary error; cleanup errors are separately surfaced. No root permissions, shared fixture,
+seed, real server, broad name/count cleanup or collection implementation is changed.
+
+Captured on 2026-11-10, independently for each supported pin: genuine two-book and one-episode
+creates plus their library-list responses. All `Config.Labels`, RepoDigests and actual `/status`
+versions were rechecked; they match the complete official-image provenance table and label values
+above. Both revision labels are present and match the exact pins. An absent label still requires
+separate recorded exact-source fallback authorization; a mismatching label fails.
+
+`ABSAPITests/Fixtures/playlist-writes-*.json` contains representative sanitized responses:
+stable synthetic IDs/dates, trimmed filesystem/probe metadata, retained member order and episode
+track shape. Untrimmed raw responses were checked for two books/one episode and ordered
+`(libraryItemId, episodeId)` pairs, then decoded with **strict** `LibraryItem`/`PodcastEpisode`
+checks before accepting fixtures. Optional expansion leniency cannot hide a valid nested decode
+failure. `Playlist.items` alone is element-lossy; required identities still fail/drop. Outer
+`PagedResults.rawCount` counts playlists, not members; tests inspect raw nested counts independently.
+Existing reads, realtime `playlist_added`, initializers and encoding remain compatible.
+
+Run from the owned worktree, with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`,
+`MISE_TRUSTED_CONFIG_PATHS=$PWD`, and `TMPDIR=$PWD/.build/server-tmp` (create it first):
+
+```sh
+swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+  --filter 'Playlist|LibraryEndpointsTests|ItemEndpointsTests|LibraryResponseDecodingTests|LibraryModelTests|RealtimeEventTests'
+ABS_SERVER_VERSION=2.26.0 scripts/test-server.sh test --filter PlaylistWriteContractTests
+ABS_SERVER_VERSION=2.37.2 scripts/test-server.sh test --filter PlaylistWriteContractTests
+ABS_SERVER_VERSION=2.26.0 mise run test:server
+ABS_SERVER_VERSION=2.37.2 mise run test:server
+mise run lint
+mise run xcproj:check
+mise run test
+git diff --check
+```
+
+Set `ABS_PLAYLIST_LIVE_CAPTURE_DIR=$PWD/.build/playlist-live/<version>-<run>` for live runs to retain
+the actual successful mutation/detail/list responses and exact-ID cleanup results in per-fixture
+UUID directories. Each response is captured once; no write is replayed for capture. The initial
+untrimmed captures live at `.build/playlist-captures/{2.26.0,2.37.2}/`, with `book-create.json`,
+`podcast-create.json`, `book-list.json`, `podcast-list.json`, `identities.json`, `provenance.json`,
+`ledger.json` and `cleanup.json`. These are local synthetic artifacts, not bundled resources.
+Recheck those captures, their lists and strict nested decoding with:
+
+```sh
+ABS_PLAYLIST_CAPTURE_DIR=$PWD/.build/playlist-captures \
+  swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter PlaylistResponseTests
+```
+
+Both focused live runs executed all 10 playlist tests without skips. The full-server suite's existing
+unrelated series-fixture skip does not imply a playlist skip. Default package-suite server skips are
+not live evidence. These checks do not claim UI, device, playback or full parent-issue acceptance.
 
 ## CI
 

@@ -1,0 +1,80 @@
+{
+  "book": {
+    "id": "playlist-book",
+    "name": "Synthetic book",
+    "libraryId": "library-book",
+    "userId": "user-fixture",
+    "description": "Capture",
+    "lastUpdate": 1700000000000,
+    "createdAt": 1700000000000,
+    "items": [
+      {
+        "libraryItemId": "item-book0",
+        "libraryItem": {
+          "id": "item-book0",
+          "libraryId": "library-book",
+          "mediaType": "book",
+          "media": {
+            "id": "media-book0",
+            "metadata": {"title": "Single File Tale"},
+            "duration": 40
+          }
+        }
+      },
+      {
+        "libraryItemId": "item-book1",
+        "libraryItem": {
+          "id": "item-book1",
+          "libraryId": "library-book",
+          "mediaType": "book",
+          "media": {
+            "id": "media-book1",
+            "metadata": {"title": "The Synthetic Tale"},
+            "duration": 50
+          }
+        }
+      }
+    ]
+  },
+  "podcast": {
+    "id": "playlist-podcast",
+    "name": "Synthetic podcast",
+    "libraryId": "library-podcast",
+    "userId": "user-fixture",
+    "description": "Capture",
+    "lastUpdate": 1700000000000,
+    "createdAt": 1700000000000,
+    "items": [
+      {
+        "episodeId": "episode-fixture",
+        "episode": {
+          "id": "episode-fixture",
+          "libraryItemId": "item-podcast0",
+          "podcastId": "media-podcast0",
+          "title": "Episode One",
+          "index": null,
+          "episodeType": null,
+          "duration": 20,
+          "audioTrack": {
+            "index": 1,
+            "startOffset": 0,
+            "duration": 20,
+            "title": "Episode One.mp3",
+            "mimeType": "audio/mpeg"
+          }
+        },
+        "libraryItemId": "item-podcast0",
+        "libraryItem": {
+          "id": "item-podcast0",
+          "libraryId": "library-podcast",
+          "mediaType": "podcast",
+          "media": {
+            "id": "media-podcast0",
+            "metadata": {"title": "Synthetic Cast"},
+            "numEpisodes": 0
+          }
+        }
+      }
+    ]
+  }
+}
