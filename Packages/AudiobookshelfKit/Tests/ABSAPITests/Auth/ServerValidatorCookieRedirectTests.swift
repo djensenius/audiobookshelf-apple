@@ -37,6 +37,30 @@ private func validator(_ server: StubServer) -> ServerValidator {
     ServerValidator(sessionConfiguration: { server.sessionConfiguration() })
 }
 
+/// A server whose `/login` is answered by `login`, behind a proxy that lets `/status` through.
+private func loginServer(login: @escaping StubURLProtocol.Handler) -> StubServer {
+    StubServer { request in
+        switch request.url?.path() {
+        case "/abs/status": .json(statusJSON)
+        case "/abs/login": login(request)
+        default: .text("Not Found", status: 404)
+        }
+    }
+}
+
+/// Validates `server` and signs in, with the stub honouring the validation's cookie jar.
+private func signIn(_ server: StubServer) async throws -> LoginResult {
+    let validator = validator(server)
+    let validated = try await validator.validate(address: "https://\(server.host)/abs")
+    server.useCookieStorage(try #require(validated.cookieStorage))
+    return try await validator.login(to: validated, username: "david", password: "pw")
+}
+
+/// A `Set-Cookie` value the jar has never seen, so every redirect brings a new cookie.
+private func freshCookie() -> String {
+    "lb=\(UUID().uuidString); Path=/"
+}
+
 /// A proxy, load balancer or auth gateway that sets a cookie on first contact and redirects back
 /// to the same URL gets the request once more, with the cookie (#172).
 @Suite struct ServerValidatorCookieRedirectTests {
@@ -116,34 +140,66 @@ private func validator(_ server: StubServer) -> ServerValidator {
         #expect(server.requests.count == 1)
     }
 
-    /// A proxy that keeps redirecting gets one retry, not a loop.
+    /// A proxy that keeps redirecting, with a new cookie each time, gets one retry, not a loop.
     @Test func authorizeRetriesOnlyOnce() async throws {
-        let server = StubServer { request in proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "") }
+        let server = StubServer { request in
+            proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "", setCookie: freshCookie())
+        }
         let client = try accountClient(server)
 
         await #expect(throws: ServerValidationError.loginRedirected) {
             try await validator(server).authorize(with: client)
         }
-        let requests = server.requests(path: "/abs/api/authorize")
-        #expect(requests.count == 2)
-        #expect(hasProxyCookie(requests.last))
+        #expect(server.requests(path: "/abs/api/authorize").count == 2)
+    }
+
+    /// The jar already holds `lb=1`. A cookie the retry wouldn't send, or would send unchanged,
+    /// gives no reason to send the request again.
+    @Test(arguments: [
+        "lb=1; Path=/", "lb=2; Path=/other", "lb=; Max-Age=0; Path=/", "lb=2; Domain=other.example; Path=/",
+    ])
+    func authorizeDoesNotRetryForACookieItWouldNotSend(setCookie: String) async throws {
+        let server = StubServer { request in
+            proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "", setCookie: setCookie)
+        }
+        let client = try accountClient(server)
+        let jar = try #require(client.cookieStorage)
+        jar.setCookie(
+            try #require(HTTPCookie(properties: [.name: "lb", .value: "1", .domain: server.host, .path: "/"])))
+
+        await #expect(throws: ServerValidationError.loginRedirected) {
+            try await validator(server).authorize(with: client)
+        }
+        #expect(server.requests.count == 1)
+    }
+
+    /// A 303 says the request was handled, so it is never sent again, even with a new cookie.
+    @Test func seeOtherIsNeverRetried() async throws {
+        let seeOther: StubURLProtocol.Handler = { request in
+            proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "", status: 303)
+        }
+        let server = StubServer(handler: seeOther)
+        let client = try accountClient(server)
+        await #expect(throws: ServerValidationError.loginRedirected) {
+            try await validator(server).authorize(with: client)
+        }
+        #expect(server.requests.count == 1)
+
+        let login = loginServer(login: seeOther)
+        await #expect(throws: ServerValidationError.loginRedirected) {
+            try await signIn(login)
+        }
+        #expect(login.requests(path: "/abs/login").count == 1)
     }
 
     /// The password is only re-sent to the URL it was posted to.
     @Test func loginRetriesASameURLCookieRedirectOnce() async throws {
-        let server = StubServer { request in
-            switch (request.url?.path(), hasProxyCookie(request)) {
-            case ("/abs/status", _): .json(statusJSON)
-            case ("/abs/login", false): proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "")
-            case ("/abs/login", true): .json(authResponseJSON())
-            default: .text("Not Found", status: 404)
-            }
+        let server = loginServer { request in
+            hasProxyCookie(request)
+                ? .json(authResponseJSON()) : proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "")
         }
-        let validator = validator(server)
-        let validated = try await validator.validate(address: "https://\(server.host)/abs")
-        server.useCookieStorage(try #require(validated.cookieStorage))
 
-        let result = try await validator.login(to: validated, username: "david", password: "pw")
+        let result = try await signIn(server)
 
         #expect(result.tokens.accessToken == "access-new")
         let logins = server.requests(path: "/abs/login")
@@ -157,6 +213,41 @@ private func validator(_ server: StubServer) -> ServerValidator {
         #expect(retry.value(forHTTPHeaderField: "x-return-tokens") == "true")
     }
 
+    @Test(arguments: [302, 307]) func loginDoesNotRetryASameURLRedirectWithoutCookies(status: Int) async throws {
+        let server = loginServer { request in
+            proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "", status: status, setCookie: nil)
+        }
+
+        await #expect(throws: ServerValidationError.loginRedirected) {
+            try await signIn(server)
+        }
+        #expect(server.requests(path: "/abs/login").count == 1)
+    }
+
+    @Test(arguments: ["/abs/login/", "/abs/login?lb=1", "https://elsewhere.stub.test/abs/login"])
+    func loginDoesNotRetryACookieRedirectElsewhere(location: String) async throws {
+        let server = loginServer { request in
+            hasProxyCookie(request) ? .json(authResponseJSON()) : proxyRedirect(from: request.url, to: location)
+        }
+
+        await #expect(throws: ServerValidationError.loginRedirected) {
+            try await signIn(server)
+        }
+        #expect(server.requests(path: "/abs/login").count == 1)
+    }
+
+    /// A login that keeps redirecting, with a new cookie each time, is posted twice at most.
+    @Test func loginRetriesOnlyOnce() async throws {
+        let server = loginServer { request in
+            proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "", setCookie: freshCookie())
+        }
+
+        await #expect(throws: ServerValidationError.loginRedirected) {
+            try await signIn(server)
+        }
+        #expect(server.requests(path: "/abs/login").count == 2)
+    }
+
     /// A request that doesn't send cookies would gain nothing from a retry, and the jar isn't touched.
     @Test func requestWithoutCookiesIsNotRetried() async throws {
         let server = StubServer { request in proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "") }
@@ -168,5 +259,30 @@ private func validator(_ server: StubServer) -> ServerValidator {
         #expect(reply.httpResponse.statusCode == 302)
         #expect(server.requests.count == 1)
         #expect(client.cookieStorage?.cookies?.isEmpty == true)
+    }
+
+    /// A withheld cookie (here `refresh_token`, as on logout) set by the redirect is neither
+    /// stored nor a reason to retry; the proxy's cookie still is.
+    @Test(arguments: [
+        "refresh_token=planted; Path=/", "lb=1; Path=/, refresh_token=planted; Path=/",
+    ])
+    func withheldCookiesAreNotStoredOrRetriedFor(setCookie: String) async throws {
+        let server = StubServer { request in
+            hasProxyCookie(request)
+                ? .json("{}")
+                : proxyRedirect(from: request.url, to: request.url?.absoluteString ?? "", setCookie: setCookie)
+        }
+        let client = try accountClient(server)
+        let endpoint = Endpoint<Data>(
+            .post, "/api/authorize", followsRedirects: false, withheldCookies: ["refresh_token"])
+
+        let reply = try await ServerValidator.sendRetryingCookieRedirect(endpoint, client: client)
+
+        let setsProxyCookie = setCookie.hasPrefix("lb=1")
+        #expect(reply.httpResponse.statusCode == (setsProxyCookie ? 200 : 302))
+        #expect(server.requests.count == (setsProxyCookie ? 2 : 1))
+        #expect(
+            server.requests.allSatisfy { !($0.value(forHTTPHeaderField: "Cookie") ?? "").contains("refresh_token") })
+        #expect(client.cookieStorage?.cookies?.contains { $0.name == "refresh_token" } == false)
     }
 }
