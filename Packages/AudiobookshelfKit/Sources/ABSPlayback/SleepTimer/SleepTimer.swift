@@ -11,8 +11,9 @@ import Observation
 /// - The chime plays once per run, ``chimeLeadTime`` seconds before the end; a run that starts with less left,
 ///   or jumps past that moment, never chimes.
 /// - For ``gracePeriod`` seconds after the timer pauses playback, ``reset()`` or playing the same item restarts it.
-/// - ``reset()`` restarts a running timer while audio plays. It is the entry point for a gesture such as shake to
-///   reset (#147).
+/// - ``reset()`` restarts a running timer while audio plays. The `shakeDetector` calls it for shake to reset, only
+///   while a reset can do something. Once paused in the background iOS likely suspends the app, so a shake during
+///   the grace period probably only works in the foreground (to be checked on a device).
 /// - An automatic timer starts when playback starts inside the ``AutoSleepPolicy`` window.
 ///
 /// The playback coordinator (#52) conforms to ``SleepTimerPlaybackControl`` and calls:
@@ -50,8 +51,10 @@ public final class SleepTimer {
     /// Whether the timer recently paused playback and a reset or play would restart it.
     public private(set) var canRestart = false
     public var isRunning: Bool { mode != nil }
-    /// Takes effect at the next tick.
-    public var options: SleepTimerOptions
+    /// Takes effect at the next tick; changes to the shake sensitivity apply immediately.
+    public var options: SleepTimerOptions {
+        didSet { updateShakeDetection() }
+    }
 
     private enum Goal {
         case length(TimeInterval)
@@ -87,6 +90,7 @@ public final class SleepTimer {
 
     @ObservationIgnored private let control: any SleepTimerPlaybackControl
     @ObservationIgnored private let feedback: any SleepTimerFeedback
+    @ObservationIgnored private let shakeDetector: (any ShakeDetecting)?
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let calendar: Calendar
     @ObservationIgnored private let tickInterval: Duration
@@ -107,14 +111,18 @@ public final class SleepTimer {
     @ObservationIgnored private var appliedVolume: Float = 1
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var graceTask: Task<Void, Never>?
+    @ObservationIgnored private var detectingSensitivity: ShakeSensitivity?
     /// Ticks so far, for tests.
     @ObservationIgnored private(set) var tickCount = 0
     var isTicking: Bool { tickTask != nil }
 
-    /// - Parameter tickInterval: How often the countdown, fade and chime update.
+    /// - Parameters:
+    ///   - shakeDetector: Pass ``ShakeDetector`` on iOS; `nil` disables shake to reset.
+    ///   - tickInterval: How often the countdown, fade and chime update.
     public init(
         control: any SleepTimerPlaybackControl,
         feedback: any SleepTimerFeedback = SystemSleepTimerFeedback(),
+        shakeDetector: (any ShakeDetecting)? = nil,
         options: SleepTimerOptions = SleepTimerOptions(),
         clock: any Clock<Duration> = ContinuousClock(),
         calendar: Calendar = .autoupdatingCurrent,
@@ -122,6 +130,7 @@ public final class SleepTimer {
     ) {
         self.control = control
         self.feedback = feedback
+        self.shakeDetector = shakeDetector
         self.options = options
         self.clock = clock
         self.calendar = calendar
@@ -132,6 +141,7 @@ public final class SleepTimer {
     isolated deinit {
         tickTask?.cancel()
         graceTask?.cancel()
+        if detectingSensitivity != nil { shakeDetector?.stop() }
     }
 
     // MARK: - Commands
@@ -231,6 +241,7 @@ public final class SleepTimer {
         pendingRewind = nil
         endGrace()
         publish(remaining: remaining)
+        updateShakeDetection()
     }
 
     /// Call once a seek, chapter skip, rewind or item load lands at `time`. An end-of-chapter timer moves to the
@@ -275,6 +286,7 @@ public final class SleepTimer {
         lastTick = now()
         startTicking()
         update(Run(goal: goal, isAutomatic: isAutomatic), at: time)
+        updateShakeDetection()
         return true
     }
 
@@ -331,6 +343,7 @@ public final class SleepTimer {
         self.run = run
         applyVolume(fadeVolume(left))
         publish(remaining: max(left, 0))
+        updateShakeDetection()
     }
 
     /// Notes where a duration run's fade began, to rewind there after it expires; time added above the fade
@@ -391,6 +404,7 @@ public final class SleepTimer {
         tickTask = nil
         applyVolume(1)
         publish(remaining: nil)
+        updateShakeDetection()
     }
 
     private func startTicking() {
@@ -412,6 +426,7 @@ public final class SleepTimer {
     private func graceDidEnd() {
         endGrace()
         publish(remaining: remaining)
+        updateShakeDetection()
     }
 
     private func endGrace() {
@@ -515,6 +530,18 @@ public final class SleepTimer {
         if isAutomatic != automatic { isAutomatic = automatic }
         let restartable = run == nil && expiredRun != nil
         if canRestart != restartable { canRestart = restartable }
+    }
+
+    private func updateShakeDetection() {
+        let isActive = (run != nil && control.isPlaying) || restartableRun != nil
+        let sensitivity = isActive ? options.shakeSensitivity : nil
+        guard let shakeDetector, sensitivity != detectingSensitivity else { return }
+        detectingSensitivity = sensitivity
+        if let sensitivity {
+            shakeDetector.start(sensitivity: sensitivity) { [weak self] in self?.reset() }
+        } else {
+            shakeDetector.stop()
+        }
     }
 
     // MARK: - Scheduling

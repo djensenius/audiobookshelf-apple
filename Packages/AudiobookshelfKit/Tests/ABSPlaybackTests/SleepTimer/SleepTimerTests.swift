@@ -4,18 +4,19 @@ import Testing
 
 @testable import ABSPlayback
 
-/// A timer on a manual clock that ticks every second, with fake playback and feedback.
+/// A timer on a manual clock that ticks every second, with fake playback, feedback and shake detection.
 @MainActor
 private final class Harness {
     let clock = ManualClock()
     let control: FakePlaybackControl
     let feedback = FakeFeedback()
+    let shake = FakeShakeDetector()
     let timer: SleepTimer
 
     init(timeline: PlaybackTimeline? = nil, at time: Double = 0, options: SleepTimerOptions = SleepTimerOptions()) {
         control = FakePlaybackControl(timeline: timeline, at: time)
         timer = SleepTimer(
-            control: control, feedback: feedback, options: options, clock: clock,
+            control: control, feedback: feedback, shakeDetector: shake, options: options, clock: clock,
             calendar: .gregorianUTC, tickInterval: .seconds(1))
     }
 
@@ -528,6 +529,7 @@ struct SleepTimerTests {
         case .anotherItem: harness.timer.itemDidChange("b")
         }
         #expect(harness.timer.canRestart == (end == .clockOnly), "Published when the grace task runs")
+        #expect(harness.shake.sensitivity == (end == .clockOnly ? .medium : nil))
         #expect(harness.timer.reset() == false)
         #expect(harness.timer.playbackWillStart() == 0)
         #expect(harness.timer.isRunning == false)
@@ -552,18 +554,80 @@ struct SleepTimerTests {
         #expect(harness.timer.remaining == 598)
     }
 
-    @Test func deinitStopsTicking() async {
+    @Test func deinitStopsTickingAndShakeDetection() async {
         let clock = ManualClock()
+        let shake = FakeShakeDetector()
         var timer: SleepTimer? = SleepTimer(
-            control: FakePlaybackControl(), feedback: FakeFeedback(), clock: clock, calendar: .gregorianUTC,
-            tickInterval: .seconds(1))
+            control: FakePlaybackControl(), feedback: FakeFeedback(), shakeDetector: shake, clock: clock,
+            calendar: .gregorianUTC, tickInterval: .seconds(1))
         weak let weakTimer = timer
         timer?.start(.duration(600))
         await until { clock.sleeperCount == 1 }
+        #expect(shake.sensitivity == .medium)
 
         timer = nil
         #expect(weakTimer == nil)
+        #expect(shake.sensitivity == nil)
         await until { clock.sleeperCount == 0 }
+    }
+
+    // MARK: - Shake to reset
+
+    @Test func shakingResetsARunningOrExpiredTimer() async {
+        let harness = Harness()
+        harness.timer.start(.duration(10))
+        await harness.advance(5)
+        harness.shake.shake()
+        #expect(harness.timer.remaining == 10)
+
+        await harness.expire()
+        #expect(harness.shake.sensitivity == .medium, "Detects during the grace period")
+        harness.shake.shake()
+        await until { harness.control.plays == 1 }
+        #expect(harness.timer.isRunning)
+        #expect(harness.feedback.resets == 2)
+    }
+
+    @Test func shakeDetectionFollowsTheTimerAndSettings() {
+        let harness = Harness(options: SleepTimerOptions(shakeSensitivity: nil))
+        harness.timer.start(.duration(600))
+        #expect(harness.shake.sensitivity == nil)
+
+        harness.timer.options.shakeSensitivity = .high
+        #expect(harness.shake.sensitivity == .high)
+        harness.timer.options.shakeSensitivity = .veryLow
+        #expect(harness.shake.sensitivity == .veryLow)
+        #expect(harness.shake.starts == 2)
+
+        harness.timer.options.fadesOut = false
+        #expect(harness.shake.starts == 2)
+        harness.timer.options.shakeSensitivity = nil
+        #expect(harness.shake.sensitivity == nil)
+    }
+
+    @Test func shakeDetectionStopsWhilePausedAndWhenCancelled() async {
+        let harness = Harness()
+        harness.timer.start(.duration(600))
+        #expect(harness.shake.sensitivity == .medium)
+        harness.control.isPlaying = false
+        await harness.advance(1)
+        #expect(harness.shake.sensitivity == nil)
+        harness.control.isPlaying = true
+        await harness.advance(1)
+        #expect(harness.shake.sensitivity == .medium)
+        #expect(harness.shake.starts == 2)
+
+        harness.timer.cancel()
+        #expect(harness.shake.sensitivity == nil)
+    }
+
+    @Test func noShakeDetectionAfterACutShortTimer() async {
+        let harness = Harness()
+        harness.timer.start(.duration(600))
+        harness.timer.subtract(1000)
+        await harness.advance(1)
+        #expect(harness.control.pauseCount == 1)
+        #expect(harness.shake.sensitivity == nil)
     }
 
     // MARK: - Automatic timer
