@@ -13,14 +13,24 @@ public struct AudioEngineSource: Sendable, Hashable {
     public let prefersPreciseTiming: Bool
     /// Seek tolerance in seconds: `0` for direct play, up to `0.5` for HLS (ADR 0007).
     public let seekTolerance: Double
+    /// Optional MIME type per entry of ``trackURLs`` (same order), passed as
+    /// `AVURLAssetOverrideMIMETypeKey` for extensionless direct-play URLs (ADR 0007 §2). Empty, or a
+    /// `nil` entry, means no override.
+    public let trackMIMETypes: [String?]
 
     public init(
-        timeline: PlaybackTimeline, trackURLs: [URL], prefersPreciseTiming: Bool = false, seekTolerance: Double = 0
+        timeline: PlaybackTimeline, trackURLs: [URL], trackMIMETypes: [String?] = [],
+        prefersPreciseTiming: Bool = false, seekTolerance: Double = 0
     ) {
         self.timeline = timeline
         self.trackURLs = trackURLs
+        self.trackMIMETypes = trackMIMETypes
         self.prefersPreciseTiming = prefersPreciseTiming
         self.seekTolerance = seekTolerance.isFinite ? max(seekTolerance, 0) : 0
+    }
+
+    func mimeType(trackIndex: Int) -> String? {
+        trackMIMETypes.indices.contains(trackIndex) ? trackMIMETypes[trackIndex] : nil
     }
 }
 

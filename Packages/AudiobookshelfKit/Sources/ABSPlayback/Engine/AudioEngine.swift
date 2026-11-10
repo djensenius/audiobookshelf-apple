@@ -107,8 +107,16 @@ public final class AudioEngine: AudioEngineProtocol {
         // flight starts the player when it completes, and an interrupted seek is retried first.
         if isLoading || isSeeking {
             refreshState()
-        } else if let pendingSeekTarget {
-            Task { await seek(to: pendingSeekTarget) }
+        } else if pendingSeekTarget != nil {
+            // Retry the interrupted seek, unless a seek, load or stop or a pause happens first: the
+            // retry must never overwrite a newer position.
+            let generation = seekGeneration
+            Task { [weak self] in
+                guard let self, generation == seekGeneration, isPlaybackRequested,
+                    let target = pendingSeekTarget
+                else { return }
+                await seek(to: target)
+            }
             refreshState()
         } else {
             startPlayer()
@@ -211,8 +219,12 @@ public final class AudioEngine: AudioEngineProtocol {
 
     /// Sets the precise-timing key only when wanted. Passing an explicit `false` is not the same as
     /// leaving the key out: on macOS 27.2 it made local WAV items fail with -11800 / -17770.
-    static func assetOptions(prefersPreciseTiming: Bool) -> [String: Any] {
-        prefersPreciseTiming ? [AVURLAssetPreferPreciseDurationAndTimingKey: true] : [:]
+    /// `mimeType` overrides the type for URLs without a usable extension (ADR 0007 §2).
+    static func assetOptions(prefersPreciseTiming: Bool, mimeType: String? = nil) -> [String: Any] {
+        var options: [String: Any] = [:]
+        if prefersPreciseTiming { options[AVURLAssetPreferPreciseDurationAndTimingKey] = true }
+        if let mimeType, !mimeType.isEmpty { options[AVURLAssetOverrideMIMETypeKey] = mimeType }
+        return options
     }
 
     private func rebuildQueue(from start: Int) {
@@ -237,7 +249,9 @@ public final class AudioEngine: AudioEngineProtocol {
             assets[trackIndex]
             ?? AVURLAsset(
                 url: source.trackURLs[trackIndex],
-                options: Self.assetOptions(prefersPreciseTiming: source.prefersPreciseTiming))
+                options: Self.assetOptions(
+                    prefersPreciseTiming: source.prefersPreciseTiming, mimeType: source.mimeType(trackIndex: trackIndex)
+                ))
         assets[trackIndex] = asset
         let item = AVPlayerItem(asset: asset)
         item.audioTimePitchAlgorithm = .timeDomain
@@ -402,7 +416,10 @@ public final class AudioEngine: AudioEngineProtocol {
     }
 
     private func tick() {
-        guard !isSeeking, !hasEnded, failure == nil, let timeline, let item = player.currentItem,
+        // While a seek runs or its target is still pending, the item is not at the requested
+        // position, so its time must not be published.
+        guard !isSeeking, pendingSeekTarget == nil, !hasEnded, failure == nil, let timeline,
+            let item = player.currentItem,
             item.status == .readyToPlay, let entry = queued[ObjectIdentifier(item)]
         else { return }
         if entry.trackIndex != currentTrackIndex {
@@ -434,7 +451,9 @@ public final class AudioEngine: AudioEngineProtocol {
         // a track, so fail on the first skipped one instead.
         if failure == nil, let previous = currentTrackIndex,
             let skipped = queued.values
-                .filter({ $0.item.status == .failed && $0.trackIndex > previous })
+                // `>=`: the previously current item may have failed and been dropped before its
+                // status change was handled.
+                .filter({ $0.item.status == .failed && $0.trackIndex >= previous })
                 .filter({ $0.trackIndex < entry?.trackIndex ?? Int.max })
                 .min(by: { $0.trackIndex < $1.trackIndex })
         {

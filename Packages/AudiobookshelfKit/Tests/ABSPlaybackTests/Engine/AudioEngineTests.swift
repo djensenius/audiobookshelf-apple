@@ -288,6 +288,45 @@ struct AudioEngineTests {
         #expect(engine.currentTime >= 7)
     }
 
+    @Test func staleSeekRetryDoesNotOverwriteNewerSeek() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        try await engine.load(fixture.source, at: 0)
+        engine.play()
+        let seeker = engine.itemSeeker
+        engine.itemSeeker = { _, _, _ in false }
+        #expect(await engine.seek(to: 7) == .interrupted)
+        engine.itemSeeker = seeker
+
+        // play() schedules a retry to 7; the newer seek must win.
+        engine.play()
+        #expect(await engine.seek(to: 2) == .completed)
+        #expect(await eventually { engine.state == .playing })
+
+        #expect(engine.pendingSeekTarget == nil)
+        #expect(engine.currentTrackIndex == 0)
+        #expect(engine.currentTime >= 2 && engine.currentTime < 3)
+    }
+
+    @Test(.tags(.realtimeAudio)) func pendingSeekTargetSuppressesTicks() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        try await engine.load(fixture.source, at: 0)
+        engine.itemSeeker = { _, _, _ in false }
+        #expect(await engine.seek(to: 4.5) == .interrupted)
+        #expect(engine.currentTrackIndex == 1)
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+
+        // The replacement item plays from its unseeked start; its time must not be published.
+        engine.player.play()
+        #expect(await eventually { (engine.player.currentItem?.currentTime().seconds ?? 0) > 0.3 })
+
+        #expect(engine.currentTime == 0)
+        #expect(!events.contains { if case .tick = $0 { true } else { false } })
+        #expect(engine.pendingSeekTarget == 4.5)
+    }
+
     @Test(.tags(.realtimeAudio)) func playDuringLoadStartsAfterTheSeek() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()
@@ -393,6 +432,27 @@ struct AudioEngineTests {
             AudioEngine.assetOptions(prefersPreciseTiming: true)[AVURLAssetPreferPreciseDurationAndTimingKey] as? Bool
                 == true)
         #expect(AudioEngine.assetOptions(prefersPreciseTiming: false).isEmpty)
+    }
+
+    @Test func mimeTypeOverridesAssetType() {
+        let options = AudioEngine.assetOptions(prefersPreciseTiming: false, mimeType: "audio/mp4")
+        #expect(options[AVURLAssetOverrideMIMETypeKey] as? String == "audio/mp4")
+        #expect(AudioEngine.assetOptions(prefersPreciseTiming: false, mimeType: nil).isEmpty)
+        #expect(AudioEngine.assetOptions(prefersPreciseTiming: false, mimeType: "").isEmpty)
+    }
+
+    @Test func loadsExtensionlessURLWithMIMEType() async throws {
+        let fixture = try AudioFixture(trackCount: 1)
+        let extensionless = fixture.directory.appending(path: "track")
+        try FileManager.default.copyItem(at: fixture.urls[0], to: extensionless)
+        let engine = makeEngine()
+
+        try await engine.load(
+            AudioEngineSource(timeline: fixture.timeline, trackURLs: [extensionless], trackMIMETypes: ["audio/wav"]),
+            at: 1)
+
+        #expect(engine.state == .paused)
+        #expect(engine.currentTime == 1)
     }
 }
 
