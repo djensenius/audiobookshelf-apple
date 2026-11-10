@@ -216,6 +216,133 @@ struct AudioEngineTests {
         #expect(engine.player.rate == 0)
     }
 
+    /// Posts the current item's end as AVFoundation would.
+    private func postEnd(of engine: AudioEngine) {
+        NotificationCenter.default.post(
+            name: AVPlayerItem.didPlayToEndTimeNotification, object: engine.player.currentItem)
+    }
+
+    /// Loads into the last track and ends it.
+    private func makeEndedEngine(_ fixture: AudioFixture, session: FakeAudioSession? = nil) async throws -> AudioEngine
+    {
+        let engine = makeEngine(session: session)
+        try await engine.load(fixture.source, at: 8)
+        postEnd(of: engine)
+        try await waitUntil { engine.state == .ended }
+        return engine
+    }
+
+    @Test(.tags(.realtimeAudio)) func endOfMediaDuringASeekDoesNotEndPlayback() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        try await engine.load(fixture.source, at: 7)
+        engine.play()
+        let held = HeldSeeks()
+        engine.itemSeeker = held.wrap(engine.itemSeeker)
+
+        // The last item ends while a seek within it is still completing.
+        let seek = Task { await engine.seek(to: 7.5) }
+        try await waitUntil { held.isHolding }
+        postEnd(of: engine)
+        held.release()
+
+        #expect(await seek.value == .completed)
+        #expect(!events.contains(.endOfMedia))
+        #expect(engine.isPlaybackRequested)
+        #expect(engine.player.rate == 1)
+        #expect(engine.currentTime == 7.5)
+    }
+
+    @Test func interruptedSeekAfterTheEndKeepsTheRememberedPlay() async throws {
+        let fixture = try AudioFixture()
+        let engine = try await makeEndedEngine(fixture)
+        engine.play()
+        let seeker = engine.itemSeeker
+        engine.itemSeeker = { _, _, _ in false }
+
+        #expect(await engine.seek(to: 1) == .interrupted)
+
+        // No longer at the end: waiting for the seek, with the play still requested.
+        #expect(engine.state == .buffering)
+        #expect(engine.isPlaybackRequested)
+        #expect(engine.pendingSeekTarget == 1)
+
+        // play() retries the seek and plays from its target.
+        engine.itemSeeker = seeker
+        engine.play()
+        #expect(await eventually { engine.pendingSeekTarget == nil && engine.player.rate == 1 })
+        #expect(engine.currentTrackIndex == 0)
+        #expect(engine.state != .ended)
+    }
+
+    @Test(.tags(.realtimeAudio)) func seekToTheEndWhileEndedEndsAgainOnPlay() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        try await engine.load(fixture.source, at: 8.8)
+        engine.setRate(2)
+        engine.play()
+        #expect(await eventually { engine.state == .ended })
+
+        #expect(await engine.seek(to: 9) == .completed)
+        #expect(engine.state == .paused)
+        #expect(engine.currentTime == 9)
+
+        engine.play()
+        #expect(await eventually { engine.state == .ended })
+        #expect(events.count { $0 == .endOfMedia } == 2)
+        #expect(!engine.isPlaybackRequested)
+    }
+
+    @Test func activationFailureForAPlayRememberedAfterTheEndRecovers() async throws {
+        let fixture = try AudioFixture()
+        let session = FakeAudioSession()
+        let engine = try await makeEndedEngine(fixture, session: session)
+        engine.play()
+        session.activationError = FakeAudioSession.ActivationError()
+
+        #expect(await engine.seek(to: 1) == .completed)
+        #expect(engine.state == .paused)
+        #expect(!engine.isPlaybackRequested)
+        #expect(engine.player.rate == 0)
+
+        session.activationError = nil
+        engine.play()
+        #expect(engine.isPlaybackRequested)
+        #expect(engine.player.rate == 1)
+    }
+
+    @Test func pauseOrStopDuringASeekAfterTheEndClearsThePlay() async throws {
+        let fixture = try AudioFixture()
+        let engine = try await makeEndedEngine(fixture)
+        let held = HeldSeeks()
+        engine.itemSeeker = held.wrap(engine.itemSeeker)
+
+        engine.play()
+        let first = Task { await engine.seek(to: 1) }
+        try await waitUntil { held.isHolding }
+        engine.pause()
+        held.release()
+        #expect(await first.value == .completed)
+        #expect(engine.state == .paused)
+        #expect(engine.player.rate == 0)
+        #expect(!engine.isPlaybackRequested)
+
+        engine.play()
+        let second = Task { await engine.seek(to: 2) }
+        try await waitUntil { held.isHolding }
+        engine.stop()
+        held.release()
+        #expect(await second.value == .superseded)
+        #expect(engine.state == .idle)
+        #expect(engine.player.rate == 0)
+        #expect(!engine.isPlaybackRequested)
+        #expect(engine.pendingSeekTarget == nil)
+    }
+
     @Test(.tags(.realtimeAudio)) func lastTrackEndingAfterAnUnreportedSkipFails() async throws {
         let fixture = try AudioFixture()
         try FileManager.default.removeItem(at: fixture.urls[1])
@@ -233,7 +360,7 @@ struct AudioEngineTests {
         engine.setRate(2)
         engine.play()
 
-        #expect(await eventually(timeout: .seconds(4)) { if case .failed = engine.state { true } else { false } })
+        #expect(await eventually { if case .failed = engine.state { true } else { false } })
         guard case .failed(.itemFailed(trackIndex: 1, _)) = engine.state else {
             Issue.record("expected itemFailed(1), got \(engine.state)")
             return
@@ -533,9 +660,11 @@ struct AudioEngineTests {
 
         // The seek rebuilds the queue while the old item's log is still being fetched.
         #expect(await engine.seek(to: 0.5) == .completed)
+        #expect(engine.currentTrackIndex == 0)
+        // Hold the position so the queue cannot reach the (still missing) track 1 again.
+        engine.pause()
         log.release([])
-        try await waitUntil { log.pending == 0 }
-        for _ in 0..<10 { await Task.yield() }
+        try await waitUntil { log.returned == 1 }
 
         #expect({ if case .failed = engine.state { false } else { true } }())
         #expect(!events.contains { if case .failed = $0 { true } else { false } })
@@ -568,15 +697,19 @@ struct AudioEngineTests {
         let events = Box<[AudioEngineEvent]>([])
         let engine = try await makeEngineWithPendingFailure(fixture, log: log, events: events)
 
-        // A seek into track 2, which may already be the current item, still rebuilds.
+        // A seek into track 2, which may already be the current item, still rebuilds. Nothing
+        // suspends between the seek setting the position and returning, so it is exact here; the
+        // player then runs at 1x, leaving 2.5 s before track 2 ends.
+        engine.setRate(1)
         #expect(await engine.seek(to: 6.5) == .completed)
-        log.release(Self.notFound)
-        try await waitUntil { log.pending == 0 }
-        for _ in 0..<10 { await Task.yield() }
-
-        #expect(!events.value.contains { if case .failed = $0 { true } else { false } })
         #expect(engine.currentTrackIndex == 2)
         #expect(engine.currentTime == 6.5)
+        #expect(engine.player.rate == 1)
+        log.release(Self.notFound)
+        try await waitUntil { log.returned == 1 }
+
+        #expect(!events.value.contains { if case .failed = $0 { true } else { false } })
+        #expect(engine.currentTime >= 6.5)
         #expect(engine.isPlaybackRequested)
         #expect(await eventually { engine.state == .playing })
     }
@@ -616,13 +749,16 @@ struct AudioEngineTests {
         try FileManager.default.moveItem(at: missing, to: fixture.urls[1])
         engine.errorLogFetcher = { _ in Self.notFound }
         #expect(await engine.seek(to: 3.5) == .completed)
+        // Exact before anything can suspend; then hold the position while the old report finishes.
+        #expect(engine.currentTrackIndex == 1)
+        #expect(engine.currentTime == 3.5)
+        engine.pause()
         log.release(Self.notFound)
-        try await waitUntil { log.pending == 0 }
-        for _ in 0..<10 { await Task.yield() }
+        try await waitUntil { log.returned == 1 }
 
         #expect(!events.value.contains { if case .failed = $0 { true } else { false } })
         #expect(engine.currentTrackIndex == 1)
-        #expect(engine.currentTime == 3.5)
+        #expect(engine.currentTime >= 3.5 && engine.currentTime < 6)
     }
 
     /// Loads track 0 with track 1's file moved to `missing`, and waits until AVQueuePlayer has
@@ -1001,18 +1137,46 @@ final class FailablePlayers {
 @MainActor
 final class GatedErrorLog {
     private(set) var fetches = 0
+    /// Fetches that returned. The engine's report continues on the main actor without suspending,
+    /// so once this counts a fetch, that report has run.
+    private(set) var returned = 0
     private var waiters: [CheckedContinuation<[PlaybackFailure.ErrorLogEntry], Never>] = []
     var pending: Int { waiters.count }
 
     func fetch(_ item: AVPlayerItem) async -> [PlaybackFailure.ErrorLogEntry] {
         fetches += 1
-        return await withCheckedContinuation { waiters.append($0) }
+        let entries = await withCheckedContinuation { waiters.append($0) }
+        returned += 1
+        return entries
     }
 
     func release(_ entries: [PlaybackFailure.ErrorLogEntry]) {
         let released = waiters
         waiters = []
         for waiter in released { waiter.resume(returning: entries) }
+    }
+}
+
+/// Wraps an item seeker so each seek's completion is held until ``release()``.
+@MainActor
+final class HeldSeeks {
+    private var held: [CheckedContinuation<Void, Never>] = []
+    var isHolding: Bool { !held.isEmpty }
+
+    func wrap(
+        _ seeker: @escaping @MainActor (AVPlayerItem, CMTime, CMTime) async -> Bool
+    ) -> @MainActor (AVPlayerItem, CMTime, CMTime) async -> Bool {
+        { item, time, tolerance in
+            let finished = await seeker(item, time, tolerance)
+            await withCheckedContinuation { self.held.append($0) }
+            return finished
+        }
+    }
+
+    func release() {
+        let released = held
+        held = []
+        for continuation in released { continuation.resume() }
     }
 }
 

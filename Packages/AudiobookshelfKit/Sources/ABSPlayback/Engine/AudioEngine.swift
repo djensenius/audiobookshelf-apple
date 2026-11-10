@@ -193,6 +193,9 @@ public final class AudioEngine: AudioEngineProtocol {
         let generation = seekGeneration
         pendingSeekTarget = target
         isSeeking = true
+        // A seek leaves the end: the position is the seek's target now, even if the seek is
+        // interrupted, so a remembered play() retries it rather than waiting at the end.
+        hasEnded = false
         // After a failure, or while one is being reported, rebuild: the queue may have dropped the
         // failed item, and the report must not outlive a newer seek.
         if failure != nil || pendingItemFailure != nil {
@@ -608,8 +611,10 @@ public final class AudioEngine: AudioEngineProtocol {
     }
 
     private func itemDidPlayToEnd(_ id: ObjectIdentifier) {
-        // A reported or pending failure means playback did not reach the end.
-        guard failure == nil, pendingItemFailure == nil, let entry = queued[id], let timeline,
+        // A reported or pending failure means playback did not reach the end. During a seek (or
+        // while its target is pending) the seek decides the position, not an end it overtook.
+        guard failure == nil, pendingItemFailure == nil, !isSeeking, pendingSeekTarget == nil,
+            let entry = queued[id], let timeline,
             entry.trackIndex == queued.values.map(\.trackIndex).max()
         else { return }
         // So does a failed track the queue skipped without the engine noticing yet.

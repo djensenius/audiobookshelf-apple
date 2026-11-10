@@ -53,9 +53,10 @@ final class AudioFixture: Sendable {
 }
 
 /// Polls `condition` on the main actor every 10 ms until it holds, `timeout` passes or the task
-/// is cancelled (both return `false`).
+/// is cancelled (both return `false`). The timeout is generous so a busy machine (parallel test
+/// runs) does not fail a passing test; it only bounds a failing one.
 @MainActor
-func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async -> Bool {
+func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async -> Bool {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
     while !condition() {
@@ -72,7 +73,7 @@ struct WaitTimedOut: Error {}
 /// `CancellationError` if the task is cancelled.
 @MainActor
 func waitUntil(
-    timeout: Duration = .seconds(5), sourceLocation: SourceLocation = #_sourceLocation, _ condition: () -> Bool
+    timeout: Duration = .seconds(10), sourceLocation: SourceLocation = #_sourceLocation, _ condition: () -> Bool
 ) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
