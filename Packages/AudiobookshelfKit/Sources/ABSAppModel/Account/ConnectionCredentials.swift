@@ -104,8 +104,9 @@ actor ConnectionCredentials: TokenProvider {
     nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     private let vault: CredentialVault
     /// Runs after a rejected refresh token ended the session, before ``APIClient`` throws
-    /// `sessionExpired`, with the ``generation`` that ended it.
-    private let onExpire: @MainActor @Sendable (UUID, Int) -> Void
+    /// `sessionExpired`, with the ``generation`` that ended it, and whether the Keychain delete
+    /// failed, which leaves the rejected tokens stored.
+    private let onExpire: @MainActor @Sendable (UUID, Int, Bool) async -> Void
     private var session: StoredSession?
     private var customHeaders: [String: String] = [:]
     private var isLoaded = false
@@ -123,7 +124,10 @@ actor ConnectionCredentials: TokenProvider {
     /// Test hook: called whenever a refresh waits for one another client started.
     private var refreshJoinObserver: (@Sendable () -> Void)?
 
-    init(connectionID: UUID, vault: CredentialVault, onExpire: @escaping @MainActor @Sendable (UUID, Int) -> Void) {
+    init(
+        connectionID: UUID, vault: CredentialVault,
+        onExpire: @escaping @MainActor @Sendable (UUID, Int, Bool) async -> Void
+    ) {
         self.connectionID = connectionID
         self.vault = vault
         self.onExpire = onExpire
@@ -234,9 +238,20 @@ actor ConnectionCredentials: TokenProvider {
 
     func expireSession(ifCurrent rejected: AuthTokens) async -> Bool {
         guard let current = session, current.tokens == rejected else { return false }
-        clearSession()
-        await onExpire(connectionID, generation)
+        let deleteFailed = clearSession() != nil
+        await onExpire(connectionID, generation, deleteFailed)
         return true
+    }
+
+    /// Waits for every refresh of `rejected`, from any client, then compares. The wait and the
+    /// comparison run without a suspension between them, so a refresh can't start in between and
+    /// be cut off from saving its pair.
+    func expireSessionAfterRefreshes(ifCurrent rejected: AuthTokens) async -> Bool {
+        while let running = refreshes[rejected] {
+            refreshJoinObserver?()
+            _ = try? await running.task.value
+        }
+        return await expireSession(ifCurrent: rejected)
     }
 
     func refreshTokens(_ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void) async throws {
@@ -249,6 +264,9 @@ actor ConnectionCredentials: TokenProvider {
         let task = Task {
             // Unregistered before it finishes, as in `APIClient`, so nothing joins it once done.
             defer { if refreshes[tokens]?.id == id { refreshes[tokens] = nil } }
+            // Another sign-in or refresh replaced the pair while this waited for the actor: its
+            // refresh token may have rotated, so don't send it. The caller reads the stored pair.
+            if let stored = try? load().session, stored.tokens != tokens { return }
             try await refresh()
         }
         refreshes[tokens] = (id, task)

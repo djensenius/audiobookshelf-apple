@@ -7,6 +7,15 @@ import Testing
 
 @testable import ABSAppModel
 
+extension ConnectionCredentials {
+    /// For tests that don't look at whether the delete failed.
+    fileprivate init(
+        connectionID: UUID, vault: CredentialVault, onExpire: @escaping @MainActor @Sendable (UUID, Int) -> Void
+    ) {
+        self.init(connectionID: connectionID, vault: vault) { id, generation, _ in onExpire(id, generation) }
+    }
+}
+
 /// Records the generations that `onExpire` reports.
 private final class ExpiryRecorder: Sendable {
     private let generations = Mutex<[Int]>([])

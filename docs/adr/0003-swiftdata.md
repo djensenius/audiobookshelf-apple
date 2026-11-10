@@ -540,7 +540,10 @@ Model notes:
     it exists, reuses it and clears `isDisconnected`/`disconnectedAt`. Dependent
     records and derived media keys therefore stay associated, so
     `pendingSync(for:)` finds the retained dirty progress.
-  - Signing out sets `signedOutAt` before deleting the Keychain session. A sign-in
+  - Signing out sets `signedOutAt` before deleting the Keychain session, and so does
+    an expiry (the server rejecting the refresh token) whose delete failed. A save
+    that a newer sign-in overtook is undone by date: `clearSignedOut(id:savedAt:)`
+    clears only the sign-out saved at that date, never a later one or a sign-in's. A sign-in
     clears it once its new session is saved, when it marks the connection used
     (`markUsed` clears it in the same save, so a connection is never active while
     signed out) or, if the sign-in is superseded, when it keeps the session for

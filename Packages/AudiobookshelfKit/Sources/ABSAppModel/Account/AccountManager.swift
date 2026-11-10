@@ -85,8 +85,8 @@ public enum AccountError: Error, Sendable, Equatable, LocalizedError {
 public final class AccountManager {
     public private(set) var state: AccountState = .signedOut
     /// Saved connections, most recently used first. Removed connections that are kept for their
-    /// local data aren't listed. A connection's `signedOutAt` is set from ``logout()`` until it's
-    /// signed in to again.
+    /// local data aren't listed. A connection's `signedOutAt` is set from ``logout()``, or from an
+    /// expiry whose session couldn't be deleted, until it's signed in to again.
     public private(set) var connections: [ServerConnectionDTO] = []
     /// The active connection, set while signed in, offline or restoring.
     public private(set) var activeConnection: ServerConnectionDTO?
@@ -126,7 +126,8 @@ public final class AccountManager {
     @ObservationIgnored private var removing: Set<UUID> = []
     /// A test seam: ``restoreSession()`` awaits it after loading the connections and before
     /// choosing one, so a test can sign out in that window. The store calls there can't be held
-    /// from outside: SwiftData runs them on the calling thread, the main actor.
+    /// from outside: `ServerConnectionStore` is a `@ModelActor`, which runs its jobs one at a time
+    /// in the order they were called.
     @ObservationIgnored var restoreWillChooseConnection: (@MainActor () async -> Void)?
     /// A test seam: an expiry awaits it after signing out locally and before it saves the sign-out,
     /// so a test can sign in again in that window.
@@ -272,6 +273,8 @@ public final class AccountManager {
                 } else if signInGenerations[saved.id] == saved.generation {
                     // Kept for switching to later, so clear a sign-out saved with the connection.
                     // If that fails, the connection stays signed out; nothing is activated here.
+                    // The store runs its jobs in call order, so this is saved after the sign-out
+                    // it clears, not before it.
                     _ = try? await store.setSignedOut(id: saved.id, at: nil)
                 }
             } else {
@@ -421,9 +424,22 @@ public final class AccountManager {
         removing.insert(id)
         defer { removing.remove(id) }
         let activeClient = activeConnection?.id == id ? client : nil
+        // Signed out first, so a restore or switch that's reading the session stops at once; put
+        // back if the deletion fails.
+        let before = localState
         abandon(id)
-        guard let connection = try await store.connection(id: id) else { throw AccountError.connectionNotFound }
-        let removed = try await credentials(for: id).removeAll()
+        let abandoned = operation
+        let connection: ServerConnectionDTO
+        let removed: (session: StoredSession?, customHeaders: [String: String])
+        do {
+            guard let found = try await store.connection(id: id) else { throw AccountError.connectionNotFound }
+            connection = found
+            removed = try await credentials(for: id).removeAll()
+        } catch {
+            // Not over a newer call's state.
+            if operation == abandoned, state == .signedOut, activeConnection == nil { restore(before) }
+            throw error
+        }
         // A sign-in to it that started earlier mustn't save it again, even once the store has
         // removed it.
         removals += 1
@@ -505,15 +521,37 @@ public final class AccountManager {
         }
     }
 
-    /// Signs out locally if `id` is active or being activated, and supersedes the running calls
-    /// only if they're activating `id`.
+    /// Cancels the running call if it's activating `id`, and signs out locally if `id` is active.
+    /// Another active connection stays, as offline if the cancelled call was restoring it.
     private func abandon(_ id: UUID) {
-        if pendingConnectionID == id {
-            _ = begin()
-        } else if activeConnection?.id != id {
+        let isPending = pendingConnectionID == id
+        let operation = isPending ? begin() : self.operation
+        if activeConnection?.id == id {
+            signOutLocally(error: nil)
+        } else if isPending {
+            endSupersededRestore(operation)
+        }
+    }
+
+    private var localState: LocalState {
+        LocalState(
+            state: state, activeConnection: activeConnection, client: client, authorization: authorization,
+            features: features, lastError: lastError)
+    }
+
+    /// Puts back what ``abandon(_:)`` and a sign-out cleared. A restore or switch it cancelled
+    /// doesn't resume: the connection stays offline if it was active.
+    private func restore(_ saved: LocalState) {
+        if saved.state == .restoring {
+            if let active = saved.activeConnection { goOffline(active, client: saved.client, error: saved.lastError) }
             return
         }
-        signOutLocally(error: nil)
+        activeConnection = saved.activeConnection
+        client = saved.client
+        authorization = saved.authorization
+        features = saved.features
+        lastError = saved.lastError
+        state = saved.state
     }
 
     /// Whether `id` is being removed or is no longer saved and connected.
@@ -529,8 +567,9 @@ public final class AccountManager {
     /// The connection's credentials, which all of its clients share. Internal for tests.
     func credentials(for id: UUID) -> ConnectionCredentials {
         if let existing = credentials[id] { return existing }
-        let created = ConnectionCredentials(connectionID: id, vault: vault) { [weak self] id, generation in
-            self?.sessionExpired(id, generation: generation)
+        let created = ConnectionCredentials(connectionID: id, vault: vault) {
+            [weak self] id, generation, deleteFailed in
+            await self?.sessionExpired(id, generation: generation, deleteFailed: deleteFailed)
         }
         credentials[id] = created
         return created
@@ -651,15 +690,27 @@ public final class AccountManager {
         state = .signedOut
     }
 
-    /// The server rejected the refresh token. The credentials have deleted the tokens.
-    private func sessionExpired(_ id: UUID, generation: Int) {
+    /// The server rejected the refresh token. The credentials have deleted the tokens, or if
+    /// `deleteFailed`, retry that; then the sign-out is saved with the connection, as a logout's
+    /// is, so a relaunch doesn't restore the rejected tokens offline.
+    private func sessionExpired(_ id: UUID, generation: Int, deleteFailed: Bool) async {
         // A sign-in since the expiry replaced the session.
         guard generation > signInGenerations[id, default: 0] else { return }
         // A sign-in that saved the expired session mustn't activate it.
         expiredGenerations[id] = generation
         Log.auth.notice("The session expired")
-        guard activeConnection?.id == id, !removing.contains(id) else { return }
-        signOutLocally(error: .server(.sessionExpired))
+        if activeConnection?.id == id, !removing.contains(id) { signOutLocally(error: .server(.sessionExpired)) }
+        guard deleteFailed, !removing.contains(id) else { return }
+        await willSaveExpiry?()
+        guard let savedAt = await saveSignOut(of: id) else { return }
+        // A sign-in that saved a newer session while this saved: it clears a sign-out when it marks
+        // the connection used, unless that came first, so clear this one by its date. The store runs
+        // its jobs in order, so a sign-in recorded after this check marks the connection used after
+        // this save.
+        if signInGenerations[id, default: 0] > generation {
+            _ = try? await store.clearSignedOut(id: id, savedAt: savedAt)
+        }
+        await reloadConnections()
     }
 
     private func reloadConnections() async {
@@ -748,6 +799,16 @@ private struct NoTokens: TokenProvider {
 private struct ServerLogin: Hashable {
     let address: String
     let userId: String
+}
+
+/// What `AccountManager` publishes about the active connection, for ``AccountManager/restore(_:)``.
+private struct LocalState {
+    let state: AccountState
+    let activeConnection: ServerConnectionDTO?
+    let client: APIClient?
+    let authorization: AuthResponse?
+    let features: ServerFeatures?
+    let lastError: AccountError?
 }
 
 /// What a sign-in captured when it was called.

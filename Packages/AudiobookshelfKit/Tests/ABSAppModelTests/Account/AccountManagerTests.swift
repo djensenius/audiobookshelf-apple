@@ -1524,17 +1524,23 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
 
     @Test func removingTheConnectionASwitchIsReadingKeepsTheActiveOne() async throws {
         let harness = try Harness()
+        let setUp = harness.makeManager()
+        let firstID = try await signIn(setUp, to: FakeServer())
+        // Signed out, so a switch to it pauses before reading its session.
+        await setUp.logout()
+        let secondID = try await signIn(setUp, to: FakeServer(userId: "usr-2"))
         let manager = harness.makeManager()
-        let firstID = try await signIn(manager, to: FakeServer())
-        let secondID = try await signIn(manager, to: FakeServer(userId: "usr-2"))
+        await manager.restoreSession()
         let user = try #require(manager.state.user)
-        let read = harness.keychain.holdNextRead()
+        #expect(user.connectionID == secondID)
+        let reading = StubGate()
+        manager.willReadSignedOutSession = { await reading.pass() }
         let switching = Task { try await manager.switch(to: firstID) }
-        await read.arrived()
+        await reading.arrived()
 
         try await manager.remove(firstID)
         #expect(manager.state == .signedIn(user) && manager.activeConnection?.id == secondID)
-        read.open()
+        reading.open()
         await #expect(throws: CancellationError.self) { try await switching.value }
         #expect(manager.state == .signedIn(user) && manager.client != nil)
     }
@@ -1571,7 +1577,10 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         let server = FakeServer()
         let id = try await signIn(manager, to: server)
         let client = try #require(manager.client)
-        harness.keychain.failWrites(with: errSecInteractionNotAllowed, where: { $0 == nil })
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed) { data in
+            // The delete keeps the custom headers, so it writes the item without the session.
+            data.map { !String(decoding: $0, as: UTF8.self).contains("accessToken") } ?? true
+        }
         server.revokeSession()
         var signedInAgain = false
         // After the expiry signed out, before it saves that.
