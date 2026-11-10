@@ -108,13 +108,17 @@ import SwiftData
     /// history rows keep its old id for display. The caller removes the Keychain credentials and
     /// resume-data blobs in both cases.
     ///
-    /// A download started while the connection is being removed is resolved by the stores'
-    /// existence checks: `DownloadStore.upsertRecord(_:now:)` and
+    /// The stores' existence checks make a download racing the removal unlikely to orphan
+    /// records, but not impossible: `DownloadStore.upsertRecord(_:now:)` and
     /// `LocalItemStore.upsertFromDownload(_:coverUpdatedAt:now:)` throw `connectionNotFound`
-    /// once the row is deleted, and a record saved first makes this method keep the row.
+    /// once the row is deleted, and a record saved first makes this method keep the row. The
+    /// stores check and write through separate contexts, though, so this method can count no
+    /// downloads, a record can then be saved, and this method can delete the row, leaving the
+    /// record orphaned. Callers must stop the connection's downloads before calling this.
     ///
-    /// A disconnected connection whose retained records are later removed is not deleted here;
-    /// that needs a cleanup pass (#73).
+    /// A disconnected connection whose retained records are later removed is not deleted here.
+    /// The cleanup pass (#73) must handle that, and must also catch records whose connection
+    /// is gone.
     public func remove(id: UUID, now: Date = .now) throws -> RemovalOutcome {
         try commit {
             guard let record = try fetchRecord(id: id) else { return .notFound }

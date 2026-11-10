@@ -151,14 +151,15 @@ import SwiftData
             .map(DownloadPartDTO.init)
     }
 
-    /// Records a part's progress; never changes its state. Returns `false` when the part doesn't
-    /// exist.
+    /// Records a part's progress; never changes its state. Returns `false` without writing when
+    /// the part doesn't exist or is `.completed`: a late, throttled write must not lower the
+    /// byte counts of a finished file, which `LocalItemStore` uses for its size.
     @discardableResult
     public func updateProgress(
         partID: UUID, bytesWritten: Int64, expectedBytes: Int64, now: Date = .now
     ) throws -> Bool {
         try commit {
-            guard let part = try fetchPart(id: partID) else { return false }
+            guard let part = try fetchPart(id: partID), part.stateValue != .completed else { return false }
             part.bytesWritten = bytesWritten
             part.expectedBytes = expectedBytes
             part.record?.updatedAt = now
