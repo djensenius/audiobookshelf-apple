@@ -58,6 +58,9 @@ public struct ProgressSyncClock: Sendable {
 @MainActor
 public protocol PlaybackProgressSource: AnyObject {
     var currentTime: Double { get }
+    /// Confirmed engine sample, never a seek target; nil while waiting/seeking. Includes the
+    /// final pre-stop sample during `finalCloseReport`, even though the engine is already stopped.
+    var confirmedPlaybackTime: Double? { get }
     var duration: Double { get }
     var isPlaying: Bool { get }
     var chapterIndex: Int? { get }

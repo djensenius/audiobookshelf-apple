@@ -80,4 +80,14 @@ import Testing
             try await makeClient(server).send(SessionEndpoints.listeningSessions(itemID: "gone"))
         }
     }
+
+    @Test(arguments: ["{}", #"{"sessions":null}"#, #"{"sessions":{}}"#])
+    func missingOrInvalidSessionsFailsClosed(json: String) async throws {
+        let server = StubServer { _ in .json(json) }
+        await #expect {
+            try await makeClient(server).send(SessionEndpoints.listeningSessions(itemID: "li-1"))
+        } throws: { error in
+            if case .decoding = error as? APIError { true } else { false }
+        }
+    }
 }

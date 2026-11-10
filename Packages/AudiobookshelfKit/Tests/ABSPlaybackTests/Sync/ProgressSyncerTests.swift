@@ -125,6 +125,8 @@ struct ProgressSyncerTests {
         await s.play(for: 2)
 
         s.h.clock.advance(by: 0.25)
+        s.h.engine.currentTime += 0.25
+        s.h.engine.onEvent?(.tick(s.h.engine.currentTime))
         await s.coordinator.seek(to: 500)
         await s.settle()
         s.coordinator.pause()
@@ -134,13 +136,60 @@ struct ProgressSyncerTests {
         #expect(s.service.reports.map(\.timeListened) == [2.25, 0])
     }
 
-    @Test func slowSeekWithFrozenMediaCreditsNothing() async throws {
+    @Test(arguments: [false, true])
+    func repeatedStalledFlushesCreditNothing(buffering: Bool) async throws {
+        let s = try SyncHarness()
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 2)
+        if buffering { s.h.engine.state = .buffering }
+        for gap in [0.25, 0.25, 3, -1] {
+            s.h.clock.advance(by: gap)
+            await s.syncer.flush()
+        }
+        s.h.engine.state = .playing
+        s.h.engine.onEvent?(.tick(s.h.engine.currentTime))
+        s.h.clock.advance(by: 0.25)
+        s.h.engine.currentTime += 0.5
+        await s.syncer.flush()
+        #expect(s.service.reports.map(\.timeListened) == [2, 0, 0, 0, 0.25])
+    }
+
+    @Test(arguments: [false, true], [0.5, 2.0])
+    func heldSeekFlushesKeepOnlyConfirmedFinalSample(close: Bool, rate: Double) async throws {
+        let s = try SyncHarness()
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 2, rate: rate)
+        let gate = Gate()
+        defer { gate.open() }
+        s.h.engine.seekGates = [gate]
+        let seek = Task { await s.coordinator.seek(to: 500) }
+        while s.h.engine.pendingSeekTarget != 500 { await Task.yield() }
+        for _ in 0..<2 {
+            s.h.clock.advance(by: 0.25)
+            await s.syncer.flush()
+        }
+        gate.open()
+        _ = await seek.value
+        await s.settle()
+        // The last real sample hasn't had a tick yet; pause/close must preserve its wall time.
+        s.h.clock.advance(by: 0.25)
+        s.h.engine.currentTime += 0.25 * rate
+        if close { s.coordinator.stop() } else { s.coordinator.pause() }
+        await s.coordinator.waitForPendingCloses()
+        await s.settle()
+        let closed = s.h.service.state.withLock { $0.closeReports.values.reduce(0) { $0 + $1.timeListened } }
+        #expect(s.service.reports.map(\.timeListened).reduce(0, +) + closed == 2.25)
+        #expect(s.service.reports.prefix(2).map(\.timeListened) == [2, 0])
+    }
+
+    @Test(arguments: [0.25, 1.8])
+    func seekWithFrozenMediaCreditsNothing(delay: Double) async throws {
         let s = try SyncHarness()
         await s.coordinator.play(itemID: "a")
         await s.play(for: 2)
 
-        // The seek takes 1.8 s to land and no tick fires meanwhile.
-        s.h.clock.advance(by: 1.8)
+        // No confirmed playback sample, even when the seek lands before the next tick.
+        s.h.clock.advance(by: delay)
         await s.coordinator.seek(to: 500)
         await s.settle()
         s.coordinator.pause()
@@ -175,6 +224,8 @@ struct ProgressSyncerTests {
 
         // While report 1 is held, a seek and a pause queue one follow-up report.
         s.h.clock.advance(by: 0.25)
+        s.h.engine.currentTime += 0.25
+        s.h.engine.onEvent?(.tick(s.h.engine.currentTime))
         await s.coordinator.seek(to: 100)
         s.coordinator.pause()
         #expect(s.service.log == ["sync 1"])

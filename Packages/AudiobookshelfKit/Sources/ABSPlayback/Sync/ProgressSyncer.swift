@@ -14,9 +14,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   coordinator's `/close` through `finalCloseReport`.
 /// - **Listening time** is wall-clock time while playing, independent of rate (ADR 0007). A tick
 ///   credits the monotonic time since the previous tick only while playing and only if media time
-///   advanced; a gap longer than ``maxTickGap`` (a suspension) credits one interval. A seek
-///   credits the time since the last tick only when it's within one tick interval, and adds
-///   nothing for the jump or for the time the seek took.
+///   advanced; a gap longer than ``maxTickGap`` (a suspension) credits one interval. A seek adds
+///   nothing for the jump or for the time the seek took; only confirmed samples earn credit.
 /// - **One request at a time.** Every send runs on one serial queue, and a send
 ///   counts as finished only when the service call returns, after its task has completed. So no
 ///   report or PATCH goes out while an earlier one could still reach the server. The
@@ -78,7 +77,11 @@ public final class ProgressSyncer {
     private var queuedSyncSessionID: String?
     private var tail: Task<Void, Never>?
     private var persistenceTail: Task<Void, Never>?
+    /// Test seam: hold local persistence independently of transport.
+    var beforePositionPersistence: (@MainActor () async -> Void)?
     private var pendingPositions: [MediaKey: Position] = [:]
+    /// Covers snapshot acquisition, transport and settlement, before any of them can suspend.
+    private var sendingKey: MediaKey?
     /// `nil` error means success; neither outcome may be forgotten if the store throws.
     private var pendingSettlements: [MediaKey: (patch: ProgressPatch, error: String?)] = [:]
     /// Set by ``detach()``: queued requests are skipped; one already in flight finishes.
@@ -171,7 +174,7 @@ public final class ProgressSyncer {
         case .playbackStarted:
             isPlaying = true
             lastSyncAt = now
-            lastTick = source.map { (now, $0.currentTime) }
+            lastTick = source?.confirmedPlaybackTime.map { (now, $0) }
         case .paused, .ended:
             creditPlayedTime()
             isPlaying = false
@@ -179,7 +182,6 @@ public final class ProgressSyncer {
             requestSync()
         case .didSeek(let time):
             defer { loadedTime = nil }
-            creditTimeBeforeSeek(now: now)
             chapterIndex = source?.chapterIndex
             lastTick = isPlaying ? (now, time) : nil
             if loadedTime != time { requestSync() }
@@ -199,7 +201,7 @@ public final class ProgressSyncer {
 
     private func tick(_ time: Double, now: TimeInterval) {
         guard current != nil else { return }
-        let playing = isPlaying && source?.isPlaying == true
+        let playing = isPlaying && source?.isPlaying == true && source?.confirmedPlaybackTime != nil
         if playing, let last = lastTick, time > last.mediaTime {
             current?.listened += credit(for: now - last.uptime)
         }
@@ -225,22 +227,14 @@ public final class ProgressSyncer {
         return PlaybackSyncReport(currentTime: closing.currentTime, timeListened: listened, duration: closing.duration)
     }
 
-    /// Credits the time since the last tick, when playing (a pause, the end, a flush or a close).
+    /// A final sample may advance after the last tick. Targets and stalls earn nothing, and
+    /// every observation refreshes the baseline so later playback cannot inherit a stalled gap.
     private func creditPlayedTime() {
         let now = clock.uptime()
-        guard isPlaying, let last = lastTick else { return }
+        let sample = source?.confirmedPlaybackTime
+        defer { lastTick = sample.map { (now, $0) } }
+        guard isPlaying, let last = lastTick, let sample, sample > last.mediaTime else { return }
         current?.listened += credit(for: now - last.uptime)
-        lastTick = (now, source?.currentTime ?? last.mediaTime)
-    }
-
-    /// Credits the time played between the last tick and a seek. The event comes after the seek
-    /// lands and carries no pre-seek media time, so the time is credited only when no tick was
-    /// due yet (at most one interval, while the source plays); otherwise the media may have been
-    /// frozen while the seek loaded, and nothing is credited.
-    private func creditTimeBeforeSeek(now: TimeInterval) {
-        guard isPlaying, source?.isPlaying == true, let last = lastTick else { return }
-        let gap = now - last.uptime
-        if gap.isFinite, gap > 0, gap <= tickInterval { current?.listened += gap }
     }
 
     /// The longest gap between ticks still counted as play; a longer one (the app was suspended)
@@ -317,10 +311,12 @@ public final class ProgressSyncer {
     ) -> Position? {
         guard time.isFinite, time >= 0 else { return nil }
         let duration = duration.isFinite && duration > 0 ? duration : 0
-        // An unsaved report is pending work even when its row doesn't exist yet.
+        // Capture the obligation at arrival: a send may clean the row before the lookup runs.
+        // Unsaved positions and unsettled outcomes also remain pending work.
         let position = Position(
             time: time, duration: duration, editedAt: clock.now(),
-            onlyIfPending: onlyIfPending && (pendingPositions[key]?.onlyIfPending ?? true))
+            onlyIfPending: onlyIfPending && (pendingPositions[key]?.onlyIfPending ?? true)
+                && sendingKey != key && pendingSettlements[key] == nil)
         pendingPositions[key] = position
         queuePersistence()
         return position
@@ -330,6 +326,7 @@ public final class ProgressSyncer {
         let previous = persistenceTail
         persistenceTail = Task {
             await previous?.value
+            await beforePositionPersistence?()
             let positions = pendingPositions
             for (key, queuedPosition) in positions {
                 var position = queuedPosition
@@ -383,6 +380,8 @@ public final class ProgressSyncer {
             for _ in 0..<Self.maxSendsPerRow {
                 await waitForPendingWrites()
                 guard !isDetached, pendingPositions.isEmpty else { return }
+                sendingKey = row.key
+                defer { sendingKey = nil }
                 let patch: ProgressPatch?
                 do {
                     patch = try await store.beginSend(for: row.key, now: clock.now())

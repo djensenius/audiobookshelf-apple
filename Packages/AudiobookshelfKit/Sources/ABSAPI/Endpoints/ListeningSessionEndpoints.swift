@@ -75,7 +75,7 @@ public struct ListeningSessionsPage: Decodable, Sendable, Hashable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        sessions = try container.decodeIfPresent([ListeningSessionRecord].self, forKey: .sessions) ?? []
+        sessions = try container.decode([ListeningSessionRecord].self, forKey: .sessions)
         total = try container.decodeLenientIntIfPresent(forKey: .total) ?? sessions.count
         numPages = try container.decodeLenientIntIfPresent(forKey: .numPages) ?? 1
         page = try container.decodeLenientIntIfPresent(forKey: .page) ?? 0

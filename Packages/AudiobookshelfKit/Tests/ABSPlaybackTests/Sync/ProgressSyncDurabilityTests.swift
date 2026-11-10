@@ -223,6 +223,47 @@ struct ProgressSyncDurabilityTests {
         #expect(!row.needsServerSync)
     }
 
+    @Test(arguments: [false, true])
+    func closeObligationPrecedesQualificationLookup(lookupFails: Bool) async throws {
+        let s = try SyncHarness()
+        let patch = Gate()
+        let started = Gate()
+        let persistence = Gate()
+        let saving = Gate()
+        defer {
+            patch.open()
+            persistence.open()
+        }
+        s.service.state.withLock {
+            $0.patchGates = [patch]
+            $0.patchStarted = started
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await started.wait()
+        await s.play(for: 5, settling: false)
+        s.syncer.beforePositionPersistence = {
+            saving.open()
+            await persistence.wait()
+        }
+        s.coordinator.stop()
+        await saving.wait()
+        patch.open()
+        // Observe actual settlement while the close has not yet looked up its row.
+        while try await s.store.progress(for: s.h.key("a"))?.needsServerSync == true { await Task.yield() }
+        #expect(try await s.store.progress(for: s.h.key("a"))?.currentTime == 15)
+        if lookupFails { await s.store.failNextRowFetch(with: CocoaError(.fileReadUnknown)) }
+        s.syncer.beforePositionPersistence = nil
+        persistence.open()
+        await s.settle()
+        await s.syncer.drainPendingProgress()
+        #expect(s.service.patches.map(\.update) == [SyncHarness.audio(15), SyncHarness.audio(20)])
+        let row = try #require(try await s.store.progress(for: s.h.key("a")))
+        #expect(row.currentTime == 20)
+        #expect(row.serverBaseline?.currentTime == 20)
+        #expect(!row.needsServerSync)
+    }
+
     @Test(arguments: [false, true], [false, true])
     func settlementFailureRetainsOutcomeAndNewerEdit(transportFails: Bool, lookupFails: Bool) async throws {
         let s = try SyncHarness()
