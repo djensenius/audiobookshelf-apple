@@ -246,8 +246,8 @@ Model notes:
       are kept and stay dirty;
     - dirty, and the server's group equals that group in any entry of
       `unacknowledgedSends` (newest checked first): it is the echo of our own
-      PATCH whose response was lost. The baseline advances to those values, that
-      group is removed from that entry and every older one (entries left empty
+      PATCH whose response was lost. The group takes the server's form of those
+      values, the baseline advances to them, that group is removed from that entry and every older one (entries left empty
       are dropped; other groups keep their evidence), and the flag clears only if
       `<group>EditedAt` still equals the entry's. A newer local edit stays dirty
       and is never rolled back;
@@ -266,10 +266,13 @@ Model notes:
     value.
 
     Afterwards `serverBaseline` becomes the server's values. Comparisons allow 1 s
-    for `currentTime` and `duration`, 0.001 for `progress` and `ebookProgress`,
-    and are exact otherwise. `finishedAt` is stored and compared in whole
-    milliseconds, as the server keeps it, so the echo of a local "mark finished"
-    compares equal.
+    for `currentTime` and `duration` and 0.001 for `ebookProgress`, and are exact
+    otherwise. Audio `progress` isn't compared, because the server normalizes it
+    (`MediaProgress.applyProgressUpdate`, 2.26.0 to master): finishing or
+    auto-finishing stores 1, un-finishing stores 0, and a sent value equal to its
+    old `currentTime / duration` is ignored. `finishedAt` is stored and compared
+    in whole milliseconds, as the server keeps it, so the echo of a local "mark
+    finished" compares equal.
 
     Conflicts compare the device clock (`<group>EditedAt`) with the server clock
     (`lastUpdate`). A device whose clock runs ahead wins conflicts it should lose,
@@ -286,8 +289,9 @@ Model notes:
     baseline unchanged, so an earlier send that may have committed stays
     recognisable after later retries fail. When the list already holds 8 entries,
     the oldest is dropped and `<group>HistoryTruncated` is set for each group it
-    carried (`ProgressSend` groups are optional, so entries can be pruned per
-    group). After it succeeds, the store always copies the sent
+    carried, and for each dirty group its PATCH could have changed as a side
+    effect (below), since that PATCH may have committed (`ProgressSend` groups are
+    optional, so entries can be pruned per group). After it succeeds, the store always copies the sent
     snapshot values into `serverBaseline` for the sent group, because the server
     now holds them, and sets `serverBaseline.lastUpdate` to the later of its
     current value and the response's, so it never moves backwards. It removes the
@@ -313,16 +317,27 @@ Model notes:
   - **Truncation flags and #53 side effects.** A `<group>HistoryTruncated` flag
     means "the server's value for this group may come from our own sends, so the
     dirty local value wins". Besides overflow, it guards against the server's side
-    effects: an audio PATCH can un-finish or auto-finish the item, a finished
-    PATCH can reset `currentTime`, and any PATCH for media the server has no
-    progress for creates it with defaults for the other groups. When one of these
-    groups has been sent while the other is dirty (or, only when one of our sends
-    went out while the row had no baseline, any group), the flags of the affected
-    dirty groups are set, so the server's side effect can't overwrite the pending
-    local edit, at three points (a plain fetch with nothing sent shields nothing):
+    effects (`MediaProgress.applyProgressUpdate` and
+    `User.createUpdateMediaProgressFromPayload`, 2.26.0 to master):
+    - an audio PATCH un-finishes the item when it moves `currentTime` away from
+      the end;
+    - a finished PATCH sets `progress` to 1 when finishing, and resets
+      `currentTime` and `progress` to 0 when un-finishing;
+    - every PATCH to existing progress, ebook-only too, auto-finishes it when
+      fewer than 10 s are left (`progress` becomes 1);
+    - a PATCH for media the server has no progress for creates it with defaults
+      for the other groups and no auto-finish check.
+
+    So audio affects finished, finished affects audio, and ebook affects both
+    (or, only when one of our sends went out while the row had no baseline, any
+    group affects every other). When a group has been sent, the flags of the
+    dirty groups it affects are set, so the server's side effect can't overwrite
+    the pending local edit, at four points (a plain fetch with nothing sent
+    shields nothing):
     - when the send is acknowledged;
     - when a fetch matches it as the echo of a lost send;
-    - when server progress is merged while it is in flight.
+    - when server progress is merged while it is in flight;
+    - when its entry is dropped from the full list.
 
     A flag clears when its group's own send is acknowledged, or when the group
     stops being dirty (an echo settles it or the server wins a conflict).
@@ -335,6 +350,9 @@ Model notes:
       than the edit, and the time rule lets the server win.
     - On a row with no baseline, once one of our sends has gone out, another
       device's value can lose to ours until the first acknowledgement or echo.
+    - The server auto-finishes unfinished progress within 10 s of the end on any
+      PATCH, including one that un-finishes, so a "not finished" sent there
+      doesn't stick; the server's finished value is taken.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
@@ -648,7 +666,8 @@ Ongoing checks:
   sends the newer seek; PATCH A commits but loses its response after a newer
   seek, retry B fails before reaching the server, and a fresh fetch returning A's
   values keeps the newer seek dirty (A is still recognised); overflowing the
-  8-entry list sets `<group>HistoryTruncated` for the dropped entry's groups, and
+  8-entry list sets `<group>HistoryTruncated` for the dropped entry's groups and
+  the dirty groups its PATCH could have changed, and
   an unmatched server value for such a group then keeps the local value dirty; a server echo of an in-flight PATCH (newer `lastUpdate`, older
   values) arriving after a newer local seek is deferred and leaves the seek dirty
   and unchanged, on both PATCH success and failure; deleting a connection with dirty progress and then logging in

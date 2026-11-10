@@ -103,9 +103,10 @@ extension ProgressSend {
 /// come from our own sends, so the dirty local value wins". They are set when a send entry is
 /// dropped from the full list, and when the server may have changed the group as a side effect
 /// of another PATCH (#53: an audio PATCH can un-finish or auto-finish, a finished one can reset
-/// `currentTime`, and an ebook PATCH without server progress creates zero audio): when that PATCH is acknowledged, when an echo matches it after its
-/// response was lost, and when server progress is merged while it is in flight. A group's flag
-/// clears when its own send is acknowledged or it stops being dirty.
+/// audio, any PATCH can auto-finish, and one without server progress creates defaults): when
+/// that PATCH is acknowledged, when an echo matches it after its response was lost, when server
+/// progress is merged while it is in flight, and when its entry is dropped from the full list.
+/// A group's flag clears when its own send is acknowledged or it stops being dirty.
 struct ProgressSyncState: Sendable, Equatable {
     var currentTime: Double = 0
     var progress: Double = 0
@@ -202,13 +203,15 @@ struct ProgressSyncState: Sendable, Equatable {
     /// `unacknowledgedSends` before it is sent; `nil` when nothing is dirty. An identical earlier
     /// entry (a retry of the same values and edit) is moved to the end rather than repeated. When
     /// the list is full, the oldest entry is dropped and the truncation flag of each group it
-    /// carried is set.
+    /// carried, and of each dirty group its PATCH could have changed (#53), is set.
     mutating func beginSend() -> ProgressSend? {
         guard let group = nextSendGroup else { return nil }
         let send = dirtyValues.only(group)
         unacknowledgedSends.removeAll { $0 == send }
         while unacknowledgedSends.count >= ProgressSend.historyLimit {
-            truncated.formUnion(unacknowledgedSends.removeFirst().groups)
+            let dropped = unacknowledgedSends.removeFirst().groups
+            truncated.formUnion(dropped)
+            shieldSideEffects(of: dropped)
         }
         unacknowledgedSends.append(send)
         return send
@@ -295,7 +298,10 @@ struct ProgressSyncState: Sendable, Equatable {
                 unacknowledgedSends[older].remove(group)
             }
             unacknowledgedSends.removeAll { $0.groups.isEmpty }
-            if editedAt(group) == sentEditedAt { markClean(group) }
+            if editedAt(group) == sentEditedAt {
+                take(group, from: server)  // The server's normalized form of our value.
+                markClean(group)
+            }
             return
         }
         // The server value may be one of our dropped sends, or a side effect of our PATCH.
@@ -310,9 +316,11 @@ struct ProgressSyncState: Sendable, Equatable {
         dropEvidence(group)
     }
 
-    /// #53: the server applies an audio PATCH by un-finishing or auto-finishing, and a finished
-    /// PATCH by resetting `currentTime`; a PATCH for media it has no progress for creates the
-    /// progress with defaults for the other groups (zero audio, unfinished, no ebook location).
+    /// #53: the server applies an audio PATCH by un-finishing or auto-finishing, a finished PATCH
+    /// by setting `progress` to 1 or resetting `currentTime`, and checks every PATCH to existing
+    /// progress, ebook-only too, for auto-finishing (fewer than 10 s left; `progress` becomes 1).
+    /// A PATCH for media it has no progress for creates the progress with defaults for the other
+    /// groups (zero audio, unfinished, no ebook location).
     /// When `sent` carried one of them, a pending
     /// local edit of an affected group wins over the server's value until its own send is
     /// acknowledged. `unseeded` is whether the row had no server baseline when it was sent
@@ -323,6 +331,7 @@ struct ProgressSyncState: Sendable, Equatable {
         var affected: ProgressGroups = []
         if sent.contains(.audio) { affected.insert(.finished) }
         if sent.contains(.finished) { affected.insert(.audio) }
+        if sent.contains(.ebook) { affected.formUnion([.audio, .finished]) }
         // Without server progress, the PATCH creates it with defaults for every unsent group.
         if unseeded ?? (serverBaseline == nil) { affected.formUnion(ProgressGroups.all.subtracting(sent)) }
         truncated.formUnion(affected.intersection(dirty))
@@ -373,13 +382,15 @@ struct ProgressSyncState: Sendable, Equatable {
             finishedAt: finishedAt, ebookLocation: ebookLocation, ebookProgress: ebookProgress, lastUpdate: lastUpdate)
     }
 
-    // Comparisons allow 1 s for `currentTime` and `duration` and 0.001 for `progress` and
-    // `ebookProgress`. Dates compare exactly at the server's resolution, whole milliseconds.
+    // Comparisons allow 1 s for `currentTime` and `duration` and 0.001 for `ebookProgress`. Audio
+    // `progress` isn't compared: the server rewrites it (1 when finishing or auto-finishing, 0
+    // when un-finishing) and ignores a sent value equal to its old `currentTime / duration`.
+    // Dates compare exactly at the server's resolution, whole milliseconds.
 
     static func matches(_ server: ProgressBaseline, _ other: ProgressBaseline, _ group: ProgressGroups) -> Bool {
         switch group {
         case .audio:
-            audioMatches(server, other.currentTime, other.progress, other.duration)
+            audioMatches(server, other.currentTime, other.duration)
         case .finished:
             server.isFinished == other.isFinished && datesMatch(server.finishedAt, other.finishedAt)
         default:
@@ -391,7 +402,7 @@ struct ProgressSyncState: Sendable, Equatable {
         switch group {
         case .audio:
             guard let audio = send.audio else { return false }
-            return audioMatches(server, audio.currentTime, audio.progress, audio.duration)
+            return audioMatches(server, audio.currentTime, audio.duration)
         case .finished:
             guard let finished = send.finished else { return false }
             return server.isFinished == finished.isFinished && datesMatch(server.finishedAt, finished.finishedAt)
@@ -401,11 +412,8 @@ struct ProgressSyncState: Sendable, Equatable {
         }
     }
 
-    private static func audioMatches(
-        _ server: ProgressBaseline, _ currentTime: Double, _ progress: Double, _ duration: Double
-    ) -> Bool {
+    private static func audioMatches(_ server: ProgressBaseline, _ currentTime: Double, _ duration: Double) -> Bool {
         abs(server.currentTime - currentTime) <= 1 && abs(server.duration - duration) <= 1
-            && abs(server.progress - progress) <= 0.001
     }
 
     private static func ebookMatches(_ server: ProgressBaseline, _ location: String?, _ progress: Double?) -> Bool {
