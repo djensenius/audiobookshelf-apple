@@ -477,7 +477,10 @@ private func query(_ request: URLRequest?) -> [String: String] {
         }
         let logout = try #require(server.requests(path: "/abs/logout").first)
         #expect(logout.value(forHTTPHeaderField: "x-refresh-token") == "refresh-new")
-        #expect(logout.value(forHTTPHeaderField: "Cookie") == nil)
+        // Cleanup logout withholds only `refresh_token`, so the header token selects the session;
+        // the sign-in jar's other cookies still reach the server (and any proxy in front of it).
+        #expect(!logout.httpShouldHandleCookies)
+        #expect(logout.value(forHTTPHeaderField: "Cookie") == "auth_method=openid-mobile; connect.sid=s%3Asession-1")
     }
 
     @Test func missingTokensAfterCallback() async throws {
