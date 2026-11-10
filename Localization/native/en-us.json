@@ -46,5 +46,9 @@
   "MessageStatsLoadFailed": "Couldn't load your stats.",
   "MessageStatsRefreshFailed": "Couldn't refresh your stats. Showing the last ones loaded.",
   "MessageStoreUnavailable": "Couldn't open the app's data.",
-  "MessageStoreUnavailableHelp": "Quit and reopen Audiobookshelf. If this keeps happening, make sure your device has free storage space."
+  "MessageStoreUnavailableHelp": "Quit and reopen Audiobookshelf. If this keeps happening, make sure your device has free storage space.",
+  "SharedBookCount": "{0} books",
+  "SharedHideFromContinueListening": "Hide from Continue Listening",
+  "SharedMarkAsNotFinished": "Mark as Not Finished",
+  "SharedOpenDetailsHint": "Opens the details."
 }
