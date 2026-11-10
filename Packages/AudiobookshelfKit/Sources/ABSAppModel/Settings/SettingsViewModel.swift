@@ -30,14 +30,19 @@ public final class SettingsViewModel {
     public let settings: AppSettings
     @ObservationIgnored private let calendar: Calendar
 
-    /// Set when the user picks "Custom time", so the stepper stays visible even when it
-    /// lands on a preset; cleared when they pick a preset.
-    private var isSleepTimerLengthCustom = false
-    private var isAutoRewindLengthCustom = false
+    /// Whether the length pickers are in "Custom time" mode, showing the stepper. Set when
+    /// the stored length isn't a preset, when the user picks Custom and while they edit the
+    /// custom minutes, so the stepper stays visible when it lands on a preset; cleared when
+    /// they pick a preset (or end of chapter).
+    private var isSleepTimerLengthCustom: Bool
+    private var isAutoRewindLengthCustom: Bool
 
     public init(settings: AppSettings, calendar: Calendar = .autoupdatingCurrent) {
         self.settings = settings
         self.calendar = calendar
+        isSleepTimerLengthCustom =
+            settings.sleepTimerLength != 0 && Self.presetChoice(milliseconds: settings.sleepTimerLength) == .custom
+        isAutoRewindLengthCustom = Self.presetChoice(milliseconds: settings.autoSleepTimerAutoRewindTime) == .custom
     }
 
     // MARK: Display
@@ -87,10 +92,14 @@ public final class SettingsViewModel {
         }
     }
 
-    /// The sleep timer length in whole minutes, for the custom stepper.
+    /// The sleep timer length in whole minutes, for the custom stepper. Editing it keeps the
+    /// picker on Custom, even on a preset.
     public var sleepTimerCustomMinutes: Int {
         get { Self.customMinutes(milliseconds: settings.sleepTimerLength) }
-        set { settings.sleepTimerLength = Self.milliseconds(minutes: Self.clampedCustomMinutes(newValue)) }
+        set {
+            isSleepTimerLengthCustom = true
+            settings.sleepTimerLength = Self.milliseconds(minutes: Self.clampedCustomMinutes(newValue))
+        }
     }
 
     /// ``AppSettings/autoSleepTimerAutoRewindTime`` as a picker choice.
@@ -116,10 +125,12 @@ public final class SettingsViewModel {
         }
     }
 
-    /// The auto sleep timer's rewind length in whole minutes, for the custom stepper.
+    /// The auto sleep timer's rewind length in whole minutes, for the custom stepper. Editing
+    /// it keeps the picker on Custom, even on a preset.
     public var autoRewindCustomMinutes: Int {
         get { Self.customMinutes(milliseconds: settings.autoSleepTimerAutoRewindTime) }
         set {
+            isAutoRewindLengthCustom = true
             settings.autoSleepTimerAutoRewindTime = Self.milliseconds(minutes: Self.clampedCustomMinutes(newValue))
         }
     }

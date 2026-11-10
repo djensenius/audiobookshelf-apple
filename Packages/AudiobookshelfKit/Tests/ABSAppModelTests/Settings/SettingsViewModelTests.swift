@@ -166,6 +166,60 @@ private var utcCalendar: Calendar {
         }
     }
 
+    @Test func reopeningShowsTheStoredChoice() throws {
+        try withSettings { settings, _ in
+            settings.sleepTimerLength = 11 * 60_000
+            settings.autoSleepTimerAutoRewindTime = 7 * 60_000
+            var model = SettingsViewModel(settings: settings)
+            #expect(model.sleepTimerLengthChoice == .custom)
+            #expect(model.autoRewindLengthChoice == .custom)
+
+            settings.sleepTimerLength = 30 * 60_000
+            settings.autoSleepTimerAutoRewindTime = 10 * 60_000
+            model = SettingsViewModel(settings: settings)
+            #expect(model.sleepTimerLengthChoice == .minutes(30))
+            #expect(model.autoRewindLengthChoice == .minutes(10))
+
+            settings.sleepTimerLength = 0
+            model = SettingsViewModel(settings: settings)
+            #expect(model.sleepTimerLengthChoice == .endOfChapter)
+        }
+    }
+
+    @Test func editingCustomSleepTimerLengthAcrossAPresetStaysCustom() throws {
+        try withSettings { settings, _ in
+            // Reopened with a custom length.
+            settings.sleepTimerLength = 11 * 60_000
+            let model = SettingsViewModel(settings: settings)
+            model.sleepTimerCustomMinutes -= 1
+            #expect(settings.sleepTimerLength == 10 * 60_000)
+            #expect(model.sleepTimerLengthChoice == .custom)
+
+            // Opened on a preset, then another scene stored a custom length.
+            settings.sleepTimerLength = 15 * 60_000
+            let other = SettingsViewModel(settings: settings)
+            settings.sleepTimerLength = 16 * 60_000
+            other.sleepTimerCustomMinutes -= 1
+            #expect(other.sleepTimerLengthChoice == .custom)
+        }
+    }
+
+    @Test func editingCustomRewindLengthAcrossAPresetStaysCustom() throws {
+        try withSettings { settings, _ in
+            settings.autoSleepTimerAutoRewindTime = 11 * 60_000
+            let model = SettingsViewModel(settings: settings)
+            model.autoRewindCustomMinutes -= 1
+            #expect(settings.autoSleepTimerAutoRewindTime == 10 * 60_000)
+            #expect(model.autoRewindLengthChoice == .custom)
+
+            settings.autoSleepTimerAutoRewindTime = 5 * 60_000
+            let other = SettingsViewModel(settings: settings)
+            settings.autoSleepTimerAutoRewindTime = 4 * 60_000
+            other.autoRewindCustomMinutes += 1
+            #expect(other.autoRewindLengthChoice == .custom)
+        }
+    }
+
     @Test func customMinutesAreClamped() throws {
         try withSettings { settings, _ in
             let model = SettingsViewModel(settings: settings)
