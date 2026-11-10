@@ -10,6 +10,9 @@ struct StubResponse: Sendable {
     var delay: Duration?
     /// Fails the request with this error instead of responding.
     var error: URLError?
+    /// Redirects to this URL (with `status` and a `Location` header) through
+    /// `urlProtocol(_:wasRedirectedTo:redirectResponse:)`, so session and task delegates run.
+    var redirect: URL?
 
     static func json(_ json: String, status: Int = 200, delay: Duration? = nil) -> StubResponse {
         StubResponse(
@@ -18,6 +21,10 @@ struct StubResponse: Sendable {
 
     static func text(_ text: String, status: Int) -> StubResponse {
         StubResponse(status: status, headers: ["Content-Type": "text/plain"], body: Data(text.utf8))
+    }
+
+    static func redirect(to location: String, status: Int = 302) -> StubResponse {
+        StubResponse(status: status, headers: ["Location": location], redirect: URL(string: location))
     }
 
     static func failure(_ code: URLError.Code) -> StubResponse {
@@ -39,6 +46,7 @@ final class StubURLProtocol: URLProtocol {
     }
 
     private static let routes = Mutex<[String: Route]>([:])
+    private let isStopped = Mutex(false)
 
     static func register(host: String, handler: @escaping Handler) {
         routes.withLock { $0[host] = Route(handler: handler) }
@@ -67,24 +75,28 @@ final class StubURLProtocol: URLProtocol {
             routes[host]?.requests.append(request)
             return routes[host]?.handler
         }
-        guard let handler, let url = request.url else {
+        guard let handler else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
         let stub = handler(request)
         if let delay = stub.delay {
             let box = UncheckedProtocol(value: self)
+            let recorded = request
             DispatchQueue.global().asyncAfter(deadline: .now() + delay.timeInterval) {
-                box.value.deliver(stub, for: url)
+                box.value.deliver(stub, for: recorded)
             }
         } else {
-            deliver(stub, for: url)
+            deliver(stub, for: request)
         }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        isStopped.withLock { $0 = true }
+    }
 
-    private func deliver(_ stub: StubResponse, for url: URL) {
+    private func deliver(_ stub: StubResponse, for request: URLRequest) {
+        guard !isStopped.withLock({ $0 }), let url = request.url else { return }
         if let error = stub.error {
             client?.urlProtocol(self, didFailWithError: error)
             return
@@ -95,6 +107,19 @@ final class StubURLProtocol: URLProtocol {
         else {
             client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
             return
+        }
+        if let location = stub.redirect {
+            // Mirrors URLSession: the proposed request keeps every header except Authorization.
+            var next = request
+            next.url = location
+            next.setValue(nil, forHTTPHeaderField: "Authorization")
+            if stub.status == 303 {
+                next.httpMethod = "GET"
+                next.httpBody = nil
+            }
+            // If the delegate follows the redirect, the session ignores the response below; if
+            // it declines, the 3xx response is what the task returns.
+            client?.urlProtocol(self, wasRedirectedTo: next, redirectResponse: response)
         }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: stub.body)
@@ -120,10 +145,15 @@ final class StubURLProtocol: URLProtocol {
 /// Routes stay registered for the life of the test process; hosts are unique, so they never
 /// collide.
 struct StubServer: Sendable {
-    let host = "\(UUID().uuidString.lowercased()).stub.test"
+    let host: String
 
-    init(handler: @escaping StubURLProtocol.Handler) {
+    init(host: String = uniqueHost(), handler: @escaping StubURLProtocol.Handler) {
+        self.host = host
         StubURLProtocol.register(host: host, handler: handler)
+    }
+
+    static func uniqueHost() -> String {
+        "\(UUID().uuidString.lowercased()).stub.test"
     }
 
     /// `https://<host>/abs`, a server hosted under a subpath.

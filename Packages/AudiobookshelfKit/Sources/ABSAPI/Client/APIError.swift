@@ -10,6 +10,8 @@ public enum APIError: Error, Sendable, Equatable {
     case network(URLError.Code)
     /// The request timed out.
     case timedOut
+    /// The server redirected somewhere the client won't follow, such as from `https` to `http`.
+    case redirectRefused(status: Int)
     /// The response was not an HTTP response.
     case invalidResponse
     /// An authenticated endpoint was called with no stored tokens.

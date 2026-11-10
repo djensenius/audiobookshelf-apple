@@ -17,9 +17,9 @@ private func makeClient(
     _ server: StubServer,
     tokens: InMemoryTokenProvider = InMemoryTokenProvider(),
     customHeaders: [String: String] = [:]
-) -> APIClient {
+) throws -> APIClient {
     APIClient(
-        configuration: APIClientConfiguration(baseURL: server.baseURL, customHeaders: customHeaders),
+        configuration: try APIClientConfiguration(baseURL: server.baseURL, customHeaders: customHeaders),
         tokenProvider: tokens,
         sessionConfiguration: server.sessionConfiguration()
     )
@@ -28,7 +28,7 @@ private func makeClient(
 @Suite struct APIClientRequestTests {
     @Test func injectsCustomHeadersTokenAndBody() async throws {
         let server = StubServer { _ in .json(#"{"id":"lib1","name":"Books"}"#) }
-        let client = makeClient(server, customHeaders: ["CF-Access-Client-Id": "proxy-id", "X-Proxy": "1"])
+        let client = try makeClient(server, customHeaders: ["CF-Access-Client-Id": "proxy-id", "X-Proxy": "1"])
 
         let library = try await client.send(
             Endpoint<Library>(
@@ -56,9 +56,9 @@ private func makeClient(
 
     @Test func updatedCustomHeadersApplyToLaterRequests() async throws {
         let server = StubServer { _ in .text("OK", status: 200) }
-        let client = makeClient(server, customHeaders: ["X-Old": "1"])
+        let client = try makeClient(server, customHeaders: ["X-Old": "1"])
 
-        await client.setCustomHeaders(["X-New": "2"])
+        try await client.setCustomHeaders(["X-New": "2"])
         _ = try await client.send(Endpoint<EmptyResponse>(.post, "/api/me/sync"))
 
         let request = try #require(server.requests.first)
@@ -68,7 +68,7 @@ private func makeClient(
 
     @Test func unauthenticatedEndpointSendsNoToken() async throws {
         let server = StubServer { _ in .json("{}") }
-        let client = makeClient(server, customHeaders: ["X-Proxy": "1"])
+        let client = try makeClient(server, customHeaders: ["X-Proxy": "1"])
 
         _ = try await client.send(Endpoint<EmptyResponse>(.get, "/ping", requiresAuthentication: false))
 
@@ -77,9 +77,9 @@ private func makeClient(
         #expect(request.value(forHTTPHeaderField: "X-Proxy") == "1")
     }
 
-    @Test func authenticatedEndpointWithoutTokensFails() async {
+    @Test func authenticatedEndpointWithoutTokensFails() async throws {
         let server = StubServer { _ in .json("{}") }
-        let client = makeClient(server, tokens: InMemoryTokenProvider(nil))
+        let client = try makeClient(server, tokens: InMemoryTokenProvider(nil))
 
         await #expect(throws: APIError.notAuthenticated) {
             try await client.send(Endpoint<EmptyResponse>(.get, "/api/libraries"))
@@ -89,7 +89,7 @@ private func makeClient(
 
     @Test func endpointTimeoutOverridesDefault() async throws {
         let server = StubServer { _ in .json("{}") }
-        let client = makeClient(server)
+        let client = try makeClient(server)
 
         _ = try await client.send(Endpoint<EmptyResponse>(.get, "/a"))
         _ = try await client.send(Endpoint<EmptyResponse>(.get, "/b", timeout: 5))
@@ -99,7 +99,7 @@ private func makeClient(
 
     @Test func returnsRawDataUnparsed() async throws {
         let server = StubServer { _ in .text("not json", status: 200) }
-        let client = makeClient(server)
+        let client = try makeClient(server)
 
         let data = try await client.send(Endpoint<Data>(.get, "/api/items/1/ebook"))
 
@@ -107,10 +107,8 @@ private func makeClient(
     }
 
     @Test func suppressedRedirectReturnsLocation() async throws {
-        let server = StubServer { _ in
-            StubResponse(status: 302, headers: ["Location": "https://idp.example/authorize?state=abc"])
-        }
-        let client = makeClient(server)
+        let server = StubServer { _ in .redirect(to: "https://idp.example/authorize?state=abc") }
+        let client = try makeClient(server)
 
         let response = try await client.response(
             for: Endpoint<EmptyResponse>(
@@ -120,18 +118,7 @@ private func makeClient(
         #expect(response.httpResponse.statusCode == 302)
         #expect(
             response.httpResponse.value(forHTTPHeaderField: "Location") == "https://idp.example/authorize?state=abc")
-    }
-
-    @Test func redirectDelegateDeclinesRedirects() async throws {
-        let delegate = RedirectSuppressingDelegate()
-        let url = try #require(URL(string: "https://example.com/a"))
-        let response = try #require(HTTPURLResponse(url: url, statusCode: 302, httpVersion: nil, headerFields: nil))
-        let task = URLSession.shared.dataTask(with: url)
-
-        let next = await delegate.urlSession(
-            .shared, task: task, willPerformHTTPRedirection: response, newRequest: URLRequest(url: url))
-
-        #expect(next == nil)
+        #expect(server.requests.count == 1)
     }
 }
 
@@ -175,18 +162,18 @@ private func makeClient(
         (StubResponse.failure(.notConnectedToInternet), APIError.network(.notConnectedToInternet)),
         (StubResponse.failure(.timedOut), APIError.timedOut),
     ])
-    func mapsResponsesToErrors(stub: StubResponse, expected: APIError) async {
+    func mapsResponsesToErrors(stub: StubResponse, expected: APIError) async throws {
         let server = StubServer { _ in stub }
-        let client = makeClient(server)
+        let client = try makeClient(server)
 
         await #expect(throws: expected) {
             try await client.send(Endpoint<EmptyResponse>(.post, "/login", requiresAuthentication: false))
         }
     }
 
-    @Test func malformedBodyIsDecodingError() async {
+    @Test func malformedBodyIsDecodingError() async throws {
         let server = StubServer { _ in .json(#"{"id":"lib1"}"#) }
-        let client = makeClient(server)
+        let client = try makeClient(server)
 
         await #expect {
             try await client.send(Endpoint<Library>(.get, "/api/libraries/lib1"))
@@ -196,9 +183,9 @@ private func makeClient(
         }
     }
 
-    @Test func cancelledRequestThrowsCancellation() async {
+    @Test func cancelledRequestThrowsCancellation() async throws {
         let server = StubServer { _ in .failure(.cancelled) }
-        let client = makeClient(server)
+        let client = try makeClient(server)
 
         await #expect(throws: CancellationError.self) {
             try await client.send(Endpoint<EmptyResponse>(.get, "/api/libraries"))
@@ -209,8 +196,8 @@ private func makeClient(
 @Suite struct APIClientCookieTests {
     @Test func eachConnectionHasItsOwnCookieJar() throws {
         let server = StubServer { _ in .json("{}") }
-        let first = makeClient(server)
-        let second = makeClient(server)
+        let first = try makeClient(server)
+        let second = try makeClient(server)
 
         let firstJar = try #require(first.cookieStorage)
         let secondJar = try #require(second.cookieStorage)
@@ -227,18 +214,51 @@ private func makeClient(
         #expect(secondJar.cookies(for: server.baseURL)?.isEmpty ?? true)
     }
 
-    @Test func sharedCookieStorageIsReplaced() throws {
+    @Test func reusedConfigurationGetsFreshCookieJars() throws {
         let server = StubServer { _ in .json("{}") }
         let configuration = server.sessionConfiguration()
         configuration.httpCookieStorage = .shared
+        let settings = try APIClientConfiguration(baseURL: server.baseURL)
 
-        let client = APIClient(
-            configuration: APIClientConfiguration(baseURL: server.baseURL),
-            tokenProvider: InMemoryTokenProvider(),
-            sessionConfiguration: configuration
-        )
+        let first = APIClient(
+            configuration: settings, tokenProvider: InMemoryTokenProvider(), sessionConfiguration: configuration)
+        let second = APIClient(
+            configuration: settings, tokenProvider: InMemoryTokenProvider(), sessionConfiguration: configuration)
 
-        let jar = try #require(client.cookieStorage)
-        #expect(jar !== HTTPCookieStorage.shared)
+        let firstJar = try #require(first.cookieStorage)
+        let secondJar = try #require(second.cookieStorage)
+        #expect(firstJar !== HTTPCookieStorage.shared)
+        #expect(secondJar !== HTTPCookieStorage.shared)
+        #expect(firstJar !== secondJar)
+    }
+}
+
+@Suite struct CustomHeaderValidationTests {
+    @Test(arguments: ["Authorization", "authorization", "COOKIE", "Cookie"])
+    func rejectsReservedHeaders(name: String) throws {
+        let url = try #require(URL(string: "https://example.com"))
+        #expect(throws: CustomHeaderError.reserved(name: name)) {
+            try APIClientConfiguration(baseURL: url, customHeaders: ["X-Proxy": "1", name: "secret"])
+        }
+    }
+
+    @Test func setCustomHeadersRejectsReservedHeaderAndKeepsOldOnes() async throws {
+        let server = StubServer { _ in .json("{}") }
+        let client = try makeClient(server, customHeaders: ["X-Proxy": "1"])
+
+        await #expect(throws: CustomHeaderError.reserved(name: "Authorization")) {
+            try await client.setCustomHeaders(["Authorization": "Basic abc"])
+        }
+        _ = try await client.send(Endpoint<EmptyResponse>(.get, "/ping"))
+
+        let request = try #require(server.requests.first)
+        #expect(request.value(forHTTPHeaderField: "X-Proxy") == "1")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-1")
+    }
+
+    @Test func reservedHeaderErrorSuggestsAlternative() {
+        let description = CustomHeaderError.reserved(name: "Cookie").errorDescription ?? ""
+        #expect(description.contains("Cookie"))
+        #expect(description.contains("service token"))
     }
 }

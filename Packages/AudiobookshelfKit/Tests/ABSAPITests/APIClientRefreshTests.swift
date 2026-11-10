@@ -36,9 +36,9 @@ private actor RotatedTokenProvider: TokenProvider {
     func sessionExpired() {}
 }
 
-private func makeClient(_ server: StubServer, tokens: any TokenProvider) -> APIClient {
+private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws -> APIClient {
     APIClient(
-        configuration: APIClientConfiguration(baseURL: server.baseURL, customHeaders: ["X-Proxy": "1"]),
+        configuration: try APIClientConfiguration(baseURL: server.baseURL, customHeaders: ["X-Proxy": "1"]),
         tokenProvider: tokens,
         sessionConfiguration: server.sessionConfiguration()
     )
@@ -48,7 +48,7 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) -> APIC
     @Test func refreshesOnUnauthorizedAndRetriesOnce() async throws {
         let server = tokenServer(refresh: .json(refreshedJSON))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         let result = try await client.send(Endpoint<OK>(.get, "/api/me"))
 
@@ -61,24 +61,24 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) -> APIC
         #expect(refresh.value(forHTTPHeaderField: "X-Proxy") == "1")
         #expect(refresh.value(forHTTPHeaderField: "Authorization") == nil)
         #expect(server.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer access-2")
-        #expect(await tokens.updates == [AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")])
-        #expect(await tokens.expiredCount == 0)
+        #expect(tokens.updates == [AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")])
+        #expect(tokens.expiredCount == 0)
     }
 
     @Test func keepsRefreshTokenWhenResponseOmitsIt() async throws {
         let server = tokenServer(refresh: .json(#"{"user":{"accessToken":"access-2"}}"#))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         _ = try await client.send(Endpoint<OK>(.get, "/api/me"))
 
-        #expect(await tokens.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-1"))
+        #expect(tokens.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-1"))
     }
 
     @Test func concurrentUnauthorizedRequestsShareOneRefresh() async throws {
         let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(200)))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         let results = try await withThrowingTaskGroup(of: OK.self) { group in
             for index in 0..<8 {
@@ -91,27 +91,41 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) -> APIC
         let rejected = server.requests.filter { $0.value(forHTTPHeaderField: "Authorization") == "Bearer access-1" }
         #expect(rejected.count > 1)
         #expect(server.requests(path: refreshPath).count == 1)
-        #expect(await tokens.updates.count == 1)
+        #expect(tokens.updates.count == 1)
     }
 
-    @Test(arguments: [401, 403])
-    func rejectedRefreshExpiresSession(status: Int) async {
-        let server = tokenServer(refresh: .text("Invalid refresh token", status: status))
+    @Test func rejectedRefreshExpiresSession() async throws {
+        let server = tokenServer(refresh: .text("Invalid refresh token", status: 401))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         await #expect(throws: APIError.sessionExpired) {
             try await client.send(Endpoint<OK>(.get, "/api/me"))
         }
-        #expect(await tokens.expiredCount == 1)
-        #expect(await tokens.current == nil)
+        #expect(tokens.expiredCount == 1)
+        #expect(tokens.current == nil)
         #expect(server.requests(path: "/abs/api/me").count == 1)
     }
 
-    @Test func concurrentRequestsExpireSessionOnce() async {
-        let server = tokenServer(refresh: StubResponse(status: 401, delay: .milliseconds(200)))
+    @Test func forbiddenRefreshKeepsSession() async throws {
+        let server = tokenServer(refresh: .text("Blocked by firewall", status: 403))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
+
+        await #expect(throws: APIError.forbidden(message: "Blocked by firewall")) {
+            try await client.send(Endpoint<OK>(.get, "/api/me"))
+        }
+        #expect(tokens.expiredCount == 0)
+        #expect(tokens.current?.refreshToken == "refresh-1")
+    }
+
+    @Test func concurrentRetriesRejectedAfterRefreshExpireSessionOnce() async throws {
+        let server = StubServer { request in
+            request.url?.path() == refreshPath
+                ? .json(refreshedJSON, delay: .milliseconds(100)) : .text("Unauthorized", status: 401)
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
 
         let errors = await withTaskGroup(of: APIError?.self) { group in
             for index in 0..<5 {
@@ -129,50 +143,155 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) -> APIC
 
         #expect(errors == Array(repeating: .sessionExpired, count: 5))
         #expect(server.requests(path: refreshPath).count == 1)
-        #expect(await tokens.expiredCount == 1)
+        #expect(tokens.expiredCount == 1)
     }
 
-    @Test func serverErrorDuringRefreshKeepsSession() async {
+    @Test func rejectedRefreshAfterNewSignInKeepsNewSession() async throws {
+        let tokens = InMemoryTokenProvider()
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath {
+                // The user signs in again while the old session's refresh is in flight.
+                tokens.signIn(AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+                return .text("Unauthorized", status: 401)
+            }
+            return request.value(forHTTPHeaderField: "Authorization") == "Bearer access-2"
+                ? .json(#"{"ok":true}"#) : .text("Unauthorized", status: 401)
+        }
+        let client = try makeClient(server, tokens: tokens)
+
+        let result = try await client.send(Endpoint<OK>(.get, "/api/me"))
+
+        #expect(result == OK(ok: true))
+        #expect(tokens.expiredCount == 0)
+        #expect(tokens.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+    }
+
+    @Test func rejectedRetryAfterNewSignInKeepsNewSession() async throws {
+        let tokens = InMemoryTokenProvider()
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath { return .json(refreshedJSON) }
+            switch request.value(forHTTPHeaderField: "Authorization") {
+            case "Bearer access-2":
+                // The user signs in again before the retry's 401 is handled.
+                tokens.signIn(AuthTokens(accessToken: "access-3", refreshToken: "refresh-3"))
+                return .text("Unauthorized", status: 401)
+            case "Bearer access-3":
+                return .json(#"{"ok":true}"#)
+            default:
+                return .text("Unauthorized", status: 401)
+            }
+        }
+        let client = try makeClient(server, tokens: tokens)
+
+        let result = try await client.send(Endpoint<OK>(.get, "/api/me"))
+
+        #expect(result == OK(ok: true))
+        #expect(tokens.expiredCount == 0)
+        #expect(tokens.current?.accessToken == "access-3")
+    }
+
+    @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {
+        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(400)))
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let starter = Task { try await client.send(Endpoint<OK>(.get, "/api/items/starter")) }
+        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        let waiter = Task { try await client.send(Endpoint<OK>(.get, "/api/items/waiter")) }
+        try await waitUntil { server.requests(path: "/abs/api/items/waiter").count == 1 }
+        try await Task.sleep(for: .milliseconds(50))
+        waiter.cancel()
+
+        #expect(try await starter.value == OK(ok: true))
+        await #expect(throws: CancellationError.self) { try await waiter.value }
+        #expect(server.requests(path: refreshPath).count == 1)
+        #expect(tokens.updates == [AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")])
+    }
+
+    @Test func cancellingRequestThatStartedRefreshLeavesOthers() async throws {
+        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(400)))
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let starter = Task { try await client.send(Endpoint<OK>(.get, "/api/items/starter")) }
+        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        let waiter = Task { try await client.send(Endpoint<OK>(.get, "/api/items/waiter")) }
+        try await waitUntil { server.requests(path: "/abs/api/items/waiter").count == 1 }
+        try await Task.sleep(for: .milliseconds(50))
+        starter.cancel()
+
+        await #expect(throws: CancellationError.self) { try await starter.value }
+        #expect(try await waiter.value == OK(ok: true))
+        #expect(server.requests(path: refreshPath).count == 1)
+        #expect(tokens.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+        #expect(tokens.updates.count == 1)
+    }
+
+    @Test func concurrentRequestsExpireSessionOnce() async throws {
+        let server = tokenServer(refresh: StubResponse(status: 401, delay: .milliseconds(200)))
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let errors = await withTaskGroup(of: APIError?.self) { group in
+            for index in 0..<5 {
+                group.addTask {
+                    do {
+                        _ = try await client.send(Endpoint<OK>(.get, "/api/items/\(index)"))
+                        return nil
+                    } catch {
+                        return error as? APIError
+                    }
+                }
+            }
+            return await group.reduce(into: []) { $0.append($1) }
+        }
+
+        #expect(errors == Array(repeating: .sessionExpired, count: 5))
+        #expect(server.requests(path: refreshPath).count == 1)
+        #expect(tokens.expiredCount == 1)
+    }
+
+    @Test func serverErrorDuringRefreshKeepsSession() async throws {
         let server = tokenServer(refresh: .text("Bad Gateway", status: 502))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         await #expect(throws: APIError.http(status: 502, message: "Bad Gateway")) {
             try await client.send(Endpoint<OK>(.get, "/api/me"))
         }
-        #expect(await tokens.expiredCount == 0)
-        #expect(await tokens.current?.refreshToken == "refresh-1")
+        #expect(tokens.expiredCount == 0)
+        #expect(tokens.current?.refreshToken == "refresh-1")
     }
 
-    @Test func offlineDuringRefreshKeepsSession() async {
+    @Test func offlineDuringRefreshKeepsSession() async throws {
         let server = tokenServer(refresh: .failure(.notConnectedToInternet))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         await #expect(throws: APIError.network(.notConnectedToInternet)) {
             try await client.send(Endpoint<OK>(.get, "/api/me"))
         }
-        #expect(await tokens.expiredCount == 0)
+        #expect(tokens.expiredCount == 0)
     }
 
-    @Test func unauthorizedAfterRefreshExpiresSession() async {
+    @Test func unauthorizedAfterRefreshExpiresSession() async throws {
         let server = StubServer { request in
             request.url?.path() == refreshPath ? .json(refreshedJSON) : .text("Unauthorized", status: 401)
         }
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         await #expect(throws: APIError.sessionExpired) {
             try await client.send(Endpoint<OK>(.get, "/api/me"))
         }
         #expect(server.requests(path: refreshPath).count == 1)
         #expect(server.requests(path: "/abs/api/me").count == 2)
-        #expect(await tokens.expiredCount == 1)
+        #expect(tokens.expiredCount == 1)
     }
 
     @Test func requestUsingStaleTokenRetriesWithoutRefreshing() async throws {
         let server = tokenServer(refresh: .json(refreshedJSON))
-        let client = makeClient(server, tokens: RotatedTokenProvider())
+        let client = try makeClient(server, tokens: RotatedTokenProvider())
 
         let result = try await client.send(Endpoint<OK>(.get, "/api/me"))
 
@@ -184,22 +303,22 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) -> APIC
             ])
     }
 
-    @Test func unauthenticatedEndpointNeverRefreshes() async {
+    @Test func unauthenticatedEndpointNeverRefreshes() async throws {
         let server = tokenServer(refresh: .json(refreshedJSON))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         await #expect(throws: APIError.unauthorized(message: "Unauthorized")) {
             try await client.send(Endpoint<EmptyResponse>(.post, "/login", requiresAuthentication: false))
         }
         #expect(server.requests(path: refreshPath).isEmpty)
-        #expect(await tokens.expiredCount == 0)
+        #expect(tokens.expiredCount == 0)
     }
 
-    @Test func malformedRefreshResponseIsDecodingError() async {
+    @Test func malformedRefreshResponseIsDecodingError() async throws {
         let server = tokenServer(refresh: .json(#"{"user":{}}"#))
         let tokens = InMemoryTokenProvider()
-        let client = makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
 
         await #expect {
             try await client.send(Endpoint<OK>(.get, "/api/me"))
@@ -207,6 +326,15 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) -> APIC
             guard case .decoding = error as? APIError else { return false }
             return true
         }
-        #expect(await tokens.expiredCount == 0)
+        #expect(tokens.expiredCount == 0)
     }
+}
+
+/// Polls `condition` every 10 ms for up to two seconds.
+private func waitUntil(_ condition: () -> Bool) async throws {
+    for _ in 0..<200 {
+        if condition() { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    Issue.record("Timed out waiting for condition")
 }

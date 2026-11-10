@@ -5,15 +5,51 @@ public struct APIClientConfiguration: Sendable {
     /// The server address, including any subpath (for example `https://example.com/abs`).
     public var baseURL: URL
     /// Headers the user configured for this server (for example for a reverse proxy). They are
-    /// sent with every request, including token refreshes.
-    public var customHeaders: [String: String]
+    /// sent with every request to the server's origin, including token refreshes.
+    public private(set) var customHeaders: [String: String]
     /// The default request timeout in seconds; endpoints may override it.
     public var timeout: TimeInterval
 
-    public init(baseURL: URL, customHeaders: [String: String] = [:], timeout: TimeInterval = 30) {
+    /// - Throws: ``CustomHeaderError`` if a custom header is reserved.
+    public init(
+        baseURL: URL,
+        customHeaders: [String: String] = [:],
+        timeout: TimeInterval = 30
+    ) throws(CustomHeaderError) {
+        try Self.validate(customHeaders: customHeaders)
         self.baseURL = baseURL
         self.customHeaders = customHeaders
         self.timeout = timeout
+    }
+
+    /// - Throws: ``CustomHeaderError`` if a custom header is reserved.
+    public mutating func setCustomHeaders(_ headers: [String: String]) throws(CustomHeaderError) {
+        try Self.validate(customHeaders: headers)
+        customHeaders = headers
+    }
+
+    /// Header names the client manages itself and that users may not set.
+    public static let reservedHeaderNames: Set<String> = ["authorization", "cookie"]
+
+    /// Checks custom headers before they are saved, so the connect screen can explain the
+    /// problem.
+    public static func validate(customHeaders: [String: String]) throws(CustomHeaderError) {
+        for name in customHeaders.keys.sorted() where reservedHeaderNames.contains(name.lowercased()) {
+            throw .reserved(name: name)
+        }
+    }
+}
+
+/// A custom header the user can't configure.
+public enum CustomHeaderError: Error, Sendable, Equatable, LocalizedError {
+    /// `Authorization` and `Cookie` carry the Audiobookshelf session.
+    case reserved(name: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .reserved(let name):
+            "The \(name) header is used for your Audiobookshelf sign-in. Use a different header or a service token."
+        }
     }
 }
 
