@@ -206,7 +206,10 @@ struct ProgressSyncState: Sendable, Equatable {
     /// carried, and of each dirty group its PATCH could have changed (#53), is set.
     mutating func beginSend() -> ProgressSend? {
         guard let group = nextSendGroup else { return nil }
-        let send = dirtyValues.only(group)
+        var send = dirtyValues.only(group)
+        // The server stores a missing `ebookProgress` as 0 when the PATCH creates the progress
+        // and as `nil` when it updates it; sending 0 makes both store 0, so the echo matches.
+        if let ebook = send.ebook, ebook.ebookProgress == nil { send.ebook?.ebookProgress = 0 }
         unacknowledgedSends.removeAll { $0 == send }
         while unacknowledgedSends.count >= ProgressSend.historyLimit {
             let dropped = unacknowledgedSends.removeFirst().groups
@@ -236,10 +239,8 @@ struct ProgressSyncState: Sendable, Equatable {
             baseline.finishedAt = finished.finishedAt
         }
         if let ebook = send.ebook {
-            // Keep the 0 the server created for a missing `ebookProgress` when acknowledged again.
-            let created = baseline.ebookLocation == ebook.ebookLocation && baseline.ebookProgress == 0
             baseline.ebookLocation = ebook.ebookLocation
-            baseline.ebookProgress = ebook.ebookProgress ?? (created ? 0 : nil)
+            baseline.ebookProgress = ebook.ebookProgress
         }
         // Creating progress stores a missing `ebookProgress` as 0.
         if unseeded, baseline.ebookProgress == nil { baseline.ebookProgress = 0 }
@@ -275,8 +276,7 @@ struct ProgressSyncState: Sendable, Equatable {
         // An echo of our audio or finished PATCH may carry the server's side effect on the other
         // group, so shield that group before resolving it.
         for group in ProgressGroups.each where !excluded.contains(group) && dirty.contains(group) {
-            if unacknowledgedSends.contains(where: { Self.matches(server, $0, group, created: serverBaseline == nil) })
-            {
+            if unacknowledgedSends.contains(where: { Self.matches(server, $0, group) }) {
                 shieldSideEffects(of: group)
             }
         }
@@ -304,9 +304,7 @@ struct ProgressSyncState: Sendable, Equatable {
         if let baseline = serverBaseline, Self.matches(server, baseline, group) { return }
         // The echo of one of our PATCHes whose response was lost. Only this group's evidence is
         // settled and pruned (from that entry and every older one); other groups keep theirs.
-        if let index = unacknowledgedSends.lastIndex(where: {
-            Self.matches(server, $0, group, created: serverBaseline == nil)
-        }) {
+        if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }) {
             let sentEditedAt = unacknowledgedSends[index].editedAt(group)
             for older in 0...index {
                 unacknowledgedSends[older].remove(group)
@@ -413,12 +411,9 @@ struct ProgressSyncState: Sendable, Equatable {
     }
 
     /// Whether `server` holds `send`'s value of `group` as the server stores it: an un-finish
-    /// fewer than 10 s from the end is auto-finished (`finishedAt` no earlier than the edit),
-    /// and, when the send `created` the progress (no baseline yet), a missing `ebookProgress` is
-    /// stored as 0.
-    static func matches(
-        _ server: ProgressBaseline, _ send: ProgressSend, _ group: ProgressGroups, created: Bool = false
-    ) -> Bool {
+    /// fewer than 10 s from the end is auto-finished (`finishedAt` no earlier than the edit). A
+    /// missing `ebookProgress` is sent as 0 (``beginSend()``), so it needs no special case.
+    static func matches(_ server: ProgressBaseline, _ send: ProgressSend, _ group: ProgressGroups) -> Bool {
         switch group {
         case .audio:
             guard let audio = send.audio else { return false }
@@ -436,7 +431,6 @@ struct ProgressSyncState: Sendable, Equatable {
         default:
             guard let ebook = send.ebook else { return false }
             return ebookMatches(server, ebook.ebookLocation, ebook.ebookProgress)
-                || (created && ebook.ebookProgress == nil && ebookMatches(server, ebook.ebookLocation, 0))
         }
     }
 

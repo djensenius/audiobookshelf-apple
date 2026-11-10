@@ -230,8 +230,13 @@ Model notes:
     progress for creates it with zero audio and unfinished (#53). The body never
     carries `lastUpdate` (the server would store it as `updatedAt`, a device-clock
     time that can be older than the baseline, so the echo would be dropped as
-    stale), and an ebook PATCH always sends `ebookProgress`, `null` when unknown
-    (an omitted key leaves the old value on existing progress).
+    stale), and an ebook PATCH always sends `ebookProgress`, 0 when unknown: an
+    omitted key leaves the old value on existing progress, and a `null` is stored
+    as `null` on existing progress but as 0 when the PATCH creates it
+    (`User.createUpdateMediaProgressFromPayload`). Without a baseline the device
+    can't know which applies (another device may have created the row), so it
+    sends 0 and the server stores 0 either way. Other clients see 0% rather than
+    "unknown".
   - **Stale server values are dropped before any merge.** `LocalProgressStore`
     keeps an in-memory generation counter and, per row, the generation of its last
     local edit or PATCH settlement. Every fetch (`/api/me`, an expanded item,
@@ -283,10 +288,10 @@ Model notes:
       the send's edit (an earlier finish isn't this send's echo). The ack keeps
       such an un-finish send as evidence while a newer finished edit is pending,
       so that edit survives the finished echo; an unchanged edit takes it;
-    - creating progress stores a missing `ebookProgress` as 0
-      (`User.createUpdateMediaProgressFromPayload`), so while the row has no
-      baseline a sent `nil` also matches 0 at the same location, and the ack of
-      a send that created the progress records 0 in the baseline.
+    - a missing `ebookProgress` is sent as 0 (above), so its echo matches
+      exactly; a baseline of 0 never stands for a sent `nil`. Only the ack that
+      creates progress records 0 for an unsent `ebookProgress` the device had as
+      `nil`, which is what creation stores.
 
     Other normalizations need nothing: the server clamps `progress` (not
     compared); creation defaults `currentTime` and `duration` to 0, which only
@@ -373,7 +378,17 @@ Model notes:
       PATCH, including one that un-finishes, so a "not finished" sent there
       doesn't stick; the server's finished value is taken. The match uses the
       default 10 s threshold and compares the server's `finishedAt` with the
-      device's edit time, so clock skew can misjudge it.
+      device's edit time, so clock skew can misjudge it. It can also match an
+      auto-finish caused by a different PATCH (our ebook or audio PATCH, or
+      another device's position), which is harmless for an unchanged un-finish
+      (sending it would be auto-finished too). If the other device explicitly
+      finished there after our edit while a newer un-finish is pending, ours is
+      kept and sent, and the server's un-finish resets `currentTime` to 0.
+    - The ack of a send on a row with no baseline copies the unsent groups'
+      local values into the baseline, as if the PATCH created the row. If
+      another device had already created it, a later local edit of such a group
+      can lose a conflict to that device's older value with a later
+      `lastUpdate`.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
@@ -693,8 +708,12 @@ Ongoing checks:
   values) arriving after a newer local seek is deferred and leaves the seek dirty
   and unchanged, on both PATCH success and failure; a newer edit survives the
   server's normalized echo (an un-finish auto-finished near the end, a created
-  `ebookProgress` of 0 for a sent `nil`) after an ack or a lost response, and an
-  unchanged edit takes it; deleting a connection with dirty progress and then logging in
+  `ebookProgress` of 0) after an ack or a lost response, and an unchanged edit
+  takes it; a missing `ebookProgress` is sent as 0, so a page turn made while it
+  is in flight survives its echo on existing and on created progress; a seeded
+  random simulation of the 2.26.0 server (#53 side effects, creation defaults,
+  another device, relaunches, stale fetches) keeps every dirty group unless the
+  server's value is newer or is what sending it would store, and converges; deleting a connection with dirty progress and then logging in
   again to the same address and user returns the same connection `id`, and
   `pendingSync(for:)` returns the retained progress.
 - #72 (P4-01): a sealed resume-data file on disk contains no plaintext bearer
