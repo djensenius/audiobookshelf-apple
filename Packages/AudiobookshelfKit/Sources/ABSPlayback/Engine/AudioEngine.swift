@@ -52,9 +52,15 @@ public final class AudioEngine: AudioEngineProtocol {
     @ObservationIgnored private var source: AudioEngineSource?
     @ObservationIgnored private var assets: [Int: AVURLAsset] = [:]
     @ObservationIgnored private var queued: [ObjectIdentifier: QueuedItem] = [:]
-    /// Error log entries per queued item, refreshed on each new entry, so a failure can carry the
-    /// HTTP status (ADR 0007). An entry that arrives after the failure is not included.
-    @ObservationIgnored private var errorLogs: [ObjectIdentifier: [PlaybackFailure.ErrorLogEntry]] = [:]
+    /// Fetches an item's error log before its failure is reported, so the failure carries the HTTP
+    /// status (ADR 0007). Replaced in tests to delay the fetch.
+    @ObservationIgnored var errorLogFetcher: @MainActor (AVPlayerItem) async -> [PlaybackFailure.ErrorLogEntry] = {
+        await PlaybackFailure.errorLogEntries(of: $0)
+    }
+    /// An item failure waiting for its error log. The player is paused meanwhile.
+    @ObservationIgnored private var pendingItemFailure: Task<Void, Never>?
+    /// Incremented whenever the queue is cleared, so a delayed failure for an old item is dropped.
+    @ObservationIgnored private var queueGeneration = 0
     @ObservationIgnored private var readyWaiters: [ObjectIdentifier: [CheckedContinuation<Void, Never>]] = [:]
     @ObservationIgnored private var seekGeneration = 0
     @ObservationIgnored private var loadGeneration = 0
@@ -227,7 +233,8 @@ public final class AudioEngine: AudioEngineProtocol {
         guard failure == nil else { return .failed }
         // A failed item may already have been dropped from the queue, so check it first.
         guard item.status != .failed else {
-            fail(trackIndex: position.trackIndex, item: item)
+            await reportItemFailure(trackIndex: position.trackIndex, item: item)?.value
+            guard generation == seekGeneration else { return .superseded }
             return .failed
         }
         guard item === player.currentItem, item.status == .readyToPlay else { return .interrupted }
@@ -302,7 +309,8 @@ public final class AudioEngine: AudioEngineProtocol {
         player.removeAllItems()
         for entry in queued.values { entry.statusObservation.invalidate() }
         queued = [:]
-        errorLogs = [:]
+        queueGeneration += 1
+        pendingItemFailure = nil
         resumeReadyWaiters()
     }
 
@@ -398,13 +406,31 @@ public final class AudioEngine: AudioEngineProtocol {
         onEvent?(.trackChanged(index))
     }
 
-    /// `error` defaults to `item.error`; the item's error log adds the HTTP status.
-    private func fail(trackIndex: Int, item: AVPlayerItem, error: (any Error)? = nil) {
-        guard failure == nil else { return }
-        // A failed asset stays failed; the retry seek must create a new one.
-        assets[trackIndex] = nil
-        let failure = PlaybackFailure(error: error ?? item.error, errorLog: errorLogs[ObjectIdentifier(item)] ?? [])
-        fail(.itemFailed(trackIndex: trackIndex, failure))
+    /// Reports an item failure once the item's error log is fetched (`error` defaults to
+    /// `item.error`), and returns the pending report. The player pauses at once, so it does not play
+    /// past the failed track. If the queue is cleared (a seek, load, stop or player replacement)
+    /// before the log arrives, the failure is dropped. While a report is pending, it is returned.
+    @discardableResult
+    private func reportItemFailure(
+        trackIndex: Int, item: AVPlayerItem, error: (any Error)? = nil
+    ) -> Task<Void, Never>? {
+        if let pendingItemFailure { return pendingItemFailure }
+        guard failure == nil else { return nil }
+        let generation = queueGeneration
+        let id = ObjectIdentifier(item)
+        player.pause()
+        let report = Task { [weak self] in
+            guard let self else { return }
+            let log = await errorLogFetcher(item)
+            guard generation == queueGeneration else { return }
+            pendingItemFailure = nil
+            guard queued[id]?.item === item, failure == nil else { return }
+            // A failed asset stays failed; the retry seek must create a new one.
+            assets[trackIndex] = nil
+            fail(.itemFailed(trackIndex: trackIndex, PlaybackFailure(error: error ?? item.error, errorLog: log)))
+        }
+        pendingItemFailure = report
+        return report
     }
 
     private func fail(_ error: AudioEngineError) {
@@ -484,12 +510,6 @@ public final class AudioEngine: AudioEngineProtocol {
                 let reason = notification.userInfo?[reasonKey] as? AVPlayer.RateDidChangeReason
                 MainActor.assumeIsolated { self?.rateDidChange(reason: reason) }
             },
-            center.addObserver(forName: AVPlayerItem.newErrorLogEntryNotification, object: nil, queue: .main) {
-                [weak self] notification in
-                guard let object = notification.object else { return }
-                let id = ObjectIdentifier(object as AnyObject)
-                MainActor.assumeIsolated { self?.errorLogChanged(id) }
-            },
             center.addObserver(
                 forName: AVPlayerItem.failedToPlayToEndTimeNotification, object: nil, queue: .main
             ) { [weak self] notification in
@@ -504,7 +524,8 @@ public final class AudioEngine: AudioEngineProtocol {
     private func tick() {
         // While a seek runs or its target is still pending, the item is not at the requested
         // position, so its time must not be published.
-        guard !isSeeking, pendingSeekTarget == nil, !hasEnded, failure == nil, let timeline,
+        guard !isSeeking, pendingSeekTarget == nil, !hasEnded, failure == nil, pendingItemFailure == nil,
+            let timeline,
             let item = player.currentItem,
             item.status == .readyToPlay, let entry = queued[ObjectIdentifier(item)]
         else { return }
@@ -535,7 +556,7 @@ public final class AudioEngine: AudioEngineProtocol {
         let entry = item.flatMap { queued[ObjectIdentifier($0)] }
         // AVQueuePlayer silently drops a failed item and moves on; for an audiobook that would skip
         // a track, so fail on the first skipped one instead.
-        if failure == nil, let previous = currentTrackIndex,
+        if failure == nil, pendingItemFailure == nil, let previous = currentTrackIndex,
             let skipped = queued.values
                 // `>=`: the previously current item may have failed and been dropped before its
                 // status change was handled.
@@ -543,12 +564,12 @@ public final class AudioEngine: AudioEngineProtocol {
                 .filter({ $0.trackIndex < entry?.trackIndex ?? Int.max })
                 .min(by: { $0.trackIndex < $1.trackIndex })
         {
-            fail(trackIndex: skipped.trackIndex, item: skipped.item)
+            reportItemFailure(trackIndex: skipped.trackIndex, item: skipped.item)
             return
         }
         guard let item, let entry else { return }
         setCurrentTrack(entry.trackIndex)
-        if item.status == .failed { fail(trackIndex: entry.trackIndex, item: item) }
+        if item.status == .failed { reportItemFailure(trackIndex: entry.trackIndex, item: item) }
         if isPlaybackRequested, player.rate > 0, player.rate != defaultRate { player.rate = defaultRate }
     }
 
@@ -556,7 +577,7 @@ public final class AudioEngine: AudioEngineProtocol {
         guard let entry = queued[id], entry.item.status != .unknown else { return }
         for waiter in readyWaiters.removeValue(forKey: id) ?? [] { waiter.resume() }
         if entry.item.status == .failed, entry.item === player.currentItem {
-            fail(trackIndex: entry.trackIndex, item: entry.item)
+            reportItemFailure(trackIndex: entry.trackIndex, item: entry.item)
         }
     }
 
@@ -572,17 +593,8 @@ public final class AudioEngine: AudioEngineProtocol {
         onEvent?(.endOfMedia)
     }
 
-    private func errorLogChanged(_ id: ObjectIdentifier) {
-        guard let item = queued[id]?.item else { return }
-        Task { [weak self] in
-            let entries = await PlaybackFailure.errorLogEntries(of: item)
-            guard let self, queued[id] != nil else { return }
-            errorLogs[id] = entries
-        }
-    }
-
     private func itemFailedToPlayToEnd(_ id: ObjectIdentifier, error: NSError?) {
         guard let entry = queued[id] else { return }
-        fail(trackIndex: entry.trackIndex, item: entry.item, error: error)
+        reportItemFailure(trackIndex: entry.trackIndex, item: entry.item, error: error)
     }
 }

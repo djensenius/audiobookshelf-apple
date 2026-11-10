@@ -447,6 +447,57 @@ struct AudioEngineTests {
         #expect(engine.currentTrackIndex == 1)
     }
 
+    @Test(.tags(.realtimeAudio)) func itemFailureWaitsForItsErrorLog() async throws {
+        let fixture = try AudioFixture()
+        try FileManager.default.removeItem(at: fixture.urls[1])
+        let engine = makeEngine()
+        let log = GatedErrorLog()
+        engine.errorLogFetcher = log.fetch
+        try await engine.load(fixture.source, at: 2.8)
+        engine.setRate(2)
+        engine.play()
+
+        try await waitUntil { log.fetches == 1 }
+        // Not reported yet, and not playing past the failed track.
+        #expect({ if case .failed = engine.state { false } else { true } }())
+        #expect(engine.player.rate == 0)
+
+        log.release([.init(domain: "CoreMediaErrorDomain", statusCode: -12_938, comment: "HTTP 404: File Not Found")])
+
+        #expect(
+            await eventually {
+                if case .failed(.itemFailed(trackIndex: 1, let failure)) = engine.state {
+                    failure.kind == .http(status: 404) && failure.domain == AVFoundationErrorDomain
+                } else {
+                    false
+                }
+            })
+    }
+
+    @Test(.tags(.realtimeAudio)) func delayedErrorLogDoesNotFailANewerQueue() async throws {
+        let fixture = try AudioFixture()
+        try FileManager.default.removeItem(at: fixture.urls[1])
+        let engine = makeEngine()
+        let log = GatedErrorLog()
+        engine.errorLogFetcher = log.fetch
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        try await engine.load(fixture.source, at: 2.8)
+        engine.setRate(2)
+        engine.play()
+        try await waitUntil { log.fetches == 1 }
+
+        // The seek rebuilds the queue while the old item's log is still being fetched.
+        #expect(await engine.seek(to: 0.5) == .completed)
+        log.release([])
+        try await waitUntil { log.pending == 0 }
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect({ if case .failed = engine.state { false } else { true } }())
+        #expect(!events.contains { if case .failed = $0 { true } else { false } })
+        #expect(engine.currentTrackIndex == 0)
+    }
+
     @Test func activationFailureDoesNotPlay() async throws {
         let fixture = try AudioFixture()
         let session = FakeAudioSession()
@@ -561,5 +612,24 @@ final class FailablePlayers {
         let player = FailablePlayer()
         created.append(player)
         return player
+    }
+}
+
+/// An error log fetch that waits until the test releases it.
+@MainActor
+final class GatedErrorLog {
+    private(set) var fetches = 0
+    private var waiters: [CheckedContinuation<[PlaybackFailure.ErrorLogEntry], Never>] = []
+    var pending: Int { waiters.count }
+
+    func fetch(_ item: AVPlayerItem) async -> [PlaybackFailure.ErrorLogEntry] {
+        fetches += 1
+        return await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release(_ entries: [PlaybackFailure.ErrorLogEntry]) {
+        let released = waiters
+        waiters = []
+        for waiter in released { waiter.resume(returning: entries) }
     }
 }
