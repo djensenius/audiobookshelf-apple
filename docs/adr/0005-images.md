@@ -364,6 +364,13 @@ static, unauthenticated remote images (none are planned).
       from `urlSession(_:downloadTask:didWriteData:…)` once 4 MiB is passed.
       Server WebP and downloaded JPEG covers are far smaller (see the disk
       estimates); only external covers can hit the cap.
+    - Every local file is also checked with `stat` before ImageIO opens it:
+      a stored file over 4 MiB fails with `tooLarge`. A downloaded cover
+      over 4 MiB (an original the server kept unresized) is treated as
+      missing, so the server's resized cover is fetched and cached instead;
+      offline, the placeholder shows. There is no separate, larger cap for
+      downloaded covers, because the peak below counts 4 MiB of input per
+      concurrent decode.
     - **Source cap:** sources over 4096 × 4096 px (the server's own clamp) are
       rejected after reading their properties, before any pixels are decoded.
   - **Decode:** decoding is a `[MemoryKey: Task]` entry, where the memory key is
@@ -396,7 +403,10 @@ static, unauthenticated remote images (none are planned).
     redraw it into an 8-bit premultiplied `CGContext` before caching. The
     context uses Display P3 when the source colour space is wide gamut
     (`CGColorSpaceIsWideGamutRGB`), and sRGB otherwise. The 8 B/px intermediate
-    is freed straight afterwards.
+    is freed straight afterwards. ARGB and XRGB (alpha or skip first, default
+    byte order) count as standard too: they are what ImageIO's thumbnails
+    produce for PNG and JPEG, so normalizing them would redraw every decode.
+    Other orders, such as ABGR, are normalized.
   - Sources with float samples or more than 16 bits per component are
     rejected and show the placeholder, so no intermediate is ever above
     8 B/px. Only absolute external cover URLs can produce them: the server
@@ -432,10 +442,13 @@ static, unauthenticated remote images (none are planned).
 - **`CoverFileStore`:**
   - **Location:** the store lives in the App Group container so the widget
     extension can read it (P5-11b, #89). Files are at
-    `<container for group.org.davidjensenius.Audiobookshelf>/Library/Caches/Images/<serverID>/<kind>-<entityID>-<updatedAt>-<bucket>.<ext>`
+    `<container for group.org.davidjensenius.Audiobookshelf>/Library/Caches/Images/<serverID>/<kind>-<id≤64>-<updatedAt|n>-<bucket>-<hash>.<ext>`
     (`.webp` from the server, `.jpg` when materialised from a downloaded cover,
     the source's own type for external covers).
-    Entity IDs are sanitised before use in file names.
+    `<id≤64>` is the entity ID with anything but letters, digits and `_`
+    replaced by `_`, cut to 64 characters. A missing `updatedAt` is `n`, so it
+    stays distinct from `0`. `<hash>` is 12 hex digits of SHA-256 over the
+    original entity ID and external URL, so sanitised or cut IDs can't collide.
   - **Fallback:** if the App Group entitlement is missing (unsigned CI builds,
     for example), the store uses the app's own `Caches` directory. Widgets then
     show placeholders.
@@ -466,6 +479,11 @@ static, unauthenticated remote images (none are planned).
       download), the decode treats it as a miss and refetches once. A second
       failure shows the placeholder.
   - **Logout:** removing a server deletes its folder.
+    - *Implementation deviation (#43):* `ImagePipeline.removeServer` cancels
+      the server's fetches and decodes, drops its memory entries, and makes
+      `CoverFileStore` refuse writes from fetches started before the
+      removal, but it deletes the folder without waiting for open leases.
+      Waiting for them is tracked in #143.
 - **Rendering:** the pipeline returns `CGImage` plus scale. Each consumer wraps
   it:
   - SwiftUI: `Image(decorative:scale:)`;
