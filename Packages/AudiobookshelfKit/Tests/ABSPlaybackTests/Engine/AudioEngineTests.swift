@@ -498,6 +498,115 @@ struct AudioEngineTests {
         #expect(engine.currentTrackIndex == 0)
     }
 
+    /// Plays from 2.8 at 2x with track 1 missing and holds the failure report on the log fetch.
+    private func makeEngineWithPendingFailure(
+        _ fixture: AudioFixture, log: GatedErrorLog, events: Box<[AudioEngineEvent]>
+    ) async throws -> AudioEngine {
+        let engine = makeEngine()
+        engine.errorLogFetcher = log.fetch
+        engine.onEvent = { events.value.append($0) }
+        try await engine.load(fixture.source, at: 2.8)
+        engine.setRate(2)
+        engine.play()
+        try await waitUntil { log.fetches == 1 }
+        return engine
+    }
+
+    private static let notFound = [
+        PlaybackFailure.ErrorLogEntry(
+            domain: "CoreMediaErrorDomain", statusCode: -12_938, comment: "HTTP 404: File Not Found")
+    ]
+
+    @Test(.tags(.realtimeAudio)) func seekDuringPendingFailureInvalidatesIt() async throws {
+        let fixture = try AudioFixture()
+        try FileManager.default.removeItem(at: fixture.urls[1])
+        let log = GatedErrorLog()
+        let events = Box<[AudioEngineEvent]>([])
+        let engine = try await makeEngineWithPendingFailure(fixture, log: log, events: events)
+
+        // A seek into track 2, which may already be the current item, still rebuilds.
+        #expect(await engine.seek(to: 6.5) == .completed)
+        log.release(Self.notFound)
+        try await waitUntil { log.pending == 0 }
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(!events.value.contains { if case .failed = $0 { true } else { false } })
+        #expect(engine.currentTrackIndex == 2)
+        #expect(engine.currentTime == 6.5)
+        #expect(engine.isPlaybackRequested)
+        #expect(await eventually { engine.state == .playing })
+    }
+
+    @Test(.tags(.realtimeAudio)) func playDuringPendingFailureDoesNotStartThePlayer() async throws {
+        let fixture = try AudioFixture()
+        try FileManager.default.removeItem(at: fixture.urls[1])
+        let log = GatedErrorLog()
+        let events = Box<[AudioEngineEvent]>([])
+        let engine = try await makeEngineWithPendingFailure(fixture, log: log, events: events)
+        #expect(engine.player.rate == 0)
+
+        engine.pause()
+        engine.play()
+
+        #expect(engine.player.rate == 0)
+        #expect(engine.isPlaybackRequested)
+        #expect(engine.state == .buffering)
+
+        log.release(Self.notFound)
+        #expect(
+            await eventually { if case .failed(.itemFailed(trackIndex: 1, _)) = engine.state { true } else { false } })
+        #expect(engine.player.rate == 0)
+        #expect(!engine.isPlaybackRequested)
+    }
+
+    @Test(.tags(.realtimeAudio)) func seekDuringPendingFailureUsesAFreshAsset() async throws {
+        let fixture = try AudioFixture()
+        let missing = fixture.directory.appending(path: "missing.wav")
+        try FileManager.default.moveItem(at: fixture.urls[1], to: missing)
+        let log = GatedErrorLog()
+        let events = Box<[AudioEngineEvent]>([])
+        let engine = try await makeEngineWithPendingFailure(fixture, log: log, events: events)
+
+        // The file is back; the failed asset must not be reused by the rebuild. Later fetches
+        // return at once so a reused failed asset fails the seek instead of waiting on the gate.
+        try FileManager.default.moveItem(at: missing, to: fixture.urls[1])
+        engine.errorLogFetcher = { _ in Self.notFound }
+        #expect(await engine.seek(to: 3.5) == .completed)
+        log.release(Self.notFound)
+        try await waitUntil { log.pending == 0 }
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(!events.value.contains { if case .failed = $0 { true } else { false } })
+        #expect(engine.currentTrackIndex == 1)
+        #expect(engine.currentTime == 3.5)
+    }
+
+    @Test(.tags(.realtimeAudio)) func pendingFailureKeepsTheLastConfirmedPosition() async throws {
+        let fixture = try AudioFixture()
+        try FileManager.default.removeItem(at: fixture.urls[1])
+        let log = GatedErrorLog()
+        let events = Box<[AudioEngineEvent]>([])
+        // Without `currentItem` notifications the tick is what detects the skipped track.
+        let engine = AudioEngine(audioSession: nil, timeObserverInterval: 0.05, makePlayer: { SilentAdvancePlayer() })
+        engine.player.isMuted = true
+        engine.player.sourceClock = CMClockGetHostTimeClock()
+        engine.errorLogFetcher = log.fetch
+        engine.onEvent = { events.value.append($0) }
+        try await engine.load(fixture.source, at: 2.8)
+        engine.setRate(2)
+        engine.play()
+        try await waitUntil { log.fetches == 1 }
+
+        // Let the periodic observer run while the report waits.
+        try await Task.sleep(for: .milliseconds(200))
+
+        #expect(engine.currentTime <= 3)
+        #expect(!events.value.contains { if case .tick(let time) = $0 { time > 3 } else { false } })
+        log.release(Self.notFound)
+        #expect(await eventually { if case .failed = engine.state { true } else { false } })
+        #expect(engine.currentTime <= 3)
+    }
+
     @Test func activationFailureDoesNotPlay() async throws {
         let fixture = try AudioFixture()
         let session = FakeAudioSession()
@@ -603,6 +712,28 @@ final class FailablePlayer: AVQueuePlayer {
     }
 }
 
+/// An `AVQueuePlayer` that never announces `currentItem` changes, so only the periodic time
+/// observer can notice that the queue advanced.
+final class SilentAdvancePlayer: AVQueuePlayer {
+    override func addObserver(
+        _ observer: NSObject, forKeyPath keyPath: String, options: NSKeyValueObservingOptions = [],
+        context: UnsafeMutableRawPointer?
+    ) {
+        guard keyPath != "currentItem" else { return }
+        super.addObserver(observer, forKeyPath: keyPath, options: options, context: context)
+    }
+
+    override func removeObserver(_ observer: NSObject, forKeyPath keyPath: String, context: UnsafeMutableRawPointer?) {
+        guard keyPath != "currentItem" else { return }
+        super.removeObserver(observer, forKeyPath: keyPath, context: context)
+    }
+
+    override func removeObserver(_ observer: NSObject, forKeyPath keyPath: String) {
+        guard keyPath != "currentItem" else { return }
+        super.removeObserver(observer, forKeyPath: keyPath)
+    }
+}
+
 /// Creates ``FailablePlayer``s for the engine and keeps them.
 @MainActor
 final class FailablePlayers {
@@ -632,4 +763,11 @@ final class GatedErrorLog {
         waiters = []
         for waiter in released { waiter.resume(returning: entries) }
     }
+}
+
+/// A mutable value shared with event closures.
+@MainActor
+final class Box<Value> {
+    var value: Value
+    init(_ value: Value) { self.value = value }
 }
