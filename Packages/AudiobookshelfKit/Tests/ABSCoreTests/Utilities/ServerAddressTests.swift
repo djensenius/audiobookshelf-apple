@@ -56,6 +56,19 @@ import Testing
             ServerAddress.connectionCandidates(for: "abs.local:13378/abs").map(\.description) == [
                 "https://abs.local:13378/abs", "http://abs.local:13378/abs",
             ])
+        // Each candidate keeps the typed port unless it is that scheme's default.
+        #expect(
+            ServerAddress.connectionCandidates(for: "abs.local:443/abs").map(\.description) == [
+                "https://abs.local/abs", "http://abs.local:443/abs",
+            ])
+        #expect(
+            ServerAddress.connectionCandidates(for: "abs.local:80").map(\.description) == [
+                "https://abs.local:80", "http://abs.local",
+            ])
+        #expect(
+            ServerAddress.connectionCandidates(for: "[::1]:443").map(\.description) == [
+                "https://[::1]", "http://[::1]:443",
+            ])
         #expect(
             ServerAddress.connectionCandidates(for: "https://abs.local").map(\.description) == ["https://abs.local"])
         #expect(ServerAddress.connectionCandidates(for: "http://abs.local").map(\.description) == ["http://abs.local"])

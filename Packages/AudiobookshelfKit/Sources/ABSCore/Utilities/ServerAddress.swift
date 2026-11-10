@@ -60,11 +60,10 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
     /// redirect when the user typed `https`.
     public static func connectionCandidates(for input: String) -> [ServerAddress] {
         guard let address = ServerAddress(input) else { return [] }
-        guard address.isSchemeInferred,
-            var components = URLComponents(url: address.url, resolvingAgainstBaseURL: false)
-        else { return [address] }
-        components.scheme = "http"
-        guard let url = components.url, let fallback = ServerAddress(url.absoluteString) else {
+        // Build the fallback from the typed input, not from `address`: an explicit `:443` was
+        // dropped there as the https default but is a real port for http.
+        let typed = bracketingBareIPv6(input.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard address.isSchemeInferred, let fallback = ServerAddress("http://" + typed) else {
             return [address]
         }
         return [address, fallback]
