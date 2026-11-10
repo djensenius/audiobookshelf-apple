@@ -198,10 +198,12 @@ public final class AppSettings {
     /// app's own store when the App Group is unavailable).
     public init(defaults: UserDefaults = AppSettings.sharedDefaults()) {
         self.defaults = defaults
-        reloadFromStore()
+        // Observe before the first read so a write between reading a key and observing it
+        // isn't missed.
         observer = DefaultsObserver(defaults: defaults, keys: Key.allCases.map(\.rawValue)) { [weak self] in
             self?.reloadFromStore()
         }
+        reloadFromStore()
     }
 
     // MARK: Reset
@@ -232,8 +234,14 @@ public final class AppSettings {
     }
 
     /// Saves the last-used library for a server and user; `nil` removes it.
+    ///
+    /// Applies the change to the dictionary currently in the store, not the cached copy,
+    /// so another account's entry written elsewhere (whose reload may still be pending)
+    /// isn't overwritten.
     public func setLastLibraryID(_ libraryID: String?, serverID: String, userID: String) {
-        lastLibraryIDs[Self.accountKey(serverID: serverID, userID: userID)] = libraryID
+        var stored = Reader(defaults: defaults).stringDictionary(.lastLibraryIDs)
+        stored[Self.accountKey(serverID: serverID, userID: userID)] = libraryID
+        lastLibraryIDs = stored
     }
 
     // MARK: Store selection
@@ -278,10 +286,13 @@ public final class AppSettings {
 
     nonisolated static func isPlaybackRate(_ value: Double) -> Bool { value.isFinite && value > 0 }
 
-    /// Accepts `HH:mm` with hours 00–23 and minutes 00–59.
+    /// Accepts `HH:mm` (exactly two ASCII digits each) with hours 00–23 and minutes 00–59.
     nonisolated static func isTimeOfDay(_ value: String) -> Bool {
         let parts = value.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count == 2, parts.allSatisfy({ $0.count == 2 && $0.allSatisfy(\.isASCII) }),
+        guard parts.count == 2,
+            parts.allSatisfy({
+                $0.utf8.count == 2 && $0.utf8.allSatisfy { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) }
+            }),
             let hours = Int(parts[0]), let minutes = Int(parts[1])
         else { return false }
         return (0..<24).contains(hours) && (0..<60).contains(minutes)
@@ -431,21 +442,35 @@ extension AppSettings {
 }
 
 /// Typed, validating reads from `UserDefaults`; anything unusable reads as the default.
+///
+/// `NSNumber` bridging would let `0`/`1` read as `Bool` and stored booleans read as
+/// numbers, so booleans must be `CFBoolean` and numbers must not be.
 private struct Reader {
     let defaults: UserDefaults
 
     func bool(_ key: AppSettings.Key, _ fallback: Bool) -> Bool {
-        defaults.object(forKey: key.rawValue) as? Bool ?? fallback
+        guard let object = defaults.object(forKey: key.rawValue), Self.isCFBoolean(object),
+            let value = object as? Bool
+        else { return fallback }
+        return value
     }
 
     func int(_ key: AppSettings.Key, _ fallback: Int, where isValid: (Int) -> Bool) -> Int {
-        guard let value = defaults.object(forKey: key.rawValue) as? Int, isValid(value) else { return fallback }
+        guard let object = defaults.object(forKey: key.rawValue), !Self.isCFBoolean(object),
+            let value = object as? Int, isValid(value)
+        else { return fallback }
         return value
     }
 
     func double(_ key: AppSettings.Key, _ fallback: Double, where isValid: (Double) -> Bool) -> Double {
-        guard let value = defaults.object(forKey: key.rawValue) as? Double, isValid(value) else { return fallback }
+        guard let object = defaults.object(forKey: key.rawValue), !Self.isCFBoolean(object),
+            let value = object as? Double, isValid(value)
+        else { return fallback }
         return value
+    }
+
+    private static func isCFBoolean(_ object: Any) -> Bool {
+        CFGetTypeID(object as CFTypeRef) == CFBooleanGetTypeID()
     }
 
     func string(_ key: AppSettings.Key, _ fallback: String, where isValid: (String) -> Bool) -> String {

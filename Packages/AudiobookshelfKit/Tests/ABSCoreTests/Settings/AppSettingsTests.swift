@@ -24,6 +24,17 @@ private func eventually(_ condition: () -> Bool) async -> Bool {
     return condition()
 }
 
+/// Runs `write` on a background thread and blocks the caller until it finishes, so work the
+/// write enqueues on the main actor can't run in between.
+private func writeOnBackgroundThreadAndWait(_ write: @escaping @Sendable () -> Void) {
+    let done = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        write()
+        done.signal()
+    }
+    done.wait()
+}
+
 /// A Sendable flag set from an observation `onChange` handler.
 private final class Flag: Sendable {
     private let storage = Mutex(false)
@@ -221,6 +232,52 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
         }
     }
 
+    @Test func numbersAndBooleansDontCrossBridge() async throws {
+        try await withIsolatedDefaults { defaults, _ in
+            defaults.set(0, forKey: AppSettings.Key.enableAltView.rawValue)
+            defaults.set(1, forKey: AppSettings.Key.chapterTrack.rawValue)
+            defaults.set(false, forKey: AppSettings.Key.sleepTimerLength.rawValue)
+            defaults.set(true, forKey: AppSettings.Key.jumpForwardTime.rawValue)
+            defaults.set(true, forKey: AppSettings.Key.playbackRate.rawValue)
+
+            let settings = AppSettings(defaults: defaults)
+            #expect(settings.enableAltView == true)
+            #expect(settings.chapterTrack == true)
+            #expect(settings.sleepTimerLength == 900_000)
+            #expect(settings.jumpForwardTime == 10)
+            #expect(settings.playbackRate == 1.0)
+
+            let snapshot = AppSettings.snapshot(from: defaults)
+            #expect(snapshot.enableAltView == true)
+            #expect(snapshot.sleepTimerLength == 900_000)
+        }
+    }
+
+    @Test func setLastLibraryKeepsPendingExternalEntries() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            let settings = AppSettings(defaults: defaults)
+            settings.setLastLibraryID("lib-a", serverID: "s", userID: "a")
+
+            // Another account's entry is written off the main thread; its reload is queued on
+            // the main actor, which stays blocked until setLastLibraryID below runs.
+            writeOnBackgroundThreadAndWait {
+                let external = UserDefaults(suiteName: suiteName)
+                var stored = external?.dictionary(forKey: AppSettings.Key.lastLibraryIDs.rawValue) ?? [:]
+                stored[AppSettings.accountKey(serverID: "s", userID: "b")] = "lib-b"
+                external?.set(stored, forKey: AppSettings.Key.lastLibraryIDs.rawValue)
+            }
+            #expect(settings.lastLibraryID(serverID: "s", userID: "b") == nil)  // reload still pending
+            settings.setLastLibraryID("lib-c", serverID: "s", userID: "c")
+
+            #expect(settings.lastLibraryID(serverID: "s", userID: "b") == "lib-b")
+            let stored = AppSettings.snapshot(from: defaults)
+            #expect(stored.lastLibraryID(serverID: "s", userID: "a") == "lib-a")
+            #expect(stored.lastLibraryID(serverID: "s", userID: "b") == "lib-b")
+            #expect(stored.lastLibraryID(serverID: "s", userID: "c") == "lib-c")
+            #expect(await eventually { settings.lastLibraryIDs == stored.lastLibraryIDs })
+        }
+    }
+
     @Test func lastLibraryIsPerServerAndUser() async throws {
         try await withIsolatedDefaults { defaults, _ in
             let settings = AppSettings(defaults: defaults)
@@ -375,7 +432,9 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
         #expect(AppSettings.isTimeOfDay(value))
     }
 
-    @Test(arguments: ["24:00", "12:60", "6:00", "12:5", "ab:cd", "1200", "12:00:00", ""])
+    @Test(arguments: [
+        "24:00", "12:60", "6:00", "12:5", "ab:cd", "1200", "12:00:00", "", "+1:00", "-0:30", "00:+1", "１２:００",
+    ])
     func rejectsInvalidTimesOfDay(_ value: String) {
         #expect(!AppSettings.isTimeOfDay(value))
     }
