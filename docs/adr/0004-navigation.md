@@ -184,7 +184,7 @@ The visible destination (for example an item pushed from Series) is therefore un
   - If `selectedTab` is a section the new library does not have (for example `.authors` in a podcast library, or `.latest` in a book library), `Router` selects `.library`.
   - If the Library root's selected section is unsupported, it resets to that library's default section (the grid).
   - Home, Library, Search, Downloads and Account exist for both types and are kept.
-- Switching server or user resets every path in every window.
+- Switching server or user resets every path in every window. `Router.resetForIdentityChange(serverID:userID:)` takes the new IDs, because the router's identity decides which snapshots it accepts.
 
 ### Typed routes and the Router
 
@@ -300,6 +300,7 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 - `serverID` and `userID`.
 - The selected tab.
 - `libraryID`.
+- `libraryKind` (book or podcast), the type of `libraryID`, so `librarySection` can be validated on restore before the libraries load.
 - `librarySection`, the Library root's selected section, so a restored compact scene keeps its Series (or other section) context at the root and when going Back from a restored detail.
 - The `[AppTab: [Route]]` paths.
 - Whether the queue inspector is shown.
