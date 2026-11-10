@@ -72,9 +72,9 @@ extension AudioEngineTests {
 
         @Test(.tags(.realtimeAudio)) func expiryAfterAReplacementPausesAndRestoresTheCurrentPlayer() async throws {
             try await engine.load(fixture.source, at: 0)
+            #expect(timer.start(.duration(3)), "Before playing, so the fade begins at 0")
             engine.play()
             #expect(await eventually { engine.state == .playing })
-            #expect(timer.start(.duration(3)))
 
             await replacePlayer()
             engine.play()
@@ -85,7 +85,7 @@ extension AudioEngineTests {
             #expect(timer.isRunning == false)
             #expect(engine.isPlaybackRequested == false)
             #expect(players.created[1].volume == 1)
-            #expect(await eventually { engine.currentTime < 0.5 }, "Back to where the fade began")
+            #expect(await eventually { engine.currentTime < 0.25 }, "Back to where the fade began")
             #expect(engine.state != .playing && !engine.isPlaybackRequested)
         }
     }
