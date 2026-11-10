@@ -190,8 +190,11 @@ iOS.
   cancelled and its part queued, keeping its resume data: a file it finished stays in
   `Downloads/` for the part's next launch, and a failure doesn't change the download's
   state.
-- Resuming a download waits for a pause that is still cancelling its transfers, so the
-  download continues.
+- Resuming a download waits for a pause that is still cancelling its transfers, so every
+  part of the download continues.
+- If a background wake can't read the downloads from the store, it ends at once without a
+  session. Its events wait for a later session, and the engine doesn't let them end a later
+  wake early.
 
 ## Known limits
 

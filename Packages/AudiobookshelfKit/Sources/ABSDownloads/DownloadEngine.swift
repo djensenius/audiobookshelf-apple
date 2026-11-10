@@ -304,9 +304,12 @@ public actor DownloadEngine {
     /// the transfer's resume data is sealed so a later ``start(partIDs:)`` continues it;
     /// otherwise any resume data is deleted. Set the record's state first (for example
     /// `paused`): then ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses to start
-    /// its parts again, from a relaunch or a launch already under way. A launch of a part
-    /// waits for its stop to finish. Parts being completed or failed are left alone.
+    /// its parts again, from a relaunch or a launch already under way. Every part's stop is
+    /// registered before any cancellation is awaited, and a launch of a part waits for its
+    /// stop to finish, so a start during the stop restarts every part. Parts being completed
+    /// or failed are left alone.
     public func stop(partIDs: [UUID], keepingResumeData: Bool) async {
+        var stops: [(partID: UUID, stop: Task<Void, Never>)] = []
         for partID in partIDs where !settling.contains(partID) {
             retries.removeValue(forKey: partID)?.cancel()
             launching[partID] = nil
@@ -324,6 +327,9 @@ public actor DownloadEngine {
                 await finishStopping(partID, task: task, keepingResumeData: keepingResumeData)
             }
             stopping[partID] = stop
+            stops.append((partID, stop))
+        }
+        for (partID, stop) in stops {
             await stop.value
             if stopping[partID] == stop { stopping[partID] = nil }
         }
@@ -393,9 +399,15 @@ public actor DownloadEngine {
     /// Call from `.backgroundTask(.urlSession(DownloadEngine.sessionIdentifier))` (through
     /// the static ``handleBackgroundEvents()``): creates the session if needed, then returns
     /// once it has delivered, and the engine has handled, the events of this wake. It doesn't
-    /// restart queued parts.
+    /// restart queued parts. When the downloads can't be read, it returns at once and marks
+    /// the wake abandoned, so its events-finished call, delivered once a later session exists,
+    /// doesn't release a later wake early.
     public func handleBackgroundEvents() async {
-        guard await ensureSession() else { return }
+        guard await ensureSession() else {
+            // A session another process holds is that process's: its events don't come here.
+            if !isSessionInUse { registry.abandonWake() }
+            return
+        }
         if unclaimedBackgroundFinishes > 0 {
             unclaimedBackgroundFinishes -= 1
             return

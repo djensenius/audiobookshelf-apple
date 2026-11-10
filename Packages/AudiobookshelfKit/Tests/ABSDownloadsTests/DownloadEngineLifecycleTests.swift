@@ -314,6 +314,36 @@ import Testing
         #expect(await engine.unclaimedBackgroundFinishes == 0)
     }
 
+    @Test func wakeThatCantReadTheDownloadsIsAbandoned() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let reads = Mutex(0)
+        let engine = harness.makeEngine(readRecords: { store in
+            guard
+                reads.withLock({
+                    $0 += 1; return $0
+                }) > 1
+            else { throw TestError() }
+            return try await store.allRecords()
+        })
+
+        // The wake can't read the downloads, so it returns without a session.
+        await engine.handleBackgroundEvents()
+        #expect(harness.sessions.withLock { $0.isEmpty })
+        #expect(await engine.activate())
+        // Its events-finished call arrives once the activation has created the session.
+        harness.session?.finishBackgroundEvents()
+        await engine.processPendingEvents()
+        #expect(await engine.unclaimedBackgroundFinishes == 0)
+
+        // A later wake is released by its own events-finished call, which leaves nothing behind.
+        let wake = Task { await engine.handleBackgroundEvents() }
+        harness.session?.finishBackgroundEvents()
+        await wake.value
+        await engine.processPendingEvents()
+        #expect(await engine.unclaimedBackgroundFinishes == 0)
+        #expect(harness.registry.consumeAbandonedWake() == false)
+    }
+
     @Test func timedOutWaitLeavesNoEntry() async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let registry = DownloadEngineRegistry()
@@ -664,11 +694,14 @@ import Testing
         #expect(try await engine.pause(recordID: UUID()) == false)
     }
 
-    @Test func resumeWaitsForAPauseUnderWay() async throws {
+    /// A restart during a multi-part pause waits for each part's stop, then restarts every part:
+    /// a resume lists them in the record's order, and a start can list them in another.
+    @Test(arguments: [false, true])
+    func resumeWaitsForAPauseUnderWay(reversingParts: Bool) async throws {
         let never = StubGate()
-        let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(200, gate: never) : .status(200) }
-        let partID = UUID()
-        let record = try await harness.addRecord(parts: [partID])
+        let harness = try await DownloadHarness { $0.stubCount <= 2 ? .status(200, gate: never) : .status(200) }
+        let partIDs = [UUID(), UUID()]
+        let record = try await harness.addRecord(parts: partIDs)
         let (reads, readCount) = AsyncStream.makeStream(of: Int.self)
         let (cancelling, cancelStarted) = AsyncStream.makeStream(of: Void.self)
         let release = StubGate()
@@ -687,22 +720,31 @@ import Testing
                 await withCheckedContinuation { continuation in release.run { continuation.resume() } }
                 return await task.cancelByProducingResumeData()
             })
-        await engine.start(partIDs: [partID])
-        await harness.waitForRequests(1)
+        await engine.start(partIDs: partIDs)
+        await harness.waitForRequests(2)
 
-        // The pause's cancellation is held while the resume reads the downloads and launches.
+        // The pause's first cancellation is held while the restart reads the downloads and launches.
         let pausing = Task { try await engine.pause(recordID: record.id) }
         _ = await cancelling.first { _ in true }
-        let resuming = Task { try await engine.resume(recordID: record.id) }
-        // The activation and the first start read twice; the resume's start reads the third time.
+        let resuming = Task {
+            guard reversingParts else { return try await engine.resume(recordID: record.id) }
+            let isQueued = try await harness.store.setState(.queued, forRecord: record.id)
+            await engine.start(partIDs: partIDs.reversed())
+            return isQueued
+        }
+        // The activation and the first start read twice; the restart's start reads the third time.
         _ = await reads.first { $0 >= 3 }
         await engine.processPendingEvents()
         release.open()
 
         #expect(try await pausing.value)
         #expect(try await resuming.value)
+        // No part is left queued without a transfer (otherwise the record never completes).
+        for partID in partIDs {
+            try #require(try await harness.store.part(id: partID)?.state != .queued)
+        }
         #expect(await engine.nextRecordComplete() != nil)
-        #expect(harness.requests.count == 2)
+        #expect(harness.requests.count == 4)
     }
 
     @Test func activationFinalisesCompletedRecords() async throws {
