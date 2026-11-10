@@ -29,16 +29,6 @@ enum UserFixtures {
         "ereaderDevices":[],"Source":"docker"}
         """
 
-    /// `POST /login` from a server before 2.26: only the non-expiring `token`.
-    static let legacyLoginResponse = """
-        {"user":{"id":"usr-2","username":"guest","type":"guest","token":"legacy-jwt","mediaProgress":[],\
-        "seriesHideFromContinueListening":[],"bookmarks":[],"isActive":true,"isLocked":false,"lastSeen":null,\
-        "createdAt":1690000000000,"permissions":{"download":false,"update":false,"delete":false,"upload":false,\
-        "accessAllLibraries":true,"accessAllTags":true,"accessExplicitContent":false},\
-        "librariesAccessible":[],"itemTagsSelected":[]},"userDefaultLibraryId":null,\
-        "serverSettings":{"version":"2.17.0","language":"de"},"Source":"debian"}
-        """
-
     /// `GET /status` with local sign-in only.
     static let statusLocal = """
         {"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"language":"en-us",\

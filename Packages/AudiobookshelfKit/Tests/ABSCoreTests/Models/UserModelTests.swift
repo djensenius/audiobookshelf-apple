@@ -31,19 +31,6 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(user.permissions.selectedTagsNotAccessible)
     }
 
-    @Test func decodesLegacyLoginResponseToken() throws {
-        let response = try decode(AuthResponse.self, UserFixtures.legacyLoginResponse)
-        #expect(response.tokens == AuthTokens(accessToken: "legacy-jwt", refreshToken: nil))
-        #expect(response.userDefaultLibraryId == nil)
-        #expect(response.serverSettings?.language == "de")
-        #expect(response.user.type == .guest)
-        #expect(response.user.lastSeen == nil)
-        #expect(response.user.permissions.accessAllLibraries)
-        // Omitted flags default to false.
-        #expect(!response.user.permissions.createEreader)
-        #expect(!response.user.permissions.selectedTagsNotAccessible)
-    }
-
     @Test func tokensAreNilWithoutAnyToken() throws {
         let json = #"{"user":{"id":"usr-3","username":"x","token":null},"userDefaultLibraryId":"lib-1"}"#
         let response = try decode(AuthResponse.self, json)
@@ -52,7 +39,9 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(response.user.permissions == UserPermissions())
     }
 
-    @Test func prefersAccessTokenOverLegacyToken() throws {
+    @Test func ignoresLegacyToken() throws {
+        let legacyOnly = #"{"user":{"id":"u","username":"x","token":"old"}}"#
+        #expect(try decode(AuthResponse.self, legacyOnly).tokens == nil)
         let json = #"{"user":{"id":"u","username":"x","token":"old","accessToken":"new","refreshToken":null}}"#
         let response = try decode(AuthResponse.self, json)
         #expect(response.tokens == AuthTokens(accessToken: "new", refreshToken: nil))

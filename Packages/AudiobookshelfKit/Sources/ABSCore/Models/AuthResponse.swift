@@ -3,8 +3,8 @@ import Foundation
 /// Credentials returned at sign-in.
 public struct AuthTokens: Sendable, Hashable {
     public var accessToken: String
-    /// `nil` for the legacy non-expiring token, or when the request didn't send
-    /// `x-return-tokens: true` (the server then sets a cookie instead).
+    /// `nil` when the request didn't send `x-return-tokens: true` (the server then sets a
+    /// cookie instead).
     public var refreshToken: String?
 
     public init(accessToken: String, refreshToken: String? = nil) {
@@ -50,7 +50,8 @@ public struct ServerSettings: Sendable, Hashable, Codable {
 ///
 /// The tokens are inside the `user` object. Servers 2.26 and later add `accessToken` and
 /// `refreshToken` there on login and refresh, and still send the old non-expiring `token`
-/// (`null` for users created since). `/api/authorize` adds neither new field.
+/// (`null` for users created since), which this client ignores. `/api/authorize` adds neither
+/// new field.
 public struct AuthResponse: Sendable, Hashable, Decodable {
     public var user: User
     /// The library to open first, or `nil` if the user can't access any.
@@ -58,7 +59,6 @@ public struct AuthResponse: Sendable, Hashable, Decodable {
     public var serverSettings: ServerSettings?
     private var accessToken: String?
     private var refreshToken: String?
-    private var legacyToken: String?
 
     public init(
         user: User, userDefaultLibraryId: String? = nil, serverSettings: ServerSettings? = nil,
@@ -71,17 +71,13 @@ public struct AuthResponse: Sendable, Hashable, Decodable {
         refreshToken = tokens?.refreshToken
     }
 
-    /// `accessToken`/`refreshToken` when the server sent them, otherwise the legacy `token` with
-    /// no refresh token; `nil` if neither is present.
+    /// `accessToken`/`refreshToken`, or `nil` if the server sent no access token (as on
+    /// `/api/authorize`). The legacy `user.token` is intentionally ignored: the minimum supported
+    /// server is 2.26.0 (ADR 0007), which always sends `accessToken` on login and refresh.
     public var tokens: AuthTokens? {
-        if let accessToken, !accessToken.isEmpty {
-            let refreshToken = refreshToken.flatMap { $0.isEmpty ? nil : $0 }
-            return AuthTokens(accessToken: accessToken, refreshToken: refreshToken)
-        }
-        if let legacyToken, !legacyToken.isEmpty {
-            return AuthTokens(accessToken: legacyToken)
-        }
-        return nil
+        guard let accessToken, !accessToken.isEmpty else { return nil }
+        let refreshToken = refreshToken.flatMap { $0.isEmpty ? nil : $0 }
+        return AuthTokens(accessToken: accessToken, refreshToken: refreshToken)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -89,7 +85,7 @@ public struct AuthResponse: Sendable, Hashable, Decodable {
     }
 
     private enum TokenKeys: String, CodingKey {
-        case accessToken, refreshToken, token
+        case accessToken, refreshToken
     }
 
     public init(from decoder: any Decoder) throws {
@@ -100,6 +96,5 @@ public struct AuthResponse: Sendable, Hashable, Decodable {
         let tokens = try container.nestedContainer(keyedBy: TokenKeys.self, forKey: .user)
         accessToken = try tokens.decodeIfPresent(String.self, forKey: .accessToken)
         refreshToken = try tokens.decodeIfPresent(String.self, forKey: .refreshToken)
-        legacyToken = try tokens.decodeIfPresent(String.self, forKey: .token)
     }
 }
