@@ -255,6 +255,7 @@ public actor APIClient {
         )
         request.httpMethod = endpoint.method.rawValue
         request.timeoutInterval = endpoint.timeout ?? configuration.timeout
+        request.httpShouldHandleCookies = endpoint.sendsCookies
         for (name, value) in configuration.customHeaders {
             request.setValue(value, forHTTPHeaderField: name)
         }

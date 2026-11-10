@@ -34,6 +34,8 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
     /// When `false`, redirects are not followed and a 3xx response is returned as a success so
     /// the caller can read its `Location` header.
     public var followsRedirects: Bool
+    /// When `false`, the request neither sends nor stores the connection's cookies.
+    public var sendsCookies: Bool
 
     public init(
         _ method: HTTPMethod = .get,
@@ -44,6 +46,7 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
         requiresAuthentication: Bool = true,
         timeout: TimeInterval? = nil,
         followsRedirects: Bool = true,
+        sendsCookies: Bool = true,
         as response: Response.Type = Response.self
     ) {
         self.method = method
@@ -54,6 +57,7 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
         self.requiresAuthentication = requiresAuthentication
         self.timeout = timeout
         self.followsRedirects = followsRedirects
+        self.sendsCookies = sendsCookies
     }
 }
 

@@ -28,16 +28,19 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
     @Test func endpointShapes() {
         let status = AuthEndpoints.status()
         #expect(status.method == .get && status.path == "/status" && !status.requiresAuthentication)
+        #expect(status.timeout == 10)
         let ping = AuthEndpoints.ping()
         #expect(ping.method == .get && ping.path == "/ping" && !ping.requiresAuthentication)
         let login = AuthEndpoints.login(username: "david", password: "pw")
         #expect(login.method == .post && login.path == "/login" && !login.requiresAuthentication)
         #expect(login.headers == ["x-return-tokens": "true"])
+        #expect(!login.followsRedirects)
         let authorize = AuthEndpoints.authorize()
         #expect(authorize.method == .post && authorize.path == "/api/authorize" && authorize.requiresAuthentication)
         let logout = AuthEndpoints.logout(refreshToken: "refresh-1")
         #expect(logout.method == .post && logout.path == "/logout" && !logout.requiresAuthentication)
         #expect(logout.headers == ["x-refresh-token": "refresh-1"])
+        #expect(!logout.sendsCookies && status.sendsCookies && login.sendsCookies)
     }
 
     @Test func pingDecodes() async throws {
@@ -81,6 +84,33 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         #expect(request.httpMethod == "POST")
         #expect(request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
         #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+    }
+
+    /// Stub protocols never see the jar's `Cookie` header, so this checks the request's
+    /// cookie handling flag, which is what keeps the jar's `refresh_token` cookie off the request.
+    @Test func logoutIsSentWithoutCookies() async throws {
+        let server = StubServer { request in
+            request.url?.path() == "/abs/logout" ? .json(#"{"redirect_url":null}"#) : .json(#"{"success":true}"#)
+        }
+        let client = try makeClient(server)
+
+        _ = try await client.send(AuthEndpoints.ping())
+        _ = try await client.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+
+        #expect(try #require(server.requests(path: "/abs/ping").first).httpShouldHandleCookies)
+        let logout = try #require(server.requests(path: "/abs/logout").first)
+        #expect(!logout.httpShouldHandleCookies)
+        #expect(logout.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+    }
+
+    @Test func tokensAreRedacted() {
+        let tokens = ABSAPI.AuthTokens(accessToken: "secret-access", refreshToken: "secret-refresh")
+        var dumped = ""
+        dump(tokens, to: &dumped)
+        for text in [String(describing: tokens), String(reflecting: tokens), dumped, "\(tokens)"] {
+            #expect(!text.contains("secret-access") && !text.contains("secret-refresh"))
+            #expect(text.contains("<redacted>"))
+        }
     }
 
     @Test func logoutDecodesOpenIDRedirect() async throws {

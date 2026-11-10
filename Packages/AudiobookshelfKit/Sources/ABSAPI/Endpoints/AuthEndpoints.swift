@@ -7,10 +7,14 @@ import Foundation
 /// these; ``APIClientConfiguration`` never lets them set `Authorization` or `Cookie`.
 public enum AuthEndpoints {
     /// `GET /status`, unauthenticated: the server version, whether it is initialised, and its
-    /// sign-in methods.
+    /// sign-in methods. It is the first request to a new address, so it times out sooner than
+    /// other requests and an unreachable `https` port falls back to `http` quickly.
     public static func status() -> Endpoint<ServerStatus> {
-        Endpoint(.get, "/status", requiresAuthentication: false)
+        Endpoint(.get, "/status", requiresAuthentication: false, timeout: statusTimeout)
     }
+
+    /// The `GET /status` timeout in seconds (the legacy app used 6).
+    static let statusTimeout: TimeInterval = 10
 
     /// `GET /ping`, unauthenticated: `{"success":true}`.
     public static func ping() -> Endpoint<PingResponse> {
@@ -21,6 +25,10 @@ public enum AuthEndpoints {
     /// return the refresh token in the body instead of a cookie; see
     /// ``AuthResponse/sessionTokens``. A wrong password is a 401 with the body
     /// `Unauthorized`; too many attempts are a 429.
+    ///
+    /// Redirects are not followed, so the password is never re-sent to another address by a
+    /// 307 or 308; a 3xx reaches the caller and fails to decode. ``ServerValidator`` reports it
+    /// as ``ServerValidationError/loginRedirected``.
     public static func login(username: String, password: String) -> Endpoint<AuthResponse> {
         Endpoint(
             .post, "/login",
@@ -28,7 +36,8 @@ public enum AuthEndpoints {
             body: LoginRequest(username: username, password: password),
             requiresAuthentication: false,
             // The legacy app allows 20 s: the server hashes the password with bcrypt.
-            timeout: 20
+            timeout: 20,
+            followsRedirects: false
         )
     }
 
@@ -38,13 +47,16 @@ public enum AuthEndpoints {
         Endpoint(.post, "/api/authorize")
     }
 
-    /// `POST /logout`: invalidates the session that `refreshToken` belongs to. The server reads
-    /// it from the `x-refresh-token` header (or the cookie the app doesn't use). `/logout` is not
-    /// behind the access-token check, so no access token is sent and a 401 never triggers a
-    /// refresh.
+    /// `POST /logout`: invalidates the session that `refreshToken` belongs to.
+    ///
+    /// The server prefers a `refresh_token` cookie over the `x-refresh-token` header, and the
+    /// connection's cookie jar can hold one (`/auth/refresh` sets it), so the request is sent
+    /// without cookies to make the header token the one invalidated. `/logout` is not behind the
+    /// access-token check, so no access token is sent and a 401 never triggers a refresh.
     public static func logout(refreshToken: String) -> Endpoint<LogoutResponse> {
         Endpoint(
-            .post, "/logout", headers: ["x-refresh-token": refreshToken], requiresAuthentication: false)
+            .post, "/logout", headers: ["x-refresh-token": refreshToken], requiresAuthentication: false,
+            sendsCookies: false)
     }
 }
 
