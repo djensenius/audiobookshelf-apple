@@ -30,7 +30,7 @@ public struct PlaybackFailure: Sendable, Hashable {
     /// The first `NSUnderlyingErrorKey` error, often `NSURLErrorDomain` or `NSOSStatusErrorDomain`.
     public let underlyingDomain: String?
     public let underlyingCode: Int?
-    /// The HTTP status from the item's error log, when it reports one.
+    /// The newest HTTP status in the item's error log, when it has one.
     public let httpStatus: Int?
     /// A display description (the error's localized description).
     public let description: String
@@ -64,46 +64,59 @@ extension PlaybackFailure {
         }
     }
 
+    /// Classifies `error` with the item's cumulative `errorLog`. Precedence:
+    /// 1. A network, TLS or cancellation error in the current error's underlying chain.
+    /// 2. The newest classifiable log entry (a transport error or an HTTP status). The log keeps
+    ///    entries playback already recovered from, so only the newest one counts.
+    /// 3. A decode or unsupported-format error in the current error's chain.
     init(error: (any Error)?, errorLog: [ErrorLogEntry] = []) {
+        let status = Self.httpStatus(in: errorLog)
         guard let error else {
-            let status = Self.httpStatus(in: errorLog)
+            let newest = errorLog.last { Self.kind(of: $0) != nil } ?? errorLog.last
             self.init(
-                kind: status.map { .http(status: $0) } ?? .unknown, domain: "", code: 0, httpStatus: status,
-                description: errorLog.last?.comment ?? "Unknown error")
+                kind: Self.kind(of: nil, errorLog: errorLog), domain: "", code: 0, httpStatus: status,
+                description: newest?.comment ?? "Unknown error")
             return
         }
         let nsError = error as NSError
         let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError
-        let status = Self.httpStatus(in: errorLog)
         self.init(
-            kind: Self.kind(of: nsError, errorLog: errorLog, httpStatus: status),
+            kind: Self.kind(of: nsError, errorLog: errorLog),
             domain: nsError.domain, code: nsError.code,
             underlyingDomain: underlying?.domain, underlyingCode: underlying?.code,
             httpStatus: status, description: nsError.localizedDescription)
     }
 
-    /// The last HTTP status in the log: `errorStatusCode` when it is one, else "HTTP 404" in the
-    /// comment (CoreMedia uses its own negative codes).
+    /// The newest HTTP status in the log.
     static func httpStatus(in log: [ErrorLogEntry]) -> Int? {
-        for entry in log.reversed() {
-            if (400..<600).contains(entry.statusCode) { return entry.statusCode }
-            if let comment = entry.comment, let match = comment.firstMatch(of: /HTTP (\d{3})/),
-                let status = Int(match.1), (400..<600).contains(status)
-            {
-                return status
-            }
+        log.reversed().lazy.compactMap(httpStatus(of:)).first
+    }
+
+    /// The entry's HTTP status: `errorStatusCode` when it is one, else "HTTP 404" in the comment
+    /// (CoreMedia uses its own negative codes).
+    private static func httpStatus(of entry: ErrorLogEntry) -> Int? {
+        guard entry.domain != NSURLErrorDomain else { return nil }
+        if (400..<600).contains(entry.statusCode) { return entry.statusCode }
+        if let comment = entry.comment, let match = comment.firstMatch(of: /HTTP (\d{3})/),
+            let status = Int(match.1), (400..<600).contains(status)
+        {
+            return status
         }
         return nil
     }
 
-    private static func kind(of error: NSError, errorLog: [ErrorLogEntry], httpStatus: Int?) -> Kind {
-        // Transport errors decide first, from anywhere in the underlying chain or the log.
-        let urlCodes =
-            chain(of: error).filter { $0.domain == NSURLErrorDomain }.map(\.code)
-            + errorLog.filter { $0.domain == NSURLErrorDomain }.map(\.statusCode)
-        if let kind = urlCodes.lazy.compactMap(urlKind).first { return kind }
-        if let httpStatus { return .http(status: httpStatus) }
-        for error in chain(of: error) where error.domain == AVFoundationErrorDomain {
+    private static func kind(of entry: ErrorLogEntry) -> Kind? {
+        if entry.domain == NSURLErrorDomain { return urlKind(entry.statusCode) }
+        return httpStatus(of: entry).map { .http(status: $0) }
+    }
+
+    private static func kind(of error: NSError?, errorLog: [ErrorLogEntry]) -> Kind {
+        let errors = error.map(chain(of:)) ?? []
+        for error in errors where error.domain == NSURLErrorDomain {
+            if let kind = urlKind(error.code) { return kind }
+        }
+        if let kind = errorLog.reversed().lazy.compactMap(kind(of:)).first { return kind }
+        for error in errors where error.domain == AVFoundationErrorDomain {
             switch AVError.Code(rawValue: error.code) {
             case .decodeFailed, .failedToParse: return .decode
             case .fileFormatNotRecognized, .decoderNotFound: return .unsupported

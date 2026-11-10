@@ -79,6 +79,47 @@ struct PlaybackFailureTests {
             ).kind == .network)
     }
 
+    @Test func newestLogEntryDecides() {
+        let coreMedia = NSError(domain: "CoreMediaErrorDomain", code: -12_938)
+        let timeout = PlaybackFailure.ErrorLogEntry(
+            domain: NSURLErrorDomain, statusCode: URLError.Code.timedOut.rawValue)
+        let unauthorized = PlaybackFailure.ErrorLogEntry(
+            domain: "CoreMediaErrorDomain", statusCode: -12_938, comment: "HTTP 401: Unauthorized")
+
+        let recoveredTimeout = PlaybackFailure(error: coreMedia, errorLog: [timeout, unauthorized])
+        #expect(recoveredTimeout.kind == .http(status: 401))
+        #expect(recoveredTimeout.httpStatus == 401)
+
+        let newerTimeout = PlaybackFailure(error: coreMedia, errorLog: [unauthorized, timeout])
+        #expect(newerTimeout.kind == .network)
+        #expect(newerTimeout.httpStatus == 401)
+
+        let unclassifiable = PlaybackFailure.ErrorLogEntry(domain: "CoreMediaErrorDomain", statusCode: -1)
+        #expect(PlaybackFailure(error: coreMedia, errorLog: [timeout, unclassifiable]).kind == .network)
+    }
+
+    @Test func classifiesLogOnlyTransportErrors() {
+        let tls = PlaybackFailure(
+            error: nil,
+            errorLog: [
+                .init(domain: "CoreMediaErrorDomain", statusCode: 404),
+                .init(domain: NSURLErrorDomain, statusCode: URLError.Code.serverCertificateUntrusted.rawValue),
+            ])
+        #expect(tls.kind == .tls)
+
+        let cancelled = PlaybackFailure(
+            error: nil, errorLog: [.init(domain: NSURLErrorDomain, statusCode: URLError.Code.cancelled.rawValue)])
+        #expect(cancelled.kind == .cancelled)
+    }
+
+    @Test func currentTransportErrorWinsOverTheLog() {
+        let failure = PlaybackFailure(
+            error: avError(.unknown, underlying: urlError(.secureConnectionFailed)),
+            errorLog: [.init(domain: NSURLErrorDomain, statusCode: URLError.Code.timedOut.rawValue)])
+
+        #expect(failure.kind == .tls)
+    }
+
     @Test func classifiesMediaErrors() {
         #expect(PlaybackFailure(error: avError(.decodeFailed)).kind == .decode)
         #expect(PlaybackFailure(error: avError(.unknown, underlying: avError(.failedToParse))).kind == .decode)
