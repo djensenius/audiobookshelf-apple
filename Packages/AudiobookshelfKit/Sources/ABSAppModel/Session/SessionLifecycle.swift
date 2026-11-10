@@ -67,6 +67,9 @@ public final class SessionLifecycle {
     /// carries the epoch it arrived in, which lets a view that missed a short-lived gate still
     /// tell that its link is stale. A `.ready` gate only follows one of these, or `.launching`,
     /// because the session ends (and the gate leaves `.ready`) before another identity starts.
+    /// The epoch doesn't compare accounts, so a link that was waiting through a round trip back
+    /// to the same account (a switch that lands where it began, or a sign-out that is reversed)
+    /// is dropped as well; a mounted host normally takes a link at once, so this is rare.
     public private(set) var linkEpoch: UInt64 = 0
 
     @ObservationIgnored private let source: any AccountSessionSource
