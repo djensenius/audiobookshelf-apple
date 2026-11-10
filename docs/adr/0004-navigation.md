@@ -152,7 +152,13 @@ CarPlay scene (UIKit, CPTemplateApplicationSceneDelegate) // no Router, shares A
 
 #### Compact-width rule
 
-The sidebar-only section tabs need a fallback. If the size class becomes compact while a sidebar-only section is selected, `Router.normalize(isCompact: true)` selects `.library` and sets that section as the Library root's selected section. If the size class becomes regular again, nothing changes.
+The sidebar-only section tabs need a fallback. If the size class becomes compact while a sidebar-only section is selected (for example on an iPhone Duo fold or a narrowed iPad window), `Router.normalize(isCompact: true)` keeps the user on the same screen:
+
+1. It sets that section (for example Series) as the Library root's selected section, so the Library root now shows what the section tab's root showed.
+2. It moves the section's path into Library: `paths[.library] = paths[.series]`. This **replaces** any existing Library path. That older Library path was not visible, and keeping it would put an unrelated screen on top.
+3. It clears `paths[.series]` and selects `.library`.
+
+The visible destination (for example an item pushed from Series) is therefore unchanged, and Back returns to the Series list in the Library root. If the size class becomes regular again, nothing moves back: the user stays in Library with that section selected, and the Series tab starts at its root. Router tests cover the transfer and the replacement.
 
 #### Unauthenticated and offline states
 
@@ -172,6 +178,10 @@ The sidebar-only section tabs need a fallback. If the size class becomes compact
   - A toolbar `Menu` item on the Home and Library roots in tab-bar mode. This is a `Label` with an icon and the library name, and it replaces the button in `Appbar.vue`.
   - A **Library** menu on the Mac.
 - Switching libraries resets the paths of the library-scoped tabs: Home, Library, the section tabs and Search. Downloads and Account are kept.
+- Switching between a book and a podcast library also repairs the selection, because the two have different sections (see Context):
+  - If `selectedTab` is a section the new library does not have (for example `.authors` in a podcast library, or `.latest` in a book library), `Router` selects `.library`.
+  - If the Library root's selected section is unsupported, it resets to that library's default section (the grid).
+  - Home, Library, Search, Downloads and Account exist for both types and are kept.
 - Switching server or user resets every path in every window.
 
 ### Typed routes and the Router
@@ -201,7 +211,7 @@ enum Route: Hashable, Codable, Sendable {
     var isFullPlayerPresented = false     // per-scene presentation state,
     var isQueueInspectorPresented = false // never stored on the shared player
     subscript(path tab: AppTab) -> [Route] { get set }  // NavigationStack binds $router[path: tab]
-    var snapshot: Snapshot { get set }    // Codable: tab, libraryID, paths, inspector flag
+    var snapshot: Snapshot { get set }    // Codable: server/user IDs, tab, libraryID, paths, inspector flag
     func open(_ link: DeepLink)           // the only entry point for external navigation
     func normalize(isCompact: Bool)       // the view passes horizontalSizeClass == .compact
 }
@@ -265,9 +275,9 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 
 **Play links never start playback silently.** Any app or web page can open a URL, so `play/` links are limited:
 
-- If the link targets the item (and episode) that is already loaded, it only resumes. It never seeks, even when the link carries `t=`.
-- Otherwise the item screen opens with a confirmation: "Play *title*?", which shows `t=` as "from 1:23:45" if present.
-  - Nothing replaces the current session, and nothing seeks, until the user confirms.
+- If the link targets the item (and episode) that is **currently playing**, it is a no-op apart from opening the item screen. It never seeks, even when the link carries `t=`.
+- In every other case, including an item that is loaded but paused, the item screen opens with a confirmation: "Play *title*?" (or "Resume *title*?" for the paused session), which shows `t=` as "from 1:23:45" if present.
+  - Nothing starts, resumes, replaces the current session or seeks until the user confirms.
 - Siri, Shortcuts and widgets start playback through App Intents (P5-09 #86, P5-10 #87), not through URLs, so they do not need this confirmation.
 
 **Handoff**
@@ -282,8 +292,9 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 
 **Per scene (`@SceneStorage`)**
 
-`Router.snapshot` is stored as JSON `Data` under the key `nav.snapshot`. It is a `Codable` struct of:
+`Router.snapshot` is stored as JSON `Data` under an identity-scoped key: `nav.snapshot.<serverID>.<userID>`. `RootView` builds the key from the active session and hosts the stack in a child view initialised with that key and `.id(identity)`, so a server or user switch reads a different entry. The snapshot is a `Codable` struct of:
 
+- `serverID` and `userID`.
 - The selected tab.
 - `libraryID`.
 - The `[AppTab: [Route]]` paths.
@@ -293,7 +304,7 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 
 **Restore rules**
 
-- Keys include the active server and user ID. A mismatch discards the stored state.
+- The key and the stored `serverID`/`userID` must both match the active session. On a mismatch (for example after the server re-issues a user ID) the snapshot is discarded and the scene starts from the defaults.
 - Paths are written when `scenePhase` becomes `.background`, not on every push.
 - A route whose target no longer exists shows `ContentUnavailableView` and is pruned from the path.
 
