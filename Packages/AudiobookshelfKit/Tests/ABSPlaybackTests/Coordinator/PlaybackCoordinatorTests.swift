@@ -156,18 +156,22 @@ struct PlaybackCoordinatorTests {
         #expect(engine.loads.map(\.time) == [770])
     }
 
-    @Test func failedServerProgressFallsBackToSessionDate() async throws {
-        let updated = h.clock.ago(120)
+    @Test func failedServerProgressLetsLocalProgressWin() async throws {
         service.state.withLock {
             $0.serverTime["A"] = 800
             $0.progressError = .network(.notConnectedToInternet)
-            $0.sessionUpdatedAt = updated
+            // The session's own date is its creation time; it must not count.
+            $0.sessionUpdatedAt = h.clock.now
         }
         try await h.setLocalProgress("A", time: 500, updated: h.clock.ago(3600))
 
         await coordinator.play(itemID: "A")
+        #expect(engine.loads.map(\.time) == [470])
 
-        #expect(engine.loads.map(\.time) == [790])
+        // With nothing else, the session's position is used, without rewind.
+        service.state.withLock { $0.serverTime["B"] = 800 }
+        await coordinator.play(itemID: "B")
+        #expect(engine.loads.map(\.time) == [470, 800])
     }
 
     @Test func explicitStartTimeAndDisabledAutoRewindSkipRewind() async throws {
@@ -295,6 +299,64 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.isPlaying)
     }
 
+    @Test(arguments: [false, true])
+    func pauseOrResumeDuringSeekAfterLoadTakesOver(resumes: Bool) async throws {
+        let loadGate = Gate()
+        let seekGate = Gate()
+        engine.loadGates = [loadGate]
+        engine.seekGates = [seekGate]
+        let play = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { engine.loads.count == 1 }
+        #expect(await coordinator.seek(to: 2000) == nil)
+        loadGate.open()
+        await yieldUntil { engine.seeks.count == 1 }
+
+        if resumes { await coordinator.resume() } else { coordinator.pause() }
+        seekGate.open()
+        await play.value
+
+        #expect(coordinator.isPlaying == resumes)
+        #expect(h.events.events.filter { $0 == .playbackStarted }.count == (resumes ? 1 : 0))
+    }
+
+    @Test func rateChangedInSettingsIsAppliedOnResume() async throws {
+        await coordinator.play(itemID: "A")
+        coordinator.pause()
+        h.settings.playbackRate = 1.75
+
+        await coordinator.resume()
+
+        #expect(engine.defaultRate == 1.75)
+    }
+
+    @Test func nearTheEndButNotEndedResumesInPlace() async throws {
+        await coordinator.play(itemID: "A", startTime: 3599.5)
+        coordinator.pause()
+
+        await coordinator.resume()
+
+        #expect(engine.seeks.isEmpty)
+        #expect(coordinator.currentTime == 3599.5)
+        #expect(coordinator.isPlaying)
+    }
+
+    @Test func playSameItemWithStartTimeWhilePlayingOnlySeeks() async throws {
+        await coordinator.play(itemID: "A")
+        var asked = 0
+        coordinator.willResume = {
+            asked += 1
+            return 0
+        }
+        let start = h.events.count
+
+        await coordinator.play(itemID: "A", startTime: 100)
+
+        #expect(engine.seeks == [100])
+        #expect(asked == 0)
+        #expect(h.events.since(start) == [.didSeek(time: 100)])
+        #expect(coordinator.isPlaying)
+    }
+
     @Test func playSameItemWithStartTimeSeeksInSameSession() async throws {
         await coordinator.play(itemID: "A")
         await coordinator.play(itemID: "A", startTime: 2000)
@@ -342,11 +404,11 @@ struct PlaybackCoordinatorTests {
 
         await coordinator.play(itemID: "A")
 
-        #expect(coordinator.error == .streamingNotAllowed(.cellular))
+        #expect(coordinator.error == .streamingNotAllowed(.cellular, key: h.key("A")))
         #expect(service.starts.isEmpty)
         #expect(engine.loads.isEmpty)
         #expect(coordinator.phase == .idle)
-        #expect(h.events.events == [.failed(.streamingNotAllowed(.cellular))])
+        #expect(h.events.events == [.failed(.streamingNotAllowed(.cellular, key: h.key("A")))])
 
         await coordinator.play(itemID: "A", allowingMeteredNetwork: true)
         #expect(service.starts.isEmpty)
@@ -356,7 +418,7 @@ struct PlaybackCoordinatorTests {
         h.policy.decision = .askUser(.lowDataMode)
 
         await coordinator.play(itemID: "A")
-        #expect(coordinator.error == .streamingNeedsConfirmation(.lowDataMode))
+        #expect(coordinator.error == .streamingNeedsConfirmation(.lowDataMode, key: h.key("A")))
         #expect(service.starts.isEmpty)
 
         await coordinator.play(itemID: "A", allowingMeteredNetwork: true)
@@ -377,8 +439,38 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.session?.id == "A-1")
         #expect(service.closes.isEmpty)
         #expect(service.starts == ["A"])
-        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular))
-        #expect(h.events.events.last == .failed(.streamingNeedsConfirmation(.cellular)))
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: h.key("B")))
+        #expect(h.events.events.last == .failed(.streamingNeedsConfirmation(.cellular, key: h.key("B"))))
+    }
+
+    @Test func blockedPolicyDoesNotInterruptCurrentResumeOrSeek() async throws {
+        await coordinator.play(itemID: "A", startTime: 1000)
+        coordinator.pause()
+        h.clock.advance(by: 120)
+        h.policy.decision = .askUser(.cellular)
+        let resumeGate = Gate()
+        engine.seekGates = [resumeGate]
+        let start = h.events.count
+
+        let resume = Task { await coordinator.resume() }
+        await yieldUntil { engine.seeks.count == 1 }
+        await coordinator.play(itemID: "B")
+        resumeGate.open()
+        await resume.value
+
+        #expect(coordinator.isPlaying)
+        #expect(h.events.since(start).contains(.didSeek(time: 990)))
+        #expect(h.events.since(start).contains(.playbackStarted))
+
+        let seekGate = Gate()
+        engine.seekGates = [seekGate]
+        let seek = Task { await coordinator.seek(to: 2000) }
+        await yieldUntil { engine.seeks.count == 2 }
+        await coordinator.play(itemID: "B")
+        seekGate.open()
+        #expect(await seek.value == 2000)
+        #expect(h.events.events.last == .didSeek(time: 2000))
+        #expect(service.starts == ["A"])
     }
 
     @Test func stalePolicyDecisionIsDiscarded() async {
@@ -436,12 +528,32 @@ struct PlaybackCoordinatorTests {
 
         let next = Task { await coordinator.play(itemID: "B") }
         await yieldUntil { service.closes == ["A-1"] }
-        for _ in 0..<20 { await Task.yield() }
-        #expect(service.starts == ["A"])
         gate.open()
         await next.value
 
-        #expect(service.log == ["start A", "close A-1", "start B"])
+        // The log order is the proof: B starts only after A's close returned.
+        #expect(service.log == ["start A", "close A-1", "close A-1 done", "start B"])
+        #expect(coordinator.isPlaying)
+    }
+
+    @Test func playDuringWaitForCloseSupersedesIt() async {
+        await coordinator.play(itemID: "A")
+        let gate = Gate()
+        service.state.withLock { $0.closeGates["A-1"] = gate }
+
+        let playB = Task { await coordinator.play(itemID: "B") }
+        await yieldUntil { service.closes == ["A-1"] }
+        let playC = Task { await coordinator.play(itemID: "C") }
+        await yieldUntil { coordinator.mediaKey == h.key("C") }
+        gate.open()
+        await playB.value
+        await playC.value
+        await coordinator.waitForPendingCloses()
+
+        // B never starts; C waited for A's close too.
+        #expect(service.log == ["start A", "close A-1", "close A-1 done", "start C"])
+        #expect(coordinator.mediaKey == h.key("C"))
+        #expect(coordinator.session?.id == "C-2")
         #expect(coordinator.isPlaying)
     }
 
@@ -688,19 +800,28 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.restoredRecord == nil)
     }
 
-    @Test func seekWhileRestoredMovesTheNewestPosition() async {
+    @Test func seekWhileRestoredStartsExactlyThere() async {
         h.lastPlayed.record = h.record("A", position: 600, age: 3600)
+        h.setServerProgress("A", time: 300, updated: h.clock.ago(2 * 3600))
         coordinator.restoreLastPlayed()
+        var asked = 0
+        coordinator.willResume = {
+            asked += 1
+            return 30
+        }
 
         #expect(await coordinator.seek(to: 1200) == 1200)
         #expect(coordinator.currentTime == 1200)
         await coordinator.resume()
 
-        // The record is newest: its position moved by the seek, then rewound 30 s.
-        #expect(engine.loads.map(\.time) == [1170])
+        // An explicit start: no auto-rewind and no extra rewind.
+        #expect(engine.loads.map(\.time) == [1200])
+        #expect(engine.seeks.isEmpty)
+        #expect(asked == 1)
+        #expect(coordinator.isPlaying)
     }
 
-    @Test func seekWhileRestoredDoesNotOverrideNewerServerProgress() async {
+    @Test func seekWhileRestoredYieldsToNewerServerProgress() async {
         h.lastPlayed.record = h.record("A", position: 600, age: 3600)
         h.setServerProgress("A", time: 900, updated: h.clock.ago(10 * 60))
         coordinator.restoreLastPlayed()
@@ -708,8 +829,8 @@ struct PlaybackCoordinatorTests {
         await coordinator.seek(to: 630)
         await coordinator.resume()
 
-        // Server progress is newer: 900, moved 30 s by the seek, rewound 20 s.
-        #expect(engine.loads.map(\.time) == [910])
+        // Another device played it after the record: newest-of wins (900, rewound 20 s).
+        #expect(engine.loads.map(\.time) == [880])
     }
 
     @Test func restoreThenPlayAnotherItem() async {

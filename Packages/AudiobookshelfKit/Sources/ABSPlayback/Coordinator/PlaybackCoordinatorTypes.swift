@@ -53,11 +53,11 @@ public enum ResumePosition {
 
 /// Why playback couldn't start or stopped.
 public enum PlaybackCoordinatorError: Error, Sendable, Equatable {
-    /// The path is metered and the streaming setting is "ask": ask the user, then call
+    /// The path is metered and the streaming setting is "ask": ask the user, then play `key` with
     /// `play(…, allowingMeteredNetwork: true)`. No session was started.
-    case streamingNeedsConfirmation(MeteredReason)
-    /// The path is metered and the streaming setting is "never". No session was started.
-    case streamingNotAllowed(MeteredReason)
+    case streamingNeedsConfirmation(MeteredReason, key: MediaKey)
+    /// The path is metered and the streaming setting is "never". No session was started for `key`.
+    case streamingNotAllowed(MeteredReason, key: MediaKey)
     case sessionStartFailed(APIError)
     case streamUnavailable(StreamResolutionError)
     /// The engine couldn't load the media.
@@ -118,7 +118,9 @@ public enum PlaybackCoordinatorEvent: Sendable, Equatable {
     case tick(time: Double)
     case ended
     case failed(PlaybackCoordinatorError)
-    /// Emitted before the close request is sent; every ``sessionStarted(sessionID:key:)`` gets one.
+    /// Every ``sessionStarted(sessionID:key:)`` gets one. Emitted on the main actor right after
+    /// the close `Task` is created; the request goes out only once the main actor is free, so
+    /// observers see this first.
     case sessionWillClose(ClosingSession)
 }
 

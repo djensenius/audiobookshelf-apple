@@ -107,8 +107,9 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         return .completed
     }
 
-    /// Plays to the end, as the real engine does: play stays requested.
+    /// Plays to the end, as the real engine does: play is no longer requested.
     func finish() {
+        isPlaybackRequested = false
         currentTime = duration
         state = .ended
         onEvent?(.endOfMedia)
@@ -194,6 +195,7 @@ final class StubSessionService: PlaybackSessionService {
             return (state.closeGates.removeValue(forKey: id), state.closeError)
         }
         await gate?.wait()
+        state.withLock { $0.log.append("close \(id) done") }
         if let error { throw error }
     }
 }

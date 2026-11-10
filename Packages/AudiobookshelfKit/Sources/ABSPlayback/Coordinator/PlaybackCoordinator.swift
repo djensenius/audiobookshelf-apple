@@ -12,10 +12,11 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// server session, loads the engine at the resume position and applies the saved rate. Closes the
 /// session when playback stops or the item changes, and restores the last item paused at launch.
 ///
-/// - **Races.** Every ``play(itemID:episodeID:startTime:allowingMeteredNetwork:)``, ``stop()`` and
-///   ``restoreLastPlayed()`` takes a new generation. A continuation from an older generation (a
-///   policy check, session start or engine load finishing late) is dropped, and a session it
-///   opened is closed. A blocked streaming policy leaves the current item playing.
+/// - **Races.** A play that passes the streaming policy, ``stop()`` and ``restoreLastPlayed()``
+///   take a new generation. A continuation from an older generation (a session start or engine
+///   load finishing late) is dropped, and a session it opened is closed. Policy checks have their
+///   own token, so a later play or stop discards a pending one, and a blocked play leaves the
+///   current item (and its seeks and resumes) untouched.
 /// - **Closing.** A session is owned by exactly one place: the start continuation until it becomes
 ///   current, then the coordinator. Whoever drops it closes it once, in the background. The next
 ///   `/play` waits up to ``closeWaitTimeout`` for closes in flight, so the server normally sees the
@@ -99,11 +100,9 @@ public final class PlaybackCoordinator {
 
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var playWhenLoaded = true
-    /// A position chosen while starting (a seek, or a play with a start time), applied on load.
+    /// A position chosen while starting or unloaded (a seek, or a play with a start time).
     @ObservationIgnored private var pendingStartTime: Double?
-    /// The unloaded position before any seeks while unloaded. Such seeks move every progress
-    /// candidate by the same distance, so newer server progress still wins.
-    @ObservationIgnored private var unloadedBase: Double = 0
+    @ObservationIgnored private var policyCheck = 0
     /// When playback was last seen playing; drives auto-rewind on resume.
     @ObservationIgnored private var lastPlayedAt: Date?
     @ObservationIgnored private var lastPlayedSavedAt: Date?
@@ -123,8 +122,6 @@ public final class PlaybackCoordinator {
     static let lastPlayedSaveInterval: TimeInterval = 15
     /// How long a play waits for the previous session's close before starting the next one.
     public static let closeWaitTimeout: Duration = .seconds(2)
-    /// Within this many seconds of the end, playing again starts from the beginning.
-    static let endTolerance: Double = 1
 
     /// - Parameter sleep: Times the wait for closes in flight (tests replace it).
     public init(
@@ -183,12 +180,14 @@ public final class PlaybackCoordinator {
     /// newest of server progress, local audio progress and the last-played record, rewound by
     /// ``AutoRewind``. Finished media starts from the beginning.
     /// - Parameter allowingMeteredNetwork: The user agreed to stream on a metered network after
-    ///   ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:)``. Never overrides "never".
+    ///   ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:key:)``. Never overrides "never".
     public func play(
         itemID: String, episodeID: String? = nil, startTime: Double? = nil, allowingMeteredNetwork: Bool = false
     ) async {
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
+        policyCheck += 1
+        let check = policyCheck
         if key == mediaKey {
             switch phase {
             case .loaded:
@@ -202,23 +201,29 @@ public final class PlaybackCoordinator {
             }
         }
 
-        generation += 1
-        let current = generation
-        switch await policy.streamingDecision() {
+        let checkedGeneration = generation
+        let decision = await policy.streamingDecision()
+        guard check == policyCheck, checkedGeneration == generation else { return }
+        switch decision {
         case .allowed: break
         case .askUser(let reason) where allowingMeteredNetwork:
             logger.info("Streaming on a metered path (\(String(describing: reason), privacy: .public))")
-        case .askUser(let reason): return block(.streamingNeedsConfirmation(reason), generation: current)
-        case .denied(let reason): return block(.streamingNotAllowed(reason), generation: current)
+        case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: key))
+        case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
-        guard current == generation else { return }
 
+        generation += 1
+        let current = generation
         let restarting = key == mediaKey
-        let offset = restarting && phase == .unloaded ? unloadedPosition - unloadedBase : 0
+        // A seek while unloaded (restored, or after a failed start) is an explicit start, unless
+        // server progress turns out newer than when the item last played here (another device
+        // played it since); local progress is this device's own, saved alongside the record.
+        let unloadedSeek = restarting && phase == .unloaded && startTime == nil ? pendingStartTime : nil
+        let unloadedSince = lastPlayedAt
         tearDown(reason: restarting ? .restarted : .itemChanged)
         guard current == generation else { return }
         error = nil
-        pendingStartTime = startTime
+        pendingStartTime = startTime ?? unloadedSeek
         lastPlayedAt = nil
         reachedEnd = false
         playWhenLoaded = true
@@ -274,7 +279,7 @@ public final class PlaybackCoordinator {
                 ProgressCandidate(
                     currentTime: record.position, updatedAt: record.timestamp, isFinished: record.isFinished))
         }
-        let serverDate: Date?
+        var serverDate: Date?
         switch server {
         case .success(let progress):
             serverDate = progress?.lastUpdate.map(Self.date(ms:))
@@ -282,15 +287,17 @@ public final class PlaybackCoordinator {
                 ProgressCandidate(
                     currentTime: session.currentTime, updatedAt: serverDate, isFinished: progress?.isFinished ?? false))
         case .failure(let error):
-            logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public)); using the session's")
-            candidates.append(
-                ProgressCandidate(currentTime: session.currentTime, updatedAt: session.updatedAt.map(Self.date(ms:))))
+            // Undated: the session position is used only when there is nothing else.
+            logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public))")
+            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
         }
-        candidates = candidates.map {
-            ProgressCandidate(currentTime: $0.currentTime + offset, updatedAt: $0.updatedAt, isFinished: $0.isFinished)
-        }
-        let explicitStart = pendingStartTime
+        var explicitStart = pendingStartTime
         pendingStartTime = nil
+        if let unloadedSeek, explicitStart == unloadedSeek, let unloadedSince, let serverDate,
+            serverDate > unloadedSince
+        {
+            explicitStart = nil
+        }
         let extra = playWhenLoaded ? Self.nonNegative(willResume?() ?? 0) : 0
         let resumeTime = ResumePosition.startTime(
             explicit: explicitStart, candidates: candidates, duration: source.timeline.duration, now: now(),
@@ -311,6 +318,7 @@ public final class PlaybackCoordinator {
         guard current == generation else { return }
         phase = .loaded
         restoredRecord = nil
+        let intent = resumeIntent
         if let pending = pendingStartTime {
             // A seek while loading.
             pendingStartTime = nil
@@ -321,7 +329,8 @@ public final class PlaybackCoordinator {
         emit(.didSeek(time: engine.currentTime))
         guard current == generation, phase == .loaded else { return }
         saveLastPlayed()
-        if playWhenLoaded { startEngine() }
+        // A pause or resume during the seek above takes over.
+        if playWhenLoaded, intent == resumeIntent { startEngine() }
     }
 
     /// Plays the current item: resumes a loaded one (rewinding by `seconds`, or by ``AutoRewind``
@@ -340,10 +349,15 @@ public final class PlaybackCoordinator {
     /// `startTime`, to 0 after the end, or back by `seconds` or ``AutoRewind``), which emits
     /// ``PlaybackCoordinatorEvent/didSeek(time:)`` with where it landed; then play. A pause during
     /// the seek cancels the play, and a resume while one is in flight is ignored (a `startTime`
-    /// replaces it).
+    /// replaces it). While already playing, a `startTime` is only a seek.
     private func resumeLoaded(rewindingBy seconds: Double?, startingAt startTime: Double?) async {
         let time = engine.currentTime
-        let atEnd = reachedEnd || engine.state == .ended || (duration > 0 && duration - time < Self.endTolerance)
+        let atEnd = reachedEnd || engine.state == .ended
+        if let startTime, engine.isPlaybackRequested, !atEnd, resumingIntent == nil {
+            // Already playing: just move.
+            await seek(to: startTime)
+            return
+        }
         guard startTime != nil || (resumingIntent == nil && (atEnd || !engine.isPlaybackRequested)) else { return }
         resumeIntent += 1
         let intent = resumeIntent
@@ -392,8 +406,8 @@ public final class PlaybackCoordinator {
 
     /// Seeks to a global time and returns where playback landed, or `nil` when a later seek
     /// replaced it or it failed. While starting, the target is applied once loaded (`nil`). While
-    /// unloaded, moves the position shown; the next play shifts the resume position by the same
-    /// distance rather than overriding newer progress.
+    /// unloaded, moves the position shown, and the next play starts exactly there with no rewind,
+    /// unless server progress is newer than when the item last played on this device.
     @discardableResult
     public func seek(to time: Double) async -> Double? {
         switch phase {
@@ -411,6 +425,7 @@ public final class PlaybackCoordinator {
         case .unloaded:
             let finite = time.isFinite ? max(time, 0) : 0
             unloadedPosition = unloadedDuration > 0 ? min(finite, unloadedDuration) : finite
+            pendingStartTime = unloadedPosition
             return unloadedPosition
         case .starting:
             pendingStartTime = time
@@ -437,7 +452,6 @@ public final class PlaybackCoordinator {
         pendingStartTime = nil
         reachedEnd = false
         unloadedPosition = 0
-        unloadedBase = 0
         unloadedDuration = 0
         phase = .idle
         lastPlayedStore.clear()
@@ -456,7 +470,6 @@ public final class PlaybackCoordinator {
         mediaKey = record.key
         restoredRecord = record
         unloadedPosition = record.position.isFinite ? max(record.position, 0) : 0
-        unloadedBase = unloadedPosition
         unloadedDuration = record.duration ?? 0
         lastPlayedAt = record.timestamp
         phase = .unloaded
@@ -510,6 +523,7 @@ public final class PlaybackCoordinator {
     // MARK: Helpers
 
     private func startEngine() {
+        engine.setRate(Float(rate))
         engine.play()
         emit(.playbackStarted)
     }
@@ -521,11 +535,8 @@ public final class PlaybackCoordinator {
         emit(.failed(error))
     }
 
-    /// A streaming-policy block: the current item keeps playing. A start this play superseded
-    /// can no longer finish, so that item is left unloaded.
-    private func block(_ error: PlaybackCoordinatorError, generation blocked: Int) {
-        guard blocked == generation else { return }
-        if phase == .starting { tearDown(reason: .itemChanged) }
+    /// A streaming-policy block: the current item, and anything in flight for it, carries on.
+    private func block(_ error: PlaybackCoordinatorError) {
         self.error = error
         emit(.failed(error))
     }
@@ -537,7 +548,6 @@ public final class PlaybackCoordinator {
             unloadedPosition = engine.currentTime
             unloadedDuration = engine.duration
         }
-        unloadedBase = unloadedPosition
         resumeIntent += 1
         resumingIntent = nil
         if phase == .loaded || phase == .starting { engine.stop() }
