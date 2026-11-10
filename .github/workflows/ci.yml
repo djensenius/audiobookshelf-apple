@@ -67,4 +67,25 @@ jobs:
         run: mise run build:ios
 
       - name: Test app on macOS
-        run: mise run test:app
+        id: macos_tests
+        run: mise run test:app -- -resultBundlePath "$RUNNER_TEMP/macos-app-tests-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.xcresult"
+
+      - name: Summarize failed macOS app tests
+        if: failure() && steps.macos_tests.outcome == 'failure'
+        run: |
+          result="$RUNNER_TEMP/macos-app-tests-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.xcresult"
+          if [[ ! -d "$result" ]]; then
+            echo "::error::macOS app tests failed without creating a result bundle at $result"
+            exit 1
+          fi
+          xcrun xcresulttool get test-results summary --path "$result"
+
+      - name: Retain failed macOS app test result
+        if: failure() && steps.macos_tests.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos-app-tests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+          path: ${{ runner.temp }}/macos-app-tests-${{ github.run_id }}-${{ github.run_attempt }}.xcresult
+          retention-days: 3
+          if-no-files-found: error
+          include-hidden-files: true
