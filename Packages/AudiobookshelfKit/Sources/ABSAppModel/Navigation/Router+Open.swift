@@ -30,7 +30,7 @@ extension Router {
             return
         }
         pendingServerSwitch = nil
-        pendingPlayLink = nil
+        clearPendingPlayLink()
         pendingSearchQuery = nil
         isFullPlayerPresented = false
         cancelLibraryRequest()
@@ -39,8 +39,9 @@ extension Router {
         case .item(let id, let episodeID):
             push(Self.itemRoutes(id: id, episodeID: episodeID), on: .library)
         case .play(let playLink):
+            // The push leaves the linked screen on top, whether it appended or found it there.
             push(Self.itemRoutes(id: playLink.itemID, episodeID: playLink.episodeID), on: .library)
-            pendingPlayLink = playLink
+            setPendingPlayLink(playLink)
         case .series(let id):
             push([.series(id: id)], on: .library)
         case .author(let id):
@@ -74,13 +75,13 @@ extension Router {
         }
     }
 
-    /// Clears ``pendingPlayLink`` once the Library path no longer holds the screen it opened,
-    /// so the item screen never confirms a link for a screen that was discarded.
+    /// Clears ``pendingPlayLink`` once the Library path no longer starts with the path to the
+    /// screen it opened, so the item screen never confirms a link for a discarded screen. The
+    /// position matters, not just the route: an older screen for the same item lower in the
+    /// path isn't the one the link opened.
     func dropPendingPlayLinkIfOffPath() {
-        guard let link = pendingPlayLink,
-            let target = Self.itemRoutes(id: link.itemID, episodeID: link.episodeID).last
-        else { return }
-        if !self[path: .library].contains(target) { pendingPlayLink = nil }
+        guard pendingPlayLink != nil, !self[path: .library].starts(with: pendingPlayLinkPath) else { return }
+        clearPendingPlayLink()
     }
 
     private static func itemRoutes(id: String, episodeID: String?) -> [Route] {

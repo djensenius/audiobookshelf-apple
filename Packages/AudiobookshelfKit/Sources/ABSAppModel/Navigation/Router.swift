@@ -32,11 +32,15 @@ public final class Router {
     /// declared here: extensions can't add stored properties.
     public private(set) var pendingLibraryID: String?
     /// A `play/` link opened in this scene, until the item screen shows its confirmation
-    /// (``PlayLinkDecision``) and clears it. Every link ``open(_:)`` navigates to replaces it;
-    /// a link for another server doesn't. Any change to the Library path that drops the
-    /// link's item (or episode) screen clears it: a library switch, section repair,
-    /// ``normalize(isCompact:)``, popping the screen, snapshot restore or an identity change.
-    public var pendingPlayLink: PlayLink?
+    /// (``PlayLinkDecision``) and calls ``clearPendingPlayLink()``. Every link ``open(_:)``
+    /// navigates to replaces it; a link for another server doesn't. Any change to the Library
+    /// path that drops the exact screen the link opened clears it: a library switch, section
+    /// repair, ``normalize(isCompact:)``, popping the screen, snapshot restore or an identity
+    /// change. An older screen for the same item lower in the path doesn't keep it.
+    public internal(set) var pendingPlayLink: PlayLink?
+    /// The Library path up to and including the screen ``pendingPlayLink`` opened. The link
+    /// stays pending only while the Library path starts with exactly this.
+    private(set) var pendingPlayLinkPath: [Route] = []
     /// A `search?q=` query opened in this scene, until the Search tab shows it and clears it.
     /// Cleared like ``pendingPlayLink``, except that a library switch keeps it.
     public var pendingSearchQuery: String?
@@ -130,6 +134,18 @@ public final class Router {
         isQueueInspectorPresented = false
     }
 
+    /// Drops ``pendingPlayLink``, for example once the item screen has shown its confirmation.
+    public func clearPendingPlayLink() {
+        pendingPlayLink = nil
+        pendingPlayLinkPath = []
+    }
+
+    /// Makes `link` pending for the screen on top of the Library path.
+    func setPendingPlayLink(_ link: PlayLink) {
+        pendingPlayLink = link
+        pendingPlayLinkPath = self[path: .library]
+    }
+
     /// Drops a library request, because a later link navigated elsewhere.
     func cancelLibraryRequest() {
         pendingLibraryID = nil
@@ -139,7 +155,7 @@ public final class Router {
     /// play link and search query, which belonged to the old paths. Snapshot restore uses it
     /// too, so a link opened before the restore leaves nothing stale behind.
     func resetNavigation() {
-        pendingPlayLink = nil
+        clearPendingPlayLink()
         pendingSearchQuery = nil
         selectedTab = .home
         libraryID = nil
