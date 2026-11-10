@@ -5,14 +5,21 @@ import Testing
 
 @testable import ABSPlayback
 
+extension Tag {
+    /// Tests that play media in real time.
+    @Tag static var realtimeAudio: Self
+}
+
 /// Plays real (silent, muted) 3-second WAV tracks. Serialized to keep real-time waits short and
 /// predictable; each test waits well under a second of media time.
 @MainActor
-@Suite(.serialized)
+@Suite(.serialized, .timeLimit(.minutes(1)))
 struct AudioEngineTests {
     private func makeEngine(session: FakeAudioSession? = nil) -> AudioEngine {
         let engine = AudioEngine(audioSession: session, timeObserverInterval: 0.05)
         engine.player.isMuted = true
+        // Time playback with the host clock so it does not depend on an audio device (headless CI).
+        engine.player.sourceClock = CMClockGetHostTimeClock()
         return engine
     }
 
@@ -71,7 +78,7 @@ struct AudioEngineTests {
         #expect(events.contains { if case .failed = $0 { true } else { false } })
     }
 
-    @Test func playAdvancesTimeAndPauseStops() async throws {
+    @Test(.tags(.realtimeAudio)) func playAdvancesTimeAndPauseStops() async throws {
         let fixture = try AudioFixture()
         let session = FakeAudioSession()
         let engine = makeEngine(session: session)
@@ -113,7 +120,7 @@ struct AudioEngineTests {
         #expect(events.withoutTicks == [.trackChanged(0), .trackChanged(2), .trackChanged(0)])
     }
 
-    @Test func seekWhilePlayingKeepsPlaying() async throws {
+    @Test(.tags(.realtimeAudio)) func seekWhilePlayingKeepsPlaying() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()
         try await engine.load(fixture.source, at: 0)
@@ -142,9 +149,11 @@ struct AudioEngineTests {
         #expect(engine.pendingSeekTarget == nil)
     }
 
-    @Test func defaultRateAppliesOnPlayAndAcrossTracks() async throws {
+    @Test(.tags(.realtimeAudio)) func defaultRateAppliesOnPlayAndAcrossTracks() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
         try await engine.load(fixture.source, at: 2.7)
 
         engine.setRate(2)
@@ -158,12 +167,13 @@ struct AudioEngineTests {
         #expect(engine.player.rate == 2)
         #expect(await eventually { engine.currentTrackIndex == 1 && engine.currentTime > 3 })
         #expect(engine.player.rate == 2)
+        #expect(!events.contains(.endOfMedia))
 
         engine.setRate(1.5)
         #expect(engine.player.rate == 1.5)
     }
 
-    @Test func endOfMediaEndsPlayback() async throws {
+    @Test(.tags(.realtimeAudio)) func endOfMediaEndsPlayback() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()
         var events: [AudioEngineEvent] = []
@@ -187,7 +197,7 @@ struct AudioEngineTests {
         #expect(engine.player.items().count == 3)
     }
 
-    @Test func skipsNonPlayableTracks() async throws {
+    @Test(.tags(.realtimeAudio)) func skipsNonPlayableTracks() async throws {
         let fixture = try AudioFixture()
         // The second track (1–2) lies inside the first, so it is not playable.
         let timeline = PlaybackTimeline(
@@ -234,7 +244,7 @@ struct AudioEngineTests {
         #expect(await engine.seek(to: 1) == .failed)
     }
 
-    @Test func interruptionPausesAndResumesAtDefaultRate() async throws {
+    @Test(.tags(.realtimeAudio)) func interruptionPausesAndResumesAtDefaultRate() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()
         let handler = AudioInterruptionHandler(engine: engine)
@@ -249,6 +259,133 @@ struct AudioEngineTests {
         handler.handle(.interruptionEnded(shouldResume: true))
         #expect(engine.isPlaybackRequested)
         #expect(engine.player.rate == 1.5)
+    }
+
+    @Test func interruptedSeekRetriesOnceThenWaitsWithoutPlaying() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        try await engine.load(fixture.source, at: 0)
+        engine.play()
+        var attempts = 0
+        engine.itemSeeker = { _, _, _ in
+            attempts += 1
+            return false
+        }
+
+        #expect(await engine.seek(to: 7) == .interrupted)
+
+        #expect(attempts == 2)
+        #expect(engine.pendingSeekTarget == 7)
+        #expect(engine.currentTime < 7)
+        #expect(engine.isPlaybackRequested)
+        #expect(engine.player.rate == 0)
+        #expect(engine.state == .buffering)
+
+        // play() retries the pending seek, then plays from its target.
+        engine.itemSeeker = AudioEngine(audioSession: nil).itemSeeker
+        engine.play()
+        #expect(await eventually { engine.pendingSeekTarget == nil && engine.state == .playing })
+        #expect(engine.currentTime >= 7)
+    }
+
+    @Test(.tags(.realtimeAudio)) func playDuringLoadStartsAfterTheSeek() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        let load = Task { try await engine.load(fixture.source, at: 4) }
+        while engine.state != .loading { await Task.yield() }
+
+        engine.play()
+        #expect(engine.player.rate == 0)
+        #expect(engine.isPlaybackRequested)
+
+        try await load.value
+        #expect(await eventually { engine.state == .playing })
+        #expect(engine.currentTime >= 4)
+        #expect(engine.currentTrackIndex == 1)
+    }
+
+    @Test(.tags(.realtimeAudio)) func overlappingTrackEndsAtNextStart() async throws {
+        let fixture = try AudioFixture(trackCount: 2)
+        let timeline = PlaybackTimeline(
+            tracks: [
+                AudioTrack(index: 1, startOffset: 0, duration: 3),
+                AudioTrack(index: 2, startOffset: 2.5, duration: 3),
+            ],
+            chapters: [])
+        let engine = makeEngine()
+        try await engine.load(AudioEngineSource(timeline: timeline, trackURLs: fixture.urls), at: 2.3)
+
+        let items = engine.player.items()
+        #expect(items.count == 2)
+        #expect(items.first?.forwardPlaybackEndTime.seconds == 2.5)
+        #expect(items.last?.forwardPlaybackEndTime.isValid == false)
+
+        engine.setRate(2)
+        engine.play()
+        #expect(await eventually { engine.currentTrackIndex == 1 && engine.currentTime > 2.5 })
+        #expect(engine.currentTime < 3)
+    }
+
+    @Test(.tags(.realtimeAudio)) func missingLaterTrackFailsAndSeekRetries() async throws {
+        let fixture = try AudioFixture()
+        let original = fixture.urls[1]
+        let missing = fixture.directory.appending(path: "missing.wav")
+        try FileManager.default.moveItem(at: original, to: missing)
+        let engine = makeEngine()
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        try await engine.load(fixture.source, at: 2.8)
+
+        engine.setRate(2)
+        engine.play()
+
+        // AVQueuePlayer drops the failed item and would play track 2; the engine fails on track 1.
+        #expect(await eventually { if case .failed = engine.state { true } else { false } })
+        #expect(
+            events.contains {
+                if case .failed(.itemFailed(trackIndex: 1, _)) = $0 { true } else { false }
+            })
+        #expect(engine.isPlaybackRequested == false)
+
+        try FileManager.default.moveItem(at: missing, to: original)
+        #expect(await engine.seek(to: 4) == .completed)
+        #expect(engine.state == .paused)
+        #expect(engine.currentTrackIndex == 1)
+    }
+
+    @Test func activationFailureDoesNotPlay() async throws {
+        let fixture = try AudioFixture()
+        let session = FakeAudioSession()
+        session.activationError = FakeAudioSession.ActivationError()
+        let engine = makeEngine(session: session)
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        try await engine.load(fixture.source, at: 0)
+
+        engine.play()
+
+        #expect(engine.player.rate == 0)
+        #expect(engine.isPlaybackRequested == false)
+        #expect(engine.state == .paused)
+        #expect(
+            events.contains {
+                if case .failed(.audioSessionActivationFailed) = $0 { true } else { false }
+            })
+    }
+
+    @Test(.tags(.realtimeAudio)) func systemRateChangeCountsAsPause() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        try await engine.load(fixture.source, at: 0)
+        engine.play()
+        #expect(await eventually { engine.state == .playing })
+
+        engine.player.rate = 0
+        NotificationCenter.default.post(
+            name: AVPlayer.rateDidChangeNotification, object: engine.player,
+            userInfo: [AVPlayer.rateDidChangeReasonKey: AVPlayer.RateDidChangeReason.appBackgrounded])
+
+        #expect(await eventually { engine.isPlaybackRequested == false && engine.state == .paused })
     }
 
     @Test func preciseTimingFollowsSetting() {

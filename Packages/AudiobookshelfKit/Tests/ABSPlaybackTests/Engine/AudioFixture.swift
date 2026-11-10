@@ -64,12 +64,18 @@ func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async 
     return true
 }
 
-/// Records `activate` / `deactivate` calls.
+/// Records `activate` / `deactivate` calls; throws ``activationError`` when set.
 @MainActor
 final class FakeAudioSession: AudioSessionActivating {
+    struct ActivationError: Error {}
+
     private(set) var activations = 0
     private(set) var deactivations = 0
+    var activationError: ActivationError?
 
-    func activate() throws { activations += 1 }
+    func activate() throws {
+        activations += 1
+        if let activationError { throw activationError }
+    }
     func deactivate() { deactivations += 1 }
 }

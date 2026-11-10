@@ -85,6 +85,46 @@ struct AudioInterruptionHandlerTests {
         #expect(engine.calls == ["pause", "play", "pause"])
     }
 
+    @Test func userPlayAndPauseClearLateResume() {
+        let engine = FakeAudioEngine()
+        engine.isPlaybackRequested = true
+        let handler = AudioInterruptionHandler(engine: engine)
+
+        handler.handle(.interruptionBegan)
+        engine.play()
+        handler.userDidChangePlayback()
+        engine.pause()
+        handler.userDidChangePlayback()
+        handler.handle(.interruptionEnded(shouldResume: true))
+
+        #expect(engine.calls == ["pause", "play", "pause"])
+        #expect(!engine.isPlaybackRequested)
+    }
+
+    @Test func secondBeganKeepsTheResume() {
+        let engine = FakeAudioEngine()
+        engine.isPlaybackRequested = true
+        let handler = AudioInterruptionHandler(engine: engine)
+
+        handler.handle(.interruptionBegan)
+        handler.handle(.interruptionBegan)
+        handler.handle(.interruptionEnded(shouldResume: true))
+
+        #expect(engine.calls == ["pause", "play"])
+    }
+
+    @Test func sessionActivationClearsTheResume() {
+        let engine = FakeAudioEngine()
+        engine.isPlaybackRequested = true
+        let handler = AudioInterruptionHandler(engine: engine)
+
+        handler.handle(.interruptionBegan)
+        handler.handle(.sessionActivated)
+        handler.handle(.interruptionEnded(shouldResume: true))
+
+        #expect(engine.calls == ["pause"])
+    }
+
     @Test func holdsEngineWeakly() {
         var engine: FakeAudioEngine? = FakeAudioEngine()
         let handler = AudioInterruptionHandler(engine: engine)

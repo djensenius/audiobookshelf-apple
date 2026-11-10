@@ -35,6 +35,7 @@ public enum PlaybackState: Sendable, Hashable {
     case playing
     /// The last track played to its end.
     case ended
+    /// An item failed. A seek retries (rebuilding the queue); the retry policy belongs to P2-06a.
     case failed(AudioEngineError)
 }
 
@@ -47,6 +48,8 @@ public enum AudioEngineError: Error, Sendable, Hashable {
     case itemFailed(trackIndex: Int, description: String)
     /// Another `load` or `stop` replaced this load before it finished.
     case superseded
+    /// The audio session could not be activated, so playback did not start. Not a sticky failure.
+    case audioSessionActivationFailed(description: String)
 }
 
 /// How a seek ended. Every seek gets an increasing generation; only the latest one can complete.

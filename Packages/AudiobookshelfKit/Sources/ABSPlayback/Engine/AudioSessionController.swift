@@ -43,7 +43,12 @@
             for token in tokens { notificationCenter.removeObserver(token) }
         }
 
-        /// Sets the `.playback` category with the `.spokenAudio` mode. ``activate()`` calls it once.
+        /// Sets the `.playback` category with the `.spokenAudio` mode. ``activate()`` calls it when
+        /// needed, but the playback coordinator must call it before requesting to become the primary
+        /// Now Playing app (ADR 0006).
+        ///
+        /// The route-sharing policy stays `.default`: `.longFormAudio` changes how routes are picked
+        /// (AirPlay 2 routing, no picker in some cases) and needs device validation first.
         public func configure() throws {
             try session.setCategory(.playback, mode: .spokenAudio, options: [])
             isConfigured = true
@@ -81,6 +86,7 @@
         }
 
         nonisolated static func routeChangeEvent(_ userInfo: [AnyHashable: Any]?) -> AudioSessionEvent? {
+            // Any lost output pauses, not only wired headphones as in the legacy app.
             guard let rawReason = userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                 AVAudioSession.RouteChangeReason(rawValue: rawReason) == .oldDeviceUnavailable
             else { return nil }
@@ -101,6 +107,17 @@
                 ) { notification in
                     guard let event = Self.resumptionEvent(notification.userInfo) else { return }
                     MainActor.assumeIsolated { handler.handle(event) }
+                },
+                notificationCenter.addObserver(
+                    forName: AVAudioSession.didBecomeActiveNotification, object: session, queue: .main
+                ) { _ in
+                    MainActor.assumeIsolated { handler.handle(.sessionActivated) }
+                },
+                // After a media services reset the category is gone; reconfigure on next activation.
+                notificationCenter.addObserver(
+                    forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.isConfigured = false }
                 },
                 notificationCenter.addObserver(
                     forName: AVAudioSession.routeChangeNotification, object: session, queue: .main
