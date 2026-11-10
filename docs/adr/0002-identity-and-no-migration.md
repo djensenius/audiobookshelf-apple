@@ -131,15 +131,22 @@ notes and the App Store description say so.
   HTTPS-only for non-local hosts. Arbitrary loads already cover local hosts.
 - The app shows an "insecure connection" warning when a user adds an `http://` server on a
   non-local host (server connect UI,
-  [#40](https://github.com/djensenius/audiobookshelf-apple/issues/40)).
+  [#40](https://github.com/djensenius/audiobookshelf-apple/issues/40)). Local means a
+  loopback, private, link-local or unique-local address, in any form the system accepts
+  (`2130706433` is 127.0.0.1), or `localhost`, a `.local` name or a single-label name such
+  as `nas`. Names aren't resolved, so a DNS search domain can still turn a single-label name
+  into a public host without a warning.
 - `NSLocalNetworkUsageDescription` (build setting `INFOPLIST_KEY_NSLocalNetworkUsageDescription`)
   explains why the app talks to LAN servers and `.local` names. `NSBonjourServices` is not
   set: the app doesn't browse for services.
 - Local network permission denied: the system prompts on the first connection to a local
   host, so the app doesn't connect to local hosts before the user asks it to. When a
-  request to a local host (private, link-local or unique-local address, or a `.local`
-  name) fails with a connectivity error, the app checks a Network framework path to that
-  host; an unsatisfied path with reason `localNetworkDenied` means the permission is off.
+  request fails with a connectivity error, the app checks a Network framework path to that
+  host, unless it's a loopback address; an unsatisfied path with reason
+  `localNetworkDenied` means the permission is off. Names and public addresses are checked
+  too, since split DNS, `.lan`, `.home.arpa` or `.internal` names can resolve to a local
+  address and a network can use a public range locally; the path's reason is
+  authoritative, and it reports a denial only when the destination is local.
   The app then explains this and links to Settings (iOS) or System Settings › Privacy &
   Security › Local Network (macOS), and retries when the app becomes active again.
   Detection belongs to the network monitor in

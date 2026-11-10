@@ -186,11 +186,18 @@ Model notes:
   `ImageKey` and to decide when to refresh the downloaded cover.
 - **`LocalMediaSnapshot`** is a `Codable, Sendable, Hashable` struct owned by
   `ABSData`, not an `ABSCore` API model, so API changes can't break stored blobs.
-  It holds `snapshotVersion: Int` (1), metadata (title, subtitle, authors,
+  It holds `snapshotVersion: Int` (2), metadata (title, subtitle, authors,
   narrators, series, description, published year, explicit and abridged flags),
   chapters, audio tracks (index, title, duration, start offset, MIME type, ino),
-  the ebook file (ino, filename, format) and, for podcasts, the downloaded episodes
-  (id, title, season and episode, published date, duration, chapters, track). Files
+  the ebook file (ino, filename, format), for podcasts the downloaded episodes
+  (id, title, season and episode, published date, duration, chapters, track), and
+  `coverUpdatedAt: Date?`, the server's cover timestamp, added in version 2 (`nil`
+  in version 1 blobs). The `LocalLibraryItem.coverUpdatedAt` column is the source of
+  truth; the snapshot field only seeds it at download time, when
+  `LocalItemStore.upsertFromDownload` gets no explicit timestamp. An explicit
+  argument and `updateCover` update only the column. Known gap: a re-download whose
+  snapshot has no timestamp (only records saved before version 2) keeps the old
+  column value until the download engine fills the snapshot. Files
   link to tracks through `LocalFile.trackIndex` and `episodeId`; the snapshot never
   holds local paths.
 - **Progress** rows exist for downloaded media that has been played or synced, and
