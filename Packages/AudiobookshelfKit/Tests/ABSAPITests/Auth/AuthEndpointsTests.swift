@@ -41,7 +41,8 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         let logout = AuthEndpoints.logout(refreshToken: "refresh-1")
         #expect(logout.method == .post && logout.path == "/logout" && !logout.requiresAuthentication)
         #expect(logout.headers == ["x-refresh-token": "refresh-1"])
-        #expect(!logout.sendsCookies && status.sendsCookies && login.sendsCookies)
+        #expect(logout.sendsCookies && logout.withheldCookies == ["refresh_token"])
+        #expect(status.sendsCookies && login.sendsCookies && status.withheldCookies.isEmpty)
     }
 
     @Test func pingDecodes() async throws {
@@ -87,13 +88,19 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
     }
 
-    /// Stub protocols never see the jar's `Cookie` header, so this checks the request's
-    /// cookie handling flag, which is what keeps the jar's `refresh_token` cookie off the request.
-    @Test func logoutIsSentWithoutCookies() async throws {
+    /// The client writes the logout's `Cookie` header itself (stub protocols never see the
+    /// jar's own header): every cookie in the jar except `refresh_token`.
+    @Test func logoutSendsProxyCookiesButNotTheRefreshToken() async throws {
         let server = StubServer { request in
             request.url?.path() == "/abs/logout" ? .json(#"{"redirect_url":null}"#) : .json(#"{"success":true}"#)
         }
         let client = try makeClient(server)
+        let jar = try #require(client.cookieStorage)
+        for (name, value) in [("lb", "1"), ("refresh_token", "cookie-token"), ("connect.sid", "s%3Aabc")] {
+            jar.setCookie(
+                try #require(
+                    HTTPCookie(properties: [.name: name, .value: value, .domain: server.host, .path: "/"])))
+        }
 
         _ = try await client.send(AuthEndpoints.ping())
         _ = try await client.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
@@ -101,7 +108,29 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         #expect(try #require(server.requests(path: "/abs/ping").first).httpShouldHandleCookies)
         let logout = try #require(server.requests(path: "/abs/logout").first)
         #expect(!logout.httpShouldHandleCookies)
+        let cookies = try #require(logout.value(forHTTPHeaderField: "Cookie"))
+        #expect(Set(cookies.components(separatedBy: "; ")) == ["lb=1", "connect.sid=s%3Aabc"])
         #expect(logout.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+    }
+
+    @Test func logoutWithAnEmptyJarSendsNoCookies() async throws {
+        let server = StubServer { _ in .json(#"{"redirect_url":null}"#) }
+        let client = try makeClient(server)
+        let jar = try #require(client.cookieStorage)
+        jar.setCookie(
+            try #require(
+                HTTPCookie(properties: [.name: "refresh_token", .value: "t", .domain: server.host, .path: "/"])))
+
+        _ = try await client.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+        #expect(jar.cookies?.count == 1)
+        jar.cookies?.forEach(jar.deleteCookie)
+        _ = try await client.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+
+        for logout in server.requests(path: "/abs/logout") {
+            #expect(logout.value(forHTTPHeaderField: "Cookie") == nil)
+            #expect(!logout.httpShouldHandleCookies)
+        }
+        #expect(server.requests(path: "/abs/logout").count == 2)
     }
 
     @Test func tokensAreRedacted() {

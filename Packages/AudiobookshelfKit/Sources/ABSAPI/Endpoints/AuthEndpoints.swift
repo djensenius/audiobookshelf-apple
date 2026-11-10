@@ -55,13 +55,15 @@ public enum AuthEndpoints {
     /// `POST /logout`: invalidates the session that `refreshToken` belongs to.
     ///
     /// The server prefers a `refresh_token` cookie over the `x-refresh-token` header, and the
-    /// connection's cookie jar can hold one (`/auth/refresh` sets it), so the request is sent
-    /// without cookies to make the header token the one invalidated. `/logout` is not behind the
-    /// access-token check, so no access token is sent and a 401 never triggers a refresh.
+    /// connection's cookie jar can hold one (`/auth/refresh` sets it), so that cookie is withheld
+    /// to make the header token the one invalidated. The jar's other cookies are sent: a proxy in
+    /// front of the server may need its own, and `connect.sid` is this connection's own server
+    /// session, which logging out should end. `/logout` is not behind the access-token check,
+    /// so no access token is sent and a 401 never triggers a refresh.
     public static func logout(refreshToken: String) -> Endpoint<LogoutResponse> {
         Endpoint(
             .post, "/logout", headers: ["x-refresh-token": refreshToken], requiresAuthentication: false,
-            sendsCookies: false)
+            withheldCookies: ["refresh_token"])
     }
 }
 
