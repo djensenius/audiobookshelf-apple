@@ -720,7 +720,7 @@ Official docs read, from developer.apple.com/documentation/xcode: "Writing custo
   - `Infomaniak/ios-kDrive:ci_scripts/ci_post_clone.sh:4-13` does this.
   - `HedvigInsurance/ugglan:ci_scripts/ci_post_clone.sh:14-19` does the same.
   - `ZUM-Internet/iOS-DemoProject:ci_scripts/tuist_install.sh:1-3` uses `brew install mise`.
-- Install it again in any script that needs it.
+- Each `ci_*.sh` script runs in its own shell, so `export`ed variables and `mise activate` from `ci_post_clone.sh` do not carry over to `ci_pre_xcodebuild.sh` or `ci_post_xcodebuild.sh`, and build phases never see them. Re-run the PATH setup (or call `~/.local/bin/mise` by absolute path) in every script that needs it. Files written to disk (such as the installed binary) do persist within the same build. This is from the documented script model; I did not run it on Xcode Cloud.
 - The Xcode Cloud release notes (Sep 2025) record a Homebrew install failure on macOS beta (26) environments, so use stable macOS environments.
 - Since the app uses only built-in frameworks and local SPM, you may not need `ci_post_clone.sh` at all.
 

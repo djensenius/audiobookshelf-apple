@@ -613,7 +613,7 @@ Notes:
 | upgrade | 5 | Polling→WebSocket upgrade only |
 | noop | 6 | Upgrade only |
 
-- **Handshake:** the server immediately sends `0{"sid":"…","upgrades":[…],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}`. The sid goes on all later requests (needed for polling only). `maxPayload` governs polling aggregation, so it is not needed for WebSocket-only.
+- **Handshake:** the server immediately sends an open packet such as `0{"sid":"…","upgrades":[…],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}` (the values shown are the engine.io defaults, not read from a live Audiobookshelf server; always use the values from the handshake, never hard-code them). The sid goes on all later requests (needed for polling only). `maxPayload` governs polling aggregation, so it is not needed for WebSocket-only.
 - **Heartbeat:**
   - Every `pingInterval`, the server sends `2`. The client replies **`3`** within `pingTimeout`.
   - If the client sees no ping within `pingInterval + pingTimeout`, it must treat the connection as dead and reconnect.
