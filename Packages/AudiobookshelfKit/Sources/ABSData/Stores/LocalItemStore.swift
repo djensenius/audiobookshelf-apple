@@ -35,7 +35,9 @@ import SwiftData
     ///
     /// - Throws: ``StoreError/incompleteDownload`` unless every part completed, and
     ///   ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist.
-    /// - Parameter coverUpdatedAt: The server's cover timestamp; `nil` keeps the stored one.
+    /// - Parameter coverUpdatedAt: The server's cover timestamp; `nil` falls back to the
+    ///   snapshot's `coverUpdatedAt`, and when both are `nil` the stored one is kept. A re-download
+    ///   whose snapshot has no timestamp (saved before snapshot version 2) keeps the old value.
     @discardableResult
     public func upsertFromDownload(
         _ download: DownloadRecordDTO,
@@ -82,7 +84,9 @@ import SwiftData
             let authors = download.media.metadata.authors
             item.authorName = authors.isEmpty ? nil : authors.joined(separator: ", ")
             if let coverPath { item.coverRelativePath = coverPath }
-            if let coverUpdatedAt { item.coverUpdatedAt = coverUpdatedAt }
+            if let coverUpdatedAt = coverUpdatedAt ?? download.media.coverUpdatedAt {
+                item.coverUpdatedAt = coverUpdatedAt
+            }
             item.updatedAt = now
             return LocalLibraryItemDTO(item)
         }
@@ -203,6 +207,7 @@ import SwiftData
     ) -> LocalMediaSnapshot {
         guard episodeId != nil else { return downloaded }
         var merged = downloaded
+        merged.coverUpdatedAt = downloaded.coverUpdatedAt ?? existing.coverUpdatedAt
         let newIDs = Set(downloaded.episodes.map(\.id))
         merged.episodes = existing.episodes.filter { !newIDs.contains($0.id) } + downloaded.episodes
         return merged
