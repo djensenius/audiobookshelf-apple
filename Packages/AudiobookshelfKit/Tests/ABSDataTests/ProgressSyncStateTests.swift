@@ -678,6 +678,76 @@ import Testing
         #expect(state.isFinished)
     }
 
+    /// The server auto-finishes an un-finish PATCH for progress fewer than 10 s from the end. An
+    /// unchanged edit takes the finished value; a newer un-finish survives the echo.
+    @Test(arguments: [false, true], [false, true])
+    func unfinishNormalizedToFinishedStillMatchesOurSend(acknowledged: Bool, editedAgain: Bool) throws {
+        var state = ProgressSyncState(seed: Self.server(currentTime: 995, lastUpdate: Self.t0))
+        state.apply(ProgressEdit(isFinished: false), now: Self.at(1))
+        let finished = try Self.send(&state)
+        if editedAgain {
+            state.apply(ProgressEdit(isFinished: true), now: Self.at(2))
+            state.apply(ProgressEdit(isFinished: false), now: Self.at(3))
+        }
+        if acknowledged { state.acknowledge(finished, serverLastUpdate: Self.at(5)) }
+        var echo = Self.server(currentTime: 995, isFinished: true, finishedAt: Self.at(5), lastUpdate: Self.at(5))
+        echo.progress = 1
+        state.merge(echo)
+        #expect(state.isFinished == !editedAgain)
+        #expect(state.dirty == (editedAgain ? .finished : []))
+        #expect(state.currentTime == 995)
+    }
+
+    /// A finish from before the un-finish edit isn't its normalized echo: the newer edit wins.
+    @Test func unfinishAfterAutoFinishIsNotItsEcho() throws {
+        var state = ProgressSyncState(seed: Self.server(currentTime: 995, lastUpdate: Self.t0))
+        state.apply(ProgressEdit(isFinished: false), now: Self.at(3))
+        _ = try Self.send(&state)  // Fails before reaching the server.
+        var fetched = Self.server(currentTime: 995, isFinished: true, finishedAt: Self.at(2), lastUpdate: Self.at(2))
+        fetched.progress = 1
+        state.merge(fetched)
+        #expect(!state.isFinished)
+        #expect(state.dirty == .finished)
+    }
+
+    /// Creating progress stores a missing `ebookProgress` as 0. A page turn made while that PATCH
+    /// was in flight survives its echo; an unchanged edit takes the 0.
+    @Test(arguments: [false, true], [false, true])
+    func createdEbookProgressDefaultStillMatchesOurSend(acknowledged: Bool, editedAgain: Bool) throws {
+        var state = ProgressSyncState(lastUpdate: Self.t0)
+        state.apply(ProgressEdit(ebook: .init(location: "A", progress: nil)), now: Self.at(1))
+        let ebook = try Self.send(&state)
+        if editedAgain { state.apply(ProgressEdit(ebook: .init(location: "B", progress: 0.4)), now: Self.at(2)) }
+        if acknowledged { state.acknowledge(ebook, serverLastUpdate: Self.at(5)) }
+        state.merge(
+            ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "A", ebookProgress: 0,
+                lastUpdate: Self.at(5)))
+        #expect(state.ebookLocation == (editedAgain ? "B" : "A"))
+        #expect(state.ebookProgress == (editedAgain ? 0.4 : 0))
+        #expect(state.dirty == (editedAgain ? .ebook : []))
+    }
+
+    /// A missing `ebookProgress` is sent as 0: existing progress would store a sent `nil` as
+    /// `nil` but creation as 0, and a baseline of 0 can't tell them apart. With 0 the echo
+    /// matches either way, so a page turn made in flight survives it.
+    @Test(arguments: [false, true])
+    func missingEbookProgressIsSentAsZero(existing: Bool) throws {
+        let server = Self.server(ebookLocation: "A", ebookProgress: 0, lastUpdate: Self.t0)
+        var state = existing ? ProgressSyncState(seed: server) : ProgressSyncState(lastUpdate: Self.t0)
+        state.apply(ProgressEdit(ebook: .init(location: "A", progress: nil)), now: Self.at(1))
+        let ebook = try Self.send(&state)
+        #expect(ebook.ebook?.ebookProgress == 0)
+        state.apply(ProgressEdit(ebook: .init(location: "B", progress: 0.4)), now: Self.at(2))
+        state.acknowledge(ebook, serverLastUpdate: nil)
+        // The echo, stored as the server stores the PATCH: as sent for existing progress, and with
+        // a missing value as 0 when creating it.
+        let stored = existing ? ebook.ebook?.ebookProgress : ebook.ebook?.ebookProgress ?? 0
+        state.merge(Self.server(ebookLocation: "A", ebookProgress: stored, lastUpdate: Self.at(5)))
+        #expect(state.ebookLocation == "B")
+        #expect(state.dirty == .ebook)
+    }
+
     // MARK: - Interleavings
 
     /// Random interleavings against a simulated server. A PATCH reaches the server at a random
@@ -685,7 +755,7 @@ import Testing
     /// writes now and then; fetches may be stale.
     /// Odd seeds run short episodes that start without server progress, which the first PATCH
     /// creates. Each run ends by stopping the other device and syncing until nothing is dirty.
-    @Test(arguments: [1, 7, 37, 2026, 53, 54] as [UInt64])
+    @Test(arguments: [1, 7, 13, 35, 37, 41, 2026, 53, 54] as [UInt64])
     func randomInterleavingsKeepTheInvariants(seed: UInt64) throws {
         let seeded = seed.isMultiple(of: 2)
         for episode in 0..<(seeded ? 1 : 25) {
@@ -703,7 +773,11 @@ import Testing
 private enum Origin: Equatable {
     /// Our send of the edit made at that time, possibly normalized by the server.
     case ours(Date)
+    /// Our un-finish of the edit made at the first time, auto-finished at the second.
+    case normalized(Date, Date)
     case sideEffect(Date)
+    /// The server auto-finished a position another device wrote at that time.
+    case autoFinished(Date)
     case other
 }
 
@@ -716,6 +790,7 @@ private struct Simulation {
     var exists: Bool
     var origins: [Int: Origin] = [:]
     var lastOtherWrite = Date.distantPast
+    var lastOtherPosition = Date.distantPast
     var inFlight: ProgressSend?
     var delivered: Date?
     /// A fetch captured earlier, valid while `epoch` (bumped by edits and settlements) is unchanged.
@@ -776,7 +851,9 @@ private struct Simulation {
         case 1:
             state.apply(ProgressEdit(isFinished: roll(2) == 0), now: now)
         default:
-            state.apply(ProgressEdit(ebook: .init(location: "loc\(step)", progress: 0.5)), now: now)
+            // Sometimes the same page again, e.g. one another device left at 0.
+            let location = roll(3) == 0 ? state.ebookLocation : "loc\(step)"
+            state.apply(ProgressEdit(ebook: .init(location: location, progress: roll(2) == 0 ? 0.5 : nil)), now: now)
         }
         epoch += 1
     }
@@ -825,6 +902,8 @@ private struct Simulation {
             server.ebookProgress = ebook.ebookProgress
             origins[2] = .ours(ebook.editedAt)
         }
+        // Creation stores a missing `ebookProgress` as 0.
+        if created, server.ebookProgress == nil { server.ebookProgress = 0 }
         // Existing progress is checked after every PATCH, ebook-only too: fewer than 10 s left
         // auto-finishes (`progress` 1), and a `currentTime` change away from the end un-finishes.
         let nearEnd = server.duration > 0 && server.duration - server.currentTime < 10
@@ -833,7 +912,9 @@ private struct Simulation {
             server.finishedAt = server.finishedAt ?? ProgressSyncState.wholeMilliseconds(now)
             server.progress = 1
             // An un-finish sent near the end can't stick: the server's form of our own value.
-            origins[1] = send.finished.map { .ours($0.editedAt) } ?? .sideEffect(now)
+            origins[1] =
+                send.finished.map { .normalized($0.editedAt, now) }
+                ?? (origins[0] == .other ? .autoFinished(lastOtherPosition) : .sideEffect(now))
             if send.audio == nil { origins[0] = .sideEffect(now) }
         } else if !created, server.isFinished, server.currentTime != oldTime, !nearEnd {
             server.isFinished = false
@@ -866,11 +947,13 @@ private struct Simulation {
             server.currentTime = Double(roll(2) == 0 ? 990 + roll(10) : roll(1000))
             server.duration = 1000
             server.progress = server.currentTime / 1000
+            lastOtherPosition = now
         case 1:
             server.isFinished.toggle()
             server.finishedAt = server.isFinished ? ProgressSyncState.wholeMilliseconds(now) : nil
         default:
             server.ebookLocation = "other\(roll(1000))"
+            server.ebookProgress = roll(2) == 0 ? 0 : 0.3
         }
         if !exists {
             exists = true
@@ -928,17 +1011,34 @@ private struct Simulation {
         let excluded = inFlight?.groups ?? []
         state.merge(fetched, excluding: excluded)
         for (index, group) in ProgressGroups.each.enumerated() {
-            let changed = Self.values(group, of: state) != Self.values(group, of: before)
+            // Positions within the 1 s matching tolerance count as the same.
+            let changed =
+                group == .audio
+                ? abs(state.currentTime - before.currentTime) > 1 || abs(state.duration - before.duration) > 1
+                : Self.values(group, of: state) != Self.values(group, of: before)
             if before.dirty.contains(group), changed {
                 let editedAt = before.editedAt(group) ?? .distantPast
                 let allowed: Bool
                 switch origins[index] {
                 // Only the very edit we sent may take its (normalized) server value.
                 case .ours(let sentEditedAt): allowed = sentEditedAt == editedAt
+                case .normalized(let sentEditedAt, let at):
+                    allowed = sentEditedAt == editedAt || lastOtherWrite > max(at, editedAt)
                 case .sideEffect(let at): allowed = lastOtherWrite > max(at, editedAt)
+                case .autoFinished(let at): allowed = at > editedAt
                 case .other, nil: allowed = fetched.lastUpdate > editedAt
                 }
-                #expect(allowed, "dirty \(group.rawValue) lost to \(String(describing: origins[index])) at \(step)")
+                // The server already holds what sending the edit would store: an un-finish fewer
+                // than 10 s from the end is auto-finished, and a missing `ebookProgress` is sent as 0.
+                let moot =
+                    group == .finished
+                    ? !before.isFinished && fetched.isFinished && fetched.duration > 0
+                        && fetched.duration - fetched.currentTime < 10
+                        && (fetched.finishedAt ?? .distantPast) >= ProgressSyncState.wholeMilliseconds(editedAt)
+                    : group == .ebook && fetched.ebookLocation == before.ebookLocation
+                        && fetched.ebookProgress == (before.ebookProgress ?? 0)
+                #expect(
+                    allowed || moot, "dirty \(group.rawValue) lost to \(String(describing: origins[index])) at \(step)")
             }
             // Liveness: a newer write from another device wins unless something justifies keeping ours.
             let justified =

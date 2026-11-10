@@ -206,7 +206,10 @@ struct ProgressSyncState: Sendable, Equatable {
     /// carried, and of each dirty group its PATCH could have changed (#53), is set.
     mutating func beginSend() -> ProgressSend? {
         guard let group = nextSendGroup else { return nil }
-        let send = dirtyValues.only(group)
+        var send = dirtyValues.only(group)
+        // The server stores a missing `ebookProgress` as 0 when the PATCH creates the progress
+        // and as `nil` when it updates it; sending 0 makes both store 0, so the echo matches.
+        if let ebook = send.ebook, ebook.ebookProgress == nil { send.ebook?.ebookProgress = 0 }
         unacknowledgedSends.removeAll { $0 == send }
         while unacknowledgedSends.count >= ProgressSend.historyLimit {
             let dropped = unacknowledgedSends.removeFirst().groups
@@ -239,10 +242,19 @@ struct ProgressSyncState: Sendable, Equatable {
             baseline.ebookLocation = ebook.ebookLocation
             baseline.ebookProgress = ebook.ebookProgress
         }
+        // Creating progress stores a missing `ebookProgress` as 0.
+        if unseeded, baseline.ebookProgress == nil { baseline.ebookProgress = 0 }
         if let serverLastUpdate { baseline.lastUpdate = max(baseline.lastUpdate, serverLastUpdate) }
         serverBaseline = baseline
         let sent = send.groups
         dropEvidence(sent)
+        // The server may have auto-finished our un-finish: while a newer finished edit is
+        // pending, keep this send as evidence so the finished echo still matches it.
+        if let finished = send.finished, !finished.isFinished, dirty.contains(.finished),
+            editedAt(.finished) != finished.editedAt
+        {
+            unacknowledgedSends.append(send.only(.finished))
+        }
         truncated.subtract(sent)
         for group in ProgressGroups.each where sent.contains(group) && editedAt(group) == send.editedAt(group) {
             dirty.remove(group)
@@ -398,6 +410,9 @@ struct ProgressSyncState: Sendable, Equatable {
         }
     }
 
+    /// Whether `server` holds `send`'s value of `group` as the server stores it: an un-finish
+    /// fewer than 10 s from the end is auto-finished (`finishedAt` no earlier than the edit). A
+    /// missing `ebookProgress` is sent as 0 (``beginSend()``), so it needs no special case.
     static func matches(_ server: ProgressBaseline, _ send: ProgressSend, _ group: ProgressGroups) -> Bool {
         switch group {
         case .audio:
@@ -405,6 +420,13 @@ struct ProgressSyncState: Sendable, Equatable {
             return audioMatches(server, audio.currentTime, audio.duration)
         case .finished:
             guard let finished = send.finished else { return false }
+            // Auto-finished after the edit: by this PATCH, not an earlier one.
+            if !finished.isFinished, server.isFinished, server.duration > 0,
+                server.duration - server.currentTime < 10, let finishedAt = server.finishedAt,
+                finishedAt >= wholeMilliseconds(finished.editedAt)
+            {
+                return true
+            }
             return server.isFinished == finished.isFinished && datesMatch(server.finishedAt, finished.finishedAt)
         default:
             guard let ebook = send.ebook else { return false }
