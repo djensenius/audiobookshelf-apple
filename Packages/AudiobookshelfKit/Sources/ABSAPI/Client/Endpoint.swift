@@ -42,7 +42,9 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
     /// When `false`, the request neither sends nor stores the connection's cookies.
     public var sendsCookies: Bool
     /// Names of the connection's cookies to leave off this request; the others are still sent.
-    /// When not empty, the request's cookies are set by the client and none are stored.
+    /// When not empty, the request's cookies are written by the client, including on each followed
+    /// same-origin redirect, whose `Set-Cookie` (except the withheld names) is stored in the jar
+    /// first; the final response's cookies are not stored.
     public var withheldCookies: Set<String>
 
     public init(

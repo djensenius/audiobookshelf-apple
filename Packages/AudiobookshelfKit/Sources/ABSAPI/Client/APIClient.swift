@@ -110,9 +110,11 @@ public actor APIClient {
         let request = try makeRequest(for: endpoint)
         let followsRedirects = endpoint.followsRedirects
         let staysOnOrigin = endpoint.staysOnOrigin
+        let cookies = writtenCookies(for: endpoint)
 
         guard endpoint.requiresAuthentication else {
-            let reply = try await perform(request, followsRedirects: followsRedirects, staysOnOrigin: staysOnOrigin)
+            let reply = try await perform(
+                request, followsRedirects: followsRedirects, staysOnOrigin: staysOnOrigin, cookies: cookies)
             return try handle(reply.data, reply.http, for: endpoint)
         }
 
@@ -136,7 +138,7 @@ public actor APIClient {
             let sendGeneration = refreshGeneration
             let reply = try await perform(
                 authorized(request, tokens.accessToken), followsRedirects: followsRedirects,
-                staysOnOrigin: staysOnOrigin)
+                staysOnOrigin: staysOnOrigin, cookies: cookies)
             // A 401 from a hop that never received the token says nothing about the token.
             guard reply.http.statusCode == 401, !reply.credentialsStripped else {
                 return try handle(reply.data, reply.http, for: endpoint)
@@ -371,16 +373,20 @@ public actor APIClient {
         for (name, value) in endpoint.headers {
             request.setValue(value, forHTTPHeaderField: name)
         }
-        if endpoint.sendsCookies, !endpoint.withheldCookies.isEmpty, let url = request.url {
+        if let cookies = writtenCookies(for: endpoint), let url = request.url {
             // The client writes the cookies itself: the jar's, then the endpoint's own `Cookie`
             // header (custom headers can't set one).
-            request.setValue(
-                Self.cookieHeader(
-                    jar: cookieStorage?.cookies(for: url) ?? [], withholding: endpoint.withheldCookies,
-                    explicit: request.value(forHTTPHeaderField: "Cookie")),
-                forHTTPHeaderField: "Cookie")
+            request.setValue(cookies.header(for: url), forHTTPHeaderField: "Cookie")
         }
         return request
+    }
+
+    /// The rule for an endpoint whose cookies the client writes itself (one that withholds some),
+    /// or `nil` when `URLSession` handles them (or none are sent).
+    private func writtenCookies<Response>(for endpoint: Endpoint<Response>) -> WrittenCookies? {
+        guard endpoint.sendsCookies, !endpoint.withheldCookies.isEmpty else { return nil }
+        let explicit = endpoint.headers.first { $0.key.lowercased() == "cookie" }?.value
+        return WrittenCookies(jar: cookieStorage, withheld: endpoint.withheldCookies, explicit: explicit)
     }
 
     /// One `Cookie` header from the jar's cookies, minus `withheld` and any named in `explicit`
@@ -413,10 +419,12 @@ public actor APIClient {
 
     /// - Parameter staysOnOrigin: Declines any redirect that would leave the origin (and so be
     ///   stripped of credentials) instead of following it without them.
+    /// - Parameter cookies: For a request whose cookies the client writes, the rule that
+    ///   rewrites them on each followed same-origin hop.
     private func perform(
-        _ request: URLRequest, followsRedirects: Bool, staysOnOrigin: Bool = false
+        _ request: URLRequest, followsRedirects: Bool, staysOnOrigin: Bool = false, cookies: WrittenCookies? = nil
     ) async throws -> Reply {
-        let chain = followsRedirects ? RedirectChainDelegate(staysOnOrigin: staysOnOrigin) : nil
+        let chain = followsRedirects ? RedirectChainDelegate(staysOnOrigin: staysOnOrigin, cookies: cookies) : nil
         let delegate: any URLSessionTaskDelegate = chain ?? RedirectSuppressingDelegate()
         let data: Data
         let response: URLResponse
