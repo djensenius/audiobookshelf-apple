@@ -176,12 +176,25 @@ struct SleepTimerTests {
         #expect(harness.feedback.chimes == 1)
     }
 
-    @Test(arguments: [(20.0, 0.0), (600, 580)])
+    @Test func chimesOnceASlowerRateLiftsAChapterAboveTheLeadTime() async {
+        let harness = Harness(timeline: chapters, at: 400, options: SleepTimerOptions(playsAlmostDoneChime: true))
+        harness.control.rate = 2
+        harness.timer.start(.endOfChapter)
+        #expect(harness.timer.remaining == 25)
+        harness.control.rate = 1
+        await harness.play(from: 400, to: 419)
+        #expect(harness.feedback.chimes == 0)
+        await harness.play(from: 419, to: 420)
+        #expect(harness.feedback.chimes == 1, "30 s before the end at 1×")
+    }
+
+    /// Starting inside the lead time, cutting well into it, or cutting just below it, skips the chime.
+    @Test(arguments: [(20.0, 0.0), (600, 580), (600, 570.25)])
     func neverChimesForARunStartedOrCutInsideTheLeadTime(length: Double, cut: Double) async {
         let harness = Harness(options: SleepTimerOptions(playsAlmostDoneChime: true))
         harness.timer.start(.duration(length))
         harness.timer.subtract(cut)
-        await harness.advance(20)
+        await harness.advance(30)
         #expect(harness.control.pauseCount == 1)
         #expect(harness.feedback.chimes == 0, "Jumping past the chime skips it")
     }
@@ -201,12 +214,14 @@ struct SleepTimerTests {
         #expect(harness.timer.isRunning, "Restarted within the grace period")
     }
 
-    @Test func anItemLoadedBeforeTheExpirySeekIsntSought() async {
+    /// Another item, or a seek that landed, before the expiry's seek task runs wins: no rewind to the fade.
+    @Test(arguments: [false, true])
+    func aChangeBeforeTheExpirySeekWins(userSeeks: Bool) async {
         let harness = Harness(at: 100)
         harness.timer.start(.duration(30))
         await harness.play(from: 100, to: 130)
         #expect(harness.control.pauseCount == 1)
-        harness.timer.itemDidChange("other")
+        if userSeeks { harness.control.currentTime = 5000 } else { harness.timer.itemDidChange("other") }
         await Task { @MainActor in }.value  // Queued after the expiry's seek task, so that has run.
         #expect(harness.control.seeks.isEmpty)
     }
@@ -314,6 +329,28 @@ struct SleepTimerTests {
         await harness.advance(1)
         #expect(harness.control.pauseCount == 1, "At the end of the first track")
         #expect(harness.timer.isRunning == false)
+    }
+
+    @Test func chapterTimeLeftLeavesOutGapsBetweenTracks() async {
+        let timeline = PlaybackTimeline(
+            tracks: [
+                AudioTrack(index: 1, startOffset: 5, duration: 95),
+                AudioTrack(index: 2, startOffset: 110, duration: 90),
+            ],
+            chapters: [Chapter(id: 0, start: 0, end: 120), Chapter(id: 1, start: 120, end: 200)])
+        let harness = Harness(timeline: timeline, at: 70, options: SleepTimerOptions(playsAlmostDoneChime: true))
+        harness.timer.start(.endOfChapter)
+        #expect(harness.timer.remaining == 40, "30 s of the first track, then 10 of the second")
+        await harness.play(from: 70, to: 80)
+        #expect(harness.feedback.chimes == 1, "30 s before the end")
+        await harness.play(from: 80, to: 100)
+        #expect(harness.timer.remaining == 10)
+        harness.control.currentTime = 110
+        await harness.advance(1)
+        #expect(harness.timer.remaining == 10)
+        #expect(harness.control.volumes.suffix(2) == [Float(11.0 / 60), Float(10.0 / 60)], "No jump across the gap")
+        await harness.play(from: 110, to: 120)
+        #expect(harness.control.pauseCount == 1)
     }
 
     @Test func aSeekDuringTheChapterFadeRestoresTheVolume() {
