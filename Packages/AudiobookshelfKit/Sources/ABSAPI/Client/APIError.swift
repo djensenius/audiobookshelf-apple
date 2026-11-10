@@ -27,12 +27,19 @@ public enum APIError: Error, Sendable, Equatable {
     /// The response body did not match the expected type.
     case decoding(String)
 
-    /// A connection failure, timeout or 5xx: the server may answer if asked again later.
+    /// A connection failure, timeout, 408, 429 or 5xx: the server may answer if asked again later.
+    /// TLS, ATS and malformed-URL failures aren't transient.
     var isTransient: Bool {
         switch self {
-        case .network, .timedOut: true
-        case .http(let status, _): (500..<600).contains(status)
+        case .timedOut: true
+        case .network(let code): Self.connectivityCodes.contains(code)
+        case .http(let status, _): status == 408 || status == 429 || (500..<600).contains(status)
         default: false
         }
     }
+
+    private static let connectivityCodes: Set<URLError.Code> = [
+        .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost,
+        .dnsLookupFailed, .internationalRoamingOff, .dataNotAllowed, .timedOut,
+    ]
 }

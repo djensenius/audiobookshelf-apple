@@ -38,6 +38,8 @@ public actor APIClient {
     private var refreshJoinObserver: (@Sendable () -> Void)?
     /// The clock for access token expiry; tests replace it with ``setNow(_:)``.
     private var now: @Sendable () -> Date = { Date() }
+    /// The access token the latest successful refresh returned, and when it arrived.
+    private var refreshReceipt: (accessToken: String, receivedAt: Date)?
 
     private struct CompletedRefresh {
         let from: AuthTokens
@@ -179,13 +181,18 @@ public actor APIClient {
     /// refreshed token, each call with it refreshes again.
     ///
     /// - Parameter rejected: `nil` before starting a request: the stored token, refreshed first
-    ///   if its JWT `exp` is within ``accessTokenExpiryLeeway`` of now (a token without a
-    ///   readable `exp` is returned as is). If that refresh fails with a network error, timeout
-    ///   or 5xx while the token hasn't expired yet, the token is still returned. After a 401,
-    ///   the token the server rejected: refreshed if it is still the stored token; otherwise the
-    ///   newer stored token is returned without refreshing.
-    /// - Throws: ``APIError/notAuthenticated`` when signed out, and the errors a 401's refresh
-    ///   throws (such as ``APIError/sessionExpired``) when the refresh fails.
+    ///   if it expires within ``accessTokenExpiryLeeway`` (see ``earlyRefreshExpiry(of:)``; a
+    ///   token without a readable `exp` is returned as is). If that refresh fails with a
+    ///   transient error (``APIError/isTransient``), the stored token is still returned if the
+    ///   session is unchanged and the token hasn't expired yet, or the new session's token if a
+    ///   sign-in replaced it. After a 401, the token the server rejected: refreshed if it is
+    ///   still the stored token; otherwise the newer stored token is returned without
+    ///   refreshing.
+    /// - Throws: ``APIError/notAuthenticated`` when signed out (including during the refresh on
+    ///   the `nil` path). Otherwise whatever the refresh throws, as for a 401:
+    ///   ``APIError/sessionExpired`` when the server rejects the refresh token, other
+    ///   ``APIError``s when it fails, and, with a rejected token, `CancellationError` when a
+    ///   sign-out or new sign-in replaces the session during the refresh.
     public func accessToken(replacing rejected: String?) async throws -> String {
         let readGeneration = refreshGeneration
         requestGenerations[readGeneration, default: 0] += 1
@@ -197,20 +204,55 @@ public actor APIClient {
             let outcome = try await refreshedTokens(replacing: tokens, readAt: readGeneration, sentAt: readGeneration)
             return outcome.tokens.accessToken
         }
-        guard let expiry = AccessTokenExpiry.date(of: tokens.accessToken),
-            expiry.timeIntervalSince(now()) <= Self.accessTokenExpiryLeeway
+        guard let expiry = earlyRefreshExpiry(of: tokens.accessToken),
+            expiry.expiresAt.timeIntervalSince(now()) <= expiry.leeway
         else { return tokens.accessToken }
         do {
             let outcome = try await refreshedTokens(replacing: tokens, readAt: readGeneration, sentAt: readGeneration)
             return outcome.tokens.accessToken
-        } catch let error as APIError where error.isTransient && now() < expiry {
-            return tokens.accessToken
+        } catch let error as APIError where error.isTransient {
+            // The session may have ended or changed while the refresh was failing.
+            guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
+            guard current == tokens else { return current.accessToken }
+            guard now() < expiry.expiresAt else { throw error }
+            return current.accessToken
+        } catch is CancellationError where !Task.isCancelled {
+            // A sign-out or new sign-in replaced the session during the refresh.
+            guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
+            guard current != tokens else { throw CancellationError() }
+            return current.accessToken
         }
     }
 
-    /// How close to its `exp` an access token is refreshed before use by
-    /// ``accessToken(replacing:)``.
+    /// The most an access token is refreshed ahead of its expiry by ``accessToken(replacing:)``.
     static let accessTokenExpiryLeeway: TimeInterval = 120
+
+    /// When `accessToken` expires by this device's clock, and how early to refresh it; `nil` when
+    /// it shouldn't be refreshed early.
+    ///
+    /// A token this client received from a refresh is timed from when it arrived: its lifetime
+    /// (`exp` − `iat`) after the receipt, so a server clock that differs from this device's doesn't
+    /// make it look expired. Without `iat`, such a token that already looked near expiry when it
+    /// arrived is never refreshed early. Any other token (loaded from storage) uses `exp` against
+    /// this device's clock. The leeway is at most half the lifetime, and a token whose `exp` isn't
+    /// after its `iat` is never refreshed early, so a fresh token never immediately looks near
+    /// expiry and each pair is replaced by an early refresh at most once (a refresh that fails
+    /// transiently is tried again on the next call).
+    private func earlyRefreshExpiry(of accessToken: String) -> (expiresAt: Date, leeway: TimeInterval)? {
+        guard let claims = AccessTokenExpiry(token: accessToken) else { return nil }
+        let receivedAt = refreshReceipt?.accessToken == accessToken ? refreshReceipt?.receivedAt : nil
+        guard let issuedAt = claims.issuedAt else {
+            let expiresAt = Date(timeIntervalSince1970: claims.expiresAt)
+            if let receivedAt, expiresAt.timeIntervalSince(receivedAt) <= Self.accessTokenExpiryLeeway {
+                return nil
+            }
+            return (expiresAt, Self.accessTokenExpiryLeeway)
+        }
+        let lifetime = claims.expiresAt - issuedAt
+        guard lifetime > 0 else { return nil }
+        let expiresAt = receivedAt?.addingTimeInterval(lifetime) ?? Date(timeIntervalSince1970: claims.expiresAt)
+        return (expiresAt, min(Self.accessTokenExpiryLeeway, lifetime / 2))
+    }
 
     /// Lets tests control the clock used for access token expiry.
     func setNow(_ now: @escaping @Sendable () -> Date) {
@@ -333,6 +375,7 @@ public actor APIClient {
         // token, so anything it returns (including tokens) must not be trusted. Such a redirect is
         // declined and surfaces as `.redirectRefused`.
         let reply = try await perform(request, followsRedirects: true, staysOnOrigin: true)
+        let receivedAt = now()
         guard !reply.credentialsStripped else { throw APIError.invalidResponse }
         let data = reply.data
         switch reply.http.statusCode {
@@ -355,6 +398,7 @@ public actor APIClient {
             }
             // Recorded before the flight's task finishes, so no request can miss both the
             // flight and its result.
+            refreshReceipt = (refreshed.accessToken, receivedAt)
             refreshGeneration += 1
             completedRefreshes.append(CompletedRefresh(from: tokens, to: refreshed, generation: refreshGeneration))
             pruneCompletedRefreshes()

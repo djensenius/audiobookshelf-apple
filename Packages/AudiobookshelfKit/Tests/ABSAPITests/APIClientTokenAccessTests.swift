@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSAPI
@@ -272,5 +273,239 @@ private func makeExpiryClient(
             try await client.accessToken(replacing: nil)
         }
         #expect(tokens.current == nil)
+    }
+}
+
+private func refreshJSON(_ accessToken: String) -> String {
+    #"{"user":{"accessToken":"\#(accessToken)","refreshToken":"refresh-2"}}"#
+}
+
+private let expiringToken = makeJWT(expiringAt: now.addingTimeInterval(60))
+private let newSession = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
+
+/// A clock tests can move forward.
+private final class TestClock: Sendable {
+    private let date = Mutex(now)
+    func read() -> Date { date.withLock { $0 } }
+    func advance(by interval: TimeInterval) { date.withLock { $0 += interval } }
+}
+
+@Suite struct APIClientTokenExpiryRaceTests {
+    @Test func transientFailureAfterSignOutThrowsNotAuthenticated() async throws {
+        let gate = StubGate()
+        let (client, _, tokens) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .text("Bad gateway", status: 502, gate: gate))
+
+        let token = Task { try await client.accessToken(replacing: nil) }
+        await gate.arrived()
+        tokens.signOut()
+        gate.open()
+
+        await #expect(throws: APIError.notAuthenticated) { try await token.value }
+    }
+
+    @Test func transientFailureAfterNewSignInReturnsNewToken() async throws {
+        let gate = StubGate()
+        let (client, _, tokens) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .text("Bad gateway", status: 502, gate: gate))
+
+        let token = Task { try await client.accessToken(replacing: nil) }
+        await gate.arrived()
+        tokens.signIn(newSession)
+        gate.open()
+
+        #expect(try await token.value == "access-new")
+    }
+
+    @Test func successfulRefreshRacingNewSignInReturnsNewToken() async throws {
+        let gate = StubGate()
+        let (client, _, tokens) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .json(refreshJSON(freshToken), gate: gate))
+
+        let token = Task { try await client.accessToken(replacing: nil) }
+        await gate.arrived()
+        tokens.signIn(newSession)
+        gate.open()
+
+        #expect(try await token.value == "access-new")
+        #expect(tokens.current == newSession)
+        #expect(tokens.updates.isEmpty)
+    }
+
+    @Test func successfulRefreshRacingSignOutThrowsNotAuthenticated() async throws {
+        let gate = StubGate()
+        let (client, _, tokens) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .json(refreshJSON(freshToken), gate: gate))
+
+        let token = Task { try await client.accessToken(replacing: nil) }
+        await gate.arrived()
+        tokens.signOut()
+        gate.open()
+
+        await #expect(throws: APIError.notAuthenticated) { try await token.value }
+        #expect(tokens.current == nil)
+    }
+
+    @Test func expiringTokenJoinsRefreshStartedByUnauthorizedRequest() async throws {
+        let gate = StubGate()
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath { return .json(refreshJSON(freshToken), gate: gate) }
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer \(freshToken)" {
+                return .json(#"{"ok":true}"#)
+            }
+            return .text("Unauthorized", status: 401)
+        }
+        let tokens = InMemoryTokenProvider(AuthTokens(accessToken: expiringToken, refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+        await client.setNow { now }
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
+
+        let response = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await gate.arrived()
+        let token = Task { try await client.accessToken(replacing: nil) }
+        await joins.reached()
+        gate.open()
+
+        #expect(try await token.value == freshToken)
+        #expect(try await response.value == OK(ok: true))
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
+    @Test func tokenFarFromExpiryDoesNotWaitForRunningRefresh() async throws {
+        let gate = StubGate()
+        let stored = makeJWT(expiringAt: now.addingTimeInterval(7200))
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath { return .json(refreshJSON(freshToken), gate: gate) }
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer \(freshToken)" {
+                return .json(#"{"ok":true}"#)
+            }
+            return .text("Unauthorized", status: 401)
+        }
+        let tokens = InMemoryTokenProvider(AuthTokens(accessToken: stored, refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+        await client.setNow { now }
+
+        let response = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await gate.arrived()
+        // Returns while the refresh is still held, so it didn't join it.
+        #expect(try await client.accessToken(replacing: nil) == stored)
+        gate.open()
+
+        #expect(try await response.value == OK(ok: true))
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
+    @Test func nonTransientRefreshFailuresThrowAndKeepTokens() async throws {
+        let other = StubServer { _ in .json(refreshJSON("access-evil")) }
+        let failures: [(StubResponse, (APIError) -> Bool)] = [
+            (.text("Forbidden", status: 403), { $0 == .forbidden(message: "Forbidden") }),
+            (.json(#"{"nope":1}"#), { if case .decoding = $0 { true } else { false } }),
+            (.redirect(to: "https://\(other.host)/x", status: 307), { $0 == .redirectRefused(status: 307) }),
+        ]
+        for (refresh, matches) in failures {
+            let (client, _, tokens) = try await makeExpiryClient(accessToken: expiringToken, refresh: refresh)
+            do {
+                _ = try await client.accessToken(replacing: nil)
+                Issue.record("Expected an error")
+            } catch let error as APIError {
+                #expect(matches(error), "\(error)")
+            }
+            #expect(tokens.current == AuthTokens(accessToken: expiringToken, refreshToken: "refresh-1"))
+            #expect(tokens.updates.isEmpty)
+            #expect(tokens.expiredCount == 0)
+        }
+        #expect(other.requests.isEmpty)
+    }
+
+    @Test func transientFailureAtExactExpiryThrows() async throws {
+        let (client, _, _) = try await makeExpiryClient(
+            accessToken: makeJWT(expiringAt: now), refresh: .text("Bad gateway", status: 502))
+
+        await #expect(throws: APIError.http(status: 502, message: "Bad gateway")) {
+            try await client.accessToken(replacing: nil)
+        }
+    }
+}
+
+@Suite struct APIClientTokenClockSkewTests {
+    /// The server's clock is an hour behind this device, so a token it just issued looks
+    /// expired by this device's clock.
+    @Test func refreshedTokenFromSkewedServerIsNotRefreshedAgain() async throws {
+        let skewed = makeJWT(
+            claims: #"{"iat":\#(Int(now.timeIntervalSince1970) - 3600),"exp":\#(Int(now.timeIntervalSince1970))}"#)
+        let (client, server, tokens) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .json(refreshJSON(skewed)))
+        let clock = TestClock()
+        await client.setNow { clock.read() }
+
+        #expect(try await client.accessToken(replacing: nil) == skewed)
+        #expect(try await client.accessToken(replacing: nil) == skewed)
+        #expect(server.requests(path: refreshPath).count == 1)
+
+        // Timed from its arrival, it nears expiry an hour later.
+        clock.advance(by: 3600 - 121)
+        #expect(try await client.accessToken(replacing: nil) == skewed)
+        #expect(server.requests(path: refreshPath).count == 1)
+        clock.advance(by: 2)
+        _ = try await client.accessToken(replacing: nil)
+        #expect(server.requests(path: refreshPath).count == 2)
+        #expect(tokens.updates.count == 2)
+    }
+
+    @Test func refreshedTokenWithoutIssuedAtThatLooksExpiringIsNotRefreshedAgain() async throws {
+        let (client, server, _) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .json(refreshJSON(makeJWT(expiringAt: now.addingTimeInterval(30)))))
+
+        _ = try await client.accessToken(replacing: nil)
+        _ = try await client.accessToken(replacing: nil)
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
+    @Test func tokenExpiringAtOrBeforeIssueIsNotRefreshedEarly() async throws {
+        let t = Int(now.timeIntervalSince1970)
+        let token = makeJWT(claims: #"{"iat":\#(t),"exp":\#(t)}"#)
+        let (client, server, _) = try await makeExpiryClient(accessToken: token)
+
+        #expect(try await client.accessToken(replacing: nil) == token)
+        #expect(server.requests.isEmpty)
+    }
+
+    /// A 100 s lifetime gets a 50 s leeway rather than 120 s.
+    @Test func shortLivedTokenUsesHalfItsLifetimeAsLeeway() async throws {
+        let t = Int(now.timeIntervalSince1970)
+        let outside = makeJWT(claims: #"{"iat":\#(t - 40),"exp":\#(t + 60)}"#)
+        let (client, server, _) = try await makeExpiryClient(accessToken: outside)
+        #expect(try await client.accessToken(replacing: nil) == outside)
+        #expect(server.requests.isEmpty)
+
+        let inside = makeJWT(claims: #"{"iat":\#(t - 60),"exp":\#(t + 40)}"#)
+        let (insideClient, insideServer, _) = try await makeExpiryClient(accessToken: inside)
+        #expect(try await insideClient.accessToken(replacing: nil) == freshToken)
+        #expect(insideServer.requests(path: refreshPath).count == 1)
+    }
+}
+
+@Suite struct APIErrorTransientTests {
+    @Test(arguments: [
+        (APIError.http(status: 408, message: nil), true),
+        (.http(status: 429, message: nil), true),
+        (.http(status: 499, message: nil), false),
+        (.http(status: 500, message: nil), true),
+        (.http(status: 599, message: nil), true),
+        (.http(status: 600, message: nil), false),
+        (.forbidden(message: nil), false),
+        (.decoding("bad"), false),
+        (.timedOut, true),
+        (.network(.notConnectedToInternet), true),
+        (.network(.networkConnectionLost), true),
+        (.network(.dataNotAllowed), true),
+        (.network(.secureConnectionFailed), false),
+        (.network(.serverCertificateUntrusted), false),
+        (.network(.appTransportSecurityRequiresSecureConnection), false),
+        (.network(.badURL), false),
+    ])
+    func classifiesTransientErrors(error: APIError, isTransient: Bool) {
+        #expect(error.isTransient == isTransient)
     }
 }

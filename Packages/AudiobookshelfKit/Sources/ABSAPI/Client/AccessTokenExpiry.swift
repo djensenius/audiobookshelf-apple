@@ -1,20 +1,46 @@
 import Foundation
 
-/// Reads the `exp` claim of a JWT access token, only to schedule refreshes. The signature isn't
-/// checked: the server still decides whether the token is valid.
-enum AccessTokenExpiry {
-    /// When `token` expires, or `nil` if that's unknown (not a JWT, or no numeric `exp`).
-    static func date(of token: String) -> Date? {
+/// The `exp` and `iat` claims of a JWT access token, read only to schedule refreshes. The
+/// signature isn't checked: the server still decides whether the token is valid. Times are
+/// seconds since 1970 by the server's clock.
+struct AccessTokenExpiry: Equatable {
+    let expiresAt: TimeInterval
+    let issuedAt: TimeInterval?
+
+    init(expiresAt: TimeInterval, issuedAt: TimeInterval?) {
+        self.expiresAt = expiresAt
+        self.issuedAt = issuedAt
+    }
+
+    /// `nil` if the expiry is unknown: not a JWT, or no finite numeric `exp`. An unreadable `iat`
+    /// is ignored. The payload is decoded as base64url with optional padding; the standard
+    /// alphabet's `+` and `/` are accepted too.
+    init?(token: String) {
         let segments = token.split(separator: ".", omittingEmptySubsequences: false)
-        guard segments.count == 3, let payload = decode(base64URL: segments[1]) else { return nil }
-        guard let claims = try? JSONDecoder().decode(Claims.self, from: payload),
-            let exp = claims.exp, exp.isFinite
+        guard segments.count == 3, let payload = Self.decode(base64URL: segments[1]),
+            let claims = try? JSONDecoder().decode(Claims.self, from: payload)
         else { return nil }
-        return Date(timeIntervalSince1970: exp)
+        expiresAt = claims.exp
+        issuedAt = claims.iat
     }
 
     private struct Claims: Decodable {
-        let exp: Double?
+        let exp: TimeInterval
+        let iat: TimeInterval?
+
+        private enum CodingKeys: String, CodingKey {
+            case exp, iat
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            exp = try container.decode(TimeInterval.self, forKey: .exp)
+            guard exp.isFinite else {
+                throw DecodingError.dataCorruptedError(forKey: .exp, in: container, debugDescription: "Not finite")
+            }
+            let iat = try? container.decodeIfPresent(TimeInterval.self, forKey: .iat)
+            self.iat = iat.flatMap { $0.isFinite ? $0 : nil }
+        }
     }
 
     /// Decodes a base64url segment with optional padding.
@@ -25,5 +51,5 @@ enum AccessTokenExpiry {
         return Data(base64Encoded: base64)
     }
 
-    private static let maximumSegmentLength = 16_384
+    static let maximumSegmentLength = 16_384
 }
