@@ -91,3 +91,11 @@ sw.*
 
 /resources/
 /android/app/release/
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+*.xcresult
+xcuserdata/
+Audiobookshelf.xcodeproj/project.xcworkspace/

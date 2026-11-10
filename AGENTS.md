@@ -11,9 +11,43 @@ replacing the Nuxt/Capacitor app this repository was forked from. Track work on 
 
 ## Layout today
 
-The new Swift app and package structure will be added in Phase 0; document it here
-when it lands. Everything else is **legacy reference code** — read it to port
-behavior, but it is not built:
+### Native app
+
+| Path | What it is |
+| --- | --- |
+| `Audiobookshelf.xcodeproj/project.xcproj` | Xcode 27.2 JSON project: app target `Audiobookshelf` (iOS, iPadOS, native macOS; no Catalyst) and test target `AudiobookshelfTests` |
+| `Audiobookshelf/` | App sources (synchronized folder), `Info.plist` fragment (background audio, CarPlay scene), macOS entitlements |
+| `AudiobookshelfTests/` | App tests (Swift Testing), hosted in the app |
+| `Packages/AudiobookshelfKit/` | Local Swift package with all feature code; one `AudiobookshelfKit` library product exposes every module |
+
+`AudiobookshelfKit` modules (all are declared in `Package.swift` already; add source
+files, don't add targets without need):
+
+| Module | Responsibility | Depends on |
+| --- | --- | --- |
+| `ABSCore` | Models and shared utilities | — |
+| `ABSAPI` | HTTP client, authentication, endpoints | ABSCore |
+| `ABSRealtime` | Socket.IO real-time updates | ABSCore, ABSAPI |
+| `ABSData` | SwiftData persistence | ABSCore |
+| `ABSPlayback` | Playback and progress sync | ABSCore, ABSAPI, ABSData |
+| `ABSDownloads` | Offline downloads | ABSCore, ABSAPI, ABSData |
+| `ABSUI` | Shared SwiftUI components and design system | ABSCore |
+
+Each module has a `<Module>Tests` target. Package tests run with `swift test`
+(`mise run test:kit`); they cannot be added to the app scheme.
+
+Bundle IDs: `org.davidjensenius.Audiobookshelf` and
+`org.davidjensenius.AudiobookshelfTests`. No signing team is committed.
+
+CarPlay: the scene and `CarPlaySceneDelegate` exist, but the
+`com.apple.developer.carplay-audio` entitlement is not added yet — it requires Apple
+approval. Add it to `Audiobookshelf/Audiobookshelf.entitlements` (and make that
+file apply to iOS) once granted.
+
+### Legacy reference
+
+Everything else is **legacy reference code** — read it to port behavior, but it is
+not built:
 
 | Path | What it is |
 | --- | --- |
@@ -31,7 +65,30 @@ Repository tooling lives in `scripts/`, `.github/workflows/`, and `mise.toml`.
   `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, for example
   `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild …`.
 - [mise](https://mise.jdx.dev) pins tools and defines tasks. Run `mise install`
-  once, then `mise run lint` (ShellCheck + actionlint) before pushing.
+  once. mise tasks set `DEVELOPER_DIR` to Xcode.app unless it is already set.
+
+| Command | What it does |
+| --- | --- |
+| `mise run lint` | ShellCheck, actionlint, and `swift format lint --strict` (`lint:repo` skips Swift) |
+| `mise run format` | `swift format` Swift sources in place |
+| `mise run build:ios` / `build:macos` | Build the app (unsigned) into `.build/DerivedData` |
+| `mise run test` | Package tests (`test:kit`) and macOS app tests (`test:app`) |
+| `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
+
+Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing.
+
+## Xcode project rules
+
+- The project uses the JSON format. Never create `project.pbxproj` — Xcode refuses
+  to open a project with both files.
+- Never use `agvtool`; it breaks JSON projects. Edit `MARKETING_VERSION` and
+  `CURRENT_PROJECT_VERSION` in `project.xcproj` directly.
+- Keep `project.xcproj` canonical (`mise run xcproj:format`, which builds Apple's
+  `xcprojformatter` at a pinned commit). CI fails otherwise.
+- Target IDs are fixed strings (`AB0000000000000000000001` app,
+  `…0002` tests) referenced by the shared scheme; don't change them.
+- New app files go in the synchronized `Audiobookshelf/` folder; no project edit is
+  needed.
 
 ## Conventions
 

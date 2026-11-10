@@ -17,6 +17,18 @@ server, targeting iPhone, iPad, iPhone Duo, Mac, and CarPlay.
 - [mise](https://mise.jdx.dev) for tools and tasks (`mise run lint`).
 - Xcode Cloud for TestFlight builds.
 
+## Building
+
+Requires Xcode 27.2 and [mise](https://mise.jdx.dev). Open
+`Audiobookshelf.xcodeproj` in Xcode, or from the command line:
+
+```sh
+mise install
+mise run build:ios     # or build:macos
+mise run test          # package and macOS app tests
+mise run lint          # ShellCheck, actionlint, swift format
+```
+
 ## Relationship to upstream
 
 This repository started from
