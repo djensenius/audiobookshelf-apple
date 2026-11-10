@@ -234,7 +234,7 @@ import Testing
 
     // MARK: - History overflow and per-group pruning
 
-    @Test func overflowSetsTruncationOnlyForDroppedGroups() throws {
+    @Test func overflowSetsTruncationForDroppedGroupsAndTheirSideEffects() throws {
         var state = Self.seeded()
         // Finished, not ebook: a dirty ebook group would alternate with the failing audio sends.
         state.apply(ProgressEdit(isFinished: true), now: Self.at(1))
@@ -244,9 +244,30 @@ import Testing
             try Self.send(&state)
         }
         #expect(state.unacknowledgedSends.count == ProgressSend.historyLimit)
-        // The dropped first entry carried only the finished group.
-        #expect(state.truncated == .finished)
+        // The dropped first entry carried only finished, whose PATCH may also have changed the
+        // dirty audio (#53).
+        #expect(state.truncated == [.finished, .audio])
         #expect(state.unacknowledgedSends.allSatisfy { $0.audio != nil })
+    }
+
+    /// Copilot on #146: the first audio PATCH committed and un-finished the item on the server,
+    /// its response was lost, and eight distinct retries pushed it out of the list. Its echo must
+    /// still not overwrite the user's pending "finished".
+    @Test func evictedAudioSendStillShieldsPendingFinish() throws {
+        var state = ProgressSyncState(
+            seed: Self.server(currentTime: 1000, isFinished: true, finishedAt: Self.t0, lastUpdate: Self.t0))
+        state.apply(Self.seek(300), now: Self.at(1))
+        try Self.send(&state)  // Committed at 5 (the server un-finishes); the response is lost.
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(2))
+        for index in 1...ProgressSend.historyLimit {
+            state.apply(Self.seek(Double(300 + index * 10)), now: Self.at(Double(10 + index)))
+            try Self.send(&state)  // Fails before reaching the server.
+        }
+        #expect(state.unacknowledgedSends.allSatisfy { $0.audio?.currentTime != 300 })
+
+        state.merge(Self.server(currentTime: 300, lastUpdate: Self.at(5)))
+        #expect(state.isFinished)
+        #expect(state.dirty == [.audio, .finished])
     }
 
     @Test func truncatedGroupKeepsLocalOnUnmatchedServerValue() throws {
@@ -270,20 +291,19 @@ import Testing
 
     @Test func untruncatedGroupStillResolvesConflictsByTime() throws {
         var state = Self.seeded()
-        state.apply(ProgressEdit(isFinished: true), now: Self.at(1))
-        try Self.send(&state)
-        for index in 0..<ProgressSend.historyLimit {
+        for index in 0...ProgressSend.historyLimit {
             state.apply(Self.seek(Double(200 + index)), now: Self.at(Double(10 + index)))
             try Self.send(&state)
         }
-        #expect(state.truncated == .finished)
-        // Audio isn't truncated: an unmatched, newer server value is a real conflict the server wins.
-        state.merge(Self.server(currentTime: 900, lastUpdate: Self.at(500)))
-        #expect(state.currentTime == 900)
-        #expect(state.dirty.contains(.audio) == false)
-        // Finished is truncated: its local value wins.
-        #expect(state.isFinished)
-        #expect(state.dirty.contains(.finished))
+        #expect(state.truncated == .audio)
+        state.apply(Self.page("mine", 0.2), now: Self.at(30))
+        // Ebook isn't truncated: an unmatched, newer server value is a real conflict the server wins.
+        state.merge(Self.server(currentTime: 900, ebookLocation: "other", lastUpdate: Self.at(500)))
+        #expect(state.ebookLocation == "other")
+        #expect(state.dirty.contains(.ebook) == false)
+        // Audio is truncated: its local value wins.
+        #expect(state.currentTime == Double(200 + ProgressSend.historyLimit))
+        #expect(state.dirty.contains(.audio))
     }
 
     /// The case from the ADR 0003 review (#37 comment): ebook edit → PATCH A (response lost) →
@@ -613,17 +633,49 @@ import Testing
         #expect(state.truncated == .ebook)
     }
 
-    @Test func ebookSendWithBaselineShieldsNothing() throws {
-        var state = Self.seeded()
+    /// Copilot on #146: progress created by an audio PATCH at 995 of 1000 s isn't auto-finished,
+    /// but the next PATCH, even ebook-only, auto-finishes it (`MediaProgress.applyProgressUpdate`).
+    /// A seek and an explicit "not finished" made while that ebook PATCH is in flight survive,
+    /// whether its echo is merged before or after the acknowledgement.
+    @Test(arguments: [false, true])
+    func ebookPatchAutoFinishCannotOverwritePendingEdits(acknowledgeFirst: Bool) throws {
+        var state = ProgressSyncState(seed: Self.server(currentTime: 995, lastUpdate: Self.t0))
         state.apply(Self.page("A", 0.3), now: Self.at(1))
         let ebook = try Self.send(&state)
-        state.apply(Self.seek(200), now: Self.at(2))
-        state.apply(ProgressEdit(isFinished: true), now: Self.at(2))
-        state.merge(Self.server(lastUpdate: Self.t0), excluding: .ebook)
-        #expect(state.truncated.isEmpty)
-        state.acknowledge(ebook, serverLastUpdate: Self.at(3))
-        #expect(state.truncated.isEmpty)
+        state.apply(Self.seek(300), now: Self.at(2))
+        state.apply(ProgressEdit(isFinished: false), now: Self.at(2))
+        var finished = Self.server(
+            currentTime: 995, isFinished: true, finishedAt: Self.at(5), ebookLocation: "A", ebookProgress: 0.3,
+            lastUpdate: Self.at(5))
+        finished.progress = 1
+        if acknowledgeFirst {
+            state.acknowledge(ebook, serverLastUpdate: Self.at(5))
+            state.merge(finished)
+        } else {
+            state.merge(finished, excluding: .ebook)
+            state.acknowledge(ebook, serverLastUpdate: Self.at(5))
+        }
+        #expect(state.currentTime == 300)
+        #expect(state.isFinished == false)
         #expect(state.dirty == [.audio, .finished])
+    }
+
+    /// Copilot on #146: auto-finishing an audio PATCH at 995 of 1000 s stores `progress` 1, not
+    /// the 0.995 sent. A seek made while it was in flight survives its echo, whether the PATCH
+    /// was acknowledged or its response was lost.
+    @Test(arguments: [false, true])
+    func autoFinishNormalizedProgressStillMatchesOurSend(acknowledged: Bool) throws {
+        var state = ProgressSyncState(seed: Self.server(currentTime: 900, lastUpdate: Self.t0))
+        state.apply(Self.seek(995), now: Self.at(1))
+        let audio = try Self.send(&state)
+        state.apply(Self.seek(300), now: Self.at(2))
+        if acknowledged { state.acknowledge(audio, serverLastUpdate: Self.at(5)) }
+        var echo = Self.server(currentTime: 995, isFinished: true, finishedAt: Self.at(5), lastUpdate: Self.at(5))
+        echo.progress = 1
+        state.merge(echo)
+        #expect(state.currentTime == 300)
+        #expect(state.dirty == .audio)
+        #expect(state.isFinished)
     }
 
     // MARK: - Interleavings
@@ -649,7 +701,8 @@ import Testing
 
 /// Where the server's value of a group came from.
 private enum Origin: Equatable {
-    case ours
+    /// Our send of the edit made at that time, possibly normalized by the server.
+    case ours(Date)
     case sideEffect(Date)
     case other
 }
@@ -728,41 +781,64 @@ private struct Simulation {
         epoch += 1
     }
 
-    /// The PATCH reaches the server, which applies it with the #53 side effects.
+    /// The PATCH reaches the server, which applies it like audiobookshelf 2.26.0 to master:
+    /// `User.createUpdateMediaProgressFromPayload` creates missing progress from the payload with
+    /// defaults and no auto-finish; `MediaProgress.applyProgressUpdate` updates existing progress
+    /// with the #53 side effects.
     mutating func deliver(now: Date) {
         guard let send = inFlight, delivered == nil else { return }
         delivered = now
-        if !exists {
-            // #53: the server creates the progress with defaults for the groups not sent.
+        let created = !exists
+        if created {
             exists = true
             for index in 0..<3 { origins[index] = .sideEffect(now) }
         }
+        let wasFinished = server.isFinished
+        let oldTime = server.currentTime
+        if let finished = send.finished {
+            server.finishedAt =
+                finished.isFinished ? finished.finishedAt ?? ProgressSyncState.wholeMilliseconds(now) : nil
+            if created || finished.isFinished != wasFinished {
+                // Finishing sets `progress` to 1; un-finishing resets `progress` and `currentTime`.
+                if finished.isFinished { server.progress = 1 }
+                if !created, !finished.isFinished {
+                    server.progress = 0
+                    server.currentTime = 0
+                }
+                if !created { origins[0] = .sideEffect(now) }
+            }
+            server.isFinished = finished.isFinished
+            origins[1] = .ours(finished.editedAt)
+        } else if let audio = send.audio,
+            created || audio.progress != (server.duration > 0 ? min(1, server.currentTime / server.duration) : 0)
+        {
+            // An audio `progress` equal to the old `currentTime / duration` is ignored.
+            server.progress = audio.progress
+        }
         if let audio = send.audio {
             server.currentTime = audio.currentTime
-            server.progress = audio.progress
             server.duration = audio.duration
-            origins[0] = .ours
-            let nearEnd = audio.currentTime >= audio.duration - 10
-            if nearEnd != server.isFinished {
-                server.isFinished = nearEnd
-                server.finishedAt = nearEnd ? ProgressSyncState.wholeMilliseconds(now) : nil
-                origins[1] = .sideEffect(now)
-            }
-        }
-        if let finished = send.finished {
-            server.isFinished = finished.isFinished
-            server.finishedAt = finished.finishedAt
-            origins[1] = .ours
-            if !finished.isFinished {
-                server.currentTime = 0
-                server.progress = 0
-                origins[0] = .sideEffect(now)
-            }
+            origins[0] = .ours(audio.editedAt)
         }
         if let ebook = send.ebook {
             server.ebookLocation = ebook.ebookLocation
             server.ebookProgress = ebook.ebookProgress
-            origins[2] = .ours
+            origins[2] = .ours(ebook.editedAt)
+        }
+        // Existing progress is checked after every PATCH, ebook-only too: fewer than 10 s left
+        // auto-finishes (`progress` 1), and a `currentTime` change away from the end un-finishes.
+        let nearEnd = server.duration > 0 && server.duration - server.currentTime < 10
+        if !created, !server.isFinished, nearEnd {
+            server.isFinished = true
+            server.finishedAt = server.finishedAt ?? ProgressSyncState.wholeMilliseconds(now)
+            server.progress = 1
+            // An un-finish sent near the end can't stick: the server's form of our own value.
+            origins[1] = send.finished.map { .ours($0.editedAt) } ?? .sideEffect(now)
+            if send.audio == nil { origins[0] = .sideEffect(now) }
+        } else if !created, server.isFinished, server.currentTime != oldTime, !nearEnd {
+            server.isFinished = false
+            server.finishedAt = nil
+            origins[1] = .sideEffect(now)
         }
         server.lastUpdate = now
     }
@@ -786,7 +862,9 @@ private struct Simulation {
         let group = roll(3)
         switch group {
         case 0:
-            server.currentTime = Double(roll(1000))
+            // Sometimes near the end without finishing, as progress created by a PATCH can be.
+            server.currentTime = Double(roll(2) == 0 ? 990 + roll(10) : roll(1000))
+            server.duration = 1000
             server.progress = server.currentTime / 1000
         case 1:
             server.isFinished.toggle()
@@ -839,7 +917,7 @@ private struct Simulation {
             }
         }
         for (taken, value) in zip(taken, takenValues) {
-            if !(Self.partner(taken.element).map(sent.contains) ?? false) {
+            if Self.causes(taken.element).isDisjoint(with: sent) {
                 #expect(Self.values(taken.element, of: state) == value, "other device's \(taken.element.rawValue) lost")
             }
         }
@@ -855,7 +933,8 @@ private struct Simulation {
                 let editedAt = before.editedAt(group) ?? .distantPast
                 let allowed: Bool
                 switch origins[index] {
-                case .ours: allowed = false
+                // Only the very edit we sent may take its (normalized) server value.
+                case .ours(let sentEditedAt): allowed = sentEditedAt == editedAt
                 case .sideEffect(let at): allowed = lastOtherWrite > max(at, editedAt)
                 case .other, nil: allowed = fetched.lastUpdate > editedAt
                 }
@@ -866,11 +945,13 @@ private struct Simulation {
                 excluded.contains(group) || before.truncated.contains(group)
                 || before.serverBaseline.map { ProgressSyncState.matches(fetched, $0, group) } ?? false
                 || before.unacknowledgedSends.contains { ProgressSyncState.matches(fetched, $0, group) }
-                // #53, modelled independently of the code: the partner group is in flight or echoed.
-                || Self.partner(group).map { partner in
-                    excluded.contains(partner)
-                        || before.unacknowledgedSends.contains { ProgressSyncState.matches(fetched, $0, partner) }
-                } ?? false
+                // #53, modelled independently of the code: a group whose PATCH can change this one
+                // is in flight or echoed.
+                || !Self.causes(group).isDisjoint(with: excluded)
+                || ProgressGroups.each.contains { cause in
+                    Self.causes(group).contains(cause)
+                        && before.unacknowledgedSends.contains { ProgressSyncState.matches(fetched, $0, cause) }
+                }
                 || (before.serverBaseline == nil && (inFlight != nil || !before.unacknowledgedSends.isEmpty))
             if fresh, before.dirty.contains(group), origins[index] == .other,
                 fetched.lastUpdate > before.editedAt(group) ?? .distantPast, !justified
@@ -886,12 +967,14 @@ private struct Simulation {
         }
     }
 
-    /// The group a PATCH of `group` can change as a #53 side effect.
-    static func partner(_ group: ProgressGroups) -> ProgressGroups? {
+    /// The groups whose PATCH can change `group` as a #53 side effect: finishing sets `progress`
+    /// to 1 and un-finishing resets audio; an audio PATCH can un-finish or auto-finish; any PATCH,
+    /// ebook included, can auto-finish (setting `progress` to 1).
+    static func causes(_ group: ProgressGroups) -> ProgressGroups {
         switch group {
-        case .audio: .finished
-        case .finished: .audio
-        default: nil
+        case .audio: [.finished, .ebook]
+        case .finished: [.audio, .ebook]
+        default: []
         }
     }
 
