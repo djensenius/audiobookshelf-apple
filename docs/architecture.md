@@ -66,7 +66,7 @@ models in a view).
 | `ABSAPI` | HTTP client, authentication (local and OIDC), endpoints, custom headers, API DTOs, image request building | `ABSCore` |
 | `ABSRealtime` | Socket.IO client over `URLSessionWebSocketTask` | `ABSCore`, `ABSAPI` |
 | `ABSData` | SwiftData schema, `@ModelActor` stores, and `<Model>DTO` types for persisted models | `ABSCore` |
-| `ABSPlayback` | Playback engine, `PlaybackCoordinator`, progress sync, sleep timer, Now Playing adapter (`ABSPlayback/NowPlaying/`) | `ABSCore`, `ABSAPI`, `ABSData` |
+| `ABSPlayback` | Playback engine, `PlaybackCoordinator`, progress sync, play queue and next-episode auto-advance (`ABSPlayback/Queue/`), sleep timer, Now Playing adapter (`ABSPlayback/NowPlaying/`) | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSDownloads` | Background `URLSession` downloads | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSUI` | Design system, shared components, covers, localized strings | `ABSCore` |
 | `ABSAppModel` | Account and library state, routing (`Router`, `Route`, `DeepLink`, `AppTab` in `ABSAppModel/Navigation/`), feature view models, realtime bridge, `DownloadedCoverLookup` implementation | everything above except `ABSUI` |

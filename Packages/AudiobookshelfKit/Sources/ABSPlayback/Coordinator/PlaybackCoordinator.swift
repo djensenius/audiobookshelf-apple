@@ -89,6 +89,7 @@ public final class PlaybackCoordinator {
     /// Picks what plays after an item ends (P2-13, ``PlaybackQueueAdvancer``); without one, or
     /// when it returns `nil`, the item stays loaded at its end.
     @ObservationIgnored public var nextItemProvider: (any NextItemProvider)?
+    @ObservationIgnored private var autoAdvanceTask: Task<Void, Never>?
 
     // MARK: Dependencies
 
@@ -529,8 +530,10 @@ public final class PlaybackCoordinator {
             reachedEnd = true
             lastPlayedAt = now()
             saveLastPlayed()
+            // Taken before observers run, so one that pauses or stops on `.ended` cancels it.
+            let state = autoAdvanceState
             emit(.ended)
-            playNextItem()
+            playNextItem(ifStill: state)
         case .failed(let failure):
             // Recovery (ADR 0007 retries, rebuilds) hooks in here; for now the failure is surfaced.
             let error = PlaybackCoordinatorError(engineError: failure)
@@ -541,18 +544,27 @@ public final class PlaybackCoordinator {
 
     // MARK: Helpers
 
+    /// Changes with every play (even a blocked one), resume, pause and stop.
+    private var autoAdvanceState: [Int] { [generation, policyCheck, resumeIntent] }
+
     /// After the end, plays what ``nextItemProvider`` picks, unless a play, resume, pause, seek or
-    /// stop happened while it was deciding.
-    private func playNextItem() {
-        guard let provider = nextItemProvider, let key = mediaKey, phase == .loaded, reachedEnd else { return }
-        let state = (generation, policyCheck, resumeIntent)
-        Task { [weak self] in
+    /// stop happened since `state` was taken (at the end, before observers ran).
+    private func playNextItem(ifStill state: [Int]) {
+        guard let provider = nextItemProvider, let key = mediaKey, phase == .loaded, reachedEnd,
+            state == autoAdvanceState
+        else { return }
+        autoAdvanceTask = Task { [weak self] in
             guard let next = await provider.nextItem(after: key), let self,
                 next.serverConnectionID == sessions.serverConnectionID, reachedEnd, mediaKey == key,
-                state == (generation, policyCheck, resumeIntent)
+                state == autoAdvanceState
             else { return }
             await play(itemID: next.libraryItemId, episodeID: next.episodeId)
         }
+    }
+
+    /// Waits for the latest auto-advance, including the play it starts (tests).
+    func waitForAutoAdvance() async {
+        await autoAdvanceTask?.value
     }
 
     private func startEngine() {

@@ -27,6 +27,22 @@ public struct QueueItem: Sendable, Hashable, Codable, Identifiable {
         self.duration = duration
     }
 
+    enum CodingKeys: String, CodingKey {
+        case libraryItemID, episodeID, title, subtitle, coverPath, duration
+    }
+
+    /// Normalizes an empty `episodeID` to `nil`, as the memberwise initializer does.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            libraryItemID: try container.decode(String.self, forKey: .libraryItemID),
+            episodeID: try container.decodeIfPresent(String.self, forKey: .episodeID),
+            title: try container.decode(String.self, forKey: .title),
+            subtitle: try container.decodeIfPresent(String.self, forKey: .subtitle),
+            coverPath: try container.decodeIfPresent(String.self, forKey: .coverPath),
+            duration: try container.decodeIfPresent(Double.self, forKey: .duration))
+    }
+
     /// The media; the queue holds each media at most once.
     public var id: String { Self.id(libraryItemID: libraryItemID, episodeID: episodeID) }
 

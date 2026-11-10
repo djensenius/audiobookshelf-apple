@@ -38,8 +38,21 @@ struct QueueAutoAdvanceTests {
         queue = PlaybackQueue(serverConnectionID: h.connectionID, store: InMemoryQueueStore())
     }
 
-    private func attach(episodes: (any PodcastEpisodeSource)? = nil) {
-        PlaybackQueueAdvancer(queue: queue, episodes: episodes).attach(to: coordinator)
+    @discardableResult
+    private func attach(episodes: (any PodcastEpisodeSource)? = nil) -> PlaybackQueueAdvancer {
+        let advancer = PlaybackQueueAdvancer(queue: queue, episodes: episodes)
+        advancer.attach(to: coordinator)
+        return advancer
+    }
+
+    /// Plays episode e1 of a serial podcast and ends it, with the next-episode lookup held at
+    /// `gate`; returns once the lookup started.
+    private func endEpisodeWhileLookupIsHeld(_ gate: Gate) async {
+        let source = StubEpisodeSource(listing(isSerial: true, finished: []), gate: gate)
+        attach(episodes: source)
+        await coordinator.play(itemID: "P", episodeID: "e1")
+        h.engine.finish()
+        await yieldUntil { source.requests == 1 }
     }
 
     private func episodeKey(_ id: String) -> MediaKey {
@@ -120,9 +133,9 @@ struct QueueAutoAdvanceTests {
         let start = h.events.count
 
         h.engine.finish()
-        await yieldUntil { source.requests == 1 }
-        for _ in 0..<20 { await Task.yield() }
+        await coordinator.waitForAutoAdvance()
 
+        #expect(source.requests == 1)
         #expect(h.events.since(start) == [.ended])
         #expect(coordinator.phase == .loaded)
         #expect(coordinator.mediaKey == episodeKey("e4"))
@@ -139,7 +152,7 @@ struct QueueAutoAdvanceTests {
         await coordinator.play(itemID: "A")
 
         h.engine.finish()
-        for _ in 0..<20 { await Task.yield() }
+        await coordinator.waitForAutoAdvance()
 
         #expect(source.requests == 0)
         #expect(h.service.starts == ["A"])
@@ -156,43 +169,149 @@ struct QueueAutoAdvanceTests {
         await coordinator.play(itemID: "P", episodeID: "e1")
 
         h.engine.finish()
-        await yieldUntil { source.requests == 1 }
-        for _ in 0..<20 { await Task.yield() }
+        await coordinator.waitForAutoAdvance()
 
+        #expect(source.requests == 1)
         #expect(h.service.starts == ["P"])
         #expect(coordinator.mediaKey == episodeKey("e1"))
     }
 
-    @Test func userActionWhileDecidingWins() async throws {
-        let gate = Gate()
-        let source = StubEpisodeSource(listing(isSerial: true, finished: []), gate: gate)
-        attach(episodes: source)
-        await coordinator.play(itemID: "P", episodeID: "e1")
+    @Test func observerPausingOnTheEndCancelsTheAdvance() async throws {
+        attach()
+        queue.addToEnd(queueItem("B"))
+        let coordinator = coordinator
+        _ = coordinator.addObserver { event in
+            if event == .ended { coordinator.pause() }
+        }
+        await coordinator.play(itemID: "A")
 
         h.engine.finish()
-        await yieldUntil { source.requests == 1 }
+        await coordinator.waitForAutoAdvance()
+
+        #expect(h.service.starts == ["A"])
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(queue.items == [queueItem("B")])
+    }
+
+    @Test func playOfAnotherItemWhileDecidingWins() async throws {
+        let gate = Gate()
+        await endEpisodeWhileLookupIsHeld(gate)
+
         await coordinator.play(itemID: "B")
         gate.open()
-        for _ in 0..<20 { await Task.yield() }
+        await coordinator.waitForAutoAdvance()
 
         #expect(coordinator.mediaKey == h.key("B"))
         #expect(h.service.starts == ["P", "B"])
     }
 
-    @Test func seekAfterTheEndCancelsTheAdvance() async throws {
+    @Test func blockedPlayWhileDecidingCancelsTheAdvance() async throws {
         let gate = Gate()
-        let source = StubEpisodeSource(listing(isSerial: true, finished: []), gate: gate)
-        attach(episodes: source)
-        await coordinator.play(itemID: "P", episodeID: "e1")
+        await endEpisodeWhileLookupIsHeld(gate)
 
-        h.engine.finish()
-        await yieldUntil { source.requests == 1 }
-        await coordinator.seek(to: 100)
+        h.policy.decision = .denied(.cellular)
+        await coordinator.play(itemID: "B")
+        #expect(coordinator.error == .streamingNotAllowed(.cellular, key: h.key("B")))
+        h.policy.decision = .allowed
         gate.open()
-        for _ in 0..<20 { await Task.yield() }
+        await coordinator.waitForAutoAdvance()
 
         #expect(coordinator.mediaKey == episodeKey("e1"))
         #expect(h.service.starts == ["P"])
+    }
+
+    @Test func pauseWhileDecidingCancelsTheAdvance() async throws {
+        let gate = Gate()
+        await endEpisodeWhileLookupIsHeld(gate)
+
+        coordinator.pause()
+        gate.open()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(coordinator.mediaKey == episodeKey("e1"))
+        #expect(h.service.starts == ["P"])
+    }
+
+    @Test func seekWhileDecidingCancelsTheAdvance() async throws {
+        let gate = Gate()
+        await endEpisodeWhileLookupIsHeld(gate)
+
+        await coordinator.seek(to: 100)
+        gate.open()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(coordinator.mediaKey == episodeKey("e1"))
+        #expect(h.service.starts == ["P"])
+    }
+
+    @Test func stopWhileDecidingCancelsTheAdvance() async throws {
+        let gate = Gate()
+        await endEpisodeWhileLookupIsHeld(gate)
+
+        coordinator.stop()
+        gate.open()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(coordinator.mediaKey == nil)
+        #expect(coordinator.phase == .idle)
+        #expect(h.service.starts == ["P"])
+    }
+
+    @Test(arguments: [NetworkDecision.denied(.cellular), .askUser(.lowDataMode)])
+    func blockedAdvanceKeepsTheItemQueued(decision: NetworkDecision) async throws {
+        attach()
+        queue.addToEnd(queueItem("B"))
+        await coordinator.play(itemID: "A")
+
+        h.policy.decision = decision
+        h.engine.finish()
+        await coordinator.waitForAutoAdvance()
+
+        let expected: PlaybackCoordinatorError =
+            switch decision {
+            case .denied(let reason): .streamingNotAllowed(reason, key: h.key("B"))
+            default: .streamingNeedsConfirmation(.lowDataMode, key: h.key("B"))
+            }
+        #expect(coordinator.error == expected)
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(queue.items == [queueItem("B")])
+        #expect(h.service.starts == ["A"])
+    }
+
+    @Test func restoringAQueuedItemKeepsItQueuedUntilItsSessionStarts() async throws {
+        attach()
+        queue.addToEnd(queueItem("A"))
+        h.lastPlayed.record = h.record("A", position: 100, age: 60)
+
+        #expect(coordinator.restoreLastPlayed())
+        #expect(queue.items == [queueItem("A")])
+
+        await coordinator.resume()
+        #expect(coordinator.isPlaying)
+        #expect(queue.items.isEmpty)
+    }
+
+    @Test func detachStopsAdvancingAndDequeuing() async throws {
+        let advancer = attach()
+        queue.addToEnd(queueItem("A"))
+        queue.addToEnd(queueItem("B"))
+        advancer.detach(from: coordinator)
+        #expect(coordinator.nextItemProvider == nil)
+
+        await coordinator.play(itemID: "A")
+        h.engine.finish()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(h.service.starts == ["A"])
+        #expect(queue.items == [queueItem("A"), queueItem("B")])
+    }
+
+    @Test func detachLeavesAnotherProviderInPlace() {
+        let first = attach()
+        let second = PlaybackQueueAdvancer(queue: queue, episodes: nil)
+        coordinator.nextItemProvider = second
+        first.detach(from: coordinator)
+        #expect(coordinator.nextItemProvider === second)
     }
 
     @Test func withoutAProviderTheEndIsUnchanged() async throws {
@@ -200,7 +319,7 @@ struct QueueAutoAdvanceTests {
         await coordinator.play(itemID: "A")
 
         h.engine.finish()
-        for _ in 0..<20 { await Task.yield() }
+        await coordinator.waitForAutoAdvance()
 
         #expect(h.service.starts == ["A"])
         #expect(queue.items == [queueItem("B")])

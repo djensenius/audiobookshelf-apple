@@ -8,6 +8,8 @@ public protocol PlaybackQueueStoring: AnyObject {
     func load(serverConnectionID: UUID) -> [QueueItem]
     /// Saves `items`; an empty queue removes the saved one.
     func save(_ items: [QueueItem], serverConnectionID: UUID)
+    /// Deletes the connection's saved queue, when the connection is removed.
+    func removeQueue(serverConnectionID: UUID)
 }
 
 /// Keeps each connection's queue as JSON in `UserDefaults` (the App Group store by default), under
@@ -40,6 +42,10 @@ public final class UserDefaultsPlaybackQueueStore: PlaybackQueueStoring {
         } else if let data = try? JSONEncoder().encode(items) {
             defaults.set(data, forKey: key)
         }
+    }
+
+    public func removeQueue(serverConnectionID: UUID) {
+        defaults.removeObject(forKey: key(serverConnectionID))
     }
 
     private func key(_ serverConnectionID: UUID) -> String {

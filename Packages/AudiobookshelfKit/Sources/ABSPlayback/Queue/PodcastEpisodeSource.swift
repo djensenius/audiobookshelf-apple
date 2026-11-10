@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSData
 import Foundation
 
 /// A podcast's episodes and which of them the user finished, for picking the next episode.
@@ -51,17 +52,34 @@ public protocol PodcastEpisodeSource: Sendable {
 }
 
 /// ``PodcastEpisodeSource`` over one connection's ``APIClient``: the expanded item and the user's
-/// progress from `GET /api/me`.
+/// progress from `GET /api/me`. An episode's finished change that hasn't synced yet
+/// (`finishedDirty` in local progress) overrides the server's.
 public struct APIPodcastEpisodeSource: PodcastEpisodeSource {
     private let client: APIClient
+    private let serverConnectionID: UUID
+    private let localProgress: (any LocalProgressReading)?
 
-    public init(client: APIClient) {
+    public init(client: APIClient, serverConnectionID: UUID, localProgress: (any LocalProgressReading)?) {
         self.client = client
+        self.serverConnectionID = serverConnectionID
+        self.localProgress = localProgress
     }
 
     public func listing(podcastItemID: String) async throws -> PodcastEpisodeListing {
         async let item = client.send(ItemEndpoints.item(id: podcastItemID))
-        async let user = client.send(Endpoint<User>(.get, "/api/me"))
-        return PodcastEpisodeListing(item: try await item, progress: try await user.mediaProgress)
+        async let user = client.send(UserEndpoints.me)
+        var listing = PodcastEpisodeListing(item: try await item, progress: try await user.mediaProgress)
+        guard let localProgress else { return listing }
+        for episode in listing.episodes {
+            let key = MediaKey(
+                serverConnectionID: serverConnectionID, libraryItemId: podcastItemID, episodeId: episode.id)
+            guard let local = try? await localProgress.progress(for: key), local.finishedDirty else { continue }
+            if local.isFinished {
+                listing.finishedEpisodeIDs.insert(episode.id)
+            } else {
+                listing.finishedEpisodeIDs.remove(episode.id)
+            }
+        }
+        return listing
     }
 }

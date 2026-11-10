@@ -15,8 +15,8 @@ public protocol NextItemProvider: AnyObject {
 
 /// Auto-advance (P2-13): after an item ends, plays the first queued item; with an empty queue,
 /// after a podcast episode, plays the podcast's next unfinished episode (see
-/// ``PodcastEpisodeListing/nextUnfinished(after:)``). A queued item leaves the queue once it
-/// becomes the current item, however it was started.
+/// ``PodcastEpisodeListing/nextUnfinished(after:)``). A queued item leaves the queue once a
+/// session for it starts, however it was started; restoring it at launch doesn't count.
 @MainActor
 public final class PlaybackQueueAdvancer: NextItemProvider {
     public let queue: PlaybackQueue
@@ -30,13 +30,21 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     }
 
     /// Becomes `coordinator`'s ``PlaybackCoordinator/nextItemProvider`` and removes items from the
-    /// queue as they start. Attach to one coordinator, once.
+    /// queue as their sessions start. Attach to one coordinator at a time.
     public func attach(to coordinator: PlaybackCoordinator) {
         guard observerToken == nil else { return }
         coordinator.nextItemProvider = self
         observerToken = coordinator.addObserver { [weak queue] event in
-            if case .itemChanged(let key?) = event { queue?.remove(key) }
+            if case .sessionStarted(_, let key) = event { queue?.remove(key) }
         }
+    }
+
+    /// Undoes ``attach(to:)``: stops following `coordinator`, and stops being its
+    /// ``PlaybackCoordinator/nextItemProvider`` unless another provider replaced this one.
+    public func detach(from coordinator: PlaybackCoordinator) {
+        if let observerToken { coordinator.removeObserver(observerToken) }
+        observerToken = nil
+        if coordinator.nextItemProvider === self { coordinator.nextItemProvider = nil }
     }
 
     public func nextItem(after key: MediaKey) async -> MediaKey? {

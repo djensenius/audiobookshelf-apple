@@ -17,6 +17,10 @@ final class InMemoryQueueStore: PlaybackQueueStoring {
         saves += 1
         saved[serverConnectionID] = items
     }
+
+    func removeQueue(serverConnectionID: UUID) {
+        saved[serverConnectionID] = nil
+    }
 }
 
 func queueItem(_ itemID: String, episode: String? = nil) -> QueueItem {
@@ -149,6 +153,32 @@ struct PlaybackQueueTests {
 
         #expect(PlaybackQueue(serverConnectionID: connection, store: store).items.isEmpty)
         #expect(PlaybackQueue(serverConnectionID: other, store: store).items == [queueItem("B"), queueItem("A")])
+    }
+
+    @Test func removeQueueDeletesOnlyThatConnectionsQueue() throws {
+        let scratch = try ScratchDefaults()
+        let store = UserDefaultsPlaybackQueueStore(defaults: scratch.defaults)
+        let other = UUID()
+        PlaybackQueue(serverConnectionID: connection, store: store).addToEnd(queueItem("A"))
+        PlaybackQueue(serverConnectionID: other, store: store).addToEnd(queueItem("B"))
+
+        store.removeQueue(serverConnectionID: connection)
+
+        #expect(scratch.defaults.data(forKey: "playback_queue_\(connection.uuidString)") == nil)
+        #expect(PlaybackQueue(serverConnectionID: connection, store: store).items.isEmpty)
+        #expect(PlaybackQueue(serverConnectionID: other, store: store).items == [queueItem("B")])
+    }
+
+    @Test func decodingNormalizesAnEmptyEpisodeID() throws {
+        let json =
+            #"[{"libraryItemID": "A", "episodeID": "", "title": "T"}, {"libraryItemID": "P", "episodeID": "e1", "title": "E"}]"#
+        let items = try JSONDecoder().decode([QueueItem].self, from: Data(json.utf8))
+        #expect(
+            items == [
+                QueueItem(libraryItemID: "A", title: "T"), QueueItem(libraryItemID: "P", episodeID: "e1", title: "E"),
+            ])
+        #expect(items[0].episodeID == nil)
+        #expect(items[0].id == queueItem("A").id)
     }
 
     @Test func unreadableSavedQueueLoadsEmpty() throws {
