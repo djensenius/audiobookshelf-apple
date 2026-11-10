@@ -6,7 +6,7 @@ import os
 
 private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "ProgressSyncer")
 
-/// Keeps listening progress from being lost (#53; ADR 0003 "Write throttling", ADR 0007 point 8).
+/// The progress transport component (#234 of #53). End-to-end reconciliation belongs to #158.
 ///
 /// - **Cadence.** A streamed session reports `POST /api/session/:id/sync` every ``syncInterval``
 ///   while playing, and at once on pause, seek, chapter change, the end and ``flush()`` (call it
@@ -17,20 +17,25 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   advanced; a gap longer than ``maxTickGap`` (a suspension) credits one interval. A seek
 ///   credits the time since the last tick only when it's within one tick interval, and adds
 ///   nothing for the jump or for the time the seek took.
-/// - **One request at a time.** Every send and store write runs on one serial queue, and a send
+/// - **One request at a time.** Every send runs on one serial queue, and a send
 ///   counts as finished only when the service call returns, after its task has completed. So no
 ///   report or PATCH goes out while an earlier one could still reach the server. The
 ///   coordinator's `/close` doesn't go through this queue yet, so it can overlap a report in
 ///   flight (#158).
-/// - **Failures.** A failed `/sync` writes the position to `LocalMediaProgress`
-///   (`needsServerSync`), the durable retry queue. Its listening time is carried into the next
+/// - **Positions first.** Each report trigger saves `LocalMediaProgress` with `needsServerSync`
+///   before sending. Local writes have their own serial queue, so a held request doesn't block
+///   saving a newer seek or pause. Failed writes stay in memory for the next trigger or drain;
+///   no report is sent while a position still needs saving.
+///   Close-position refreshes enter that queue at event arrival too, never after transport.
+/// - **Failures.** The position stays in the durable retry queue. Listening time is carried into the next
 ///   report only when the request clearly never reached the server (DNS, connect, TLS, auth);
 ///   after an ambiguous failure it is dropped, so it is never counted twice.
 /// - **Durable queue.** ``drainPendingProgress()`` PATCHes the connection's dirty rows, one group
 ///   per request from `LocalProgressStore.beginSend`, in its order (audio, finished, ebook). It
 ///   runs after every successful `/sync` and on ``flush()``; call it on reconnect and at launch.
-///   While a row is pending, every report also updates it, so the PATCH never sends an older
-///   position than the session's.
+///   A successful `/sync` still drains the saved position through PATCH: only the store's PATCH
+///   acknowledgement clears the dirty group, without clearing a newer edit. Clean rows are kept.
+///   Failed settlements retain their token and outcome for the next drain.
 @MainActor
 public final class ProgressSyncer {
     /// Seconds between reports while playing (legacy `TIME_BETWEEN_SESSION_SYNC_IN_SECONDS`).
@@ -38,11 +43,21 @@ public final class ProgressSyncer {
     /// PATCHes per row in one drain: each group once, plus re-sends of groups edited meanwhile.
     static let maxSendsPerRow = 6
 
+    private struct Position: Equatable {
+        let time: Double
+        let duration: Double
+        let editedAt: Date
+        /// A close must qualify as dirty work once; failed saves retain that qualification.
+        var onlyIfPending: Bool
+    }
+
     private struct CurrentSession {
         let sessionID: String
         let key: MediaKey
         /// Listening time not yet handed to a report.
         var listened: TimeInterval = 0
+        /// The latest report trigger, persisted independently of transport.
+        var position: Position?
     }
 
     private weak var source: (any PlaybackProgressSource)?
@@ -62,6 +77,10 @@ public final class ProgressSyncer {
     /// The session with a `/sync` queued but not started; later requests join it.
     private var queuedSyncSessionID: String?
     private var tail: Task<Void, Never>?
+    private var persistenceTail: Task<Void, Never>?
+    private var pendingPositions: [MediaKey: Position] = [:]
+    /// `nil` error means success; neither outcome may be forgotten if the store throws.
+    private var pendingSettlements: [MediaKey: (patch: ProgressPatch, error: String?)] = [:]
     /// Set by ``detach()``: queued requests are skipped; one already in flight finishes.
     private var isDetached = false
 
@@ -81,7 +100,7 @@ public final class ProgressSyncer {
         source.finalCloseReport = { [weak self] closing in self?.closeReport(for: closing) }
     }
 
-    /// Stops following the source.
+    /// Stops following the source. Already queued position saves are allowed to finish.
     public func detach() {
         isDetached = true
         if let observer { source?.removeObserver(observer) }
@@ -112,10 +131,23 @@ public final class ProgressSyncer {
 
     /// Waits for every queued report, store write and PATCH.
     func waitForIdle() async {
+        await waitForPendingWrites()
         while let task = tail {
             await task.value
             if tail == task {
                 tail = nil
+                break
+            }
+        }
+        await waitForPendingWrites()
+    }
+
+    /// Waits for local writes independently of a held network request.
+    func waitForPendingWrites() async {
+        while let task = persistenceTail {
+            await task.value
+            if persistenceTail == task {
+                persistenceTail = nil
                 return
             }
         }
@@ -158,9 +190,7 @@ public final class ProgressSyncer {
             isPlaying = false
             lastTick = nil
             if closing.wasLoaded {
-                enqueue { [weak self] in
-                    await self?.updatePendingRow(closing.key, time: closing.currentTime, duration: closing.duration)
-                }
+                queuePosition(closing.key, time: closing.currentTime, duration: closing.duration, onlyIfPending: true)
             }
         case .itemChanged, .failed:
             break
@@ -233,22 +263,29 @@ public final class ProgressSyncer {
     }
 
     private func requestSync() {
-        guard let sessionID = current?.sessionID else { return }
+        guard let session = current, let source,
+            let position = queuePosition(session.key, time: source.currentTime, duration: source.duration)
+        else { return }
+        current?.position = position
+        let sessionID = session.sessionID
         lastSyncAt = clock.uptime()
         guard queuedSyncSessionID != sessionID else { return }
         queuedSyncSessionID = sessionID
         enqueue { [weak self] in await self?.sendSync(sessionID: sessionID) }
     }
 
-    /// Sends one report for `sessionID` if it is still current. The snapshot (position, duration
-    /// and listening time) is taken now, when the previous request has finished.
+    /// Sends the latest saved trigger for `sessionID`, if it is still current.
     private func sendSync(sessionID: String) async {
+        await waitForPendingWrites()
         if queuedSyncSessionID == sessionID { queuedSyncSessionID = nil }
-        guard !isDetached, let session = current, session.sessionID == sessionID, let source else { return }
-        let time = source.currentTime
-        let duration = source.duration
+        guard !isDetached, pendingPositions.isEmpty, let session = current, session.sessionID == sessionID,
+            let position = session.position
+        else { return }
         let listened = session.listened
-        guard let report = PlaybackSyncReport(currentTime: time, timeListened: listened, duration: duration) else {
+        guard
+            let report = PlaybackSyncReport(
+                currentTime: position.time, timeListened: listened, duration: position.duration)
+        else {
             return
         }
         current?.listened = 0
@@ -269,30 +306,59 @@ public final class ProgressSyncer {
                     "Dropped \(listened, privacy: .public) s of listening time after an ambiguous sync failure (\(Self.caseName(error), privacy: .public))"
                 )
             }
-            await record(session.key, time: time, duration: duration)
             return
         }
-        await updatePendingRow(session.key, time: time, duration: duration)
         await drain()
     }
 
-    /// Records the position into the media's row if it is waiting for a PATCH, so the PATCH
-    /// never sends an older position.
-    private func updatePendingRow(_ key: MediaKey, time: Double, duration: Double) async {
-        guard (try? await store.progress(for: key))?.needsServerSync == true else { return }
-        await record(key, time: time, duration: duration)
+    @discardableResult
+    private func queuePosition(
+        _ key: MediaKey, time: Double, duration: Double, onlyIfPending: Bool = false
+    ) -> Position? {
+        guard time.isFinite, time >= 0 else { return nil }
+        let duration = duration.isFinite && duration > 0 ? duration : 0
+        // An unsaved report is pending work even when its row doesn't exist yet.
+        let position = Position(
+            time: time, duration: duration, editedAt: clock.now(),
+            onlyIfPending: onlyIfPending && (pendingPositions[key]?.onlyIfPending ?? true))
+        pendingPositions[key] = position
+        queuePersistence()
+        return position
     }
 
-    private func record(_ key: MediaKey, time: Double, duration: Double) async {
-        guard time.isFinite, time >= 0 else { return }
-        let duration = duration.isFinite && duration > 0 ? duration : 0
-        let progress = duration > 0 ? min(time / duration, 1) : 0
-        do {
-            try await store.recordEdit(
-                ProgressEdit(audio: .init(currentTime: time, duration: duration, progress: progress)), for: key,
-                now: clock.now())
-        } catch {
-            logger.error("Saving progress for a later sync failed: \(String(describing: error), privacy: .public)")
+    private func queuePersistence() {
+        let previous = persistenceTail
+        persistenceTail = Task {
+            await previous?.value
+            let positions = pendingPositions
+            for (key, queuedPosition) in positions {
+                var position = queuedPosition
+                guard pendingPositions[key] == position else { continue }
+                let progress = position.duration > 0 ? min(position.time / position.duration, 1) : 0
+                do {
+                    if position.onlyIfPending {
+                        let isPending = try await store.progress(for: key)?.needsServerSync == true
+                        // The lookup may suspend while a newer event replaces this close.
+                        guard pendingPositions[key] == position else { continue }
+                        if !isPending {
+                            pendingPositions[key] = nil
+                            continue
+                        }
+                        // Keep the obligation before awaiting the save: an older PATCH may
+                        // clean the row while this newer position is still waiting for a retry.
+                        position.onlyIfPending = false
+                        pendingPositions[key] = position
+                    }
+                    try await store.recordEdit(
+                        ProgressEdit(
+                            audio: .init(currentTime: position.time, duration: position.duration, progress: progress)),
+                        for: key, now: position.editedAt)
+                    // A newer event may have arrived while the save ran.
+                    if pendingPositions[key] == position { pendingPositions[key] = nil }
+                } catch {
+                    logger.error("Saving pending progress failed: \(String(describing: error), privacy: .public)")
+                }
+            }
         }
     }
 
@@ -300,6 +366,12 @@ public final class ProgressSyncer {
 
     private func drain() async {
         guard !isDetached else { return }
+        queuePersistence()
+        await waitForPendingWrites()
+        guard !isDetached, pendingPositions.isEmpty else { return }
+        for outcome in Array(pendingSettlements.values) {
+            guard await settle(outcome.patch, error: outcome.error) else { return }
+        }
         let rows: [LocalMediaProgressDTO]
         do {
             rows = try await store.pendingSync(for: service.serverConnectionID)
@@ -309,7 +381,8 @@ public final class ProgressSyncer {
         }
         for row in rows {
             for _ in 0..<Self.maxSendsPerRow {
-                guard !isDetached else { return }
+                await waitForPendingWrites()
+                guard !isDetached, pendingPositions.isEmpty else { return }
                 let patch: ProgressPatch?
                 do {
                     patch = try await store.beginSend(for: row.key, now: clock.now())
@@ -320,24 +393,37 @@ public final class ProgressSyncer {
                 guard let patch else { break }
                 guard let update = Self.update(for: patch.values) else {
                     logger.fault("beginSend returned a send with no group")
-                    _ = try? await store.failSend(patch, error: "emptySend")
+                    _ = await settle(patch, error: "emptySend")
                     break
                 }
                 do {
                     try await service.updateProgress(
                         itemID: row.key.libraryItemId, episodeID: row.key.episodeId, update)
                 } catch {
-                    _ = try? await store.failSend(patch, error: Self.caseName(error))
+                    guard await settle(patch, error: Self.caseName(error)) else { return }
                     if Self.isOffline(error) { return }
                     break
                 }
-                do {
-                    try await store.completeSend(patch, serverLastUpdate: nil)
-                } catch {
-                    logger.error(
-                        "Saving a progress acknowledgement failed: \(String(describing: error), privacy: .public)")
-                }
+                guard await settle(patch, error: nil) else { return }
             }
+        }
+    }
+
+    /// Retry this exact local outcome before taking another PATCH. If the store released the
+    /// token on rollback, its settlement returns false; the dirty row gets a fresh send instead.
+    private func settle(_ patch: ProgressPatch, error: String?) async -> Bool {
+        pendingSettlements[patch.key] = (patch, error)
+        do {
+            if let error {
+                try await store.failSend(patch, error: error)
+            } else {
+                try await store.completeSend(patch, serverLastUpdate: nil)
+            }
+            pendingSettlements[patch.key] = nil
+            return true
+        } catch {
+            logger.error("Saving a progress outcome failed: \(String(describing: error), privacy: .public)")
+            return false
         }
     }
 

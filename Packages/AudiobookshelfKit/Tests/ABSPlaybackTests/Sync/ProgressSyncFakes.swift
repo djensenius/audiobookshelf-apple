@@ -21,6 +21,8 @@ final class StubProgressSyncService: ProgressSyncService {
         var syncErrors: [APIError?] = []
         var patchErrors: [APIError?] = []
         var syncGates: [Gate] = []
+        var patchGates: [Gate] = []
+        var patchStarted: Gate?
         var log: [String] = []
         var syncWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
     }
@@ -66,11 +68,16 @@ final class StubProgressSyncService: ProgressSyncService {
     }
 
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {
-        let error = state.withLock { state in
+        let (gate, error, started) = state.withLock { state in
             state.patches.append(Patch(itemID: itemID, episodeID: episodeID, update: update))
             state.log.append("patch \(itemID)")
-            return state.patchErrors.isEmpty ? nil : state.patchErrors.removeFirst()
+            return (
+                state.patchGates.isEmpty ? nil : state.patchGates.removeFirst(),
+                state.patchErrors.isEmpty ? nil : state.patchErrors.removeFirst(), state.patchStarted
+            )
         }
+        started?.open()
+        await gate?.wait()
         if let error { throw error }
     }
 }

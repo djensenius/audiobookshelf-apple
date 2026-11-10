@@ -17,6 +17,7 @@ struct ProgressSyncerTests {
         await s.play(for: 14.5)
         await s.settle()
         #expect(s.service.reports.isEmpty)
+        #expect(try await s.store.progress(for: s.h.key("a")) == nil)
 
         await s.play(for: 0.5)
         await s.settle()
@@ -30,8 +31,9 @@ struct ProgressSyncerTests {
         #expect(s.service.reports.count == 2)
         #expect(s.service.reports.last?.timeListened == 15)
         #expect(s.service.reports.last?.currentTime == 45)
-        // Streaming writes no progress row while its reports succeed.
-        #expect(try await s.store.progress(for: s.h.key("a")) == nil)
+        // Reports are saved first; the PATCH acknowledgement leaves a clean, current row.
+        #expect(try await s.store.progress(for: s.h.key("a"))?.currentTime == 45)
+        #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
     }
 
     @Test func pauseSeekChapterChangeAndEndReportAtOnce() async throws {
@@ -97,7 +99,7 @@ struct ProgressSyncerTests {
 
         #expect(
             s.service.reports == [try #require(PlaybackSyncReport(currentTime: 7, timeListened: 7, duration: 3600))])
-        #expect(s.service.patches.map(\.itemID) == ["b"])
+        #expect(s.service.patches.map(\.itemID) == ["b", "a"])
         #expect(try await s.store.pendingSync(for: s.h.connectionID).isEmpty)
     }
 
@@ -179,7 +181,7 @@ struct ProgressSyncerTests {
 
         gate.open()
         await s.settle()
-        #expect(s.service.log == ["sync 1", "sync 1 done", "sync 2", "sync 2 done"])
+        #expect(s.service.log == ["sync 1", "sync 1 done", "patch a", "sync 2", "sync 2 done"])
         #expect(
             s.service.reports == [
                 try #require(PlaybackSyncReport(currentTime: 15, timeListened: 15, duration: 3600)),
@@ -288,7 +290,7 @@ struct ProgressSyncerTests {
         try await LocalProgressStore(modelContainer: container).recordEdit(
             ProgressEdit(isFinished: true), for: MediaKey(serverConnectionID: UUID(), libraryItemId: "x"))
 
-        // A new process: a new store and syncer over the same container.
+        // A new store and syncer over the same in-memory container; disk reopening is tested separately.
         let s = try SyncHarness(
             progressStore: LocalProgressStore(modelContainer: container), connectionID: connectionID)
         await s.syncer.drainPendingProgress()
@@ -375,7 +377,11 @@ struct ProgressSyncerTests {
 
         #expect(s.service.log == ["sync 1", "sync 1 done"])
         #expect(s.service.patches.isEmpty)
-        #expect(try await s.store.pendingSync(for: s.h.connectionID).count == 1)
+        let pending = try await s.store.pendingSync(for: s.h.connectionID)
+        #expect(
+            Dictionary(uniqueKeysWithValues: pending.map { ($0.key.libraryItemId, $0.currentTime) }) == [
+                "a": 100, "b": 50,
+            ])
     }
 
     // MARK: Errors
