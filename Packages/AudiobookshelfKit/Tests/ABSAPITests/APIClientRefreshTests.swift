@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSAPI
@@ -34,6 +35,51 @@ private actor RotatedTokenProvider: TokenProvider {
 
     func replaceTokens(expected: AuthTokens, with new: AuthTokens) -> Bool { false }
     func expireSession(ifCurrent rejected: AuthTokens) -> Bool { false }
+}
+
+/// Wraps an ``InMemoryTokenProvider`` and holds the `heldCall`-th `tokens()` read (after taking
+/// its snapshot) until ``release()``, to simulate a slow read that returns an old pair.
+private final class GatedTokenProvider: TokenProvider {
+    private struct State {
+        var calls = 0
+        var isHolding = false
+        var released = false
+    }
+
+    let inner = InMemoryTokenProvider()
+    private let heldCall: Int
+    private let state = Mutex(State())
+
+    init(holdingCall heldCall: Int) {
+        self.heldCall = heldCall
+    }
+
+    var isHolding: Bool { state.withLock { $0.isHolding } }
+
+    func release() {
+        state.withLock { $0.released = true }
+    }
+
+    func tokens() async -> AuthTokens? {
+        let snapshot = await inner.tokens()
+        let hold = state.withLock {
+            $0.calls += 1
+            $0.isHolding = $0.calls == heldCall
+            return $0.isHolding
+        }
+        if hold {
+            while !state.withLock({ $0.released }) { try? await Task.sleep(for: .milliseconds(5)) }
+        }
+        return snapshot
+    }
+
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
+        await inner.replaceTokens(expected: expected, with: new)
+    }
+
+    func expireSession(ifCurrent rejected: AuthTokens) async -> Bool {
+        await inner.expireSession(ifCurrent: rejected)
+    }
 }
 
 private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws -> APIClient {
@@ -321,6 +367,54 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(final.value(forHTTPHeaderField: "x-refresh-token") == nil)
         #expect(tokens.current == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
         #expect(tokens.expiredCount == 0)
+    }
+
+    @Test func replacementSessionGetsItsOwnRefreshBeforeExpiry() async throws {
+        let replacement = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
+        let tokens = InMemoryTokenProvider()
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath {
+                return request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-new"
+                    ? .json(#"{"user":{"accessToken":"access-3","refreshToken":"refresh-3"}}"#)
+                    : .text("Unauthorized", status: 401)
+            }
+            switch request.value(forHTTPHeaderField: "Authorization") {
+            case "Bearer access-3": return .json(#"{"ok":true}"#)
+            case "Bearer access-1":
+                // The user signs in again while the old token is being rejected; the new access
+                // token has also expired by the time it is used.
+                tokens.signIn(replacement)
+                return .text("Unauthorized", status: 401)
+            default: return .text("Unauthorized", status: 401)
+            }
+        }
+        let client = try makeClient(server, tokens: tokens)
+
+        let result = try await client.send(Endpoint<OK>(.get, "/api/me"))
+
+        #expect(result == OK(ok: true))
+        let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
+        #expect(refreshTokens == ["refresh-new"])
+        #expect(tokens.current == AuthTokens(accessToken: "access-3", refreshToken: "refresh-3"))
+        #expect(tokens.expiredCount == 0)
+    }
+
+    @Test func staleSnapshotAfterFinishedRefreshDoesNotRefreshAgain() async throws {
+        let server = tokenServer(refresh: .json(refreshedJSON))
+        // Call 1 is the slow request's first read; call 2 is its read inside the refresh.
+        let tokens = GatedTokenProvider(holdingCall: 2)
+        let client = try makeClient(server, tokens: tokens)
+
+        let slow = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        try await waitUntil { tokens.isHolding }
+        let fast = try await client.send(Endpoint<OK>(.get, "/api/me"))
+        tokens.release()
+
+        #expect(fast == OK(ok: true))
+        #expect(try await slow.value == OK(ok: true))
+        #expect(server.requests(path: refreshPath).count == 1)
+        #expect(tokens.inner.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+        #expect(tokens.inner.expiredCount == 0)
     }
 
     @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {

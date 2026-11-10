@@ -20,10 +20,22 @@ public actor APIClient {
     /// refresh of its own pair (not one left over from a previous sign-in).
     private var refreshFlights: [AuthTokens: RefreshFlight] = [:]
     private var nextFlightID = 0
+    /// Recent successful refreshes as (rejected pair, refreshed pair), newest last. A request
+    /// that read the rejected pair before a refresh finished uses the result instead of
+    /// refreshing the already-rotated token again.
+    private var completedRefreshes: [(from: AuthTokens, to: AuthTokens)] = []
+    private static let completedRefreshLimit = 8
 
     private struct RefreshFlight {
         let id: Int
-        let task: Task<AuthTokens, any Error>
+        let task: Task<RefreshOutcome, any Error>
+    }
+
+    /// Tokens to retry with, and whether a refresh of the rejected pair produced them (rather
+    /// than a different session that replaced it, which hasn't been refreshed yet).
+    private struct RefreshOutcome {
+        let tokens: AuthTokens
+        let didRefresh: Bool
     }
 
     /// - Parameter sessionConfiguration: Tests pass a configuration with stub protocol classes.
@@ -74,21 +86,25 @@ public actor APIClient {
         }
 
         guard var tokens = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
-        var hasRefreshed = false
-        // At most three sends: the original, the retry after a refresh, and one more if the
-        // tokens changed again (for example a new sign-in) while the retry was in flight.
-        for _ in 0..<3 {
+        // The pair a refresh produced for this request. Only that pair being rejected ends the
+        // session; any other pair (for example from a new sign-in) gets its own refresh first.
+        var refreshedPair: AuthTokens?
+        // Bounds the sends if the tokens keep changing: the original, the retry after a refresh,
+        // and two more for a session that replaced the first one and needs its own refresh.
+        let maxSends = 4
+        for send in 1...maxSends {
             let reply = try await perform(authorized(request, tokens.accessToken), followsRedirects: followsRedirects)
             // A 401 from a hop that never received the token says nothing about the token.
-            guard reply.http.statusCode == 401, !reply.credentialsStripped else {
+            guard reply.http.statusCode == 401, !reply.credentialsStripped, send < maxSends else {
                 return try handle(reply.data, reply.http, for: endpoint)
             }
-            if hasRefreshed {
+            if tokens == refreshedPair {
                 guard let current = await expireSession(rejected: tokens) else { throw APIError.sessionExpired }
                 tokens = current
             } else {
-                tokens = try await refreshedTokens(replacing: tokens)
-                hasRefreshed = true
+                let outcome = try await refreshedTokens(replacing: tokens)
+                tokens = outcome.tokens
+                if outcome.didRefresh { refreshedPair = outcome.tokens }
             }
             try Task.checkCancellation()
         }
@@ -98,25 +114,35 @@ public actor APIClient {
     // MARK: - Token refresh
 
     /// Returns tokens newer than `rejected`, joining a refresh of the same pair if one is
-    /// running, and starting one only if no other request has already refreshed.
-    private func refreshedTokens(replacing rejected: AuthTokens) async throws -> AuthTokens {
-        if let flight = refreshFlights[rejected] { return try await flight.task.value }
-        guard let current = await tokenProvider.tokens() else { throw APIError.sessionExpired }
-        if current.accessToken != rejected.accessToken { return current }
-        // Re-check after the suspension above; another request may have started a refresh.
-        if let flight = refreshFlights[current] { return try await flight.task.value }
+    /// running, and starting one only if no other request has already refreshed it.
+    private func refreshedTokens(replacing rejected: AuthTokens) async throws -> RefreshOutcome {
+        while true {
+            if let flight = refreshFlights[rejected] { return try await flight.task.value }
+            if let refreshed = completedRefresh(of: rejected) {
+                return RefreshOutcome(tokens: refreshed, didRefresh: true)
+            }
+            guard let current = await tokenProvider.tokens() else { throw APIError.sessionExpired }
+            // The read may be older than a refresh that started or finished during the suspension.
+            if refreshFlights[rejected] != nil || completedRefresh(of: rejected) != nil { continue }
+            if current.accessToken != rejected.accessToken { return RefreshOutcome(tokens: current, didRefresh: false) }
+            if let flight = refreshFlights[current] { return try await flight.task.value }
 
-        nextFlightID += 1
-        let flight = RefreshFlight(id: nextFlightID, task: Task { try await refresh(current) })
-        refreshFlights[current] = flight
-        defer {
-            // Only remove this flight's entry, never a newer flight for the same pair.
-            if refreshFlights[current]?.id == flight.id { refreshFlights[current] = nil }
+            nextFlightID += 1
+            let flight = RefreshFlight(id: nextFlightID, task: Task { try await refresh(current) })
+            refreshFlights[current] = flight
+            defer {
+                // Only remove this flight's entry, never a newer flight for the same pair.
+                if refreshFlights[current]?.id == flight.id { refreshFlights[current] = nil }
+            }
+            return try await flight.task.value
         }
-        return try await flight.task.value
     }
 
-    private func refresh(_ tokens: AuthTokens) async throws -> AuthTokens {
+    private func completedRefresh(of rejected: AuthTokens) -> AuthTokens? {
+        completedRefreshes.last { $0.from == rejected }?.to
+    }
+
+    private func refresh(_ tokens: AuthTokens) async throws -> RefreshOutcome {
         var request = try makeRequest(
             for: Endpoint<EmptyResponse>(.post, "/auth/refresh", requiresAuthentication: false)
         )
@@ -143,7 +169,11 @@ public actor APIClient {
             guard await tokenProvider.replaceTokens(expected: tokens, with: refreshed) else {
                 throw CancellationError()
             }
-            return refreshed
+            // Recorded before the flight's task finishes, so no request can miss both the
+            // flight and its result.
+            completedRefreshes.append((from: tokens, to: refreshed))
+            if completedRefreshes.count > Self.completedRefreshLimit { completedRefreshes.removeFirst() }
+            return RefreshOutcome(tokens: refreshed, didRefresh: true)
         case 401 where reply.credentialsStripped:
             // The hop that answered never received the refresh token, so it can't have rejected it.
             throw Self.error(status: 401, data: data)
@@ -151,7 +181,7 @@ public actor APIClient {
             // The server only answers 401 for a bad refresh token; a 403 here comes from a proxy
             // or firewall and must not sign the user out.
             guard let current = await expireSession(rejected: tokens) else { throw APIError.sessionExpired }
-            return current
+            return RefreshOutcome(tokens: current, didRefresh: false)
         default:
             throw Self.error(status: reply.http.statusCode, data: data)
         }
