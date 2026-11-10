@@ -145,11 +145,12 @@ public struct PlaybackTimeline: Sendable, Hashable {
 
     /// Global time for an offset into `tracks[trackIndex]`, with the offset clamped to
     /// `0...playbackDuration` (NaN counts as `0`), so it never passes where the track stops playing.
-    /// Returns `nil` for an index outside ``tracks``.
+    /// The result is also clamped to `0...duration`, since a skipped track can start past the
+    /// reachable end. Returns `nil` for an index outside ``tracks``.
     public func time(trackIndex: Int, offset: Double) -> Double? {
         guard tracks.indices.contains(trackIndex) else { return nil }
         let track = tracks[trackIndex]
-        return track.start + min(max(offset.isNaN ? 0 : offset, 0), track.playbackDuration)
+        return clamp(track.start + min(max(offset.isNaN ? 0 : offset, 0), track.playbackDuration))
     }
 
     public func time(at position: TrackPosition) -> Double? {

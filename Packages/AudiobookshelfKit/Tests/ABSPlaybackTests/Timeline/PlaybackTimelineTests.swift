@@ -174,6 +174,21 @@ import Testing
         }
     }
 
+    /// A skipped track can start past the reachable end; converting back must stay in `0...duration`.
+    @Test func zeroLengthTrackWithNonzeroStartRoundTrips() throws {
+        let single = PlaybackTimeline(tracks: [AudioTrack(index: 1, startOffset: 5, duration: 0)], chapters: [])
+        #expect(single.duration == 0)
+        let position = try #require(single.position(at: 0))
+        #expect(position == .init(trackIndex: 0, offset: 0))
+        #expect(single.time(at: position) == 0)
+        #expect(single.time(trackIndex: 0, offset: 10) == 0)
+
+        let trailing = TimelineFixture.trailingZeroLength.timeline
+        #expect(trailing.time(trackIndex: 1, offset: 0) == 100)
+        let end = try #require(trailing.position(at: .infinity))
+        #expect(trailing.time(at: end) == 100)
+    }
+
     @Test func nestedAndTrailingTracksNormaliseChapters() {
         #expect(TimelineFixture.nestedTracks.timeline.chapters.map(\.end) == [120, 300])
         #expect(TimelineFixture.nestedTracks.timeline.tracks.map(\.isPlayable) == [true, false])
