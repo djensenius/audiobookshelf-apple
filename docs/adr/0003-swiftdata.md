@@ -164,7 +164,7 @@ General rules:
 | `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?`, `isDisconnected: Bool`, `disconnectedAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
 | `LocalLibraryItem` | `id: UUID` | `serverConnectionID: UUID`, `serverAddress`, `serverUserId`, `libraryItemId`, `mediaType` (`book`/`podcast`), `title`, `authorName: String?`, `relativeDirectory`, `coverRelativePath: String?`, `coverUpdatedAt: Date?`, `addedAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) files: [LocalFile]` | `#Unique([\.id], [\.serverConnectionID, \.libraryItemId])`; `#Index([\.libraryItemId], [\.serverConnectionID])` |
 | `LocalFile` | `id: UUID` | `item: LocalLibraryItem?` (inverse), `kind` (`audio`/`ebook`), `relativePath`, `filename`, `mimeType`, `size: Int64`, `serverIno: String?`, `trackIndex: Int?` (book track order), `episodeId: String?` (podcast) | `#Unique([\.id])` |
-| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date` (latest change, for display and ordering only), `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `audioEditedAt: Date?`, `finishedEditedAt: Date?`, `ebookEditedAt: Date?`, `@Attribute(.codable) serverBaseline: ProgressBaseline?`, `@Attribute(.codable) unacknowledgedSends: [ProgressSend]` (oldest first, at most 8), `sendHistoryTruncated: Bool`, `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
+| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date` (latest change, for display and ordering only), `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `audioEditedAt: Date?`, `finishedEditedAt: Date?`, `ebookEditedAt: Date?`, `@Attribute(.codable) serverBaseline: ProgressBaseline?`, `@Attribute(.codable) unacknowledgedSends: [ProgressSend]` (oldest first, at most 8), `audioHistoryTruncated: Bool`, `finishedHistoryTruncated: Bool`, `ebookHistoryTruncated: Bool` (all default `false`), `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
 | `DownloadRecord` | `id: UUID`, `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `mediaType`, `title`, `state` (`queued`/`downloading`/`paused`/`failed`), `relativeDirectory`, `createdAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) parts: [DownloadPart]` | `#Unique([\.id], [\.key])`; `#Index([\.state])` |
 | `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `hasResumeData: Bool` (flag only; the sealed blob lives outside the store), `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
 | `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?` | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
@@ -243,8 +243,8 @@ Model notes:
       entry and every older entry are removed, and the flag clears only if
       `<group>EditedAt` still equals the entry's. A newer local edit stays dirty
       and is never rolled back;
-    - dirty, matching neither the baseline nor any entry, while
-      `sendHistoryTruncated` is set: the server value may be one of our dropped
+    - dirty, matching neither the baseline nor any entry, while that group's
+      `<group>HistoryTruncated` is set: the server value may be one of our dropped
       sends, so the local group wins and stays dirty;
     - dirty, and the server's group differs from the baseline (or there is no
       baseline): a real conflict. The local group wins only if its
@@ -263,11 +263,13 @@ Model notes:
     serialised, and a failure or lost response leaves the list, the flags and the
     baseline unchanged, so an earlier send that may have committed stays
     recognisable after later retries fail. When the list already holds 8 entries,
-    the oldest is dropped and `sendHistoryTruncated` is set. After it succeeds, the store always copies the sent
+    the oldest is dropped and `<group>HistoryTruncated` is set for each group it
+    carried (`ProgressSend` groups are optional, so entries can be pruned per
+    group). After it succeeds, the store always copies the sent
     snapshot values into `serverBaseline` for every sent group, because the server
     now holds them, sets `serverBaseline.lastUpdate` from the response when the
-    server returns one, and empties `unacknowledgedSends` and clears
-    `sendHistoryTruncated`, because the server now holds the newest send. It then
+    server returns one, and empties `unacknowledgedSends` and clears all three
+    `<group>HistoryTruncated` flags, because the server now holds the newest send. It then
     clears a group's flag only if its `<group>EditedAt` still equals the
     snapshot's. A group edited during the request stays dirty with its newer local values, and the next fetch sees the
     server matching the advanced baseline, so the edit is kept and sent rather
@@ -380,10 +382,22 @@ Model notes:
   structs only gain optional fields (decoded with `decodeIfPresent`), never rename
   or retype keys, and bump `snapshotVersion`. An incompatible change becomes a new
   attribute in a new schema version with a `.custom` stage.
-- If the container fails to load with `SwiftDataError.backwardMigration`,
-  `.unknownSchema` or `.unknownDataStoreSchema` (a downgrade or a corrupt store),
-  `DataStack` logs a fault, moves the store files aside with a timestamp suffix and
-  creates an empty store. Downloaded files that are no longer referenced are removed
+- **Downgrades.** Opening a store written by a newer version that only added
+  optional attributes succeeds: Core Data's inferred migration drops the new
+  columns and keeps the rows (tested in #36). An incompatible store (an unrelated
+  or non-additive newer schema, or a corrupt file) fails with
+  `SwiftDataError.loadIssueModelContainer`, not `.backwardMigration`.
+- **Recovery.** Only a writing process recovers. When the load fails with
+  `.backwardMigration`, `.unknownSchema` or `.unknownDataStoreSchema`, or with
+  `.loadIssueModelContainer` and a probe confirms the store is incompatible,
+  `DataStack` logs a fault, moves the store and its `-wal`/`-shm` files into
+  `Broken/<epoch>-<uuid>/` next to it (keeping only the newest copy) and creates an
+  empty store. The probe calls a store incompatible only when its first 16 bytes
+  are readable and aren't the SQLite header, when reading its metadata fails with
+  SQLite error 11 or 26, or when the metadata matches no schema in
+  `ABSMigrationPlan`. An unreadable file (for example protected data while the
+  device is locked) or any other error is transient: the error is rethrown and the
+  store is left alone. Downloaded files that are no longer referenced are removed
   by the orphan sweep in #73 (P4-02). The server still holds synced progress.
 
 ### Store location and container
@@ -391,10 +405,17 @@ Model notes:
 - `DataStack` builds one `ModelContainer` per process (it is `Sendable`);
   `AppEnvironment` creates it and injects it into every store.
 - `DataStack` has three locations:
-  - `.appGroup` (production):
-    `ModelConfiguration("Audiobookshelf", schema:, groupContainer: .identifier("group.org.davidjensenius.Audiobookshelf"), cloudKitDatabase: .none)`,
-    which puts the store at
-    `<group container>/Library/Application Support/Audiobookshelf.store`;
+  - `.appGroup` (production): the store at
+    `<group container>/Library/Application Support/Audiobookshelf.store` for
+    `AppSettings.appGroupIdentifier`, opened with
+    `ModelConfiguration("Audiobookshelf", schema:, url:, cloudKitDatabase: .none)`
+    (the same file `groupContainer: .identifier(_:)` resolves to). Load failures
+    are rethrown, never answered with another store, because a private store would
+    split the data and the orphan sweep could delete downloads. Only when the
+    process has no App Group entitlement (the ad hoc signed macOS test host) does a
+    writing process fall back to `Application Support/Audiobookshelf.store` in its
+    own container, logging a fault (and asserting in debug builds outside test
+    hosts). A read-only process never falls back; it throws;
   - `.url(URL)` for on-disk tests;
   - `.inMemory` (`isStoredInMemoryOnly: true, groupContainer: .none, cloudKitDatabase: .none`)
     for unit tests and previews.
@@ -537,6 +558,9 @@ Assumed; the tests and device checks are performed in #36 (P1-13a) and #37
 - Changing the shape of a `.codable` type doesn't change the schema version hash;
   the snapshot rules keep old blobs decodable either way.
 - Widget reads with `allowsSave: false` are safe while the app writes.
+- Device check (#37, P1-13b): on a locked device, after first unlock and before
+  it, opening the store either succeeds or fails without the recovery probe moving
+  it aside (protected data reads as unreadable, so it is treated as transient).
 
 Ongoing checks:
 
@@ -557,8 +581,8 @@ Ongoing checks:
   sends the newer seek; PATCH A commits but loses its response after a newer
   seek, retry B fails before reaching the server, and a fresh fetch returning A's
   values keeps the newer seek dirty (A is still recognised); overflowing the
-  8-entry list sets `sendHistoryTruncated` and an unmatched server value then
-  keeps the local value dirty; a server echo of an in-flight PATCH (newer `lastUpdate`, older
+  8-entry list sets `<group>HistoryTruncated` for the dropped entry's groups, and
+  an unmatched server value for such a group then keeps the local value dirty; a server echo of an in-flight PATCH (newer `lastUpdate`, older
   values) arriving after a newer local seek is deferred and leaves the seek dirty
   and unchanged, on both PATCH success and failure; deleting a connection with dirty progress and then logging in
   again to the same address and user returns the same connection `id`, and

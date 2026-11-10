@@ -188,7 +188,7 @@ import Testing
             let progress = Fixtures.progress()
             progress.serverBaseline = baseline
             progress.unacknowledgedSends = sends
-            progress.sendHistoryTruncated = true
+            progress.finishedHistoryTruncated = true
             progress.audioDirty = true
             progress.audioEditedAt = Fixtures.date
             progress.needsServerSync = true
@@ -210,7 +210,7 @@ import Testing
         let progress = try #require(try context.fetch(FetchDescriptor<LocalMediaProgress>()).first)
         #expect(progress.serverBaseline == baseline)
         #expect(progress.unacknowledgedSends == sends)
-        #expect(progress.sendHistoryTruncated)
+        #expect(!progress.audioHistoryTruncated && progress.finishedHistoryTruncated && !progress.ebookHistoryTruncated)
         #expect(progress.audioDirty && !progress.finishedDirty && !progress.ebookDirty)
         #expect(progress.audioEditedAt == Fixtures.date)
 
@@ -224,6 +224,47 @@ import Testing
         #expect(part.expectedBytes == 3_000_000_000)
         #expect(part.taskIdentifier == 42)
         #expect(part.hasResumeData)
+    }
+
+    @Test func fractionalDatesRoundTripExactlyOnDisk() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "Audiobookshelf.store")
+        // Sub-millisecond precision, as produced by `Date.now`.
+        let now = Date(timeIntervalSinceReferenceDate: Date.now.timeIntervalSinceReferenceDate + 0.123_456_789)
+        let send = ProgressSend(audio: .init(currentTime: 1.5, progress: 0.1, duration: 15, editedAt: now))
+
+        do {
+            let context = ModelContext(try DataStack(location: .url(url)).container)
+            let progress = Fixtures.progress()
+            progress.audioEditedAt = now
+            progress.lastUpdate = now
+            progress.unacknowledgedSends = [send]
+            context.insert(progress)
+            try context.save()
+        }
+
+        let context = ModelContext(try DataStack(location: .url(url)).container)
+        let progress = try #require(try context.fetch(FetchDescriptor<LocalMediaProgress>()).first)
+        #expect(progress.audioEditedAt == now)
+        #expect(progress.lastUpdate == now)
+        #expect(progress.unacknowledgedSends.first?.audio?.editedAt == now)
+        #expect(progress.unacknowledgedSends == [send])
+    }
+
+    @Test func mediaKeyBuildsAndParsesStoredKeys() throws {
+        let book = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_1")
+        #expect(book.rawValue == "6F1E2A4B-1C2D-4E5F-8A9B-0C1D2E3F4A5B|li_1|")
+        #expect(MediaKey(rawValue: book.rawValue) == book)
+
+        let episode = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_1", episodeId: "ep_1")
+        #expect(episode.rawValue == "6F1E2A4B-1C2D-4E5F-8A9B-0C1D2E3F4A5B|li_1|ep_1")
+        #expect(MediaKey(rawValue: episode.rawValue) == episode)
+        #expect(MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_1", episodeId: "") == book)
+
+        #expect(MediaKey(rawValue: "not-a-uuid|li_1|") == nil)
+        #expect(MediaKey(rawValue: "\(Fixtures.connectionID.uuidString)|li_1") == nil)
+        #expect(MediaKey(rawValue: "\(Fixtures.connectionID.uuidString)||") == nil)
     }
 
     @Test func emptyCodableValuesRoundTrip() throws {

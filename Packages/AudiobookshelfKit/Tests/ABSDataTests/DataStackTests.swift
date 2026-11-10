@@ -4,8 +4,8 @@ import Testing
 
 @testable import ABSData
 
-/// A schema from a newer build, used to simulate a downgrade.
-private enum FutureSchema: VersionedSchema {
+/// An unrelated schema from some other build, used to simulate a store this build can't read.
+private enum UnrelatedSchema: VersionedSchema {
     static var versionIdentifier: Schema.Version { Schema.Version(99, 0, 0) }
     static var models: [any PersistentModel.Type] { [ServerConnectionRecord.self] }
 
@@ -20,7 +20,83 @@ private enum FutureSchema: VersionedSchema {
     }
 }
 
+/// A plausible next version: SchemaV1 plus one optional attribute, used to simulate a downgrade.
+private enum SupersetSchemaV2: VersionedSchema {
+    static var versionIdentifier: Schema.Version { Schema.Version(2, 0, 0) }
+    static var models: [any PersistentModel.Type] {
+        [
+            ServerConnectionRecord.self, SchemaV1.LocalLibraryItem.self, SchemaV1.LocalFile.self,
+            SchemaV1.LocalMediaProgress.self, SchemaV1.DownloadRecord.self, SchemaV1.DownloadPart.self,
+            SchemaV1.PendingLocalSession.self, SchemaV1.PlaybackHistoryEvent.self,
+        ]
+    }
+
+    @Model final class ServerConnectionRecord {
+        #Unique<ServerConnectionRecord>([\.id], [\.address, \.userId])
+        #Index<ServerConnectionRecord>([\.lastUsedAt])
+
+        var id: UUID
+        var address: String
+        var userId: String
+        var username: String
+        var authMethod: String
+        var serverVersion: String?
+        var createdAt: Date
+        var lastUsedAt: Date?
+        var isDisconnected: Bool
+        var disconnectedAt: Date?
+        var nickname: String?
+
+        init(id: UUID) {
+            self.id = id
+            address = "https://abs.example.com"
+            userId = "usr_1"
+            username = "reader"
+            authMethod = "local"
+            createdAt = Fixtures.date
+            isDisconnected = false
+            nickname = "Home"
+        }
+    }
+}
+
 @Suite struct DataStackTests {
+    private let fileManager = FileManager.default
+
+    private func exists(_ url: URL) -> Bool {
+        fileManager.fileExists(atPath: url.path(percentEncoded: false))
+    }
+
+    /// The `Broken/<epoch>-<uuid>/` directories next to a store.
+    private func brokenCopies(in directory: URL) -> [URL] {
+        let root = directory.appending(path: "Broken")
+        return (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+    }
+
+    /// Writes a store with `schema` (no migration plan), as another build would.
+    private func writeStore(schema: Schema, at url: URL, insert: (ModelContext) -> Void) throws {
+        try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, url: url, cloudKitDatabase: .none)]
+        )
+        let context = ModelContext(container)
+        insert(context)
+        try context.save()
+    }
+
+    private func openURL(_ url: URL, allowsSave: Bool = true) throws -> DataStack {
+        try DataStack(
+            location: .url(url),
+            allowsSave: allowsSave,
+            groupContainerURL: { nil },
+            fallbackDirectory: url.deletingLastPathComponent(),
+            now: Date(timeIntervalSince1970: 1_900_000_000)
+        )
+    }
+
+    // MARK: - Locations
+
     @Test func migrationPlanStartsAtV1() {
         #expect(ABSMigrationPlan.schemas.count == 1)
         #expect(ABSMigrationPlan.schemas.first == SchemaV1.self)
@@ -47,7 +123,7 @@ private enum FutureSchema: VersionedSchema {
 
     @Test func opensAndReopensV1StoreOnDisk() throws {
         let directory = Fixtures.temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? fileManager.removeItem(at: directory) }
         let url = directory.appending(path: "nested/Audiobookshelf.store")
         let id = UUID()
 
@@ -61,7 +137,7 @@ private enum FutureSchema: VersionedSchema {
             context.insert(Fixtures.historyEvent())
             try context.save()
         }
-        #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+        #expect(exists(url))
 
         let context = ModelContext(try DataStack(location: .url(url)).container)
         #expect(try context.fetch(FetchDescriptor<ServerConnectionRecord>()).map(\.id) == [id])
@@ -69,9 +145,9 @@ private enum FutureSchema: VersionedSchema {
         #expect(try context.fetchCount(FetchDescriptor<PlaybackHistoryEvent>()) == 1)
     }
 
-    @Test func readOnlyStackCannotSave() throws {
+    @Test func readOnlyStackDoesNotPersistWrites() throws {
         let directory = Fixtures.temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? fileManager.removeItem(at: directory) }
         let url = directory.appending(path: "Audiobookshelf.store")
         do {
             let context = ModelContext(try DataStack(location: .url(url)).container)
@@ -79,90 +155,205 @@ private enum FutureSchema: VersionedSchema {
             try context.save()
         }
 
-        let reader = try DataStack(location: .url(url), allowsSave: false)
-        #expect(reader.container.configurations.allSatisfy { !$0.allowsSave })
-        let context = ModelContext(reader.container)
+        do {
+            let reader = try DataStack(location: .url(url), allowsSave: false)
+            #expect(reader.container.configurations.allSatisfy { !$0.allowsSave })
+            let context = ModelContext(reader.container)
+            #expect(try context.fetchCount(FetchDescriptor<ServerConnectionRecord>()) == 1)
+            context.insert(Fixtures.connection(address: "https://other.example.com"))
+            #expect(throws: (any Error).self) { try context.save() }
+        }
+
+        let context = ModelContext(try DataStack(location: .url(url)).container)
         #expect(try context.fetchCount(FetchDescriptor<ServerConnectionRecord>()) == 1)
     }
 
-    @Test func appGroupFallsBackWhenGroupContainerIsUnavailable() throws {
+    // MARK: - App Group
+
+    @Test func appGroupStoreLivesInGroupContainer() throws {
+        let group = Fixtures.temporaryDirectory()
+        let fallback = Fixtures.temporaryDirectory()
+        defer {
+            try? fileManager.removeItem(at: group)
+            try? fileManager.removeItem(at: fallback)
+        }
+        var fallbacks = 0
+
+        let stack = try DataStack(
+            location: .appGroup,
+            allowsSave: true,
+            groupContainerURL: { group },
+            fallbackDirectory: fallback,
+            onFallback: { fallbacks += 1 }
+        )
+        let context = ModelContext(stack.container)
+        context.insert(Fixtures.connection())
+        try context.save()
+
+        #expect(stack.resolvedLocation == .appGroup)
+        #expect(exists(group.appending(path: "Library/Application Support/Audiobookshelf.store")))
+        #expect(!exists(fallback))
+        #expect(fallbacks == 0)
+    }
+
+    @Test func appGroupLoadFailureIsRethrownWithoutFallback() throws {
+        let group = Fixtures.temporaryDirectory()
+        let fallback = Fixtures.temporaryDirectory()
+        defer {
+            try? fileManager.removeItem(at: group)
+            try? fileManager.removeItem(at: fallback)
+        }
+        // A regular file where the store's directory should be makes every load fail.
+        try fileManager.createDirectory(at: group.appending(path: "Library"), withIntermediateDirectories: true)
+        try Data().write(to: group.appending(path: "Library/Application Support"))
+        var fallbacks = 0
+
+        #expect(throws: (any Error).self) {
+            _ = try DataStack(
+                location: .appGroup,
+                allowsSave: true,
+                groupContainerURL: { group },
+                fallbackDirectory: fallback,
+                onFallback: { fallbacks += 1 }
+            )
+        }
+        #expect(!exists(fallback))
+        #expect(fallbacks == 0)
+    }
+
+    @Test func appGroupFallsBackOnlyWithoutEntitlement() throws {
         let directory = Fixtures.temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? fileManager.removeItem(at: directory) }
+        var fallbacks = 0
 
         let stack = try DataStack(
             location: .appGroup,
             allowsSave: true,
             groupContainerURL: { nil },
-            fallbackDirectory: directory
+            fallbackDirectory: directory,
+            onFallback: { fallbacks += 1 }
         )
         let expected = directory.appending(path: "Audiobookshelf.store")
         #expect(stack.resolvedLocation == .url(expected))
+        #expect(fallbacks == 1)
 
         let context = ModelContext(stack.container)
         context.insert(Fixtures.connection())
         try context.save()
-        #expect(FileManager.default.fileExists(atPath: expected.path(percentEncoded: false)))
+        #expect(exists(expected))
     }
 
-    @Test func storeFromNewerSchemaIsMovedAsideAndRecreated() throws {
+    @Test func readOnlyAppGroupNeverFallsBack() throws {
         let directory = Fixtures.temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appending(path: "Audiobookshelf.store")
+        defer { try? fileManager.removeItem(at: directory) }
 
-        do {
-            let schema = Schema(versionedSchema: FutureSchema.self)
-            let container = try ModelContainer(
-                for: schema,
-                configurations: [ModelConfiguration(schema: schema, url: url, cloudKitDatabase: .none)]
+        #expect(throws: DataStack.LoadError.appGroupUnavailable) {
+            _ = try DataStack(
+                location: .appGroup,
+                allowsSave: false,
+                groupContainerURL: { nil },
+                fallbackDirectory: directory
             )
-            let context = ModelContext(container)
-            context.insert(FutureSchema.ServerConnectionRecord(id: UUID(), nickname: "future"))
-            try context.save()
         }
+        #expect(!exists(directory))
+    }
 
-        let now = Date(timeIntervalSince1970: 1_900_000_000)
-        let stack = try DataStack(
-            location: .url(url),
-            allowsSave: true,
-            groupContainerURL: { nil },
-            fallbackDirectory: directory,
-            now: now
-        )
-        let context = ModelContext(stack.container)
+    // MARK: - Recovery
+
+    @Test func storeFromUnrelatedSchemaIsMovedAsideAndRecreated() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let url = directory.appending(path: "Audiobookshelf.store")
+        let schema = Schema(versionedSchema: UnrelatedSchema.self)
+        try writeStore(schema: schema, at: url) {
+            $0.insert(UnrelatedSchema.ServerConnectionRecord(id: UUID(), nickname: "other"))
+        }
+        #expect(DataStack.isIncompatibleStore(at: url))
+
+        let context = ModelContext(try openURL(url).container)
         #expect(try context.fetchCount(FetchDescriptor<ServerConnectionRecord>()) == 0)
         context.insert(Fixtures.connection())
         try context.save()
-
-        let movedAside = directory.appending(path: "Audiobookshelf.store.broken-1900000000")
-        #expect(FileManager.default.fileExists(atPath: movedAside.path(percentEncoded: false)))
+        #expect(brokenCopies(in: directory).count == 1)
     }
 
-    @Test func corruptStoreIsMovedAsideAndRecreated() throws {
+    /// Pins how SwiftData treats a downgrade from a version that only added an optional attribute:
+    /// no `backwardMigration` error; Core Data's inferred migration opens the store, drops the new
+    /// column and keeps every row, so no recovery happens.
+    @Test func downgradeFromAdditiveSchemaKeepsRows() throws {
         let directory = Fixtures.temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: directory) }
         let url = directory.appending(path: "Audiobookshelf.store")
-        try Data(repeating: 0x5A, count: 8192).write(to: url)
+        let id = UUID()
+        try writeStore(schema: Schema(versionedSchema: SupersetSchemaV2.self), at: url) {
+            $0.insert(SupersetSchemaV2.ServerConnectionRecord(id: id))
+            $0.insert(Fixtures.progress())
+        }
 
-        let stack = try DataStack(
-            location: .url(url),
-            allowsSave: true,
-            groupContainerURL: { nil },
-            fallbackDirectory: directory,
-            now: Date(timeIntervalSince1970: 1_900_000_000)
-        )
-        let context = ModelContext(stack.container)
+        let context = ModelContext(try openURL(url).container)
+        #expect(try context.fetch(FetchDescriptor<ServerConnectionRecord>()).map(\.id) == [id])
+        #expect(try context.fetchCount(FetchDescriptor<LocalMediaProgress>()) == 1)
+        #expect(brokenCopies(in: directory).isEmpty)
+    }
+
+    @Test func corruptStoreAndSideFilesAreMovedAsideKeepingNewestCopy() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let older = directory.appending(path: "Broken/1-OLDER")
+        try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
+        let url = directory.appending(path: "Audiobookshelf.store")
+        let garbage = Data(repeating: 0x5A, count: 8192)
+        for suffix in ["", "-wal", "-shm"] {
+            try garbage.write(to: directory.appending(path: "Audiobookshelf.store\(suffix)"))
+        }
+
+        let context = ModelContext(try openURL(url).container)
         context.insert(Fixtures.connection())
         try context.save()
 
-        let movedAside = directory.appending(path: "Audiobookshelf.store.broken-1900000000")
-        #expect(try Data(contentsOf: movedAside) == Data(repeating: 0x5A, count: 8192))
+        let copies = brokenCopies(in: directory)
+        #expect(copies.count == 1)
+        let copy = try #require(copies.first)
+        #expect(copy.lastPathComponent.hasPrefix("1900000000-"))
+        for suffix in ["", "-wal", "-shm"] {
+            #expect(try Data(contentsOf: copy.appending(path: "Audiobookshelf.store\(suffix)")) == garbage)
+        }
+        #expect(!exists(older))
+    }
+
+    @Test func readOnlyStackNeverRecovers() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appending(path: "Audiobookshelf.store")
+        try Data(repeating: 0x5A, count: 8192).write(to: url)
+
+        #expect(throws: (any Error).self) { _ = try openURL(url, allowsSave: false) }
+        #expect(exists(url))
+        #expect(brokenCopies(in: directory).isEmpty)
+    }
+
+    @Test func unreadableStoreIsTreatedAsTransient() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appending(path: "Audiobookshelf.store")
+        try Data(repeating: 0x5A, count: 8192).write(to: url)
+        // Stands in for a protected file while the device is locked.
+        try fileManager.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path(percentEncoded: false))
+        defer {
+            try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path(percentEncoded: false))
+        }
+
+        #expect(!DataStack.isIncompatibleStore(at: url))
+        #expect(throws: (any Error).self) { _ = try openURL(url) }
+        #expect(exists(url))
+        #expect(brokenCopies(in: directory).isEmpty)
     }
 
     @Test func validV1StoreIsNotTreatedAsIncompatible() throws {
         let directory = Fixtures.temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        defer { try? fileManager.removeItem(at: directory) }
         let url = directory.appending(path: "Audiobookshelf.store")
         do {
             let context = ModelContext(try DataStack(location: .url(url)).container)

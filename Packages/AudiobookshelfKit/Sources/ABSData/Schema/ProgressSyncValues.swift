@@ -39,8 +39,8 @@ public struct ProgressBaseline: Codable, Sendable, Hashable {
 /// A progress PATCH whose outcome is unknown: the values of the groups it sent and each
 /// group's `<group>EditedAt` when the snapshot was taken. A `nil` group was not sent.
 public struct ProgressSend: Codable, Sendable, Hashable {
-    /// The most entries `LocalMediaProgress.unacknowledgedSends` keeps; older ones are dropped
-    /// and `sendHistoryTruncated` is set.
+    /// The most entries `LocalMediaProgress.unacknowledgedSends` keeps; when an older one is
+    /// dropped, the `<group>HistoryTruncated` flag of each group it carried is set.
     public static let historyLimit = 8
 
     public var audio: Audio?

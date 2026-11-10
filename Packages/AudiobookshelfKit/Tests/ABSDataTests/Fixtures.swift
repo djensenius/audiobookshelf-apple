@@ -10,7 +10,7 @@ enum Fixtures {
     static let date = Date(timeIntervalSince1970: 1_800_000_000)
 
     static func mediaKey(_ libraryItemId: String, episodeId: String? = nil) -> String {
-        "\(connectionID.uuidString)|\(libraryItemId)|\(episodeId ?? "")"
+        MediaKey(serverConnectionID: connectionID, libraryItemId: libraryItemId, episodeId: episodeId).rawValue
     }
 
     static let bookSnapshot = LocalMediaSnapshot(

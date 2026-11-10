@@ -213,7 +213,11 @@ public enum SchemaV1: VersionedSchema {
         @Attribute(.codable) public var serverBaseline: ProgressBaseline?
         /// PATCHes whose outcome is unknown, oldest first, at most `ProgressSend.historyLimit`.
         @Attribute(.codable) public var unacknowledgedSends: [ProgressSend]
-        public var sendHistoryTruncated: Bool
+        /// Set per group when an entry carrying that group was dropped from
+        /// `unacknowledgedSends`; an unmatched server value for the group then keeps the local one.
+        public var audioHistoryTruncated: Bool = false
+        public var finishedHistoryTruncated: Bool = false
+        public var ebookHistoryTruncated: Bool = false
         /// True when any dirty flag is set; the indexed pending-sync query.
         public var needsServerSync: Bool
         public var lastSyncAttemptAt: Date?
@@ -242,7 +246,9 @@ public enum SchemaV1: VersionedSchema {
             ebookEditedAt: Date? = nil,
             serverBaseline: ProgressBaseline? = nil,
             unacknowledgedSends: [ProgressSend] = [],
-            sendHistoryTruncated: Bool = false,
+            audioHistoryTruncated: Bool = false,
+            finishedHistoryTruncated: Bool = false,
+            ebookHistoryTruncated: Bool = false,
             needsServerSync: Bool = false,
             lastSyncAttemptAt: Date? = nil,
             lastSyncError: String? = nil
@@ -269,7 +275,9 @@ public enum SchemaV1: VersionedSchema {
             self.ebookEditedAt = ebookEditedAt
             self.serverBaseline = serverBaseline
             self.unacknowledgedSends = unacknowledgedSends
-            self.sendHistoryTruncated = sendHistoryTruncated
+            self.audioHistoryTruncated = audioHistoryTruncated
+            self.finishedHistoryTruncated = finishedHistoryTruncated
+            self.ebookHistoryTruncated = ebookHistoryTruncated
             self.needsServerSync = needsServerSync
             self.lastSyncAttemptAt = lastSyncAttemptAt
             self.lastSyncError = lastSyncError
