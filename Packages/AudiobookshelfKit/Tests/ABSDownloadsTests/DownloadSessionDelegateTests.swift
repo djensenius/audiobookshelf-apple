@@ -25,6 +25,18 @@ struct DownloadSessionDelegateTests {
         Case(status: 204, expected: .httpStatus(204)),
         Case(status: 302, expected: .httpStatus(302)),
         Case(status: 200, contentType: "text/html", expected: .unexpectedContent("text/html")),
+        Case(status: 200, contentType: "text/plain; charset=utf-8", expected: .unexpectedContent("text/plain")),
+        Case(status: 206, contentType: "application/json", expected: .unexpectedContent("application/json")),
+        Case(status: 200, contentType: "application/xml", expected: .unexpectedContent("application/xml")),
+        Case(
+            status: 200, contentType: "application/problem+json",
+            expected: .unexpectedContent("application/problem+json")),
+        Case(
+            status: 200, contentType: "application/epub+zip",
+            expected: .failed(DownloadTransferFailure(URLError(.zeroByteResource)))),
+        Case(
+            status: 200, contentType: "image/svg+xml",
+            expected: .failed(DownloadTransferFailure(URLError(.zeroByteResource)))),
         Case(status: 200, expected: .failed(DownloadTransferFailure(URLError(.zeroByteResource)))),
         Case(status: 206, expected: .failed(DownloadTransferFailure(URLError(.zeroByteResource)))),
     ])

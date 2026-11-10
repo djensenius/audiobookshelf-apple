@@ -14,7 +14,8 @@ enum DownloadTaskResult: Sendable, Equatable {
     /// The response came from another origin than the request (a redirect left the server);
     /// the body was discarded.
     case offOrigin
-    /// The body was an HTML page (a proxy or captive portal), not the file.
+    /// The body was an error page or message (HTML from a proxy or captive portal, text, JSON
+    /// or XML), not the file.
     case unexpectedContent(String)
     /// The body's size isn't the part's expected size.
     case sizeMismatch(expected: Int64, actual: Int64)
@@ -104,7 +105,8 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// Why `response` isn't the part's file, or `nil` when it may be. Checked in this order,
     /// both for a body and for a task that ended without one: another origin than the request
     /// (whatever the status, so no refresh follows), a 401 after a redirect, a status other
-    /// than 200 or 206 (ADR 0007: a 204 is an error), and an HTML page.
+    /// than 200 or 206 (ADR 0007: a 204 is an error), and an error body (``isErrorBody(_:)``),
+    /// which the size check can't catch when its length happens to match.
     static func classify(response: URLResponse?, task: URLSessionTask) -> DownloadTaskResult? {
         guard let response = response as? HTTPURLResponse else { return .httpStatus(0) }
         guard let requested = task.originalRequest?.url, let answered = response.url,
@@ -112,8 +114,19 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
         else { return .offOrigin }
         if response.statusCode == 401, answered != requested { return .redirectedUnauthorized }
         guard response.statusCode == 200 || response.statusCode == 206 else { return .httpStatus(response.statusCode) }
-        if let type = response.mimeType?.lowercased(), type == "text/html" { return .unexpectedContent(type) }
+        if let type = response.mimeType?.lowercased(), isErrorBody(type) { return .unexpectedContent(type) }
         return nil
+    }
+
+    /// Whether a body of MIME type `type` is an error page or message rather than a file: any
+    /// `text/*`, and JSON or XML (`application/json`, `application/xml`, and `application/*+json`
+    /// or `+xml` such as `application/problem+json`). No part (audio, video, an ebook or an
+    /// image) has one of these types.
+    static func isErrorBody(_ type: String) -> Bool {
+        if type.hasPrefix("text/") { return true }
+        guard type.hasPrefix("application/") else { return false }
+        return type == "application/json" || type == "application/xml" || type.hasSuffix("+json")
+            || type.hasSuffix("+xml")
     }
 
     /// The whole file's length as the response declares it: the total of a 206's

@@ -217,7 +217,8 @@ import SwiftData
     /// Starts a part, in one write: moves it from one of `expecting` to `.running`, and its
     /// record from `.queued` to `.downloading`. The engine creates a transfer only when this
     /// returns `true`, so a launch from a stale read can't restart a part that has since
-    /// completed, been stopped, failed for good or been deleted.
+    /// completed, been stopped, failed for good or been deleted. The compare-and-set only holds
+    /// when the engine and the app share one `DownloadStore` actor.
     ///
     /// `expecting` is the states the caller may start the part from: `.queued`, and `.failed`
     /// for a retry. The change is refused when the part or its record doesn't exist, the part
