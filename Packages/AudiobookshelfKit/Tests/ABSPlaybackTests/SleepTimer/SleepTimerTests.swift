@@ -67,7 +67,7 @@ private func autoOptions(mode: SleepTimerMode = .duration(10), rewind: TimeInter
 }
 
 @MainActor
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.serialized, .timeLimit(.minutes(1)))
 struct SleepTimerTests {
     // MARK: - Duration
 
