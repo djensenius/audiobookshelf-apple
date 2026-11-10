@@ -171,7 +171,8 @@ iOS.
   retry count, and every sibling the failure stopped, once the failure is settled. A
   plain `start(partIDs:)` that overlaps the failure restarts only the parts it named, not
   the siblings (starting a `failed` record's parts without `resume(recordID:)` is not
-  supported). The replay happens once per part for each resume: if the restarted part
+  supported, and a sibling that fails for good while such a start is replaying stays
+  failed). The replay happens once per part for each resume: if the restarted part
   fails for good again, that failure is final and fails the download, even while the
   resume is still starting. A newer failure of another part (the download is `failed`
   again) is not overwritten by the replay of an older resume.

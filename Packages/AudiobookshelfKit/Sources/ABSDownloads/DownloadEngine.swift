@@ -185,9 +185,11 @@ public actor DownloadEngine {
     /// Resumes that haven't reached the part-start section yet. Failures during this interval
     /// must leave the record startable by the resume.
     private var resumingRecords: Set<UUID> = []
-    /// Incremented synchronously when a resume begins, before its first store await.
+    /// Incremented synchronously when a resume begins, before its first store await. One `Int`
+    /// per record that was ever resumed, kept until the engine goes away.
     private var resumeGenerations: [UUID: Int] = [:]
     /// A part gets one stale-failure replay per user resume; a replay's own failure stays final.
+    /// One `Int` per part that was ever replayed, kept until the engine goes away.
     private var replayedResumeGenerationByPart: [UUID: Int] = [:]
     /// Records whose `failed` state couldn't be saved after a part failed for good. Their parts
     /// can't launch until ``reconcile()`` saves it.
