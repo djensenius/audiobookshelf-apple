@@ -279,17 +279,18 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 **URL format** (`ABSAppModel/Navigation/DeepLink.swift`)
 
 - The legacy app handled only `audiobookshelf://oauth`, so there is no older link format to stay compatible with.
-- The kind is the host (`audiobookshelf://item/li_1`). Without a host (`audiobookshelf:item/li_1`, `audiobookshelf:///item/li_1`) it is the first path segment. Scheme and kind are case-insensitive; IDs are not.
-- Each kind takes exactly one non-empty ID segment (`search` and `downloads` take none); a trailing `/` is ignored. A missing ID, extra segments, an unknown kind or `oauth` gives `nil`.
-- Path segments and query values are percent-decoded, and `+` in a query value is a space. Empty query values count as absent, and the first of a repeated parameter wins.
-- `t=` is seconds (`5025`, `5025.5`) or a clock time (`1:23:45`, `83:45`). Anything else, including negative values, is ignored and the link still opens the item.
+- The kind is the host (`audiobookshelf://item/li_1`); a URL without a host gives `nil`. Scheme, kind and query names are case-insensitive; IDs are not.
+- Each kind takes exactly one ID segment (`search` and `downloads` take none); one trailing `/` is ignored. A missing ID, an empty or extra segment (`item//li_1`), an unknown kind or `oauth` gives `nil`.
+- IDs (including `episode=` and `server=`) must not be blank, `.` or `..`, contain control characters, or exceed 256 characters; `q=` is capped at 1,024. Otherwise the link is `nil`.
+- Path segments and query values are percent-decoded, and `+` in a query value is a space. A value that doesn't decode gives `nil`. Empty `episode=`, `q=` and `t=` count as absent, but an empty or unreadable `server=` gives `nil` rather than falling back to the active server. The first of a repeated parameter wins.
+- `t=` is seconds (`5025`, `5025.5`) or a clock time (`1:23:45`, `83:45`), at most 10,000,000 seconds. Anything else, including negative values, is ignored and the link still opens the item.
 - `Router.open(_:)` opens item, series, author, collection and playlist links in the Library tab, pushing onto its path. `library` calls `requestLibrary(id:)`. `search` selects Search at its root and sets `pendingSearchQuery`. A `server=` that isn't the router's server only sets `pendingServerSwitch`.
-- A paused, loaded play-link target with `t=` asks to play from `t=` (`.confirmPlay`), because resuming would ignore it. Without `t=` it asks to resume.
+- `PlayLinkDecision` gives `.openOnly` for the item that is playing (or buffering), `.confirmResume(startTime:)` for the loaded but paused item, and `.confirmPlay(startTime:)` otherwise. A `play/{podcastID}` link without an episode has nothing to play; the item screen treats it as open-only.
 
 **Play links never start playback silently.** Any app or web page can open a URL, so `play/` links are limited:
 
 - If the link targets the item (and episode) that is **currently playing**, it is a no-op apart from opening the item screen. It never seeks, even when the link carries `t=`.
-- In every other case, including an item that is loaded but paused, the item screen opens with a confirmation: "Play *title*?" (or "Resume *title*?" for the paused session), which shows `t=` as "from 1:23:45" if present.
+- In every other case, including an item that is loaded but paused, the item screen opens with a confirmation: "Play *title*?" (or "Resume *title*?" for the paused session), which shows `t=` as "from 1:23:45" if present. For the paused session with `t=`, the UI may also offer "Resume at current position".
   - Nothing starts, resumes, replaces the current session or seeks until the user confirms.
 - Siri, Shortcuts and widgets start playback through App Intents (P5-09 #86, P5-10 #87), not through URLs, so they do not need this confirmation.
 

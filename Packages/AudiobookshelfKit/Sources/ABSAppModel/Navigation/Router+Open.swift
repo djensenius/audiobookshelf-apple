@@ -18,6 +18,12 @@ extension Router {
     ///
     /// Every link that navigates also dismisses the full player, which would cover the
     /// destination, and replaces any earlier pending play link, search query or server switch.
+    /// Links other than `library` also cancel a pending library request, so resolving it later
+    /// can't reset the paths they opened; a `library` link replaces it.
+    ///
+    /// The scene (S5) must hold incoming links until this router has its identity
+    /// (``resetForIdentityChange(serverID:userID:)``) and its restored ``snapshot``: the
+    /// server check needs ``serverID``, and a restore resets the paths and pending state.
     public func open(_ link: DeepLink) {
         if let linkServer = link.serverID, !Self.isSameServer(linkServer, serverID) {
             pendingServerSwitch = link
@@ -27,6 +33,7 @@ extension Router {
         pendingPlayLink = nil
         pendingSearchQuery = nil
         isFullPlayerPresented = false
+        cancelLibraryRequest()
 
         switch link.target {
         case .item(let id, let episodeID):

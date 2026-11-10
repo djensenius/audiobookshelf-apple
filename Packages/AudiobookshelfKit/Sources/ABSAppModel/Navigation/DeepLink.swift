@@ -39,59 +39,71 @@ public struct DeepLink: Hashable, Sendable {
         self.serverID = serverID
     }
 
-    /// Parses an `audiobookshelf://` URL. Returns `nil` for another scheme, `oauth`, an unknown
-    /// kind, a missing or empty ID, or extra path segments.
+    /// Parses an `audiobookshelf://` URL. Returns `nil` for another scheme, a URL without a
+    /// host, `oauth`, an unknown kind, a missing, empty or invalid ID (``isValidID(_:)``),
+    /// empty or extra path segments, a `server=` that is empty or doesn't decode, a query value
+    /// that doesn't decode, or a `q=` longer than ``maxQueryLength``.
     ///
-    /// The kind is the host (`audiobookshelf://item/li_1`). When the URL has no host
-    /// (`audiobookshelf:item/li_1` or `audiobookshelf:///item/li_1`) the kind is the first path
-    /// segment instead, the form Android's `URL` reports. Path segments and query values are
-    /// percent-decoded, and `+` in a query value is a space. A start time that isn't valid is
-    /// ignored rather than rejecting the link.
+    /// The kind is the host (`audiobookshelf://item/li_1`); one trailing `/` is allowed. Path
+    /// segments and query values are percent-decoded, `+` in a query value is a space, and
+    /// query names are matched ignoring case, the first of a repeated name winning. A start
+    /// time that isn't valid is ignored rather than rejecting the link.
     public init?(url: URL) {
         guard url.scheme?.lowercased() == "audiobookshelf",
-            let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+            let kind = components.host?.lowercased(), !kind.isEmpty,
+            let segments = Self.pathSegments(components), segments.count <= 1,
+            let query = Self.queryValues(components)
         else { return nil }
 
-        var segments: [String] = []
-        for raw in components.percentEncodedPath.split(separator: "/") {
-            guard let segment = String(raw).removingPercentEncoding else { return nil }
-            segments.append(segment)
-        }
-        let kind: String
-        if let host = components.host, !host.isEmpty {
-            kind = host.lowercased()
-        } else if !segments.isEmpty {
-            kind = segments.removeFirst().lowercased()
-        } else {
-            return nil
-        }
-
-        let query = Self.queryValues(components)
-        guard segments.count <= 1 else { return nil }
         let id = segments.first
+        if let id, !Self.isValidID(id) { return nil }
+        let episodeID = query["episode"].flatMap { $0.isEmpty ? nil : $0 }
+        if let episodeID, !Self.isValidID(episodeID) { return nil }
 
         switch kind {
         case "item":
             guard let id else { return nil }
-            target = .item(id: id, episodeID: query["episode"])
+            target = .item(id: id, episodeID: episodeID)
         case "play":
             guard let id else { return nil }
             let start = query["t"].flatMap(Self.parseStartTime)
-            target = .play(PlayLink(itemID: id, episodeID: query["episode"], startTime: start))
+            target = .play(PlayLink(itemID: id, episodeID: episodeID, startTime: start))
         case "series", "author", "collection", "playlist", "library":
             guard let id else { return nil }
             target = Self.idTarget(kind, id: id)
         case "search":
-            guard segments.isEmpty else { return nil }
-            target = .search(query: query["q"])
+            guard id == nil else { return nil }
+            let text = query["q"].flatMap { $0.isEmpty ? nil : $0 }
+            if let text, text.count > Self.maxQueryLength { return nil }
+            target = .search(query: text)
         case "downloads":
-            guard segments.isEmpty else { return nil }
+            guard id == nil else { return nil }
             target = .downloads
         default:
             // Includes "oauth", the OIDC callback handled by the sign-in flow.
             return nil
         }
-        serverID = query["server"]
+
+        // A server the link names but we can't read must not fall back to the active server.
+        if let server = query["server"] {
+            guard Self.isValidID(server) else { return nil }
+            serverID = server
+        }
+    }
+
+    /// The longest ID (item, episode, series and so on, and `server=`) a link may carry.
+    static let maxIDLength = 256
+    /// The longest search query a link may carry.
+    static let maxQueryLength = 1_024
+
+    /// Whether `id` can be an ID: not blank, at most ``maxIDLength`` characters, no control
+    /// characters, and not `.` or `..`.
+    static func isValidID(_ id: String) -> Bool {
+        !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && id.count <= maxIDLength
+            && id != "." && id != ".."
+            && !id.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) }
     }
 
     private static func idTarget(_ kind: String, id: String) -> Target {
@@ -104,22 +116,49 @@ public struct DeepLink: Hashable, Sendable {
         }
     }
 
-    /// The first non-empty value of each query parameter, decoded.
-    private static func queryValues(_ components: URLComponents) -> [String: String] {
+    /// The decoded path segments after the host, or `nil` if one is empty (`item//li_1`) or
+    /// doesn't decode. One trailing `/` is ignored.
+    private static func pathSegments(_ components: URLComponents) -> [String]? {
+        var path = Substring(components.percentEncodedPath)
+        if path.hasPrefix("/") { path = path.dropFirst() }
+        if path.hasSuffix("/") { path = path.dropLast() }
+        guard !path.isEmpty else { return [] }
+        var segments: [String] = []
+        for raw in path.split(separator: "/", omittingEmptySubsequences: false) {
+            guard let segment = String(raw).removingPercentEncoding, !segment.isEmpty else { return nil }
+            segments.append(segment)
+        }
+        return segments
+    }
+
+    /// The decoded first value of each query parameter, keyed by lower-cased name; `nil` if a
+    /// value doesn't decode. A parameter without a value (`?server`) is empty.
+    private static func queryValues(_ components: URLComponents) -> [String: String]? {
         var values: [String: String] = [:]
         for item in components.percentEncodedQueryItems ?? [] {
-            guard values[item.name] == nil,
-                let value = item.value?.replacing("+", with: " ").removingPercentEncoding,
-                !value.isEmpty
-            else { continue }
-            values[item.name] = value
+            let name = item.name.lowercased()
+            guard values[name] == nil else { continue }
+            guard let value = (item.value ?? "").replacing("+", with: " ").removingPercentEncoding else {
+                return nil
+            }
+            values[name] = value
         }
         return values
     }
 
+    /// The largest start time a link may carry, about 115 days, so converting it (for
+    /// example to `Duration`) can't overflow.
+    static let maxStartTime: TimeInterval = 10_000_000
+
     /// Parses `t=`: seconds (`5025` or `5025.5`) or a clock time (`1:23:45` or `83:45`).
-    /// Returns `nil` for anything else, including negative values.
+    /// Returns `nil` for anything else, including negative values and values above
+    /// ``maxStartTime``.
     static func parseStartTime(_ text: String) -> TimeInterval? {
+        guard let seconds = parseSeconds(text), seconds <= maxStartTime else { return nil }
+        return seconds
+    }
+
+    private static func parseSeconds(_ text: String) -> TimeInterval? {
         let parts = text.split(separator: ":", omittingEmptySubsequences: false)
         guard (1...3).contains(parts.count) else { return nil }
         if parts.count == 1 {

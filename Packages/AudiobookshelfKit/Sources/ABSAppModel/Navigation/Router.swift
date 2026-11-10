@@ -28,13 +28,16 @@ public final class Router {
     /// ID, so the scene (S7a) looks up the library's kind and sections and calls
     /// ``selectLibrary(id:kind:supportedSections:)``, which clears this.
     ///
-    /// Other pending requests, such as S2's `pendingPlayLink`, must also be stored properties
+    /// Other pending requests, such as ``pendingPlayLink``, must also be stored properties
     /// declared here: extensions can't add stored properties.
     public private(set) var pendingLibraryID: String?
     /// A `play/` link opened in this scene, until the item screen shows its confirmation
-    /// (``PlayLinkDecision``) and clears it. ``open(_:)`` replaces it with every link.
+    /// (``PlayLinkDecision``) and clears it. Every link ``open(_:)`` navigates to replaces it;
+    /// a link for another server doesn't. A library switch that resets paths, a snapshot
+    /// restore and an identity change clear it, because the item is no longer on screen.
     public var pendingPlayLink: PlayLink?
     /// A `search?q=` query opened in this scene, until the Search tab shows it and clears it.
+    /// Cleared like ``pendingPlayLink``, except that a library switch keeps it.
     public var pendingSearchQuery: String?
     /// A link for another server connection, waiting for the user to confirm the switch. The
     /// UI that asks (S6) clears it, and must keep its own copy to reopen after the switch,
@@ -92,7 +95,9 @@ public final class Router {
     /// (when ``libraryID`` is `nil`) keeps them. Either way, a selected tab or Library section
     /// that isn't in `supportedSections` falls back to Library or the default grid, and the
     /// paths of unsupported sections are cleared, which repairs the selection after a book ↔
-    /// podcast switch or a permission change. Clears a matching ``pendingLibraryID``.
+    /// podcast switch or a permission change. Clears a matching ``pendingLibraryID``, and
+    /// clears ``pendingPlayLink`` when the paths are reset: `open(_:)` pushes the item only
+    /// onto Library, which the reset empties.
     ///
     /// - Parameter supportedSections: the sections the library shows for this user, usually
     ///   ``AppTab/sections(for:canAddPodcast:hasPlaylists:)``.
@@ -101,6 +106,7 @@ public final class Router {
             for tab in AppTab.allCases where tab.isLibraryScoped {
                 self[path: tab] = []
             }
+            pendingPlayLink = nil
         }
         libraryID = id
         libraryKind = kind
@@ -118,15 +124,22 @@ public final class Router {
         self.userID = userID
         resetNavigation()
         pendingLibraryID = nil
-        pendingPlayLink = nil
-        pendingSearchQuery = nil
         pendingServerSwitch = nil
         isFullPlayerPresented = false
         isQueueInspectorPresented = false
     }
 
-    /// Returns the tab, library, section and paths to their defaults.
+    /// Drops a library request, because a later link navigated elsewhere.
+    func cancelLibraryRequest() {
+        pendingLibraryID = nil
+    }
+
+    /// Returns the tab, library, section and paths to their defaults, and drops the pending
+    /// play link and search query, which belonged to the old paths. Snapshot restore uses it
+    /// too, so a link opened before the restore leaves nothing stale behind.
     func resetNavigation() {
+        pendingPlayLink = nil
+        pendingSearchQuery = nil
         selectedTab = .home
         libraryID = nil
         libraryKind = nil
