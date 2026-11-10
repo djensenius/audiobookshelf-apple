@@ -74,6 +74,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     /// How many plays are silently refused while a prior engine failure remains sticky.
     var silentlyRefusingPlays = 0
     private var generation = 0
+    private var seekGeneration = 0
 
     func load(_ source: AudioEngineSource, at time: Double) async throws(AudioEngineError) {
         generation += 1
@@ -99,6 +100,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         state = isPlaybackRequested ? .playing : .paused
     }
 
+    /// As the real engine does, defers playing (shown as buffering) while a seek is in flight.
     func play() {
         if silentlyRefusingPlays > 0 {
             silentlyRefusingPlays -= 1
@@ -133,10 +135,15 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func seek(to time: Double) async -> SeekResult {
+        seekGeneration += 1
+        let request = seekGeneration
+        let current = generation
         seeks.append(time)
         pendingSeekTarget = time
-        if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
         let result = seekResults.isEmpty ? SeekResult.completed : seekResults.removeFirst()
+        if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
+        // A late seek never overwrites a newer seek, load or stop (including the same target).
+        guard current == generation, request == seekGeneration else { return .superseded }
         if result == .completed {
             pendingSeekTarget = nil
             currentTime = time
@@ -179,6 +186,11 @@ final class StubSessionService: PlaybackSessionService {
         var serverTime: [String: Double] = [:]
         var sessionUpdatedAt: Date?
         var startGates: [String: Gate] = [:]
+        /// Metadata and expanded library item for an item's sessions (none by default).
+        var metadata: [String: (MediaMetadata, LibraryItem?)] = [:]
+        /// Native-engine fixtures; tests without overrides retain the default session and stream.
+        var sessionOverride: PlaybackSession?
+        var streamOverride: ResolvedStream?
         var closeGates: [String: Gate] = [:]
         var startError: APIError?
         var resolveError: (any Error)?
@@ -210,13 +222,13 @@ final class StubSessionService: PlaybackSessionService {
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
         // As the API client's request does, a start for a cancelled caller sends nothing and throws.
         try Task.checkCancellation()
-        let (gate, error, time, id, updatedAt) = state.withLock { state in
+        let (gate, error, time, id, updatedAt, metadata) = state.withLock { state in
             state.starts.append(itemID)
             state.log.append("start \(itemID)")
             state.count += 1
             return (
                 state.startGates.removeValue(forKey: itemID), state.startError, state.serverTime[itemID] ?? 0,
-                "\(itemID)-\(state.count)", state.sessionUpdatedAt
+                "\(itemID)-\(state.count)", state.sessionUpdatedAt, state.metadata[itemID]
             )
         }
         // The gate holds the request before it reaches the server.
@@ -229,8 +241,10 @@ final class StubSessionService: PlaybackSessionService {
             state.takenOver += state.openSessions
             state.openSessions = [id]
         }
+        if let session = state.withLock({ $0.sessionOverride }) { return session }
         return PlaybackSession(
             id: id, libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
+            mediaMetadata: metadata?.0,
             chapters: [Chapter(id: 0, start: 0, end: 1000, title: "One"), Chapter(id: 1, start: 1000, end: 3600)],
             displayTitle: "Title \(itemID)", displayAuthor: "Author", coverPath: "/covers/\(itemID).jpg",
             duration: 3600, currentTime: time,
@@ -238,7 +252,7 @@ final class StubSessionService: PlaybackSessionService {
             audioTracks: [
                 AudioTrack(index: 1, startOffset: 0, duration: 1800, mimeType: "audio/mpeg"),
                 AudioTrack(index: 2, startOffset: 1800, duration: 1800, mimeType: "audio/mpeg"),
-            ])
+            ], libraryItem: metadata?.1)
     }
 
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
@@ -250,6 +264,7 @@ final class StubSessionService: PlaybackSessionService {
 
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
         if let error = state.withLock({ $0.resolveError }) { throw error }
+        if let stream = state.withLock({ $0.streamOverride }) { return stream }
         let tracks = session.audioTracks.map { track in
             PlayableTrack(
                 url: URL(filePath: "/\(session.id)/\(track.index ?? 0)"), mimeType: track.mimeType,
@@ -275,7 +290,9 @@ final class StubSessionService: PlaybackSessionService {
     }
 }
 
+/// Observable like ``AppSettings``, so rate changes reach observers (Now Playing).
 @MainActor
+@Observable
 final class StubPlaybackSettings: PlaybackSettingsProviding {
     var playbackRate = 1.0 {
         didSet { if !(playbackRate.isFinite && playbackRate > 0) { playbackRate = oldValue } }
