@@ -35,7 +35,7 @@ import SwiftData
     /// is only for creating and reconciling a download; the engine's updates go through
     /// ``beginRunning(partID:expecting:now:)``,
     /// ``updateProgress(partID:bytesWritten:expectedBytes:now:)``,
-    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)`` and
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:retryCount:requeue:now:)`` and
     /// ``completePart(partID:finalBytes:now:)``. A part passed here as `.completed` must carry its
     /// final size in `bytesWritten`.
     ///
@@ -148,7 +148,7 @@ import SwiftData
     /// The part whose task has `taskIdentifier`; a lookup cache only, the task's
     /// `taskDescription` (the part's `id`) is authoritative.
     ///
-    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)`` keeps the
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:retryCount:requeue:now:)`` keeps the
     /// identifier unique, but a reconciling ``upsertRecord(_:now:)`` can repeat a stale one; then
     /// the part whose record was updated most recently wins.
     public func part(taskIdentifier: Int) throws -> DownloadPartDTO? {
@@ -178,7 +178,8 @@ import SwiftData
     /// `.completed` is final: leaving it needs `requeue` (an explicit re-download), so a late
     /// update from a stale task can't undo a completion. Entering it goes through
     /// ``completePart(partID:finalBytes:now:)``, which records the final size. Moving to
-    /// `.failed` counts a retry.
+    /// `.failed` counts a retry unless `retryCount` is supplied, in which case that count is
+    /// saved with the state.
     /// `taskIdentifier` is set as given (`nil` clears it) and cleared from any other part that
     /// still has it, as task identifiers restart with each session. `error` becomes `lastError`
     /// (`nil` clears it); `hasResumeData` is kept when `nil`.
@@ -192,6 +193,7 @@ import SwiftData
         taskIdentifier: Int?,
         error: String? = nil,
         hasResumeData: Bool? = nil,
+        retryCount: Int? = nil,
         requeue: Bool = false,
         now: Date = .now
     ) throws -> Bool {
@@ -204,7 +206,11 @@ import SwiftData
                     other.taskIdentifier = nil
                 }
             }
-            if state == .failed, part.stateValue != .failed { part.retryCount += 1 }
+            if let retryCount {
+                part.retryCount = retryCount
+            } else if state == .failed, part.stateValue != .failed {
+                part.retryCount += 1
+            }
             part.state = state.rawValue
             part.taskIdentifier = taskIdentifier
             part.lastError = error
@@ -225,7 +231,7 @@ import SwiftData
     /// is in another state or `.completed` (even if `expecting` has it), or the record is
     /// `.paused` (stopped) or `.failed` (failed for good). The task identifier and error are
     /// cleared; the caller records the new task's identifier with
-    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)``. Progress, the
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:retryCount:requeue:now:)``. Progress, the
     /// retry count and the resume-data flag are kept.
     ///
     /// - Returns: whether the part was started.
@@ -251,7 +257,7 @@ import SwiftData
     /// queues a part it read as `.running` without a transfer, and must not overwrite a state
     /// written since (a part that failed for good, say). The change is refused when the part
     /// doesn't exist, is in another state, or is `.completed` (even if `expecting` has it; see
-    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)``). The task
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:retryCount:requeue:now:)``). The task
     /// identifier and error are cleared; progress, the retry count and the resume-data flag
     /// are kept.
     ///

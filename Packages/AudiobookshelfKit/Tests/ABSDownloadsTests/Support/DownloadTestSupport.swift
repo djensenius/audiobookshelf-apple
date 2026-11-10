@@ -97,6 +97,9 @@ final class SignallingClock: Clock {
 
     let started: AsyncStream<Void>
     private let continuation: AsyncStream<Void>.Continuation
+    private let sleepCount = Mutex(0)
+
+    var sleeps: Int { sleepCount.withLock { $0 } }
 
     init() {
         (started, continuation) = AsyncStream.makeStream()
@@ -106,6 +109,7 @@ final class SignallingClock: Clock {
     var minimumResolution: Duration { .zero }
 
     func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        sleepCount.withLock { $0 += 1 }
         continuation.yield()
         try await Task.sleep(for: .seconds(3600))
     }

@@ -203,6 +203,8 @@ public actor DownloadEngine {
     private(set) var unclaimedBackgroundFinishes = 0
     /// Wakes waiting for their events-finished call.
     var backgroundWaiterCount: Int { backgroundWaiters.count }
+    /// Background event completions held until a disconnect's replacement tasks are submitted.
+    private var backgroundFinishesAwaitingRecreation = 0
 
     /// - Parameters:
     ///   - networkAccess: the request flags for the current download cellular policy, read
@@ -400,9 +402,8 @@ public actor DownloadEngine {
     }
 
     private func performPause(_ recordID: UUID) async throws -> Bool {
-        guard try await store.setState(.paused, forRecord: recordID),
-            let record = try await readRecord(store, recordID)
-        else { return false }
+        guard let record = try await readRecord(store, recordID) else { return false }
+        guard try await store.setState(.paused, forRecord: recordID) else { return false }
         pendingRecordFailures.remove(recordID)
         await stop(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), keepingResumeData: true)
         return true
@@ -653,14 +654,17 @@ public actor DownloadEngine {
         session.finishTasksAndInvalidate()
     }
 
-    private func sessionInvalidated() {
+    private func sessionInvalidated() async {
         session = nil
         activation = nil
         isInvalidatingSession = false
         tasks.removeAll()
         ignoredTasks.removeAll()
-        guard !isSessionInUse else { return }
-        Task { [weak self] in await self?.recreateSession() }
+        if !isSessionInUse { await recreateSession() }
+        while backgroundFinishesAwaitingRecreation > 0 {
+            backgroundFinishesAwaitingRecreation -= 1
+            releaseBackgroundWake()
+        }
     }
 
     /// Creates the session again after a ``RetryPolicy`` delay, then launches the parts that
@@ -675,12 +679,19 @@ public actor DownloadEngine {
             return
         }
         let delay = retryPolicy.delay(beforeRetry: sessionRecreations, random: random()) ?? .zero
-        if delay > .zero { try? await clock.sleep(for: delay) }
+        if delay > .zero, !isInBackground { try? await clock.sleep(for: delay) }
         guard await ensureSession() else { return }
         let deferred = deferredLaunches
         deferredLaunches.removeAll()
+        let notBefore: Date?
+        if isInBackground, delay > .zero {
+            let seconds = Double(delay.components.seconds) + Double(delay.components.attoseconds) / 1e18
+            notBefore = now().addingTimeInterval(seconds)
+        } else {
+            notBefore = nil
+        }
         for partID in deferred {
-            await launch(partID)
+            await launch(partID, notBefore: notBefore)
         }
     }
 
@@ -880,17 +891,13 @@ public actor DownloadEngine {
                 if attempt > 0 { try? await clock.sleep(for: .seconds(1)) }
                 await savePendingWrites()
             }
-            // An abandoned wake's call is matched first: it can arrive once a later wake waits,
-            // and must not release that one before its own events are handled.
-            if !registry.consumeAbandonedWake() {
-                if !backgroundWaiters.isEmpty {
-                    backgroundWaiters.removeFirst().resume()
-                } else {
-                    unclaimedBackgroundFinishes += 1
-                }
+            if isInvalidatingSession {
+                backgroundFinishesAwaitingRecreation += 1
+                return
             }
+            releaseBackgroundWake()
         case .sessionInvalidated:
-            sessionInvalidated()
+            await sessionInvalidated()
         case .restartQueued:
             // Handled here, between completions: saves that failed and records left complete
             // but not finalised are done before parts restart.
@@ -898,6 +905,19 @@ public actor DownloadEngine {
             restart = Task { [weak self] in await self?.restartQueuedParts() }
         case .barrier(let continuation):
             continuation.resume()
+        }
+    }
+
+    /// Releases the matching wake once its writes and any session recreation are complete.
+    private func releaseBackgroundWake() {
+        // An abandoned wake's call is matched first: it can arrive once a later wake waits,
+        // and must not release that one before its own events are handled.
+        if !registry.consumeAbandonedWake() {
+            if !backgroundWaiters.isEmpty {
+                backgroundWaiters.removeFirst().resume()
+            } else {
+                unclaimedBackgroundFinishes += 1
+            }
         }
     }
 
@@ -1207,12 +1227,13 @@ public actor DownloadEngine {
         let failure = failures[partID, default: 0] + 1
         failures[partID] = failure
         guard let delay = retryPolicy.delay(beforeRetry: failure, random: random()) else {
-            await failPermanently(partID, code: code, message: message)
+            await failPermanently(partID, code: code, message: message, retryCount: failure)
             return
         }
         await persistIdle(partID) {
             try await $0.setPartState(
-                .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData)
+                .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData,
+                retryCount: failure)
         }
         updateContinuation.yield(
             .partFailed(partID: partID, recordID: context.recordID, code: code, message: message, willRetry: true))
@@ -1242,14 +1263,17 @@ public actor DownloadEngine {
     /// a concurrent launch of another part is refused; until that is saved, the engine
     /// launches none of them. A ``start(partIDs:)`` of the part meanwhile (a resume of the
     /// record while the siblings stop) starts it once this is done.
-    private func failPermanently(_ partID: UUID, code: DownloadFailureCode, message: String) async {
+    private func failPermanently(
+        _ partID: UUID, code: DownloadFailureCode, message: String, retryCount: Int? = nil
+    ) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
         tasks[partID] = nil
         retries.removeValue(forKey: partID)?.cancel()
         await saveRecordFailure(context.recordID)
         await persistIdle(partID) {
             try await $0.setPartState(
-                .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData)
+                .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData,
+                retryCount: retryCount)
         }
         let siblings = contexts.filter { $0.value.recordID == context.recordID && $0.key != partID }.map(\.key)
         await stop(partIDs: siblings, keepingResumeData: true)

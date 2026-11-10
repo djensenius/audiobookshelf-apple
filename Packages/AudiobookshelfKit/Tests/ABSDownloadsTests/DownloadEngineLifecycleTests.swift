@@ -902,6 +902,79 @@ import Testing
         #expect(try await engine.pause(recordID: UUID()) == false)
     }
 
+    @Test func failedPauseReadLeavesRecordAndTransferConsistent() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let reads = Mutex(0)
+        let engine = harness.makeEngine(readRecord: { store, recordID in
+            if reads.withLock({
+                $0 += 1
+                return $0
+            }) == 1 {
+                throw TestError()
+            }
+            return try await store.record(id: recordID)
+        })
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+
+        do {
+            _ = try await engine.pause(recordID: record.id)
+            Issue.record("Expected the injected record read to fail")
+        } catch is TestError {
+        }
+
+        #expect(try await harness.store.record(id: record.id)?.state == .downloading)
+        #expect(await harness.session?.session.allTasks.first?.state == .running)
+        #expect(try await engine.pause(recordID: record.id))
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        gate.open()
+        await harness.waitForCompletions(1)
+        await engine.processPendingEvents()
+
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+        #expect(
+            try await harness.localItems.item(
+                serverConnectionID: record.key.serverConnectionID, libraryItemId: record.key.libraryItemId) == nil)
+    }
+
+    @Test func backgroundDisconnectRecreatesSessionBeforeReleasingWake() async throws {
+        let gate = StubGate()
+        let never = StubGate()
+        let harness = try await DownloadHarness {
+            $0.stubCount == 1
+                ? .failure(code: NSURLErrorBackgroundSessionWasDisconnected, gate: gate)
+                : .status(200, gate: never)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let clock = SignallingClock()
+        let engine = harness.makeEngine(clock: clock)
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        let originalSession = try #require(harness.session)
+        await engine.deactivate()
+
+        let wake = Task { await engine.handleBackgroundEvents() }
+        while await engine.backgroundWaiterCount == 0 { await Task.yield() }
+        gate.open()
+        await harness.waitForCompletions(1)
+        originalSession.finishBackgroundEvents()
+        await wake.value
+        await engine.processPendingEvents()
+
+        #expect(clock.sleeps == 0)
+        #expect(harness.sessions.withLock { $0.count } == 2)
+        let session = try #require(harness.session).session
+        let task = try #require(await session.allTasks.first { $0.taskDescription == partID.uuidString })
+        #expect(task.state == .running)
+        #expect(task.earliestBeginDate != nil)
+        #expect(try await harness.store.part(id: partID)?.state == .running)
+    }
+
     /// A start during a multi-part pause's stops waits for each part's stop, then restarts every
     /// part, in whatever order it lists them. (A resume waits for the whole pause; see
     /// ``resumeWaitsForAPauseBeforeItsStops()``.)

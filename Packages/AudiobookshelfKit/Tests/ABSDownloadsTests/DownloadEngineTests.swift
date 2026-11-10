@@ -163,6 +163,31 @@ import Testing
         #expect(harness.requests.count == 2)
     }
 
+    @Test func failedBeginRunningPersistsRetryBudgetAcrossRelaunch() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness {
+            $0.stubCount == 1 ? .status(503) : .status(200, gate: gate)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], partState: .failed)
+        let engine = harness.makeEngine(clock: SignallingClock())
+        await harness.store.failNextCommit(with: TestError())
+
+        await engine.start(partIDs: [partID])
+
+        #expect(await engine.nextFailure(willRetry: true) != nil)
+        #expect(try await harness.store.part(id: partID)?.retryCount == 1)
+
+        let relaunched = harness.makeEngine(registry: DownloadEngineRegistry())
+        #expect(await relaunched.activate())
+        #expect(await relaunched.nextFailure(willRetry: true) != nil)
+        await harness.waitForRequests(2)
+        #expect(try await harness.store.part(id: partID)?.retryCount == 2)
+        gate.open()
+        #expect(await relaunched.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 2)
+    }
+
     /// Posts a finished file for the part, as the delegate does once it has moved it, while
     /// the part's transfer is still running.
     private func postMovedFile(_ partID: UUID, harness: DownloadHarness, engine: DownloadEngine) async throws {
