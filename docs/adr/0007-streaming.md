@@ -284,8 +284,7 @@ Cons:
      - **Final sync before close.** Before step 2 of a rebuild, the old session gets one `POST /api/session/{old}/close` with `{currentTime: savedPosition, timeListened: unsyncedDelta, duration}`.
        - The server applies that body through `syncSession` before removing the session (`PlaybackSessionManager.js:421-426`).
        - Doing this first also moves the user's progress forward. A new HLS `Stream` starts transcoding at the user's progress (`PlaybackSessionManager.js:345`, `Stream.js:241-263`), so this avoids a needless transcode reset.
-       - If the old session is already gone (404), or the device is offline, the delta is **not** dropped. It goes into the persisted sync queue, tagged with the old session id.
-       - When that queue entry is replayed and its session is gone, the delta is carried into the **new** session's first `/sync`.
+       - If the device is offline or the `/close` gets no response, the delta goes into the persisted sync queue, tagged with the old session id. It is replayed under the reconciliation rule below.
      - **Restoring the position.** The new item seeks to the saved position **before** playing.
        - Use `seek(to:toleranceBefore:toleranceAfter:)` with a small tolerance: 0 for direct play, ≤ 0.5 s for HLS.
        - Set `AVPlayer.defaultRate` to the saved rate before `play()`.
@@ -293,9 +292,15 @@ Cons:
        - Re-apply the rate after `play()`, because AVPlayer can reset it.
        - The new session's first `/sync` reports the saved position.
      - **`timeListening` without double-counting.** The server adds each `timeListened` as a delta (`PlaybackSession.addListeningTime`, `server/objects/PlaybackSession.js:238`).
-       - The engine accumulates listened seconds only from time-observer deltas while the rate is above 0 and time is advancing, capped at wall-clock time. Stalls and rebuild gaps add nothing.
-       - Each delta belongs to exactly one session id, and leaves the queue only after a 200 from exactly one destination: the old session's `/close` or `/sync`, or the new session's first `/sync`. The accumulator for the new session starts at 0.
-       - The final report uses `/close` with a body, not `/sync`. If the response is lost and the call is retried, the retry gets 404, because the session is already closed. The delta is therefore never applied twice.
+       - **Count wall-clock time, not media time.** Listening time is elapsed wall-clock time while playing, independent of rate: 60 s at 0.5× counts as 60 s, and so does 60 s at 2×. This matches the legacy app, which adds `now − updatedAt` only when `isPlaying` (legacy `ios/App/Shared/player/PlayerProgress.swift:46-56`, called from `AudioPlayer.swift:218`).
+       - **Observer as a gate only.** The time observer only confirms that playback is happening. A tick credits the monotonic-clock time since the previous tick (`ContinuousClock`) only if `timeControlStatus == .playing`, the rate is above 0, and item time advanced since the previous tick.
+       - **Guards.** A tick gap longer than 2× the observer interval (suspension, stall, rebuild) credits at most one interval. Ticks while seeking, waiting, rebuilding or paused credit 0. Seeks and skips never add time, because media-time jumps are not counted.
+       - **One owner per delta.** Each delta belongs to exactly one session id. The engine also records `ackedTotal`, the sum of `timeListened` the server acknowledged for that session. The accumulator for the new session starts at 0.
+       - **Reconciling an unacknowledged `/close`.** A 404 on a retried `/close` is ambiguous: the first attempt may have applied the delta before its 200 was lost, or the session may have vanished first (restart or expiry). The server persists every sync and close to the DB, but only when `timeListening > 0` (`saveSession`, `PlaybackSessionManager.js:433-441`). It then removes the session only from memory (`closeSession` / `removeSession`, `PlaybackSessionManager.js:421-455`). The stored record can therefore be read through `GET /api/me/item/listening-sessions/:libraryItemId/:episodeId?`, which returns the newest sessions first with `id`, `timeListening` and `currentTime` (`MeController.js:185`, `ApiRouter.js:531-534`; this route exists in v2.26.0). On a 404 after an unacknowledged `/close` that carried a delta:
+         - **Record found and `timeListening ≥ ackedTotal + delta − 1 s`:** the delta was applied, so drop it.
+         - **Record found with `timeListening ≈ ackedTotal`, or no record because nothing was ever saved:** the delta was not applied, so carry it into the new session's next `/sync`.
+         - **Undecidable** (record not on the first page, values match neither case, or the lookup fails after the normal queue retries): drop the delta. This undercounts by at most one sync interval but never double-counts.
+       - **Final report through `/close`.** It uses `/close` with a body, not `/sync`, so a blind retry can never re-apply it: the retry gets 404 and goes through reconciliation.
      - **Now Playing and CarPlay.** During a rebuild, the Now Playing session (`ABSPlayback/NowPlaying/`, which also feeds CarPlay) keeps publishing the saved position as elapsed time, with a buffering or paused state.
        - The new item's time is not published until its seek has completed.
        - Elapsed time never jumps back to the server's `currentTime`, or to 0.
@@ -402,8 +407,10 @@ Cons:
 - **Network loss:** no attempts are spent while the path is unsatisfied. A retry happens immediately when the path becomes satisfied. The error appears after 5 minutes offline.
 - **No double-counted listening time:**
   - Across a rebuild, the sum of `timeListened` sent to the old session's `/close` and the new session's `/sync` calls equals the played time, and stall or rebuild gaps add 0.
-  - A retried `/close` after a lost response adds nothing.
-  - When the old session is gone, its queued delta is sent once, through the new session's first `/sync`.
+  - At 0.5× and 2×, 60 s of wall-clock playback reports 60 s. Seeks, skips, pauses and stalls add 0.
+  - A `/close` whose 200 is lost (the server applied it), then retried and answered with 404: reconciliation finds the stored `timeListening` already includes the delta, and the delta is dropped rather than resent.
+  - A `/close` that never reached the server (session lost on restart) has its delta carried once into the new session's `/sync`.
+  - An undecidable reconciliation drops the delta, with no resend.
 - **Position source:** the new session's server `currentTime` (deliberately older) is ignored, and the saved local position is used.
 - **Now Playing:** elapsed time never decreases during a rebuild.
 - **Direct play to HLS fallback:** the fallback keeps the position and rate, and sends the old session's final `/close` before the transcode `/play`.
