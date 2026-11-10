@@ -123,4 +123,23 @@ import Testing
         #expect(await store.lookup(key("a"))?.url == good.url)
         #expect(await store.size == 16_384)
     }
+
+    @Test func retiredLeasedFileIsNotCountedAgainByARescan() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 40_000)
+        var retired: LeasedFile? = try await store.insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: 0)
+        let retiredURL = try #require(retired?.url)
+        await store.discard(retiredURL)
+        for id in ["b", "c"] {
+            _ = try await store.insert(moving: temporaryFile(), for: key(id), pathExtension: "webp", generation: 0)
+        }
+        await store.fullPass()
+        #expect(await store.size == 32_768)
+        retired = nil
+        #expect(!FileManager.default.fileExists(atPath: retiredURL.path))
+        await store.fullPass()
+        #expect(await store.size == 32_768)
+        #expect(await store.lookup(key("b")) != nil)
+        #expect(await store.lookup(key("c")) != nil)
+    }
 }

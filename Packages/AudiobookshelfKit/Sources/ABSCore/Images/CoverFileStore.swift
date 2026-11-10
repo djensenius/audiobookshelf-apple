@@ -262,13 +262,15 @@ public actor CoverFileStore {
         var modified: Date
     }
 
+    /// The cache files, without those retired and waiting for their lease to be released, which
+    /// ``retire(_:)`` has already taken out of `totalBytes`.
     private func files(in root: URL? = nil) -> [File] {
         let keys: [URLResourceKey] = [.isRegularFileKey, .totalFileAllocatedSizeKey, .contentModificationDateKey]
         guard let enumerator = FileManager.default.enumerator(at: root ?? directory, includingPropertiesForKeys: keys)
         else { return [] }
         return enumerator.compactMap { item in
             guard let url = item as? URL, let values = try? url.resourceValues(forKeys: Set(keys)),
-                values.isRegularFile == true
+                values.isRegularFile == true, !leases.isPendingDeletion(Self.leaseKey(url))
             else { return nil }
             return File(
                 url: url, size: values.totalFileAllocatedSize ?? 0,
