@@ -113,8 +113,9 @@ import SwiftData
         }
     }
 
-    /// Records a sign-out at `date`, before its session is deleted from the Keychain, or `nil`
-    /// once a sign-in has saved a new session that isn't marked used yet. Returns `false` when the
+    /// Records a sign-out at `date`, or clears it with `nil`. A logout records it before its
+    /// session is deleted from the Keychain, an expiry once that delete failed; a sign-in clears
+    /// it with ``clearSignedOut(id:savedAt:)`` or ``markUsed(id:at:)``. Returns `false` when the
     /// connection doesn't exist.
     @discardableResult
     public func setSignedOut(id: UUID, at date: Date?) throws -> Bool {

@@ -121,7 +121,8 @@ actor ConnectionCredentials: TokenProvider {
     /// The refresh running for each pair, from whichever client started it.
     private var refreshes: [AuthTokens: (id: Int, task: Task<Void, any Error>)] = [:]
     private var nextRefreshID = 0
-    /// Test hook: called whenever a refresh waits for one another client started.
+    /// Test hook: called whenever a refresh waits for one another client started, and whenever an
+    /// expiry waits for a refresh of the rejected pair.
     private var refreshJoinObserver: (@Sendable () -> Void)?
 
     init(
@@ -211,7 +212,7 @@ actor ConnectionCredentials: TokenProvider {
         return try removeAll()
     }
 
-    /// Lets tests wait until a refresh is waiting for another client's.
+    /// Lets tests wait until a refresh, or an expiry, is waiting for another client's refresh.
     func observeRefreshJoins(_ observer: @escaping @Sendable () -> Void) {
         refreshJoinObserver = observer
     }
