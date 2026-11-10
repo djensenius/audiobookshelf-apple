@@ -473,6 +473,35 @@ struct PlaybackCoordinatorTests {
         #expect(service.starts == ["A"])
     }
 
+    @Test func stopWhilePolicyCheckIsPendingDiscardsThePlay() async {
+        let gate = Gate()
+        h.policy.gate = gate
+        let play = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { h.policy.checks == 1 }
+        #expect(coordinator.pendingPlayKey == h.key("A"))
+        #expect(coordinator.phase == .idle)
+
+        coordinator.stop()
+        #expect(coordinator.pendingPlayKey == nil)
+        gate.open()
+        await play.value
+
+        #expect(coordinator.pendingPlayKey == nil)
+        #expect(coordinator.phase == .idle)
+        #expect(coordinator.mediaKey == nil)
+        #expect(service.starts.isEmpty)
+        #expect(engine.stopCount == 0)
+        #expect(h.events.events.isEmpty)
+    }
+
+    @Test func pendingPlayKeyClearsWhenThePlayCommitsOrIsBlocked() async {
+        await coordinator.play(itemID: "A")
+        #expect(coordinator.pendingPlayKey == nil)
+        h.policy.decision = .denied(.cellular)
+        await coordinator.play(itemID: "B")
+        #expect(coordinator.pendingPlayKey == nil)
+    }
+
     @Test func stalePolicyDecisionIsDiscarded() async {
         h.policy.decision = .denied(.cellular)
         let gate = Gate()
@@ -831,6 +860,48 @@ struct PlaybackCoordinatorTests {
 
         // Another device played it after the record: newest-of wins (900, rewound 20 s).
         #expect(engine.loads.map(\.time) == [880])
+    }
+
+    /// This device's own progress reaching the server late, or a different position within the
+    /// skew window, doesn't override the seek.
+    @Test(arguments: [(600.0, 3599.0), (603.0, 600.0), (900.0, 3550.0)])
+    func seekWhileRestoredIgnoresOwnLateProgress(serverTime: Double, age: TimeInterval) async {
+        h.lastPlayed.record = h.record("A", position: 600, age: 3600)
+        h.setServerProgress("A", time: serverTime, updated: h.clock.ago(age))
+        coordinator.restoreLastPlayed()
+
+        await coordinator.seek(to: 1200)
+        await coordinator.resume()
+
+        #expect(engine.loads.map(\.time) == [1200])
+    }
+
+    @Test(arguments: [false, true])
+    func failedStartRetryKeepsSeekWhileRestored(newerServer: Bool) async {
+        h.lastPlayed.record = h.record("A", position: 600, age: 3600)
+        coordinator.restoreLastPlayed()
+        await coordinator.seek(to: 1200)
+        service.state.withLock { $0.startError = .network(.notConnectedToInternet) }
+        await coordinator.resume()
+        #expect(coordinator.phase == .unloaded)
+
+        service.state.withLock { $0.startError = nil }
+        if newerServer { h.setServerProgress("A", time: 900, updated: h.clock.ago(10 * 60)) }
+        await coordinator.resume()
+
+        #expect(engine.loads.map(\.time) == [newerServer ? 880 : 1200])
+    }
+
+    @Test func failedLoadRetryKeepsStartTime() async {
+        engine.loadError = .emptyTimeline
+        await coordinator.play(itemID: "A", startTime: 1500)
+        #expect(coordinator.phase == .unloaded)
+
+        engine.loadError = nil
+        await coordinator.resume()
+
+        #expect(engine.loads.map(\.time) == [1500, 1500])
+        #expect(coordinator.isPlaying)
     }
 
     @Test func restoreThenPlayAnotherItem() async {

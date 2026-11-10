@@ -49,6 +49,8 @@ public final class PlaybackCoordinator {
     public private(set) var error: PlaybackCoordinatorError?
     /// The restored record, for display (title, author, cover, chapter) until the item loads.
     public private(set) var restoredRecord: LastPlayedRecord?
+    /// The media a play is checking the streaming policy for, before it commits (a loading hint).
+    public private(set) var pendingPlayKey: MediaKey?
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
 
@@ -122,6 +124,12 @@ public final class PlaybackCoordinator {
     static let lastPlayedSaveInterval: TimeInterval = 15
     /// How long a play waits for the previous session's close before starting the next one.
     public static let closeWaitTimeout: Duration = .seconds(2)
+    /// A seek while unloaded gives way to server or local progress only if that progress is
+    /// really from elsewhere: dated more than this after the last-played record (this device's
+    /// own sync lands a little later, plus clock skew) …
+    static let otherProgressDateTolerance: TimeInterval = 60
+    /// … and more than this many seconds away from the record's position.
+    static let otherProgressPositionTolerance: Double = 5
 
     /// - Parameter sleep: Times the wait for closes in flight (tests replace it).
     public init(
@@ -188,6 +196,7 @@ public final class PlaybackCoordinator {
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
         policyCheck += 1
         let check = policyCheck
+        pendingPlayKey = nil
         if key == mediaKey {
             switch phase {
             case .loaded:
@@ -202,8 +211,11 @@ public final class PlaybackCoordinator {
         }
 
         let checkedGeneration = generation
+        pendingPlayKey = key
         let decision = await policy.streamingDecision()
-        guard check == policyCheck, checkedGeneration == generation else { return }
+        guard check == policyCheck else { return }
+        pendingPlayKey = nil
+        guard checkedGeneration == generation else { return }
         switch decision {
         case .allowed: break
         case .askUser(let reason) where allowingMeteredNetwork:
@@ -215,21 +227,19 @@ public final class PlaybackCoordinator {
         generation += 1
         let current = generation
         let restarting = key == mediaKey
-        // A seek while unloaded (restored, or after a failed start) is an explicit start, unless
-        // server progress turns out newer than when the item last played here (another device
-        // played it since); local progress is this device's own, saved alongside the record.
+        // A seek while unloaded (restored, or a failed start's start time) is an explicit start,
+        // unless progress from elsewhere turns out newer than the last-played record.
         let unloadedSeek = restarting && phase == .unloaded && startTime == nil ? pendingStartTime : nil
-        let unloadedSince = lastPlayedAt
         tearDown(reason: restarting ? .restarted : .itemChanged)
         guard current == generation else { return }
         error = nil
         pendingStartTime = startTime ?? unloadedSeek
-        lastPlayedAt = nil
         reachedEnd = false
         playWhenLoaded = true
         phase = .starting
         if !restarting {
             mediaKey = key
+            lastPlayedAt = nil
             restoredRecord = nil
             unloadedPosition = 0
             unloadedDuration = 0
@@ -274,27 +284,28 @@ public final class PlaybackCoordinator {
             candidates.append(
                 ProgressCandidate(currentTime: local.currentTime, updatedAt: date, isFinished: local.isFinished))
         }
-        if let record = lastPlayedStore.load(), record.key == key {
+        let record = lastPlayedStore.load().flatMap { $0.key == key ? $0 : nil }
+        if let record {
             candidates.append(
                 ProgressCandidate(
                     currentTime: record.position, updatedAt: record.timestamp, isFinished: record.isFinished))
         }
-        var serverDate: Date?
         switch server {
         case .success(let progress):
-            serverDate = progress?.lastUpdate.map(Self.date(ms:))
             candidates.append(
                 ProgressCandidate(
-                    currentTime: session.currentTime, updatedAt: serverDate, isFinished: progress?.isFinished ?? false))
+                    currentTime: session.currentTime, updatedAt: progress?.lastUpdate.map(Self.date(ms:)),
+                    isFinished: progress?.isFinished ?? false))
         case .failure(let error):
             // Undated: the session position is used only when there is nothing else.
             logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public))")
             candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
         }
-        var explicitStart = pendingStartTime
-        pendingStartTime = nil
-        if let unloadedSeek, explicitStart == unloadedSeek, let unloadedSince, let serverDate,
-            serverDate > unloadedSince
+        // Kept until the load succeeds, so a retry after a failure starts there again.
+        let plannedStart = pendingStartTime
+        var explicitStart = plannedStart
+        if let unloadedSeek, explicitStart == unloadedSeek, let record,
+            candidates.contains(where: { Self.isFromElsewhere($0, than: record) })
         {
             explicitStart = nil
         }
@@ -318,10 +329,12 @@ public final class PlaybackCoordinator {
         guard current == generation else { return }
         phase = .loaded
         restoredRecord = nil
+        lastPlayedAt = nil
         let intent = resumeIntent
-        if let pending = pendingStartTime {
+        let pending = pendingStartTime
+        pendingStartTime = nil
+        if let pending, pending != plannedStart {
             // A seek while loading.
-            pendingStartTime = nil
             await engine.seek(to: engine.timeline?.clamp(pending) ?? pending)
             guard current == generation, phase == .loaded else { return }
         }
@@ -407,7 +420,8 @@ public final class PlaybackCoordinator {
     /// Seeks to a global time and returns where playback landed, or `nil` when a later seek
     /// replaced it or it failed. While starting, the target is applied once loaded (`nil`). While
     /// unloaded, moves the position shown, and the next play starts exactly there with no rewind,
-    /// unless server progress is newer than when the item last played on this device.
+    /// unless server or local progress from elsewhere is newer than the last-played record (see
+    /// `otherProgressDateTolerance`).
     @discardableResult
     public func seek(to time: Double) async -> Double? {
         switch phase {
@@ -444,6 +458,7 @@ public final class PlaybackCoordinator {
     /// Stops playback, closes the session and forgets the item, so it isn't restored at launch.
     public func stop() {
         generation += 1
+        pendingPlayKey = nil
         let hadItem = mediaKey != nil
         tearDown(reason: .stopped)
         mediaKey = nil
@@ -646,6 +661,13 @@ public final class PlaybackCoordinator {
     /// The error's case without associated values (which can carry server messages), for logs.
     private nonisolated static func caseName(_ error: any Error) -> String {
         String(String(describing: error).prefix { $0 != "(" })
+    }
+
+    /// Progress saved somewhere else since the record: newer and at a different position.
+    private static func isFromElsewhere(_ candidate: ProgressCandidate, than record: LastPlayedRecord) -> Bool {
+        guard let date = candidate.updatedAt else { return false }
+        return date.timeIntervalSince(record.timestamp) > otherProgressDateTolerance
+            && abs(candidate.currentTime - record.position) > otherProgressPositionTolerance
     }
 
     private static func nonNegative(_ value: Double) -> Double {
