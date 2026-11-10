@@ -126,6 +126,13 @@ final class FakeAccountSource: AccountSessionSource {
         client = nil
     }
 
+    /// Expires without notifying observers, so the lifecycle hasn't reconciled it when its next
+    /// transition runs.
+    func expireUnobserved() {
+        _phase = .signedOut
+        _client = nil
+    }
+
     /// Restores again, as from offline, and gets `client` for the same identity.
     func reconnect(client: APIClient) async {
         guard let identity = phase.identity else { return }
@@ -146,6 +153,10 @@ final class FakeParticipant: SessionParticipant {
     /// When set, ``sessionWillEnd(_:)`` waits for it to open after stopping, or for
     /// cancellation.
     var endGate: Gate?
+    /// When set, ``sessionDidReconnect(_:)`` waits for it.
+    var reconnectGate: Gate?
+    /// The context of the last start or reconnect.
+    private(set) var context: SessionContext?
     /// Runs once inside the next ``sessionDidStart(_:)``.
     var onStart: (@MainActor () async -> Void)?
     /// Runs inside ``sessionWillEnd(_:)``, after stopping.
@@ -160,6 +171,7 @@ final class FakeParticipant: SessionParticipant {
 
     func sessionDidStart(_ context: SessionContext) async {
         isRunning = true
+        self.context = context
         log.record("\(name).start(\(context.identity.userID))")
         if let onStart {
             self.onStart = nil
@@ -168,7 +180,9 @@ final class FakeParticipant: SessionParticipant {
     }
 
     func sessionDidReconnect(_ context: SessionContext) async {
+        self.context = context
         log.record("\(name).reconnect(\(context.identity.userID))")
+        await reconnectGate?.wait()
     }
 
     func sessionWillEnd(_ reason: SessionEndReason) async {
@@ -200,7 +214,9 @@ final class FakeParticipant: SessionParticipant {
 }
 
 /// The library: connects, marks the seed boundary, fetches `/api/me` and seeds, then clears. A
-/// seed drops itself when the library reconnected, reseeded or cleared since it began.
+/// seed drops itself when the library reconnected, reseeded or cleared since it began. Like
+/// `ProgressCache`, a seed keeps progress applied after the boundary, and drops progress applied
+/// before it that `/api/me` (here always empty) doesn't return.
 @MainActor
 final class FakeLibrary: SessionSeeding {
     private let log: CallLog
@@ -210,6 +226,12 @@ final class FakeLibrary: SessionSeeding {
     var seedGate: Gate?
     private var generation = 0
     private var isRunning = false
+    /// Orders progress writes against the seed boundary.
+    private var tick = 0
+    private var boundary = 0
+    private var appliedAt: [String: Int] = [:]
+    /// Items with cached progress.
+    var progress: Set<String> { Set(appliedAt.keys) }
 
     init(log: CallLog) {
         self.log = log
@@ -240,6 +262,8 @@ final class FakeLibrary: SessionSeeding {
 
     func beginSeed(_ context: SessionContext) async {
         generation += 1
+        tick += 1
+        boundary = tick
         log.record("library.beginSeed(\(context.identity.userID))")
     }
 
@@ -251,7 +275,14 @@ final class FakeLibrary: SessionSeeding {
             log.record("library.seedDropped(\(context.identity.userID))")
             return
         }
+        appliedAt = appliedAt.filter { $0.value > boundary }
         log.record("library.seed(\(context.identity.userID))")
+    }
+
+    /// Progress from a running source, such as playback.
+    func apply(_ item: String) {
+        tick += 1
+        appliedAt[item] = tick
     }
 }
 

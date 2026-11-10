@@ -27,8 +27,12 @@ public enum SessionScenePhase: Sendable, Hashable {
 /// A participant's ``SessionStage`` is the only way into the pipeline, so anything that applies
 /// progress is registered as ``SessionStage/progressSource`` and can't start before the seed
 /// boundary: progress it applies is never dropped by the seed. When the same identity comes
-/// back online or gets a new client, the pipeline runs again with
-/// ``SessionParticipant/sessionDidReconnect(_:)`` and a new seed.
+/// back online or gets a new client, the session reconnects: the old seed is cancelled,
+/// ``SessionSeeding/beginSeed(_:)`` marks a new boundary, every participant gets
+/// ``SessionParticipant/sessionDidReconnect(_:)`` in start order, then a new seed runs. The
+/// library stays connected to the same identity through a reconnect, so the boundary comes
+/// first: the progress sources keep running, and anything they apply while a reconnect hook is
+/// suspended lands after the boundary and survives the seed.
 ///
 /// **End order.** The started participants end in reverse start order, so the progress sources
 /// stop before the library clears, and only then does the account sign out, switch or get
@@ -52,11 +56,12 @@ public final class SessionLifecycle {
     @ObservationIgnored private var connectParticipants: [any SessionParticipant] = []
     @ObservationIgnored private var progressSources: [any SessionParticipant] = []
     @ObservationIgnored private var session: RunningSession?
-    /// The session ``performAccountChange(_:)`` ended, and its client, while its body runs.
-    @ObservationIgnored private var changingFrom: (identity: SessionIdentity, client: APIClient?)?
-    /// How many ``performAccountChange(_:)`` calls are running; the last one to finish follows
-    /// the account.
+    /// How many ``performAccountChange(_:)`` calls are running. No session starts until the
+    /// last one finishes; an expiry still ends one.
     @ObservationIgnored private var accountChanges = 0
+    @ObservationIgnored private var lastSessionID: UInt64 = 0
+    /// The session whose pipeline is starting, before it becomes ``session``.
+    @ObservationIgnored private var beginning: SessionContext?
     @ObservationIgnored private var launch: Task<Void, Never>?
     @ObservationIgnored private var observation: Task<Void, Never>?
     /// The last queued transition; the next one waits for it.
@@ -154,30 +159,29 @@ public final class SessionLifecycle {
     @discardableResult
     public func signOut() async -> URL? {
         if rejectReentrant("signOut()") {
-            if let identity = session?.context.identity ?? source.phase.identity {
-                requestSignOut(of: identity)
-            }
+            if let context = session?.context ?? beginning { requestSignOut(of: context) }
             return nil
         }
         return await serialized { await self.performSignOut() }
     }
 
-    /// Queues a sign-out of `identity` after the transitions already queued, without waiting for
-    /// it. For participants and their tasks, for example on a rejected request; pass the
-    /// identity from their ``SessionContext``. When the sign-out's turn comes, it does nothing
-    /// unless `identity` is still the active account, so a request from an ended session can't
-    /// sign out the next one, nor during ``performAccountChange(_:)`` away from it. If the source
-    /// already signed out by itself, the session ends as expired instead, without a flush.
-    /// There's no OpenID end-session URL to open this way.
-    public func requestSignOut(of identity: SessionIdentity) {
+    /// Queues a sign-out of the session `context` describes, after the transitions already
+    /// queued, without waiting for it. For participants and their tasks, for example on a
+    /// rejected request; pass the participant's ``SessionContext``. When the sign-out's turn
+    /// comes, it does nothing unless that same session (by ``SessionContext/sessionID``, not
+    /// just the identity) is still running and the source hasn't moved to another identity, so
+    /// a request from an ended session can't sign out a later one, even of the same account.
+    /// If the source already signed out by itself, the session ends as expired instead, without
+    /// a flush. There's no OpenID end-session URL to open this way.
+    public func requestSignOut(of context: SessionContext) {
         _ = enqueue {
             if self.source.phase == .signedOut {
                 await self.reconcile()
                 return
             }
-            let current = self.session?.context.identity ?? self.source.phase.identity
-            let isChangingAway = self.session == nil && self.changingFrom?.identity == identity
-            guard current == identity, !isChangingAway else {
+            guard let running = self.session, running.context.sessionID == context.sessionID,
+                self.source.phase.identity ?? running.context.identity == running.context.identity
+            else {
                 Log.auth.info("Ignored a sign-out request from an ended session")
                 return
             }
@@ -234,8 +238,9 @@ public final class SessionLifecycle {
     /// ``SessionEndReason/switch``, shows ``AuthGate/switching(from:)``, runs `body` (the
     /// connect flow's sign-in), then follows wherever the account ended up, whether `body`
     /// returned, threw or was cancelled. If the account is still the old one, its session starts
-    /// again. Overlapping calls (say, from two scenes) follow the account once the last one
-    /// finishes.
+    /// again. No session starts while any change's body runs, so overlapping calls (say, from
+    /// two scenes) follow the account once, when the last one finishes. An expiry during a body
+    /// still ends whatever is running.
     ///
     /// The gate changes while `body` runs, so present the sign-in UI (the web sign-in's
     /// presentation anchor) outside the gated content, or keep the current shell on screen
@@ -244,11 +249,7 @@ public final class SessionLifecycle {
     public func performAccountChange(_ body: @MainActor () async throws -> Void) async rethrows {
         if rejectReentrant("performAccountChange(_:)") { return }
         accountChanges += 1
-        await serialized {
-            guard let running = self.session else { return }
-            await self.endForAccountChange()
-            self.changingFrom = (running.context.identity, running.context.client)
-        }
+        await serialized { await self.endForAccountChange() }
         do {
             try await body()
         } catch {
@@ -268,7 +269,11 @@ public final class SessionLifecycle {
     }
 
     private func performSignOut() async -> URL? {
-        guard session != nil || source.phase != .signedOut else { return nil }
+        guard source.phase != .signedOut else {
+            // Signed out by itself and not reconciled yet: an expiry, not a sign-out.
+            await reconcile()
+            return nil
+        }
         if let identity = session?.context.identity { gate = .signingOut(from: identity) }
         await endFlushing(.signOut)
         showConnect()
@@ -281,7 +286,6 @@ public final class SessionLifecycle {
         await serialized {
             self.accountChanges -= 1
             guard self.accountChanges == 0 else { return }
-            self.changingFrom = nil
             await self.reconcile()
         }
     }
@@ -317,17 +321,19 @@ public final class SessionLifecycle {
                 // Keep the gate: launching at launch, or switching during a switch.
                 break
             case .signedOut:
-                changingFrom = nil
                 await end(.expired)
                 showConnect()
             case .active(let identity, let isOffline):
-                let context = SessionContext(identity: identity, client: client, isOffline: isOffline)
+                // Deferred to the last account change's end; the gate stays switching.
+                guard accountChanges == 0 else { break }
                 if let running = session, running.context.identity == identity {
-                    await update(running, to: context)
-                } else if session != nil || !isWaitingForAccountChange(identity, client: client) {
-                    changingFrom = nil
+                    await update(running, to: running.context.with(client: client, isOffline: isOffline))
+                } else {
                     await end(.switch)
-                    await begin(context)
+                    lastSessionID += 1
+                    await begin(
+                        SessionContext(
+                            identity: identity, client: client, isOffline: isOffline, sessionID: lastSessionID))
                 }
                 if session?.context.identity == identity {
                     gate = .ready(identity, isOffline: isOffline)
@@ -336,14 +342,9 @@ public final class SessionLifecycle {
         }
     }
 
-    /// Whether `identity` is still the account ``performAccountChange(_:)`` left, on the same
-    /// client; a new client means it signed in again.
-    private func isWaitingForAccountChange(_ identity: SessionIdentity, client: APIClient?) -> Bool {
-        guard let changingFrom, changingFrom.identity == identity else { return false }
-        return client == nil || client === changingFrom.client
-    }
-
     private func begin(_ context: SessionContext) async {
+        beginning = context
+        defer { beginning = nil }
         let seeder = self.seeder
         let connect: [any SessionParticipant] = (seeder.map { [$0] } ?? []) + connectParticipants
         let progressSources = self.progressSources
@@ -369,11 +370,9 @@ public final class SessionLifecycle {
         session?.context = context
         guard reconnected else { return }
         running.seed?.cancel()
-        for participant in running.connect {
-            await participant.sessionDidReconnect(context)
-        }
+        // The boundary first: progress applied while a hook below is suspended survives the seed.
         await running.seeder?.beginSeed(context)
-        for participant in running.progressSources {
+        for participant in running.participants {
             await participant.sessionDidReconnect(context)
         }
         guard source.phase.identity == context.identity else { return }
@@ -419,8 +418,14 @@ public final class SessionLifecycle {
         timer.cancel()
     }
 
+    /// Flushes and ends the session with `reason`; or, when the source already signed out by
+    /// itself (an expiry not reconciled yet), ends it as expired without flushing.
     private func endFlushing(_ reason: SessionEndReason) async {
         guard let participants = session?.participants else { return }
+        guard source.phase != .signedOut else {
+            await end(.expired)
+            return
+        }
         await flush(participants)
         await end(reason)
     }
@@ -558,4 +563,10 @@ private final class UnavailableAccountSource: AccountSessionSource {
     func logout() async -> URL? { nil }
     func `switch`(to connectionID: UUID) async throws { throw error }
     func remove(_ connectionID: UUID) async throws -> URL? { throw error }
+}
+
+extension SessionContext {
+    fileprivate func with(client: APIClient?, isOffline: Bool) -> SessionContext {
+        SessionContext(identity: identity, client: client, isOffline: isOffline, sessionID: sessionID)
+    }
 }

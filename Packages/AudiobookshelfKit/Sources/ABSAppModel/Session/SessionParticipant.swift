@@ -7,11 +7,15 @@ public struct SessionContext: Sendable {
     /// The connection's client; `nil` when the source has none.
     public let client: APIClient?
     public let isOffline: Bool
+    /// Tells this session apart from every other one of the same lifecycle, including a later
+    /// session of the same identity. It stays the same across a reconnect.
+    public let sessionID: UInt64
 
-    public init(identity: SessionIdentity, client: APIClient?, isOffline: Bool) {
+    public init(identity: SessionIdentity, client: APIClient?, isOffline: Bool, sessionID: UInt64) {
         self.identity = identity
         self.client = client
         self.isOffline = isOffline
+        self.sessionID = sessionID
     }
 }
 
@@ -52,14 +56,15 @@ public enum SessionStage: Sendable, Hashable {
 ///   `switchAccount(to:)` and the rest) from these methods, ``flush()`` or the tasks they start
 ///   while the transition runs: that would deadlock, so such a call asserts and does nothing.
 ///   To sign out from there (say, on a rejected request), call
-///   ``SessionLifecycle/requestSignOut(of:)`` with the identity from the ``SessionContext``,
-///   which queues it without waiting and ignores it once that session has ended.
+///   ``SessionLifecycle/requestSignOut(of:)`` with the participant's ``SessionContext``, which
+///   queues it without waiting and ignores it once that session has ended.
 @MainActor
 public protocol SessionParticipant: AnyObject, Sendable {
     func sessionDidStart(_ context: SessionContext) async
     /// The same identity came back online or got a new client, for example after a launch with
-    /// a locked Keychain. Replace the client from `context`. Called in start order, around a new
-    /// seed boundary as at start. The default does nothing.
+    /// a locked Keychain. Replace the client from `context`. Called in start order, after the
+    /// new seed boundary (``SessionSeeding/beginSeed(_:)``) and before the new seed. The default
+    /// does nothing.
     func sessionDidReconnect(_ context: SessionContext) async
     /// Stops the participant's work for the session. With ``SessionEndReason/expired`` this must
     /// not use the network.
