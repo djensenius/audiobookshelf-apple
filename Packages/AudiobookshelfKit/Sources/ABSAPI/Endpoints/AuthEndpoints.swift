@@ -60,10 +60,15 @@ public enum AuthEndpoints {
     /// front of the server may need its own, and `connect.sid` is this connection's own server
     /// session, which logging out should end. `/logout` is not behind the access-token check,
     /// so no access token is sent and a 401 never triggers a refresh.
+    ///
+    /// Only redirects on the server's origin are followed (``Endpoint/staysOnOrigin``). A hop
+    /// off the origin would be stripped of the refresh token and cookies, so whatever it answered
+    /// says nothing about the session; it fails with ``APIError/redirectRefused(status:)``
+    /// instead of reporting a logout that never revoked anything.
     public static func logout(refreshToken: String) -> Endpoint<LogoutResponse> {
         Endpoint(
             .post, "/logout", headers: ["x-refresh-token": refreshToken], requiresAuthentication: false,
-            withheldCookies: ["refresh_token"])
+            staysOnOrigin: true, withheldCookies: ["refresh_token"])
     }
 }
 

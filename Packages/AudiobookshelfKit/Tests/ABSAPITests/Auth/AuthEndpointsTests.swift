@@ -43,6 +43,9 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         #expect(logout.headers == ["x-refresh-token": "refresh-1"])
         #expect(logout.sendsCookies && logout.withheldCookies == ["refresh_token"])
         #expect(status.sendsCookies && login.sendsCookies && status.withheldCookies.isEmpty)
+        #expect(logout.followsRedirects && logout.staysOnOrigin)
+        #expect(!status.staysOnOrigin && !AuthEndpoints.ping().staysOnOrigin && !login.staysOnOrigin)
+        #expect(!authorize.staysOnOrigin && !Endpoint<EmptyResponse>(.get, "/api/me").staysOnOrigin)
     }
 
     @Test func pingDecodes() async throws {
@@ -150,6 +153,68 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
             #expect(!logout.httpShouldHandleCookies)
         }
         #expect(server.requests(path: "/abs/logout").count == 2)
+    }
+
+    /// A same-origin 307/308 keeps the method, body, refresh token and the client-written cookies.
+    @Test(arguments: [307, 308]) func logoutFollowsSameOriginRedirects(status: Int) async throws {
+        let server = StubServer { request in
+            request.url?.path() == "/abs/logout"
+                ? .redirect(to: "https://\(request.url?.host() ?? "")/abs/v2/logout", status: status)
+                : .json(#"{"redirect_url":null}"#)
+        }
+        let client = try makeClient(server)
+        let jar = try #require(client.cookieStorage)
+        for (name, value) in [("lb", "1"), ("refresh_token", "cookie-token")] {
+            jar.setCookie(
+                try #require(
+                    HTTPCookie(properties: [.name: name, .value: value, .domain: server.host, .path: "/"])))
+        }
+
+        let response = try await client.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+
+        #expect(response == LogoutResponse(redirectURL: nil))
+        let followed = try #require(server.requests(path: "/abs/v2/logout").first)
+        #expect(followed.httpMethod == "POST")
+        #expect(followed.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+        #expect(followed.value(forHTTPHeaderField: "Cookie") == "lb=1")
+        #expect(!followed.httpShouldHandleCookies)
+    }
+
+    /// A hop off the origin would lose the refresh token, so its reply can't confirm a logout:
+    /// the redirect is declined and fails instead of reporting success.
+    @Test(arguments: [302, 307, 308]) func logoutRefusesCrossOriginRedirects(status: Int) async throws {
+        let other = StubServer { _ in .json(#"{"redirect_url":null}"#) }
+        let server = StubServer { _ in .redirect(to: "https://\(other.host)/logout", status: status) }
+        let client = try makeClient(server)
+
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await client.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+        }
+        #expect(other.requests.isEmpty)
+        #expect(server.requests.count == 1)
+    }
+
+    /// The same-host port change and `http` → `https` upgrade on another host are off the origin too.
+    @Test func logoutRefusesPortChangesAndOtherHostUpgrades() async throws {
+        let other = StubServer { _ in .json(#"{"redirect_url":null}"#) }
+        let portChange = StubServer { request in
+            request.url?.port == nil
+                ? .redirect(to: "https://\(request.url?.host() ?? ""):8443/abs/logout", status: 307)
+                : .json(#"{"redirect_url":null}"#)
+        }
+        let upgrade = StubServer { _ in .redirect(to: "https://\(other.host)/abs/logout", status: 308) }
+        let upgradeClient = APIClient(
+            configuration: try APIClientConfiguration(baseURL: #require(URL(string: "http://\(upgrade.host)/abs"))),
+            tokenProvider: InMemoryTokenProvider(), sessionConfiguration: upgrade.sessionConfiguration())
+
+        await #expect(throws: APIError.redirectRefused(status: 307)) {
+            try await makeClient(portChange).send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+        }
+        await #expect(throws: APIError.redirectRefused(status: 308)) {
+            try await upgradeClient.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+        }
+        #expect(portChange.requests.count == 1)
+        #expect(other.requests.isEmpty)
     }
 
     @Test func tokensAreRedacted() {
