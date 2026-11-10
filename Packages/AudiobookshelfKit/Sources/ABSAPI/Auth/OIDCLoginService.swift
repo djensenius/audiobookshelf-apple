@@ -28,6 +28,11 @@ public protocol WebAuthenticator: Sendable {
 /// The server keeps the OpenID state in its session cookie, so steps 1 and 4 go through one
 /// ``APIClient`` and its cookie jar. The code, verifier, state and tokens are never logged.
 ///
+/// That jar is discarded after sign-in, together with the server's `auth_method=openid-mobile`
+/// cookie. `POST /logout` reads only that cookie (and `openid_id_token`, which is `Secure`) to
+/// build the identity provider's end-session `redirect_url`, so a later sign-out from another
+/// client gets `redirect_url: null`.
+///
 /// Methods throw ``OIDCLoginError`` for problems specific to OpenID,
 /// ``ServerValidationError`` for the failures password sign-in shares (connection, version
 /// gate, missing tokens), or `CancellationError`. The UI ignores
@@ -90,6 +95,9 @@ public struct OIDCLoginService: Sendable {
             reply = try await client.response(for: Self.callback(state: state, code: code, verifier: pkce.verifier))
         } catch let error as APIError {
             throw Self.callbackError(error)
+        }
+        if (300..<400).contains(reply.httpResponse.statusCode) {
+            throw Self.refusal(from: reply.httpResponse)
         }
         return try await ServerValidator.loginResult(from: reply, client: client)
     }
@@ -155,10 +163,15 @@ public struct OIDCLoginService: Sendable {
     }
 
     /// Checks the callback and returns its authorization code.
+    ///
+    /// `state` is checked before anything else (RFC 6749 §4.1.2.1), so a page in the browser
+    /// session can't make up an error by navigating to `audiobookshelf://oauth?error=…`.
     static func authorizationCode(from url: URL, expectedState: String) throws(OIDCLoginError) -> String {
-        guard url.scheme?.lowercased() == callbackScheme, url.host()?.lowercased() == callbackHost else {
-            throw .invalidCallback
-        }
+        let path = url.path(percentEncoded: true)
+        guard url.scheme?.lowercased() == callbackScheme, url.host()?.lowercased() == callbackHost,
+            path.isEmpty || path == "/", url.port == nil, url.user() == nil, url.password() == nil,
+            url.fragment() == nil
+        else { throw .invalidCallback }
         let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
         func value(_ name: String) throws(OIDCLoginError) -> String? {
             let values = items.filter { $0.name == name }
@@ -166,14 +179,42 @@ public struct OIDCLoginService: Sendable {
             return values.first?.value.flatMap { $0.isEmpty ? nil : $0 }
         }
 
-        if let error = try value("error") {
-            throw .identityProvider(error: error, description: try value("error_description"))
-        }
         guard try value("state") == expectedState else { throw .stateMismatch }
+        if let error = try value("error") {
+            throw .identityProvider(
+                error: displayText(error, limit: 64) ?? "error",
+                description: displayText(try value("error_description"), limit: 200))
+        }
         // The server's mobile redirect forwards only `code` and `state`, and writes a missing code
         // as the string "undefined" (`encodeURIComponent(undefined)`).
         guard let code = try value("code"), code != "undefined" else { throw .missingCode }
         return code
+    }
+
+    /// The error for a redirect from `/auth/openid/callback`.
+    ///
+    /// Audiobookshelf 2.26.0–2.37.2 answer every failure after the session check (a code the
+    /// identity provider refuses, a user that isn't allowed or doesn't exist) with
+    /// `302 /login?error=<message>&autoLaunch=0`: `passportCallback` treats the request as
+    /// mobile only if `req.session[…].mobile === true`, but `mobile` holds the redirect URI.
+    static func refusal(from response: HTTPURLResponse) -> OIDCLoginError {
+        let location = response.value(forHTTPHeaderField: "Location")
+            .flatMap { URL(string: $0, relativeTo: response.url)?.absoluteURL }
+        return .serverRefused(message: location.flatMap { displayText(queryValue("error", in: $0), limit: 200) })
+    }
+
+    /// Text from a URL that may be shown to the user: letters, digits, spaces and basic
+    /// punctuation only, whitespace collapsed, and at most `limit` characters.
+    static func displayText(_ text: String?, limit: Int) -> String? {
+        guard let text else { return nil }
+        let allowed = CharacterSet.letters.union(.decimalDigits).union(CharacterSet(charactersIn: " .,:;'()-_!?"))
+        let filtered = String(
+            String.UnicodeScalarView(
+                text.unicodeScalars.map { CharacterSet.whitespacesAndNewlines.contains($0) ? " " : $0 }
+                    .filter(allowed.contains)))
+        let words = filtered.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
+        let limited = words.count > limit ? String(words.prefix(limit - 1)) + "…" : words
+        return limited.isEmpty ? nil : limited
     }
 
     private static func queryValue(_ name: String, in url: URL) -> String? {
@@ -226,7 +267,8 @@ public enum OIDCLoginError: Error, Sendable, Equatable, LocalizedError {
     /// The browser returned to something other than `audiobookshelf://oauth`, or a parameter
     /// was repeated.
     case invalidCallback
-    /// The identity provider reported an error (`error` and `error_description`).
+    /// The identity provider reported an error (`error` and `error_description`, filtered and
+    /// shortened for display) in a callback with the right `state`.
     case identityProvider(error: String, description: String?)
     /// The callback's `state` doesn't match the identity provider URL's.
     case stateMismatch
@@ -236,6 +278,9 @@ public enum OIDCLoginError: Error, Sendable, Equatable, LocalizedError {
     case sessionLost
     /// The server or identity provider rejected the authorization code (401).
     case rejected
+    /// The server redirected the callback to its sign-in page with this `error`, as 2.26.0–2.37.2
+    /// do for every refusal. The message is filtered and shortened for display.
+    case serverRefused(message: String?)
     /// The server failed while finishing the sign-in.
     case callbackFailed(status: Int)
 
@@ -267,6 +312,12 @@ public enum OIDCLoginError: Error, Sendable, Equatable, LocalizedError {
             "The sign-in took too long or was interrupted. Try again."
         case .rejected:
             "The server couldn't verify the sign-in with the identity provider. Try again."
+        case .serverRefused(let message?):
+            "The server refused the sign-in (\(message)). Check that your account may use single sign-on, "
+                + "or ask the server's administrator."
+        case .serverRefused(nil):
+            "The server refused the sign-in. Check that your account may use single sign-on, "
+                + "or ask the server's administrator."
         case .callbackFailed(let status):
             "The server couldn't finish single sign-on (HTTP \(status)). Check the server's OpenID settings."
         }

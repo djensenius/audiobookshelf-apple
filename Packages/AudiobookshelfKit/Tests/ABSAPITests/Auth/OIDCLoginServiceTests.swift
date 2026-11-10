@@ -209,6 +209,31 @@ private func query(_ request: URLRequest?) -> [String: String] {
         #expect(server.requests(path: "/abs/auth/openid/callback").isEmpty)
     }
 
+    @Test func identityProviderErrorIsFiltered() throws {
+        let description = "<a href=\"https://evil.example\">Call\n+1 555</a> " + String(repeating: "x", count: 300)
+        let callback = callbackURL(["error": "denied<script>", "error_description": description, "state": "s"])
+        let error = #expect(throws: OIDCLoginError.self) {
+            try OIDCLoginService.authorizationCode(from: callback, expectedState: "s")
+        }
+        guard case .identityProvider(let code, let text?) = error else {
+            Issue.record("Expected an identity provider error, got \(String(describing: error))")
+            return
+        }
+        #expect(code == "deniedscript")
+        #expect(text.count == 200)
+        #expect(text.hasPrefix("a hrefhttps:evil.exampleCall 1 555a x"))
+        #expect(!text.contains("<") && !text.contains("/") && !text.contains("\n"))
+    }
+
+    @Test func errorCallbackWithWrongStateIsStateMismatch() async throws {
+        let server = stubServer()
+        let callback = callbackURL(["error": "access_denied", "error_description": "Call +1 555", "state": "attacker"])
+        await #expect(throws: OIDCLoginError.stateMismatch) {
+            try await login(server, authenticator: FakeAuthenticator { _ in callback })
+        }
+        #expect(server.requests(path: "/abs/auth/openid/callback").isEmpty)
+    }
+
     @Test func cancellation() async throws {
         let server = stubServer()
         await #expect(throws: OIDCLoginError.cancelled) {
@@ -256,6 +281,27 @@ private func query(_ request: URLRequest?) -> [String: String] {
         #expect(authenticator.openedURLs.isEmpty)
     }
 
+    @Test func resolvesRelativeLocationAgainstServer() async throws {
+        let server = stubServer(
+            authorize: StubResponse(
+                status: 302, headers: ["Location": "../idp/authorize?state=server-state", "Set-Cookie": sessionCookies])
+        )
+        let authenticator = FakeAuthenticator()
+        _ = try await login(server, authenticator: authenticator)
+        let opened = try #require(authenticator.openedURLs.first)
+        #expect(opened.url.absoluteString == "https://\(server.host)/abs/idp/authorize?state=server-state")
+        #expect(server.requests(path: "/abs/auth/openid/callback").count == 1)
+    }
+
+    @Test func tooManyAttemptsFromAuthorize() async throws {
+        let server = stubServer(authorize: .text("Too many requests", status: 429))
+        let authenticator = FakeAuthenticator()
+        await #expect(throws: ServerValidationError.tooManyAttempts) {
+            try await login(server, authenticator: authenticator)
+        }
+        #expect(authenticator.openedURLs.isEmpty)
+    }
+
     @Test func openIDNotEnabled() async throws {
         let server = stubServer(status: statusOpenID.replacingOccurrences(of: #","openid""#, with: ""))
         await #expect(throws: OIDCLoginError.notEnabled) {
@@ -268,10 +314,26 @@ private func query(_ request: URLRequest?) -> [String: String] {
         (StubResponse.text("No session", status: 400), OIDCLoginError.sessionLost),
         (.text("Unauthorized", status: 401), .rejected),
         (.text("Error in callback", status: 500), .callbackFailed(status: 500)),
+        // What 2.26.0–2.37.2 send for every refusal after the session check.
+        (.redirect(to: "/login?error=Unauthorized&autoLaunch=0"), .serverRefused(message: "Unauthorized")),
+        (
+            .redirect(to: "/login?error=User%20not%20found%20%3Cb%3E%2Fx&autoLaunch=0", status: 302),
+            .serverRefused(message: "User not found bx")
+        ),
+        (StubResponse(status: 302, headers: ["Location": "/login?autoLaunch=0"]), .serverRefused(message: nil)),
+        (StubResponse(status: 302), .serverRefused(message: nil)),
     ])
     func callbackFailures(response: StubResponse, expected: OIDCLoginError) async throws {
         let server = stubServer(callback: response)
         await #expect(throws: expected) {
+            try await login(server, authenticator: FakeAuthenticator())
+        }
+        #expect(server.requests(path: "/abs/login").isEmpty)
+    }
+
+    @Test func tooManyAttemptsFromCallback() async throws {
+        let server = stubServer(callback: .text("Too many requests", status: 429))
+        await #expect(throws: ServerValidationError.tooManyAttempts) {
             try await login(server, authenticator: FakeAuthenticator())
         }
     }
@@ -295,12 +357,19 @@ private func query(_ request: URLRequest?) -> [String: String] {
 
     @Test(arguments: [
         "https://oauth?code=c&state=s", "audiobookshelf://login?code=c&state=s",
-        "audiobookshelf://oauth?code=c&state=s&state=s",
+        "audiobookshelf://oauth?code=c&state=s&state=s", "audiobookshelf://oauth/extra?code=c&state=s",
+        "audiobookshelf://oauth:8080?code=c&state=s", "audiobookshelf://user@oauth?code=c&state=s",
+        "audiobookshelf://user:pass@oauth?code=c&state=s", "audiobookshelf://oauth?code=c&state=s#fragment",
     ])
     func invalidCallbackURL(url: String) throws {
         #expect(throws: OIDCLoginError.invalidCallback) {
             try OIDCLoginService.authorizationCode(from: URL(string: url)!, expectedState: "s")
         }
+    }
+
+    @Test(arguments: ["audiobookshelf://oauth?code=c&state=s", "audiobookshelf://oauth/?code=c&state=s"])
+    func validCallbackURL(url: String) throws {
+        #expect(try OIDCLoginService.authorizationCode(from: URL(string: url)!, expectedState: "s") == "c")
     }
 
     @Test func errorsNeverIncludeSecrets() throws {

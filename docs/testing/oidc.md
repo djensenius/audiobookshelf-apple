@@ -27,8 +27,9 @@ supported v2.26.0): `server/Auth.js` routes `/auth/openid`, `/auth/openid/mobile
 
 ## Set up the server and IdP
 
-Use Audiobookshelf 2.26.0 or newer over `https` (an `http` server only works with an `http`
-IdP, which is for local testing only).
+Use Audiobookshelf 2.26.0 or newer over `https`. The app requires the IdP's sign-in URL to
+be `https`; an `http` IdP URL is accepted only when the server itself is `http` (local
+testing).
 
 ### Authentik
 
@@ -68,7 +69,20 @@ On an iPhone (or simulator) and on a Mac:
 - [ ] After signing in at the IdP, the browser sheet closes by itself and the app is signed
       in. `LoginResult.tokens` has an access and a refresh token.
 - [ ] Closing the browser sheet (Cancel) returns to the sign-in screen with no error shown.
-- [ ] A user the IdP denies (for example not in the allowed group) sees a friendly error.
+- [ ] A denied user sees the message for where the denial happened (2.26.0–2.37.2):
+  - The IdP refuses and redirects back with `error=…` (for example Keycloak's "Deny" on a
+    consent screen): the server's mobile redirect drops the error and forwards
+    `code=undefined`, so the app shows `.missingCode`, "The identity provider didn't
+    complete the sign-in. Try again."
+  - The IdP blocks the user on its own page (Authentik policy denial): the IdP never
+    redirects; the user closes the sheet and no error is shown (`.cancelled`).
+  - Audiobookshelf refuses the user (group claim missing when a group claim is configured,
+    no matching user with Auto Register off, account disabled, already linked): the
+    callback answers `302 /login?error=Unauthorized&autoLaunch=0` and the app shows
+    `.serverRefused`, "The server refused the sign-in (Unauthorized). …".
+  - The server can't exchange the code with the IdP (for example a wrong client secret):
+    `302 /login?error=Error%20in%20callback`, shown as "The server refused the sign-in
+    (Error in callback). …".
 - [ ] Signing in a second time with `.shared` skips the IdP's password prompt.
 - [ ] Removing `audiobookshelf://oauth` from Allowed Mobile Redirect URIs makes sign-in fail
       with the "couldn't start single sign-on" message, without opening a browser.
@@ -79,6 +93,17 @@ On an iPhone (or simulator) and on a Mac:
       verifier, `state` or token.
 
 ## Notes
+
+- Sign-out loses the IdP end-session URL. The flow's cookie jar holds
+  `auth_method=openid-mobile`, which `POST /logout` reads (`req.cookies.auth_method`, Auth.js
+  v2.37.2:508) to return the IdP's end-session `redirect_url`. The jar is discarded after
+  sign-in, and `/logout` has no body field or header for the auth method (only
+  `x-refresh-token`), so a later sign-out gets `redirect_url: null`. The `id_token_hint`
+  would also be missing: `openid_id_token` is a `Secure` cookie set on the callback.
+- Servers 2.26.0–2.37.2 redirect every callback refusal to `/login?error=…` instead of
+  answering 401/500, because `passportCallback` checks `session.mobile === true` while
+  `mobile` holds the redirect URI (Auth.js v2.37.2:424). The app reads `error` from that
+  redirect, filters it to letters, digits and basic punctuation, and shortens it.
 
 - `WebAuthenticationSession` intercepts the `audiobookshelf` callback itself; the app does
   not declare the scheme in `CFBundleURLTypes`. The legacy app (`com.audiobookshelf.app`)
