@@ -86,6 +86,7 @@ struct AutoSleepPolicyTests {
         let defaultOptions = SleepTimerOptions(settings: AppSettings.snapshot(from: defaults))
         #expect(defaultOptions == SleepTimerOptions())
         #expect(defaultOptions.autoSleep == .disabled)
+        #expect(defaultOptions.playsAlmostDoneChime == false)
 
         let settings = AppSettings(defaults: defaults)
         settings.autoSleepTimer = true

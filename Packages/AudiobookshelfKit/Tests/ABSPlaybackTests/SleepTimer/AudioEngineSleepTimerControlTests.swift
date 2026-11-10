@@ -86,6 +86,7 @@ extension AudioEngineTests {
             #expect(engine.isPlaybackRequested == false)
             #expect(players.created[1].volume == 1)
             #expect(await eventually { engine.currentTime < 0.5 }, "Back to where the fade began")
+            #expect(engine.state != .playing && !engine.isPlaybackRequested)
         }
     }
 }

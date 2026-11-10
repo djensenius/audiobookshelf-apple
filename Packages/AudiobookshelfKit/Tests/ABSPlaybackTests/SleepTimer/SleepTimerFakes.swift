@@ -4,7 +4,8 @@ import Testing
 
 @testable import ABSPlayback
 
-/// Playback that moves only when a test says so. `pause()` stops it and `play()` starts it; seeks land at once.
+/// Playback that moves only when a test says so. `pause()` stops it and `play()` starts it; seeks land at once
+/// unless held.
 @MainActor
 final class FakePlaybackControl: SleepTimerPlaybackControl {
     var isPlaying = true
@@ -17,6 +18,9 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
     private(set) var seeks: [Double] = []
     /// Whether seeks complete.
     var seeksLand = true
+    /// Whether seeks wait for ``finishSeek()``.
+    var holdsSeeks = false
+    private var heldSeek: CheckedContinuation<Void, Never>?
     /// The volume when playback was last paused.
     private(set) var volumeAtPause: Float?
 
@@ -40,9 +44,15 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
 
     func seek(to time: Double) async -> Double? {
         seeks.append(time)
+        if holdsSeeks { await withCheckedContinuation { heldSeek = $0 } }
         guard seeksLand else { return nil }
         currentTime = time
         return time
+    }
+
+    func finishSeek() {
+        heldSeek?.resume()
+        heldSeek = nil
     }
 
     func setVolume(_ volume: Float) {
