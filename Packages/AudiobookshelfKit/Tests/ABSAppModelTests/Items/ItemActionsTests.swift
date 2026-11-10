@@ -42,6 +42,17 @@ private struct GatedWriter: ProgressWriting {
     }
 }
 
+private struct FirstGatedWriter: ProgressWriting {
+    let gate = GatedCalls<Write, Void>()
+    let writes = Locked<[Write]>([])
+
+    func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        let write = Write(itemID: itemID, episodeID: episodeID, update: update)
+        writes.value.append(write)
+        if writes.value.count == 1 { try await gate.call(write) }
+    }
+}
+
 private let clock = Date(timeIntervalSince1970: 2_000)
 private let clockMilliseconds = 2_000_000
 
@@ -56,7 +67,7 @@ private func progress(
 }
 
 @MainActor
-private func makeActions(_ cache: ProgressCache, _ writer: GatedWriter) -> ProgressItemActions {
+private func makeActions(_ cache: ProgressCache, _ writer: any ProgressWriting) -> ProgressItemActions {
     ProgressItemActions(cache: cache, writer: writer, now: { clock })
 }
 
@@ -74,13 +85,31 @@ private func makeActions(_ cache: ProgressCache, _ writer: GatedWriter) -> Progr
 
         let optimistic = try #require(cache.progress(libraryItemID: "item"))
         #expect(optimistic.isFinished && optimistic.progress == 1 && optimistic.currentTime == 100)
-        #expect(optimistic.lastUpdate == clockMilliseconds && optimistic.finishedAt == clockMilliseconds)
+        #expect(optimistic.lastUpdate == 1_000 && optimistic.finishedAt == clockMilliseconds)
         #expect(write.request.update == .finished(true, at: clock))
         #expect(write.request.itemID == "item" && write.request.episodeID == nil)
 
         write.reply.resume(returning: ())
         try await action.value
         #expect(cache.progress(libraryItemID: "item") == optimistic)
+    }
+
+    @Test func aServerSeedAfterASuccessfulActionReconcilesDespiteDeviceClockSkew() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress(finished: true, current: 100, lastUpdate: 1_000))
+        let writer = GatedWriter()
+        let actions = makeActions(cache, writer)
+        var writes = writer.gate.calls.makeAsyncIterator()
+
+        let action = Task { try await actions.markFinished(ItemActionTarget(libraryItemID: "item")) }
+        let write = try #require(await writes.next())
+        write.reply.resume(returning: ())
+        try await action.value
+
+        let serverProgress = progress(current: 15, lastUpdate: 1_500)
+        let token = cache.beginSeed()
+        #expect(cache.seed([serverProgress], token: token))
+        #expect(cache.progress(libraryItemID: "item") == serverProgress)
     }
 
     @Test func markFinishedWithoutProgressCreatesAFinishedEntryFromTheTargetsDuration() async throws {
@@ -232,6 +261,32 @@ private func makeActions(_ cache: ProgressCache, _ writer: GatedWriter) -> Progr
         try await unfinish.value
         #expect(writer.log.value.map { $0.hasPrefix("write") ? "write" : $0 } == ["write", "release", "write"])
         #expect(writer.concurrency.peak == 1)
+    }
+
+    @Test func queuedActionsCannotMutateTheNextAccountProgress() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress())
+        let writer = FirstGatedWriter()
+        let actions = makeActions(cache, writer)
+        var writes = writer.gate.calls.makeAsyncIterator()
+        let target = ItemActionTarget(libraryItemID: "item")
+
+        let first = Task { try await actions.markFinished(target) }
+        let firstWrite = try #require(await writes.next())
+        let second = Task { try await actions.markNotFinished(target) }
+        await Task.yield()
+
+        cache.clear()
+        let newAccountProgress = progress(finished: true, current: 100, lastUpdate: 1_500)
+        cache.apply(newAccountProgress)
+        firstWrite.reply.resume(returning: ())
+
+        let firstResult = await first.result
+        let secondResult = await second.result
+        #expect(throws: CancellationError.self) { try firstResult.get() }
+        #expect(throws: CancellationError.self) { try secondResult.get() }
+        #expect(writer.writes.value.count == 1)
+        #expect(cache.progress(libraryItemID: "item") == newAccountProgress)
     }
 
     @Test func aSecondActionStartsFromTheStateLeftByAFailedFirst() async throws {

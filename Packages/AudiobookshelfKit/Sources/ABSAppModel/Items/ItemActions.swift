@@ -65,8 +65,8 @@ extension APIClient: ProgressWriting {
 ///   playback) is newer and stays.
 /// - An action runs to completion even if its caller is cancelled, so the cache and the server
 ///   don't end up disagreeing about a half-done action.
-/// - The optimistic progress is stamped with the device clock, so a server update for the item
-///   may be ignored until the next seed if the clock runs ahead (see `later(than:_:)`).
+/// - Optimistic ordering is tracked separately from server timestamps. A full progress seed
+///   requested after a successful action reconciles its authoritative row, even with clock skew.
 /// - The local playback database isn't touched; reconciling it with a newer server value is the
 ///   syncer's job (P2-06d, #158).
 @MainActor
@@ -79,6 +79,7 @@ public final class ProgressItemActions: ItemActionPerforming {
     private let cache: ProgressCache
     private let writer: any ProgressWriting
     private let now: @Sendable () -> Date
+    private let sessionToken: ProgressCache.SessionToken
     private var tails: [String: Tail] = [:]
     private var tickets = 0
 
@@ -86,6 +87,7 @@ public final class ProgressItemActions: ItemActionPerforming {
         self.cache = cache
         self.writer = writer
         self.now = now
+        self.sessionToken = cache.sessionToken()
     }
 
     public func markFinished(_ target: ItemActionTarget) async throws {
@@ -95,22 +97,20 @@ public final class ProgressItemActions: ItemActionPerforming {
     }
 
     public func markNotFinished(_ target: ItemActionTarget) async throws {
-        try await run(target, update: .finished(false)) { existing, date in
+        try await run(target, update: .finished(false)) { existing, _ in
             guard var progress = existing, progress.isFinished else { return nil }
             progress.isFinished = false
             progress.progress = 0
             progress.currentTime = 0
             progress.finishedAt = nil
-            progress.lastUpdate = Self.later(than: existing, date)
             return progress
         }
     }
 
     public func hideFromContinueListening(_ target: ItemActionTarget) async throws {
-        try await run(target, update: .hideFromContinueListening(true)) { existing, date in
+        try await run(target, update: .hideFromContinueListening(true)) { existing, _ in
             guard var progress = existing else { return nil }
             progress.hideFromContinueListening = true
-            progress.lastUpdate = Self.later(than: existing, date)
             return progress
         }
     }
@@ -128,19 +128,7 @@ public final class ProgressItemActions: ItemActionPerforming {
         progress.progress = 1
         progress.currentTime = progress.duration
         progress.finishedAt = milliseconds
-        progress.lastUpdate = later(than: existing, date)
         return progress
-    }
-
-    /// `date` in epoch milliseconds, or one more than the existing update, so the cache accepts it.
-    ///
-    /// Known limitation: this is the device clock. If it runs ahead of the server's, the cache
-    /// ignores a later server update (`user_updated`) for the item until the next seed, because
-    /// ``ProgressCache/apply(_:)`` drops anything not newer. Reconciliation belongs with the
-    /// progress sync.
-    private static func later(than existing: MediaProgress?, _ date: Date) -> Int {
-        let milliseconds = Int((date.timeIntervalSince1970 * 1000).rounded())
-        return max(milliseconds, (existing?.lastUpdate ?? Int.min) + 1)
     }
 
     // MARK: Running
@@ -149,6 +137,8 @@ public final class ProgressItemActions: ItemActionPerforming {
         _ target: ItemActionTarget, update: MediaProgressUpdate,
         optimistic: @escaping @MainActor (MediaProgress?, Date) -> MediaProgress?
     ) async throws {
+        let actionSession = cache.sessionToken()
+        guard actionSession == sessionToken else { throw CancellationError() }
         let key = target.key
         let previous = tails[key]?.task
         tickets += 1
@@ -156,7 +146,8 @@ public final class ProgressItemActions: ItemActionPerforming {
         let task = Task<Result<Void, any Error>, Never> { @MainActor in
             _ = await previous?.value
             do {
-                try await self.perform(target, update: update, optimistic: optimistic)
+                try await self.perform(
+                    target, update: update, optimistic: optimistic, session: actionSession)
                 return .success(())
             } catch {
                 return .failure(error)
@@ -170,19 +161,21 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     private func perform(
         _ target: ItemActionTarget, update: MediaProgressUpdate,
-        optimistic: (MediaProgress?, Date) -> MediaProgress?
+        optimistic: (MediaProgress?, Date) -> MediaProgress?, session: ProgressCache.SessionToken
     ) async throws {
+        guard cache.isCurrent(session) else { throw CancellationError() }
         let before = cache.progress(libraryItemID: target.libraryItemID, episodeID: target.episodeID)
-        var applied: MediaProgress?
-        if let value = optimistic(before, now()), cache.apply(value) { applied = value }
+        let applied = optimistic(before, now()).flatMap { cache.applyOptimistic($0, token: session) }
+        guard cache.isCurrent(session) else { throw CancellationError() }
         do {
             try await writer.writeProgress(
                 itemID: target.libraryItemID, episodeID: target.episodeID, update: update)
         } catch {
-            // The pre-image may be older than a seed row that lost to the optimistic value; the
-            // next seed corrects that.
-            if let applied { cache.rollback(applied, to: before) }
+            guard cache.isCurrent(session) else { throw CancellationError() }
+            if let applied { cache.rollbackOptimistic(applied, to: before, token: session) }
             throw error
         }
+        guard cache.isCurrent(session) else { throw CancellationError() }
+        if let applied { cache.commitOptimistic(applied, token: session) }
     }
 }
