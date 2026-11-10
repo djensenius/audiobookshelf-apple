@@ -639,9 +639,10 @@ All entries were checked in the Xcode 27.2 iPhoneOS and MacOSX SDK `SwiftUI.swif
 **Follow-ups**
 
 - **P3-04 #44**:
-  - Add `NSUserActivityTypes` (`org.davidjensenius.Audiobookshelf.item`) to the app's `Info.plist`.
+  - Add `NSUserActivityTypes` (`org.davidjensenius.Audiobookshelf.item`) to the app's `Info.plist` (done in P3-04d #179).
   - Implement `AppTab`, `Route`, `Router` and `DeepLink` in `ABSAppModel/Navigation/`, including the play-link confirmation rule.
-  - Note the legacy-app scheme collision in the onboarding and release notes.
+  - Note the legacy-app scheme collision in the onboarding and release notes (the release notes have it in `docs/release.md`).
+- **Handoff account identity** (follow-up issue): add `serverAddress` and `userID` to the payload and resolve them to a local connection before `Router.open(_:)`. See "Handoff".
 - **P5-07 #84**: `DuoArrangement` in ABSUI.
 - The player UI (P2-09 #56), iPad (P5-06 #83), Mac (P5-05 #82) and CarPlay (P5-02 #79, P5-03 #80) issues follow the placements above.
 
