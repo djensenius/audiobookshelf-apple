@@ -1,0 +1,19 @@
+{
+  "id": "series-fixture",
+  "name": "Series Evidence Fixture",
+  "nameIgnorePrefix": "Series Evidence Fixture",
+  "description": null,
+  "addedAt": 1700000000000,
+  "updatedAt": 1700000000000,
+  "libraryId": "library-fixture",
+  "progress": {
+    "libraryItemIds": [
+      "item-one",
+      "item-two"
+    ],
+    "libraryItemIdsFinished": [
+      "item-one"
+    ],
+    "isFinished": false
+  }
+}
