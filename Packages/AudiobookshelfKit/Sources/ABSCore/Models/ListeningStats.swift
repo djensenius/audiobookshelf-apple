@@ -1,7 +1,7 @@
 import Foundation
 
 /// `GET /api/me/listening-stats` (server `ApiRouter.getUserListeningStatsHelpers`). Times are
-/// seconds.
+/// seconds and accept numeric strings; `days` and `dayOfWeek` skip non-numeric values.
 public struct ListeningStats: Sendable, Hashable, Codable {
     public var totalTime: Double
     /// Keyed by library item ID. Sessions without one are grouped under the key `"null"`.
@@ -33,11 +33,11 @@ public struct ListeningStats: Sendable, Hashable, Codable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        totalTime = try container.decodeIfPresent(Double.self, forKey: .totalTime) ?? 0
+        totalTime = container.decodeLenientDouble(forKey: .totalTime) ?? 0
         items = try container.decodeIfPresent([String: ListeningStatsItem].self, forKey: .items) ?? [:]
-        days = try container.decodeIfPresent([String: Double].self, forKey: .days) ?? [:]
-        dayOfWeek = try container.decodeIfPresent([String: Double].self, forKey: .dayOfWeek) ?? [:]
-        today = try container.decodeIfPresent(Double.self, forKey: .today) ?? 0
+        days = try container.decodeLenientDoubleDictionary(forKey: .days) ?? [:]
+        dayOfWeek = try container.decodeLenientDoubleDictionary(forKey: .dayOfWeek) ?? [:]
+        today = container.decodeLenientDouble(forKey: .today) ?? 0
         recentSessions = try container.decodeLossyArrayIfPresent(PlaybackSession.self, forKey: .recentSessions) ?? []
     }
 }
@@ -69,7 +69,7 @@ public struct ListeningStatsItem: Sendable, Hashable, Codable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(String.self, forKey: .id)
-        timeListening = try container.decodeIfPresent(Double.self, forKey: .timeListening) ?? 0
+        timeListening = container.decodeLenientDouble(forKey: .timeListening) ?? 0
         mediaMetadata = try? container.decodeIfPresent(ListeningStatsMetadata.self, forKey: .mediaMetadata)
         lastUpdate = try container.decodeIfPresent(Int.self, forKey: .lastUpdate)
     }
@@ -211,17 +211,17 @@ public struct UserYearStats: Sendable, Hashable, Codable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         totalListeningSessions = try container.decodeIfPresent(Int.self, forKey: .totalListeningSessions) ?? 0
-        totalListeningTime = try container.decodeIfPresent(Double.self, forKey: .totalListeningTime) ?? 0
-        totalBookListeningTime = try container.decodeIfPresent(Double.self, forKey: .totalBookListeningTime) ?? 0
-        totalPodcastListeningTime =
-            try container.decodeIfPresent(Double.self, forKey: .totalPodcastListeningTime) ?? 0
+        totalListeningTime = container.decodeLenientDouble(forKey: .totalListeningTime) ?? 0
+        totalBookListeningTime = container.decodeLenientDouble(forKey: .totalBookListeningTime) ?? 0
+        totalPodcastListeningTime = container.decodeLenientDouble(forKey: .totalPodcastListeningTime) ?? 0
         topAuthors = try container.decodeLossyArrayIfPresent(YearStatsNameTime.self, forKey: .topAuthors) ?? []
         topGenres = try container.decodeLossyArrayIfPresent(YearStatsGenreTime.self, forKey: .topGenres) ?? []
-        mostListenedNarrator = try container.decodeIfPresent(YearStatsNameTime.self, forKey: .mostListenedNarrator)
-        mostListenedMonth = try container.decodeIfPresent(YearStatsMonthTime.self, forKey: .mostListenedMonth)
+        // A NaN sum serialises as `null` inside these objects; drop the object rather than the response.
+        mostListenedNarrator = try? container.decodeIfPresent(YearStatsNameTime.self, forKey: .mostListenedNarrator)
+        mostListenedMonth = try? container.decodeIfPresent(YearStatsMonthTime.self, forKey: .mostListenedMonth)
         numBooksFinished = try container.decodeIfPresent(Int.self, forKey: .numBooksFinished) ?? 0
         numBooksListened = try container.decodeIfPresent(Int.self, forKey: .numBooksListened) ?? 0
-        longestAudiobookFinished = try container.decodeIfPresent(
+        longestAudiobookFinished = try? container.decodeIfPresent(
             YearStatsBook.self, forKey: .longestAudiobookFinished)
         booksWithCovers = try container.decodeIfPresent([String].self, forKey: .booksWithCovers) ?? []
         finishedBooksWithCovers = try container.decodeIfPresent([String].self, forKey: .finishedBooksWithCovers) ?? []
@@ -230,7 +230,8 @@ public struct UserYearStats: Sendable, Hashable, Codable {
 
 /// `GET /api/stats/year/:year`, admin only (server `utils/queries/adminStats.getStatsForYear`).
 /// Book totals cover items added up to the end of the year. Times are seconds and sizes bytes;
-/// `totalListeningTime` and `totalBooksDuration` are not rounded.
+/// `totalListeningTime` and `totalBooksDuration` are not rounded, and the time sums accept
+/// numeric strings.
 public struct ServerYearStats: Sendable, Hashable, Codable {
     public var numListeningSessions: Int
     public var numBooksAdded: Int
@@ -281,11 +282,11 @@ public struct ServerYearStats: Sendable, Hashable, Codable {
         numBooksAdded = try container.decodeIfPresent(Int.self, forKey: .numBooksAdded) ?? 0
         numAuthorsAdded = try container.decodeIfPresent(Int.self, forKey: .numAuthorsAdded) ?? 0
         totalBooksAddedSize = try container.decodeIfPresent(Int.self, forKey: .totalBooksAddedSize) ?? 0
-        totalBooksAddedDuration = try container.decodeIfPresent(Double.self, forKey: .totalBooksAddedDuration) ?? 0
+        totalBooksAddedDuration = container.decodeLenientDouble(forKey: .totalBooksAddedDuration) ?? 0
         booksAddedWithCovers = try container.decodeIfPresent([String].self, forKey: .booksAddedWithCovers) ?? []
         totalBooksSize = try container.decodeIfPresent(Int.self, forKey: .totalBooksSize) ?? 0
-        totalBooksDuration = try container.decodeIfPresent(Double.self, forKey: .totalBooksDuration) ?? 0
-        totalListeningTime = try container.decodeIfPresent(Double.self, forKey: .totalListeningTime) ?? 0
+        totalBooksDuration = container.decodeLenientDouble(forKey: .totalBooksDuration) ?? 0
+        totalListeningTime = container.decodeLenientDouble(forKey: .totalListeningTime) ?? 0
         numBooks = try container.decodeIfPresent(Int.self, forKey: .numBooks) ?? 0
         topAuthors = try container.decodeLossyArrayIfPresent(YearStatsNameTime.self, forKey: .topAuthors) ?? []
         topNarrators = try container.decodeLossyArrayIfPresent(YearStatsNameTime.self, forKey: .topNarrators) ?? []

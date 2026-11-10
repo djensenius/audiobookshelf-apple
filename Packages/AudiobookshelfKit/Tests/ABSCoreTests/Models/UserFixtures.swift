@@ -1,7 +1,8 @@
 // Scrubbed server responses (Audiobookshelf 2.26+ unless noted), minified.
 enum UserFixtures {
     /// `POST /login` with `x-return-tokens: true` (2.26+). The user has one malformed progress
-    /// entry (`libraryItemId: null`) and one malformed bookmark (no `time`).
+    /// entry (`libraryItemId: null`), one malformed bookmark (no `time`), a bookmark whose `time`
+    /// is a numeric string, and one malformed e-reader device (no `name`).
     static let loginResponse = """
         {"user":{"id":"usr-1","username":"david","email":null,"type":"admin","token":null,"isOldToken":false,\
         "mediaProgress":[{"id":"mp-1","userId":"usr-1","libraryItemId":"li-book-1","episodeId":null,\
@@ -16,7 +17,8 @@ enum UserFixtures {
         "currentTime":1800,"isFinished":true,"hideFromContinueListening":true,"ebookLocation":null,\
         "ebookProgress":null,"lastUpdate":1700000300000,"startedAt":1700000200000,"finishedAt":1700000300000}],\
         "seriesHideFromContinueListening":["se-1"],"bookmarks":[{"libraryItemId":"li-book-1","title":"Good bit",\
-        "time":1234.5,"createdAt":1700000050000},{"libraryItemId":"li-book-1","title":"Broken"}],\
+        "time":1234.5,"createdAt":1700000050000},{"libraryItemId":"li-book-1","title":"Broken"},\
+        {"libraryItemId":"li-book-1","title":"Stringy","time":"42.5","createdAt":1700000060000}],\
         "isActive":true,"isLocked":false,"lastSeen":1700000400000,"createdAt":1690000000000,"permissions":\
         {"download":true,"update":true,"delete":false,"upload":true,"createEreader":true,\
         "accessAllLibraries":false,"accessAllTags":false,"accessExplicitContent":true,\
@@ -26,7 +28,9 @@ enum UserFixtures {
         "sortingIgnorePrefix":true,"sortingPrefixes":["the","a"],"chromecastEnabled":false,\
         "dateFormat":"MM/dd/yyyy","timeFormat":"HH:mm","language":"en-us","logLevel":2,"version":"2.26.0",\
         "buildNumber":1,"authActiveAuthMethods":["local"],"timeZone":"America/Toronto"},\
-        "ereaderDevices":[],"Source":"docker"}
+        "ereaderDevices":[{"name":"Kindle","email":"me@kindle.example","availabilityOption":"specificUsers",\
+        "users":["usr-1"]},{"email":"broken@example.com"},{"name":"Kobo","email":"kobo@example.com",\
+        "availabilityOption":"everyone","users":null}],"Source":"docker"}
         """
 
     /// `GET /status` with local sign-in only.
@@ -62,6 +66,21 @@ enum UserFixtures {
         "playMethod":0,"mediaPlayer":"html5","deviceInfo":null,"serverVersion":"2.26.0","date":"2024-03-01",\
         "dayOfWeek":"Friday","timeListening":3600,"startTime":0,"currentTime":3600,"startedAt":1709280000000,\
         "updatedAt":1709283600000},{"id":"ps-2","libraryItemId":null,"mediaType":"book","timeListening":1}]}
+        """
+
+    /// `GET /api/me/listening-stats` with values old rows can produce: a `"null"` item key with a
+    /// null `id`, malformed `mediaMetadata`, numeric strings, and null or non-numeric day totals.
+    static let lenientListeningStats = """
+        {"totalTime":"12.5","items":{"null":{"id":null,"timeListening":"7.5","mediaMetadata":"oops"},\
+        "li-1":{"id":"li-1","timeListening":5,"mediaMetadata":{"title":5}}},"days":{"2024-03-01":"7.5",\
+        "2024-03-02":null,"2024-03-03":"abc","2024-03-04":5},"dayOfWeek":{"Friday":7.5,"Saturday":null},\
+        "today":null,"recentSessions":[]}
+        """
+
+    /// `GET /api/me/stats/year/2024` with a string total and objects whose NaN times became null.
+    static let lenientUserYearStats = """
+        {"totalListeningSessions":2,"totalListeningTime":"100","mostListenedNarrator":{"name":"N","time":null},\
+        "mostListenedMonth":{"month":1,"time":null},"longestAudiobookFinished":{"id":null}}
         """
 
     /// `GET /api/me/stats/year/2024`.

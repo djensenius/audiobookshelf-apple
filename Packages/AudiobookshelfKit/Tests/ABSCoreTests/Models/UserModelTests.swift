@@ -52,8 +52,11 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(user.mediaProgress.map(\.id) == ["mp-1", "mp-3"])
         #expect(
             user.bookmarks == [
-                AudioBookmark(libraryItemId: "li-book-1", title: "Good bit", time: 1234.5, createdAt: 1_700_000_050_000)
+                AudioBookmark(
+                    libraryItemId: "li-book-1", title: "Good bit", time: 1234.5, createdAt: 1_700_000_050_000),
+                AudioBookmark(libraryItemId: "li-book-1", title: "Stringy", time: 42.5, createdAt: 1_700_000_060_000),
             ])
+        #expect(user.bookmarks.map(\.id) == ["li-book-1-1234.5", "li-book-1-42.5"])
 
         let book = user.mediaProgress[0]
         #expect(book.mediaItemType == .book)
@@ -90,7 +93,76 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         let decoded = try JSONDecoder().decode(User.self, from: data)
         #expect(decoded == user)
         // Tokens are never stored on the user.
-        #expect(String(decoding: data, as: UTF8.self).contains("access-abc") == false)
+        let json = String(decoding: data, as: UTF8.self)
+        #expect(!json.contains("access-abc"))
+        #expect(!json.contains("refresh-abc"))
+    }
+
+    @Test func redactsTokensWhenPrinted() throws {
+        let response = try decode(AuthResponse.self, UserFixtures.loginResponse)
+        let tokens = try #require(response.tokens)
+        for subject in [tokens, response] as [Any] {
+            var dumped = ""
+            dump(subject, to: &dumped)
+            for output in [String(describing: subject), String(reflecting: subject), dumped, "\(subject)"] {
+                #expect(!output.contains("access-abc"))
+                #expect(!output.contains("refresh-abc"))
+                #expect(output.contains("<redacted>"))
+            }
+        }
+        #expect(
+            String(describing: AuthTokens(accessToken: "a"))
+                == "AuthTokens(accessToken: <redacted>, refreshToken: nil)")
+    }
+
+    @Test func decodesEReaderDevices() throws {
+        let devices = try #require(try decode(AuthResponse.self, UserFixtures.loginResponse).ereaderDevices)
+        #expect(
+            devices == [
+                EReaderDevice(
+                    name: "Kindle", email: "me@kindle.example", availabilityOption: .specificUsers,
+                    users: ["usr-1"]),
+                EReaderDevice(name: "Kobo", email: "kobo@example.com", availabilityOption: .unknown("everyone")),
+            ])
+        let minimal = #"{"user":{"id":"u","username":"x"}}"#
+        #expect(try decode(AuthResponse.self, minimal).ereaderDevices == nil)
+    }
+
+    @Test func decodesMinimalUser() throws {
+        let user = try decode(User.self, #"{"id":"u","username":"x"}"#)
+        #expect(user.mediaProgress.isEmpty)
+        #expect(user.bookmarks.isEmpty)
+        #expect(user.seriesHideFromContinueListening.isEmpty)
+        #expect(user.type == .user)
+        #expect(user.isActive)
+        #expect(!user.isLocked)
+        #expect(user.librariesAccessible.isEmpty)
+        #expect(user.hasOpenIDLink == nil)
+    }
+
+    @Test func missingPermissionFlagsReadAsFalse() throws {
+        let json = #"{"download":true,"accessAllLibraries":true}"#
+        let permissions = try decode(UserPermissions.self, json)
+        #expect(permissions == UserPermissions(download: true, accessAllLibraries: true))
+        #expect(!permissions.createEreader)
+        #expect(!permissions.accessAllTags)
+        #expect(!permissions.selectedTagsNotAccessible)
+    }
+
+    @Test func mediaProgressDefaultsNullNumbersToZero() throws {
+        let json = #"{"id":"mp","libraryItemId":"li","duration":null,"currentTime":null,"progress":null}"#
+        let progress = try decode(MediaProgress.self, json)
+        #expect(progress.duration == 0)
+        #expect(progress.currentTime == 0)
+        #expect(progress.progress == 0)
+        #expect(!progress.isFinished)
+        #expect(progress.ebookProgress == nil)
+    }
+
+    @Test func bookmarkRejectsNonNumericTime() {
+        #expect(throws: DecodingError.self) {
+            try decode(AudioBookmark.self, #"{"libraryItemId":"li","title":"x","time":"soon"}"#)
+        }
     }
 
     @Test func unknownEnumsRoundTrip() throws {
@@ -170,6 +242,20 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(stats.recentSessions.first?.dayOfWeek == "Friday")
     }
 
+    @Test func decodesListeningStatsLeniently() throws {
+        let stats = try decode(ListeningStats.self, UserFixtures.lenientListeningStats)
+        #expect(stats.totalTime == 12.5)
+        #expect(stats.today == 0)
+        let orphan = try #require(stats.items["null"])
+        #expect(orphan.id == nil)
+        #expect(orphan.timeListening == 7.5)
+        #expect(orphan.mediaMetadata == nil)
+        #expect(stats.items["li-1"]?.mediaMetadata == nil)
+        #expect(stats.items["li-1"]?.timeListening == 5)
+        #expect(stats.days == ["2024-03-01": 7.5, "2024-03-04": 5])
+        #expect(stats.dayOfWeek == ["Friday": 7.5])
+    }
+
     @Test func decodesEmptyListeningStats() throws {
         let json = #"{"totalTime":0,"items":{},"days":{},"dayOfWeek":{},"today":0,"recentSessions":[]}"#
         #expect(try decode(ListeningStats.self, json) == ListeningStats())
@@ -192,6 +278,23 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
 
     @Test func decodesEmptyUserYearStats() throws {
         #expect(try decode(UserYearStats.self, UserFixtures.emptyUserYearStats) == UserYearStats())
+    }
+
+    @Test func decodesYearStatsLeniently() throws {
+        let user = try decode(UserYearStats.self, UserFixtures.lenientUserYearStats)
+        #expect(user.totalListeningSessions == 2)
+        #expect(user.totalListeningTime == 100)
+        #expect(user.mostListenedNarrator == nil)
+        #expect(user.mostListenedMonth == nil)
+        #expect(user.longestAudiobookFinished == nil)
+        #expect(user.topAuthors.isEmpty)
+
+        let server = try decode(
+            ServerYearStats.self,
+            #"{"totalListeningTime":"0120.5","totalBooksDuration":"360.25","totalBooksAddedDuration":null}"#)
+        #expect(server.totalListeningTime == 120.5)
+        #expect(server.totalBooksDuration == 360.25)
+        #expect(server.totalBooksAddedDuration == 0)
     }
 
     @Test func decodesServerYearStats() throws {
