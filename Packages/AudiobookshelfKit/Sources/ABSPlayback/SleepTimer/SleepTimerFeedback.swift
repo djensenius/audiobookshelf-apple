@@ -16,7 +16,8 @@ public protocol SleepTimerFeedback: AnyObject {
     func playResetFeedback()
 }
 
-/// Plays a synthesized bell for the chime and vibrates (iOS only) for a reset.
+/// Plays a synthesized bell for the chime and vibrates (iOS only) for a reset. On macOS the chime plays through
+/// the default system output, which may not be the device playing the book.
 @MainActor
 public final class SystemSleepTimerFeedback: SleepTimerFeedback {
     /// The Android `SLEEP_TIMER_CHIME_SOUND_VOLUME`.
@@ -32,11 +33,16 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
     /// Synthesized once.
     private static let chime = makeChime()
 
-    /// One engine and node for every chime; the engine stops between chimes.
-    private var output: (engine: AVAudioEngine, node: AVAudioPlayerNode)?
+    /// One engine and node for every chime; the engine stops between chimes. Rebuilt after a configuration
+    /// change (a route or format change), which stops the engine.
+    private var output: (engine: AVAudioEngine, node: AVAudioPlayerNode, observer: any NSObjectProtocol)?
     private var chimeGeneration = 0
 
     public init() {}
+
+    isolated deinit {
+        discardOutput()
+    }
 
     public func playChime() {
         guard let buffer = Self.chime, let output = chimeOutput(format: buffer.format) else { return }
@@ -67,7 +73,7 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
     }
 
     private func chimeOutput(format: AVAudioFormat) -> (engine: AVAudioEngine, node: AVAudioPlayerNode)? {
-        if let output { return output }
+        if let output { return (output.engine, output.node) }
         let engine = AVAudioEngine()
         let node = AVAudioPlayerNode()
         engine.attach(node)
@@ -78,8 +84,19 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
             logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
-        output = (engine, node)
-        return output
+        let observer = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            // Safe: the observer runs on `OperationQueue.main`, which executes on the main thread.
+            MainActor.assumeIsolated { self?.discardOutput() }
+        }
+        output = (engine, node, observer)
+        return (engine, node)
+    }
+
+    private func discardOutput() {
+        if let observer = output?.observer { NotificationCenter.default.removeObserver(observer) }
+        output = nil
     }
 
     private func chimeDidFinish(_ generation: Int) {

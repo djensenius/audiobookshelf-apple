@@ -14,9 +14,11 @@ public protocol SleepTimerPlaybackControl: AnyObject {
     /// The loaded timeline; `nil` without media.
     var timeline: PlaybackTimeline? { get }
     func pause()
-    /// Resumes playback after moving back `seconds` (no move for `0`): shaking during the grace period after expiry.
-    /// Returns where playback resumed, or `nil` when the rewind didn't land (then it doesn't play).
-    func play(rewindingBy seconds: Double) async -> Double?
+    /// Resumes playback after a reset during the grace period.
+    func play()
+    /// Seeks to a timeline time: back to where the fade began, or a reset's rewind. Returns where playback
+    /// landed, or `nil` when the seek didn't complete.
+    func seek(to time: Double) async -> Double?
     /// Sets the output volume, `0...1`, for the fade-out. The timer restores `1` when it ends.
     func setVolume(_ volume: Float)
 }
@@ -40,13 +42,12 @@ public final class AudioEngineSleepTimerControl: SleepTimerPlaybackControl {
         engine?.pause()
     }
 
-    public func play(rewindingBy seconds: Double) async -> Double? {
-        guard let engine else { return nil }
-        if seconds > 0, let timeline = engine.timeline {
-            let target = timeline.jumpBackward(from: engine.currentTime, by: seconds)
-            guard await engine.seek(to: target) == .completed else { return nil }
-        }
-        engine.play()
+    public func play() {
+        engine?.play()
+    }
+
+    public func seek(to time: Double) async -> Double? {
+        guard let engine, await engine.seek(to: time) == .completed else { return nil }
         return engine.currentTime
     }
 

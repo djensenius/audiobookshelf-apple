@@ -190,7 +190,7 @@ struct SleepTimerTests {
         #expect(harness.feedback.chimes == 0)
     }
 
-    @Test func playingAgainRewindsToWhereTheFadeBegan() async {
+    @Test func expirySeeksBackToWhereTheFadeBegan() async {
         let harness = Harness(at: 100)
         harness.timer.start(.duration(30))
         await harness.play(from: 100, to: 110)
@@ -199,7 +199,9 @@ struct SleepTimerTests {
 
         await harness.play(from: 110, to: 175)
         #expect(harness.control.pauseCount == 1)
-        #expect(harness.timer.playbackWillStart() == 60)
+        await until { harness.control.currentTime == 115 }
+        #expect(harness.control.seeks == [115])
+        #expect(harness.timer.playbackWillStart() == 0)
         #expect(harness.timer.isRunning, "Restarted within the grace period")
     }
 
@@ -211,7 +213,8 @@ struct SleepTimerTests {
         harness.timer.didSeek(to: 500)
         await harness.play(from: 500, to: 520)
         #expect(harness.control.pauseCount == 1)
-        #expect(harness.timer.playbackWillStart() == 20)
+        await until { harness.control.currentTime == 500 }
+        #expect(harness.control.seeks == [500])
     }
 
     @Test func endOfChapterDoesNotRewindAfterItsFade() async {
@@ -221,6 +224,7 @@ struct SleepTimerTests {
         #expect(harness.control.pauseCount == 1)
         await harness.endGrace()
         #expect(harness.timer.playbackWillStart() == 0)
+        #expect(harness.control.seeks.isEmpty)
     }
 
     // MARK: - End of chapter
@@ -266,8 +270,10 @@ struct SleepTimerTests {
         #expect(harness.control.pauseCount == 1)
     }
 
-    @Test func aResumeRewindBeforeTheNextChapterKeepsItsEnd() async {
+    @Test(arguments: zip([1, 0.75, 1], [447.3, 447.3, 440]))
+    func aResumeRewindBeforeTheNextChapterKeepsItsEnd(rate: Double, landing: Double) async {
         let harness = Harness(timeline: chapters, at: 440)
+        harness.control.rate = rate
         harness.timer.start(.endOfChapter)
         await harness.play(from: 440, to: 449)
         harness.control.currentTime = 450.3
@@ -277,11 +283,22 @@ struct SleepTimerTests {
         harness.clock.advance(by: .seconds(20))
         #expect(harness.timer.playbackWillStart() == 0)
         harness.control.isPlaying = true
-        harness.control.currentTime = 447.3
-        harness.timer.didSeek(to: 447.3)
-        #expect(abs((harness.timer.remaining ?? 0) - 552.7) < 1e-9)
-        await harness.play(from: 447.3, to: 452.3)
+        harness.control.currentTime = landing
+        harness.timer.didSeek(to: landing)
+        #expect(abs((harness.timer.remaining ?? 0) - (1000 - landing) / rate) < 1e-9)
+        await harness.play(from: landing, to: landing + 12)
         #expect(harness.control.pauseCount == 1)
+    }
+
+    @Test func aSeekKeepsTheNextChapterOnlyUpToThirtySecondsBeforeIt() {
+        let harness = Harness(timeline: chapters, at: 500)
+        harness.timer.start(.endOfChapter)
+        harness.control.currentTime = 420
+        harness.timer.didSeek(to: 420)
+        #expect(harness.timer.remaining == 580)
+        harness.control.currentTime = 419
+        harness.timer.didSeek(to: 419)
+        #expect(harness.timer.remaining == 31)
     }
 
     @Test func anUnreportedJumpRetargetsInsteadOfExpiring() async {
@@ -428,6 +445,31 @@ struct SleepTimerTests {
         #expect(harness.timer.remaining == 850, "Capped at the end of the media")
     }
 
+    @Test func chapterTimeAddedSurvivesASeekWithinTheChapter() {
+        let harness = Harness(timeline: chapters, at: 100)
+        harness.timer.start(.endOfChapter)
+        harness.timer.add(300)
+        harness.control.isPlaying = false
+        harness.control.currentTime = 90
+        harness.timer.didSeek(to: 90)
+        #expect(harness.timer.remaining == 660, "Still aims at 750")
+        harness.control.currentTime = 1200
+        harness.timer.didSeek(to: 1200)
+        #expect(harness.timer.remaining == 600, "Another chapter drops it")
+    }
+
+    @Test func chapterTimeSubtractedSurvivesASeekWithinTheChapter() async {
+        let harness = Harness(timeline: chapters, at: 100)
+        harness.timer.start(.endOfChapter)
+        harness.timer.subtract(1000)
+        harness.control.currentTime = 90
+        harness.timer.didSeek(to: 90)
+        #expect(harness.timer.remaining == 11)
+        await harness.play(from: 90, to: 101)
+        #expect(harness.control.pauseCount == 1)
+        #expect(harness.timer.canRestart == false, "Still cut short")
+    }
+
     @Test func adjustingRefreshesTheFade() {
         let harness = Harness()
         harness.timer.start(.duration(30))
@@ -505,8 +547,8 @@ struct SleepTimerTests {
         harness.shake.shake()
         #expect(harness.timer.mode == .duration(10))
         #expect(harness.timer.canRestart == false)
-        await until { !harness.control.plays.isEmpty }
-        #expect(harness.control.plays == [0])
+        await until { harness.control.plays == 1 }
+        #expect(harness.control.seeks.isEmpty)
         #expect(harness.control.isPlaying)
         #expect(harness.feedback.resets == 1)
     }
@@ -529,7 +571,7 @@ struct SleepTimerTests {
         #expect(harness.timer.reset() == false)
         #expect(harness.timer.playbackWillStart() == 0)
         #expect(harness.timer.isRunning == false)
-        #expect(harness.control.plays.isEmpty)
+        #expect(harness.control.plays == 0)
     }
 
     @Test func theGracePeriodEndsBeforeItsTaskRuns() async {
@@ -672,16 +714,48 @@ struct SleepTimerTests {
     }
 
     @Test func shakeAfterAnAutomaticTimerRewindsAndPlays() async throws {
-        let harness = Harness(at: 1000, options: try autoOptions())
+        let harness = Harness(timeline: chapters, at: 1000, options: try autoOptions())
         _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
         await harness.expire()
 
         harness.shake.shake()
-        await until { !harness.control.plays.isEmpty }
-        #expect(harness.control.plays == [300])
-        #expect(harness.control.currentTime == 700)
+        #expect(harness.feedback.resets == 0, "Not until it plays")
+        await until { harness.control.plays == 1 }
+        #expect(harness.control.seeks == [700])
+        #expect(harness.feedback.resets == 1)
         #expect(harness.timer.isAutomatic)
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 11)) == 0)
+    }
+
+    @Test func aResetWhoseRewindFailsStopsWithoutPlaying() async throws {
+        let harness = Harness(timeline: chapters, at: 1000, options: try autoOptions())
+        _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        await harness.expire()
+        harness.control.seeksLand = false
+        #expect(harness.timer.reset())
+        await until { !harness.timer.isRunning }
+        #expect(harness.control.plays == 0)
+        #expect(harness.feedback.resets == 0)
+    }
+
+    @Test func theAutomaticRewindStartsWhereTheFadeBegan() async throws {
+        let harness = Harness(at: 1000, options: try autoOptions(mode: .duration(70)))
+        _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        await harness.play(from: 1000, to: 1070)
+        await until { harness.control.currentTime == 1010 }
+        await harness.endGrace()
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == 300)
+    }
+
+    @Test(arguments: [true, false])
+    func theAutomaticRewindIsDroppedOnceThePositionMoves(reported: Bool) async throws {
+        let harness = Harness(at: 1000, options: try autoOptions())
+        _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        await harness.expire()
+        await harness.endGrace()
+        harness.control.currentTime = 5000
+        if reported { harness.timer.didSeek(to: 5000) }
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == 0)
     }
 
     @Test func automaticChapterTimerRestartsFromTheRewoundPosition() async throws {

@@ -20,7 +20,7 @@ public struct AutoSleepPolicy: Sendable, Hashable {
         }
 
         /// Parses 24-hour `HH:mm`, the format of the `autoSleepTimerStartTime` and `autoSleepTimerEndTime` settings.
-        // TODO: Parse with `AppSettings.minutesSinceMidnight` once #142 lands.
+        // TODO: Parse with `AppSettings.minutesSinceMidnight` (#142) after merging main.
         public init?(_ text: String) {
             let parts = text.split(separator: ":", omittingEmptySubsequences: false)
             guard parts.count == 2,

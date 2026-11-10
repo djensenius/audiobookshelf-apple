@@ -5,19 +5,17 @@ import Testing
 
 @MainActor
 struct AudioEngineSleepTimerControlTests {
-    @Test func playRewindsThroughTheEngineAndReportsWhereItLanded() async {
+    @Test func seeksAndPlaysThroughTheEngine() async {
         let engine = FakeAudioEngine()
-        engine.timeline = TimelineFixture.crossingChapters.timeline
         engine.currentTime = 500
         engine.state = .playing
         let control = AudioEngineSleepTimerControl(engine: engine)
         #expect(control.isPlaying)
-        #expect(await control.play(rewindingBy: 30) == 470)
-        #expect(engine.calls == ["seek", "play"])
-
+        #expect(await control.seek(to: 470) == 470)
         engine.seekResult = .superseded
-        #expect(await control.play(rewindingBy: 30) == nil)
-        #expect(engine.calls == ["seek", "play", "seek"], "Doesn't play where it didn't land")
+        #expect(await control.seek(to: 400) == nil, "Only where it landed")
+        control.play()
+        #expect(engine.calls == ["seek", "seek", "play"])
 
         control.setVolume(0.25)
         #expect(engine.volume == 0.25)
@@ -91,6 +89,7 @@ extension AudioEngineTests {
             #expect(timer.isRunning == false)
             #expect(engine.isPlaybackRequested == false)
             #expect(players.created[1].volume == 1)
+            #expect(await eventually { engine.currentTime < 0.5 }, "Back to where the fade began")
         }
     }
 }
