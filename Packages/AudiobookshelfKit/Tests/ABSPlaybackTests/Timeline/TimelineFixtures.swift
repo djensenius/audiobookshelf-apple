@@ -20,6 +20,10 @@ enum TimelineFixture: String, CaseIterable, Sendable, CustomTestStringConvertibl
     case gappedTracks
     /// Tracks 0–100 and 95–200.
     case overlappingTracks
+    /// Track 100–150 inside 0–300; the contained track is skipped. Chapters 0–120 and 120–400.
+    case nestedTracks
+    /// Track 0–100, then a zero-length track at 500 that must not extend the duration. Chapter 0–600.
+    case trailingZeroLength
     /// Zero, negative and missing-offset tracks: resolves to 0–0, 0–50, 50–50, 50–100.
     case degenerateTracks
     /// A single zero-length track.
@@ -86,6 +90,20 @@ enum TimelineFixture: String, CaseIterable, Sendable, CustomTestStringConvertibl
                     AudioTrack(index: 2, startOffset: 95, duration: 105),
                 ],
                 chapters: [])
+        case .nestedTracks:
+            PlaybackTimeline(
+                tracks: [
+                    AudioTrack(index: 1, startOffset: 0, duration: 300),
+                    AudioTrack(index: 2, startOffset: 100, duration: 50),
+                ],
+                chapters: [Chapter(id: 0, start: 0, end: 120), Chapter(id: 1, start: 120, end: 400)])
+        case .trailingZeroLength:
+            PlaybackTimeline(
+                tracks: [
+                    AudioTrack(index: 1, startOffset: 0, duration: 100),
+                    AudioTrack(index: 2, startOffset: 500, duration: 0),
+                ],
+                chapters: [Chapter(id: 0, start: 0, end: 600)])
         case .degenerateTracks:
             PlaybackTimeline(
                 tracks: [

@@ -60,6 +60,12 @@ import Testing
         .init(.overlappingTracks, 94, 0, 94),
         .init(.overlappingTracks, 97, 1, 2),
         .init(.overlappingTracks, 200, 1, 105),
+        // A contained track is skipped: the containing track plays to its end.
+        .init(.nestedTracks, 120, 0, 120),
+        .init(.nestedTracks, 150, 0, 150),
+        .init(.nestedTracks, 300, 0, 300),
+        .init(.nestedTracks, 400, 0, 300),
+        .init(.trailingZeroLength, 600, 0, 100),
         // Zero-length tracks are skipped; missing offsets continue from the previous track.
         .init(.degenerateTracks, 0, 1, 0),
         .init(.degenerateTracks, 50, 3, 0),
@@ -142,9 +148,53 @@ import Testing
         (.gappedTracks, [100, 200]),
         (.degenerateTracks, [0, 50, 50, 100]),
         (.mp3, (1...30).map { TimelineFixture.mp3Start($0) }),
+        (.nestedTracks, [300, 100]),
+        (.trailingZeroLength, [100, 500]),
     ])
     func playbackEndStopsAtNextTrack(_ fixture: TimelineFixture, _ expected: [Double]) {
         #expect(fixture.timeline.tracks.map(\.playbackEnd) == expected)
+    }
+
+    /// `duration` is the reachable end, so clamping, chapters and the last-chapter range agree with it.
+    @Test(arguments: [
+        (TimelineFixture.nestedTracks, 300.0), (.trailingZeroLength, 100), (.overlappingTracks, 200),
+        (.gappedTracks, 200), (.degenerateTracks, 100), (.zeroLength, 0), (.empty, 0),
+    ])
+    func durationIsReachableEnd(_ fixture: TimelineFixture, _ expected: Double) throws {
+        let timeline = fixture.timeline
+        #expect(timeline.duration == expected)
+        #expect(timeline.clamp(.infinity) == expected)
+        if let position = timeline.position(at: .infinity) {
+            #expect(timeline.time(at: position) == expected)
+        }
+        #expect(timeline.chapters.allSatisfy { $0.end <= expected })
+        if !timeline.chapters.isEmpty {
+            #expect(timeline.endOfChapter(at: expected) == expected)
+            #expect(timeline.progressRange(at: expected, chapterTrack: true).end == expected)
+        }
+    }
+
+    @Test func nestedAndTrailingTracksNormaliseChapters() {
+        #expect(TimelineFixture.nestedTracks.timeline.chapters.map(\.end) == [120, 300])
+        #expect(TimelineFixture.nestedTracks.timeline.tracks.map(\.isPlayable) == [true, false])
+        #expect(TimelineFixture.trailingZeroLength.timeline.chapters.map(\.end) == [100])
+    }
+
+    @Test func forwardPlaybackEndTimeIsTrackLocal() {
+        let timeline = PlaybackTimeline(
+            tracks: [
+                AudioTrack(index: 1, startOffset: 0, duration: 1000),
+                AudioTrack(index: 2, startOffset: 1000, duration: 100),
+                AudioTrack(index: 3, startOffset: 1050, duration: 150),
+            ],
+            chapters: [])
+        let track = timeline.tracks[1]
+        #expect(track.playbackEnd == 1050)
+        #expect(track.forwardPlaybackEndTime == 50)
+        #expect(track.playbackDuration == 50)
+        #expect(timeline.tracks.map(\.forwardPlaybackEndTime) == [1000, 50, 150])
+        #expect(timeline.time(trackIndex: 1, offset: 80) == 1050)
+        #expect(timeline.position(at: 1050) == .init(trackIndex: 2, offset: 0))
     }
 
     @Test func clampsInfinity() {

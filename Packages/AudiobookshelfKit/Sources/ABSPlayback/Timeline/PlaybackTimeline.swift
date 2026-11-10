@@ -6,6 +6,12 @@ import ABSCore
 /// Inputs are normalised once on creation:
 /// - Tracks: non-finite or negative durations become `0`; a missing `startOffset` continues from the
 ///   previous track's end; tracks are ordered by start (stable). Tracks may overlap or leave gaps.
+///   The queue plays each track once, in order, so overlaps are resolved by ``Track/playbackEnd``:
+///   where a later track extends past the current one, the current one stops at the later one's
+///   start; a later track that ends within what earlier tracks already cover (for example 100–150
+///   inside 0–300) is skipped, so all of the containing track plays. Zero-length tracks are skipped.
+/// - ``duration`` is the reachable end: the end of the last playable track, so it never includes
+///   skipped tracks' ends.
 /// - Chapters: ordered by start (stable); clamped to `0...duration`; trimmed so each ends no later
 ///   than the next one starts (so of several chapters with the same start, the last is kept); empty
 ///   chapters are dropped. A timeline with zero duration has no chapters.
@@ -27,13 +33,23 @@ public struct PlaybackTimeline: Sendable, Hashable {
         public let sourceIndex: Int
         public let start: Double
         public let duration: Double
-        /// Where playback of this track should stop: the next playable track's start or this track's
-        /// end, whichever is smaller. Set it as the item's forward end time so global time never goes
-        /// backwards when tracks overlap.
+        /// Global time at which playback of this track stops: the next playable track's start or
+        /// this track's end, whichever is smaller. Equal to ``start`` for a skipped track (zero-length,
+        /// or contained in earlier tracks), which the queue should leave out.
         public let playbackEnd: Double
 
         public var end: Double { start + duration }
+
+        /// Seconds of this track that play; `0` for a skipped track.
         public var playbackDuration: Double { playbackEnd - start }
+
+        /// Track-local seconds at which the item should stop, for `AVPlayerItem.forwardPlaybackEndTime`.
+        /// Unlike ``playbackEnd`` this is relative to the item, not the timeline (a track starting at
+        /// 1000 that stops at 1050 has a forward end time of 50). Same value as ``playbackDuration``.
+        public var forwardPlaybackEndTime: Double { playbackDuration }
+
+        /// Whether the queue should include this track.
+        public var isPlayable: Bool { playbackDuration > 0 }
     }
 
     /// A track and an offset into it, as handed to the player.
@@ -53,7 +69,7 @@ public struct PlaybackTimeline: Sendable, Hashable {
     /// Normalised chapters. Chapter indexes returned by the timeline refer to this array, not to
     /// `session.chapters`.
     public let chapters: [Chapter]
-    /// End of the last track, or `0` without tracks.
+    /// The reachable end: the ``Track/playbackEnd`` of the last playable track, or `0` without one.
     public let duration: Double
 
     public init(tracks: [AudioTrack], chapters: [Chapter]) {
@@ -68,18 +84,27 @@ public struct PlaybackTimeline: Sendable, Hashable {
         }
         let sorted = Self.stableSorted(placed, by: \.start)
 
-        var result: [Track] = []
-        result.reserveCapacity(sorted.count)
-        for (index, track) in sorted.enumerated() {
+        // Sweep in start order. `reach` is the end of the last kept track; a track ending at or
+        // before it is already covered and skipped, otherwise it trims the last kept track.
+        var playbackEnds = sorted.map(\.start)
+        var lastKept: Int?
+        var reach: Double = 0
+        for (index, track) in sorted.enumerated() where track.duration > 0 {
             let end = track.start + track.duration
-            let nextStart = sorted[(index + 1)...].first { $0.duration > 0 }?.start ?? end
-            result.append(
-                Track(
-                    audioTrack: track.audioTrack, sourceIndex: track.sourceIndex, start: track.start,
-                    duration: track.duration, playbackEnd: max(min(end, nextStart), track.start)))
+            if let lastKept {
+                guard end > reach else { continue }
+                playbackEnds[lastKept] = min(playbackEnds[lastKept], track.start)
+            }
+            playbackEnds[index] = end
+            lastKept = index
+            reach = end
         }
-        self.tracks = result
-        self.duration = result.map(\.end).max() ?? 0
+        self.tracks = sorted.enumerated().map { index, track in
+            Track(
+                audioTrack: track.audioTrack, sourceIndex: track.sourceIndex, start: track.start,
+                duration: track.duration, playbackEnd: playbackEnds[index])
+        }
+        self.duration = reach
         self.chapters = Self.normalise(chapters, duration: duration)
     }
 
@@ -97,14 +122,14 @@ public struct PlaybackTimeline: Sendable, Hashable {
     /// The track playing at `time`, and the offset into it. Tracks cover `start..<playbackEnd`.
     ///
     /// - A time on a boundary belongs to the track that starts there.
-    /// - Where tracks overlap, the later-starting track wins.
+    /// - Where tracks overlap, the later-starting track wins; skipped tracks are never returned.
     /// - A time in a gap, or before the first track, maps to the start of the next track.
     /// - A time at or past the end maps to the end of the last playable track.
-    /// - Zero-length tracks are skipped unless every track is zero-length (then the first track, offset 0).
+    /// - If no track is playable (all zero-length), returns the first track at offset 0.
     /// - Returns `nil` without tracks.
     public func position(at time: Double) -> TrackPosition? {
         guard !tracks.isEmpty else { return nil }
-        let playable = tracks.indices.filter { tracks[$0].playbackDuration > 0 }
+        let playable = tracks.indices.filter { tracks[$0].isPlayable }
         guard let lastPlayable = playable.last else { return TrackPosition(trackIndex: 0, offset: 0) }
         let time = clamp(time)
 
@@ -115,15 +140,16 @@ public struct PlaybackTimeline: Sendable, Hashable {
             return TrackPosition(trackIndex: next, offset: 0)
         }
         let index = playable.last { tracks[$0].start <= time } ?? lastPlayable
-        return TrackPosition(trackIndex: index, offset: min(time - tracks[index].start, tracks[index].duration))
+        return TrackPosition(trackIndex: index, offset: min(time - tracks[index].start, tracks[index].playbackDuration))
     }
 
-    /// Global time for an offset into `tracks[trackIndex]`, with the offset clamped to the track
-    /// (NaN counts as `0`). Returns `nil` for an index outside ``tracks``.
+    /// Global time for an offset into `tracks[trackIndex]`, with the offset clamped to
+    /// `0...playbackDuration` (NaN counts as `0`), so it never passes where the track stops playing.
+    /// Returns `nil` for an index outside ``tracks``.
     public func time(trackIndex: Int, offset: Double) -> Double? {
         guard tracks.indices.contains(trackIndex) else { return nil }
         let track = tracks[trackIndex]
-        return track.start + min(max(offset.isNaN ? 0 : offset, 0), track.duration)
+        return track.start + min(max(offset.isNaN ? 0 : offset, 0), track.playbackDuration)
     }
 
     public func time(at position: TrackPosition) -> Double? {
