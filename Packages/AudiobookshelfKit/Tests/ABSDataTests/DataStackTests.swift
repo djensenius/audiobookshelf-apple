@@ -68,9 +68,9 @@ private enum SupersetSchemaV2: VersionedSchema {
         fileManager.fileExists(atPath: url.path(percentEncoded: false))
     }
 
-    /// The `Broken/<epoch>-<uuid>/` directories next to a store.
+    /// The `Broken/Audiobookshelf.store/<epoch>-<uuid>/` directories next to a store.
     private func brokenCopies(in directory: URL) -> [URL] {
-        let root = directory.appending(path: "Broken")
+        let root = directory.appending(path: "Broken/Audiobookshelf.store")
         return (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
     }
 
@@ -321,7 +321,7 @@ private enum SupersetSchemaV2: VersionedSchema {
     @Test func corruptStoreAndSideFilesAreMovedAsideKeepingNewestCopy() throws {
         let directory = Fixtures.temporaryDirectory()
         defer { try? fileManager.removeItem(at: directory) }
-        let older = directory.appending(path: "Broken/1-OLDER")
+        let older = directory.appending(path: "Broken/Audiobookshelf.store/1-OLDER")
         try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
         let url = directory.appending(path: "Audiobookshelf.store")
         let garbage = Data(repeating: 0x5A, count: 8192)
@@ -403,12 +403,30 @@ private enum SupersetSchemaV2: VersionedSchema {
         for code in [7, 8, 264, 520, 776, 1032, 1288, 1544] {  // SQLITE_NOMEM, SQLITE_READONLY_*
             #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSSQLiteErrorDomain: code])))
         }
+        // Timeouts, busy/locked (incl. extended codes), I/O, full, protocol, can't open, auth.
+        for code in [5, 261, 517, 6, 262, 10, 13, 14, 15, 23] {
+            let sqlite = NSError(domain: NSSQLiteErrorDomain, code: code)
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: sqlite])))
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_100, [NSSQLiteErrorDomain: code])))
+        }
+        // NSPersistentStoreTimeoutError, NSPersistentStoreSaveConflictsError, NSFileReadUnknownError.
+        for code in [NSPersistentStoreTimeoutError, NSPersistentStoreSaveConflictsError, NSFileReadUnknownError] {
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(code)))
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(code)])))
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_100, [NSDetailedErrorsKey: [cocoa(code)]])))
+        }
+        for code in [EINTR, EAGAIN, EBUSY] {
+            let posix = NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: posix])))
+        }
+        #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(259)])))
         #expect(!DataStack.isConfirmedIncompatibility(nil))
 
         #expect(DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(134_110)])))
         #expect(DataStack.isConfirmedIncompatibility(cocoa(134_100)))
         #expect(
-            DataStack.isConfirmedIncompatibility(cocoa(1, [NSDetailedErrorsKey: [cocoa(134_130), cocoa(134_140)]])))
+            DataStack.isConfirmedIncompatibility(
+                cocoa(134_110, [NSDetailedErrorsKey: [cocoa(134_130), cocoa(134_140)]])))
         #expect(DataStack.isConfirmedIncompatibility(cocoa(259, [NSSQLiteErrorDomain: 26])))
         #expect(
             DataStack.isConfirmedIncompatibility(
@@ -438,20 +456,31 @@ private enum SupersetSchemaV2: VersionedSchema {
         let directory = Fixtures.temporaryDirectory()
         defer { try? fileManager.removeItem(at: directory) }
         let url = directory.appending(path: "Audiobookshelf.store")
-        do {
-            let context = ModelContext(try DataStack(location: .url(url)).container)
+        let other = directory.appending(path: "Other.store")
+        for store in [url, other] {
+            let context = ModelContext(try DataStack(location: .url(store)).container)
             context.insert(Fixtures.connection())
             try context.save()
         }
-        let older = directory.appending(path: "Broken/1-OLDER")
+        let older = directory.appending(path: "Broken/Audiobookshelf.store/1-OLDER")
         try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
-        let copy = directory.appending(path: "Broken/5-CRASHED")
+        let copy = directory.appending(path: "Broken/Audiobookshelf.store/5-CRASHED")
         try fileManager.createDirectory(at: copy, withIntermediateDirectories: true)
         let names = ["Audiobookshelf.store", "Audiobookshelf.store-wal", "Audiobookshelf.store-shm"]
-        try Data(names.joined(separator: "\n").utf8).write(to: copy.appending(path: DataStack.incompleteMarker))
+        // An undecodable marker still resumes: its contents are never trusted.
+        try Data([0xFF, 0xFE, 0x00]).write(to: copy.appending(path: DataStack.incompleteMarker))
         try fileManager.moveItem(at: url, to: copy.appending(path: names[0]))
         for name in names.dropFirst() where !exists(directory.appending(path: name)) {
             try Data("stale".utf8).write(to: directory.appending(path: name))
+        }
+
+        // Another store in the same directory opens intact and leaves this store's archive alone.
+        let otherContext = ModelContext(try openURL(other).container)
+        #expect(try otherContext.fetchCount(FetchDescriptor<ServerConnectionRecord>()) == 1)
+        #expect(exists(copy.appending(path: DataStack.incompleteMarker)))
+        #expect(exists(older))
+        for name in names.dropFirst() {
+            #expect(exists(directory.appending(path: name)))
         }
 
         let context = ModelContext(try openURL(url).container)
@@ -479,11 +508,11 @@ private enum SupersetSchemaV2: VersionedSchema {
         #expect(!exists(url))
     }
 
-    @Test func pruningKeepsIncompleteCopies() throws {
+    @Test func pruningIsSkippedWhileAnyCopyIsIncomplete() throws {
         let directory = Fixtures.temporaryDirectory()
         defer { try? fileManager.removeItem(at: directory) }
-        let marked = directory.appending(path: "Broken/1-MARKED")
-        let unmarked = directory.appending(path: "Broken/2-DONE")
+        let marked = directory.appending(path: "Broken/Audiobookshelf.store/1-MARKED")
+        let unmarked = directory.appending(path: "Broken/Audiobookshelf.store/2-DONE")
         try fileManager.createDirectory(at: marked, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: unmarked, withIntermediateDirectories: true)
         try Data("Other.store".utf8).write(to: marked.appending(path: DataStack.incompleteMarker))
@@ -492,8 +521,33 @@ private enum SupersetSchemaV2: VersionedSchema {
 
         try DataStack.moveStoreAside(at: url, now: Date(timeIntervalSince1970: 3))
         #expect(exists(marked.appending(path: DataStack.incompleteMarker)))
-        #expect(!exists(unmarked))
-        #expect(brokenCopies(in: directory).count == 2)
+        #expect(exists(unmarked))
+        #expect(brokenCopies(in: directory).count == 3)
         #expect(!exists(url))
+    }
+
+    /// A marker that can't be checked (no permission, I/O, locked) might hide a split store, so
+    /// nothing is opened, moved or pruned.
+    @Test func inaccessibleMarkerPreventsOpeningAndPruning() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let older = directory.appending(path: "Broken/Audiobookshelf.store/1-OLDER")
+        let locked = directory.appending(path: "Broken/Audiobookshelf.store/5-LOCKED")
+        try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: locked, withIntermediateDirectories: true)
+        try Data().write(to: locked.appending(path: DataStack.incompleteMarker))
+        let wal = directory.appending(path: "Audiobookshelf.store-wal")
+        try Data("stale".utf8).write(to: wal)
+        let lockedPath = locked.path(percentEncoded: false)
+        try fileManager.setAttributes([.posixPermissions: 0o000], ofItemAtPath: lockedPath)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedPath) }
+
+        #expect(throws: (any Error).self) { _ = try DataStack.itemExists(at: locked.appending(path: "INCOMPLETE")) }
+        #expect(throws: (any Error).self) { _ = try openURL(directory.appending(path: "Audiobookshelf.store")) }
+        #expect(!exists(directory.appending(path: "Audiobookshelf.store")))
+        #expect(exists(wal))
+        #expect(exists(older))
+        #expect(try !DataStack.itemExists(at: directory.appending(path: "Missing")))
+        #expect(try DataStack.itemExists(at: wal))
     }
 }
