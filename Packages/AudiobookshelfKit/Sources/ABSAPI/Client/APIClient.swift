@@ -357,16 +357,6 @@ public actor APIClient {
         for (name, value) in configuration.customHeaders {
             request.setValue(value, forHTTPHeaderField: name)
         }
-        if endpoint.sendsCookies, !endpoint.withheldCookies.isEmpty, let url = request.url {
-            let cookies = (cookieStorage?.cookies(for: url) ?? []).filter {
-                !endpoint.withheldCookies.contains($0.name)
-            }
-            if !cookies.isEmpty {
-                for (name, value) in HTTPCookie.requestHeaderFields(with: cookies) {
-                    request.setValue(value, forHTTPHeaderField: name)
-                }
-            }
-        }
         if let body = endpoint.body {
             do {
                 request.httpBody = try encoder.encode(body)
@@ -378,7 +368,30 @@ public actor APIClient {
         for (name, value) in endpoint.headers {
             request.setValue(value, forHTTPHeaderField: name)
         }
+        if endpoint.sendsCookies, !endpoint.withheldCookies.isEmpty, let url = request.url {
+            // The client writes the cookies itself: the jar's, then the endpoint's own `Cookie`
+            // header (custom headers can't set one).
+            request.setValue(
+                Self.cookieHeader(
+                    jar: cookieStorage?.cookies(for: url) ?? [], withholding: endpoint.withheldCookies,
+                    explicit: request.value(forHTTPHeaderField: "Cookie")),
+                forHTTPHeaderField: "Cookie")
+        }
         return request
+    }
+
+    /// One `Cookie` header from the jar's cookies, minus `withheld` and any named in `explicit`
+    /// (so an endpoint's value wins without a duplicate), followed by `explicit`; `nil` if empty.
+    static func cookieHeader(jar: [HTTPCookie], withholding withheld: Set<String>, explicit: String?) -> String? {
+        let explicitNames = Set(
+            (explicit ?? "").split(separator: ";").compactMap { pair in
+                pair.split(separator: "=", maxSplits: 1).first?.trimmingCharacters(in: .whitespaces)
+            })
+        let cookies = jar.filter { !withheld.contains($0.name) && !explicitNames.contains($0.name) }
+        let parts = [HTTPCookie.requestHeaderFields(with: cookies)["Cookie"], explicit]
+            .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: "; ")
     }
 
     private func authorized(_ request: URLRequest, _ accessToken: String) -> URLRequest {
