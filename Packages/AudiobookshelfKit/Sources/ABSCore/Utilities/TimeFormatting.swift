@@ -52,6 +52,31 @@ public enum TimeFormatting {
         return "\(pad(hours)):\(pad(minutes)):\(pad(secs))"
     }
 
+    /// The longest duration, in seconds, that is converted to a whole number. Longer ones are
+    /// clamped to it, so a finite but absurd server value can't overflow `Int`. About 31
+    /// million years.
+    public static let maxSeconds: Double = 1e15
+
+    /// ``maxSeconds`` in whole minutes, the most ``wholeMinutes(seconds:)`` and
+    /// ``wholeMinutes(minutes:)`` return.
+    public static let maxMinutes = Int((maxSeconds / 60).rounded())
+
+    /// `seconds` as whole minutes, rounded like the legacy stats page (`Math.round(seconds / 60)`),
+    /// within `0...maxMinutes`. Zero, negative and non-finite values are `0`; values past
+    /// ``maxSeconds`` are clamped before the conversion, which therefore can't trap.
+    public static func wholeMinutes(seconds: TimeInterval) -> Int {
+        guard seconds.isFinite else { return 0 }
+        return wholeMinutes(minutes: min(seconds, maxSeconds) / 60)
+    }
+
+    /// `minutes` rounded to a whole number within `0...maxMinutes`. Zero, negative and
+    /// non-finite values are `0`; larger values are clamped before the conversion, which
+    /// therefore can't trap.
+    public static func wholeMinutes(minutes: Double) -> Int {
+        guard minutes.isFinite, minutes > 0 else { return 0 }
+        return Int(min(minutes, Double(maxMinutes)).rounded())
+    }
+
     private static func wholeSeconds(_ seconds: TimeInterval, rounded: Bool) -> Int {
         guard seconds.isFinite, seconds > 0 else { return 0 }
         let whole = rounded ? seconds.rounded() : seconds.rounded(.towardZero)

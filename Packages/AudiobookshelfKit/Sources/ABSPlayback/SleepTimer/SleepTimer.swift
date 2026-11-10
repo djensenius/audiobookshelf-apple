@@ -45,6 +45,9 @@ public final class SleepTimer {
     static let seekThreshold: TimeInterval = 2
     /// A seek this far back into the chapter before keeps an end-of-chapter goal (the AutoRewind maximum).
     static let maximumResumeRewind: TimeInterval = 30
+    /// How far the target the engine keeps for the timer's own seek may differ from the time asked for (it converts it
+    /// through the timeline); a seek of the user's nearer than this can't be told from it.
+    static let retainedSeekTolerance: TimeInterval = 0.01
 
     /// The running timer's mode; a duration includes added and subtracted time. `nil` when no timer runs.
     public private(set) var mode: SleepTimerMode?
@@ -111,7 +114,8 @@ public final class SleepTimer {
     /// Counts expiries, so an expiry's seek task only touches its own automatic rewind.
     @ObservationIgnored private var expiryID = 0
     /// The expiry's seek back to where the fade began, from where playback paused, until its task starts it or a
-    /// reset or play takes it over.
+    /// reset or play takes it over. A reset's `undo` can restore it with no task behind it; the next play or reset
+    /// then delivers the seek.
     @ObservationIgnored private var queuedFadeRewind: (from: Double, to: Double)?
     @ObservationIgnored private var itemID: String?
     /// Changes when a run begins or stops, or playback plays or pauses, so a reset's resume can tell it was overtaken.
@@ -253,7 +257,8 @@ public final class SleepTimer {
     /// period, or starts the automatic timer inside its window. Returns the seconds to rewind before playing,
     /// which are consumed: the automatic rewind, if playback is still (or a seek in flight puts it back) where the
     /// automatic timer paused it, plus the way back to where the fade began if the expiry's seek there hasn't started
-    /// (the play takes it over).
+    /// (the play takes it over). The two come as one value, which the coordinator must apply whole: if playback then
+    /// aborts (the audio session fails to start, say), the seek the expiry's task would have made is gone.
     public func playbackWillStart(at date: Date = .now) -> TimeInterval {
         runID += 1
         let rewind = takeRewind()
@@ -438,8 +443,8 @@ public final class SleepTimer {
             return
         }
         // A play or reset during the seek takes the rewind from where the seek lands, and a manual start leaves it
-        // there. A failed seek leaves it where playback paused (so a seek that superseded it drops it), unless the
-        // engine keeps the seek to retry it (after a second interruption).
+        // there. A failed seek leaves it where playback paused (so a seek that superseded it drops it, however near
+        // the fade), unless the engine keeps this very seek to retry it (after a second interruption).
         pendingRewind = rewind.map { ($0, fadeStart) }
         let id = expiryID, item = itemID, pausedAt = control.currentTime
         queuedFadeRewind = (pausedAt, fadeStart)
@@ -447,7 +452,7 @@ public final class SleepTimer {
             guard self?.startsFadeRewind(of: id, item: item, from: pausedAt) == true else { return }
             let landed = await control.seek(to: fadeStart)
             guard let self, isCurrent(item) else { return }
-            let at = landed ?? (Self.isStill(control, at: fadeStart) ? fadeStart : pausedAt)
+            let at = landed ?? (Self.isRetaining(control, seekTo: fadeStart) ? fadeStart : pausedAt)
             if expiryID == id { pendingRewind?.at = at }
             if let landed { didSeek(to: landed) }
         }
@@ -518,6 +523,13 @@ public final class SleepTimer {
     /// Whether playback is still at `position`, give or take a reporting error, or a seek in flight lands it there.
     private static func isStill(_ control: any SleepTimerPlaybackControl, at position: Double) -> Bool {
         abs(control.intendedTime - position) < 1
+    }
+
+    /// Whether the engine is keeping the seek to `time` for its retry: its pending target is that time, not just near
+    /// it, as a seek of the user's that superseded it may be.
+    private static func isRetaining(_ control: any SleepTimerPlaybackControl, seekTo time: Double) -> Bool {
+        guard let target = control.pendingSeekTarget else { return false }
+        return abs(target - time) < retainedSeekTolerance
     }
 
     /// Ends the run (not its grace period), restoring the volume.
