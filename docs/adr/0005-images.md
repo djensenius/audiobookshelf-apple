@@ -319,8 +319,9 @@ static, unauthenticated remote images (none are planned).
 - **Keys:**
   - `ImageKey` is (server connection ID, kind (`itemCover` or `authorImage`),
     entity ID, `updatedAt`, variant).
-  - The memory key adds the decoded max pixel size, rounded up to a multiple of
-    32 px.
+  - The memory key adds the decoded **pixel box** (the width and height the
+    view needs, in pixels). Each side is rounded up to a multiple of 32 px and
+    capped at 1200 px.
   - The server connection ID is the stable local UUID, not the address, so it
     survives an address change.
   - A changed `updatedAt` (from a fetch or a socket event) produces a new key. Old
@@ -334,8 +335,11 @@ static, unauthenticated remote images (none are planned).
   4. network.
 
   Steps 2–4 decode off the actor in a `@concurrent` function. Concurrent decodes
-  are capped at 4 on iPhone and at the active processor count on iPad and Mac,
-  with at most one 1200-bucket decode at a time (see the memory budget below).
+  are capped at 4 on iPhone and at the active processor count on iPad and Mac.
+  At most one of them may hold the **large-decode slot**, which any decode whose
+  pixel box is larger than 512 × 832 px in area (for example the 1200 × 1200
+  player box), any normalizing decode (see Decoding), and the Now Playing
+  provider's downsampling must take (see the memory budget below).
 - **Stale offline fallback:** when step 2 uses a downloaded cover whose
   `coverUpdatedAt` is older than the requested key's `updatedAt` (offline only),
   the image is shown but is **not** stored in the memory LRU under the requested
@@ -344,19 +348,54 @@ static, unauthenticated remote images (none are planned).
   again. Nothing is written to `CoverFileStore`. Once the device is back
   online, a load of the requested key misses the LRU, skips the stale file, and
   fetches the new cover.
-- **Deduplication and cancellation:**
-  - In-flight work is a `[ImageKey: Task]` entry with a waiter count.
-  - When the last waiter cancels (a cell scrolls away), the network task is
-    cancelled.
+- **Deduplication and cancellation** (two levels, so views that need the same
+  bucket at different pixel sizes share bytes but not a decode):
+  - **Fetch:** getting the encoded bytes for steps 2–4 (downloaded file,
+    `CoverFileStore`, or network) is a `[ImageKey: Task]` entry. There is at
+    most one fetch per `ImageKey`. Its result records the version it actually
+    holds, which the stale-fallback rule above uses. The bytes are released
+    once no decode is waiting on them.
+  - **Decode:** decoding is a `[MemoryKey: Task]` entry, where the memory key is
+    `ImageKey` + rounded pixel box. Each decode waits on the fetch for its
+    `ImageKey`, so decodes of different boxes share one fetch's bytes. Views
+    asking for the same memory key share one decode.
+  - **Cancellation:** a decode is cancelled when its last view waiter leaves
+    (a cell scrolls away). A fetch is cancelled when no decode is waiting on it,
+    which cancels its network task.
 - **Decoding:**
   - Use `CGImageSourceCreateWithData` (or `…WithURL` for files) with
     `kCGImageSourceShouldCache: false`.
-  - Then call `CGImageSourceCreateThumbnailAtIndex` with
-    `kCGImageSourceThumbnailMaxPixelSize`,
+  - Read `CGImageSourceCopyPropertiesAtIndex` first (pixel width and height,
+    orientation, `kCGImagePropertyDepth`, `kCGImagePropertyColorModel`,
+    `kCGImagePropertyIsFloat`).
+  - **Fit the box:** set `kCGImageSourceThumbnailMaxPixelSize` to the long side
+    of the source aspect-fitted into the pixel box. The max pixel size only
+    bounds the long side, so passing the box's long side would decode a square
+    cover in an iPhone grid box (512 × 832) at 832 × 832 (2.64 MiB) instead of
+    within 512 × 832 (≤ 1.625 MiB).
+  - Then call `CGImageSourceCreateThumbnailAtIndex` with that size,
     `kCGImageSourceCreateThumbnailFromImageAlways`,
     `kCGImageSourceCreateThumbnailWithTransform`, and
     `kCGImageSourceShouldCacheImmediately` all set.
-  - The result is a fully decoded `CGImage`, already oriented `.up`.
+  - **Normalize:** ImageIO keeps the source's pixel format, so a 16-bit PNG
+    decodes at 8 B/px, and a format Core Animation can't display directly can
+    make it keep a second copy. If the result has `bitsPerComponent > 8`, or
+    isn't 8-bit premultiplied RGBA/BGRA (or the 8-bit RGB "skip" equivalents),
+    redraw it into an 8-bit premultiplied `CGContext` before caching. The
+    context uses Display P3 when the source colour space is wide gamut
+    (`CGColorSpaceIsWideGamutRGB`), and sRGB otherwise. The 8 B/px intermediate
+    is freed straight afterwards.
+  - Sources with float samples or more than 16 bits per component are
+    rejected and show the placeholder, so no intermediate is ever above
+    8 B/px. Only absolute external cover URLs can produce them: the server
+    returns WebP and downloads are JPEG.
+  - A decode whose properties show depth > 8 or a non-RGB colour model must
+    hold the single **large-decode slot** (see the memory budget). If an image
+    only turns out to need normalizing after decoding, the decode waits for
+    that slot before redrawing.
+  - The result is a fully decoded 8-bit `CGImage`, already oriented `.up`.
+  - **LRU cost** is the image's real `bytesPerRow × height`, not a computed
+    width × height × 4.
 - **`CoverFileStore`:**
   - **Location:** the store lives in the App Group container so the widget
     extension can read it (P5-11b, #89). Files are at
@@ -368,7 +407,20 @@ static, unauthenticated remote images (none are planned).
     show placeholders.
   - **Writers:** only the app process writes and evicts. Extensions only read.
   - **Eviction:** LRU by file modification date, which is touched on hits at most
-    once per day. Eviction runs at launch and when the app enters the background.
+    once per day. Files for the current widget snapshot are skipped (see
+    Widgets).
+    - **Caps:** 256 MiB on iPhone and iPad, 512 MiB on Mac (also in the cache
+      sizes table).
+    - **Full passes** run at launch and when the app enters the background.
+      Each pass enumerates the folder and resets the size counter from what it
+      finds, which also picks up files the OS purged.
+    - **During a session:** the store keeps its total size in bytes in memory.
+      It is scanned at launch (`totalFileAllocatedSizeKey`) and updated on
+      every write and delete. When a write pushes the total over the cap, the
+      store starts one eviction task at `.background` priority, unless one is
+      already running. The task deletes the oldest files until the total is at
+      most 90 % of the cap. This bounds a Mac app left in the foreground for
+      days.
   - **Logout:** removing a server deletes its folder.
 - **Rendering:** the pipeline returns `CGImage` plus scale. Each consumer wraps
   it:
@@ -391,10 +443,12 @@ static, unauthenticated remote images (none are planned).
     about 12.
 - **Now Playing:**
   - The current item's artwork is decoded from the 1200 bucket (or the downloaded
-    file) and is **pinned**: kept outside the LRU until playback changes.
+    file) into a 1200 × 1200 px box, so it is at most 1200 × 1200 px whatever
+    the cover's aspect ratio, and is **pinned**: kept outside the LRU until
+    playback changes.
   - The NowPlaying `Artwork` provider (in `ABSPlayback/NowPlaying/`) downsamples
-    the pinned image to the size the system asks for. It returns
-    `ArtworkRepresentation(cgImage:)`. MediaPlayer is not used
+    the pinned image to the size the system asks for, in the large-decode slot.
+    It returns `ArtworkRepresentation(cgImage:)`. MediaPlayer is not used
     ([0006](0006-now-playing.md)).
 - **Offline covers:**
   - `ABSDownloads` downloads the cover with
@@ -455,8 +509,8 @@ static, unauthenticated remote images (none are planned).
 
 | Layer | iPhone | iPad | Mac | Widget extension |
 | --- | --- | --- | --- | --- |
-| Decoded memory LRU (cost = width × height × 4 B) | 64 MiB | 128 MiB | 256 MiB | none (decode on demand) |
-| Pinned Now Playing artwork | ≤ 1 image, ≤ 5.5 MiB (1200²×4) | same | same | — |
+| Decoded memory LRU (cost = `bytesPerRow × height`) | 64 MiB | 128 MiB | 256 MiB | none (decode on demand) |
+| Pinned Now Playing artwork | ≤ 1 image, ≤ 5.49 MiB (1200 × 1200 box × 4 B) | same | same | — |
 | `CoverFileStore` (encoded, purgeable) | 256 MiB | 256 MiB | 512 MiB | read-only |
 | Downloaded covers | Not counted; deleted with the download | | | |
 | `URLCache` | Disabled for the image session | | | |
@@ -465,34 +519,41 @@ static, unauthenticated remote images (none are planned).
 
 | Scenario | Decoded size per image | All 2,000 decoded | What we hold |
 | --- | --- | --- | --- |
-| iPhone 2-column grid (≈170 pt @3x → 510 × 816 px) | 1.59 MiB | 3.1 GiB, impossible | ≈ 40 images in 64 MiB, about 4 screens |
+| iPhone 2-column grid (≈170 pt @3x → 510 × 816 px, rounded box 512 × 832) | 1.625 MiB | 3.2 GiB, impossible | ≈ 39 images in 64 MiB, about 4 screens |
 | iPad/Mac grid (≈160 pt @2x → 320 × 512 px) | 0.63 MiB | 1.2 GiB | ≈ 200 images in 128 MiB (iPad) or ≈ 400 in 256 MiB (Mac) |
-| List row or CarPlay (≈60 pt @3x → 180 × 288 px) | 0.20 MiB | 400 MiB | ≈ 320 rows in 64 MiB |
-| Player / Now Playing (1200 × 1200 px) | 5.5 MiB | n/a | 1 pinned |
+| List row or CarPlay (≈60 pt @3x → 180 × 288 px, rounded box 192 × 288) | 0.21 MiB | 422 MiB | ≈ 300 rows in 64 MiB |
+| Player / Now Playing (1200 × 1200 px box) | 5.49 MiB | n/a | 1 pinned |
 
-Retained and peak memory are budgeted separately on iPhone:
+Retained and peak memory are budgeted separately on iPhone. All sizes are
+exact: grid image 512 × 832 × 4 B = 1.625 MiB, player image 1200 × 1200 × 4 B =
+5.49 MiB, and its 16-bit intermediate 1200 × 1200 × 8 B = 10.99 MiB.
 
 - **Retained** (what stays after loads settle): the 64 MiB LRU plus the
-  5.5 MiB pinned artwork, so **≤ 70 MiB**.
+  5.49 MiB pinned artwork = 69.49 MiB, so **≤ 70 MiB**. The LRU charges real
+  `bytesPerRow × height` and evicts before inserting, so it never goes over
+  64 MiB, even for a moment.
 - **Transient** (live only while decoding): concurrent decodes are capped at
   **4 on iPhone** (the processor count on iPad and Mac), and at most **one** of
-  them may be a 1200-bucket decode (only Now Playing uses that bucket). Each
-  decode is budgeted at 2× its output buffer, to cover encoded data and ImageIO
-  scratch space. With a grid image of 510 × 816 × 4 B = 1.59 MiB and a 1200 ×
-  1200 × 4 B = 5.49 MiB player image:
-  - four grid decodes: 4 × 1.59 = 6.35 MiB output, × 2 = 12.7 MiB;
-  - worst case, three grid decodes plus one player decode:
-    3 × 1.59 + 5.49 = 10.26 MiB output, × 2 = **20.5 MiB**.
+  them holds the large-decode slot.
+  - An ordinary decode (box ≤ 512 × 832 px, already 8-bit) is budgeted at 2×
+    its output: 1.625 MiB output plus an equal allowance for encoded input and
+    ImageIO scratch space = **3.25 MiB**.
+  - The large-decode slot is budgeted for its worst case, a normalizing decode
+    in the player box: 10.99 MiB intermediate + 5.49 MiB output + 5.49 MiB for
+    encoded input and scratch = **21.97 MiB**. A non-normalizing player decode
+    needs 5.49 + 5.49 = 10.99 MiB, and a normalizing grid decode needs
+    3.25 + 1.625 + 1.625 = 6.5 MiB, so both fit.
+  - Worst case: three ordinary decodes plus the large slot =
+    3 × 3.25 + 21.97 = **31.72 MiB**.
+- **Peak** = retained + transient = 69.49 + 31.72 = 101.22 MiB. Row padding in
+  `bytesPerRow` (at most 64 B per row) adds under 0.35 MiB for the images live
+  outside the LRU, so the budget is **≤ 102 MiB** on iPhone. While a new player
+  image is being decoded, the old pinned image is still counted in retained;
+  it is released only after the swap, so this sum already covers the overlap.
 
-  The transient budget is the worst case, **≤ 20.5 MiB**.
-- **Peak** = retained + transient = 64 + 5.49 + 20.51 = 90.0 MiB, so the
-  budget is **≤ 91 MiB** on iPhone (1 MiB of rounding headroom). While a new
-  player image is being decoded, the old pinned image is still counted in
-  retained; it is released only after the swap, so this sum already covers
-  the overlap.
-
-The iPad and Mac peaks are their LRU size + 5.5 MiB + their transient
-allowance, with the same rule.
+The iPad and Mac peaks follow the same rule: LRU size + 5.49 MiB pinned +
+(processor count − 1) × 2 × their largest grid-box output + 21.97 MiB for the
+large-decode slot.
 
 Disk for 2,000 items, assuming the sizes the spike will confirm (300 px WebP
 ≈ 15 KB, 600 px ≈ 45 KB, 1200 px ≈ 150 KB):
@@ -583,20 +644,36 @@ That fits under 256 MiB without eviction churn.
     - with a downloaded cover older than the key's `updatedAt`, it fetches from
       the network instead, and offline it throws and writes no file;
   - bucket selection;
-  - key and file-path construction;
-  - deduplication: two concurrent loads produce one `URLProtocol` hit;
-  - cancellation when the last waiter leaves;
-  - LRU cost accounting and trimming on a simulated memory warning;
+  - key and file-path construction, including pixel-box rounding to 32 px
+    capped at 1200;
+  - deduplication: two concurrent loads of the same memory key produce one
+    `URLProtocol` hit and one decode. Two concurrent loads of the same
+    `ImageKey` at different pixel boxes (for example a grid cell and a list row
+    on the 600 bucket) produce one fetch and two decodes, each at its own size;
+  - cancellation: a decode is cancelled when its last waiter leaves; the fetch
+    keeps running while another decode still waits on it and is cancelled
+    (with its network task) when none does;
+  - LRU cost accounting (`bytesPerRow × height` of the real image), evicting
+    before insert, and trimming on a simulated memory warning;
+  - `CoverFileStore` size tracking: writes that push the total over a small
+    test cap start exactly one background eviction, which brings the total to
+    at most 90 % of the cap and skips current widget-snapshot files;
   - the order downloaded file (through a fake `DownloadedCoverLookup`, including
     a stale `coverUpdatedAt`) → file store → network;
-  - downsampling a fixture JPEG and WebP to a requested max pixel size.
+  - downsampling a fixture JPEG and WebP to a requested pixel box, including a
+    square cover in a 512 × 832 box, which decodes to at most 512 × 512;
+  - normalizing a 16-bit PNG fixture and a Display P3 16-bit fixture to 8-bit
+    premultiplied (sRGB and Display P3 respectively), and rejecting a float
+    fixture;
+  - the large-decode slot: a second large or normalizing decode waits until the
+    first finishes.
 - **Memory spike** (performed in #43, P3-03, as an acceptance criterion):
   - Scroll a large library against a real server on the smallest supported
     iPhone and on an iPad.
   - Record Instruments Allocations and the VM tracker. Pass: retained image
     memory after scrolling stops stays within the retained budget (≤ 70 MiB on
     iPhone), peak image memory while flinging stays within the peak budget
-    (≤ 91 MiB on iPhone), and there are no hitches beyond one frame. If peak
+    (≤ 102 MiB on iPhone), and there are no hitches beyond one frame. If peak
     goes over, lower the decode cap before the LRU size.
   - Record real encoded sizes per bucket and adjust the disk numbers in a
     follow-up.
