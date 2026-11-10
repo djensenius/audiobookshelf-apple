@@ -41,6 +41,36 @@ import Testing
         #expect(resolved(ABSColor.background, scheme: .dark) == rgb(56, 56, 56))
         #expect(resolved(ABSColor.foreground, scheme: .light) == rgb(37, 37, 37))
         #expect(resolved(ABSColor.foreground, scheme: .dark) == rgb(230, 237, 243))
+        #expect(resolved(ABSColor.mutedForeground, scheme: .light) == rgb(91, 99, 108))
+        #expect(resolved(ABSColor.mutedForeground, scheme: .dark) == rgb(156, 161, 167))
+    }
+
+    /// The WCAG 2 contrast ratio between two colours.
+    private func contrast(_ first: Color.Resolved, _ second: Color.Resolved) -> Double {
+        func luminance(_ color: Color.Resolved) -> Double {
+            0.2126 * Double(color.linearRed) + 0.7152 * Double(color.linearGreen) + 0.0722
+                * Double(color.linearBlue)
+        }
+        let (a, b) = (luminance(first), luminance(second))
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+
+    /// Body and footnote text need 4.5:1 (WCAG AA) on every surface it can sit on.
+    @Test(arguments: [AppTheme.light, .dark, .black])
+    func textMeetsContrastMinimumOnEverySurface(_ theme: AppTheme) {
+        let scheme = theme.colorScheme ?? .light
+        let surfaces = [
+            ("background", ABSColor.background), ("surface", ABSColor.surface),
+            ("secondarySurface", ABSColor.secondarySurface),
+        ]
+        let texts = [("foreground", ABSColor.foreground), ("mutedForeground", ABSColor.mutedForeground)]
+        for (surfaceName, surface) in surfaces {
+            let background = resolved(surface, scheme: scheme, theme: theme)
+            for (textName, text) in texts {
+                let ratio = contrast(resolved(text, scheme: scheme, theme: theme), background)
+                #expect(ratio >= 4.5, "\(textName) on \(surfaceName): \(ratio)")
+            }
+        }
     }
 
     @Test func blackThemeResolvesLegacyBlackPalette() {
