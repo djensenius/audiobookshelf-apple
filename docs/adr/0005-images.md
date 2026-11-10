@@ -348,6 +348,9 @@ static, unauthenticated remote images (none are planned).
   again. Nothing is written to `CoverFileStore`. Once the device is back
   online, a load of the requested key misses the LRU, skips the stale file, and
   fetches the new cover.
+  - Accepted exception: the synchronous lookup (see the live-image ledger)
+    only knows the requested key, so a stale cover always misses it and fades
+    in, even when it's in memory.
 - **Deduplication and cancellation** (two levels, so views that need the same
   bucket at different pixel sizes share a fetched file but not a decode):
   - **Fetch:** getting the encoded input for steps 2–4 (downloaded file,
@@ -364,6 +367,13 @@ static, unauthenticated remote images (none are planned).
       from `urlSession(_:downloadTask:didWriteData:…)` once 4 MiB is passed.
       Server WebP and downloaded JPEG covers are far smaller (see the disk
       estimates); only external covers can hit the cap.
+    - Every local file is also checked with `stat` before ImageIO opens it:
+      a stored file over 4 MiB fails with `tooLarge`. A downloaded cover
+      over 4 MiB (an original the server kept unresized) is treated as
+      missing, so the server's resized cover is fetched and cached instead;
+      offline, the placeholder shows. There is no separate, larger cap for
+      downloaded covers, because the peak below counts 4 MiB of input per
+      concurrent decode.
     - **Source cap:** sources over 4096 × 4096 px (the server's own clamp) are
       rejected after reading their properties, before any pixels are decoded.
   - **Decode:** decoding is a `[MemoryKey: Task]` entry, where the memory key is
@@ -396,7 +406,10 @@ static, unauthenticated remote images (none are planned).
     redraw it into an 8-bit premultiplied `CGContext` before caching. The
     context uses Display P3 when the source colour space is wide gamut
     (`CGColorSpaceIsWideGamutRGB`), and sRGB otherwise. The 8 B/px intermediate
-    is freed straight afterwards.
+    is freed straight afterwards. ARGB and XRGB (alpha or skip first, default
+    byte order) count as standard too: they are what ImageIO's thumbnails
+    produce for PNG and JPEG, so normalizing them would redraw every decode.
+    Other orders, such as ABGR, are normalized.
   - Sources with float samples or more than 16 bits per component are
     rejected and show the placeholder, so no intermediate is ever above
     8 B/px. Only absolute external cover URLs can produce them: the server
@@ -429,13 +442,26 @@ static, unauthenticated remote images (none are planned).
     The memory spike checks it.
   - The pinned Now Playing artwork stays outside the ledger and is budgeted on
     its own.
+  - **Synchronous lookup:** the LRU is one `Mutex`-protected structure, shared
+    by the actor and the nonisolated `cachedImage(for:pixelBox:)`. Views call
+    that before their first frame, so a memory hit shows without waiting for
+    the actor. There is no second copy that could diverge.
+    - A hit is wrapped in its `CoverImage` under the lock, so it is held before
+      eviction can pick it.
+    - Lock order: the LRU's lock, then the ledger's. The ledger never takes the
+      LRU's lock. Removed bitmaps are released after the lock is dropped.
+    - Removing a server purges its entries before its loads are cancelled, and
+      a decode that finishes afterwards isn't cached.
 - **`CoverFileStore`:**
   - **Location:** the store lives in the App Group container so the widget
     extension can read it (P5-11b, #89). Files are at
-    `<container for group.org.davidjensenius.Audiobookshelf>/Library/Caches/Images/<serverID>/<kind>-<entityID>-<updatedAt>-<bucket>.<ext>`
+    `<container for group.org.davidjensenius.Audiobookshelf>/Library/Caches/Images/<serverID>/<kind>-<id≤64>-<updatedAt|n>-<bucket>-<hash>.<ext>`
     (`.webp` from the server, `.jpg` when materialised from a downloaded cover,
     the source's own type for external covers).
-    Entity IDs are sanitised before use in file names.
+    `<id≤64>` is the entity ID with anything but letters, digits and `_`
+    replaced by `_`, cut to 64 characters. A missing `updatedAt` is `n`, so it
+    stays distinct from `0`. `<hash>` is 12 hex digits of SHA-256 over the
+    original entity ID and external URL, so sanitised or cut IDs can't collide.
   - **Fallback:** if the App Group entitlement is missing (unsigned CI builds,
     for example), the store uses the app's own `Caches` directory. Widgets then
     show placeholders.
@@ -466,6 +492,11 @@ static, unauthenticated remote images (none are planned).
       download), the decode treats it as a miss and refetches once. A second
       failure shows the placeholder.
   - **Logout:** removing a server deletes its folder.
+    - *Implementation deviation (#43):* `ImagePipeline.removeServer` cancels
+      the server's fetches and decodes, drops its memory entries, and makes
+      `CoverFileStore` refuse writes from fetches started before the
+      removal, but it deletes the folder without waiting for open leases.
+      Waiting for them is tracked in #143.
 - **Rendering:** the pipeline returns `CGImage` plus scale. Each consumer wraps
   it:
   - SwiftUI: `Image(decorative:scale:)`;
@@ -542,6 +573,20 @@ static, unauthenticated remote images (none are planned).
 - **Placeholders and palette:**
   - Port the legacy states: a generated title and author placeholder when there
     is no cover, a logo placeholder on failure, and a 0.3 s fade-in.
+  - Only an image loaded from disk or the network fades in. A memory hit shows
+    at full opacity on the first frame, and failures and removals don't animate.
+  - `PipelineImageHostingTests` checks the first frame by hosting
+    `PipelineImage`: in `NSHostingView` on macOS (`mise run test:kit`), and in
+    a `UIHostingController` in a window on the iOS Simulator. CI runs only the
+    macOS check. Run the iOS one locally from `Packages/AudiobookshelfKit`:
+
+    ```sh
+    udid=$(xcrun simctl list devices available | grep -E '^ +iPhone Duo [(]' | tail -n 1 | grep -oE '[0-9A-F-]{36}')
+    xcodebuild test -scheme AudiobookshelfKit \
+      -destination "platform=iOS Simulator,id=$udid" \
+      -derivedDataPath ../../.build/xcode-ios \
+      -only-testing:ABSUITests/PipelineImageHostingTests
+    ```
   - When the aspect ratio differs from the library's (1.6 or 1) by more than
     0.15, show the image aspect-fit over a blurred fill of itself.
   - `CoverPalette` computes the average colour with `CIAreaAverage` on the
