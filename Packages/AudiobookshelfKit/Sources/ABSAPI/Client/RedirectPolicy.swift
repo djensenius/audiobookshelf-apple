@@ -77,16 +77,41 @@ enum RedirectPolicy {
     }
 }
 
-/// The session delegate that applies ``RedirectPolicy`` and remembers which tasks have left
-/// the origin. A task delegate such as ``RedirectSuppressingDelegate`` takes precedence for
-/// its task.
+/// The task delegate ``APIClient`` attaches to each request that follows redirects. It applies
+/// ``RedirectPolicy`` and records whether the chain was stripped, so the client can tell that a
+/// response (for example a 401) came from a hop that never saw the credentials.
+final class RedirectChainDelegate: NSObject, URLSessionTaskDelegate, Sendable {
+    private let stripped = Mutex(false)
+
+    /// Whether any hop of this task was stripped of credentials.
+    var credentialsStripped: Bool {
+        stripped.withLock { $0 }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        let wasStripped = credentialsStripped
+        guard
+            let hop = RedirectPolicy.hop(
+                following: response, to: request, original: task.originalRequest, wasStripped: wasStripped)
+        else { return nil }
+        if hop.isStripped {
+            stripped.withLock { $0 = true }
+        }
+        return hop.request
+    }
+}
+
+/// The session delegate that applies ``RedirectPolicy`` to tasks without their own delegate and
+/// remembers which tasks have left the origin. ``APIClient`` gives every request a task
+/// delegate (``RedirectChainDelegate`` or ``RedirectSuppressingDelegate``), which takes
+/// precedence, so this is a fallback for any other task on the session.
 final class RedirectPolicyDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     private let strippedTasks = Mutex<Set<Int>>([])
-
-    /// Tasks that left the origin and haven't completed yet.
-    var strippedTaskCount: Int {
-        strippedTasks.withLock { $0.count }
-    }
 
     func urlSession(
         _ session: URLSession,

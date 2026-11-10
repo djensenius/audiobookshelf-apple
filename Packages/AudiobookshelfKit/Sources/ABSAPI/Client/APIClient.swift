@@ -7,14 +7,24 @@ import Foundation
 /// (concurrent 401s share a single refresh), persists them through the ``TokenProvider``, and
 /// retries the request once. If the server rejects the refresh token, the provider ends the
 /// session and ``APIError/sessionExpired`` is thrown. If the user signs out or in again while a
-/// refresh is in flight, its result is discarded and waiting requests throw `CancellationError`. Redirects follow ``RedirectPolicy``.
+/// refresh is in flight, its result is discarded and waiting requests throw `CancellationError`.
+/// Redirects follow ``RedirectPolicy``; a 401 from a hop that was stripped of credentials is
+/// thrown as ``APIError/unauthorized(message:)`` and never refreshes or ends the session.
 public actor APIClient {
     public private(set) var configuration: APIClientConfiguration
     private let tokenProvider: any TokenProvider
     private let session: URLSession
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
-    private var refreshTask: Task<AuthTokens, any Error>?
+    /// In-flight refreshes keyed by the token pair being refreshed, so a request only joins a
+    /// refresh of its own pair (not one left over from a previous sign-in).
+    private var refreshFlights: [AuthTokens: RefreshFlight] = [:]
+    private var nextFlightID = 0
+
+    private struct RefreshFlight {
+        let id: Int
+        let task: Task<AuthTokens, any Error>
+    }
 
     /// - Parameter sessionConfiguration: Tests pass a configuration with stub protocol classes.
     ///   It is copied, and the copy always gets its own new cookie jar, so reusing a
@@ -42,10 +52,6 @@ public actor APIClient {
         session.configuration.httpCookieStorage
     }
 
-    nonisolated var redirectDelegate: RedirectPolicyDelegate? {
-        session.delegate as? RedirectPolicyDelegate
-    }
-
     /// Replaces the connection's custom headers.
     /// - Throws: ``CustomHeaderError`` if a header is reserved (`Authorization` or `Cookie`).
     public func setCustomHeaders(_ headers: [String: String]) throws(CustomHeaderError) {
@@ -60,11 +66,11 @@ public actor APIClient {
     /// Sends `endpoint` and returns the decoded value with its HTTP response.
     public func response<Response>(for endpoint: Endpoint<Response>) async throws -> APIResponse<Response> {
         let request = try makeRequest(for: endpoint)
-        let delegate = endpoint.followsRedirects ? nil : RedirectSuppressingDelegate()
+        let followsRedirects = endpoint.followsRedirects
 
         guard endpoint.requiresAuthentication else {
-            let (data, http) = try await perform(request, delegate: delegate)
-            return try handle(data, http, for: endpoint)
+            let reply = try await perform(request, followsRedirects: followsRedirects)
+            return try handle(reply.data, reply.http, for: endpoint)
         }
 
         guard var tokens = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
@@ -72,8 +78,11 @@ public actor APIClient {
         // At most three sends: the original, the retry after a refresh, and one more if the
         // tokens changed again (for example a new sign-in) while the retry was in flight.
         for _ in 0..<3 {
-            let (data, http) = try await perform(authorized(request, tokens.accessToken), delegate: delegate)
-            guard http.statusCode == 401 else { return try handle(data, http, for: endpoint) }
+            let reply = try await perform(authorized(request, tokens.accessToken), followsRedirects: followsRedirects)
+            // A 401 from a hop that never received the token says nothing about the token.
+            guard reply.http.statusCode == 401, !reply.credentialsStripped else {
+                return try handle(reply.data, reply.http, for: endpoint)
+            }
             if hasRefreshed {
                 guard let current = await expireSession(rejected: tokens) else { throw APIError.sessionExpired }
                 tokens = current
@@ -88,20 +97,23 @@ public actor APIClient {
 
     // MARK: - Token refresh
 
-    /// Returns tokens newer than `rejected`, starting a refresh only if none is running and no
-    /// other request has already refreshed.
+    /// Returns tokens newer than `rejected`, joining a refresh of the same pair if one is
+    /// running, and starting one only if no other request has already refreshed.
     private func refreshedTokens(replacing rejected: AuthTokens) async throws -> AuthTokens {
-        if let refreshTask { return try await refreshTask.value }
-        let current = await tokenProvider.tokens()
-        // Re-check after the suspension above; another request may have started a refresh.
-        if let refreshTask { return try await refreshTask.value }
-        guard let current else { throw APIError.sessionExpired }
+        if let flight = refreshFlights[rejected] { return try await flight.task.value }
+        guard let current = await tokenProvider.tokens() else { throw APIError.sessionExpired }
         if current.accessToken != rejected.accessToken { return current }
+        // Re-check after the suspension above; another request may have started a refresh.
+        if let flight = refreshFlights[current] { return try await flight.task.value }
 
-        let task = Task { try await refresh(current) }
-        refreshTask = task
-        defer { refreshTask = nil }
-        return try await task.value
+        nextFlightID += 1
+        let flight = RefreshFlight(id: nextFlightID, task: Task { try await refresh(current) })
+        refreshFlights[current] = flight
+        defer {
+            // Only remove this flight's entry, never a newer flight for the same pair.
+            if refreshFlights[current]?.id == flight.id { refreshFlights[current] = nil }
+        }
+        return try await flight.task.value
     }
 
     private func refresh(_ tokens: AuthTokens) async throws -> AuthTokens {
@@ -111,8 +123,9 @@ public actor APIClient {
         request.setValue(tokens.refreshToken, forHTTPHeaderField: "x-refresh-token")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let (data, http) = try await perform(request, delegate: nil)
-        switch http.statusCode {
+        let reply = try await perform(request, followsRedirects: true)
+        let data = reply.data
+        switch reply.http.statusCode {
         case 200..<300:
             let body: RefreshResponse
             do {
@@ -131,13 +144,16 @@ public actor APIClient {
                 throw CancellationError()
             }
             return refreshed
+        case 401 where reply.credentialsStripped:
+            // The hop that answered never received the refresh token, so it can't have rejected it.
+            throw Self.error(status: 401, data: data)
         case 401:
             // The server only answers 401 for a bad refresh token; a 403 here comes from a proxy
             // or firewall and must not sign the user out.
             guard let current = await expireSession(rejected: tokens) else { throw APIError.sessionExpired }
             return current
         default:
-            throw Self.error(status: http.statusCode, data: data)
+            throw Self.error(status: reply.http.statusCode, data: data)
         }
     }
 
@@ -189,10 +205,17 @@ public actor APIClient {
         return request
     }
 
-    private func perform(
-        _ request: URLRequest,
-        delegate: (any URLSessionTaskDelegate)?
-    ) async throws -> (Data, HTTPURLResponse) {
+    private struct Reply {
+        let data: Data
+        let http: HTTPURLResponse
+        /// Whether a redirect hop was stripped of credentials, so the response came from a
+        /// request without `Authorization`, custom headers or cookies.
+        let credentialsStripped: Bool
+    }
+
+    private func perform(_ request: URLRequest, followsRedirects: Bool) async throws -> Reply {
+        let chain = followsRedirects ? RedirectChainDelegate() : nil
+        let delegate: any URLSessionTaskDelegate = chain ?? RedirectSuppressingDelegate()
         let data: Data
         let response: URLResponse
         do {
@@ -205,7 +228,7 @@ public actor APIClient {
             }
         }
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        return (data, http)
+        return Reply(data: data, http: http, credentialsStripped: chain?.credentialsStripped ?? false)
     }
 
     private func handle<Response>(

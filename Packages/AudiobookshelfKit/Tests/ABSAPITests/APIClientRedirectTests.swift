@@ -95,7 +95,6 @@ private func hasCredentials(_ request: URLRequest?) -> Bool {
         #expect(!hasCredentials(back))
         #expect(!hasCredentials(final))
         #expect(final.httpShouldHandleCookies == false)
-        try await waitUntil { client.redirectDelegate?.strippedTaskCount == 0 }
     }
 
     @Test func strippedRedirectDoesNotUseCookieJar() async throws {
@@ -173,13 +172,4 @@ private func hasCredentials(_ request: URLRequest?) -> Bool {
         let next = try #require(URL(string: next))
         #expect(RedirectPolicy.isSameOrigin(current, next) == expected)
     }
-}
-
-/// Polls `condition` every 10 ms for up to two seconds.
-private func waitUntil(_ condition: () -> Bool) async throws {
-    for _ in 0..<200 {
-        if condition() { return }
-        try await Task.sleep(for: .milliseconds(10))
-    }
-    Issue.record("Timed out waiting for condition")
 }

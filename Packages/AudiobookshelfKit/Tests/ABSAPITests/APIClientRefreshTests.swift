@@ -237,6 +237,92 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(server.requests(path: "/abs/api/me").count == 1)
     }
 
+    @Test func newSessionDoesNotJoinOldSessionsRefresh() async throws {
+        let replacement = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath {
+                return request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-new"
+                    ? .json(#"{"user":{"accessToken":"access-3","refreshToken":"refresh-3"}}"#)
+                    : .json(refreshedJSON, delay: .milliseconds(500))
+            }
+            return request.value(forHTTPHeaderField: "Authorization") == "Bearer access-3"
+                ? .json(#"{"ok":true}"#) : .text("Unauthorized", status: 401)
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let old = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        tokens.signIn(replacement)
+        let result = try await client.send(Endpoint<OK>(.get, "/api/me"))
+
+        #expect(result == OK(ok: true))
+        let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
+        #expect(refreshTokens == ["refresh-1", "refresh-new"])
+        await #expect(throws: CancellationError.self) { try await old.value }
+        #expect(tokens.current == AuthTokens(accessToken: "access-3", refreshToken: "refresh-3"))
+        #expect(tokens.expiredCount == 0)
+    }
+
+    @Test func unauthorizedFromStrippedHopDoesNotRefresh() async throws {
+        let originHost = StubServer.uniqueHost()
+        let other = StubServer { _ in .redirect(to: "https://\(originHost)/abs/final") }
+        let origin = StubServer(host: originHost) { request in
+            request.url?.path() == "/abs/api/me"
+                ? .redirect(to: "https://\(other.host)/x") : .text("Unauthorized", status: 401)
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(origin, tokens: tokens)
+
+        await #expect(throws: APIError.unauthorized(message: "Unauthorized")) {
+            try await client.send(Endpoint<OK>(.get, "/api/me"))
+        }
+        #expect(origin.requests(path: refreshPath).isEmpty)
+        #expect(origin.requests(path: "/abs/final").first?.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(tokens.current == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
+        #expect(tokens.expiredCount == 0)
+    }
+
+    @Test func unauthorizedFromStrippedHopAfterRefreshKeepsSession() async throws {
+        let originHost = StubServer.uniqueHost()
+        let other = StubServer { _ in .redirect(to: "https://\(originHost)/abs/final") }
+        let origin = StubServer(host: originHost) { request in
+            switch (request.url?.path(), request.value(forHTTPHeaderField: "Authorization")) {
+            case (refreshPath, _): .json(refreshedJSON)
+            case ("/abs/api/me", "Bearer access-2"): .redirect(to: "https://\(other.host)/x")
+            default: .text("Unauthorized", status: 401)
+            }
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(origin, tokens: tokens)
+
+        await #expect(throws: APIError.unauthorized(message: "Unauthorized")) {
+            try await client.send(Endpoint<OK>(.get, "/api/me"))
+        }
+        #expect(origin.requests(path: refreshPath).count == 1)
+        #expect(tokens.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+        #expect(tokens.expiredCount == 0)
+    }
+
+    @Test func unauthorizedFromStrippedRefreshHopKeepsSession() async throws {
+        let originHost = StubServer.uniqueHost()
+        let other = StubServer { _ in .redirect(to: "https://\(originHost)/abs/refresh-final", status: 307) }
+        let origin = StubServer(host: originHost) { request in
+            request.url?.path() == refreshPath
+                ? .redirect(to: "https://\(other.host)/x", status: 307) : .text("Unauthorized", status: 401)
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(origin, tokens: tokens)
+
+        await #expect(throws: APIError.unauthorized(message: "Unauthorized")) {
+            try await client.send(Endpoint<OK>(.get, "/api/me"))
+        }
+        let final = try #require(origin.requests(path: "/abs/refresh-final").first)
+        #expect(final.value(forHTTPHeaderField: "x-refresh-token") == nil)
+        #expect(tokens.current == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
+        #expect(tokens.expiredCount == 0)
+    }
+
     @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {
         let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(400)))
         let tokens = InMemoryTokenProvider()
