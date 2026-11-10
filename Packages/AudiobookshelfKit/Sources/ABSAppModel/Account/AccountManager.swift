@@ -420,10 +420,12 @@ public final class AccountManager {
 
     /// Forgets a saved connection: deletes its Keychain items and removes it from the store, then
     /// ends its server session, best effort. Removing the active connection signs out; a sign-in,
-    /// restore or switch to another connection carries on. Removing the one being signed in to,
-    /// restored or switched to cancels that call, and it stays cancelled if the removal fails: it
-    /// throws `CancellationError`, and a sign-in that hadn't saved its session yet ends the server
-    /// session it opened.
+    /// restore or switch to another connection carries on. Removing the one being signed in to
+    /// (once the sign-in has created it), restored or switched to cancels that call, and it stays
+    /// cancelled if the removal fails: it throws `CancellationError`, and a sign-in that hadn't
+    /// saved its session yet ends the server session it opened. A sign-in still authenticating,
+    /// before it has created the connection, isn't cancelled by a removal that fails; a removal
+    /// that succeeds stops it from saving the connection again.
     /// - Returns: The OpenID provider's end-session URL, as for ``logout()``.
     /// - Throws: ``AccountError/connectionNotFound`` if it isn't saved, or the ``KeychainError`` if
     ///   its Keychain items can't be deleted, which leaves the connection and its session saved.
