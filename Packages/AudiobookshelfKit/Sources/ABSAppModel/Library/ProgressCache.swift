@@ -146,6 +146,19 @@ public final class ProgressCache {
         return true
     }
 
+    /// Puts `previous` back (or removes the entry when it is `nil`), but only while the entry
+    /// still holds `applied`: an update that arrived since (the socket, local playback, another
+    /// action) is newer and stays. Returns whether the entry was restored.
+    @discardableResult
+    public func rollback(_ applied: MediaProgress, to previous: MediaProgress?) -> Bool {
+        let entry = entry(for: applied.progressKey)
+        guard entry.value == applied else { return false }
+        revision += 1
+        entry.revision = revision
+        entry.value = previous
+        return true
+    }
+
     /// Removes the progress of a media item, for example after the server deleted it. The entry
     /// stays as a tombstone, so seeds requested before now don't restore the progress.
     public func remove(libraryItemID: String, episodeID: String? = nil) {
