@@ -198,9 +198,10 @@ public actor ImagePipeline {
                 }
                 cgImage = try await ImageDecoder.normalize(cgImage)
             }
-        } catch ImagePipelineError.unsupportedImage where file.isStored {
-            // A damaged cached file: delete it, and refetch once (as for a vanished file).
-            await fileStore.discard(file.url)
+        } catch ImagePipelineError.unsupportedImage where file.storedVersion != nil {
+            // A damaged cached file: delete it unless rewritten since, and refetch once (as for a
+            // vanished file).
+            await fileStore.discard(file.url, version: file.storedVersion ?? 0)
             throw skipsDownloaded ? ImagePipelineError.unsupportedImage : .fileMissing
         }
         try Task.checkCancellation()
@@ -243,8 +244,8 @@ public actor ImagePipeline {
         var updatedAt: Int?
         /// Keeps a stored file from eviction, or deletes an unstored download when released.
         var lease: FileLease?
-        /// Whether the file is in ``CoverFileStore``.
-        var isStored = false
+        /// The ``CoverFileStore`` write the file came from, or `nil` if it isn't stored.
+        var storedVersion: Int?
     }
 
     private func fetchedFile(for key: FetchKey) async throws -> FetchedFile {
@@ -285,7 +286,8 @@ public actor ImagePipeline {
             return FetchedFile(url: downloaded.fileURL, updatedAt: key.updatedAt)
         }
         if let cached = await fileStore.lookup(key) {
-            return FetchedFile(url: cached.url, updatedAt: key.updatedAt, lease: cached.lease, isStored: true)
+            return FetchedFile(
+                url: cached.url, updatedAt: key.updatedAt, lease: cached.lease, storedVersion: cached.version)
         }
         do {
             guard isOnline() else { throw ImagePipelineError.offline }
@@ -337,7 +339,8 @@ public actor ImagePipeline {
             let stored = try await fileStore.insert(
                 moving: temporary, for: key, pathExtension: Self.pathExtension(for: response, key: key),
                 generation: generation)
-            return FetchedFile(url: stored.url, updatedAt: key.updatedAt, lease: stored.lease, isStored: true)
+            return FetchedFile(
+                url: stored.url, updatedAt: key.updatedAt, lease: stored.lease, storedVersion: stored.version)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
