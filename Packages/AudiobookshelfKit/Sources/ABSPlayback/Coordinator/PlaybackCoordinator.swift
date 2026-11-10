@@ -32,6 +32,11 @@ private let logger = Log.playback
 ///   leaves its own time behind (at 0 after a load). The coordinator treats that target as the
 ///   position: ``currentTime``, the last-played record and the paused and closing positions use
 ///   it, a resume seeks to it exactly, and a load's `didSeek` is published when the seek lands.
+/// - **Start position.** A new session starts at the newest of the server's progress, the row's
+///   audio progress and the last-played record, and the server's wins a tie, as in a sync merge.
+///   An unsent audio edit is dated by its edit time and kept over server progress whose audio is
+///   still what the row last saw. A synced group is dated by the later of its edit time and the
+///   server's row-wide `lastUpdate`, which is only an upper bound for when that group last changed.
 /// - **Restore is lazy.** ``restoreLastPlayed()`` only publishes the item, position and display
 ///   metadata from the ``LastPlayedRecord``; the session starts and the engine loads on the first
 ///   ``resume(rewindingBy:)`` or play, so opening the app never creates a server session.
@@ -202,8 +207,9 @@ public final class PlaybackCoordinator {
     /// The same media, already loaded, resumes in the same session (from `startTime` when given).
     /// Otherwise the streaming policy is checked first (a block leaves the current item as it is),
     /// then the current session is closed and a new one started at `startTime`, or else at the
-    /// newest of server progress, local audio progress and the last-played record, rewound by
-    /// ``AutoRewind``. Finished media starts from the beginning.
+    /// newest of server progress, local audio progress and the last-played record (the server's wins
+    /// a tie, as when progress is merged), rewound by ``AutoRewind``. Finished media starts from the
+    /// beginning.
     /// - Parameter allowingMeteredNetwork: The user agreed to stream on a metered network after
     ///   ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:key:)``. Never overrides "never".
     public func play(
@@ -299,9 +305,31 @@ public final class PlaybackCoordinator {
         let local = try? await progressStore.progress(for: key)
         let server = started.serverProgress
         guard current == generation else { return }
+        // On equal dates the first candidate wins, so the server's goes first: an unsent edit beats
+        // server progress only when strictly newer, as when ``ProgressSyncState`` merges.
         var candidates: [ProgressCandidate] = []
+        switch server {
+        case .success(let progress?):
+            // An unsent audio edit stays the newest audio while the server's is as the row last saw
+            // it: the server's date is row-wide, so another device's ebook or finished change moves it.
+            if let local, local.audioDirty, local.serverAudioUnchanged(in: progress) { break }
+            // Otherwise the position, date and flag all come from the fetched progress: `/play` may
+            // have captured an older position than the fetch returned.
+            candidates.append(
+                ProgressCandidate(
+                    currentTime: progress.currentTime, updatedAt: progress.lastUpdate.map(Self.date(ms:)),
+                    isFinished: progress.isFinished))
+        case .success(nil):
+            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
+        case .failure(let error):
+            // Undated: the session position is used only when there is nothing else.
+            logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public))")
+            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
+        }
         // Dated by the audio and completion groups alone, never `lastUpdate`, which ebook edits bump.
-        // A row with no saved audio state offers nothing.
+        // A row with no saved audio has no position to offer, so a finished-only edit on it (an item
+        // never played here, marked finished) adds no candidate: its flag carries no position, and
+        // the server's progress, which has the flag once sent, or the record is the position to use.
         if let local, let audioSavedAt = local.audioSavedAt {
             let finishedSavedAt = local.isFinished || local.finishedDirty ? local.finishedSavedAt : nil
             candidates.append(
@@ -314,21 +342,6 @@ public final class PlaybackCoordinator {
             candidates.append(
                 ProgressCandidate(
                     currentTime: record.position, updatedAt: record.timestamp, isFinished: record.isFinished))
-        }
-        switch server {
-        case .success(let progress?):
-            // The position, date and flag all come from the fetched progress: `/play` may have
-            // captured an older position than the fetch returned.
-            candidates.append(
-                ProgressCandidate(
-                    currentTime: progress.currentTime, updatedAt: progress.lastUpdate.map(Self.date(ms:)),
-                    isFinished: progress.isFinished))
-        case .success(nil):
-            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
-        case .failure(let error):
-            // Undated: the session position is used only when there is nothing else.
-            logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public))")
-            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
         }
         // Kept until the load succeeds, so a retry after a failure starts there again.
         let plannedStart = pendingStartTime

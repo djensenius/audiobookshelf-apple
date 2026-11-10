@@ -116,4 +116,18 @@ struct PlaybackCoordinatorProgressSourceTests {
 
         #expect(engine.loads.map(\.time) == [570])
     }
+
+    // MARK: - Ties
+
+    @Test func serverProgressWinsATieWithLocalProgress() async throws {
+        h.settings.disableAutoRewind = true
+        let saved = h.clock.ago(3600)
+        try await h.setLocalProgress("A", time: 500, updated: saved)
+        h.setServerProgress("A", time: 800, updated: saved)
+
+        await coordinator.play(itemID: "A")
+
+        // As in `ProgressSyncState`'s merge, equal dates favour the server.
+        #expect(engine.loads.map(\.time) == [800])
+    }
 }
