@@ -169,7 +169,7 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
         #expect(server.requests.allSatisfy { $0.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret" })
     }
 
-    @Test(arguments: ["/abs/status/", "/abs/status?ready=1"])
+    @Test(arguments: ["/abs/status/", "/abs/status?ready=1", "/abs/status?route=a+b&x=%20"])
     func followsRedirectToTheExactStatusURL(location: String) async throws {
         let server = StubServer { request in
             guard request.url?.absoluteString.hasSuffix("/abs/status") == true, let host = request.url?.host() else {

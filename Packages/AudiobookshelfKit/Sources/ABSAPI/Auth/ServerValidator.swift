@@ -218,7 +218,8 @@ public struct ServerValidator: Sendable {
     }
 
     /// The client configuration and endpoint that request exactly `url`: its last path
-    /// component (with any trailing slash) and query, under the rest of the path as base URL.
+    /// component (with any trailing slash) under the rest of the path as base URL. The query
+    /// stays on the base URL as sent, since ``APIClient`` would re-encode query items (`+`).
     private static func statusRequest(
         for url: URL, customHeaders: [String: String]
     ) throws -> (APIClientConfiguration, Endpoint<Data>) {
@@ -226,14 +227,12 @@ public struct ServerValidator: Sendable {
             throw ServerValidationError.notAudiobookshelf
         }
         var endpoint = statusProbe()
-        endpoint.query = components.queryItems ?? []
         var path = components.percentEncodedPath
         let trailingSlash = path.hasSuffix("/") ? "/" : ""
         if !trailingSlash.isEmpty { path.removeLast() }
         let lastSlash = path.lastIndex(of: "/") ?? path.startIndex
         endpoint.path = String(path[lastSlash...]) + trailingSlash
         components.percentEncodedPath = String(path[..<lastSlash])
-        components.query = nil
         components.fragment = nil
         guard let base = components.url else { throw ServerValidationError.notAudiobookshelf }
         do {
