@@ -21,8 +21,11 @@ import Observation
 /// Entries are created on first read, so reading items without progress (for example scrolling
 /// a grid) grows the cache by one empty entry per item read. Those are kept for the cache's
 /// lifetime, ``clear()`` included, because a view may be watching one for its first progress.
-/// Entries whose progress is removed are dropped right away: their readers are notified by the
-/// removal and create a new entry when they read again.
+/// ``remove(libraryItemID:episodeID:)`` also keeps its entry, as a tombstone stamped with a
+/// ``revision``, so a seed requested before the removal can't restore the progress. Tombstones
+/// are an empty entry each and aren't pruned. Entries whose progress a seed removes are dropped
+/// right away: their readers are notified by the removal and create a new entry when they read
+/// again.
 @MainActor
 public final class ProgressCache {
     /// One observable entry per key, created on first read or write.
@@ -31,7 +34,7 @@ public final class ProgressCache {
     final class Entry {
         var value: MediaProgress?
         /// The cache ``ProgressCache/revision`` of the last ``ProgressCache/apply(_:)`` that
-        /// stored a value here, or 0.
+        /// stored a value here or ``ProgressCache/remove(libraryItemID:episodeID:)``, or 0.
         @ObservationIgnored var revision = 0
     }
 
@@ -50,7 +53,8 @@ public final class ProgressCache {
     /// The request of the last seed applied in this generation.
     private var appliedSeedRequest = 0
 
-    /// Increases with every ``apply(_:)`` that stores progress.
+    /// Increases with every ``apply(_:)`` that stores progress and every
+    /// ``remove(libraryItemID:episodeID:)``.
     public private(set) var revision = 0
 
     public init() {}
@@ -83,6 +87,7 @@ public final class ProgressCache {
     /// Against the entries, with `boundary` the ``revision`` when the request started:
     /// - An entry applied after `boundary` may be missing from or older in the list, so it is
     ///   kept unless the list has a row for it with a later `lastUpdate` (both dated).
+    /// - An entry removed after `boundary` stays removed, even if the list has a row for it.
     /// - Any other entry missing from the list is removed.
     /// - Any other entry listed takes the list's row unless the cached one is newer (for example
     ///   local progress not synced yet).
@@ -100,7 +105,11 @@ public final class ProgressCache {
             seeded[item.progressKey] = item
         }
         for (key, entry) in entries {
-            guard let existing = entry.value else { continue }
+            guard let existing = entry.value else {
+                // A tombstone: removed while the list was being fetched.
+                if entry.revision > boundary { seeded[key] = nil }
+                continue
+            }
             if entry.revision > boundary {
                 if let incoming = seeded[key], Self.isStrictlyNewer(incoming, than: existing) { continue }
                 seeded[key] = existing
@@ -132,12 +141,13 @@ public final class ProgressCache {
         return true
     }
 
-    /// Removes the entry for a media item, for example after the server deleted its progress.
+    /// Removes the progress of a media item, for example after the server deleted it. The entry
+    /// stays as a tombstone, so seeds requested before now don't restore the progress.
     public func remove(libraryItemID: String, episodeID: String? = nil) {
-        let key = MediaProgress.key(libraryItemID: libraryItemID, episodeID: episodeID)
-        guard let entry = entries[key], entry.value != nil else { return }
-        entry.value = nil
-        entries[key] = nil
+        let entry = entry(for: MediaProgress.key(libraryItemID: libraryItemID, episodeID: episodeID))
+        revision += 1
+        entry.revision = revision
+        if entry.value != nil { entry.value = nil }
     }
 
     /// Empties every entry. The entry objects are kept, so views watching a key (even one that

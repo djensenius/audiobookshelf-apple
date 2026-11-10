@@ -203,7 +203,7 @@ private func progress(
         #expect(cache.progress(libraryItemID: "a") == nil)
     }
 
-    @Test func removedEntriesArePrunedAndReadersReregister() {
+    @Test func seedRemovalsArePrunedAndRemoveKeepsTombstones() {
         let cache = ProgressCache()
         cache.apply(progress("a", lastUpdate: 1))
         cache.apply(progress("b", lastUpdate: 1))
@@ -213,9 +213,10 @@ private func progress(
         cache.seed([progress("b", lastUpdate: 1)], token: cache.beginSeed())
         #expect(cache.entryCount == 2)
         cache.remove(libraryItemID: "b")
-        #expect(cache.entryCount == 1)
+        #expect(cache.entryCount == 2)
         cache.remove(libraryItemID: "missing")
-        #expect(cache.entryCount == 1)
+        #expect(cache.entryCount == 3)
+        #expect(cache.storedKeys.isEmpty)
 
         // A reader of a pruned key reads a new entry and sees later progress.
         let changed = Locked(false)
@@ -227,6 +228,47 @@ private func progress(
         cache.apply(progress("a", currentTime: 5, lastUpdate: 20))
         #expect(changed.value)
         #expect(cache.progress(libraryItemID: "a")?.currentTime == 5)
+    }
+
+    @Test func aSeedRequestedBeforeARemoveDoesNotRestoreIt() {
+        let cache = ProgressCache()
+        cache.apply(progress("x", currentTime: 1, lastUpdate: 10))
+        let token = cache.beginSeed()
+        // While `/api/me` is in flight, the progress is removed (a socket event or a reset).
+        cache.remove(libraryItemID: "x")
+        let changed = Locked(false)
+        withObservationTracking {
+            _ = cache.progress(libraryItemID: "x")
+        } onChange: {
+            changed.value = true
+        }
+
+        // The server read its list before the delete.
+        #expect(cache.seed([progress("x", currentTime: 1, lastUpdate: 10)], token: token))
+        #expect(cache.progress(libraryItemID: "x") == nil)
+        #expect(!changed.value)
+    }
+
+    @Test func applyThenRemoveDuringASeedRequestStaysRemoved() {
+        let cache = ProgressCache()
+        let token = cache.beginSeed()
+        cache.apply(progress("x", currentTime: 2, lastUpdate: 20))
+        cache.remove(libraryItemID: "x")
+
+        cache.seed([progress("x", currentTime: 3, lastUpdate: 30)], token: token)
+        #expect(cache.progress(libraryItemID: "x") == nil)
+        #expect(cache.storedKeys.isEmpty)
+    }
+
+    @Test func aSeedRequestedAfterARemoveRestoresIt() {
+        let cache = ProgressCache()
+        cache.apply(progress("x", currentTime: 1, lastUpdate: 10))
+        cache.remove(libraryItemID: "x")
+        let token = cache.beginSeed()
+
+        // The server still has the progress.
+        cache.seed([progress("x", currentTime: 1, lastUpdate: 10)], token: token)
+        #expect(cache.progress(libraryItemID: "x")?.currentTime == 1)
     }
 
     @Test func clearKeepsObserversOfMissingProgressAttached() {
