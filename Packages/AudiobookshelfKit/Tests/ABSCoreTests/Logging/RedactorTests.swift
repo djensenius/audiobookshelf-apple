@@ -1,5 +1,13 @@
 import ABSCore
+import Foundation
 import Testing
+
+/// Base64url without padding, as used in JWTs.
+private func base64URL(_ json: String) -> String {
+    Data(json.utf8).base64EncodedString()
+        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+        .replacingOccurrences(of: "=", with: "")
+}
 
 @Suite struct RedactorTests {
     @Test func redactsBearerTokens() {
@@ -98,5 +106,28 @@ import Testing
         #expect(
             Log.redact(#"{"password":"prefix\"suffixsecret","next":1}"#) == #"{"password":"<redacted>","next":1}"#
         )
+    }
+
+    @Test func redactsJWTWithWhitespacePrefixedHeader() {
+        let jwt = "\(base64URL(#"{ "alg":"HS256"}"#)).\(base64URL(#"{"sub":"1"}"#)).c2lnbmF0dXJl"
+        #expect(jwt.hasPrefix("eyAi"))
+        #expect(Log.redact("token: \(jwt).") == "token: <redacted>.")
+    }
+
+    @Test func redactsJWTWithEmptyClaimsAndNoSignature() {
+        let jwt = "\(base64URL(#"{"alg":"none"}"#)).\(base64URL("{}"))."
+        #expect(jwt.contains(".e30."))
+        #expect(Log.redact("saw \(jwt) here") == "saw <redacted> here")
+    }
+
+    @Test func keepsDottedTextThatIsNotAJWT() {
+        let noAlg = "\(base64URL(#"{"typ":"JWT"}"#)).\(base64URL("{}")).c2ln"
+        let arrayClaims = "\(base64URL(#"{"alg":"HS256"}"#)).\(base64URL("[1]")).c2ln"
+        for text in [
+            "api.example.com", "a.b.c", "1.2.3", "v27.0.1-beta", "cdn.eu.api.example.com",
+            "see README.md.txt now", noAlg, arrayClaims,
+        ] {
+            #expect(Log.redact(text) == text)
+        }
     }
 }

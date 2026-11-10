@@ -7,7 +7,8 @@ import Foundation
 /// - values of token and OAuth query parameters (`token`, `access_token`, `refresh_token`,
 ///   `accessToken`, `refreshToken`, `code`, `code_verifier`), in URLs or as bare `name=value` text,
 /// - JSON `"password"` values,
-/// - JSON Web Tokens anywhere in the text.
+/// - JSON Web Tokens anywhere in the text (three base64url segments whose first two decode to
+///   JSON objects, the first with an `"alg"` key).
 ///
 /// Custom header values can't be recognised by pattern, so pass them in as `secrets`.
 public struct Redactor: Sendable, Equatable {
@@ -36,6 +37,13 @@ public struct Redactor: Sendable, Equatable {
             for match in rule.regex.matches(in: text, range: whole) {
                 ranges.append(match.range(withName: "value"))
             }
+        }
+        for match in Self.jwtCandidate.regex.matches(in: text, range: whole)
+        where Self.isJWT(
+            header: original.substring(with: match.range(withName: "header")),
+            claims: original.substring(with: match.range(withName: "claims"))
+        ) {
+            ranges.append(match.range(withName: "value"))
         }
         for secret in secrets where secret.count >= Self.minimumSecretLength {
             var search = whole
@@ -69,6 +77,24 @@ public struct Redactor: Sendable, Equatable {
         return merged
     }
 
+    /// Whether `header` and `claims` are base64url-encoded JSON objects and the header has an `alg`.
+    private static func isJWT(header: String, claims: String) -> Bool {
+        guard let header = jsonObject(base64URL: header), header["alg"] != nil else { return false }
+        return jsonObject(base64URL: claims) != nil
+    }
+
+    /// Decodes a base64url segment (padding optional) as a JSON object. Segments longer than
+    /// ``maximumJWTSegmentLength`` aren't decoded, which bounds the work per candidate.
+    private static func jsonObject(base64URL segment: String) -> [String: Any]? {
+        guard segment.utf8.count <= maximumJWTSegmentLength, segment.utf8.count % 4 != 1 else { return nil }
+        var base64 = segment.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.utf8.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static let maximumJWTSegmentLength = 16_384
+
     /// A pattern whose `value` capture group is the sensitive part of each match.
     private struct Rule: Sendable {
         let regex: NSRegularExpression
@@ -92,9 +118,15 @@ public struct Redactor: Sendable, Equatable {
         ),
         // JSON passwords, including escaped characters such as `\"`.
         Rule(#""password"\s*:\s*"(?<value>(?:[^"\\]|\\.)*)"#),
-        // Any JWT left over, for example inside a JSON body. JWTs always start with `eyJ`.
-        Rule(#"\b(?<value>eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*)"#, options: []),
     ]
+
+    /// Three dot-separated base64url segments that aren't part of a longer dotted run, such as a
+    /// hostname with more labels. ``isJWT(header:claims:)`` checks the `header` and `claims` groups.
+    /// Possessive quantifiers and the lookbehind keep matching linear.
+    private static let jwtCandidate = Rule(
+        #"(?<![A-Za-z0-9_.-])(?<value>(?<header>[A-Za-z0-9_-]++)\.(?<claims>[A-Za-z0-9_-]++)\.[A-Za-z0-9_-]*+)(?!\.?[A-Za-z0-9_-])"#,
+        options: []
+    )
 }
 
 extension Redactor: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
