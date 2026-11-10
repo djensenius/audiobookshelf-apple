@@ -1,3 +1,4 @@
+import ABSCore
 import Foundation
 
 /// Why ``DownloadRequests`` won't build a background download request.

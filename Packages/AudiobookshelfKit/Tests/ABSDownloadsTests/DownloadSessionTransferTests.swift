@@ -73,13 +73,15 @@ import Testing
 
     struct SizeCase: Sendable, CustomTestStringConvertible {
         var status = 200
+        var planned: Int64 = 0
         var body = Data("audio-bytes".utf8)
         var headers: [String: String] = [:]
         var expected: DownloadTaskResult
-        var testDescription: String { "\(status) \(headers) with \(body.count) bytes" }
+        var testDescription: String { "\(status) \(headers) with \(body.count) bytes, planned \(planned)" }
     }
 
-    /// A part of unknown size is checked against the length the response declares.
+    /// A part is checked against the length the response declares: a part of unknown size
+    /// always, and after a 206 even when the planned size matches.
     @Test(arguments: [
         SizeCase(headers: ["Content-Length": "18"], expected: .sizeMismatch(expected: 18, actual: 11)),
         SizeCase(
@@ -87,12 +89,16 @@ import Testing
             expected: .sizeMismatch(expected: 18, actual: 8)),
         SizeCase(
             status: 206, headers: ["Content-Range": "bytes 0-10/*"], expected: .sizeMismatch(expected: 0, actual: 11)),
+        SizeCase(
+            status: 206, planned: 11, headers: ["Content-Range": "bytes 0-10/18"],
+            expected: .sizeMismatch(expected: 18, actual: 11)),
         SizeCase(status: 206, headers: ["Content-Range": "bytes 0-10/11"], expected: .moved(bytes: 11)),
         SizeCase(headers: ["Content-Length": ""], expected: .moved(bytes: 11)),
         SizeCase(body: Data(), expected: .failed(DownloadTransferFailure(URLError(.zeroByteResource)))),
     ])
-    func checksUnknownSizesAgainstTheResponse(_ test: SizeCase) async {
-        let outcome = await transfer(.status(test.status, body: test.body, headers: test.headers), expectedBytes: 0)
+    func checksSizesAgainstTheResponse(_ test: SizeCase) async {
+        let outcome = await transfer(
+            .status(test.status, body: test.body, headers: test.headers), expectedBytes: test.planned)
 
         #expect(outcome.result == test.expected)
         #expect(outcome.moved == (test.expected == .moved(bytes: 11) ? test.body : nil))
