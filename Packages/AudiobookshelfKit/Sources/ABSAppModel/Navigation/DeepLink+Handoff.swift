@@ -9,31 +9,41 @@ extension DeepLink {
     /// Reads a continued Handoff activity's `userInfo`, which becomes the same link a URL
     /// would, so ``Router/open(_:)`` stays the only way into navigation.
     ///
-    /// The activity carries `item` (required), `episode`, `server`, `position` (seconds) and
-    /// `library`, which opening an item doesn't need. An activity with a `position` becomes a
-    /// `play` link, so continuing a player screen asks before it plays and never resumes
-    /// silently (``PlayLinkDecision``); without one it opens the item, or the episode.
+    /// The activity carries `item` (required), `episode` and `position` (seconds). A `library`
+    /// entry is ignored, because opening an item doesn't need it. The activity has no account
+    /// identity yet (ADR 0004, "Handoff"), so the link names no server and the account that is
+    /// active here opens it. A `server` entry, whatever it holds, is ignored too: it would be
+    /// the sending device's connection ID, which means nothing on this one.
+    ///
+    /// An activity with a `position` becomes a `play` link, so continuing a player screen asks
+    /// before it plays and never resumes silently (``PlayLinkDecision``); without one it opens
+    /// the item, or the episode.
     ///
     /// The values are checked like a URL's. The result is `nil` without `userInfo`, when `item`
-    /// is missing, or when `item`, `episode` or `server` isn't a valid ID (the same rules as
-    /// ``init(url:)``); an empty `episode` or `server` counts as absent. A `position` that isn't
-    /// a number from 0 to ``maxStartTime`` is ignored, and the activity still opens the item.
+    /// is missing, or when `item` or `episode` isn't a valid ID (the same rules as
+    /// ``init(url:)``); an empty `episode` counts as absent. A `position` that isn't a number
+    /// from 0 to ``maxStartTime`` (a Boolean isn't one) is ignored, and the activity still opens
+    /// the item.
     public init?(handoff userInfo: [AnyHashable: Any]?) {
         guard let userInfo else { return nil }
         let item = Self.handoffID(userInfo["item"])
         let episode = Self.handoffID(userInfo["episode"])
-        let server = Self.handoffID(userInfo["server"])
-        // A server we can't read must not fall back to the active server, so an invalid
-        // optional entry rejects the activity instead of being dropped.
-        guard case .valid(let itemID) = item, !episode.isInvalid, !server.isInvalid else { return nil }
+        // An episode we can't read rejects the activity instead of opening the item without it.
+        guard case .valid(let itemID) = item, !episode.isInvalid else { return nil }
 
-        let position = (userInfo["position"] as? NSNumber)?.doubleValue
-        if let position, (0...Self.maxStartTime).contains(position) {
-            self.init(
-                .play(PlayLink(itemID: itemID, episodeID: episode.id, startTime: position)), serverID: server.id)
+        if let position = Self.handoffPosition(userInfo["position"]) {
+            self.init(.play(PlayLink(itemID: itemID, episodeID: episode.id, startTime: position)))
         } else {
-            self.init(.item(id: itemID, episodeID: episode.id), serverID: server.id)
+            self.init(.item(id: itemID, episodeID: episode.id))
         }
+    }
+
+    /// A start time from an activity: a number from 0 to ``maxStartTime``. Booleans are
+    /// `NSNumber`s too, so they are told apart, or `true` would start the item at one second.
+    private static func handoffPosition(_ value: Any?) -> TimeInterval? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let seconds = number.doubleValue
+        return (0...maxStartTime).contains(seconds) ? seconds : nil
     }
 
     /// An ID read from an activity: absent (or empty), valid, or present but not a valid ID.

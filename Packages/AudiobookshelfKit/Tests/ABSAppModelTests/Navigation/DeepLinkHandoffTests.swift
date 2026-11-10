@@ -4,8 +4,6 @@ import Testing
 @testable import ABSAppModel
 
 @Suite struct DeepLinkHandoffTests {
-    private let server = "6F1E7C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B"
-
     @Test func activityTypeMatchesTheInfoPlistEntry() {
         // Info.plist lists this string in NSUserActivityTypes; the app's tests check that it does.
         #expect(DeepLink.handoffActivityType == "org.davidjensenius.Audiobookshelf.item")
@@ -32,22 +30,28 @@ import Testing
         #expect(DeepLink(handoff: ["item": "li_1", "position": 0]) == playLink("li_1", at: 0))
     }
 
-    @Test func serverIsKept() {
-        let link = DeepLink(handoff: ["server": server, "item": "li_1", "library": "lib_1"])
-        #expect(link == DeepLink(.item(id: "li_1", episodeID: nil), serverID: server))
-
-        let play = DeepLink(handoff: ["server": server, "item": "li_1", "position": 12])
-        #expect(play == DeepLink(.play(PlayLink(itemID: "li_1", startTime: 12)), serverID: server))
+    @Test func aServerEntryIsIgnored() {
+        // A connection ID is a UUID this device made, so it means nothing on the device that continues
+        // the activity. Whatever a `server` entry holds, the link names no server (ADR 0004).
+        let item = DeepLink(.item(id: "li_1", episodeID: nil))
+        let servers: [Any] = ["6F1E7C2A-3B4D-4E5F-8A9B-0C1D2E3F4A5B", "", " ", "a\nb", 5, ["x"]]
+        for server in servers {
+            #expect(DeepLink(handoff: ["item": "li_1", "server": server, "library": "lib_1"]) == item, "\(server)")
+        }
+        #expect(DeepLink(handoff: ["item": "li_1", "position": 12, "server": servers[0]]) == playLink("li_1", at: 12))
     }
 
-    @Test func emptyOptionalEntriesCountAsAbsent() {
-        let link = DeepLink(handoff: ["item": "li_1", "episode": "", "server": ""])
+    @Test func emptyEpisodeCountsAsAbsent() {
+        let link = DeepLink(handoff: ["item": "li_1", "episode": ""])
         #expect(link == DeepLink(.item(id: "li_1", episodeID: nil)))
     }
 
     @Test func positionThatIsNotAValidStartTimeIsIgnored() {
         let item = DeepLink(.item(id: "li_1", episodeID: nil))
-        let positions: [Any] = [-1, -0.5, 10_000_001, Double.nan, Double.infinity, "90", ["90"]]
+        // Booleans are NSNumbers too, and `true` would otherwise start the item at one second.
+        let positions: [Any] = [
+            -1, -0.5, 10_000_001, Double.nan, Double.infinity, "90", ["90"], true, false, NSNull(),
+        ]
         for position in positions {
             #expect(DeepLink(handoff: ["item": "li_1", "position": position]) == item, "\(position)")
         }
@@ -69,14 +73,11 @@ import Testing
     func invalidIDsAreRejected(id: String) {
         #expect(DeepLink(handoff: ["item": id]) == nil)
         #expect(DeepLink(handoff: ["item": "li_1", "episode": id]) == nil)
-        // A server the activity names but we can't read must not fall back to the active one.
-        #expect(DeepLink(handoff: ["item": "li_1", "server": id]) == nil)
     }
 
     @Test func entriesThatAreNotStringsAreRejected() {
         #expect(DeepLink(handoff: ["item": 5]) == nil)
         #expect(DeepLink(handoff: ["item": "li_1", "episode": 5]) == nil)
-        #expect(DeepLink(handoff: ["item": "li_1", "server": ["x"]]) == nil)
     }
 
     @Test func longestIDIsAccepted() {

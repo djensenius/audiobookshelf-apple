@@ -296,11 +296,26 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 
 **Handoff**
 
-- Item, episode and player screens publish `.userActivity("org.davidjensenius.Audiobookshelf.item")` with server, library, item, episode and position.
-- `.onContinueUserActivity` turns the activity into the same `DeepLink`.
-- The activity type must be added to `NSUserActivityTypes` in the app's `Info.plist`. This is a follow-up in P3-04 #44.
+- Item, episode and player screens publish `.userActivity("org.davidjensenius.Audiobookshelf.item")`, with the payload below.
+- `.onContinueUserActivity` turns the activity into the same `DeepLink` (`DeepLink.init?(handoff:)`).
+- The activity type is listed in `NSUserActivityTypes` in `Audiobookshelf/Info.plist`, which the system requires before it delivers the activity. `AppEnvironmentTests` checks it.
 - The intents and entities side of Handoff is in P5-10 #87.
 - App Intents and Spotlight, added later, also produce a `DeepLink`.
+
+| `userInfo` key | Type | Meaning |
+| --- | --- | --- |
+| `item` | string, required | The library item's ID |
+| `episode` | string | The podcast episode's ID. Empty counts as absent |
+| `position` | number | Seconds, from 0 to 10,000,000. An activity with a position becomes a `play` link, which asks before it plays. A value that isn't a number in range (a Boolean isn't one) is ignored, and the activity opens the item |
+| `library` | string | Not used. The item opens in the active library |
+
+IDs follow the URL rules. A present but invalid `item` or `episode` rejects the activity.
+
+**Handoff has no account identity yet.** The only ID this device has for a server is its local connection UUID, which each device makes for itself, so it means nothing on another device. It is **never published**.
+
+- Until the payload names an account, the account that is active on the receiving device opens the item. An item that doesn't exist on that server shows the not-found state.
+- `DeepLink.init?(handoff:)` ignores a `server` entry, whatever it holds.
+- A follow-up adds `serverAddress` (normalized) and `userID` to the payload. They are additive, so a receiver that predates them still opens the item. The receiver resolves them to a local connection before `Router.open(_:)`, using the connection list of the account manager (#203). It needs the first publisher too.
 
 ### State restoration
 
