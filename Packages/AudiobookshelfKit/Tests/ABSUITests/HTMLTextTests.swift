@@ -62,6 +62,15 @@ import Testing
         #expect(plain("<ul><li></li></ul>") == "•")
     }
 
+    @Test func blocksInsideListItemsStayOnTheMarkerLine() {
+        let html = "<ul><li><p>One</p></li><li><p>Two</p><p>More</p></li></ul>"
+        #expect(plain(html) == "• One\n• Two\n\nMore")
+        #expect(plain("<ul><li><div>x</div></li></ul>") == "• x")
+        #expect(plain("<ul><li><h3>x</h3></li></ul>") == "• x")
+        #expect(plain("<ol><li><p>A</p></li><li><div>B</div></li></ol><p>End</p>") == "1. A\n2. B\n\nEnd")
+        #expect(plain("<ul><li><ul><li>x</li></ul></li></ul>") == "•\n    • x")
+    }
+
     @Test func orderedList() {
         #expect(plain("<ol><li>One<li>Two</ol>") == "1. One\n2. Two")
     }
@@ -179,6 +188,23 @@ import Testing
         #expect(plain("a<SCRIPT type=text/javascript>alert(1)</SCRIPT >b") == "ab")
         #expect(plain("a<style>p { color: red }</style>b") == "ab")
         #expect(plain("a<noscript>no</noscript><iframe src=x>frame</iframe>b") == "ab")
+    }
+
+    @Test func customAndNamespacedElementsKeepTheirText() {
+        #expect(plain("<script-widget>description</script-widget>after") == "descriptionafter")
+        #expect(plain("<svg:title>x</svg:title> y") == "x y")
+        #expect(plain("<my-p>a</my-p>b") == "ab")
+        #expect(plain("<b-x>plain</b-x>") == "plain")
+        #expect(
+            HTMLText.attributedString(from: "<b-x>plain</b-x>").runs.allSatisfy { $0.inlinePresentationIntent == nil })
+        #expect(plain("<template-x>t</template-x>u") == "tu")
+    }
+
+    @Test func nestedTemplatesAreSkipped() {
+        #expect(plain("before<template><template>inner</template>hidden</template>after") == "beforeafter")
+        #expect(plain("before<template><!-- </template> -->hidden</template>after") == "beforeafter")
+        #expect(plain("a<TEMPLATE id=t><Template>x</template>still hidden") == "a")
+        #expect(plain("a<template>x<!-- never closed") == "a")
     }
 
     @Test func otherElementsKeepTheirText() {
