@@ -17,11 +17,20 @@ public enum CoverShape: Sendable, Hashable {
     }
 }
 
+/// How a ``CoverView`` presents itself to VoiceOver.
+public enum CoverAccessibility: Sendable, Hashable {
+    /// One image element labelled with the title and author, with the progress as its value.
+    case labelled
+    /// Hidden, for cells that already speak the title (and progress) themselves.
+    case hidden
+}
+
 /// A library item cover loaded through the environment's ``ImagePipeline`` (port of legacy
 /// `BookCover.vue`).
 ///
-/// Shows the title and author on a placeholder when the item has no cover, a tinted icon if
-/// loading fails, and fades the image in. Pass `progress` to show the listening progress bar.
+/// Shows the title and author on a placeholder when the item has no cover (or there is no
+/// pipeline, as in previews), a tinted icon if loading fails, and fades the image in. Pass
+/// `progress` to show the listening progress bar.
 public struct CoverView: View {
     private let key: ImageKey?
     private let title: String
@@ -29,13 +38,16 @@ public struct CoverView: View {
     private let shape: CoverShape
     private let progress: Double?
     private let isFinished: Bool
+    private let accessibility: CoverAccessibility
+    @Environment(\.locale) private var locale
 
     /// - Parameters:
     ///   - key: The cover, or `nil` if the item has none.
     ///   - progress: The listening progress `0...1`, or `nil` for no progress bar.
+    ///   - accessibility: `.hidden` inside cells that already speak the title.
     public init(
         key: ImageKey?, title: String, author: String? = nil, shape: CoverShape = .book, progress: Double? = nil,
-        isFinished: Bool = false
+        isFinished: Bool = false, accessibility: CoverAccessibility = .labelled
     ) {
         self.key = key
         self.title = title
@@ -43,13 +55,22 @@ public struct CoverView: View {
         self.shape = shape
         self.progress = progress
         self.isFinished = isFinished
+        self.accessibility = accessibility
+    }
+
+    /// The VoiceOver value: "Finished", or "Progress, 42%", or empty without a progress bar.
+    static func accessibilityValue(progress: Double?, isFinished: Bool, locale: Locale) -> String {
+        if isFinished { return L10n.string("LabelFinished") }
+        guard let progress else { return "" }
+        return [L10n.string("LabelProgress"), progressAccessibilityValue(progress, locale: locale)]
+            .joined(separator: ", ")
     }
 
     public var body: some View {
         PipelineImage(key: key) {
             Rectangle().fill(ABSColor.secondarySurface)
-        } failure: {
-            CoverPlaceholder(title: title, author: author, showsIcon: key != nil)
+        } failure: { fallback in
+            CoverPlaceholder(title: title, author: author, showsIcon: fallback == .failed)
         }
         .aspectRatio(1 / shape.aspectRatio, contentMode: .fit)
         .overlay {
@@ -58,9 +79,14 @@ public struct CoverView: View {
             }
         }
         .clipShape(.rect(cornerRadius: ABSRadius.small))
-        .accessibilityElement(children: .combine)
+        // Explicit label and value rather than `.combine`, so the progress is always spoken.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: [title, author].compactMap(\.self).joined(separator: ", ")))
+        .accessibilityValue(
+            Text(verbatim: Self.accessibilityValue(progress: progress, isFinished: isFinished, locale: locale))
+        )
         .accessibilityAddTraits(.isImage)
+        .accessibilityHidden(accessibility == .hidden)
     }
 }
 

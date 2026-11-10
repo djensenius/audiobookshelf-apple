@@ -39,4 +39,28 @@ import Testing
         #expect(four.coverWidth == 100)
         #expect(four.coverWidth + four.step * 3 == 240)
     }
+
+    @Test func withoutAPipelineTheFallbackShowsInsteadOfLoading() {
+        #expect(ImageFallback.resolve(hasKey: true, hasPipeline: false, failed: false) == .noImage)
+        #expect(ImageFallback.resolve(hasKey: false, hasPipeline: true, failed: false) == .noImage)
+        #expect(ImageFallback.resolve(hasKey: true, hasPipeline: true, failed: false) == nil)
+        #expect(ImageFallback.resolve(hasKey: true, hasPipeline: true, failed: true) == .failed)
+    }
+
+    @Test func memoryHitsAppearWithoutAFade() {
+        #expect(ImageReveal.animation(after: .milliseconds(2)) == nil)
+        #expect(ImageReveal.animation(after: .milliseconds(400)) != nil)
+    }
+
+    @Test func voiceOverValueSpeaksProgressOrFinished() {
+        let locale = Locale(identifier: "en_US")
+        #expect(CoverView.accessibilityValue(progress: nil, isFinished: false, locale: locale) == "")
+        #expect(
+            CoverView.accessibilityValue(progress: 0.42, isFinished: false, locale: locale)
+                == L10n.string("LabelProgress") + ", 42%")
+        #expect(
+            CoverView.accessibilityValue(progress: 0.42, isFinished: true, locale: locale)
+                == L10n.string("LabelFinished"))
+    }
+
 }

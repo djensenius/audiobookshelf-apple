@@ -18,7 +18,7 @@ public struct AuthorImageView: View {
     public var body: some View {
         PipelineImage(key: key) {
             Rectangle().fill(ABSColor.surface)
-        } failure: {
+        } failure: { _ in
             ZStack {
                 Rectangle().fill(ABSColor.surface)
                 Image(systemName: "person.fill")

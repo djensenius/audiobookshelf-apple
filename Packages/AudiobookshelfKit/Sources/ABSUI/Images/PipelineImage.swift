@@ -20,6 +20,31 @@ struct ImageLoadRequest: Hashable {
     }
 }
 
+/// Why a ``PipelineImage`` shows its fallback instead of an image.
+enum ImageFallback: Hashable {
+    /// There is nothing to load: no key, or no pipeline in the environment (as in previews).
+    case noImage
+    /// The load failed.
+    case failed
+
+    /// The fallback to show, or `nil` while loading or once loaded.
+    static func resolve(hasKey: Bool, hasPipeline: Bool, failed: Bool) -> ImageFallback? {
+        guard hasKey, hasPipeline else { return .noImage }
+        return failed ? .failed : nil
+    }
+}
+
+/// How a newly loaded image appears.
+enum ImageReveal {
+    /// The fade for an image that took `elapsed` to load: none when it arrived almost at once,
+    /// as for a memory-cache hit when a cell scrolls back into view, so cached covers don't
+    /// flash. The pipeline is an actor, so even a hit is asynchronous; the elapsed time tells
+    /// them apart.
+    static func animation(after elapsed: Duration) -> Animation? {
+        elapsed < .milliseconds(50) ? nil : .easeIn(duration: 0.3)
+    }
+}
+
 /// Loads `key` from the environment's pipeline at the rendered size and shows it, filling its
 /// frame. Loading starts in `.task(id:)`, so it is cancelled when the view scrolls away.
 ///
@@ -28,7 +53,7 @@ struct ImageLoadRequest: Hashable {
 struct PipelineImage<Placeholder: View, Failure: View>: View {
     let key: ImageKey?
     @ViewBuilder let placeholder: Placeholder
-    @ViewBuilder let failure: Failure
+    @ViewBuilder let failure: (ImageFallback) -> Failure
 
     @Environment(\.imagePipeline) private var pipeline
     @Environment(\.displayScale) private var displayScale
@@ -45,8 +70,10 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
                 if let image {
                     content(image)
                         .transition(.opacity)
-                } else if failed || key == nil {
-                    failure
+                } else if let fallback = ImageFallback.resolve(
+                    hasKey: key != nil, hasPipeline: pipeline != nil, failed: failed)
+                {
+                    failure(fallback)
                 } else {
                     placeholder
                 }
@@ -57,7 +84,8 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
             } action: {
                 size = $0
             }
-            .task(id: request) { await load(request) }
+            // Keyed on the pipeline's presence too, so one injected later starts the load.
+            .task(id: pipeline == nil ? nil : request) { await load(request) }
     }
 
     @ViewBuilder private func content(_ image: CoverImage) -> some View {
@@ -84,9 +112,10 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
             image = nil
             failed = false
         }
+        let start = ContinuousClock.now
         do {
             let loaded = try await pipeline.image(for: request.key, pixelBox: request.box)
-            withAnimation(.easeIn(duration: 0.3)) {
+            withAnimation(ImageReveal.animation(after: ContinuousClock.now - start)) {
                 image = loaded
                 imageEntity = request.key.entityID
                 failed = false

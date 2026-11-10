@@ -4,15 +4,26 @@ import SwiftUI
 /// The cover of a series, collection or playlist: up to four item covers fanned out across the
 /// frame, the first on top (port of legacy `GroupCover.vue`). With no covers it shows the
 /// group's name. Size it with a frame.
+///
+/// Legacy fans out up to 10 covers; this caps them at ``maxCovers`` (4). At grid sizes the
+/// fifth and later covers show only as slivers, and every cover shown is a decoded bitmap kept
+/// alive while the tile is on screen. ADR 0005's bound of about 30 visible covers counts one
+/// per cell, so a grid of group tiles can hold up to four times that. Each cover is requested
+/// at its own rendered width, which is narrower than the tile's when several are fanned, so it
+/// usually lands in the 300 px bucket and costs less than a full-width cover.
 public struct GroupCoverView: View {
     private let name: String
     private let keys: [ImageKey]
     private let shape: CoverShape
 
-    /// - Parameter keys: The covers of the group's first items; only the first four are shown.
+    /// The most covers shown; see the type's documentation.
+    public static let maxCovers = 4
+
+    /// - Parameter keys: The covers of the group's first items; only the first ``maxCovers``
+    ///   are shown.
     public init(name: String, keys: [ImageKey], shape: CoverShape = .book) {
         self.name = name
-        self.keys = Array(keys.prefix(4))
+        self.keys = Array(keys.prefix(Self.maxCovers))
         self.shape = shape
     }
 
@@ -26,8 +37,8 @@ public struct GroupCoverView: View {
                     ForEach(Array(keys.enumerated()), id: \.offset) { index, key in
                         PipelineImage(key: key) {
                             Rectangle().fill(ABSColor.secondarySurface)
-                        } failure: {
-                            CoverPlaceholder(title: name, showsIcon: true)
+                        } failure: { fallback in
+                            CoverPlaceholder(title: name, showsIcon: fallback == .failed)
                         }
                         .frame(width: layout.coverWidth, height: proxy.size.height)
                         .shadow(color: .black.opacity(0.4), radius: 2, x: 4)
