@@ -402,6 +402,80 @@ struct BridgeHarness {
         #expect(session.snapshot == b.snapshot(.paused, at: 200))
     }
 
+    @Test func toggleBeforeTheEngineStartsKeepsItPausedAndInactive() async throws {
+        let b = try BridgeHarness()
+        let (play, gate) = await b.playHeld("a")
+        try await b.controller.perform(.skipForward(30))
+        let seekGate = Gate()
+        b.h.engine.seekGates = [seekGate]
+        gate.open()
+        await yieldUntil { b.h.engine.seeks == [30] }
+        let session = try b.session
+
+        // Loaded with the catch-up seek in flight, the engine still loading: not shown as playing.
+        b.h.engine.state = .loading
+        #expect(b.coordinator.isPlaybackRequested)
+        try await b.controller.perform(.togglePlayPause)
+        #expect(!b.coordinator.isPlaybackRequested)
+        seekGate.open()
+        await play.value
+
+        #expect(!b.coordinator.isPlaying)
+        #expect(!b.h.engine.isPlaybackRequested)
+        #expect(session.snapshot == b.snapshot(.paused, at: 30))
+        let shownPlaying = [0.0, 30].flatMap {
+            [b.snapshot(.playing(rate: 1), at: $0), b.snapshot(.buffering, at: $0)]
+        }
+        #expect(!session.snapshots.contains { $0.map(shownPlaying.contains) ?? false })
+        #expect(session.applicationPrimaryRequests == 0)
+
+        // A real play activates.
+        try await b.controller.perform(.play)
+        #expect(b.coordinator.isPlaying)
+        await b.controller.activationTask?.value
+        #expect(session.applicationPrimaryRequests == 1)
+    }
+
+    @Test func anInterruptionPauseIsPublished() async throws {
+        let b = try BridgeHarness()
+        await b.coordinator.play(itemID: "a")
+        let session = try b.session
+        b.h.engine.currentTime = 200
+
+        // The engine pauses on an audio session interruption without a coordinator event.
+        b.h.engine.isPlaybackRequested = false
+        b.h.engine.state = .paused
+        await yieldUntil { session.snapshot == b.snapshot(.paused, at: 200) }
+        #expect(!b.coordinator.isPlaybackRequested)
+    }
+
+    @Test func stallsAlternateWithPlayingAndHoldTheElapsedTime() async throws {
+        let b = try BridgeHarness()
+        await b.coordinator.play(itemID: "a")
+        let session = try b.session
+        b.h.engine.currentTime = 200
+
+        b.h.engine.state = .buffering
+        let firstStall = b.snapshot(.buffering, at: 200)
+        await yieldUntil { session.snapshot == firstStall }
+        // Ticks while stalled at the same position publish nothing: the elapsed time is held.
+        let published = session.snapshots.count
+        b.h.clock.advance(by: 5)
+        b.h.engine.onEvent?(.tick(200))
+        #expect(session.snapshots.count == published)
+
+        b.h.engine.state = .playing
+        let resumed = b.snapshot(.playing(rate: 1), at: 200)
+        await yieldUntil { session.snapshot == resumed }
+
+        b.h.clock.advance(by: 10)
+        b.h.engine.currentTime = 210
+        b.h.engine.state = .buffering
+        let secondStall = b.snapshot(.buffering, at: 210)
+        await yieldUntil { session.snapshot == secondStall }
+        #expect(Array(session.snapshots.suffix(3)) == [firstStall, resumed, secondStall])
+    }
+
     @Test func aFailedLoadAndARestartKeepTheMetadata() async throws {
         let b = try BridgeHarness()
         b.h.engine.loadError = .emptyTimeline

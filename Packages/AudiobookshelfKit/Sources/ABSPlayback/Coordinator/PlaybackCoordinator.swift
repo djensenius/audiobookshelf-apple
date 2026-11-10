@@ -57,8 +57,9 @@ public final class PlaybackCoordinator {
     /// The saved playback rate, applied on every load and play.
     public var rate: Double { settings.playbackRate }
     public var timeline: PlaybackTimeline? { phase == .loaded ? engine.timeline : nil }
-    /// Global seconds: the engine's while loaded, else the position play will resume from.
-    public var currentTime: Double { phase == .loaded ? engine.currentTime : unloadedPosition }
+    /// Global seconds: the engine's while loaded, else the position play will resume from (moved by
+    /// any jumps not yet applied).
+    public var currentTime: Double { phase == .loaded ? engine.currentTime : unloadedPositionAfterJumps }
     public var duration: Double { phase == .loaded ? engine.duration : unloadedDuration }
     public var isPlaying: Bool { phase == .loaded && engine.state == .playing }
     public var isBuffering: Bool {
@@ -68,6 +69,9 @@ public final class PlaybackCoordinator {
         case .idle, .unloaded: false
         }
     }
+    /// The engine was asked to play since this session loaded, so the audio session has been
+    /// activated (the engine activates it before playing). Reset when the session closes.
+    public private(set) var hasStartedEngine = false
     public var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
     public var chapter: Chapter? { timeline?.currentChapter(at: currentTime) }
     /// The current chapter's span, for chapter-relative times (`elapsed(at:)`, `remaining(at:)`).
@@ -102,11 +106,15 @@ public final class PlaybackCoordinator {
 
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var playWhenLoaded = true
+    /// Loaded, but `play()` hasn't finished: a catch-up seek may be in flight before the engine
+    /// starts. Play intent is `playWhenLoaded` until then.
+    @ObservationIgnored private var isFinishingLoad = false
     /// A position chosen while starting or unloaded (a seek, or a play with a start time).
     @ObservationIgnored private var pendingStartTime: Double?
     /// Jumps made while starting, or while unloaded without a chosen position; applied after the
-    /// resume position is resolved, so they never replace it.
-    @ObservationIgnored private var pendingJumpOffset: Double = 0
+    /// resume position is resolved, so they never replace it. The single source of the jumps: the
+    /// position shown is `unloadedPosition` plus this (clamped while unloaded, see `jump(by:)`).
+    private var pendingJumpOffset: Double = 0
     @ObservationIgnored private var policyCheck = 0
     /// When playback was last seen playing; drives auto-rewind on resume.
     @ObservationIgnored private var lastPlayedAt: Date?
@@ -336,6 +344,8 @@ public final class PlaybackCoordinator {
         }
         guard current == generation else { return }
         phase = .loaded
+        isFinishingLoad = true
+        defer { if current == generation { isFinishingLoad = false } }
         restoredRecord = nil
         lastPlayedAt = nil
         let intent = resumeIntent
@@ -367,6 +377,7 @@ public final class PlaybackCoordinator {
         case .idle: return
         case .starting: playWhenLoaded = true
         case .unloaded: await play(itemID: key.libraryItemId, episodeID: key.episodeId)
+        case .loaded where isFinishingLoad: playWhenLoaded = true
         case .loaded: await resumeLoaded(rewindingBy: seconds, startingAt: nil)
         }
     }
@@ -415,9 +426,15 @@ public final class PlaybackCoordinator {
         startEngine()
     }
 
+    /// Pauses, and cancels a play waiting on its streaming-policy check (``pendingPlayKey``).
     public func pause() {
+        if pendingPlayKey != nil {
+            policyCheck += 1
+            pendingPlayKey = nil
+        }
         switch phase {
         case .starting: playWhenLoaded = false
+        case .loaded where isFinishingLoad: playWhenLoaded = false
         case .loaded:
             resumeIntent += 1
             resumingIntent = nil
@@ -481,22 +498,24 @@ public final class PlaybackCoordinator {
             return nil
         case .unloaded:
             if let pendingStartTime { return await seek(to: pendingStartTime + offset) }
-            pendingJumpOffset += offset
-            let moved = max(unloadedPosition + offset, 0)
-            unloadedPosition = unloadedDuration > 0 ? min(moved, unloadedDuration) : moved
-            return unloadedPosition
+            // Kept so the position shown stays within the item: it and the resume agree.
+            pendingJumpOffset = Self.clamp(unloadedPositionAfterJumps + offset, to: unloadedDuration) - unloadedPosition
+            return unloadedPositionAfterJumps
         case .idle:
             return nil
         }
     }
 
-    /// Whether the user wants playback: true while starting to play, and while loaded and
-    /// playing, buffering, seeking or resuming, unlike ``isPlaying``. Drives play/pause toggles.
+    /// Whether the user wants playback: true while a play waits on its streaming-policy check,
+    /// while starting to play (until the engine starts), and while loaded and playing, buffering,
+    /// seeking or resuming, unlike ``isPlaying``. Drives play/pause toggles.
     public var isPlaybackRequested: Bool {
+        if pendingPlayKey != nil { return true }
         switch phase {
-        case .starting: playWhenLoaded
-        case .loaded: engine.isPlaybackRequested || resumingIntent != nil
-        case .idle, .unloaded: false
+        case .starting: return playWhenLoaded
+        case .loaded where isFinishingLoad: return playWhenLoaded
+        case .loaded: return engine.isPlaybackRequested || resumingIntent != nil
+        case .idle, .unloaded: return false
         }
     }
 
@@ -550,11 +569,14 @@ public final class PlaybackCoordinator {
         guard let key = mediaKey, phase == .loaded else { return }
         let date = now()
         lastPlayedSavedAt = date
+        // A podcast episode shows its show as the author (as Now Playing does).
+        var author = session?.displayAuthor
+        if case .podcast(let show) = session?.mediaMetadata { author = show.title }
         lastPlayedStore.save(
             LastPlayedRecord(
                 serverConnectionID: key.serverConnectionID, libraryItemID: key.libraryItemId,
                 episodeID: key.episodeId, position: currentTime, duration: duration > 0 ? duration : nil,
-                timestamp: date, isFinished: reachedEnd, title: session?.displayTitle, author: session?.displayAuthor,
+                timestamp: date, isFinished: reachedEnd, title: session?.displayTitle, author: author,
                 coverPath: session?.coverPath, chapterTitle: chapter?.title))
     }
 
@@ -590,6 +612,8 @@ public final class PlaybackCoordinator {
     // MARK: Helpers
 
     private func startEngine() {
+        isFinishingLoad = false
+        hasStartedEngine = true
         engine.setRate(Float(rate))
         engine.play()
         emit(.playbackStarted)
@@ -618,6 +642,8 @@ public final class PlaybackCoordinator {
         }
         resumeIntent += 1
         resumingIntent = nil
+        isFinishingLoad = false
+        hasStartedEngine = false
         if phase == .loaded || phase == .starting { engine.stop() }
         if phase != .idle { phase = .unloaded }
         if let session, let key = mediaKey {
@@ -721,6 +747,17 @@ public final class PlaybackCoordinator {
         guard let date = candidate.updatedAt else { return false }
         return date.timeIntervalSince(record.timestamp) > otherProgressDateTolerance
             && abs(candidate.currentTime - record.position) > otherProgressPositionTolerance
+    }
+
+    /// The unloaded position moved by jumps not yet applied, within the item.
+    private var unloadedPositionAfterJumps: Double {
+        Self.clamp(unloadedPosition + pendingJumpOffset, to: unloadedDuration)
+    }
+
+    /// `time` within `0...duration`, or only at 0 when the duration is unknown (0).
+    private static func clamp(_ time: Double, to duration: Double) -> Double {
+        let time = time.isFinite ? max(time, 0) : 0
+        return duration > 0 ? min(time, duration) : time
     }
 
     private static func nonNegative(_ value: Double) -> Double {

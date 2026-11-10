@@ -202,8 +202,9 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
 
     /// Published play state: playing while the coordinator plays, and also while loaded media stalls
     /// with play requested (published as buffering, elapsed time held), so the system offers pause
-    /// for a stalled stream. Never while starting: the first playing state activates the Now Playing
-    /// session, and the engine's audio session must be active first.
+    /// for a stalled stream. Never before the engine has started for this session (while starting,
+    /// or loaded with a catch-up seek in flight): the first playing state activates the Now Playing
+    /// session, and the engine's audio session must be active first (ADR 0006).
     static func state(of coordinator: PlaybackCoordinator, key: MediaKey, metadata: Metadata) -> NowPlayingState {
         var chapter: NowPlayingState.Chapter?
         if let timeline = coordinator.timeline, let index = coordinator.chapterIndex {
@@ -213,8 +214,8 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
                 range: TimelineRange(start: current.start, end: current.end))
         }
         let stalled =
-            !coordinator.isPlaying && coordinator.phase == .loaded && coordinator.isBuffering
-            && coordinator.isPlaybackRequested
+            !coordinator.isPlaying && coordinator.phase == .loaded && coordinator.hasStartedEngine
+            && coordinator.isBuffering && coordinator.isPlaybackRequested
         return NowPlayingState(
             key: key, title: metadata.title, author: metadata.author, narrator: metadata.narrator,
             releaseDate: metadata.releaseDate, chapter: chapter, duration: coordinator.duration,
