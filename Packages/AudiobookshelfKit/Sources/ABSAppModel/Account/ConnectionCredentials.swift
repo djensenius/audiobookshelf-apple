@@ -91,8 +91,17 @@ struct CredentialVault: Sendable {
 /// the refresh token from before the refresh. The refreshed pair is then rejected by
 /// ``replaceTokens(expected:with:)`` and never stored; if the server had already rotated the
 /// token, its session for the new token stays until it expires there.
+///
+/// Every client of the connection, including one kept after a restore made another, refreshes
+/// through ``refreshTokens(_:using:)``, so they never refresh the same pair twice.
+///
+/// Keychain calls block their thread on IPC, so each instance runs on its own serial queue
+/// rather than on the shared cooperative pool, where blocked threads would hold up unrelated
+/// tasks.
 actor ConnectionCredentials: TokenProvider {
     nonisolated let connectionID: UUID
+    private let queue = DispatchSerialQueue(label: "org.davidjensenius.Audiobookshelf.credentials")
+    nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
     private let vault: CredentialVault
     /// Runs after a rejected refresh token ended the session, before ``APIClient`` throws
     /// `sessionExpired`, with the ``generation`` that ended it.
@@ -105,6 +114,14 @@ actor ConnectionCredentials: TokenProvider {
     /// Bumped by every sign-in, sign-out, expiry and removal, so ``AccountManager`` can ignore an
     /// expiry, or skip a delete, that a newer sign-in has already replaced.
     private var generation = 0
+    /// The ``AccountManager`` call whose sign-in stored `session`, or 0 if it was read from the
+    /// Keychain, so a sign-out can keep a session that a newer call stored.
+    private var sessionOperation = 0
+    /// The refresh running for each pair, from whichever client started it.
+    private var refreshes: [AuthTokens: (id: Int, task: Task<Void, any Error>)] = [:]
+    private var nextRefreshID = 0
+    /// Test hook: called whenever a refresh waits for one another client started.
+    private var refreshJoinObserver: (@Sendable () -> Void)?
 
     init(connectionID: UUID, vault: CredentialVault, onExpire: @escaping @MainActor @Sendable (UUID, Int) -> Void) {
         self.connectionID = connectionID
@@ -120,17 +137,19 @@ actor ConnectionCredentials: TokenProvider {
         return (session, customHeaders)
     }
 
-    /// The stored session, as ``load()`` returns it, and its ``generation``, for a delete with
-    /// ``signOut(ifGeneration:)`` that mustn't end a session stored after this read.
-    func loadSession() throws(KeychainError) -> (session: StoredSession?, generation: Int) {
-        (try load().session, generation)
+    /// The stored session, as ``load()`` returns it, its ``generation``, for a delete with
+    /// ``signOut(ifGeneration:savedBefore:)`` that mustn't end a session stored after this read,
+    /// and whether a sign-in in this process stored it.
+    func loadSession() throws(KeychainError) -> (session: StoredSession?, generation: Int, storedBySignIn: Bool) {
+        (try load().session, generation, sessionOperation != 0)
     }
 
     /// Stores a new sign-in. Returns its generation and the session it replaced, for the server
     /// sign-out. Throws, keeping the previous session and custom headers in memory and in the
     /// Keychain, if the Keychain can't be written.
+    /// - Parameter operation: The ``AccountManager`` call signing in, from 1.
     func signIn(
-        _ new: StoredSession, customHeaders headers: [String: String]
+        _ new: StoredSession, customHeaders headers: [String: String], operation: Int = 1
     ) throws(KeychainError) -> (generation: Int, replaced: StoredSession?) {
         let replaced = try? load().session
         try vault.setCredentials(session: new, customHeaders: headers, for: connectionID)
@@ -139,17 +158,30 @@ actor ConnectionCredentials: TokenProvider {
         isLoaded = true
         needsWrite = false
         generation += 1
+        sessionOperation = operation
         return (generation, replaced)
     }
 
     /// Ends the session, keeping the custom headers. Returns the session that ended, for the
-    /// server sign-out, and the error if the Keychain item couldn't be deleted yet.
-    /// - Parameter expected: Only sign out if the session is still the one this generation
-    ///   stored.
-    func signOut(ifGeneration expected: Int? = nil) -> (ended: StoredSession?, deleteError: KeychainError?) {
-        guard expected == nil || expected == generation else { return (nil, nil) }
+    /// server sign-out, and the error if the Keychain item couldn't be deleted yet, or `nil`,
+    /// changing nothing, if the session isn't one of these.
+    /// - Parameters:
+    ///   - expected: Only sign out if the session is still the one this generation stored.
+    ///   - operation: Only sign out if the session was read from the Keychain or stored by a
+    ///     sign-in that started before this ``AccountManager`` call, whatever order the two
+    ///     reach this actor in.
+    func signOut(
+        ifGeneration expected: Int? = nil, savedBefore operation: Int = .max
+    ) -> (ended: StoredSession?, deleteError: KeychainError?)? {
+        guard expected == nil || expected == generation, sessionOperation < operation else { return nil }
         let ended = try? load().session
         return (ended, clearSession())
+    }
+
+    /// Whether a sign-in that started after the ``AccountManager`` call `operation` stored the
+    /// session.
+    func holdsSignIn(after operation: Int) -> Bool {
+        sessionOperation > operation
     }
 
     /// Deletes the Keychain item. Returns what it held, for the server sign-out. Throws, changing
@@ -162,7 +194,22 @@ actor ConnectionCredentials: TokenProvider {
         isLoaded = true
         needsWrite = false
         generation += 1
+        sessionOperation = 0
         return loaded
+    }
+
+    /// Deletes the Keychain item as ``removeAll()`` does, only if the session is still the one
+    /// stored at generation `expected`; otherwise returns `nil`, changing nothing.
+    func removeAll(
+        ifGeneration expected: Int
+    ) throws(KeychainError) -> (session: StoredSession?, customHeaders: [String: String])? {
+        guard expected == generation else { return nil }
+        return try removeAll()
+    }
+
+    /// Lets tests wait until a refresh is waiting for another client's.
+    func observeRefreshJoins(_ observer: @escaping @Sendable () -> Void) {
+        refreshJoinObserver = observer
     }
 
     // MARK: - TokenProvider
@@ -192,12 +239,29 @@ actor ConnectionCredentials: TokenProvider {
         return true
     }
 
+    func refreshTokens(_ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void) async throws {
+        if let running = refreshes[tokens] {
+            refreshJoinObserver?()
+            return try await running.task.value
+        }
+        nextRefreshID += 1
+        let id = nextRefreshID
+        let task = Task {
+            // Unregistered before it finishes, as in `APIClient`, so nothing joins it once done.
+            defer { if refreshes[tokens]?.id == id { refreshes[tokens] = nil } }
+            try await refresh()
+        }
+        refreshes[tokens] = (id, task)
+        try await task.value
+    }
+
     // MARK: - Private
 
     @discardableResult
     private func clearSession() -> KeychainError? {
         session = nil
         generation += 1
+        sessionOperation = 0
         needsWrite = true
         return writeIfNeeded()
     }

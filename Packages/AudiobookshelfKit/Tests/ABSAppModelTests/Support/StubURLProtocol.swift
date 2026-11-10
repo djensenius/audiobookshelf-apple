@@ -1,5 +1,6 @@
 import Foundation
 import Synchronization
+import Testing
 
 /// A canned response returned by ``StubURLProtocol``.
 struct StubResponse: Sendable {
@@ -34,8 +35,8 @@ final class StubURLProtocol: URLProtocol {
         /// Held requests the client cancelled before the gate opened.
         var abandoned: [URLRequest] = []
         var cookieStorage: HTTPCookieStorage?
-        /// One-shot gates by path.
-        var gates: [String: StubGate] = [:]
+        /// One-shot gates by path, and whether each answers the request as it arrives.
+        var gates: [String: (gate: StubGate, answersOnArrival: Bool)] = [:]
     }
 
     private static let routes = Mutex<[String: Route]>([:])
@@ -49,10 +50,13 @@ final class StubURLProtocol: URLProtocol {
     }
 
     /// Holds the next request for `path` on `host` until the gate opens; the handler then answers
-    /// it.
-    static func hold(host: String, path: String) -> StubGate {
-        let gate = StubGate()
-        routes.withLock { $0[host]?.gates[path] = gate }
+    /// it, or, if `answeringOnArrival`, answers it on arrival and the answer is delivered then, so
+    /// later requests see what it changed while it's held.
+    static func hold(
+        host: String, path: String, answeringOnArrival: Bool = false, sourceLocation: SourceLocation = #_sourceLocation
+    ) -> StubGate {
+        let gate = StubGate(sourceLocation: sourceLocation)
+        routes.withLock { $0[host]?.gates[path] = (gate, answeringOnArrival) }
         return gate
     }
 
@@ -76,17 +80,26 @@ final class StubURLProtocol: URLProtocol {
 
     override func startLoading() {
         let request = request
-        let route = Self.routes.withLock { routes -> (Handler, HTTPCookieStorage?, StubGate?)? in
+        let route = Self.routes.withLock { routes -> (Handler, HTTPCookieStorage?, (StubGate, Bool)?)? in
             guard let host = request.url?.host(), let route = routes[host] else { return nil }
             routes[host]?.requests.append(request)
             let gate = request.url.flatMap { routes[host]?.gates.removeValue(forKey: $0.path()) }
-            return (route.handler, route.cookieStorage, gate)
+            return (route.handler, route.cookieStorage, gate.map { ($0.gate, $0.answersOnArrival) })
         }
-        guard let (handler, cookieStorage, gate) = route else {
+        guard let (handler, cookieStorage, held) = route else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
-        guard let gate else { return respond(to: request, handler: handler, cookieStorage: cookieStorage) }
+        guard let (gate, answersOnArrival) = held else {
+            return respond(to: request, handler: handler, cookieStorage: cookieStorage)
+        }
+        let answer = answersOnArrival ? handler(request) : nil
+        let respondingHandler: Handler
+        if let answer {
+            respondingHandler = { _ in answer }
+        } else {
+            respondingHandler = handler
+        }
         let box = UncheckedProtocol(value: self)
         gate.hold {
             DispatchQueue.global().async {
@@ -95,7 +108,7 @@ final class StubURLProtocol: URLProtocol {
                     Self.routes.withLock { $0[host]?.abandoned.append(request) }
                     return
                 }
-                box.value.respond(to: request, handler: handler, cookieStorage: cookieStorage)
+                box.value.respond(to: request, handler: respondingHandler, cookieStorage: cookieStorage)
             }
         }
     }
@@ -136,15 +149,35 @@ final class StubURLProtocol: URLProtocol {
 }
 
 /// Holds one request, or one call at a test hook, until the test opens it.
+///
+/// Bounded, so a gate a test never opens, or a request or call that never arrives, fails the
+/// test instead of hanging the run: if, after ``timeout``, the gate isn't open, or someone is
+/// still waiting for an arrival, it records an issue, then opens and lets every waiter through.
 final class StubGate: Sendable {
+    static let timeout: Duration = .seconds(10)
+
     private struct State {
         var hasArrived = false
         var isOpen = false
         var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
         var held: (@Sendable () -> Void)?
+        var watchdog: Task<Void, Never>?
+
+        /// Nothing can wait on the gate any more.
+        var isDone: Bool { hasArrived && isOpen }
     }
 
     private let state = Mutex(State())
+
+    /// - Parameter sourceLocation: Where an issue for a timeout is reported.
+    init(sourceLocation: SourceLocation = #_sourceLocation) {
+        // Made in the test's task, so a timeout is reported against that test.
+        let watchdog = Task { [weak self] in
+            do { try await Task.sleep(for: Self.timeout) } catch { return }
+            self?.expire(sourceLocation)
+        }
+        state.withLock { $0.watchdog = watchdog }
+    }
 
     /// Returns once the request has arrived and is being held.
     func arrived() async {
@@ -161,17 +194,24 @@ final class StubGate: Sendable {
     func open() {
         let held = state.withLock { state in
             state.isOpen = true
-            defer { state.held = nil }
+            defer {
+                state.held = nil
+                if state.isDone { state.watchdog?.cancel() }
+            }
             return state.held
         }
         held?()
     }
 
-    fileprivate func hold(_ respond: @escaping @Sendable () -> Void) {
+    /// Holds `respond` until the gate opens, or calls it now if it's open.
+    func hold(_ respond: @escaping @Sendable () -> Void) {
         let (waiters, isOpen) = state.withLock { state in
             state.hasArrived = true
             if !state.isOpen { state.held = respond }
-            defer { state.arrivalWaiters = [] }
+            defer {
+                state.arrivalWaiters = []
+                if state.isDone { state.watchdog?.cancel() }
+            }
             return (state.arrivalWaiters, state.isOpen)
         }
         waiters.forEach { $0.resume() }
@@ -188,6 +228,24 @@ final class StubGate: Sendable {
     func reach() {
         open()
         hold {}
+    }
+
+    private func expire(_ sourceLocation: SourceLocation) {
+        let (waiters, held, wasOpen) = state.withLock { state in
+            defer {
+                state.hasArrived = true
+                state.isOpen = true
+                state.arrivalWaiters = []
+                state.held = nil
+            }
+            return (state.arrivalWaiters, state.held, state.isOpen)
+        }
+        guard !wasOpen || !waiters.isEmpty else { return }
+        Issue.record(
+            "A gate wasn't opened, or what it holds didn't arrive, within \(Self.timeout)",
+            sourceLocation: sourceLocation)
+        waiters.forEach { $0.resume() }
+        held?()
     }
 }
 

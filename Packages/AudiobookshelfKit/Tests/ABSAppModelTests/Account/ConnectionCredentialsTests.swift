@@ -18,7 +18,7 @@ private final class ExpiryRecorder: Sendable {
     var recorded: [Int] { generations.withLock { $0 } }
 }
 
-@Suite struct ConnectionCredentialsTests {
+@Suite(.timeLimit(.minutes(1))) struct ConnectionCredentialsTests {
     private let first = AuthTokens(accessToken: "access-1", refreshToken: "refresh-1")
     private let second = AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")
 
@@ -54,6 +54,31 @@ private final class ExpiryRecorder: Sendable {
         #expect(await credentials.tokens() == nil)
         #expect(recorder.recorded == [signedIn + 1])
         #expect(try await credentials.signIn(session, customHeaders: [:]).generation > signedIn + 1)
+    }
+
+    @Test func signOutKeepsASessionANewerCallStored() async throws {
+        let vault = CredentialVault(keychain: InMemoryKeychain())
+        let id = UUID()
+        _ = try await ConnectionCredentials(connectionID: id, vault: vault) { _, _ in }
+            .signIn(StoredSession(tokens: first, openIDSession: nil), customHeaders: [:])
+        let credentials = ConnectionCredentials(connectionID: id, vault: vault) { _, _ in }
+        #expect(try await credentials.loadSession().storedBySignIn == false)
+        // Read from the Keychain, so any call signs out of it.
+        #expect(await credentials.signOut(savedBefore: 1)?.ended?.tokens == first)
+
+        let session = StoredSession(tokens: second, openIDSession: nil)
+        _ = try await credentials.signIn(session, customHeaders: [:], operation: 3)
+        #expect(try await credentials.loadSession().storedBySignIn)
+        #expect(await credentials.holdsSignIn(after: 2))
+        #expect(await !credentials.holdsSignIn(after: 3))
+        #expect(await credentials.signOut(savedBefore: 3) == nil)
+        #expect(try await credentials.load().session == session)
+        #expect(try vault.session(for: id) == session)
+        let signedOut = await credentials.signOut(savedBefore: 4)
+        #expect(signedOut?.ended == session && signedOut?.deleteError == nil)
+        #expect(try vault.session(for: id) == nil)
+        #expect(try await credentials.loadSession().storedBySignIn == false)
+        #expect(await !credentials.holdsSignIn(after: 0))
     }
 
     @Test func corruptItemsReadAsMissing() throws {

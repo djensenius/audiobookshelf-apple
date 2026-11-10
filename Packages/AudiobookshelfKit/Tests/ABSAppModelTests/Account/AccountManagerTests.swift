@@ -1,6 +1,8 @@
 import ABSCore
 import Foundation
+import Observation
 import Security
+import SwiftData
 import Synchronization
 import Testing
 
@@ -60,9 +62,12 @@ private final class FakeServer: Sendable {
         StubURLProtocol.abandonedRequests(host: host).filter { $0.url?.path() == "/abs\(path)" }
     }
 
-    /// Holds the next request for `path` until the gate opens.
-    func hold(_ path: String) -> StubGate {
-        StubURLProtocol.hold(host: host, path: "/abs\(path)")
+    /// Holds the next request for `path` until the gate opens, as `StubURLProtocol.hold` does.
+    func hold(
+        _ path: String, answeringOnArrival: Bool = false, sourceLocation: SourceLocation = #_sourceLocation
+    ) -> StubGate {
+        StubURLProtocol.hold(
+            host: host, path: "/abs\(path)", answeringOnArrival: answeringOnArrival, sourceLocation: sourceLocation)
     }
 
     /// The server forgets the access token, so the next request refreshes.
@@ -163,11 +168,24 @@ private final class TickingClock: Sendable {
 @MainActor
 private struct Harness {
     let keychain = InMemoryKeychain()
+    let container: ModelContainer
     let store: ServerConnectionStore
     let clock = TickingClock()
 
     init() throws {
-        store = ServerConnectionStore(modelContainer: try DataStack(location: .inMemory).container)
+        container = try DataStack(location: .inMemory).container
+        store = ServerConnectionStore(modelContainer: container)
+    }
+
+    /// Saves progress that hasn't synced for the connection, so removing it keeps it, disconnected.
+    func retainRecords(of id: UUID) throws {
+        let context = ModelContext(container)
+        let progress = LocalMediaProgress(
+            key: MediaKey(serverConnectionID: id, libraryItemId: "li_1").rawValue, serverConnectionID: id,
+            libraryItemId: "li_1")
+        progress.needsServerSync = true
+        context.insert(progress)
+        try context.save()
     }
 
     /// - Parameter willReadClock: Runs before each reading of the clock, in the caller's task.
@@ -205,6 +223,27 @@ private func validate(_ server: FakeServer) async throws -> ValidatedServer {
         .validate(address: server.address, customHeaders: ["X-Proxy": "proxy-secret"])
 }
 
+/// Waits until `condition` holds, checking it again after each change to an observable property
+/// it read. Bounded as ``StubGate`` is.
+@MainActor
+private func waitUntil(
+    sourceLocation: SourceLocation = #_sourceLocation, _ condition: @escaping @MainActor @Sendable () -> Bool
+) async {
+    let holds = StubGate(sourceLocation: sourceLocation)
+    track(condition, reaching: holds)
+    await holds.arrived()
+}
+
+@MainActor
+private func track(_ condition: @escaping @MainActor @Sendable () -> Bool, reaching gate: StubGate) {
+    withObservationTracking {
+        if condition() { gate.reach() }
+    } onChange: {
+        // Called before the change; check again once it's made.
+        Task { @MainActor in track(condition, reaching: gate) }
+    }
+}
+
 @MainActor
 private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool = false) async throws -> UUID {
     let validated = try await validate(server)
@@ -216,7 +255,7 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
     return try #require(manager.activeConnection?.id)
 }
 
-@MainActor @Suite struct AccountManagerTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct AccountManagerTests {
     @Test func firstLocalLogin() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()
@@ -355,6 +394,8 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         try await manager.switch(to: firstID)
         #expect(manager.state.user?.connectionID == firstID && manager.activeConnection?.id == firstID)
         #expect(manager.connections.map(\.id) == [firstID, secondID])
+        // Published as marked used.
+        #expect(manager.activeConnection == manager.connections.first)
         #expect(first.requests("/api/authorize").count == 1)
 
         let relaunched = harness.makeManager()
@@ -589,6 +630,35 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(manager.connections.first { $0.id == id }?.signedOutAt == nil)
     }
 
+    @Test func signingInAgainPublishesTheConnectionAsSaved() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        await manager.logout()
+        _ = try await signIn(manager, to: server)
+
+        let saved = try #require(try await harness.store.connection(id: id))
+        #expect(saved.signedOutAt == nil)
+        #expect(manager.activeConnection == saved && manager.connections == [saved])
+    }
+
+    @Test func removalThatCannotBeSavedStillEndsTheSession() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+
+        await harness.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await manager.remove(id) }
+        // The session was deleted first, so it's ended now: nothing could end it later.
+        #expect(try harness.session(id) == nil && server.loggedOutRefreshTokens == ["refresh-1"])
+        #expect(manager.state == .signedOut && manager.connections.map(\.id) == [id])
+
+        try await manager.remove(id)
+        #expect(manager.connections.isEmpty && server.loggedOutRefreshTokens == ["refresh-1"])
+    }
+
     @Test func signInThatCannotClearItsSignOutFails() async throws {
         let harness = try Harness()
         let server = FakeServer()
@@ -671,7 +741,7 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
 
 /// Calls that overlap: the newer call wins, and signing out also ends the session of a call that
 /// is still running.
-@MainActor @Suite struct AccountManagerOverlapTests {
+@MainActor @Suite(.timeLimit(.minutes(1))) struct AccountManagerOverlapTests {
     @Test func logoutDuringRefreshEndsTheSession() async throws {
         let harness = try Harness()
         let server = FakeServer()
@@ -990,10 +1060,11 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         let restore = Task { await manager.restoreSession() }
         await read.arrived()
 
-        // Starts before the restore resumes from reading the session.
         let signingOut = Task {
             if removing { _ = try await manager.remove(id) } else { _ = await manager.logout() }
         }
+        // Started, so the restore resumes from reading the session after it.
+        await waitUntil { manager.state == .signedOut }
         read.open()
         try await signingOut.value
         await restore.value
@@ -1038,6 +1109,126 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         await #expect(throws: CancellationError.self) { try await signingIn.value }
         #expect(manager.state == .signedOut && manager.connections.isEmpty && harness.keychain.isEmpty)
         #expect(server.loggedOutRefreshTokens == ["refresh-1", "refresh-2"])
+    }
+
+    @Test func newerSignInSurvivesTheCleanupOfASignInARemovalCancelled() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        // Removing keeps it, disconnected, so signing in again reconnects it.
+        try harness.retainRecords(of: id)
+        let validated = try await validate(server)
+        let replacedLogout = server.hold("/logout")
+        let older = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await replacedLogout.arrived()
+        let removalLogout = server.hold("/logout")
+        let removing = Task { try await manager.remove(id) }
+        await removalLogout.arrived()
+
+        // Signs in again while the removal ends the older sign-in's session.
+        #expect(try await signIn(manager, to: server) == id)
+        replacedLogout.open()
+        await #expect(throws: CancellationError.self) { try await older.value }
+        removalLogout.open()
+        _ = try await removing.value
+        #expect(manager.state.user?.connectionID == id && manager.connections.map(\.id) == [id])
+        #expect(try harness.session(id)?.refreshToken == "refresh-3")
+        #expect(server.loggedOutRefreshTokens == ["refresh-1", "refresh-2"])
+    }
+
+    @Test func clientsOfOneConnectionShareARefresh() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let first = try #require(manager.client)
+        // Restoring makes another client for the connection; the first is still in use.
+        await manager.restoreSession()
+        let second = try #require(manager.client)
+        #expect(first !== second)
+        server.expireAccessToken()
+        // The server rotates the pair as the refresh arrives, so refreshing it again would fail.
+        let refresh = server.hold("/auth/refresh", answeringOnArrival: true)
+        let firstRequest = Task { try await first.send(AuthEndpoints.authorize()) }
+        await refresh.arrived()
+
+        let joined = StubGate()
+        await manager.credentials(for: id).observeRefreshJoins { joined.reach() }
+        let secondRequest = Task {
+            // Also when it finishes, so a failure doesn't wait for the timeout.
+            defer { joined.reach() }
+            return try await second.send(AuthEndpoints.authorize())
+        }
+        await joined.arrived()
+        refresh.open()
+        _ = try await firstRequest.value
+        _ = try await secondRequest.value
+        #expect(manager.state.user?.connectionID == id && manager.lastError == nil)
+        #expect(try harness.session(id)?.tokens == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+        #expect(server.requests("/auth/refresh").count == 1)
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func failedAuthenticationAfterANewerCallIsACancellation(oidc: Bool, signingInElsewhere: Bool) async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        _ = try await signIn(manager, to: FakeServer())
+        let server = FakeServer(userId: "usr-2")
+        let validated = try await validate(server)
+        let authenticating = server.hold(oidc ? "/auth/openid/callback" : "/login")
+        let signingIn = Task {
+            if oidc {
+                try await manager.connect(oidc: validated, authenticator: FakeAuthenticator())
+            } else {
+                try await manager.connect(local: validated, username: "david", password: "pw")
+            }
+        }
+        await authenticating.arrived()
+
+        var newerID: UUID?
+        if signingInElsewhere {
+            newerID = try await signIn(manager, to: FakeServer(userId: "usr-3"))
+        } else {
+            await manager.logout()
+        }
+        // The held request then fails.
+        server.update { $0.isOffline = true }
+        authenticating.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(manager.state.user?.connectionID == newerID && manager.lastError == nil)
+    }
+
+    @Test func signInFailingAfterALogoutIsACancellation() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        _ = try await signIn(manager, to: FakeServer())
+        let validated = try await validate(FakeServer(userId: "usr-2"))
+        let read = harness.keychain.holdNextRead()
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        // Saving the session.
+        await read.arrived()
+
+        await manager.logout()
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        read.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(manager.state == .signedOut && manager.lastError == nil)
+    }
+
+    @Test func switchFailingAfterANewerCallIsACancellation() async throws {
+        let harness = try Harness()
+        let id = try await signIn(harness.makeManager(), to: FakeServer())
+        let manager = harness.makeManager()
+        let read = harness.keychain.holdNextRead()
+        let switching = Task { try await manager.switch(to: id) }
+        await read.arrived()
+
+        await #expect(throws: AccountError.connectionNotFound) { try await manager.switch(to: UUID()) }
+        harness.keychain.failReads(with: errSecInteractionNotAllowed)
+        read.open()
+        await #expect(throws: CancellationError.self) { try await switching.value }
+        #expect(manager.state == .signedOut && manager.lastError == nil)
     }
 
     @Test func signInToAConnectionDeletedMeanwhileIsDiscarded() async throws {
@@ -1157,26 +1348,26 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         harness.keychain.failWrites(with: nil)
         server.update { $0.isOffline = false }
 
-        // The first clock reading is the sign-in's, as it saves the connection.
-        let saving = StubGate()
-        let manager = harness.makeManager { saving.reach() }
+        let manager = harness.makeManager()
         let validated = try await validate(server)
-        let read = harness.keychain.holdNextRead()
+        let reading = StubGate()
+        manager.willReadSignedOutSession = { await reading.pass() }
         let retrying = Task {
             if switching { try await manager.switch(to: id) } else { await manager.restoreSession() }
         }
-        await read.arrived()
+        await reading.arrived()
+        let replacedLogout = server.hold("/logout")
         let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
-        await saving.arrived()
-        // Once the connection is saved, the sign-in's save of the session waits behind the read.
-        _ = try await harness.store.connection(id: id)
+        // Saved its session, and is ending the one it replaced.
+        await replacedLogout.arrived()
 
-        read.open()
+        reading.open()
         if switching {
             await #expect(throws: CancellationError.self) { try await retrying.value }
         } else {
             try await retrying.value
         }
+        replacedLogout.open()
         try await signingIn.value
         let user = try #require(manager.state.user)
         #expect(manager.state == .signedIn(user) && user.connectionID == id)
@@ -1199,13 +1390,15 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
         // Saving the session.
         await read.arrived()
+        let reading = StubGate()
+        manager.willReadSignedOutSession = { await reading.pass() }
         let switching = Task { try await manager.switch(to: id) }
-        // The switch reads the connection, then its read of the session waits behind the save.
-        _ = try await harness.store.connection(id: id)
-        _ = try await harness.store.connection(id: id)
+        // The switch has read the connection, signed out.
+        await reading.arrived()
 
         read.open()
         await #expect(throws: CancellationError.self) { try await signingIn.value }
+        reading.open()
         // Signed out when the switch read it, but the session is the sign-in's.
         await #expect(throws: AccountError.notSignedIn) { try await switching.value }
         #expect(try harness.session(id)?.refreshToken == "refresh-2")

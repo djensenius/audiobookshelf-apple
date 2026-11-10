@@ -125,6 +125,17 @@ import SwiftData
         }
     }
 
+    /// Clears the sign-out saved at `date`, unless another has replaced it. Returns `false` when
+    /// the connection doesn't exist or isn't signed out at `date`.
+    @discardableResult
+    public func clearSignedOut(id: UUID, savedAt date: Date) throws -> Bool {
+        try commit {
+            guard let record = try fetchRecord(id: id), record.signedOutAt == date else { return false }
+            record.signedOutAt = nil
+            return true
+        }
+    }
+
     /// Removes a connection without orphaning its records. A connection with retained records
     /// (progress waiting for sync, pending sessions, download records or downloaded items) is
     /// kept, keeping its `id`, and marked disconnected; any other connection is deleted, and

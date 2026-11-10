@@ -4,7 +4,8 @@ import Foundation
 ///
 /// Every request carries the connection's custom headers. Authenticated requests carry the
 /// access token; on a 401 the client refreshes the tokens once with `POST /auth/refresh`
-/// (concurrent 401s share a single refresh), persists them through the ``TokenProvider``, and
+/// (concurrent 401s share a single refresh, and clients sharing a provider share it through
+/// ``TokenProvider/refreshTokens(_:using:)``), persists them through the ``TokenProvider``, and
 /// retries the request once. If the server rejects the refresh token, the provider ends the
 /// session and ``APIError/sessionExpired`` is thrown. If the user signs out or in again while a
 /// refresh is in flight, its result is discarded and waiting requests throw `CancellationError`.
@@ -222,7 +223,7 @@ public actor APIClient {
                 // once it has completed (for example while this request reads the new tokens).
                 // Only this flight's entry is removed, never a newer flight for the same pair.
                 defer { if refreshFlights[current]?.id == id { refreshFlights[current] = nil } }
-                try await refresh(current)
+                try await tokenProvider.refreshTokens(current) { try await self.refresh(current) }
             }
             refreshFlights[current] = RefreshFlight(id: id, task: task)
             try await task.value

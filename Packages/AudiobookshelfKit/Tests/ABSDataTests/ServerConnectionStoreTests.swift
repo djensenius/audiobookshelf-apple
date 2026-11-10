@@ -127,6 +127,22 @@ import Testing
         #expect(try await store.setSignedOut(id: UUID(), at: now) == false)
     }
 
+    @Test func clearsOnlyTheSignOutSavedAtADate() async throws {
+        let (store, _) = try makeStore()
+        let created = try await login(store)
+        let first = now.addingTimeInterval(0.25)
+        let second = now.addingTimeInterval(10.5)
+        try await store.setSignedOut(id: created.id, at: second)
+
+        // Replaced by a later sign-out.
+        #expect(try await store.clearSignedOut(id: created.id, savedAt: first) == false)
+        #expect(try await store.connection(id: created.id)?.signedOutAt == second)
+        #expect(try await store.clearSignedOut(id: created.id, savedAt: second))
+        #expect(try await store.connection(id: created.id)?.signedOutAt == nil)
+        #expect(try await store.clearSignedOut(id: created.id, savedAt: second) == false)
+        #expect(try await store.clearSignedOut(id: UUID(), savedAt: second) == false)
+    }
+
     @Test func markingUsedClearsASignOut() async throws {
         let (store, _) = try makeStore()
         let created = try await login(store)
