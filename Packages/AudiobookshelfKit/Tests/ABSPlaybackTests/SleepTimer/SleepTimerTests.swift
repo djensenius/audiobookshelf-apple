@@ -1084,6 +1084,21 @@ struct SleepTimerTests {
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == rewind)
     }
 
+    /// A seek of the user's that supersedes the expiry's seek back to the fade, and is heading for or lands half a
+    /// second from where the fade began, isn't the engine keeping the expiry's seek for its retry: the automatic
+    /// rewind drops, not applied once more.
+    @Test(arguments: [false, true])
+    func aUserSeekNearTheFadeStartDropsTheAutomaticRewind(landed: Bool) async throws {
+        let harness = try expiringHarness(automatic: true)
+        harness.control.holdsSeeks = true
+        await harness.play(from: 1000, to: 1070)
+        await until { harness.control.seeks == [1010] }
+        if landed { harness.control.currentTime = 1010.5 } else { harness.control.userSeekTarget = 1010.5 }
+        harness.control.seeksLand = false
+        await harness.control.finishSeek()
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 0)
+    }
+
     /// A reset before the expiry's seek back to the fade starts takes that seek over, after the automatic rewind,
     /// and resumes; a seek of the user's still wins, and the grace period comes back. The expiry's task stands down
     /// either way.

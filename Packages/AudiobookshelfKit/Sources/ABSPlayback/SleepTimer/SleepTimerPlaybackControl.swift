@@ -15,7 +15,9 @@ public protocol SleepTimerPlaybackControl: AnyObject {
     var timeline: PlaybackTimeline? { get }
     /// Where a seek or load in flight (or an interrupted one, awaiting its retry) will land; `nil` when none. The timer
     /// takes it as the position, so its rewinds yield to a user's seek and follow its own. ``seek(to:)`` must set it
-    /// before its first suspension, as ``AudioEngine`` does: the timer reads it as soon as it has started a seek.
+    /// before its first suspension, as ``AudioEngine`` does: the timer reads it as soon as it has started a seek. A
+    /// seek kept for its retry keeps the target it was asked for (to within 10 ms), which is how the timer tells it
+    /// from a user's seek that superseded it and landed nearby.
     var pendingSeekTarget: Double? { get }
     func pause()
     /// Resumes playback after a reset during the grace period.
