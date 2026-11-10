@@ -235,7 +235,7 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(session.tokens == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
         #expect(session.openIDSession == nil)
         #expect(try harness.customHeaders(id) == ["X-Proxy": "proxy-secret"])
-        let item = CredentialVault.item(CredentialVault.sessionService, id)
+        let item = CredentialVault.item(id)
         #expect(harness.keychain.accessibility(of: item) == .afterFirstUnlock)
     }
 

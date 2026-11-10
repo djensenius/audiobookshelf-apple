@@ -5,18 +5,30 @@ import Synchronization
 
 /// A `KeychainStoring` fake that can be made to fail reads or writes, or to hold a read.
 final class InMemoryKeychain: KeychainStoring {
+    private struct WriteFailure {
+        let status: OSStatus
+        var allowed: Int
+        let matches: @Sendable (Data?) -> Bool
+    }
+
     private struct State {
         var items: [KeychainItem: (data: Data, accessibility: KeychainAccessibility)] = [:]
         var readFailure: OSStatus?
-        var writeFailure: OSStatus?
+        var writeFailure: WriteFailure?
         var readGate: KeychainGate?
     }
 
     private let state = Mutex(State())
 
-    /// Makes every add, set and delete fail with `status` (reads still work); `nil` restores them.
-    func failWrites(with status: OSStatus?) {
-        state.withLock { $0.writeFailure = status }
+    /// Makes adds, sets and deletes fail with `status` (reads still work); `nil` restores them.
+    /// - Parameters:
+    ///   - allowed: How many of the matching writes still succeed first.
+    ///   - matches: Which writes fail, by the data written (`nil` for a delete).
+    func failWrites(
+        with status: OSStatus?, allowing allowed: Int = 0,
+        where matches: @escaping @Sendable (Data?) -> Bool = { _ in true }
+    ) {
+        state.withLock { $0.writeFailure = status.map { WriteFailure(status: $0, allowed: allowed, matches: matches) } }
     }
 
     /// Makes every read fail with `status`; `nil` restores them.
@@ -50,7 +62,7 @@ final class InMemoryKeychain: KeychainStoring {
     }
 
     func add(_ data: Data, for item: KeychainItem, accessibility: KeychainAccessibility) throws(KeychainError) -> Bool {
-        try write { items in
+        try write(data) { items in
             guard items[item] == nil else { return false }
             items[item] = (data, accessibility)
             return true
@@ -58,18 +70,21 @@ final class InMemoryKeychain: KeychainStoring {
     }
 
     func set(_ data: Data, for item: KeychainItem, accessibility: KeychainAccessibility) throws(KeychainError) {
-        try write { $0[item] = (data, accessibility) }
+        try write(data) { $0[item] = (data, accessibility) }
     }
 
     func delete(_ item: KeychainItem) throws(KeychainError) {
-        try write { $0[item] = nil }
+        try write(nil) { $0[item] = nil }
     }
 
     private func write<Result>(
-        _ body: (inout [KeychainItem: (data: Data, accessibility: KeychainAccessibility)]) -> Result
+        _ data: Data?, _ body: (inout [KeychainItem: (data: Data, accessibility: KeychainAccessibility)]) -> Result
     ) throws(KeychainError) -> Result {
         try state.withLock { state throws(KeychainError) in
-            if let status = state.writeFailure { throw KeychainError(status: status) }
+            if let failure = state.writeFailure, failure.matches(data) {
+                guard failure.allowed > 0 else { throw KeychainError(status: failure.status) }
+                state.writeFailure?.allowed -= 1
+            }
             return body(&state.items)
         }
     }

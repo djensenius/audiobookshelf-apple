@@ -25,58 +25,58 @@ extension StoredSession: CustomStringConvertible, CustomDebugStringConvertible, 
     var customMirror: Mirror { Mirror(self, children: [], displayStyle: .struct) }
 }
 
-/// One connection's Keychain items, under account `connectionID.uuidString` (ADR 0003): the
-/// session, and the custom headers (names and values, since values may be proxy credentials).
-/// Both are JSON and `AfterFirstUnlock`, so refreshes work while the device is locked. An item
-/// that doesn't decode reads as missing.
+/// One connection's credentials, in one Keychain item under account `connectionID.uuidString`
+/// (ADR 0003): the session, and the custom headers (names and values, since values may be proxy
+/// credentials). One item makes each change a single Keychain call that succeeds or changes
+/// nothing, so a failed sign-in can't leave its headers next to the previous session, and a
+/// failed removal can't leave half. The item is JSON and `AfterFirstUnlock`, so refreshes work
+/// while the device is locked; one that doesn't decode reads as missing.
 struct CredentialVault: Sendable {
-    static let sessionService = "org.davidjensenius.Audiobookshelf.session"
-    static let customHeadersService = "org.davidjensenius.Audiobookshelf.customHeaders"
+    static let service = "org.davidjensenius.Audiobookshelf.credentials"
+
+    private struct Stored: Codable {
+        var session: StoredSession?
+        var customHeaders: [String: String]
+    }
 
     let keychain: any KeychainStoring
 
-    func session(for id: UUID) throws(KeychainError) -> StoredSession? {
-        try read(StoredSession.self, from: Self.item(Self.sessionService, id))
+    func credentials(for id: UUID) throws(KeychainError) -> (session: StoredSession?, customHeaders: [String: String]) {
+        let item = Self.item(id)
+        guard let data = try keychain.data(for: item) else { return (nil, [:]) }
+        guard let stored = try? JSONDecoder().decode(Stored.self, from: data) else {
+            Log.auth.error("Ignoring an unreadable Keychain item in \(item.service, privacy: .public)")
+            return (nil, [:])
+        }
+        return (stored.session, stored.customHeaders)
     }
 
-    /// Stores `session`, or deletes the item for `nil`.
-    func setSession(_ session: StoredSession?, for id: UUID) throws(KeychainError) {
-        try write(session, to: Self.item(Self.sessionService, id))
+    func session(for id: UUID) throws(KeychainError) -> StoredSession? {
+        try credentials(for: id).session
     }
 
     func customHeaders(for id: UUID) throws(KeychainError) -> [String: String] {
-        try read([String: String].self, from: Self.item(Self.customHeadersService, id)) ?? [:]
+        try credentials(for: id).customHeaders
     }
 
-    /// Stores `headers`, or deletes the item when there are none.
-    func setCustomHeaders(_ headers: [String: String], for id: UUID) throws(KeychainError) {
-        try write(headers.isEmpty ? nil : headers, to: Self.item(Self.customHeadersService, id))
+    /// Stores both in one write, or deletes the item when there's neither.
+    func setCredentials(
+        session: StoredSession?, customHeaders: [String: String], for id: UUID
+    ) throws(KeychainError) {
+        guard session != nil || !customHeaders.isEmpty else { return try removeAll(for: id) }
+        // Encoding strings and dictionaries of strings can't fail.
+        guard let data = try? JSONEncoder().encode(Stored(session: session, customHeaders: customHeaders)) else {
+            throw KeychainError(status: errSecParam)
+        }
+        try keychain.set(data, for: Self.item(id), accessibility: .afterFirstUnlock)
     }
 
     func removeAll(for id: UUID) throws(KeychainError) {
-        try keychain.delete(Self.item(Self.sessionService, id))
-        try keychain.delete(Self.item(Self.customHeadersService, id))
+        try keychain.delete(Self.item(id))
     }
 
-    static func item(_ service: String, _ id: UUID) -> KeychainItem {
+    static func item(_ id: UUID) -> KeychainItem {
         KeychainItem(service: service, account: id.uuidString)
-    }
-
-    private func read<Value: Decodable>(_ type: Value.Type, from item: KeychainItem) throws(KeychainError) -> Value? {
-        guard let data = try keychain.data(for: item) else { return nil }
-        do {
-            return try JSONDecoder().decode(type, from: data)
-        } catch {
-            Log.auth.error("Ignoring an unreadable Keychain item in \(item.service, privacy: .public)")
-            return nil
-        }
-    }
-
-    private func write<Value: Encodable>(_ value: Value?, to item: KeychainItem) throws(KeychainError) {
-        guard let value else { return try keychain.delete(item) }
-        // Encoding strings and dictionaries of strings can't fail.
-        guard let data = try? JSONEncoder().encode(value) else { throw KeychainError(status: errSecParam) }
-        try keychain.set(data, for: item, accessibility: .afterFirstUnlock)
     }
 }
 
@@ -115,27 +115,21 @@ actor ConnectionCredentials: TokenProvider {
     /// The stored session and custom headers, read from the Keychain the first time. Retries a
     /// pending write.
     func load() throws(KeychainError) -> (session: StoredSession?, customHeaders: [String: String]) {
-        if !isLoaded {
-            let headers = try vault.customHeaders(for: connectionID)
-            // A sign-out whose delete failed is still pending; the Keychain copy is stale.
-            if !needsWrite { session = try vault.session(for: connectionID) }
-            customHeaders = headers
-            isLoaded = true
-        }
+        try readIfNeeded()
         writeIfNeeded()
         return (session, customHeaders)
     }
 
     /// Stores a new sign-in. Returns its generation and the session it replaced, for the server
-    /// sign-out. Throws, keeping the previous session, if the Keychain can't be written.
+    /// sign-out. Throws, keeping the previous session and custom headers in memory and in the
+    /// Keychain, if the Keychain can't be written.
     func signIn(
         _ new: StoredSession, customHeaders headers: [String: String]
     ) throws(KeychainError) -> (generation: Int, replaced: StoredSession?) {
         let replaced = try? load().session
-        try vault.setCustomHeaders(headers, for: connectionID)
-        customHeaders = headers
-        try vault.setSession(new, for: connectionID)
+        try vault.setCredentials(session: new, customHeaders: headers, for: connectionID)
         session = new
+        customHeaders = headers
         isLoaded = true
         needsWrite = false
         generation += 1
@@ -152,8 +146,8 @@ actor ConnectionCredentials: TokenProvider {
         return (ended, clearSession())
     }
 
-    /// Deletes both Keychain items. Returns what they held, for the server sign-out. Throws,
-    /// changing nothing in memory, if a delete fails.
+    /// Deletes the Keychain item. Returns what it held, for the server sign-out. Throws, changing
+    /// nothing in memory or in the Keychain, if the delete fails.
     func removeAll() throws(KeychainError) -> (session: StoredSession?, customHeaders: [String: String]) {
         let loaded = (try? load()) ?? (session, customHeaders)
         try vault.removeAll(for: connectionID)
@@ -202,11 +196,22 @@ actor ConnectionCredentials: TokenProvider {
         return writeIfNeeded()
     }
 
+    private func readIfNeeded() throws(KeychainError) {
+        guard !isLoaded else { return }
+        let stored = try vault.credentials(for: connectionID)
+        // A sign-out whose delete failed is still pending; the Keychain copy is stale.
+        if !needsWrite { session = stored.session }
+        customHeaders = stored.customHeaders
+        isLoaded = true
+    }
+
     @discardableResult
     private func writeIfNeeded() -> KeychainError? {
         guard needsWrite else { return nil }
         do {
-            try vault.setSession(session, for: connectionID)
+            // The custom headers are written with the session, so they must be read first.
+            try readIfNeeded()
+            try vault.setCredentials(session: session, customHeaders: customHeaders, for: connectionID)
             needsWrite = false
             return nil
         } catch {
