@@ -106,9 +106,11 @@ On an iPhone (or simulator) and on a Mac:
   redirect only when it points at the server's own `…/login` page, filters it to visible
   letters, digits and basic punctuation, and shortens it.
 
-- `WebAuthenticationSession` intercepts the `audiobookshelf` callback itself; the app does
-  not declare the scheme in `CFBundleURLTypes`. The legacy app (`com.audiobookshelf.app`)
-  does declare it. Having both installed does not affect this flow, because the session
-  captures the callback before the system routes the URL.
+- `WebAuthenticationSession` intercepts the `audiobookshelf` callback itself, before the
+  system routes the URL. The app also declares the scheme in `CFBundleURLTypes`, for deep
+  links (ADR 0004), and so does the legacy app (`com.audiobookshelf.app`). Having both
+  installed does not affect this flow, because the session captures the callback first.
+  `DeepLink` returns `nil` for `audiobookshelf://oauth`, so a callback that reached
+  `onOpenURL` anyway would be ignored.
 - The server only allows redirect URIs from its allow-list, so the app can't switch to an
   `https` universal-link callback without a server setting change.

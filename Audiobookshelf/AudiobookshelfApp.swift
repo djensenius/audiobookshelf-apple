@@ -5,13 +5,14 @@ import SwiftUI
 
 @main
 struct AudiobookshelfApp: App {
-    /// Shared by every scene. The app shell's `AppEnvironment` (#44) takes it over.
-    @State private var settings = AppSettings()
+    /// Shared by every scene and CarPlay.
+    private let environment = AppEnvironment.shared
+    private var settings: AppSettings { environment.settings }
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView(lifecycle: environment.lifecycle, player: environment.player)
                 .environment(settings)
                 .modifier(AppThemeModifier(settings: settings))
         }

@@ -240,13 +240,13 @@ enum Route: Hashable, Codable, Sendable {
 
 **Where the code lives**
 
-- `AppTab`, `Route`, `Router` and `DeepLink` live in **ABSAppModel**, in `ABSAppModel/Navigation/` (for example `Router.swift`, per P3-04 #44). They are tested with `swift test` in its test target.
+- `AppTab`, `Route`, `Router`, `DeepLink`, and the scene rules `SceneNavigation` and `SceneContent` (when a scene may open a link or save, and what its root shows for the session gate) live in **ABSAppModel**, in `ABSAppModel/Navigation/` (for example `Router.swift`, per P3-04 #44). They are tested with `swift test` in its test target.
 - `DuoArrangement` and the other navigation-related views and modifiers stay in **ABSUI**.
 - `RootView`, the scenes, `Commands` and CarPlay live in the app target.
 
 ### Deep links and Handoff
 
-The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.plist`). We keep it.
+The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plist`). We keep it, and the new app registers it in `Audiobookshelf/Info.plist` as one `CFBundleURLTypes` entry (`CFBundleURLName` is the bundle ID, role `Editor`, scheme `audiobookshelf`). The same plist feeds the iOS and macOS builds, and `AppEnvironmentTests` checks the entry.
 
 **Scheme collision.** The legacy Capacitor app registers the same scheme. If both apps are installed on one device, iOS does not define which app receives `audiobookshelf://` URLs, and that includes the OIDC callback.
 
@@ -270,11 +270,13 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 **Handling URLs**
 
 - `audiobookshelf://oauth` is reserved for the OIDC callback. `ASWebAuthenticationSession` consumes it, and `DeepLink` returns `nil` for it.
-- A link may carry `server={connectionID}`. If it differs from the active connection, the app asks before switching.
+- A link may carry `server={connectionID}`. If it differs from the active connection, the app asks before switching. The ID is the connection's local UUID, which each device makes for itself, so it is meaningful only for a link made and used on the same device; it is never put in a Handoff payload (see "Handoff").
 - There are no universal links, because servers are self-hosted and we control no associated domain.
 - `DeepLink.init?(url:)` is a pure parser.
-- In the scene that receives the URL, `RootView.onOpenURL` calls `router.open(_:)`.
-- `.handlesExternalEvents(preferring:allowing:)` sends links to an existing window instead of creating a new one.
+- In the scene that receives the URL, `RootView.onOpenURL` hands the link to the scene's host, which calls `router.open(_:)` once the scene has restored its saved navigation, so the restore can't wipe the link.
+  - Only a ready session's shell takes the link. During an account switch the outgoing shell doesn't, so the incoming account's shell opens it.
+  - A link is never kept while signed out, while signing out or without a store: one that arrives then is dropped. One already waiting when the account it arrived under ends is dropped too, because each waiting link carries `SessionLifecycle.linkEpoch`, which advances when the gate becomes signing out, switching, connect or store unavailable, and the host is handed the link only while the epoch is unchanged. A view can miss a short-lived gate, so the epoch decides, not the gate it rendered. A link that arrives during a switch carries the epoch after the switch began, so it opens for the incoming account.
+- `RootView` applies `.handlesExternalEvents(preferring: ["*"], allowing: ["*"])`, so URLs and continued activities go to an existing window instead of creating a new one. On macOS, repeated `open audiobookshelf://downloads` keeps one window with the modifier, and opens another window each time without it.
 
 **URL format** (`ABSAppModel/Navigation/DeepLink.swift`)
 
@@ -296,11 +298,26 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 
 **Handoff**
 
-- Item, episode and player screens publish `.userActivity("org.davidjensenius.Audiobookshelf.item")` with server, library, item, episode and position.
-- `.onContinueUserActivity` turns the activity into the same `DeepLink`.
-- The activity type must be added to `NSUserActivityTypes` in the app's `Info.plist`. This is a follow-up in P3-04 #44.
+- Item, episode and player screens will publish `.userActivity("org.davidjensenius.Audiobookshelf.item")`, with the payload below. No screen does yet; the first publisher comes with the item and player screens.
+- `.onContinueUserActivity` turns the activity into the same `DeepLink` (`DeepLink.init?(handoff:)`).
+- The activity type is listed in `NSUserActivityTypes` in `Audiobookshelf/Info.plist`, which the system requires before it delivers the activity. `AppEnvironmentTests` checks it.
 - The intents and entities side of Handoff is in P5-10 #87.
 - App Intents and Spotlight, added later, also produce a `DeepLink`.
+
+| `userInfo` key | Type | Meaning |
+| --- | --- | --- |
+| `item` | string, required | The library item's ID |
+| `episode` | string | The podcast episode's ID. Empty counts as absent |
+| `position` | number | Seconds, from 0 to 10,000,000. An activity with a position becomes a `play` link, which asks before it plays. A value that isn't a number in range (a Boolean isn't one) is ignored, and the activity opens the item |
+| `library` | string | Not used. The item opens in the active library |
+
+IDs follow the URL rules. A present but invalid `item` or `episode` rejects the activity.
+
+**Handoff has no account identity yet.** The only ID this device has for a server is its local connection UUID, which each device makes for itself, so it means nothing on another device. It is **never published**.
+
+- Until the payload names an account, the account that is active on the receiving device opens the item. An item that doesn't exist on that server shows the not-found state.
+- `DeepLink.init?(handoff:)` ignores a `server` entry, whatever it holds.
+- A follow-up adds `serverAddress` (normalized) and `userID` to the payload. They are additive, so a receiver that predates them still opens the item. The receiver resolves them to a local connection before `Router.open(_:)`, using the connection list of the account manager (#203). It needs the first publisher too.
 
 ### State restoration
 
@@ -322,7 +339,7 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 
 - The key and the stored `serverID`/`userID` must both match the active session. On a mismatch (for example after the server re-issues a user ID) the snapshot is discarded and the scene starts from the defaults.
 - `librarySection` is restored **before** the paths. It is validated against the restored library's type (book or podcast), using the same rule as library switching: an unsupported or unknown section falls back to the default grid (`nil`).
-- Paths are written when `scenePhase` becomes `.background`, not on every push.
+- The snapshot is written to scene storage as the navigation changes, and also, as a backup, whenever the scene leaves `.active` (`.inactive` as well as `.background`, because macOS can quit a scene without `.background`). It is never written before the restore has finished, which would replace the saved snapshot with the defaults. A link that the restore opens is written too.
 - A route whose target no longer exists shows `ContentUnavailableView` and is pruned from the path.
 
 **App-wide state**
@@ -622,9 +639,10 @@ All entries were checked in the Xcode 27.2 iPhoneOS and MacOSX SDK `SwiftUI.swif
 **Follow-ups**
 
 - **P3-04 #44**:
-  - Add `NSUserActivityTypes` (`org.davidjensenius.Audiobookshelf.item`) to the app's `Info.plist`.
+  - Add `NSUserActivityTypes` (`org.davidjensenius.Audiobookshelf.item`) to the app's `Info.plist` (done in P3-04d #179).
   - Implement `AppTab`, `Route`, `Router` and `DeepLink` in `ABSAppModel/Navigation/`, including the play-link confirmation rule.
-  - Note the legacy-app scheme collision in the onboarding and release notes.
+  - Note the legacy-app scheme collision in the onboarding and release notes (the release notes have it in `docs/release.md`).
+- **Handoff account identity** (follow-up issue): add `serverAddress` and `userID` to the payload and resolve them to a local connection before `Router.open(_:)`. See "Handoff".
 - **P5-07 #84**: `DuoArrangement` in ABSUI.
 - The player UI (P2-09 #56), iPad (P5-06 #83), Mac (P5-05 #82) and CarPlay (P5-02 #79, P5-03 #80) issues follow the placements above.
 

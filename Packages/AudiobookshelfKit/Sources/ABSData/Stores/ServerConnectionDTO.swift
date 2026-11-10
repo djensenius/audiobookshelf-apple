@@ -13,6 +13,8 @@ public struct ServerConnectionDTO: Sendable, Equatable, Identifiable {
     public var lastUsedAt: Date?
     public var isDisconnected: Bool
     public var disconnectedAt: Date?
+    /// When the user signed out; a session saved in the Keychain before then is stale.
+    public var signedOutAt: Date?
 
     public init(
         id: UUID,
@@ -24,7 +26,8 @@ public struct ServerConnectionDTO: Sendable, Equatable, Identifiable {
         createdAt: Date,
         lastUsedAt: Date? = nil,
         isDisconnected: Bool = false,
-        disconnectedAt: Date? = nil
+        disconnectedAt: Date? = nil,
+        signedOutAt: Date? = nil
     ) {
         self.id = id
         self.address = address
@@ -36,6 +39,7 @@ public struct ServerConnectionDTO: Sendable, Equatable, Identifiable {
         self.lastUsedAt = lastUsedAt
         self.isDisconnected = isDisconnected
         self.disconnectedAt = disconnectedAt
+        self.signedOutAt = signedOutAt
     }
 }
 
@@ -52,7 +56,8 @@ extension ServerConnectionDTO {
             createdAt: record.createdAt,
             lastUsedAt: record.lastUsedAt,
             isDisconnected: record.isDisconnected,
-            disconnectedAt: record.disconnectedAt
+            disconnectedAt: record.disconnectedAt,
+            signedOutAt: record.signedOutAt
         )
     }
 }
