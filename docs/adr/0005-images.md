@@ -455,6 +455,16 @@ static, unauthenticated remote images (none are planned).
       already running. The task deletes the oldest files until the total is at
       most 90 % of the cap. This bounds a Mac app left in the foreground for
       days.
+    - **Leases:** `CoverFileStore` is an actor. A lookup hit or an insert
+      returns the file URL together with a lease (a per-file reference count)
+      taken in the same actor call, so no eviction can run between the two.
+      The fetch holds the lease until every decode waiting on it has finished
+      or been cancelled, then releases it. Both eviction paths skip leased
+      files, even if they are the oldest. Logout waits for the server's leases
+      to be released before deleting its folder.
+    - **Vanished files:** if a file is gone anyway (OS purge, a deleted
+      download), the decode treats it as a miss and refetches once. A second
+      failure shows the placeholder.
   - **Logout:** removing a server deletes its folder.
 - **Rendering:** the pipeline returns `CGImage` plus scale. Each consumer wraps
   it:
@@ -715,6 +725,11 @@ That fits under 256 MiB without eviction churn.
     its `CoverImage` still counts against the 64 MiB combined cap, and its cost
     is released on `deinit`; with live images filling the cap, a new decode
     waits until one is released;
+  - file leases: with a decode queued behind a full decode cap, an eviction
+    that would remove its (oldest) input file skips it, and the lease is
+    released after the decode finishes and after it is cancelled, after which
+    the next eviction can delete it; deleting the file behind the store's back
+    causes exactly one refetch, then the placeholder if that also fails;
   - file-backed input: a network fetch produces a file and never `Data`; an
     input over 4 MiB (by `Content-Length`, or by bytes written when the length
     is missing) is cancelled and shows the placeholder; a 4097 × 4097 source is
