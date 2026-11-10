@@ -17,7 +17,8 @@ enum DownloadTaskResult: Sendable, Equatable {
     /// The body was an error page or message (HTML from a proxy or captive portal, text, JSON
     /// or XML), not the file.
     case unexpectedContent(String)
-    /// The body's size isn't the part's expected size.
+    /// The body isn't the whole file. `expected` is the planned size, or else the declared
+    /// length, or `0` when neither is known.
     case sizeMismatch(expected: Int64, actual: Int64)
     /// The body couldn't be moved to the destination.
     case moveFailed(String, isOutOfSpace: Bool)
@@ -142,18 +143,27 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
     }
 
     /// Checks the response, then moves the file. A body that isn't the file (see
-    /// ``classify(response:task:)``, or the wrong size) never reaches the media location. A
-    /// size other than the expected one is accepted when it is the length the server
-    /// declared: the file changed since the download was planned.
+    /// ``classify(response:task:)``, empty, or the wrong size) never reaches the media
+    /// location.
+    ///
+    /// The file must have the length the server declared, or for a 200 the planned size (the
+    /// file changed since the download was planned, or the server compressed it). After a 206
+    /// it must be the whole file the `Content-Range` describes: a resumed task's range starts
+    /// where its resume data ends, and the moved file holds both. A 200 with no declared
+    /// length for a part of unknown size is accepted when it isn't empty.
     func finish(_ task: URLSessionTask, location: URL) -> DownloadTaskResult {
         if let rejected = Self.classify(response: task.response, task: task) { return rejected }
         guard let partID = task.partID, let target = targets.withLock({ $0[partID] }) else {
             return .moveFailed("The download has no destination.", isOutOfSpace: false)
         }
         let size = DownloadLocations.fileSize(at: location) ?? task.countOfBytesReceived
-        if target.expectedBytes > 0, size != target.expectedBytes, size != Self.declaredLength(of: task.response) {
-            return .sizeMismatch(expected: target.expectedBytes, actual: size)
-        }
+        guard size > 0 else { return .failed(DownloadTransferFailure(URLError(.zeroByteResource))) }
+        let declared = Self.declaredLength(of: task.response)
+        let planned = target.expectedBytes > 0 ? target.expectedBytes : nil
+        let isWhole =
+            (task.response as? HTTPURLResponse)?.statusCode == 206
+            ? size == declared : size == declared || size == planned || (declared == nil && planned == nil)
+        guard isWhole else { return .sizeMismatch(expected: planned ?? declared ?? 0, actual: size) }
         do {
             try DownloadLocations.moveFile(at: location, to: target.destination)
         } catch {

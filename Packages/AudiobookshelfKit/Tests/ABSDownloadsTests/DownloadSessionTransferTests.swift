@@ -71,6 +71,33 @@ import Testing
         #expect(outcome.moved == Data("audio-bytes".utf8))
     }
 
+    struct SizeCase: Sendable, CustomTestStringConvertible {
+        var status = 200
+        var body = Data("audio-bytes".utf8)
+        var headers: [String: String] = [:]
+        var expected: DownloadTaskResult
+        var testDescription: String { "\(status) \(headers) with \(body.count) bytes" }
+    }
+
+    /// A part of unknown size is checked against the length the response declares.
+    @Test(arguments: [
+        SizeCase(headers: ["Content-Length": "18"], expected: .sizeMismatch(expected: 18, actual: 11)),
+        SizeCase(
+            status: 206, body: Data("audio-by".utf8), headers: ["Content-Range": "bytes 0-7/18"],
+            expected: .sizeMismatch(expected: 18, actual: 8)),
+        SizeCase(
+            status: 206, headers: ["Content-Range": "bytes 0-10/*"], expected: .sizeMismatch(expected: 0, actual: 11)),
+        SizeCase(status: 206, headers: ["Content-Range": "bytes 0-10/11"], expected: .moved(bytes: 11)),
+        SizeCase(headers: ["Content-Length": ""], expected: .moved(bytes: 11)),
+        SizeCase(body: Data(), expected: .failed(DownloadTransferFailure(URLError(.zeroByteResource)))),
+    ])
+    func checksUnknownSizesAgainstTheResponse(_ test: SizeCase) async {
+        let outcome = await transfer(.status(test.status, body: test.body, headers: test.headers), expectedBytes: 0)
+
+        #expect(outcome.result == test.expected)
+        #expect(outcome.moved == (test.expected == .moved(bytes: 11) ? test.body : nil))
+    }
+
     @Test func rejectsABodyFromAnotherOrigin() async {
         let outcome = await transfer(.status(200, from: URL(string: "https://cdn.other.test/1.mp3")!))
 
