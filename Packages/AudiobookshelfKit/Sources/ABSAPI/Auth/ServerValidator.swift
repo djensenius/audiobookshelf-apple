@@ -82,13 +82,14 @@ public struct ServerValidator: Sendable {
     /// The request uses the cookie jar validation filled, so a cookie a proxy or load balancer
     /// in front of the server set during validation (a sticky session or a challenge) is sent
     /// with the password. The jar only ever holds that host's cookies: validation refuses other
-    /// hosts, and `/status` creates no Audiobookshelf session.
+    /// hosts, and `/status` creates no Audiobookshelf session. A redirect back to the same URL
+    /// that sets cookies (a proxy's first-contact cookie) is retried once with them.
     public func login(to server: ValidatedServer, username: String, password: String) async throws -> LoginResult {
         let client = client(for: server)
         let reply: APIResponse<Data>
         do {
-            reply = try await client.response(
-                for: Self.unparsed(AuthEndpoints.login(username: username, password: password)))
+            reply = try await Self.sendRetryingCookieRedirect(
+                Self.unparsed(AuthEndpoints.login(username: username, password: password)), client: client)
         } catch let error as APIError {
             throw Self.loginError(error)
         }
@@ -131,11 +132,12 @@ public struct ServerValidator: Sendable {
     ///
     /// A redirect is not followed: a hop to another origin would answer without the token, so its
     /// response says nothing about the session. It throws
-    /// ``ServerValidationError/loginRedirected``.
+    /// ``ServerValidationError/loginRedirected``, except that a redirect back to the same URL
+    /// that sets cookies (a proxy's first-contact cookie) is retried once with them.
     public func authorize(with client: APIClient) async throws -> AuthorizeResult {
         let reply: APIResponse<Data>
         do {
-            reply = try await client.response(for: Self.unparsed(AuthEndpoints.authorize()))
+            reply = try await Self.sendRetryingCookieRedirect(Self.unparsed(AuthEndpoints.authorize()), client: client)
         } catch let error as APIError {
             throw Self.authorizeError(error)
         }
