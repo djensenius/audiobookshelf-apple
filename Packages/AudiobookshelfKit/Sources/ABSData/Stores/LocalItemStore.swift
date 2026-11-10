@@ -35,7 +35,8 @@ import SwiftData
     ///
     /// - Throws: ``StoreError/incompleteDownload`` unless every part completed, and
     ///   ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist.
-    /// - Parameter coverUpdatedAt: The server's cover timestamp; `nil` keeps the stored one.
+    /// - Parameter coverUpdatedAt: The server's cover timestamp; `nil` falls back to the
+    ///   snapshot's `coverUpdatedAt`, and when both are `nil` the stored one is kept.
     @discardableResult
     public func upsertFromDownload(
         _ download: DownloadRecordDTO,
@@ -82,7 +83,9 @@ import SwiftData
             let authors = download.media.metadata.authors
             item.authorName = authors.isEmpty ? nil : authors.joined(separator: ", ")
             if let coverPath { item.coverRelativePath = coverPath }
-            if let coverUpdatedAt { item.coverUpdatedAt = coverUpdatedAt }
+            if let coverUpdatedAt = coverUpdatedAt ?? download.media.coverUpdatedAt {
+                item.coverUpdatedAt = coverUpdatedAt
+            }
             item.updatedAt = now
             return LocalLibraryItemDTO(item)
         }
