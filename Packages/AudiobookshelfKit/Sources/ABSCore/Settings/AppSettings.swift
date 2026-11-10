@@ -287,15 +287,20 @@ public final class AppSettings {
     nonisolated static func isPlaybackRate(_ value: Double) -> Bool { value.isFinite && value > 0 }
 
     /// Accepts `HH:mm` (exactly two ASCII digits each) with hours 00–23 and minutes 00–59.
-    nonisolated static func isTimeOfDay(_ value: String) -> Bool {
-        let parts = value.split(separator: ":", omittingEmptySubsequences: false)
+    nonisolated static func isTimeOfDay(_ value: String) -> Bool { minutesSinceMidnight(value) != nil }
+
+    /// The minutes since midnight of a 24-hour `HH:mm` time (as stored in
+    /// ``autoSleepTimerStartTime`` and ``autoSleepTimerEndTime``), or `nil` if it isn't valid.
+    public nonisolated static func minutesSinceMidnight(_ timeOfDay: String) -> Int? {
+        let parts = timeOfDay.split(separator: ":", omittingEmptySubsequences: false)
         guard parts.count == 2,
             parts.allSatisfy({
                 $0.utf8.count == 2 && $0.utf8.allSatisfy { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) }
             }),
-            let hours = Int(parts[0]), let minutes = Int(parts[1])
-        else { return false }
-        return (0..<24).contains(hours) && (0..<60).contains(minutes)
+            let hours = Int(parts[0]), let minutes = Int(parts[1]),
+            (0..<24).contains(hours), (0..<60).contains(minutes)
+        else { return nil }
+        return hours * 60 + minutes
     }
 
     // MARK: Reading and writing
