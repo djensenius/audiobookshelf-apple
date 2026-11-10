@@ -400,6 +400,9 @@ private enum SupersetSchemaV2: VersionedSchema {
         let posix = NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))
         #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: posix])))
         #expect(!DataStack.isConfirmedIncompatibility(cocoa(259)))
+        for code in [7, 8, 264, 520, 776, 1032, 1288, 1544] {  // SQLITE_NOMEM, SQLITE_READONLY_*
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSSQLiteErrorDomain: code])))
+        }
         #expect(!DataStack.isConfirmedIncompatibility(nil))
 
         #expect(DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(134_110)])))
@@ -440,7 +443,9 @@ private enum SupersetSchemaV2: VersionedSchema {
             context.insert(Fixtures.connection())
             try context.save()
         }
-        let copy = directory.appending(path: "Broken/1-CRASHED")
+        let older = directory.appending(path: "Broken/1-OLDER")
+        try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
+        let copy = directory.appending(path: "Broken/5-CRASHED")
         try fileManager.createDirectory(at: copy, withIntermediateDirectories: true)
         let names = ["Audiobookshelf.store", "Audiobookshelf.store-wal", "Audiobookshelf.store-shm"]
         try Data(names.joined(separator: "\n").utf8).write(to: copy.appending(path: DataStack.incompleteMarker))
@@ -455,6 +460,23 @@ private enum SupersetSchemaV2: VersionedSchema {
         for name in names {
             #expect(exists(copy.appending(path: name)))
         }
+        #expect(!exists(older))  // Retention applies after a resumed move too.
+    }
+
+    /// An unreadable `Broken/` might hide an interrupted move, so the store isn't opened.
+    @Test func unreadableBrokenDirectoryPreventsOpening() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let broken = directory.appending(path: "Broken")
+        try fileManager.createDirectory(at: broken, withIntermediateDirectories: true)
+        try fileManager.setAttributes([.posixPermissions: 0o000], ofItemAtPath: broken.path(percentEncoded: false))
+        defer {
+            try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: broken.path(percentEncoded: false))
+        }
+
+        let url = directory.appending(path: "Audiobookshelf.store")
+        #expect(throws: (any Error).self) { _ = try openURL(url) }
+        #expect(!exists(url))
     }
 
     @Test func pruningKeepsIncompleteCopies() throws {

@@ -44,7 +44,7 @@ public struct DataStack: Sendable {
         try self.init(
             location: location,
             allowsSave: allowsSave,
-            isAppGroupEntitled: { AppSettings.isAppGroupAvailable(AppSettings.appGroupIdentifier) },
+            isAppGroupEntitled: Self.isAppGroupEntitled,
             groupContainerURL: {
                 FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: AppSettings.appGroupIdentifier)
             },
@@ -54,8 +54,7 @@ public struct DataStack: Sendable {
     }
 
     /// - Parameters:
-    ///   - isAppGroupEntitled: Whether the process has the App Group entitlement (on iOS, whether
-    ///     the container resolves).
+    ///   - isAppGroupEntitled: Whether the process has the App Group entitlement.
     ///   - groupContainerURL: The App Group container, or `nil` when it can't be resolved.
     ///   - fallbackDirectory: Where the store goes when the process isn't entitled.
     ///   - onFallback: Called when the App Group store is replaced by the fallback store.
@@ -111,6 +110,17 @@ public struct DataStack: Sendable {
     }
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "persistence")
+
+    /// On macOS, the signed entitlement (the ad hoc signed test host has none). iOS can't read its
+    /// entitlements, and `AppSettings.isAppGroupAvailable` there only checks that the container
+    /// resolves, so iOS always counts as entitled and an unresolved container fails closed.
+    private static func isAppGroupEntitled() -> Bool {
+        #if os(macOS)
+            AppSettings.isAppGroupAvailable(AppSettings.appGroupIdentifier)
+        #else
+            true
+        #endif
+    }
 
     /// A missing App Group entitlement is a build configuration error everywhere except the
     /// ad hoc signed macOS app test host (`mise run test:app`), which has no App Group.
@@ -181,8 +191,9 @@ public struct DataStack: Sendable {
     private static let incompatibilityCodes: Set<Int> = [134_100, 134_110, 134_130, 134_140]
     /// `NSFileReadNoPermissionError`, `NSFileWriteNoPermissionError`, `NSFileWriteOutOfSpaceError`.
     private static let transientCocoaCodes: Set<Int> = [257, 513, 640]
-    /// `SQLITE_PERM`, `BUSY`, `LOCKED`, `IOERR`, `FULL`, `CANTOPEN`; corrupt is `CORRUPT`, `NOTADB`.
-    private static let transientSQLiteCodes: Set<Int> = [3, 5, 6, 10, 13, 14]
+    /// `SQLITE_PERM`, `BUSY`, `LOCKED`, `NOMEM`, `READONLY`, `IOERR`, `FULL`, `CANTOPEN`; corrupt
+    /// is `CORRUPT`, `NOTADB`.
+    private static let transientSQLiteCodes: Set<Int> = [3, 5, 6, 7, 8, 10, 13, 14]
     private static let corruptSQLiteCodes: Set<Int> = [11, 26]
 
     /// Errors inspected in a load error chain; a longer chain is never confirmed.
@@ -236,27 +247,46 @@ public struct DataStack: Sendable {
         let names = [name, "\(name)-wal", "\(name)-shm"].joined(separator: "\n")
         try Data(names.utf8).write(to: destination.appending(path: incompleteMarker), options: .atomic)
         try finishMove(into: destination, from: url.deletingLastPathComponent())
-        for copy in brokenCopies(in: brokenRoot)
-        where copy.lastPathComponent != destination.lastPathComponent && !isIncomplete(copy) {
+        pruneBrokenCopies(in: brokenRoot, keeping: destination.lastPathComponent)
+    }
+
+    /// Deletes completed copies except `keeping` (default: the newest by epoch); incomplete copies
+    /// are kept. Best effort.
+    private static func pruneBrokenCopies(in root: URL, keeping: String? = nil) {
+        let completed = ((try? brokenCopies(in: root)) ?? []).filter { !isIncomplete($0) }
+        let epoch = { (copy: URL) in Int(copy.lastPathComponent.prefix { $0.isNumber }) ?? 0 }
+        let kept = keeping ?? completed.max { epoch($0) < epoch($1) }?.lastPathComponent
+        for copy in completed where copy.lastPathComponent != kept {
             try? FileManager.default.removeItem(at: copy)
         }
     }
 
-    /// Completes a move-aside interrupted by a crash or an error, before the store is opened.
+    /// Completes a move-aside interrupted by a crash or an error, before the store is opened, then
+    /// applies the retention policy. Throws if `Broken/` exists but can't be read.
     static func finishInterruptedMoves(for url: URL) throws {
         let directory = url.deletingLastPathComponent()
-        for copy in brokenCopies(in: directory.appending(path: "Broken", directoryHint: .isDirectory))
-        where isIncomplete(copy) {
+        let brokenRoot = directory.appending(path: "Broken", directoryHint: .isDirectory)
+        let incomplete = try brokenCopies(in: brokenRoot).filter(isIncomplete)
+        for copy in incomplete {
             try finishMove(into: copy, from: directory)
         }
+        if !incomplete.isEmpty { pruneBrokenCopies(in: brokenRoot) }
     }
 
     private static func isIncomplete(_ copy: URL) -> Bool {
         FileManager.default.fileExists(atPath: copy.appending(path: incompleteMarker).path(percentEncoded: false))
     }
 
-    private static func brokenCopies(in root: URL) -> [URL] {
-        (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+    /// The copies in `root`; a missing `root` has none, and any other error is thrown.
+    private static func brokenCopies(in root: URL) throws -> [URL] {
+        do {
+            return try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        } catch let error as NSError
+            where (error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError)
+            || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT))
+        {
+            return []
+        }
     }
 
     /// Moves each file listed in `destination`'s marker that is still in `directory`, in order,
