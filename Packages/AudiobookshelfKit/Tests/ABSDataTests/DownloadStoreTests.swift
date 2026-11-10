@@ -178,6 +178,96 @@ import Testing
         #expect(try await store.completePart(partID: UUID(), finalBytes: 1) == false)
     }
 
+    @Test func beginRunningStartsQueuedAndRetryableParts() async throws {
+        let (store, _) = try makeStore()
+        var queued = Self.part()
+        queued.taskIdentifier = 4
+        queued.lastError = "lost"
+        queued.hasResumeData = true
+        queued.bytesWritten = 20
+        var retrying = Self.part(trackIndex: 2, filename: "b.mp3", state: .failed)
+        retrying.retryCount = 2
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [queued, retrying]), now: now).record
+        let later = now.addingTimeInterval(5)
+
+        #expect(try await store.beginRunning(partID: queued.id, expecting: [.queued, .failed], now: later))
+        var record = try #require(try await store.record(id: created.id))
+        #expect(record.state == .downloading)
+        #expect(record.updatedAt == later)
+        var expected = queued
+        expected.state = .running
+        expected.taskIdentifier = nil
+        expected.lastError = nil
+        #expect(record.parts.first == expected)
+
+        #expect(try await store.beginRunning(partID: retrying.id, expecting: [.queued, .failed]))
+        record = try #require(try await store.record(id: created.id))
+        #expect(record.state == .downloading)
+        #expect(record.parts.map(\.state) == [.running, .running])
+        #expect(record.parts.last?.retryCount == 2)
+
+        // A compare-and-set: a part that is already running only starts again if expected.
+        #expect(try await store.beginRunning(partID: queued.id, expecting: [.queued, .failed]) == false)
+        #expect(try await store.beginRunning(partID: queued.id, expecting: [.running]))
+    }
+
+    @Test(arguments: [DownloadState.paused, .failed])
+    func beginRunningRefusesStoppedAndFailedRecords(state: DownloadState) async throws {
+        let (store, _) = try makeStore()
+        let part = Self.part()
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [part], state: state), now: now)
+            .record
+        #expect(try await store.beginRunning(partID: part.id, expecting: [.queued, .failed]) == false)
+        #expect(try await store.record(id: created.id) == created)
+    }
+
+    @Test func beginRunningRefusesCompletedAndDeletedParts() async throws {
+        let (store, container) = try makeStore()
+        let completed = Self.part()
+        let removed = Self.part(trackIndex: 2, filename: "b.mp3")
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [completed, removed]), now: now)
+            .record
+        #expect(try await store.completePart(partID: completed.id, finalBytes: 10))
+        let every = Set(DownloadPartState.allCases)
+        #expect(try await store.beginRunning(partID: completed.id, expecting: every) == false)
+        #expect(try await store.part(id: completed.id)?.state == .completed)
+
+        // The part was removed from its record.
+        let kept = try #require(try await store.record(id: created.id)?.parts.first)
+        _ = try await store.upsertRecord(Self.record(key: key, parts: [kept]), now: now)
+        #expect(try await store.beginRunning(partID: removed.id, expecting: every) == false)
+
+        // The record was deleted, with its parts.
+        let other = Self.part(filename: "c.mp3")
+        let otherKey = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_9")
+        let otherRecord = try await store.upsertRecord(Self.record(key: otherKey, parts: [other]), now: now).record
+        try await store.deleteRecord(otherRecord.id)
+        #expect(try await store.beginRunning(partID: other.id, expecting: every) == false)
+
+        // A part without a record.
+        let orphan = Self.part(filename: "orphan.mp3")
+        let context = ModelContext(container)
+        context.insert(orphan.makeModel())
+        try context.save()
+        #expect(try await store.beginRunning(partID: orphan.id, expecting: every) == false)
+        #expect(try await store.part(id: orphan.id)?.state == .queued)
+        #expect(await store.hasUncommittedChanges == false)
+    }
+
+    @Test func beginRunningFailedSaveChangesNothing() async throws {
+        let (store, _) = try makeStore()
+        let part = Self.part()
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [part]), now: now).record
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) {
+            try await store.beginRunning(partID: part.id, expecting: [.queued], now: now.addingTimeInterval(5))
+        }
+        #expect(await store.hasUncommittedChanges == false)
+        #expect(try await store.record(id: created.id) == created)
+        let reread = DownloadStore(modelContainer: store.modelContainer)
+        #expect(try await reread.record(id: created.id) == created)
+    }
+
     /// The task finishes before its last throttled progress write lands, with an unknown length:
     /// the final size comes with the completion, and a late progress write can't change it.
     @Test func completionBeforeFinalProgressRecordsFinalSize() async throws {
