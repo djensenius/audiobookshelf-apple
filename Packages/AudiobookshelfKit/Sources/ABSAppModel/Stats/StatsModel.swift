@@ -6,14 +6,14 @@ import Observation
 /// The stats endpoints ``StatsModel`` uses. `APIClient` conforms; tests use fakes.
 public protocol StatsService: Sendable {
     /// `GET /api/me/listening-stats`.
-    func listeningStats() async throws -> ListeningStats
+    func listeningStats() async throws -> ListeningStatsResponse
     /// The number of finished items in the user's progress (`GET /api/me`), counted like the
     /// legacy stats page, so finished podcast episodes count too.
     func finishedItemCount() async throws -> Int
 }
 
 extension APIClient: StatsService {
-    public func listeningStats() async throws -> ListeningStats {
+    public func listeningStats() async throws -> ListeningStatsResponse {
         try await send(StatsEndpoints.listeningStats())
     }
 
@@ -60,12 +60,12 @@ public struct StatsSession: Sendable, Hashable, Identifiable {
     /// The item's screen, or `nil` when the session has no library item, so it isn't tappable.
     public let route: Route?
 
-    init(_ session: PlaybackSession) {
+    init(_ session: ListeningSessionSummary) {
         id = session.id
-        title = session.mediaMetadata?.title ?? session.displayTitle
+        title = session.title
         timeListening = session.timeListening
         updatedAt = session.updatedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) }
-        route = session.libraryItemId.isEmpty ? nil : .item(id: session.libraryItemId)
+        route = session.libraryItemId.map { .item(id: $0) }
     }
 }
 
@@ -118,13 +118,20 @@ public final class StatsModel {
         hasLoaded && totalTime <= 0 && daysListened == 0 && recentSessions.isEmpty && itemsFinished == 0
     }
 
+    /// Loads unless stats have already loaded. Views call it each time they appear, so a load
+    /// cancelled before it finished (the view disappeared) runs again.
+    public func loadIfNeeded() async {
+        guard !hasLoaded else { return }
+        await load()
+    }
+
     /// Loads the stats and the finished count. When loads overlap, only the last one started
     /// is applied.
     public func load() async {
         sequence += 1
         let sequence = sequence
         isLoading = true
-        let result: Result<(ListeningStats, Int), any Error>
+        let result: Result<(ListeningStatsResponse, Int), any Error>
         do {
             async let stats = service.listeningStats()
             async let finished = service.finishedItemCount()
@@ -135,11 +142,11 @@ public final class StatsModel {
         guard sequence == self.sequence else { return }
         isLoading = false
         switch result {
-        case .success(let (stats, finished)):
-            self.stats = stats
+        case .success(let (response, finished)):
+            stats = response.stats
             itemsFinished = finished
-            lastSevenDays = Self.lastSevenDays(of: stats.days, endingAt: now(), in: calendar)
-            recentSessions = stats.recentSessions.map(StatsSession.init)
+            lastSevenDays = Self.lastSevenDays(of: response.stats.days, endingAt: now(), in: calendar)
+            recentSessions = response.recentSessions.map(StatsSession.init)
             error = nil
         case .failure(let error):
             if !(error is CancellationError) { self.error = error }

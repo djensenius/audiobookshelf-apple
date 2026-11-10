@@ -4,7 +4,7 @@ import Foundation
 /// The current user's listening statistics (legacy `pages/stats.vue`).
 public enum StatsEndpoints {
     /// `GET /api/me/listening-stats`: totals, per-day times and the ten most recent sessions.
-    public static func listeningStats() -> Endpoint<ListeningStats> {
+    public static func listeningStats() -> Endpoint<ListeningStatsResponse> {
         Endpoint(.get, "/api/me/listening-stats")
     }
 

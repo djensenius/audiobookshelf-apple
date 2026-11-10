@@ -28,13 +28,33 @@ import Testing
                     + #""recentSessions":[{"id":"ps-1","libraryItemId":"li-1","mediaType":"book","timeListening":90},"#
                     + #"{"id":"ps-2","libraryItemId":null,"mediaType":"book","timeListening":1}]}"#)
         }
-        let stats = try await makeClient(stub).send(StatsEndpoints.listeningStats())
-        #expect(stats.totalTime == 90)
-        #expect(stats.days == ["2024-03-01": 90])
-        #expect(stats.recentSessions.map(\.id) == ["ps-1"])
+        let response = try await makeClient(stub).send(StatsEndpoints.listeningStats())
+        #expect(response.stats.totalTime == 90)
+        #expect(response.stats.days == ["2024-03-01": 90])
+        #expect(response.stats.recentSessions.map(\.id) == ["ps-1"])
+        #expect(response.recentSessions.map(\.id) == ["ps-1", "ps-2"])
+        #expect(response.recentSessions.map(\.libraryItemId) == ["li-1", nil])
         let request = try #require(stub.requests.first)
         #expect(request.httpMethod == "GET")
         #expect(request.url?.path() == "/abs/api/me/listening-stats")
+    }
+
+    /// Old rows: a null or missing item ID, string numbers, malformed metadata. Only a session
+    /// without an `id` is skipped.
+    @Test func recentSessionSummariesDecodeLeniently() throws {
+        let json =
+            #"{"recentSessions":[{"id":"a","libraryItemId":null,"timeListening":"12.5","#
+            + #""updatedAt":"1709283600000","mediaMetadata":"oops","displayTitle":"Shown"},"#
+            + #"{"id":"b","libraryItemId":"","mediaMetadata":{"title":"Meta"},"displayTitle":"Display"},"#
+            + #"{"id":"c","timeListening":null},{"libraryItemId":"li-x"}]}"#
+        let response = try JSONDecoder().decode(ListeningStatsResponse.self, from: Data(json.utf8))
+        #expect(
+            response.recentSessions == [
+                ListeningSessionSummary(id: "a", title: "Shown", timeListening: 12.5, updatedAt: 1_709_283_600_000),
+                ListeningSessionSummary(id: "b", title: "Meta"),
+                ListeningSessionSummary(id: "c"),
+            ])
+        #expect(response.stats.recentSessions.isEmpty)
     }
 
     @Test func currentUserRequest() async throws {

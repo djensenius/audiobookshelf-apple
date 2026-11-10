@@ -61,3 +61,16 @@ public struct DailyListeningChartDescriptor: AXChartDescriptorRepresentable {
             title: title, summary: summary, xAxis: xAxis, yAxis: yAxis, additionalAxes: [], series: [series])
     }
 }
+
+/// Spoken listening totals.
+public enum ListeningTimeText {
+    /// `seconds` in words for VoiceOver, never empty: "2 hours, 5 minutes", "20 seconds" for a
+    /// brief total, and "0 minutes" for none (where ``DurationStyle/elapsed(showSeconds:useDays:)``
+    /// returns an empty string).
+    public static func spoken(_ seconds: TimeInterval, locale: Locale = .autoupdatingCurrent) -> String {
+        let minutes = DurationStyle.elapsed(showSeconds: false).accessibilityString(seconds, locale: locale)
+        if !minutes.isEmpty { return minutes }
+        let brief = DurationStyle.elapsed().accessibilityString(seconds, locale: locale)
+        return brief.isEmpty ? DailyListeningChartDescriptor.minutesText(0, locale: locale) : brief
+    }
+}

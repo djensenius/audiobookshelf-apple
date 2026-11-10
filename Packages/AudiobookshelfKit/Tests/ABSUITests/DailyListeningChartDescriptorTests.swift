@@ -71,3 +71,35 @@ import Testing
         #expect(DailyListeningChartDescriptor.minutesText(75, locale: german) != Self.minutes(75))
     }
 }
+
+@Suite struct ListeningTimeTextTests {
+    private static let locale = Locale(identifier: "en_US")
+
+    @Test func zeroReadsAsZeroMinutes() {
+        let expected = Duration.seconds(0).formatted(
+            Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: .wide).locale(Self.locale))
+        #expect(!expected.isEmpty)
+        #expect(ListeningTimeText.spoken(0, locale: Self.locale) == expected)
+        #expect(ListeningTimeText.spoken(0.2, locale: Self.locale) == expected)
+        #expect(ListeningTimeText.spoken(-5, locale: Self.locale) == expected)
+        #expect(ListeningTimeText.spoken(.nan, locale: Self.locale) == expected)
+    }
+
+    @Test func briefTotalsReadInSeconds() {
+        let expected = DurationStyle.elapsed().accessibilityString(20, locale: Self.locale)
+        #expect(!expected.isEmpty)
+        #expect(ListeningTimeText.spoken(20, locale: Self.locale) == expected)
+    }
+
+    @Test func longerTotalsReadInHoursAndMinutes() {
+        let expected = DurationStyle.elapsed(showSeconds: false).accessibilityString(3_725, locale: Self.locale)
+        #expect(ListeningTimeText.spoken(3_725, locale: Self.locale) == expected)
+    }
+
+    @Test func usesTheLocale() {
+        let german = Locale(identifier: "de_DE")
+        let expected = Duration.seconds(0).formatted(
+            Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: .wide).locale(german))
+        #expect(ListeningTimeText.spoken(0, locale: german) == expected)
+    }
+}

@@ -24,10 +24,11 @@ struct StatsView: View {
         content
             .navigationTitle(Text(verbatim: L10n.string("HeaderYourStats")))
             .task {
-                guard model == nil, let service else { return }
-                let model = StatsModel(service: service)
+                guard let service else { return }
+                let model = model ?? StatsModel(service: service)
                 self.model = model
-                await model.load()
+                // Also retries a first load cancelled when the view disappeared.
+                await model.loadIfNeeded()
             }
     }
 
@@ -112,15 +113,17 @@ private struct StatsTiles: View {
     @ViewBuilder private func tiles(minutes: Int) -> some View {
         StatTile(value: model.itemsFinished.formatted(.number.locale(locale)), titleKey: "LabelStatsItemsFinished")
         StatTile(value: model.daysListened.formatted(.number.locale(locale)), titleKey: "LabelStatsDaysListened")
-        StatTile(value: minutes.formatted(.number.locale(locale)), titleKey: "LabelStatsMinutesListening")
-            .accessibilityValue(
-                Text(verbatim: DurationStyle.elapsed(showSeconds: false).accessibilityString(model.totalTime)))
+        StatTile(
+            value: minutes.formatted(.number.locale(locale)), titleKey: "LabelStatsMinutesListening",
+            spokenValue: ListeningTimeText.spoken(model.totalTime, locale: locale))
     }
 }
 
 private struct StatTile: View {
     let value: String
     let titleKey: String
+    /// What VoiceOver reads instead of ``value``.
+    var spokenValue: String?
 
     var body: some View {
         VStack(spacing: ABSSpacing.xxSmall) {
@@ -135,7 +138,7 @@ private struct StatTile: View {
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: L10n.string(titleKey)))
-        .accessibilityValue(Text(verbatim: value))
+        .accessibilityValue(Text(verbatim: spokenValue ?? value))
     }
 }
 

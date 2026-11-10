@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSCore
 import Foundation
 import Testing
@@ -6,10 +7,10 @@ import Testing
 
 /// A ``StatsService`` whose responses come from closures.
 private struct FakeStatsService: StatsService {
-    var statsHandler: @Sendable () async throws -> ListeningStats = { ListeningStats() }
+    var statsHandler: @Sendable () async throws -> ListeningStatsResponse = { response() }
     var finishedHandler: @Sendable () async throws -> Int = { 0 }
 
-    func listeningStats() async throws -> ListeningStats { try await statsHandler() }
+    func listeningStats() async throws -> ListeningStatsResponse { try await statsHandler() }
     func finishedItemCount() async throws -> Int { try await finishedHandler() }
 }
 
@@ -30,8 +31,12 @@ private let listeningStatsFixture = """
     "updatedAt":1709283600000},{"id":"ps-2","libraryItemId":null,"mediaType":"book","timeListening":1}]}
     """
 
-private func decodeStats(_ json: String) throws -> ListeningStats {
-    try JSONDecoder().decode(ListeningStats.self, from: Data(json.utf8))
+private func response(_ stats: ListeningStats = ListeningStats()) -> ListeningStatsResponse {
+    ListeningStatsResponse(stats: stats)
+}
+
+private func decodeStats(_ json: String) throws -> ListeningStatsResponse {
+    try JSONDecoder().decode(ListeningStatsResponse.self, from: Data(json.utf8))
 }
 
 private func calendar(_ identifier: String) throws -> Calendar {
@@ -74,12 +79,21 @@ private let enUS = Locale(identifier: "en_US")
         #expect(session.route == .item(id: "li-book-1"))
     }
 
-    /// The decoder drops the fixture's session with a null `libraryItemId`; one with an empty
-    /// ID is kept but has no route, so it isn't tappable.
-    @Test func sessionsWithoutALibraryItemHaveNoRoute() async throws {
+    /// The fixture's session with a null `libraryItemId` is kept, without a route, so it shows
+    /// but isn't tappable.
+    @Test func sessionWithNullLibraryItemIsKeptWithoutARoute() async throws {
         let fixture = try decodeStats(listeningStatsFixture)
-        #expect(fixture.recentSessions.map(\.id) == ["ps-1"])
+        let model = StatsModel(service: FakeStatsService(statsHandler: { fixture }))
+        await model.load()
+        #expect(model.recentSessions.map(\.id) == ["ps-1", "ps-2"])
+        #expect(model.recentSessions.map(\.route) == [.item(id: "li-book-1"), nil])
+        let orphan = try #require(model.recentSessions.last)
+        #expect(orphan.timeListening == 1)
+        #expect(orphan.title == nil)
+    }
 
+    /// A session with an empty item ID has no route either.
+    @Test func sessionsWithoutALibraryItemHaveNoRoute() async throws {
         let stats = try decodeStats(
             #"{"recentSessions":[{"id":"ps-3","libraryItemId":"","mediaType":"book","timeListening":5,"#
                 + #""displayTitle":"Orphan"},{"id":"ps-4","libraryItemId":"li-2","mediaType":"book"}]}"#)
@@ -105,7 +119,7 @@ private let enUS = Locale(identifier: "en_US")
     }
 
     @Test func daysWithoutListeningDontCount() async throws {
-        let stats = ListeningStats(days: ["2024-03-01": 0, "2024-03-02": 60])
+        let stats = response(ListeningStats(days: ["2024-03-01": 0, "2024-03-02": 60]))
         let model = StatsModel(service: FakeStatsService(statsHandler: { stats }))
         await model.load()
         #expect(model.daysListened == 1)
@@ -170,7 +184,7 @@ private let enUS = Locale(identifier: "en_US")
         let service = FakeStatsService(
             statsHandler: {
                 if fail.value { throw TestError.offline }
-                return ListeningStats(totalTime: 60)
+                return response(ListeningStats(totalTime: 60))
             })
         let model = StatsModel(service: service)
         await model.load()
@@ -192,7 +206,7 @@ private let enUS = Locale(identifier: "en_US")
     }
 
     @Test func isLoadingWhileTheRequestRuns() async throws {
-        let gate = GatedCalls<Void, ListeningStats>()
+        let gate = GatedCalls<Void, ListeningStatsResponse>()
         var calls = gate.calls.makeAsyncIterator()
         let model = StatsModel(service: FakeStatsService(statsHandler: { try await gate.call(()) }))
 
@@ -201,9 +215,66 @@ private let enUS = Locale(identifier: "en_US")
         #expect(model.isLoading)
         #expect(!model.hasLoaded)
 
-        call.reply.resume(returning: ListeningStats(totalTime: 120))
+        call.reply.resume(returning: response(ListeningStats(totalTime: 120)))
         await load.value
         #expect(!model.isLoading)
         #expect(model.totalTime == 120)
+    }
+
+    /// The view's task is cancelled when it disappears mid-load. The model stays unloaded with no
+    /// error, and the next appearance loads again.
+    @Test func cancelledFirstLoadIsRetriedOnReappearance() async throws {
+        let gate = GatedCalls<Void, ListeningStatsResponse>()
+        var calls = gate.calls.makeAsyncIterator()
+        let model = StatsModel(service: FakeStatsService(statsHandler: { try await gate.call(()) }))
+
+        let firstAppearance = Task { await model.loadIfNeeded() }
+        let first = try #require(await calls.next())
+        firstAppearance.cancel()
+        first.reply.resume(throwing: CancellationError())
+        await firstAppearance.value
+        #expect(!model.hasLoaded)
+        #expect(!model.isLoading)
+        #expect(model.error == nil)
+
+        let secondAppearance = Task { await model.loadIfNeeded() }
+        let second = try #require(await calls.next())
+        #expect(model.isLoading)
+        second.reply.resume(returning: response(ListeningStats(totalTime: 60)))
+        await secondAppearance.value
+        #expect(model.hasLoaded)
+        #expect(model.totalTime == 60)
+    }
+
+    @Test func loadIfNeededSkipsALoadedModel() async {
+        let count = Locked(0)
+        let model = StatsModel(
+            service: FakeStatsService(statsHandler: {
+                count.value += 1
+                return response()
+            }))
+        await model.loadIfNeeded()
+        await model.loadIfNeeded()
+        #expect(count.value == 1)
+        #expect(model.hasLoaded)
+
+        // An explicit reload (pull to refresh) still reloads.
+        await model.load()
+        #expect(count.value == 2)
+    }
+
+    @Test func failedFirstLoadIsRetriedOnReappearance() async {
+        let fail = Locked(true)
+        let model = StatsModel(
+            service: FakeStatsService(statsHandler: {
+                if fail.value { throw TestError.offline }
+                return response()
+            }))
+        await model.loadIfNeeded()
+        #expect(model.error is TestError)
+        fail.value = false
+        await model.loadIfNeeded()
+        #expect(model.hasLoaded)
+        #expect(model.error == nil)
     }
 }
