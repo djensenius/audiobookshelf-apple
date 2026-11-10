@@ -41,6 +41,8 @@ struct PlaybackSessionContractTests {
     func startSyncClose() async throws {
         let seed = try await ContractSeed.shared.data()
         try await ContractServer.require().withUser { session in
+            let empty = try await session.client.send(SessionEndpoints.listeningSessions(itemID: seed.taleID))
+            #expect(empty.sessions.isEmpty)
             let device = contractDevice()
             let started = try await session.play(seed.taleID, device: device)
             #expect(started.playMethod == .directPlay)
@@ -78,6 +80,10 @@ struct PlaybackSessionContractTests {
             _ = try await session.client.send(SessionEndpoints.close(sessionID: started.id, report: closing))
             let closed = try #require(try await session.client.mediaProgress(itemID: seed.taleID))
             #expect(closed.currentTime == 20)
+            let page = try await session.client.send(SessionEndpoints.listeningSessions(itemID: seed.taleID))
+            let stored = try #require(page.sessions.first { $0.id == started.id })
+            #expect(stored.currentTime == 20)
+            #expect(approximately(stored.timeListening, 7.5, tolerance: 0.001))
 
             // A closed session is gone: the app must treat 404 as "upload this as a local session".
             await expectNotFound { try await session.open(started) }

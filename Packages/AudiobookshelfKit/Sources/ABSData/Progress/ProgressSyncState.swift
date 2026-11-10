@@ -239,6 +239,8 @@ struct ProgressSyncState: Sendable, Equatable {
         // merged server values, or defaults when the server had none).
         let unseeded = serverBaseline == nil
         var baseline = serverBaseline ?? currentValues(lastUpdate: .distantPast)
+        // Synthesizing any baseline cannot establish an unobserved ebook location.
+        if unseeded { baseline.ebookLocationIsUnknown = true }
         if let audio = send.audio {
             baseline.currentTime = audio.currentTime
             baseline.progress = audio.progress
@@ -249,7 +251,9 @@ struct ProgressSyncState: Sendable, Equatable {
             baseline.finishedAt = finished.finishedAt
         }
         if let ebook = send.ebook {
-            baseline.ebookLocation = ebook.ebookLocation
+            // A nil location was omitted, not cleared. Never infer it from a newer local edit.
+            baseline.ebookLocation = ebook.ebookLocation ?? serverBaseline?.ebookLocation
+            baseline.ebookLocationIsUnknown = ebook.ebookLocation == nil ? baseline.ebookLocationIsUnknown : nil
             baseline.ebookProgress = ebook.ebookProgress
         }
         // Creating progress stores a missing `ebookProgress` as 0.
@@ -460,7 +464,9 @@ struct ProgressSyncState: Sendable, Equatable {
         case .finished:
             server.isFinished == other.isFinished && datesMatch(server.finishedAt, other.finishedAt)
         default:
-            ebookMatches(server, other.ebookLocation, other.ebookProgress)
+            ebookMatches(
+                server, other.ebookLocationIsUnknown == true ? server.ebookLocation : other.ebookLocation,
+                other.ebookProgress)
         }
     }
 
@@ -484,7 +490,8 @@ struct ProgressSyncState: Sendable, Equatable {
             return server.isFinished == finished.isFinished && datesMatch(server.finishedAt, finished.finishedAt)
         default:
             guard let ebook = send.ebook else { return false }
-            return ebookMatches(server, ebook.ebookLocation, ebook.ebookProgress)
+            // An omitted location imposes no constraint on the PATCH's echo.
+            return ebookMatches(server, ebook.ebookLocation ?? server.ebookLocation, ebook.ebookProgress)
         }
     }
 
@@ -548,6 +555,7 @@ extension ProgressBaseline {
             finishedAt = other.finishedAt
         default:
             ebookLocation = other.ebookLocation
+            ebookLocationIsUnknown = other.ebookLocationIsUnknown
             ebookProgress = other.ebookProgress
         }
     }
