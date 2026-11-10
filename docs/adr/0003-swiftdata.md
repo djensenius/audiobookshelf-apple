@@ -164,7 +164,7 @@ General rules:
 | `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
 | `LocalLibraryItem` | `id: UUID` | `serverConnectionID: UUID`, `serverAddress`, `serverUserId`, `libraryItemId`, `mediaType` (`book`/`podcast`), `title`, `authorName: String?`, `relativeDirectory`, `coverRelativePath: String?`, `coverUpdatedAt: Date?`, `addedAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) files: [LocalFile]` | `#Unique([\.id], [\.serverConnectionID, \.libraryItemId])`; `#Index([\.libraryItemId], [\.serverConnectionID])` |
 | `LocalFile` | `id: UUID` | `item: LocalLibraryItem?` (inverse), `kind` (`audio`/`ebook`), `relativePath`, `filename`, `mimeType`, `size: Int64`, `serverIno: String?`, `trackIndex: Int?` (book track order), `episodeId: String?` (podcast) | `#Unique([\.id])` |
-| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date`, `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
+| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date` (latest change, for display and ordering only), `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `audioEditedAt: Date?`, `finishedEditedAt: Date?`, `ebookEditedAt: Date?`, `@Attribute(.codable) serverBaseline: ProgressBaseline?`, `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
 | `DownloadRecord` | `id: UUID`, `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `mediaType`, `title`, `state` (`queued`/`downloading`/`paused`/`failed`), `relativeDirectory`, `createdAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) parts: [DownloadPart]` | `#Unique([\.id], [\.key])`; `#Index([\.state])` |
 | `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `@Attribute(.externalStorage) resumeData: Data?`, `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
 | `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?` | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
@@ -203,31 +203,55 @@ Model notes:
   - `finishedDirty`: `isFinished`, `finishedAt`;
   - `ebookDirty`: `ebookLocation`, `ebookProgress`.
 
+  A local change to a group also sets that group's `<group>EditedAt` to now.
   `needsServerSync` is kept equal to "any dirty flag is set" by the store and is
-  the indexed pending-sync query. Sync rules:
+  the indexed pending-sync query. `serverBaseline` is a `Codable, Sendable` struct
+  owned by `ABSData` (`currentTime`, `progress`, `duration`, `isFinished`,
+  `finishedAt`, `ebookLocation`, `ebookProgress`, `lastUpdate`) holding the
+  server's values as last seen or acknowledged. Conflicts are detected per group
+  against this baseline, never with the row-wide `lastUpdate`. Sync rules:
   - **Seeding.** When a row is created and server progress for that media is known
-    (`ProgressCache`, `/api/me`, or a progress response), every field is seeded
-    from it with all dirty flags `false`; the local change is then applied on top.
-    Without server progress, the row starts from defaults, and only the changed
-    group is dirty.
+    (`ProgressCache`, `/api/me`, or a progress response), every field and the
+    baseline are seeded from it with all dirty flags `false`; the local change is
+    then applied on top. Without server progress, the row starts from defaults with
+    `serverBaseline == nil`, and only the changed group is dirty.
   - **PATCH.** `PATCH /api/me/progress/:id` sends only the fields of dirty groups.
     An ebook-only save never sends `currentTime`, `progress`, `duration` or
     `isFinished`, so it can't wipe audio progress made on another device, and
     vice versa.
-  - **Merge** (extends `ApiClient.syncLocalSessionsWithServer`): groups that are
-    not dirty are always overwritten with server values. For a dirty group, the
-    newer of local `lastUpdate` and server `lastUpdate` wins; when the server wins,
-    its values replace the group and the flag clears without a PATCH.
-  - **Clearing.** After a successful PATCH the store clears the flags of the groups
-    that were sent, only if the row's `lastUpdate` still equals the value that was
-    sent; a change made during the request stays dirty.
+  - **Merge** (replaces the row-wide rule in
+    `ApiClient.syncLocalSessionsWithServer`), for each group when server progress
+    arrives:
+    - not dirty: take the server values;
+    - dirty, and the server's values for the group equal the baseline's: the
+      server hasn't changed that group since we last saw it, so the local values
+      are kept and stay dirty;
+    - dirty, and the server's group differs from the baseline (or there is no
+      baseline): a real conflict. The local group wins only if its
+      `<group>EditedAt` is later than the server's `lastUpdate`; otherwise the
+      server values replace the group and its flag clears without a PATCH. The
+      server's `lastUpdate` is row-wide, so it is an upper bound on when that group
+      changed, and ambiguous cases favour the server.
+
+    Afterwards `serverBaseline` becomes the server's values. Comparisons allow 1 s
+    for `currentTime` and `duration`, 0.001 for `progress` and `ebookProgress`,
+    and are exact otherwise.
+  - **Clearing.** After a successful PATCH the store copies the sent groups into
+    `serverBaseline` and clears their flags, but only for groups whose
+    `<group>EditedAt` still equals the value that was sent; a change made during
+    the request stays dirty.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
 - **Downloads:** a finished download becomes a `LocalLibraryItem` with its
-  `LocalFile`s (an idempotent upsert on `[serverConnectionID, libraryItemId]`), and
-  then its `DownloadRecord` is deleted. A crash between the two steps is repaired at
-  launch by finalising records whose parts are all `completed`. Each
+  `LocalFile`s, and then its `DownloadRecord` is deleted. The download engine
+  (#72, P4-01) reads the completed record from `DownloadStore`, calls
+  `LocalItemStore.upsertFromDownload(_:)` (an idempotent upsert on
+  `[serverConnectionID, libraryItemId]`) and then calls
+  `DownloadStore.deleteRecord(_:)`. `DownloadStore` never writes
+  `LocalLibraryItem` or `LocalFile`. A crash between the two steps is repaired at
+  launch by running the same sequence for records whose parts are all
+  `completed`. Each
   `URLSessionTask.taskDescription` is the part's `id`; `taskIdentifier` is only a
   lookup cache. Requests authenticate with an `Authorization` header added when the
   task is created or resumed (never `?token=`), so only token-free paths are
@@ -311,8 +335,18 @@ Model notes:
   - `LocalItemStore` (local items and files);
   - `LocalProgressStore` (progress with `pendingSync(for:)`, covering audio and
     ebook fields, plus `PendingLocalSession`s);
-  - `DownloadStore` (records, parts and finalising into local items);
+  - `DownloadStore` (records and parts);
   - `PlaybackHistoryStore`.
+- **One writer per model.** Each model type is inserted, updated and deleted by
+  exactly one store: connections by `ServerConnectionStore`; `LocalLibraryItem`
+  and `LocalFile` only by `LocalItemStore`; `LocalMediaProgress` and
+  `PendingLocalSession` by `LocalProgressStore`; `DownloadRecord` and
+  `DownloadPart` by `DownloadStore`; history by `PlaybackHistoryStore`. Other
+  stores and services may read through their own context, but they delegate every
+  write to the owner. `DataStack` creates one instance of each store and shares
+  it, and each fetch-by-natural-key-then-insert runs inside one synchronous actor
+  method with no `await` in between. Because actors serialise those calls, two
+  writers can't both miss a natural key and insert different `id`s.
 - Public store methods take and return only `Sendable` values: `UUID`/`String`
   keys, `PersistentIdentifier`s, and one DTO per model named `<Model>DTO` (for
   example `LocalMediaProgressDTO` and `DownloadPartDTO`; `LocalLibraryItemDTO`
@@ -433,8 +467,12 @@ Ongoing checks:
   every `#Unique` has a test. Each later `SchemaVn` adds a test that migrates a store
   populated with the previous version.
 - #37 (P1-13b): CRUD, uniqueness and cascade tests for each store; a repeated
-  upsert keeps the original `id`; an ebook-only save leaves `audioDirty` and
-  `finishedDirty` false and its pending-sync DTO carries no audio fields.
+  upsert keeps the original `id`, including concurrent `upsertFromDownload` calls
+  for the same item; an ebook-only save leaves `audioDirty` and `finishedDirty`
+  false and its pending-sync DTO carries no audio fields; merge tests cover an
+  offline ebook edit plus an audio-only server change (the ebook edit is kept and
+  stays dirty) and dirty audio followed by a later local ebook edit while the
+  server's audio changed (the server's audio wins).
 - `mise run test:kit` under Swift 6 strict concurrency, with no Sendable warnings.
 - Review checks: `import SwiftData` only in `ABSData`, `ABSAppModel` (view models
   using `ResultsObserver`/`HistoryObserver`), app-target views and the widget; no `@Model` type in a public store signature; `cloudKitDatabase: .none`
