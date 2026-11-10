@@ -68,9 +68,9 @@ private enum SupersetSchemaV2: VersionedSchema {
         fileManager.fileExists(atPath: url.path(percentEncoded: false))
     }
 
-    /// The `Broken/<epoch>-<uuid>/` directories next to a store.
+    /// The `Broken/Audiobookshelf.store/<epoch>-<uuid>/` directories next to a store.
     private func brokenCopies(in directory: URL) -> [URL] {
-        let root = directory.appending(path: "Broken")
+        let root = directory.appending(path: "Broken/Audiobookshelf.store")
         return (try? fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
     }
 
@@ -321,7 +321,7 @@ private enum SupersetSchemaV2: VersionedSchema {
     @Test func corruptStoreAndSideFilesAreMovedAsideKeepingNewestCopy() throws {
         let directory = Fixtures.temporaryDirectory()
         defer { try? fileManager.removeItem(at: directory) }
-        let older = directory.appending(path: "Broken/1-OLDER")
+        let older = directory.appending(path: "Broken/Audiobookshelf.store/1-OLDER")
         try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
         let url = directory.appending(path: "Audiobookshelf.store")
         let garbage = Data(repeating: 0x5A, count: 8192)
@@ -456,14 +456,15 @@ private enum SupersetSchemaV2: VersionedSchema {
         let directory = Fixtures.temporaryDirectory()
         defer { try? fileManager.removeItem(at: directory) }
         let url = directory.appending(path: "Audiobookshelf.store")
-        do {
-            let context = ModelContext(try DataStack(location: .url(url)).container)
+        let other = directory.appending(path: "Other.store")
+        for store in [url, other] {
+            let context = ModelContext(try DataStack(location: .url(store)).container)
             context.insert(Fixtures.connection())
             try context.save()
         }
-        let older = directory.appending(path: "Broken/1-OLDER")
+        let older = directory.appending(path: "Broken/Audiobookshelf.store/1-OLDER")
         try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
-        let copy = directory.appending(path: "Broken/5-CRASHED")
+        let copy = directory.appending(path: "Broken/Audiobookshelf.store/5-CRASHED")
         try fileManager.createDirectory(at: copy, withIntermediateDirectories: true)
         let names = ["Audiobookshelf.store", "Audiobookshelf.store-wal", "Audiobookshelf.store-shm"]
         // An undecodable marker still resumes: its contents are never trusted.
@@ -471,6 +472,15 @@ private enum SupersetSchemaV2: VersionedSchema {
         try fileManager.moveItem(at: url, to: copy.appending(path: names[0]))
         for name in names.dropFirst() where !exists(directory.appending(path: name)) {
             try Data("stale".utf8).write(to: directory.appending(path: name))
+        }
+
+        // Another store in the same directory opens intact and leaves this store's archive alone.
+        let otherContext = ModelContext(try openURL(other).container)
+        #expect(try otherContext.fetchCount(FetchDescriptor<ServerConnectionRecord>()) == 1)
+        #expect(exists(copy.appending(path: DataStack.incompleteMarker)))
+        #expect(exists(older))
+        for name in names.dropFirst() {
+            #expect(exists(directory.appending(path: name)))
         }
 
         let context = ModelContext(try openURL(url).container)
@@ -501,8 +511,8 @@ private enum SupersetSchemaV2: VersionedSchema {
     @Test func pruningIsSkippedWhileAnyCopyIsIncomplete() throws {
         let directory = Fixtures.temporaryDirectory()
         defer { try? fileManager.removeItem(at: directory) }
-        let marked = directory.appending(path: "Broken/1-MARKED")
-        let unmarked = directory.appending(path: "Broken/2-DONE")
+        let marked = directory.appending(path: "Broken/Audiobookshelf.store/1-MARKED")
+        let unmarked = directory.appending(path: "Broken/Audiobookshelf.store/2-DONE")
         try fileManager.createDirectory(at: marked, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: unmarked, withIntermediateDirectories: true)
         try Data("Other.store".utf8).write(to: marked.appending(path: DataStack.incompleteMarker))
@@ -521,8 +531,8 @@ private enum SupersetSchemaV2: VersionedSchema {
     @Test func inaccessibleMarkerPreventsOpeningAndPruning() throws {
         let directory = Fixtures.temporaryDirectory()
         defer { try? fileManager.removeItem(at: directory) }
-        let older = directory.appending(path: "Broken/1-OLDER")
-        let locked = directory.appending(path: "Broken/5-LOCKED")
+        let older = directory.appending(path: "Broken/Audiobookshelf.store/1-OLDER")
+        let locked = directory.appending(path: "Broken/Audiobookshelf.store/5-LOCKED")
         try fileManager.createDirectory(at: older, withIntermediateDirectories: true)
         try fileManager.createDirectory(at: locked, withIntermediateDirectories: true)
         try Data().write(to: locked.appending(path: DataStack.incompleteMarker))

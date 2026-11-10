@@ -228,18 +228,24 @@ public struct DataStack: Sendable {
 
     static let incompleteMarker = "INCOMPLETE"
 
+    /// `Broken/<store file name>/`: each store's archives live in their own directory, so resuming
+    /// and pruning never touch another store's, whatever its marker says.
+    static func brokenRoot(for url: URL) -> URL {
+        url.deletingLastPathComponent().appending(path: "Broken/\(url.lastPathComponent)", directoryHint: .isDirectory)
+    }
+
     /// The store and its SQLite side files, main store first.
     private static func storeFileNames(_ url: URL) -> [String] {
         let name = url.lastPathComponent
         return [name, "\(name)-wal", "\(name)-shm"]
     }
 
-    /// Moves the store and its SQLite side files into `Broken/<epoch>-<uuid>/` next to it, then
+    /// Moves the store and its SQLite side files into `Broken/<store>/<epoch>-<uuid>/` next to it, then
     /// deletes older broken copies so at most one is kept. The move is journaled: an `INCOMPLETE`
     /// marker is written first and removed last, and the main store moves first, so a crash never
     /// leaves a stale WAL beside a missing or new store.
     static func moveStoreAside(at url: URL, now: Date) throws {
-        let brokenRoot = url.deletingLastPathComponent().appending(path: "Broken", directoryHint: .isDirectory)
+        let brokenRoot = brokenRoot(for: url)
         let destination = brokenRoot.appending(
             path: "\(Int(now.timeIntervalSince1970))-\(UUID().uuidString)",
             directoryHint: .isDirectory
@@ -267,7 +273,7 @@ public struct DataStack: Sendable {
     /// Completes a move-aside interrupted by a crash or an error, before the store is opened, then
     /// applies the retention policy. Throws, opening nothing, if `Broken/` or a marker can't be read.
     static func finishInterruptedMoves(for url: URL) throws {
-        let brokenRoot = url.deletingLastPathComponent().appending(path: "Broken", directoryHint: .isDirectory)
+        let brokenRoot = brokenRoot(for: url)
         let incomplete = try brokenCopies(in: brokenRoot).filter(isIncomplete)
         for copy in incomplete {
             try finishMove(into: copy, storeURL: url)

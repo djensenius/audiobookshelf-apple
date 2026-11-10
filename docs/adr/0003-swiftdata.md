@@ -396,8 +396,9 @@ Model notes:
   full, permission, POSIX, unknown codes) means the store may be intact. Anything
   else, including an unreadable file (protected data while the device is locked),
   is rethrown and the store left alone. A reset logs a fault and moves the store,
-  then `-wal` and `-shm`, into `Broken/<epoch>-<uuid>/` (keeping only the newest
-  copy). An `INCOMPLETE` marker is written first and removed last; the next open
+  then `-wal` and `-shm`, into `Broken/<store file>/<epoch>-<uuid>/`, keeping only
+  the newest copy. Archives are scoped to their store by path, so resuming and
+  pruning never touch another store's. An `INCOMPLETE` marker is written first and removed last; the next open
   finishes any marked move (moving the store's fixed file set, never trusting the
   marker's contents) before opening. Only `ENOENT` confirms a missing marker or
   file; if `Broken/` or a marker can't be checked, the open fails and nothing is
