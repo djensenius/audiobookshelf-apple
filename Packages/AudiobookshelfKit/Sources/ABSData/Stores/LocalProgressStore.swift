@@ -20,6 +20,16 @@ public struct ProgressPatch: Sendable, Equatable {
     public let token: UUID
 }
 
+/// Where server progress came from (``LocalProgressStore/applyServerProgress(_:capturedAt:source:)``).
+public enum ServerProgressSource: Sendable, Equatable {
+    /// `/api/me`, an expanded item or `/api/me/progress/:id`. A fetch that passes the generation
+    /// check was issued after the row's last settlement, so it includes every acknowledged PATCH.
+    case fetch
+    /// A socket event (`user_updated`, `user_item_progress_updated`). It may have been emitted
+    /// before an acknowledged PATCH was applied, as the PATCH's 200 has no body.
+    case socket
+}
+
 /// The server's per-session answer to `POST /api/session/local-all`.
 public enum SessionUploadResult: Sendable, Equatable {
     case success
@@ -31,7 +41,7 @@ public enum SessionUploadResult: Sendable, Equatable {
 /// Progress follows the ADR 0003 sync rules: local edits mark only the field groups they touch,
 /// each PATCH carries one dirty group (audio, then finished, then ebook; #53), at most one PATCH
 /// is in flight per row, and server progress is merged per group
-/// (``applyServerProgress(_:capturedAt:)``) after dropping values captured before the row's last
+/// (``applyServerProgress(_:capturedAt:source:)``) after dropping values captured before the row's last
 /// local edit or PATCH settlement. Every write is saved through ``commit(_:)``, which rolls the
 /// context back when it fails; in-memory bookkeeping changes only after a successful save.
 @ModelActor public actor LocalProgressStore: StoreActor {
@@ -48,12 +58,14 @@ public enum SessionUploadResult: Sendable, Equatable {
     private var generation: UInt64 = 0
     private var rowGenerations: [String: UInt64] = [:]
     private var inFlight: [String: (token: UUID, groups: ProgressGroups)] = [:]
+    /// Groups acknowledged without a server time whose value the server hasn't confirmed since.
+    private var unconfirmed: [String: ProgressGroups] = [:]
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "persistence")
 
     // MARK: - Progress
 
-    /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:)``.
+    /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
     public func captureGeneration() -> ProgressGeneration {
         ProgressGeneration(value: generation)
     }
@@ -104,23 +116,46 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// socket event) into existing rows; media without a row is skipped. Values for a row edited
     /// or settled since `capturedAt` are dropped, and groups carried by a PATCH in flight aren't
     /// merged. Returns the keys whose rows were merged.
+    ///
+    /// A PATCH's 200 carries no server time, so after an acknowledgement a socket event can hold
+    /// older values with any `lastUpdate`. Until a fetch, or a socket event holding the
+    /// acknowledged value (socket events arrive in order), socket values for the acknowledged
+    /// groups are ignored.
     @discardableResult
     public func applyServerProgress(
         _ updates: [MediaKey: ProgressBaseline],
-        capturedAt: ProgressGeneration
+        capturedAt: ProgressGeneration,
+        source: ServerProgressSource
     ) throws -> Set<MediaKey> {
-        try commit {
+        let (merged, held) = try commit {
             var merged: Set<MediaKey> = []
+            var held: [String: ProgressGroups] = [:]
             for (key, server) in updates {
                 if let edited = rowGenerations[key.rawValue], edited > capturedAt.value { continue }
                 guard let row = try fetchRow(key) else { continue }
                 var state = ProgressSyncState(row)
+                var server = server
+                var stillHeld = source == .fetch ? [] : unconfirmed[key.rawValue] ?? []
+                if let baseline = state.serverBaseline {
+                    for group in ProgressGroups.each where stillHeld.contains(group) {
+                        if ProgressSyncState.matches(server, baseline, group) {
+                            stillHeld.remove(group)
+                        } else {
+                            server.copy(group, from: baseline)
+                        }
+                    }
+                }
                 guard state.merge(server, excluding: inFlight[key.rawValue]?.groups ?? []) else { continue }
                 state.write(to: row)
                 merged.insert(key)
+                held[key.rawValue] = stillHeld
             }
-            return merged
+            return (merged, held)
         }
+        for (key, groups) in held {
+            unconfirmed[key] = groups.isEmpty ? nil : groups
+        }
+        return merged
     }
 
     /// Takes a snapshot of the row's next dirty group (audio, then finished, then ebook) for a
@@ -159,6 +194,9 @@ public enum SessionUploadResult: Sendable, Equatable {
             state.acknowledge(patch.values, serverLastUpdate: serverLastUpdate)
             state.write(to: row)
             row.lastSyncError = nil
+        }
+        if serverLastUpdate == nil {
+            unconfirmed[patch.key.rawValue, default: []].formUnion(patch.values.groups)
         }
         return true
     }
@@ -212,7 +250,10 @@ public enum SessionUploadResult: Sendable, Equatable {
             modelContext.delete(row)
             return true
         }
-        if deleted { rowGenerations[key.rawValue] = nil }
+        if deleted {
+            rowGenerations[key.rawValue] = nil
+            unconfirmed[key.rawValue] = nil
+        }
         return deleted
     }
 
@@ -228,8 +269,9 @@ public enum SessionUploadResult: Sendable, Equatable {
             }
             return rows.map(\.key)
         }
-        for key in keys where inFlight[key] == nil {
-            rowGenerations[key] = nil
+        for key in keys {
+            unconfirmed[key] = nil
+            if inFlight[key] == nil { rowGenerations[key] = nil }
         }
         return keys.count
     }

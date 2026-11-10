@@ -241,11 +241,31 @@ Model notes:
     keeps an in-memory generation counter and, per row, the generation of its last
     local edit or PATCH settlement. Every fetch (`/api/me`, an expanded item,
     `/api/me/progress/:id`) captures the counter when it is issued, and every socket
-    `user_item_progress_updated` captures it when received. When the values are
+    event (`user_updated`, which the server emits for each PATCH, and
+    `user_item_progress_updated`, which it emits for playback-session syncs)
+    captures it when received. When the values are
     applied, a row whose generation has advanced since that capture is skipped; the
     next fetch picks up any real server change. The counter can be in memory
     because no fetch outlives the process. In addition, server values whose
-    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped.
+    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped. Server
+    progress always carries `lastUpdate` (`MediaProgress.getOldMediaProgress`,
+    `updatedAt`); the network layer drops a payload without one rather than
+    inventing a time.
+  - **Socket values after an acknowledgement.** The PATCH's 200 has no body
+    (`MeController.createUpdateMediaProgress`, 2.26.0 to master), so the ack
+    can't advance `serverBaseline.lastUpdate` to the server's time of the write.
+    A socket event received after the ack may have been emitted before the PATCH
+    was applied, with a `lastUpdate` equal to, later than or earlier than the
+    baseline's, and the generation check can't catch it because it is captured on
+    receipt. So, in memory, the groups acknowledged without a server time are held:
+    socket values for them are ignored (the baseline's values stand in) until a
+    socket event holds the acknowledged value (events on one connection arrive in
+    the order the server emitted them, so later ones are newer) or a fetch is
+    applied (a fetch passing the generation check was issued after the ack, so it
+    includes the write). Callers say which source the values came from. Holding
+    only delays another device's newer value until the PATCH's own `user_updated`
+    or the next fetch; it never marks a group dirty, because the server already
+    holds the acknowledged value.
   - **Merge** (replaces the row-wide rule in
     `ApiClient.syncLocalSessionsWithServer`), for each group when server progress
     arrives:
@@ -328,8 +348,8 @@ Model notes:
     server matching the advanced baseline, so the edit is kept and sent rather
     than treated as a conflict.
   - **Merges during an in-flight PATCH.** While a PATCH for a row is in flight,
-    server progress for that row (a fetch, `/api/me`, or a socket
-    `user_item_progress_updated` echo of the PATCH itself) is not merged into any
+    server progress for that row (a fetch, `/api/me`, or the socket
+    `user_updated` echo of the PATCH itself) is not merged into any
     group the PATCH carries. Groups the PATCH doesn't carry merge immediately.
     Values for the carried groups may be held until the PATCH settles, but they
     keep their original capture and still go through the stale check. Settlement
@@ -706,7 +726,11 @@ Ongoing checks:
   the dirty groups its PATCH could have changed, and
   an unmatched server value for such a group then keeps the local value dirty; a server echo of an in-flight PATCH (newer `lastUpdate`, older
   values) arriving after a newer local seek is deferred and leaves the seek dirty
-  and unchanged, on both PATCH success and failure; a newer edit survives the
+  and unchanged, on both PATCH success and failure; a socket value received after
+  an acknowledgement without a server time doesn't roll the acknowledged value
+  back, whether its `lastUpdate` equals, follows or precedes the baseline's, while
+  another device's later value still arrives by socket after the acknowledged
+  value is seen, by any fetch, or at once when the ack had a server time; a newer edit survives the
   server's normalized echo (an un-finish auto-finished near the end, a created
   `ebookProgress` of 0) after an ack or a lost response, and an unchanged edit
   takes it; a missing `ebookProgress` is sent as 0, so a page turn made while it
