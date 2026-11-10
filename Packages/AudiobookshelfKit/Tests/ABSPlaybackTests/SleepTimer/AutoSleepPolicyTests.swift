@@ -89,6 +89,8 @@ struct AutoSleepPolicyTests {
         #expect(defaultOptions.playsAlmostDoneChime == false)
 
         let settings = AppSettings(defaults: defaults)
+        settings.shakeSensitivity = .high
+        #expect(SleepTimerOptions(settings: AppSettings.snapshot(from: defaults)).shakeSensitivity == .high)
         settings.autoSleepTimer = true
         settings.autoSleepTimerStartTime = "21:30"
         settings.autoSleepTimerEndTime = "07:15"
