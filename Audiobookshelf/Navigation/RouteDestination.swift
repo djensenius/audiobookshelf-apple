@@ -11,6 +11,8 @@ struct RouteDestination: View {
 
     var body: some View {
         switch route {
+        case .stats:
+            StatsView()
         case .logs:
             LogsView()
         case .settings:
