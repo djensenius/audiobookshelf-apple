@@ -3,9 +3,21 @@ import Testing
 
 @testable import ABSCore
 
-/// Yields until `condition` holds, without sleeping; the suite's time limit catches a hang.
-func yieldUntil(_ condition: () async -> Bool) async {
-    while await !condition() { await Task.yield() }
+/// Thrown by ``yieldUntil(maxYields:sourceLocation:_:)`` when its condition never holds.
+struct YieldLimitExceeded: Error {}
+
+/// Yields until `condition` holds, without sleeping. Stops on cancellation, and records an issue
+/// and throws after `maxYields`, so a regression fails instead of hanging the runner.
+func yieldUntil(
+    maxYields: Int = 1_000_000, sourceLocation: SourceLocation = #_sourceLocation, _ condition: () async -> Bool
+) async throws {
+    for _ in 0..<maxYields {
+        if await condition() { return }
+        try Task.checkCancellation()
+        await Task.yield()
+    }
+    Issue.record("Condition still false after \(maxYields) yields", sourceLocation: sourceLocation)
+    throw YieldLimitExceeded()
 }
 
 @Suite(.timeLimit(.minutes(1))) struct AsyncSemaphoreTests {
@@ -27,7 +39,7 @@ func yieldUntil(_ condition: () async -> Bool) async {
                     await semaphore.release()
                 }
             }
-            await yieldUntil { await semaphore.waiterCount == 3 && running.withLock { $0.now } == 2 }
+            try await yieldUntil { await semaphore.waiterCount == 3 && running.withLock { $0.now } == 2 }
             for gate in gates { gate.continuation.finish() }
             try await group.waitForAll()
         }
@@ -46,11 +58,11 @@ func yieldUntil(_ condition: () async -> Bool) async {
                     try await semaphore.acquire()
                     order.withLock { $0.append(index) }
                 })
-            await yieldUntil { await semaphore.waiterCount == index + 1 }
+            try await yieldUntil { await semaphore.waiterCount == index + 1 }
         }
         for index in 0..<3 {
             await semaphore.release()
-            await yieldUntil { order.withLock { $0.count } == index + 1 }
+            try await yieldUntil { order.withLock { $0.count } == index + 1 }
         }
         for waiter in waiters { try await waiter.value }
         #expect(order.withLock { $0 } == [0, 1, 2])
@@ -60,13 +72,13 @@ func yieldUntil(_ condition: () async -> Bool) async {
     @Test func cancelledWaiterGivesItsPlaceToTheNext() async throws {
         let semaphore = AsyncSemaphore(permits: 0)
         let first = Task { try await semaphore.acquire() }
-        await yieldUntil { await semaphore.waiterCount == 1 }
+        try await yieldUntil { await semaphore.waiterCount == 1 }
         let second = Task { try await semaphore.acquire() }
-        await yieldUntil { await semaphore.waiterCount == 2 }
+        try await yieldUntil { await semaphore.waiterCount == 2 }
 
         first.cancel()
         await #expect(throws: CancellationError.self) { try await first.value }
-        await yieldUntil { await semaphore.waiterCount == 1 }
+        try await yieldUntil { await semaphore.waiterCount == 1 }
         await semaphore.release()
         try await second.value
         #expect(await semaphore.availablePermits == 0)
@@ -75,7 +87,7 @@ func yieldUntil(_ condition: () async -> Bool) async {
         #expect(await semaphore.waiterCount == 0)
     }
 
-    @Test func callerCancelledBeforeAcquiringTakesNoPermit() async {
+    @Test func callerCancelledBeforeAcquiringTakesNoPermit() async throws {
         let semaphore = AsyncSemaphore(permits: 1)
         let caller = Task {
             withUnsafeCurrentTask { $0?.cancel() }

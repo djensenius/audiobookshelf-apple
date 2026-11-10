@@ -47,8 +47,7 @@ import Testing
         #expect(flight.isAbandoned)
         var iterator = finished.makeAsyncIterator()
         #expect(await iterator.next() == true)
-        // `Abandoned` or the task's `CancellationError`, depending on whether `finish` has run yet.
-        await #expect(throws: (any Error).self) { try await flight.join() }
+        await #expect(throws: Flight<Int>.Abandoned.self) { try await flight.join() }
     }
 
     /// Starts a flight whose operation waits for `gate`, then reports whether it was cancelled.
@@ -74,7 +73,7 @@ import Testing
         let flight = gatedFlight(gate.stream, starts: starts.continuation, cancelled: cancelled.continuation)
         let leaving = Task { try await flight.join() }
         let staying = Task { try await flight.join() }
-        await yieldUntil { flight.waiterCount == 2 }
+        try await yieldUntil { flight.waiterCount == 2 }
 
         leaving.cancel()
         await #expect(throws: CancellationError.self) { try await leaving.value }
@@ -92,7 +91,7 @@ import Testing
         let cancelled = AsyncStream.makeStream(of: Bool.self)
         let flight = gatedFlight(gate.stream, starts: starts.continuation, cancelled: cancelled.continuation)
         let callers = [Task { try await flight.join() }, Task { try await flight.join() }]
-        await yieldUntil { flight.waiterCount == 2 }
+        try await yieldUntil { flight.waiterCount == 2 }
 
         for caller in callers {
             caller.cancel()
@@ -102,12 +101,31 @@ import Testing
         var wasCancelled = cancelled.stream.makeAsyncIterator()
         #expect(await wasCancelled.next() == true)
         // An abandoned flight never serves a result again; the caller starts a new one.
-        await #expect(throws: (any Error).self) { try await flight.join() }
+        await #expect(throws: Flight<Int>.Abandoned.self) { try await flight.join() }
 
         let fresh = gatedFlight(gate.stream, starts: starts.continuation, cancelled: cancelled.continuation)
         #expect(try await fresh.join() == 7)
         #expect(await wasCancelled.next() == false)
         starts.continuation.finish()
         #expect(await starts.stream.reduce(0) { count, _ in count + 1 } == 2)
+    }
+
+    /// The operation ignores cancellation and succeeds after the flight is abandoned; the late
+    /// caller must still fail, so it starts a new flight.
+    @Test func abandonedFlightNeverServesALateSuccess() async throws {
+        let gate = AsyncStream.makeStream(of: Void.self)
+        let flight = Flight<Int>()
+        flight.start {
+            var iterator = gate.stream.makeAsyncIterator()
+            _ = await iterator.next()
+            return 7
+        }
+        let current = Task { try await flight.join() }
+        try await yieldUntil { flight.waiterCount == 1 }
+        flight.cancel()
+        // Current waiters get the task's result; once it arrives, `finish` has stored it.
+        #expect(try await current.value == 7)
+        #expect(flight.isAbandoned)
+        await #expect(throws: Flight<Int>.Abandoned.self) { try await flight.join() }
     }
 }
