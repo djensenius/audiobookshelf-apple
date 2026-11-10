@@ -12,6 +12,9 @@ import Testing
         let box = PixelBox(size: CGSize(width: 170, height: 272), scale: 3)
         #expect(box == PixelBox(width: 512, height: 832))
         #expect(PixelBox(width: 5000, height: 1).height == 32 && PixelBox(width: 5000, height: 1).width == 1200)
+        let huge = PixelBox(width: .greatestFiniteMagnitude, height: -.greatestFiniteMagnitude)
+        #expect(huge == PixelBox(width: 1200, height: 32))
+        #expect(PixelBox(width: .infinity, height: .nan) == PixelBox(width: 32, height: 32))
     }
 
     @Test func fileStemIsSanitisedAndUnique() {
