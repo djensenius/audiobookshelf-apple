@@ -2,12 +2,22 @@ import os
 
 /// Unified logging for the app and its packages.
 ///
-/// Interpolated values are private by default in unified logging, which hides them from
-/// the exported log. Mark a value `.public` only after passing it through
-/// ``Log/redact(_:)`` (or a ``Redactor`` that knows the custom header values):
+/// Privacy defaults depend on the interpolated type. Dynamic strings and objects are private by
+/// default, but integers, floating-point values, and `Bool`s are **public** by default, so they
+/// appear in the exported log as is. Don't rely on the defaults:
+///
+/// - Give every interpolation an explicit `privacy:` argument.
+/// - Mark a string `.public` only after passing it through ``Log/redact(_:)`` (or a ``Redactor``
+///   that knows the custom header values). ``Redactor`` matches text patterns and can't recognise
+///   a sensitive number.
+/// - Mark sensitive numbers `.private`, or `.private(mask: .hash)` when entries need to be
+///   correlated, for example user or library item identifiers held as integers, playback
+///   positions, and durations.
 ///
 /// ```swift
 /// Log.api.info("GET \(Log.redact(url.absoluteString), privacy: .public)")
+/// Log.playback.info("Seek to \(position, privacy: .private) in \(itemID, privacy: .private(mask: .hash))")
+/// Log.downloads.info("Queued \(count, privacy: .public) files")
 /// ```
 public enum Log {
     /// The unified logging subsystem shared by every category.

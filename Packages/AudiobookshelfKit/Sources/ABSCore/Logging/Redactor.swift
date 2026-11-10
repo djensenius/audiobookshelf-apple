@@ -10,7 +10,9 @@ import Foundation
 /// - JSON Web Tokens anywhere in the text (three base64url segments whose first two decode to
 ///   JSON objects, the first with an `"alg"` key).
 ///
-/// Custom header values can't be recognised by pattern, so pass them in as `secrets`.
+/// Custom header values can't be recognised by pattern, so pass them in as `secrets`. Anything
+/// else, such as a sensitive number logged with public privacy, passes through unchanged; see
+/// ``Log`` for the privacy rules.
 public struct Redactor: Sendable, Equatable {
     /// Replacement for every redacted value.
     public static let placeholder = "<redacted>"

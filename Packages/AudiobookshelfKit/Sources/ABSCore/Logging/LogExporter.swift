@@ -118,6 +118,8 @@ public actor LogExporter {
 
     /// - Parameters:
     ///   - redactor: Applied to every message; give it the custom header values so they're removed too.
+    ///     It only removes the credential patterns ``Redactor`` knows, so values logged with public
+    ///     privacy (including numbers and `Bool`s, which are public by default) are exported as is.
     ///   - timeZone: Time zone for formatted timestamps.
     public init(
         source: any LogEntrySource = OSLogStoreSource(),
