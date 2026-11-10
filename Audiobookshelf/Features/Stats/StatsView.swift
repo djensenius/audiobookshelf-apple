@@ -53,6 +53,11 @@ private struct StatsContent: View {
 
     var body: some View {
         List {
+            if model.refreshFailed {
+                Section {
+                    RefreshFailedRow { Task { await model.load() } }
+                }
+            }
             Section {
                 StatsTiles(model: model)
             }
@@ -92,6 +97,28 @@ private struct StatsContent: View {
             }
         }
         .refreshable { await model.load() }
+    }
+}
+
+/// Shown above the retained stats when a reload fails.
+private struct RefreshFailedRow: View {
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: ABSSpacing.medium) {
+            Label {
+                Text(verbatim: L10n.string("MessageStatsRefreshFailed"))
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(ABSColor.mutedForeground)
+                    .accessibilityHidden(true)
+            }
+            Spacer(minLength: ABSSpacing.small)
+            Button(action: retry) {
+                Text(verbatim: L10n.string("ButtonRetry"))
+            }
+            .buttonStyle(.borderless)
+        }
     }
 }
 
@@ -190,8 +217,11 @@ private struct RecentSessionRow: View {
                 }
             }
             Spacer(minLength: ABSSpacing.small)
-            DurationText(seconds: session.timeListening, style: .elapsed())
+            Text(verbatim: ListeningTimeText.session(session.timeListening, locale: locale))
                 .font(.footnote.bold())
+                .monospacedDigit()
+                .accessibilityLabel(
+                    Text(verbatim: ListeningTimeText.spokenSession(session.timeListening, locale: locale)))
         }
         .accessibilityElement(children: .combine)
     }

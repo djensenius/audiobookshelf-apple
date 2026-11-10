@@ -8,9 +8,9 @@ public enum StatsEndpoints {
         Endpoint(.get, "/api/me/listening-stats")
     }
 
-    /// `GET /api/me`: the signed-in user with their complete `mediaProgress`, which the stats
-    /// page counts finished items from.
-    public static func currentUser() -> Endpoint<User> {
+    /// `GET /api/me`, decoded only for the finished flags of the complete `mediaProgress`, which
+    /// the stats page counts finished items from.
+    public static func finishedProgress() -> Endpoint<FinishedProgressResponse> {
         Endpoint(.get, "/api/me")
     }
 }

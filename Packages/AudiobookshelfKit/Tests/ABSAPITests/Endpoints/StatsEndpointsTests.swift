@@ -57,17 +57,39 @@ import Testing
         #expect(response.stats.recentSessions.isEmpty)
     }
 
-    @Test func currentUserRequest() async throws {
+    @Test func finishedProgressRequest() async throws {
         let stub = StubServer { _ in
             .json(
                 #"{"id":"usr-1","username":"david","type":"user","mediaProgress":["#
                     + #"{"id":"mp-1","libraryItemId":"li-1","isFinished":true},"#
                     + #"{"id":"mp-2","libraryItemId":"li-2","isFinished":false}]}"#)
         }
-        let user = try await makeClient(stub).send(StatsEndpoints.currentUser())
-        #expect(user.mediaProgress.map(\.isFinished) == [true, false])
+        let progress = try await makeClient(stub).send(StatsEndpoints.finishedProgress())
+        #expect(progress.finished == [true, false])
+        #expect(progress.finishedCount == 1)
         let request = try #require(stub.requests.first)
         #expect(request.httpMethod == "GET")
         #expect(request.url?.path() == "/abs/api/me")
+    }
+
+    /// Legacy counted every finished row, including old ones whose item ID is null, which
+    /// `User.mediaProgress` drops. Only a row without a usable `isFinished` is skipped.
+    @Test func finishedRowWithNullItemIdIsCounted() throws {
+        let json =
+            #"{"id":"usr-1","username":"david","mediaProgress":["#
+            + #"{"id":"mp-1","libraryItemId":"li-1","isFinished":true},"#
+            + #"{"id":"mp-2","libraryItemId":null,"isFinished":true},"#
+            + #"{"libraryItemId":"li-3","episodeId":"ep-1","isFinished":true},"#
+            + #"{"id":"mp-4","libraryItemId":"li-4","isFinished":false},{"id":"mp-5"}]}"#
+        let progress = try JSONDecoder().decode(FinishedProgressResponse.self, from: Data(json.utf8))
+        #expect(progress.finished == [true, true, true, false])
+        #expect(progress.finishedCount == 3)
+        let user = try JSONDecoder().decode(User.self, from: Data(json.utf8))
+        #expect(user.mediaProgress.count(where: \.isFinished) < progress.finishedCount)
+    }
+
+    @Test func missingProgressCountsNothing() throws {
+        let progress = try JSONDecoder().decode(FinishedProgressResponse.self, from: Data(#"{"id":"usr-1"}"#.utf8))
+        #expect(progress.finishedCount == 0)
     }
 }

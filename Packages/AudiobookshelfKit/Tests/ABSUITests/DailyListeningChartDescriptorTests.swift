@@ -102,4 +102,30 @@ import Testing
             Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: .wide).locale(german))
         #expect(ListeningTimeText.spoken(0, locale: german) == expected)
     }
+
+    @Test func emptySessionShowsAndReadsZeroSeconds() {
+        let visible = Duration.zero.formatted(
+            Duration.UnitsFormatStyle(allowedUnits: [.seconds], width: .narrow).locale(Self.locale))
+        let spoken = Duration.zero.formatted(
+            Duration.UnitsFormatStyle(allowedUnits: [.seconds], width: .wide).locale(Self.locale))
+        #expect(!visible.isEmpty)
+        #expect(!spoken.isEmpty)
+        for seconds in [0, 0.2, -3, .nan] as [TimeInterval] {
+            #expect(ListeningTimeText.session(seconds, locale: Self.locale) == visible)
+            #expect(ListeningTimeText.spokenSession(seconds, locale: Self.locale) == spoken)
+        }
+    }
+
+    @Test func sessionKeepsSeconds() {
+        for seconds in [1, 65, 3_725] as [TimeInterval] {
+            #expect(
+                ListeningTimeText.session(seconds, locale: Self.locale)
+                    == DurationStyle.elapsed().string(seconds, locale: Self.locale))
+            #expect(
+                ListeningTimeText.spokenSession(seconds, locale: Self.locale)
+                    == DurationStyle.elapsed().accessibilityString(seconds, locale: Self.locale))
+        }
+        #expect(
+            ListeningTimeText.session(65, locale: Self.locale) != ListeningTimeText.session(60, locale: Self.locale))
+    }
 }

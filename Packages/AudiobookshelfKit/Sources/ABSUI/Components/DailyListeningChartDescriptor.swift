@@ -73,4 +73,22 @@ public enum ListeningTimeText {
         let brief = DurationStyle.elapsed().accessibilityString(seconds, locale: locale)
         return brief.isEmpty ? DailyListeningChartDescriptor.minutesText(0, locale: locale) : brief
     }
+
+    /// A session's time as shown, with seconds, for example "1m 5s"; "0s" for none (where
+    /// ``DurationStyle/elapsed(showSeconds:useDays:)`` returns an empty string).
+    public static func session(_ seconds: TimeInterval, locale: Locale = .autoupdatingCurrent) -> String {
+        let text = DurationStyle.elapsed().string(seconds, locale: locale)
+        return text.isEmpty ? zeroSeconds(width: .narrow, locale: locale) : text
+    }
+
+    /// The spoken form of ``session(_:locale:)``, for example "1 minute, 5 seconds"; "0 seconds"
+    /// for none.
+    public static func spokenSession(_ seconds: TimeInterval, locale: Locale = .autoupdatingCurrent) -> String {
+        let text = DurationStyle.elapsed().accessibilityString(seconds, locale: locale)
+        return text.isEmpty ? zeroSeconds(width: .wide, locale: locale) : text
+    }
+
+    private static func zeroSeconds(width: Duration.UnitsFormatStyle.UnitWidth, locale: Locale) -> String {
+        Duration.zero.formatted(Duration.UnitsFormatStyle(allowedUnits: [.seconds], width: width).locale(locale))
+    }
 }

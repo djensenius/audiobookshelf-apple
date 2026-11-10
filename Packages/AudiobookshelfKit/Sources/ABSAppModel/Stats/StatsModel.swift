@@ -18,7 +18,7 @@ extension APIClient: StatsService {
     }
 
     public func finishedItemCount() async throws -> Int {
-        try await send(StatsEndpoints.currentUser()).mediaProgress.count(where: \.isFinished)
+        try await send(StatsEndpoints.finishedProgress()).finishedCount
     }
 }
 
@@ -117,6 +117,10 @@ public final class StatsModel {
     public var isEmpty: Bool {
         hasLoaded && totalTime <= 0 && daysListened == 0 && recentSessions.isEmpty && itemsFinished == 0
     }
+
+    /// A reload failed while earlier stats are still shown, so the page keeps them and offers
+    /// a retry.
+    public var refreshFailed: Bool { hasLoaded && error != nil && !isLoading }
 
     /// Loads unless stats have already loaded. Views call it each time they appear, so a load
     /// cancelled before it finished (the view disappeared) runs again.

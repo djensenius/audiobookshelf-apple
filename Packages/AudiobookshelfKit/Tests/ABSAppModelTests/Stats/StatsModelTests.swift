@@ -198,6 +198,63 @@ private let enUS = Locale(identifier: "en_US")
         #expect(model.totalTime == 60)
     }
 
+    /// A failed pull-to-refresh keeps the shown stats and reports the failure with a retry.
+    @Test func failedRefreshKeepsTheStatsAndRetrySucceeds() async throws {
+        let fail = Locked(false)
+        let total = Locked(60.0)
+        let service = FakeStatsService(
+            statsHandler: {
+                if fail.value { throw TestError.offline }
+                return response(ListeningStats(totalTime: total.value))
+            })
+        let model = StatsModel(service: service)
+        await model.load()
+        #expect(model.hasLoaded)
+        #expect(!model.refreshFailed)
+
+        fail.value = true
+        await model.load()
+        #expect(model.error is TestError)
+        #expect(model.hasLoaded)
+        #expect(model.totalTime == 60)
+        #expect(model.refreshFailed)
+
+        fail.value = false
+        total.value = 120
+        await model.load()
+        #expect(model.error == nil)
+        #expect(!model.refreshFailed)
+        #expect(model.totalTime == 120)
+    }
+
+    @Test func refreshFailedIsClearedWhileRetrying() async throws {
+        let gate = GatedCalls<Void, ListeningStatsResponse>()
+        var calls = gate.calls.makeAsyncIterator()
+        let attempts = Locked(0)
+        let service = FakeStatsService(
+            statsHandler: {
+                attempts.value += 1
+                switch attempts.value {
+                case 1: return response(ListeningStats(totalTime: 60))
+                case 2: throw TestError.offline
+                default: return try await gate.call(())
+                }
+            })
+        let model = StatsModel(service: service)
+        await model.load()
+        await model.load()
+        #expect(model.refreshFailed)
+
+        let retry = Task { await model.load() }
+        let call = try #require(await calls.next())
+        #expect(model.isLoading)
+        #expect(!model.refreshFailed)
+        call.reply.resume(returning: response(ListeningStats(totalTime: 90)))
+        await retry.value
+        #expect(!model.refreshFailed)
+        #expect(model.totalTime == 90)
+    }
+
     @Test func failedFinishedCountFailsTheLoad() async {
         let model = StatsModel(service: FakeStatsService(finishedHandler: { throw TestError.offline }))
         await model.load()
