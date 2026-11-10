@@ -1,0 +1,421 @@
+# 0003. SwiftData schema, versioning and actor boundaries
+
+- Status: Accepted
+- Date: 2026-11-09
+- Issue: #TBD
+
+## Context
+
+The server owns almost everything: libraries, items, progress, bookmarks, users and
+listening sessions. The device only has to keep what the server can't give back
+when it is unreachable, plus the local bookkeeping for downloads:
+
+- saved server connections;
+- downloaded items, their files and enough metadata to play them offline;
+- progress made on this device that the server hasn't seen yet (audio and ebook);
+- playback sessions recorded offline, waiting for `POST /api/session/local-all`;
+- background download state, including `resumeData`;
+- the per-item playback history shown by `pages/media/_id/history.vue`.
+
+The legacy iOS app keeps all of this, and more, in Realm (schema version 21,
+`ios/App/App/AppDelegate.swift`). Its models mix concerns: tokens are stored in
+`ServerConnectionConfig`, `DownloadItemPart.uri` stores a download URL with the
+token in the query string, file locations are resolved against `Documents`, and
+playback sessions embed whole `LibraryItem` objects. Nothing is migrated from that
+store, because the server holds progress
+([ADR 0002](0002-identity-and-no-migration.md)), but its behaviour is the porting
+reference.
+
+Constraints:
+
+- Swift 6 language mode with complete strict concurrency checking; minimum OS
+  iOS/iPadOS/macOS 27.0; persistence lives in the `ABSData` module
+  ([ADR 0001](0001-architecture.md)).
+- [ADR 0001](0001-architecture.md) already says services are actors, only
+  `Sendable` DTOs cross actors and `@Model` objects never do.
+- Widgets (Phase 5) read the store from another process, so it lives in the App
+  Group `group.org.davidjensenius.Audiobookshelf` (P0-03).
+- Tests run with `swift test` on macOS, unsigned, without an App Group entitlement.
+- The SwiftData facts used here come from
+  [platform-apis.md §4.1](../research/platform-apis.md#41-swiftdata-maturity-on-27-swiftinterface-1483-lines)
+  and were re-checked against the Xcode 27.2 SDK `SwiftData.swiftinterface` (macOS
+  and iOS are identical for every API below) and in a throwaway Swift 6 spike (see
+  [Validation](#validation)).
+
+## Decision drivers
+
+1. **Correct offline progress.** Progress made offline is never lost and is synced
+   exactly once.
+2. **Compiler-checked concurrency.** Swift 6 must reject any `@Model` or
+   `ModelContext` crossing an isolation boundary.
+3. **Safe evolution.** Every shipped store opens after an app update; schema
+   changes are explicit and tested.
+4. **Small surface.** Persist only what the server can't provide; no second copy of
+   the server database.
+5. **Testable** with in-memory containers and `swift test`.
+6. **Built-in frameworks only.**
+
+## Options considered
+
+### Option 1: SwiftData with a versioned schema and `@ModelActor` stores that exchange DTOs (chosen)
+
+All models live in `SchemaV1` (a `VersionedSchema`) with a `SchemaMigrationPlan`.
+All writes go through `@ModelActor` stores in `ABSData` whose public API takes and
+returns `Sendable` value types and `PersistentIdentifier`s. Views may read with
+`@Query`; view models observe with `ResultsObserver` or `HistoryObserver`.
+
+- Pros:
+  - Built in, works on iOS and macOS, and integrates with SwiftUI (`@Query`) and
+    Observation.
+  - The SDK makes `@Model` and `ModelContext` non-`Sendable`, so leaks across
+    actors are compile errors (verified).
+  - `#Unique`, `#Index`, `.externalStorage`, `.codable`, cascade deletes, history
+    and App Group configuration cover every requirement without custom SQL.
+  - Background writes don't block the main actor.
+- Cons:
+  - DTO mapping boilerplate for every model.
+  - Migration failures surface only when the container loads, so every version
+    needs a test.
+  - `#Unique` does not deduplicate rows whose key contains `nil` (verified), so
+    key fields must be non-optional.
+
+### Option 2: SwiftData used directly on the main actor
+
+Views and view models fetch and mutate `@Model` objects through `mainContext`; no
+stores.
+
+- Pros:
+  - Least code; `@Query` everywhere.
+- Cons:
+  - Download delegate callbacks, playback progress and sync run off the main actor
+    and would hop to it for every write.
+  - Business rules (upsert, pending sync, merge) spread across views and can't be
+    tested without SwiftUI.
+  - Conflicts with ADR 0001 (services are actors).
+
+### Option 3: Core Data or SQLite (GRDB)
+
+Use `NSPersistentContainer` with a model file, or a third-party SQLite wrapper.
+
+- Pros:
+  - Mature migration tooling; GRDB gives full SQL control and value-type records.
+- Cons:
+  - Swift 6 does not check `NSManagedObject` isolation the way it checks
+    `@ModelActor`, and the model file is another artifact to keep in sync.
+  - GRDB is a new SPM dependency, which AGENTS.md rules out when a built-in
+    framework is enough.
+
+### Option 4: Codable files and `UserDefaults`
+
+Write JSON files for downloads and progress, and `UserDefaults` for connections.
+
+- Pros:
+  - No framework; trivially `Sendable`.
+- Cons:
+  - No queries, indexes, uniqueness or atomic multi-record updates; every reader
+    loads everything.
+  - Consistency across processes (widgets) and change notification are hand-rolled.
+
+## Decision
+
+Use **Option 1**. The rules below are the contract for P1-13a (schema and
+`DataStack`) and P1-13b (stores); deviating from them needs a new ADR.
+
+### Entities (SchemaV1)
+
+```mermaid
+erDiagram
+    ServerConnectionRecord ||..o{ LocalLibraryItem : "serverConnectionID"
+    ServerConnectionRecord ||..o{ LocalMediaProgress : "serverConnectionID"
+    ServerConnectionRecord ||..o{ DownloadRecord : "serverConnectionID"
+    ServerConnectionRecord ||..o{ PendingLocalSession : "serverConnectionID"
+    ServerConnectionRecord ||..o{ PlaybackHistoryEvent : "serverConnectionID"
+    LocalLibraryItem ||--o{ LocalFile : "files (cascade)"
+    LocalLibraryItem ||..o{ LocalMediaProgress : "localLibraryItemID"
+    DownloadRecord ||--o{ DownloadPart : "parts (cascade)"
+```
+
+Solid lines are SwiftData relationships; dotted lines are scalar keys.
+**Relationships are used only inside an aggregate** (item → files, download →
+parts). References between aggregates are scalar keys, so removing a server
+connection or deleting a download never cascades into progress or history.
+
+General rules:
+
+- Every model has a primary key in a `#Unique`: `id`, or `key` for
+  `LocalMediaProgress`.
+- Fields in a `#Unique` are **never optional**, because `#Unique` treats `nil` as
+  distinct. Where the natural key has an optional part (the episode), the model
+  stores a derived `key: String`.
+- The **media key** is
+  `"\(serverConnectionID.uuidString)|\(libraryItemId)|\(episodeId ?? "")"`, built
+  by one `MediaKey` helper in `ABSData`.
+- Enumerations are stored as raw `String` values with a typed computed accessor, so
+  predicates stay simple.
+- Instants are `Date`; media positions and durations are `Double` seconds.
+  Conversion from and to the server's millisecond timestamps happens in the API
+  layer.
+- File locations are **relative paths** (`String`) under the downloads root
+  (`URL.applicationSupportDirectory/Downloads/` in the app container), resolved at
+  runtime. Never store absolute paths, `file://` URLs or tokens.
+
+| Model | Key | Other fields | Uniqueness and indexes |
+| --- | --- | --- | --- |
+| `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
+| `LocalLibraryItem` | `id: UUID` | `serverConnectionID: UUID`, `serverAddress`, `serverUserId`, `libraryItemId`, `mediaType` (`book`/`podcast`), `title`, `authorName: String?`, `relativeDirectory`, `coverRelativePath: String?`, `addedAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) files: [LocalFile]` | `#Unique([\.id], [\.serverConnectionID, \.libraryItemId])`; `#Index([\.libraryItemId], [\.serverConnectionID])` |
+| `LocalFile` | `id: UUID` | `item: LocalLibraryItem?` (inverse), `kind` (`audio`/`ebook`), `relativePath`, `filename`, `mimeType`, `size: Int64`, `serverIno: String?`, `trackIndex: Int?` (book track order), `episodeId: String?` (podcast) | `#Unique([\.id])` |
+| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date`, `needsServerSync: Bool`, `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
+| `DownloadRecord` | `id: UUID`, `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `mediaType`, `title`, `state` (`queued`/`downloading`/`paused`/`failed`), `relativeDirectory`, `createdAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) parts: [DownloadPart]` | `#Unique([\.id], [\.key])`; `#Index([\.state])` |
+| `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `@Attribute(.externalStorage) resumeData: Data?`, `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
+| `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?` | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
+| `PlaybackHistoryEvent` | `id: UUID` | `serverConnectionID: UUID?`, `mediaKey`, `libraryItemId`, `episodeId: String?`, `mediaDisplayTitle`, `name` (`Play`/`Pause`/`Stop`/`Seek`/`Save`/`Finished`/`Sync`), `type` (`Playback`/`Sync`), `details: String?`, `currentTime: Double?`, `serverSyncAttempted: Bool`, `serverSyncSuccess: Bool?`, `serverSyncMessage: String?`, `timestamp: Date` | `#Unique([\.id])`; `#Index([\.mediaKey, \.timestamp])` |
+
+Model notes:
+
+- **`LocalMediaSnapshot`** is a `Codable, Sendable, Hashable` struct owned by
+  `ABSData`, not an `ABSCore` API model, so API changes can't break stored blobs.
+  It holds `snapshotVersion: Int` (1), metadata (title, subtitle, authors,
+  narrators, series, description, published year, explicit and abridged flags),
+  chapters, audio tracks (index, title, duration, start offset, MIME type, ino),
+  the ebook file (ino, filename, format) and, for podcasts, the downloaded episodes
+  (id, title, season and episode, published date, duration, chapters, track). Files
+  link to tracks through `LocalFile.trackIndex` and `episodeId`; the snapshot never
+  holds local paths.
+- **Progress** rows exist for downloaded media that has been played or synced, and
+  for any media (downloaded or streamed, audio or ebook) with a change the server
+  hasn't acknowledged: offline playback, a failed `PATCH /api/me/progress`, or a
+  local-first ebook save (P6-11a). `needsServerSync` is the single pending flag for
+  audio and ebook fields, because one PATCH carries both. Merge rule (from
+  `ApiClient.syncLocalSessionsWithServer`): the newer `lastUpdate` wins.
+  `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
+  and `localLibraryItemID == nil`.
+- **Downloads:** a finished download becomes a `LocalLibraryItem` with its
+  `LocalFile`s (an idempotent upsert on `[serverConnectionID, libraryItemId]`), and
+  then its `DownloadRecord` is deleted. A crash between the two steps is repaired at
+  launch by finalising records whose parts are all `completed`. Each
+  `URLSessionTask.taskDescription` is the part's `id`; `taskIdentifier` is only a
+  lookup cache. The token is added to the request when it is sent.
+- **Pending sessions** follow the legacy rule: after a successful `local-all`
+  upload, delete the sessions that are not `isActive` (all of them on the first
+  sync after login).
+- **History** stays on the device, as in the legacy app. Events older than 90 days
+  are deleted at launch.
+- **Connections:** the session to restore is the record with the latest
+  `lastUsedAt` (replacing `ServerConnectionConfigActiveIndex`). Removing a
+  connection does not delete downloads, progress or history.
+
+### What is not persisted in SwiftData
+
+| Data | Where it lives |
+| --- | --- |
+| Access and refresh tokens; custom header values (they may be proxy credentials) | Keychain, account = connection `id.uuidString` (P1-14) |
+| Device and player settings (`DeviceSettings`, `PlayerSettings`) | App Group `UserDefaults` through `AppSettings` |
+| Logs (`LogEntry`) | OSLog, exported by P1-04 |
+| Libraries, items, series, authors, collections, playlists, shelves, filter data, bookmarks, the user, server progress for media without local changes, listening stats | In memory (`LibraryStore`, `ProgressCache`) and HTTP caching; **no browse cache in V1** |
+| Covers and other images | Image cache ([ADR 0005](0005-images.md)) |
+| Live playback position between throttled writes | In memory, in the playback coordinator |
+
+### Versioning and migration
+
+- `enum SchemaV1: VersionedSchema` with `versionIdentifier = Schema.Version(1, 0, 0)`
+  declares every model as a nested type. Module-level typealiases
+  (`public typealias LocalMediaProgress = SchemaV1.LocalMediaProgress`) point at
+  the current version; code outside `ABSData/Schema/` uses only the typealiases.
+- `enum ABSMigrationPlan: SchemaMigrationPlan` lists `[SchemaV1.self]` with no
+  stages.
+- `SchemaV1` may be edited freely until the first TestFlight build that creates a
+  store ships. After that, **any** change to a stored property, attribute option,
+  relationship, `#Unique` or `#Index` adds `SchemaV2` (a full copy of the models)
+  and a migration stage. Old `SchemaVn` files are frozen, never deleted.
+- Use `.lightweight` for additive changes: a new optional or defaulted property, a
+  new model, an index change, or a rename with `originalName:`. Use `.custom` when
+  data must be transformed, for example deduplicating rows before adding a
+  `#Unique`.
+- Schema versions don't cover the contents of `.codable` attributes. Snapshot
+  structs only gain optional fields (decoded with `decodeIfPresent`), never rename
+  or retype keys, and bump `snapshotVersion`. An incompatible change becomes a new
+  attribute in a new schema version with a `.custom` stage.
+- If the container fails to load with `SwiftDataError.backwardMigration`,
+  `.unknownSchema` or `.unknownDataStoreSchema` (a downgrade or a corrupt store),
+  `DataStack` logs a fault, moves the store files aside with a timestamp suffix and
+  creates an empty store. Downloaded files that are no longer referenced are removed
+  by the orphan sweep in P4-02. The server still holds synced progress.
+
+### Store location and container
+
+- `DataStack` builds one `ModelContainer` per process (it is `Sendable`);
+  `AppEnvironment` creates it and injects it into every store.
+- `DataStack` has three locations:
+  - `.appGroup` (production):
+    `ModelConfiguration("Audiobookshelf", schema:, groupContainer: .identifier("group.org.davidjensenius.Audiobookshelf"), cloudKitDatabase: .none)`,
+    which puts the store at
+    `<group container>/Library/Application Support/Audiobookshelf.store`;
+  - `.url(URL)` for on-disk tests;
+  - `.inMemory` (`isStoredInMemoryOnly: true, groupContainer: .none, cloudKitDatabase: .none`)
+    for unit tests and previews.
+
+  Every location passes `ABSMigrationPlan`.
+- Widgets open the same App Group store with `allowsSave: false` and read it
+  through the same DTO mapping. Only the app writes.
+- **CloudKit is out of scope.** Every configuration sets `cloudKitDatabase: .none`
+  explicitly, so adding an iCloud entitlement later can't silently turn sync on.
+
+### Concurrency and the DTO boundary
+
+- Stores are `@ModelActor public actor`s in `ABSData`, matching P1-13b:
+  - `ServerConnectionStore`;
+  - `LocalItemStore` (local items and files);
+  - `LocalProgressStore` (progress with `pendingSync(for:)`, covering audio and
+    ebook fields, plus `PendingLocalSession`s);
+  - `DownloadStore` (records, parts and finalising into local items);
+  - `PlaybackHistoryStore`.
+- Public store methods take and return only `Sendable` values: `UUID`/`String`
+  keys, `PersistentIdentifier`s, and one DTO per model named `<Model>DTO` (for
+  example `LocalMediaProgressDTO` and `DownloadPartDTO`; `LocalLibraryItemDTO`
+  embeds `[LocalFileDTO]` and the snapshot). DTOs are `Sendable, Equatable`
+  structs, and their mapping lives next to the store.
+- `PersistentIdentifier` may cross actors (it is `Sendable`) for in-process
+  hand-offs, such as a row from a `ResultsObserver` passed to a store method. It is
+  never persisted or sent to another process; use domain keys for that. Stores save
+  before returning an identifier, so it is never temporary
+  (`PersistentIdentifier.isTemporary`, iOS/macOS 27).
+- `ModelContext` and `@Model` instances never leave the actor that owns them. Every
+  mutating store method ends with `try modelContext.save()`; changes to several
+  objects use `modelContext.transaction { }`.
+- `mainContext` is read-only by convention. App-target views use `@Query`;
+  `@MainActor` view models in `ABSAppModel` use `ResultsObserver` or
+  `HistoryObserver`. Models fetched there stay on the main actor, and all writes go
+  through stores.
+
+### Write throttling
+
+- Playback writes `LocalMediaProgress` and `PendingLocalSession` on pause, stop,
+  seek, chapter change, finish and when the app moves to the background, and
+  otherwise at most once every 15 s while playing (the legacy
+  `TIME_BETWEEN_SESSION_SYNC_IN_SECONDS`). Online streaming syncs through the
+  server session and writes no progress row unless that sync fails.
+- Download progress (`bytesWritten`) is written at most once every 2 s per part,
+  plus on every state change. The UI shows live progress from the engine's
+  in-memory stream, not from the store.
+- Ebook location changes are debounced (P6-11a) before they reach the store.
+
+### Mapping from the legacy Realm models
+
+| Realm model (legacy) | SwiftData V1 | Notes |
+| --- | --- | --- |
+| `ServerConnectionConfig` | `ServerConnectionRecord` | `token` moves to the Keychain; `index` replaced by `lastUsedAt`; `name` dropped |
+| `ServerConnectionConfigActiveIndex` | — | The latest `lastUsedAt` |
+| `DeviceSettings`, `PlayerSettings` | — | App Group `UserDefaults` (`AppSettings`) |
+| `LocalLibraryItem` | `LocalLibraryItem` | `id` becomes a `UUID`; the embedded Realm `media` becomes `LocalMediaSnapshot`; `_contentUrl`/`_coverContentUrl` become relative paths; `isInvalid`, `isLocal` and `basePath` dropped |
+| `LocalFile` | `LocalFile` | Adds `kind`, `trackIndex`, `episodeId` and `serverIno` instead of rewriting tracks (`linkLocalFiles`) |
+| `LocalPodcastEpisode` | — | Never written by the legacy app; episodes live in the snapshot |
+| `LocalMediaProgress` | `LocalMediaProgress` | Keyed by media key instead of `localLibraryItemId[-episodeId]`; adds `needsServerSync` and sync bookkeeping; millisecond `Double`s become `Date`s |
+| `DownloadItem` | `DownloadRecord` | Adds `state`; `userMediaProgress` dropped (progress comes from the server or `LocalMediaProgress`) |
+| `DownloadItemPart` | `DownloadPart` | `uri` with a token becomes the token-free `serverPath`; adds `taskIdentifier`, `resumeData` and `retryCount`; `completed`/`moved`/`failed` become `state` |
+| `PlaybackSession` | `PendingLocalSession` | Local-play sessions only, scalars only (no embedded `LibraryItem`) |
+| `LogEntry` | — | OSLog (P1-04) |
+| Android `MediaItemHistory`/`MediaItemEvent` (iOS never implemented `getMediaItemHistory`) | `PlaybackHistoryEvent` | Flattened to one row per event |
+
+## Consequences
+
+- P1-13a implements `SchemaV1.swift`, `MigrationPlan.swift` and `DataStack` exactly
+  as above; P1-13b implements the stores and DTOs. Downloads (P4-01, P4-02),
+  offline sync (P4-03), history (P2-14), ebook progress (P6-11a) and connections
+  (P1-14) use only store APIs.
+- Every schema change after the first TestFlight build needs a new `SchemaVn` and a
+  migration test, which deliberately makes small changes slower.
+- DTO mapping is boilerplate, but it keeps SwiftData types inside `ABSData` and
+  lets services and view models stay `Sendable`.
+- Two connections to the same server (for example LAN and public addresses) keep
+  separate progress rows, as in the legacy app.
+- A downgrade or corrupt store loses unsynced local state and the downloads index.
+  This is accepted because it is rare and the server holds synced progress.
+- With no browse cache, offline mode shows downloaded items only (P4-05). Adding a
+  cache later needs a new ADR and schema version.
+- The App Group must be registered (P0-03) before the production configuration
+  loads; tests never use it.
+
+## Validation
+
+Verified for this ADR:
+
+- The Xcode 27.2 (27B52) SDK `SwiftData.swiftinterface` for macOS and iOS (1,483
+  lines each, identical for these APIs) declares:
+  - `VersionedSchema` and `SchemaMigrationPlan` (both `SendableMetatype`), and
+    `MigrationStage.lightweight` and `.custom`;
+  - `@ModelActor`, `#Unique`, and `#Index` (key-path arrays, binary or R-tree);
+  - `@Attribute(.codable)` (27) and `.externalStorage`;
+  - `ModelConfiguration.GroupContainer.identifier(_:)`, `CloudKitDatabase.none`
+    and `allowsSave`;
+  - `ModelContainer: @unchecked Sendable`, and `ModelContext`'s `Sendable`
+    conformance marked unavailable ("contexts cannot be shared across concurrency
+    contexts");
+  - `PersistentIdentifier: Sendable` with `isTemporary` (27);
+  - `ResultsObserver` and `HistoryObserver` (27), `ModelContext.transaction` and
+    `author`, and the `SwiftDataError` cases named above.
+- A throwaway SwiftPM spike (macOS 27, Swift 6 language mode, deleted afterwards)
+  with nested `SchemaV1` models, a migration plan and one `@ModelActor` store built
+  with **no warnings** and passed Swift Testing tests for:
+  - an in-memory container, a store upsert, a fetch by `PersistentIdentifier`, and
+    a pending-sync query returning DTOs;
+  - `#Unique`: inserting a duplicate key leaves one row, because SwiftData upserts;
+  - a compound `#Unique` with a `nil` component **does not** deduplicate (two
+    rows), which is why key fields are non-optional;
+  - a `.cascade` delete of files with their item, and a `.codable` struct
+    round-trip;
+  - an on-disk store at a temporary URL, closed and reopened with the migration
+    plan.
+- In the same spike, the compiler rejected a `@Model` type as `Sendable`
+  ("PersistentModels are not Sendable, consider utilizing a ModelActor or use …
+  persistentModelID instead") and rejected returning a model from the store actor
+  to the main actor.
+- An App Group configuration in an unsigned `swift test` process resolved to
+  `~/Library/Group Containers/<group>/Library/Application Support/<name>.store` and
+  threw `loadIssueModelContainer`, so tests must use `.inMemory` or `.url`.
+
+Assumed, to be confirmed by P1-13a and P1-13b tests or on a device:
+
+- `@Query` and `ResultsObserver` on the main context pick up saves from store
+  actors and from other processes without extra work.
+- Changing the shape of a `.codable` type doesn't change the schema version hash;
+  the snapshot rules keep old blobs decodable either way.
+- Widget reads with `allowsSave: false` are safe while the app writes.
+
+Ongoing checks:
+
+- P1-13a: a migration-plan test opens a V1 store on disk and in memory, and every
+  `#Unique` has a test. Each later `SchemaVn` adds a test that migrates a store
+  populated with the previous version.
+- P1-13b: CRUD, uniqueness and cascade tests for each store.
+- `mise run test:kit` under Swift 6 strict concurrency, with no Sendable warnings.
+- Review checks: `import SwiftData` only in `ABSData`, app-target views and the
+  widget; no `@Model` type in a public store signature; `cloudKitDatabase: .none`
+  on every configuration.
+
+## References
+
+- [Platform API research §4.1 (SwiftData) and §4.2 (background URLSession)](../research/platform-apis.md#4-swiftdata-and-background-urlsession)
+- [ADR 0001: Architecture](0001-architecture.md),
+  [ADR 0002: Identity and no migration](0002-identity-and-no-migration.md),
+  [ADR 0005: Images](0005-images.md)
+- Apple: [SwiftData](https://developer.apple.com/documentation/swiftdata),
+  [SwiftData updates](https://developer.apple.com/documentation/updates/swiftdata),
+  [Fetching and filtering time-based model changes](https://developer.apple.com/documentation/swiftdata/fetching-and-filtering-time-based-model-changes)
+- SDK: `MacOSX27.2.sdk/System/Library/Frameworks/SwiftData.framework/Versions/A/Modules/SwiftData.swiftmodule/arm64e-apple-macos.swiftinterface`
+  and `iPhoneOS27.2.sdk/System/Library/Frameworks/SwiftData.framework/Modules/SwiftData.swiftmodule/arm64e-apple-ios.swiftinterface`
+- Legacy:
+  - [`ios/App/Shared/util/Database.swift`](../../ios/App/Shared/util/Database.swift),
+    [`ios/App/Shared/util/DaoExtensions.swift`](../../ios/App/Shared/util/DaoExtensions.swift)
+  - [`ios/App/Shared/models/local/`](../../ios/App/Shared/models/local/),
+    [`ios/App/Shared/models/download/`](../../ios/App/Shared/models/download/),
+    [`ios/App/Shared/models/ServerConnectionConfig.swift`](../../ios/App/Shared/models/ServerConnectionConfig.swift),
+    [`ios/App/Shared/models/PlaybackSession.swift`](../../ios/App/Shared/models/PlaybackSession.swift)
+  - [`ios/App/App/plugins/AbsDatabase.swift`](../../ios/App/App/plugins/AbsDatabase.swift),
+    [`ios/App/App/AppDelegate.swift`](../../ios/App/App/AppDelegate.swift) (Realm
+    schema 21),
+    [`ios/App/Shared/util/ApiClient.swift`](../../ios/App/Shared/util/ApiClient.swift)
+    (`syncLocalSessionsWithServer`),
+    [`ios/App/Shared/player/PlayerProgress.swift`](../../ios/App/Shared/player/PlayerProgress.swift)
+  - [`plugins/db.js`](../../plugins/db.js),
+    [`pages/media/_id/history.vue`](../../pages/media/_id/history.vue),
+    [`android/app/src/main/java/com/audiobookshelf/app/data/MediaItemEvent.kt`](../../android/app/src/main/java/com/audiobookshelf/app/data/MediaItemEvent.kt)
