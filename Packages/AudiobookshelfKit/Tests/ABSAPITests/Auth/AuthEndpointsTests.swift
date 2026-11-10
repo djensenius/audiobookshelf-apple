@@ -180,6 +180,22 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         #expect(!followed.httpShouldHandleCookies)
     }
 
+    /// A 301, 302 or 303 would turn the logout POST into a GET, which revokes nothing, so even a
+    /// same-origin one (back to the logout route itself) is refused rather than reported as done.
+    @Test(arguments: [301, 302, 303]) func logoutRefusesMethodChangingRedirects(status: Int) async throws {
+        let server = StubServer { request in
+            request.httpMethod == "POST"
+                ? .redirect(to: request.url?.absoluteString ?? "", status: status)
+                : .json(#"{"redirect_url":null}"#)
+        }
+
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await makeClient(server).send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+        }
+        #expect(server.requests.count == 1)
+        #expect(server.requests.allSatisfy { $0.httpMethod == "POST" })
+    }
+
     /// A hop off the origin would lose the refresh token, so its reply can't confirm a logout:
     /// the redirect is declined and fails instead of reporting success.
     @Test(arguments: [302, 307, 308]) func logoutRefusesCrossOriginRedirects(status: Int) async throws {
@@ -200,7 +216,8 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
     @Test func logoutRedirectCarriesTheProxyCookie() async throws {
         let server = StubServer { request in
             guard request.url?.path() == "/abs/logout" else { return .json(#"{"redirect_url":null}"#) }
-            var redirect = StubResponse.redirect(to: "https://\(request.url?.host() ?? "")/abs/v2/logout")
+            var redirect = StubResponse.redirect(
+                to: "https://\(request.url?.host() ?? "")/abs/v2/logout", status: 307)
             redirect.headers["Set-Cookie"] = "proxy_session=abc; Path=/"
             return redirect
         }

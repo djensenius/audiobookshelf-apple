@@ -64,7 +64,9 @@ public enum AuthEndpoints {
     /// Only redirects on the server's origin are followed (``Endpoint/staysOnOrigin``). A hop
     /// off the origin would be stripped of the refresh token and cookies, so whatever it answered
     /// says nothing about the session; it fails with ``APIError/redirectRefused(status:)``
-    /// instead of reporting a logout that never revoked anything.
+    /// instead of reporting a logout that never revoked anything. For the same reason a 301, 302
+    /// or 303 that would turn the POST into a GET is refused (``RedirectPolicy``); a 307 or 308
+    /// keeps the POST and is followed.
     public static func logout(refreshToken: String) -> Endpoint<LogoutResponse> {
         Endpoint(
             .post, "/logout", headers: ["x-refresh-token": refreshToken], requiresAuthentication: false,

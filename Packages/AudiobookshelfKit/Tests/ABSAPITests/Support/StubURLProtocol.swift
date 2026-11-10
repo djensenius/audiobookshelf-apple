@@ -114,7 +114,10 @@ final class StubURLProtocol: URLProtocol {
             var next = request
             next.url = location
             next.setValue(nil, forHTTPHeaderField: "Authorization")
-            if stub.status == 303 {
+            // Like URLSession: a 303 turns any method but HEAD into GET, and a 301 or 302 turns
+            // a POST into GET; 307 and 308 keep the method and body.
+            let method = request.httpMethod ?? "GET"
+            if (stub.status == 303 && method != "HEAD") || ([301, 302].contains(stub.status) && method == "POST") {
                 next.httpMethod = "GET"
                 next.httpBody = nil
             }
