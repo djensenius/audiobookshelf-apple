@@ -223,6 +223,18 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(episodes.first?.audioTrack?.index == nil)
     }
 
+    @Test func decodesSDKVersionAsStringOrNumber() throws {
+        let android = try decode(PlaybackSession.self, Fixtures.androidSession)
+        #expect(android.deviceInfo?.sdkVersion == "35")
+        #expect(android.deviceInfo?.clientName == "Abs Android")
+        #expect(android.deviceInfo?.deviceName == "Google Pixel 9")
+        let numeric = try decode(PlaybackSession.self, Fixtures.numericSDKVersionSession)
+        #expect(numeric.deviceInfo?.sdkVersion == "34")
+        #expect(try decode(PlaybackSession.self, Fixtures.session).deviceInfo?.sdkVersion == nil)
+        let reencoded = String(decoding: try JSONEncoder().encode(numeric), as: UTF8.self)
+        #expect(try decode(PlaybackSession.self, reencoded).deviceInfo?.sdkVersion == "34")
+    }
+
     @Test func preservesUnknownPlayMethod() throws {
         let json = #"{"id":"ps-2","libraryItemId":"li-1","mediaType":"book","playMethod":9}"#
         let session = try decode(PlaybackSession.self, json)

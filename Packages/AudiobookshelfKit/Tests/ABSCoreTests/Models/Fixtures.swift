@@ -182,4 +182,18 @@ enum Fixtures {
         "libraryId":"lib-pods","mediaType":"podcast","media":{"id":"pod-1","metadata":{"title":"The Show"},\
         "episodes":[\(nullIndexEpisode)]}}}
         """
+
+    /// A session started by the Android app, as the server returns it: `sdkVersion` is a string.
+    static let androidSession = """
+        {"id":"ps-4","userId":"user-1","libraryItemId":"li-book-1","mediaType":"book","playMethod":0,\
+        "deviceInfo":{"id":"dev-2","userId":"user-1","deviceId":"android-1","ipAddress":"192.0.2.2",\
+        "clientVersion":"0.9.81","manufacturer":"Google","model":"Pixel 9","sdkVersion":"35",\
+        "clientName":"Abs Android","deviceName":"Google Pixel 9"}}
+        """
+
+    /// A session whose device info has a numeric `sdkVersion`, as older servers stored it.
+    static let numericSDKVersionSession = """
+        {"id":"ps-5","libraryItemId":"li-book-1","mediaType":"book","deviceInfo":{"deviceId":"android-2",\
+        "sdkVersion":34,"clientName":"Abs Android"}}
+        """
 }
