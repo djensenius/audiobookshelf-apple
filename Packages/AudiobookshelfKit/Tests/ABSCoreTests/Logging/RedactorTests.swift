@@ -149,4 +149,27 @@ private func base64URL(_ json: String) -> String {
         #expect(Log.redact("see <https://a.example/x?token=abc>.") == "see <https://a.example/x?token=<redacted>>.")
         #expect(Log.redact("/x?token=abc#frag") == "/x?token=<redacted>#frag")
     }
+
+    @Test(arguments: [
+        "%74oken", "access%5Ftoken", "access%5ftoken", "TOKEN", "%54oKeN", "Refresh%5FToken", "%63%6F%64%65",
+        "code%5Fverifier", "%2574oken",
+    ])
+    func redactsEncodedAndMixedCaseParameterNames(name: String) {
+        #expect(Log.redact("/a?x=1&\(name)=s3cret&y=2") == "/a?x=1&\(name)=<redacted>&y=2")
+        #expect(Log.redact("sent \(name)=s3cret") == "sent \(name)=<redacted>")
+    }
+
+    @Test(arguments: ["%", "%zz", "tok%en", "%E2%82", "%FF", "%252525252574oken"])
+    func redactsMalformedOrDeeplyEncodedNames(name: String) {
+        #expect(Log.redact("/a?\(name)=s3cret&y=2") == "/a?\(name)=<redacted>&y=2")
+    }
+
+    @Test func keepsOrdinaryEncodedParameterNames() {
+        let text = "/a?sort%5Bfield%5D=title&q=caf%C3%A9&my%74oken=1"
+        #expect(Log.redact(text) == text)
+    }
+
+    @Test func findsTokenPairsInsideOtherValues() {
+        #expect(Log.redact("/a?a=1;token=s3cret") == "/a?a=1;token=<redacted>")
+    }
 }

@@ -5,7 +5,8 @@ import Foundation
 /// Always redacts:
 /// - `Bearer` credentials (`Authorization: Bearer abc` becomes `Authorization: Bearer <redacted>`),
 /// - values of token and OAuth query parameters (`token`, `access_token`, `refresh_token`,
-///   `accessToken`, `refreshToken`, `code`, `code_verifier`), in URLs or as bare `name=value` text,
+///   `accessToken`, `refreshToken`, `code`, `code_verifier`), in URLs or as bare `name=value` text;
+///   names match in any case and after percent-decoding, and malformed encoded names are redacted,
 /// - JSON `"password"` values,
 /// - JSON Web Tokens anywhere in the text (three base64url segments whose first two decode to
 ///   JSON objects, the first with an `"alg"` key).
@@ -39,6 +40,10 @@ public struct Redactor: Sendable, Equatable {
             for match in rule.regex.matches(in: text, range: whole) {
                 ranges.append(match.range(withName: "value"))
             }
+        }
+        for match in Self.queryParameter.regex.matches(in: text, range: whole)
+        where Self.isSensitiveParameter(original.substring(with: match.range(withName: "name"))) {
+            ranges.append(match.range(withName: "value"))
         }
         for match in Self.jwtCandidate.regex.matches(in: text, range: whole)
         where Self.isJWT(
@@ -117,19 +122,43 @@ public struct Redactor: Sendable, Equatable {
     private static let rules = [
         // Bearer credentials, whether a JWT or an opaque token.
         Rule(#"\bBearer\s+(?<value>[^\s,;"']+)"#),
-        // Token and OAuth (PKCE) query parameters, in URLs or bare `name=value` text.
-        // The value runs to the next `&`, `#`, or whitespace. It may contain any other character that's
-        // valid unescaped in a query (`'`, `!`, `*`, `(`, `)`, `~`, `$`, `,`, `;`, `:`, `@`, `/`, `?`);
-        // `"`, `<`, and `>` aren't, so they end the value and `"…"` or `<…>` around a URL survives. A
-        // closing `)` or `'` around a URL is redacted with the value: hiding one extra character is
-        // safer than leaking a value that legitimately contains it.
-        Rule(
-            #"(?:^|[?&;\s])(?:access_?token|refresh_?token|token|code_verifier|code)=(?<value>[^&#\s"<>]*)"#,
-            options: [.caseInsensitive, .anchorsMatchLines]
-        ),
         // JSON passwords, including escaped characters such as `\"`.
         Rule(#""password"\s*:\s*"(?<value>(?:[^"\\]|\\.)*)"#),
     ]
+
+    /// Token and OAuth (PKCE) parameter names, lowercased. Compared after percent-decoding.
+    private static let sensitiveParameterNames: Set<String> = [
+        "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "code", "code_verifier",
+    ]
+
+    /// Whether a query parameter name is sensitive once percent-decoded, ignoring case
+    /// (`%74oken`, `access%5Ftoken`, `TOKEN`). Names whose encoding is malformed or nested too
+    /// deeply to decode count as sensitive, so they fail closed.
+    private static func isSensitiveParameter(_ name: String) -> Bool {
+        var decoded = name
+        for _ in 0..<3 where decoded.contains("%") {
+            guard let next = decoded.removingPercentEncoding else { return true }
+            decoded = next
+        }
+        if decoded.contains("%") { return true }
+        return sensitiveParameterNames.contains(decoded.lowercased())
+    }
+
+    /// A `name=value` pair at the start of a line or after `?`, `&`, `;`, or whitespace, in URLs or
+    /// bare text. ``isSensitiveParameter(_:)`` checks the `name` group.
+    ///
+    /// The match consumes only `name=` and captures the value in a lookahead, so a pair hidden inside
+    /// another value (`a=1;token=x`) is still found. The value runs to the next `&`, `#`, or
+    /// whitespace. It may contain any other character that's valid unescaped in a query (`'`, `!`,
+    /// `*`, `(`, `)`, `~`, `$`, `,`, `;`, `:`, `@`, `/`, `?`); `"`, `<`, and `>` aren't, so they end the
+    /// value and `"…"` or `<…>` around a URL survives. A closing `)` or `'` around a URL is redacted
+    /// with the value: hiding one extra character is safer than leaking a value that contains it.
+    /// Names can't contain a separator, so each start position scans a disjoint run and matching
+    /// stays linear.
+    private static let queryParameter = Rule(
+        #"(?<![^?&;\s])(?<name>[^=&#\s"<>?;]++)=(?=(?<value>[^&#\s"<>]*))"#,
+        options: []
+    )
 
     /// Three dot-separated base64url segments that aren't part of a longer dotted run, such as a
     /// hostname with more labels. ``isJWT(header:claims:)`` checks the `header` and `claims` groups.
