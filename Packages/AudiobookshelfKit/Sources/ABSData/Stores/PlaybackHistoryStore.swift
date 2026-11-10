@@ -18,7 +18,8 @@ import SwiftData
         let continuation: AsyncStream<[PlaybackHistoryEventDTO]>.Continuation
     }
 
-    /// How long events are kept; older ones are deleted at launch by ``pruneExpired(now:)``.
+    /// How long events should be kept; callers must invoke ``pruneExpired(now:)`` at launch.
+    /// The app-shell wiring for launch pruning belongs to issue #44.
     public static let retention: TimeInterval = 90 * 24 * 60 * 60
 
     /// The most events kept per media; the legacy app kept every event forever.
