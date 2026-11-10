@@ -392,13 +392,14 @@ Model notes:
   readable and aren't the SQLite header, or if the Core Data error chain
   (`NSUnderlyingErrorKey`, `NSDetailedErrors`) holds SQLite error 11 or 26 or an
   incompatibility code (134100, 134110, 134130, 134140) and no transient error (disk
-  full, I/O, busy, locked, can't open, no permission, any POSIX error). Anything
+  full, I/O, busy, locked, out of memory, read-only, can't open, no permission,
+  any POSIX error). Anything
   else, including an unreadable file (protected data while the device is locked),
   is rethrown and the store left alone. A reset logs a fault and moves the store,
   then `-wal` and `-shm`, into `Broken/<epoch>-<uuid>/` (keeping only the newest
   copy). An `INCOMPLETE` marker listing the files is written first and removed
-  last; the next open finishes any marked move before opening, and pruning skips
-  marked copies. Downloaded files that are no longer referenced are removed
+  last; the next open finishes any marked move (then prunes) before opening, fails
+  if `Broken/` can't be read, and pruning skips marked copies. Downloaded files that are no longer referenced are removed
   by the orphan sweep in #73 (P4-02). The server still holds synced progress.
 
 ### Store location and container
@@ -412,8 +413,9 @@ Model notes:
     `ModelConfiguration("Audiobookshelf", schema:, url:, cloudKitDatabase: .none)`
     (the same file `groupContainer: .identifier(_:)` resolves to). Load failures
     are rethrown, never answered with another store, because a private store would
-    split the data and the orphan sweep could delete downloads. Only when the
-    process has no App Group entitlement (the ad hoc signed macOS test host) does a
+    split the data and the orphan sweep could delete downloads. An unresolved
+    container throws, except on macOS when the signed entitlement is missing (the
+    ad hoc signed test host); only then does a
     writing process fall back to `Application Support/Audiobookshelf.store` in its
     own container, logging a fault (and asserting in debug builds outside test
     hosts). A read-only process never falls back; it throws;
