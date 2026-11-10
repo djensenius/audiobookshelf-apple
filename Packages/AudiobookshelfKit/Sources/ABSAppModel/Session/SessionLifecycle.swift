@@ -166,11 +166,18 @@ public final class SessionLifecycle {
     /// it. For participants and their tasks, for example on a rejected request; pass the
     /// identity from their ``SessionContext``. When the sign-out's turn comes, it does nothing
     /// unless `identity` is still the active account, so a request from an ended session can't
-    /// sign out the next one. There's no OpenID end-session URL to open this way.
+    /// sign out the next one, nor during ``performAccountChange(_:)`` away from it. If the source
+    /// already signed out by itself, the session ends as expired instead, without a flush.
+    /// There's no OpenID end-session URL to open this way.
     public func requestSignOut(of identity: SessionIdentity) {
         _ = enqueue {
+            if self.source.phase == .signedOut {
+                await self.reconcile()
+                return
+            }
             let current = self.session?.context.identity ?? self.source.phase.identity
-            guard current == identity else {
+            let isChangingAway = self.session == nil && self.changingFrom?.identity == identity
+            guard current == identity, !isChangingAway else {
                 Log.auth.info("Ignored a sign-out request from an ended session")
                 return
             }

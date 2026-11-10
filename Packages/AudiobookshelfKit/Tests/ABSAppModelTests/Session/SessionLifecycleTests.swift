@@ -249,6 +249,37 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
+    @Test func signOutRequestedAfterAnExpiryEndsTheSessionAsExpired() async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        // Queued before the observation's reconcile, so it runs first.
+        harness.lifecycle.requestSignOut(of: identityA)
+        harness.source.expire()
+        #expect(await eventually { harness.lifecycle.gate == .connect })
+        // Signed out, so this only waits for the queue.
+        await harness.lifecycle.signOut()
+
+        #expect(harness.log.entries == teardown("expired"))
+    }
+
+    @Test func signOutRequestedDuringAnAccountChangeLeavesTheSignInAlone() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let lifecycle = harness.lifecycle
+
+        await lifecycle.performAccountChange {
+            lifecycle.requestSignOut(of: identityA)
+            // A nested change with no body waits for the queue, so the request runs first.
+            await lifecycle.performAccountChange {}
+            harness.source.phase = .active(identityB, isOffline: false)
+        }
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        #expect(harness.log.withoutFlushes == teardown("switch") + pipeline("b"))
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
     @Test(arguments: ["switchAccount(to:)", "removeAccount(_:)", "performAccountChange(_:)"])
     func transitionFromInsideATransitionIsRejected(operation: String) async throws {
         let harness = Harness()
