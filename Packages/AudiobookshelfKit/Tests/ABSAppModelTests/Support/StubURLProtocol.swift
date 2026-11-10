@@ -123,7 +123,7 @@ final class StubURLProtocol: URLProtocol {
     }
 }
 
-/// Holds one request until the test opens it.
+/// Holds one request, or one call at a test hook, until the test opens it.
 final class StubGate: Sendable {
     private struct State {
         var hasArrived = false
@@ -164,6 +164,11 @@ final class StubGate: Sendable {
         }
         waiters.forEach { $0.resume() }
         if isOpen { respond() }
+    }
+
+    /// Suspends until the gate opens, for holding a call at a test hook rather than a request.
+    func pass() async {
+        await withCheckedContinuation { continuation in hold { continuation.resume() } }
     }
 }
 

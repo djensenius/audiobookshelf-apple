@@ -1,7 +1,6 @@
 import ABSCore
 import ABSData
 import Foundation
-import Observation
 import Security
 import Synchronization
 import Testing
@@ -194,16 +193,6 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         try await manager.connect(local: validated, username: "david", password: "pw")
     }
     return try #require(manager.activeConnection?.id)
-}
-
-/// Returns once the state is `expected`, waking on each change rather than on the order tasks run in.
-@MainActor
-private func waitForState(_ expected: AccountState, of manager: AccountManager) async {
-    while manager.state != expected {
-        await withCheckedContinuation { continuation in
-            withObservationTracking({ _ = manager.state }, onChange: { continuation.resume() })
-        }
-    }
 }
 
 @MainActor @Suite struct AccountManagerTests {
@@ -753,14 +742,13 @@ private func waitForState(_ expected: AccountState, of manager: AccountManager) 
         let server = FakeServer()
         let id = try await signIn(harness.makeManager(), to: server)
         let manager = harness.makeManager()
+        let choosing = StubGate()
+        manager.restoreWillChooseConnection = { await choosing.pass() }
         let restore = Task { await manager.restoreSession() }
-        // The restore's only waits before it chooses the connection are store calls, which can't be
-        // held: SwiftData runs them on the calling thread, here the main actor. So this wakes as the
-        // restore starts, which is before it resumes from loading the connections.
-        await waitForState(.restoring, of: manager)
-        try #require(manager.connections.isEmpty)
+        await choosing.arrived()
 
         await manager.logout()
+        choosing.open()
         await restore.value
         #expect(manager.state == .signedOut && manager.activeConnection == nil)
         #expect(try harness.session(id) == nil && server.loggedOutRefreshTokens == ["refresh-1"])

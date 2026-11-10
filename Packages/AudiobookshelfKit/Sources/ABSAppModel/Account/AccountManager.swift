@@ -116,6 +116,10 @@ public final class AccountManager {
     @ObservationIgnored private var logouts = 0
     /// Connections that ``remove(_:)`` is deleting, whose missing session isn't an expiry.
     @ObservationIgnored private var removing: Set<UUID> = []
+    /// A test seam: ``restoreSession()`` awaits it after loading the connections and before
+    /// choosing one, so a test can sign out in that window. The store calls there can't be held
+    /// from outside: SwiftData runs them on the calling thread, the main actor.
+    @ObservationIgnored var restoreWillChooseConnection: (@MainActor () async -> Void)?
 
     /// - Parameters:
     ///   - keychain: The app passes `KeychainStore()`; tests pass a fake.
@@ -229,6 +233,7 @@ public final class AccountManager {
         state = .restoring
         lastError = nil
         await reloadConnections()
+        await restoreWillChooseConnection?()
         guard isCurrent(operation) else { return }
         var chosen: ServerConnectionDTO?
         do {
