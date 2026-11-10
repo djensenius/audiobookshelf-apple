@@ -28,7 +28,7 @@ import Observation
 /// `connectionKey` no longer matches ``connectionKey``.
 @MainActor
 @Observable
-public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable & Decodable & Sendable> {
+public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable & Sendable> {
     /// Fetches one page; `page` is zero-based and `limit` is ``pageSize``.
     public typealias PageFetcher =
         @Sendable (_ query: Query, _ page: Int, _ limit: Int) async throws -> PagedResults<Item>
