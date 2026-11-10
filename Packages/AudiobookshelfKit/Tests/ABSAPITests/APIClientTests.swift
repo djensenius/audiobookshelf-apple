@@ -135,6 +135,12 @@ private func makeClient(
         #expect(url.absoluteString == expected)
     }
 
+    @Test func keepsEscapesInPathAndEncodesTheRest() throws {
+        let base = try #require(URL(string: "https://example.com/my%20abs"))
+        let url = try APIClient.url(base: base, path: "/api/items/a%2Fb/x y%zz", query: [])
+        #expect(url.absoluteString == "https://example.com/my%20abs/api/items/a%2Fb/x%20y%25zz")
+    }
+
     @Test func encodesQueryValues() throws {
         let base = try #require(URL(string: "https://example.com/abs"))
         let url = try APIClient.url(
