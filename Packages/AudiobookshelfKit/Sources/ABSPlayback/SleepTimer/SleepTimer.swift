@@ -18,7 +18,7 @@ import Observation
 /// The playback coordinator (#52) conforms to ``SleepTimerPlaybackControl`` and calls:
 /// - ``itemDidChange(_:)`` when another item loads;
 /// - ``playbackWillStart(at:)`` before every play, before its resume seek (AutoRewind), adding what it returns to
-///   that rewind;
+///   that rewind, measured from where playback is heading (`pendingSeekTarget ?? currentTime`);
 /// - ``playbackDidPause()`` whenever anything but the timer pauses playback;
 /// - ``didSeek(to:)`` synchronously once a seek, chapter skip, resume rewind or item load lands (right after the
 ///   `await`). A tick treats a jump nobody reported as a seek.
@@ -108,6 +108,8 @@ public final class SleepTimer {
     @ObservationIgnored private var graceEnd: TimeInterval?
     /// The automatic rewind for the next play, while playback is still where the automatic timer paused it.
     @ObservationIgnored private var pendingRewind: (seconds: TimeInterval, at: Double)?
+    /// Counts expiries, so an expiry's seek task only touches its own automatic rewind.
+    @ObservationIgnored private var expiryID = 0
     @ObservationIgnored private var itemID: String?
     /// Changes when a run begins or stops, or playback plays or pauses, so a reset's resume can tell it was overtaken.
     @ObservationIgnored private var runID = 0
@@ -210,8 +212,8 @@ public final class SleepTimer {
     /// duration only after ``resetGuard`` seconds); during the grace period the expired timer restarts and playback
     /// resumes after the pending rewind, with the reset feedback once it plays. A cancel, a start, a play, a pause or
     /// another item before that rewind lands wins: nothing resumes (only a cancel stops the restarted timer). If the
-    /// rewind fails, or a seek moved playback or is moving it, the grace period and the rewind come back. Returns
-    /// whether it reset.
+    /// rewind fails, or a seek moved playback or is moving it, the grace period and the rewind come back. The timer's
+    /// own seek back to the fade, still in flight, counts as having landed. Returns whether it reset.
     @discardableResult
     public func reset() -> Bool {
         if let run {
@@ -229,8 +231,9 @@ public final class SleepTimer {
             pendingRewind = rewind
             return false
         }
-        let target = time < control.currentTime ? time : nil
-        let id = runID, item = itemID, position = control.currentTime
+        let position = control.intendedTime
+        let target = time < position ? time : nil
+        let id = runID, item = itemID
         Task { [weak self] in
             await self?.resume(rewindingTo: target, from: position, runID: id, item: item) {
                 $0.startGrace(for: expiredRun, until: graceEnd)
@@ -242,7 +245,8 @@ public final class SleepTimer {
 
     /// Call before playback starts, and before the resume seek. Restarts a timer that expired during the grace
     /// period, or starts the automatic timer inside its window. Returns the seconds to rewind before playing,
-    /// which are consumed: the automatic rewind, if playback is still where the automatic timer paused it.
+    /// which are consumed: the automatic rewind, if playback is still (or a seek in flight puts it back) where the
+    /// automatic timer paused it.
     public func playbackWillStart(at date: Date = .now) -> TimeInterval {
         runID += 1
         let rewind = takeRewind()
@@ -349,7 +353,8 @@ public final class SleepTimer {
         publish(remaining: max(left, 0))
     }
 
-    private func tick() {
+    /// Internal so a test can tick in its own job: one from the tick task can land while the test hops executors.
+    func tick() {
         tickCount += 1
         guard var run else { return }
         let isPlaying = control.isPlaying
@@ -375,7 +380,7 @@ public final class SleepTimer {
         // While paused only the end of the media expires a timer: a seek may not have landed yet. A chapter timer
         // waits for a seek in flight, whose landing decides if it reached its goal; a duration's time is up anyway.
         if left <= 0, isPlaying || time >= (control.timeline?.duration ?? 0),
-            !(run.goal.isChapterEnd && control.hasPendingSeek)
+            !(run.goal.isChapterEnd && control.pendingSeekTarget != nil)
         {
             self.run = run
             expire()
@@ -416,21 +421,25 @@ public final class SleepTimer {
         control.pause()
         if !run.wasCutShort { startGrace(for: run) }
         stopRun()
+        expiryID += 1
         let rewind = run.isAutomatic ? options.autoSleep.rewindOnExpiry : nil
         guard let fadeStart = run.fadeStart, fadeStart < control.currentTime else {
             pendingRewind = rewind.map { ($0, control.currentTime) }
             return
         }
-        // A play or reset during the seek finds playback elsewhere and drops the rewind; a manual start keeps it. A
-        // failed seek leaves it where playback paused, so a seek that superseded it drops it too.
+        // A play or reset during the seek takes the rewind from where the seek lands, and a manual start leaves it
+        // there. A failed seek leaves it where playback paused, so a seek that superseded it drops it too.
         pendingRewind = rewind.map { ($0, fadeStart) }
-        let item = itemID, pausedAt = control.currentTime
+        let id = expiryID, item = itemID, pausedAt = control.currentTime
         Task { [weak self, control] in
-            // Another item, or a seek that landed or is in flight before this task ran, wins.
-            guard self?.isCurrent(item) == true, Self.isStill(control, at: pausedAt) else { return }
+            // Another item, or a seek that landed or is in flight before this task ran, wins, and the rewind goes.
+            guard self?.isCurrent(item) == true, Self.isStill(control, at: pausedAt) else {
+                if self?.expiryID == id { self?.pendingRewind = nil }
+                return
+            }
             let landed = await control.seek(to: fadeStart)
             guard let self, isCurrent(item) else { return }
-            pendingRewind?.at = landed ?? pausedAt
+            if expiryID == id { pendingRewind?.at = landed ?? pausedAt }
             if let landed { didSeek(to: landed) }
         }
     }
@@ -462,16 +471,17 @@ public final class SleepTimer {
         itemID == item && (id == nil || id == runID)
     }
 
-    /// The pending rewind, consumed; nothing once playback moved away from where it was set, or a seek is moving it.
+    /// The pending rewind, consumed; nothing once playback moved away from where it was set, or a seek is moving it
+    /// elsewhere.
     private func takeRewind() -> TimeInterval {
         defer { pendingRewind = nil }
         guard let pendingRewind, Self.isStill(control, at: pendingRewind.at) else { return 0 }
         return pendingRewind.seconds
     }
 
-    /// Whether playback is still at `position`, give or take a reporting error, with no seek or load in flight.
+    /// Whether playback is still at `position`, give or take a reporting error, or a seek in flight lands it there.
     private static func isStill(_ control: any SleepTimerPlaybackControl, at position: Double) -> Bool {
-        !control.hasPendingSeek && abs(control.currentTime - position) < 1
+        abs(control.intendedTime - position) < 1
     }
 
     /// Ends the run (not its grace period), restoring the volume.
@@ -548,7 +558,8 @@ public final class SleepTimer {
     }
 
     private func time(rewoundBy seconds: TimeInterval) -> Double {
-        control.timeline?.jumpBackward(from: control.currentTime, by: seconds) ?? control.currentTime
+        let time = control.intendedTime
+        return control.timeline?.jumpBackward(from: time, by: seconds) ?? time
     }
 
     /// Media seconds that play moving forward from `start` to `end`, less the gaps between tracks, so playback
@@ -666,4 +677,9 @@ public final class SleepTimer {
         let (seconds, attoseconds) = duration.components
         return Double(seconds) + Double(attoseconds) / 1e18
     }
+}
+
+extension SleepTimerPlaybackControl {
+    /// Where playback is, or where the seek in flight lands it: the timer's own, or a user's that superseded it.
+    fileprivate var intendedTime: Double { pendingSeekTarget ?? currentTime }
 }

@@ -5,7 +5,7 @@ import Testing
 @testable import ABSPlayback
 
 /// Playback that moves only when a test says so. `pause()` stops it and `play()` starts it; seeks land at once
-/// unless held.
+/// unless held, and the latest seek wins, as in the engine.
 @MainActor
 final class FakePlaybackControl: SleepTimerPlaybackControl {
     var isPlaying = true
@@ -20,9 +20,11 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
     var seeksLand = true
     /// Whether seeks wait for ``finishSeek()``.
     var holdsSeeks = false
-    /// Whether a seek of the user's is in flight.
-    var userSeekIsPending = false
+    /// Where a seek of the user's in flight lands.
+    var userSeekTarget: Double?
     private var heldSeek: CheckedContinuation<Void, Never>?
+    /// Where the latest of the timer's seeks in flight lands.
+    private var seekTarget: Double?
     /// The volume when playback was last paused.
     private(set) var volumeAtPause: Float?
 
@@ -32,7 +34,7 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
     }
 
     var volume: Float { volumes.last ?? 1 }
-    var hasPendingSeek: Bool { userSeekIsPending || heldSeek != nil }
+    var pendingSeekTarget: Double? { userSeekTarget ?? seekTarget }
 
     func pause() {
         pauseCount += 1
@@ -47,8 +49,14 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
 
     func seek(to time: Double) async -> Double? {
         seeks.append(time)
-        if holdsSeeks { await withCheckedContinuation { heldSeek = $0 } }
-        heldSeek = nil
+        let generation = seeks.count
+        seekTarget = time
+        if holdsSeeks {
+            await withCheckedContinuation { heldSeek = $0 }
+            heldSeek = nil
+        }
+        guard generation == seeks.count else { return nil }
+        seekTarget = nil
         guard seeksLand else { return nil }
         currentTime = time
         return time

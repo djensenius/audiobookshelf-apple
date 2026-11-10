@@ -15,9 +15,9 @@ struct AudioEngineSleepTimerControlTests {
         #expect(control.currentTime == 500)
         #expect(control.rate == 1.5)
         #expect(control.timeline == nil)
-        #expect(control.hasPendingSeek == false)
+        #expect(control.pendingSeekTarget == nil)
         engine.pendingSeekTarget = 10
-        #expect(control.hasPendingSeek)
+        #expect(control.pendingSeekTarget == 10)
         #expect(await control.seek(to: 470) == 470)
         engine.seekResult = .superseded
         #expect(await control.seek(to: 400) == nil, "Only where it landed")
