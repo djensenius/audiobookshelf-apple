@@ -80,11 +80,17 @@ func items(_ ids: ClosedRange<Int>, prefix: String = "item") -> [TestItem] {
     ids.map { TestItem(id: "\(prefix)\($0)") }
 }
 
-/// Runs `body` with settings backed by a fresh, uniquely named `UserDefaults` suite.
+/// Runs `body` with a fresh, uniquely named `UserDefaults` suite.
 @MainActor
-func withLibrarySettings(_ body: @MainActor (AppSettings) async throws -> Void) async throws {
+func withLibraryDefaults(_ body: @MainActor (UserDefaults) async throws -> Void) async throws {
     let suiteName = "ABSAppModelTests.Library.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suiteName))
     defer { defaults.removePersistentDomain(forName: suiteName) }
-    try await body(AppSettings(defaults: defaults))
+    try await body(defaults)
+}
+
+/// Runs `body` with settings backed by a fresh, uniquely named `UserDefaults` suite.
+@MainActor
+func withLibrarySettings(_ body: @MainActor (AppSettings) async throws -> Void) async throws {
+    try await withLibraryDefaults { defaults in try await body(AppSettings(defaults: defaults)) }
 }

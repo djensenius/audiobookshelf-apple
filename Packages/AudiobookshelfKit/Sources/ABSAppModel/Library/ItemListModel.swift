@@ -11,8 +11,13 @@ import Observation
 /// skipped, because offset paging repeats items when the list changes on the server.
 ///
 /// Changing the query with ``setQuery(_:)`` (or calling ``reset()``) cancels the page in flight,
-/// clears the list and loads the first page again. Each reset starts a new generation, and a
+/// clears the list and loads the first page again. ``refresh()`` reloads too, but keeps the list
+/// until the first new page replaces it. Each reset or refresh starts a new generation, and a
 /// response from an earlier generation is never applied.
+///
+/// A model belongs to one client and account: views create it per account identity (with
+/// `LibraryStore.makeItemList(libraryID:query:)`) and recreate it when the store's
+/// `connectionKey` no longer matches ``connectionKey``.
 @MainActor
 @Observable
 public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable & Decodable & Sendable> {
@@ -32,6 +37,8 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
 
     public let pageSize: Int
     public let prefetchThreshold: Int
+    /// The account the model loads for, when created by `LibraryStore`.
+    public let connectionKey: LibraryConnectionKey?
 
     @ObservationIgnored private let fetchPage: PageFetcher
     @ObservationIgnored private var nextPage = 0
@@ -40,14 +47,20 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     @ObservationIgnored private var indexByID: [Item.ID: Int] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadTask: Task<Void, Never>?
+    /// Set by ``refresh()``: the next page replaces the items instead of being appended.
+    @ObservationIgnored private var replacesItems = false
 
     /// - Parameters:
     ///   - pageSize: Items per page; `0` asks for everything in one page.
     ///   - prefetchThreshold: How close to the end an appearing item triggers the next page.
-    public init(query: Query, pageSize: Int = 20, prefetchThreshold: Int = 5, fetchPage: @escaping PageFetcher) {
+    public init(
+        query: Query, pageSize: Int = 20, prefetchThreshold: Int = 5, connectionKey: LibraryConnectionKey? = nil,
+        fetchPage: @escaping PageFetcher
+    ) {
         self.query = query
         self.pageSize = pageSize
         self.prefetchThreshold = prefetchThreshold
+        self.connectionKey = connectionKey
         self.fetchPage = fetchPage
     }
 
@@ -67,18 +80,33 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     /// Cancels the page in flight, clears the list and loads the first page. Returns its load.
     @discardableResult
     public func reset() -> Task<Void, Never>? {
+        restart()
+        replacesItems = false
+        items = []
+        total = nil
+        indexByID = [:]
+        return loadNextPage()
+    }
+
+    /// Reloads from the first page, for example on pull to refresh. The current items stay until
+    /// the first page arrives and replaces them; later pages are appended as usual. Returns the
+    /// first page's load.
+    @discardableResult
+    public func refresh() -> Task<Void, Never>? {
+        restart()
+        replacesItems = true
+        return loadNextPage()
+    }
+
+    private func restart() {
         generation += 1
         loadTask?.cancel()
         loadTask = nil
-        items = []
-        total = nil
         isLoading = false
         error = nil
         reachedEnd = false
         nextPage = 0
         fetchedCount = 0
-        indexByID = [:]
-        return loadNextPage()
     }
 
     /// Loads the next page unless one is in flight or the end was reached. Returns the page's
@@ -129,6 +157,11 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
             nextPage += 1
             fetchedCount += page.results.count
             var appended = items
+            if replacesItems {
+                replacesItems = false
+                appended = []
+                indexByID = [:]
+            }
             for item in page.results where indexByID[item.id] == nil {
                 indexByID[item.id] = appended.count
                 appended.append(item)
@@ -153,9 +186,11 @@ extension ItemListModel where Query == LibraryQuery, Item == LibraryItem {
     /// The items of a library. The query's `page` and `limit` are set by the model.
     public convenience init(
         client: any LibraryService, libraryID: String, query: LibraryQuery = LibraryQuery(), pageSize: Int = 20,
-        prefetchThreshold: Int = 5
+        prefetchThreshold: Int = 5, connectionKey: LibraryConnectionKey? = nil
     ) {
-        self.init(query: query, pageSize: pageSize, prefetchThreshold: prefetchThreshold) { query, page, limit in
+        self.init(
+            query: query, pageSize: pageSize, prefetchThreshold: prefetchThreshold, connectionKey: connectionKey
+        ) { query, page, limit in
             var query = query
             query.page = page
             query.limit = limit

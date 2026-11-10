@@ -94,6 +94,178 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func switchingServersOrClearingClearsProgress() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+            store.progress.apply(MediaProgress(id: "p", libraryItemId: "item", lastUpdate: 1))
+
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+            #expect(store.progress.progress(libraryItemID: "item") != nil)
+
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverB)
+            #expect(store.progress.progress(libraryItemID: "item") == nil)
+
+            store.progress.apply(MediaProgress(id: "p", libraryItemId: "item", lastUpdate: 1))
+            store.clear()
+            #expect(store.progress.progress(libraryItemID: "item") == nil)
+        }
+    }
+
+    @Test func reconnectingTheSameAccountKeepsDataWhileRefreshing() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+            try await store.loadDetails(libraryID: "books")
+
+            let gate = GatedCalls<Void, [Library]>()
+            var slow = service([])
+            slow.librariesHandler = { try await gate.call(()) }
+            var calls = gate.calls.makeAsyncIterator()
+            let reconnect = Task { await store.connect(client: slow, connectionKey: serverA) }
+            let call = try #require(await calls.next())
+
+            #expect(store.isLoading)
+            #expect(store.hasLoaded)
+            #expect(store.libraries.map(\.id) == ["books"])
+            #expect(store.details.keys.sorted() == ["books"])
+
+            call.reply.resume(returning: [makeLibrary("books"), makeLibrary("pods")])
+            await reconnect.value
+            #expect(store.libraries.map(\.id) == ["books", "pods"])
+            #expect(store.details.keys.sorted() == ["books"])
+        }
+    }
+
+    @Test func overlappingRefreshesApplyTheLatest() async throws {
+        try await withLibrarySettings { settings in
+            let gate = GatedCalls<Void, [Library]>()
+            var slow = FakeLibraryService()
+            slow.librariesHandler = { try await gate.call(()) }
+            var calls = gate.calls.makeAsyncIterator()
+            let store = LibraryStore(settings: settings)
+
+            let first = Task { await store.connect(client: slow, connectionKey: serverA) }
+            let firstCall = try #require(await calls.next())
+            let second = Task { await store.refresh() }
+            let secondCall = try #require(await calls.next())
+
+            secondCall.reply.resume(returning: [makeLibrary("new")])
+            await second.value
+            #expect(store.libraries.map(\.id) == ["new"])
+            #expect(!store.isLoading)
+
+            firstCall.reply.resume(returning: [makeLibrary("old")])
+            await first.value
+            #expect(store.libraries.map(\.id) == ["new"])
+            #expect(!store.isLoading)
+        }
+    }
+
+    @Test func overlappingDetailLoadsKeepTheLatest() async throws {
+        try await withLibrarySettings { settings in
+            let gate = GatedCalls<String, LibraryWithFilterData>()
+            var slow = service([makeLibrary("books")])
+            slow.libraryHandler = { id in try await gate.call(id) }
+            var calls = gate.calls.makeAsyncIterator()
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: slow, connectionKey: serverA)
+
+            let first = Task { try await store.loadDetails(libraryID: "books") }
+            let firstCall = try #require(await calls.next())
+            let second = Task { try await store.loadDetails(libraryID: "books") }
+            let secondCall = try #require(await calls.next())
+
+            let newer = LibraryWithFilterData(
+                library: makeLibrary("books"), filterData: LibraryFilterData(tags: ["new"]))
+            let older = LibraryWithFilterData(
+                library: makeLibrary("books"), filterData: LibraryFilterData(tags: ["old"]))
+            secondCall.reply.resume(returning: newer)
+            #expect(try await second.value == newer)
+            firstCall.reply.resume(returning: older)
+            // The caller still gets its own response, but the store keeps the latest request's.
+            #expect(try await first.value == older)
+            #expect(store.filterData(libraryID: "books")?.tags == ["new"])
+        }
+    }
+
+    @Test func lastLibraryPersistsAcrossSettingsInstances() async throws {
+        try await withLibraryDefaults { defaults in
+            let first = LibraryStore(settings: AppSettings(defaults: defaults))
+            await first.connect(client: service([makeLibrary("books"), makeLibrary("pods")]), connectionKey: serverA)
+            first.saveLastLibraryID("pods")
+
+            // A relaunch: new settings over the same store.
+            let relaunched = LibraryStore(settings: AppSettings(defaults: defaults))
+            await relaunched.connect(
+                client: service([makeLibrary("books"), makeLibrary("pods")]), connectionKey: serverA)
+            #expect(relaunched.lastLibraryID == "pods")
+            #expect(relaunched.initialLibraryID == "pods")
+        }
+    }
+
+    @Test func initialLibraryPrefersLastThenUserDefaultThenFirst() async throws {
+        try await withLibrarySettings { settings in
+            let libraries = [makeLibrary("one"), makeLibrary("two"), makeLibrary("three")]
+            let store = LibraryStore(settings: settings)
+
+            await store.connect(client: service(libraries), connectionKey: serverA, defaultLibraryID: "two")
+            #expect(store.defaultLibraryID == "two")
+            #expect(store.initialLibraryID == "two")
+
+            store.saveLastLibraryID("three")
+            #expect(store.initialLibraryID == "three")
+
+            store.saveLastLibraryID("deleted")
+            #expect(store.initialLibraryID == "two")
+
+            await store.connect(client: service(libraries), connectionKey: serverA, defaultLibraryID: "inaccessible")
+            #expect(store.initialLibraryID == "one")
+        }
+    }
+
+    @Test func initialLibraryBeforeTheLibrariesLoad() async throws {
+        try await withLibrarySettings { settings in
+            var offline = FakeLibraryService()
+            offline.librariesHandler = { throw TestError.offline }
+            let store = LibraryStore(settings: settings)
+
+            await store.connect(client: offline, connectionKey: serverA, defaultLibraryID: "default")
+            #expect(!store.hasLoaded)
+            #expect(store.error is TestError)
+            #expect(store.initialLibraryID == "default")
+
+            settings.setLastLibraryID("last", serverID: serverA.serverID, userID: serverA.userID)
+            #expect(store.initialLibraryID == "last")
+
+            // Once loaded, an empty list means there are no libraries.
+            await store.connect(client: service([]), connectionKey: serverA)
+            #expect(store.hasLoaded)
+            #expect(store.initialLibraryID == nil)
+        }
+    }
+
+    @Test func refreshUpdatesARenamedLibrary() async throws {
+        try await withLibrarySettings { settings in
+            let response = Locked([makeLibrary("books", name: "Books")])
+            var fake = service([])
+            fake.librariesHandler = { response.value }
+            fake.libraryHandler = { id in
+                LibraryWithFilterData(
+                    library: makeLibrary(id, name: "Books"), filterData: LibraryFilterData(tags: ["t"]))
+            }
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: fake, connectionKey: serverA)
+            try await store.loadDetails(libraryID: "books")
+
+            response.value = [makeLibrary("books", name: "Audiobooks")]
+            await store.refresh()
+            #expect(store.library(id: "books")?.name == "Audiobooks")
+            #expect(store.details["books"]?.library.name == "Audiobooks")
+            #expect(store.filterData(libraryID: "books")?.tags == ["t"])
+        }
+    }
+
     @Test func responseForThePreviousServerIsDropped() async throws {
         try await withLibrarySettings { settings in
             let gate = GatedCalls<Void, [Library]>()
@@ -130,6 +302,7 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
             #expect(store.details.isEmpty)
             #expect(store.initialLibraryID == nil)
             #expect(store.lastLibraryID == nil)
+            #expect(!store.hasLoaded)
 
             // Without an account there is nothing to refresh or save; the saved library stays.
             await store.refresh()

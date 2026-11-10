@@ -180,6 +180,102 @@ private func makeModel(_ server: PageServer, query: String = "a", pageSize: Int 
         #expect(!model.isLoading)
     }
 
+    @Test func staleFailureAfterAResetIsDropped() async throws {
+        let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
+        let model = Model(query: "a", pageSize: 2) { query, page, limit in
+            try await gate.call(PageRequest(query: query, page: page, limit: limit))
+        }
+        var calls = gate.calls.makeAsyncIterator()
+
+        let staleLoad = try #require(model.loadNextPage())
+        let stale = try #require(await calls.next())
+        let freshLoad = try #require(model.setQuery("b"))
+        let fresh = try #require(await calls.next())
+
+        stale.reply.resume(throwing: TestError.offline)
+        await staleLoad.value
+        #expect(model.error == nil)
+        #expect(model.isLoading)
+
+        fresh.reply.resume(returning: PagedResults(results: items(1...2), total: 2, limit: 2, page: 0))
+        await freshLoad.value
+        #expect(model.error == nil)
+        #expect(model.items == items(1...2))
+    }
+
+    @Test func resetClearsAnError() async {
+        let fail = Locked(true)
+        let model = Model(query: "a", pageSize: 2) { _, page, limit in
+            if fail.value { throw TestError.offline }
+            return PagedResults(results: items(1...2), total: 2, limit: limit, page: page)
+        }
+        await model.loadNextPage()?.value
+        #expect(model.error is TestError)
+
+        fail.value = false
+        let reload = model.reset()
+        #expect(model.error == nil)
+        #expect(model.isLoading)
+        await reload?.value
+        #expect(model.items == items(1...2))
+        #expect(model.reachedEnd)
+    }
+
+    @Test func refreshKeepsItemsUntilTheFirstPage() async throws {
+        let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
+        let model = Model(query: "a", pageSize: 2) { query, page, limit in
+            try await gate.call(PageRequest(query: query, page: page, limit: limit))
+        }
+        var calls = gate.calls.makeAsyncIterator()
+        for page in 0..<2 {
+            let load = try #require(model.loadNextPage())
+            let call = try #require(await calls.next())
+            let results = items((page * 2 + 1)...(page * 2 + 2))
+            call.reply.resume(returning: PagedResults(results: results, total: 6, limit: 2, page: page))
+            await load.value
+        }
+        #expect(model.items == items(1...4))
+
+        let refresh = try #require(model.refresh())
+        let call = try #require(await calls.next())
+        #expect(call.request == PageRequest(query: "a", page: 0, limit: 2))
+        #expect(model.items == items(1...4))
+        #expect(model.isLoading)
+        // Appearing items join the reload instead of requesting page 2 of the old list.
+        model.itemAppeared(at: 3)
+
+        call.reply.resume(returning: PagedResults(results: items(10...11), total: 4, limit: 2, page: 0))
+        await refresh.value
+        #expect(model.items == items(10...11))
+        #expect(model.total == 4)
+
+        let next = try #require(model.loadNextPage())
+        let nextCall = try #require(await calls.next())
+        #expect(nextCall.request.page == 1)
+        nextCall.reply.resume(returning: PagedResults(results: items(12...13), total: 4, limit: 2, page: 1))
+        await next.value
+        #expect(model.items == items(10...13))
+        #expect(model.reachedEnd)
+    }
+
+    @Test func releasingTheModelCancelsThePageInFlight() async throws {
+        let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
+        var model: Model? = Model(query: "a", pageSize: 2) { query, page, limit in
+            try await gate.call(PageRequest(query: query, page: page, limit: limit))
+        }
+        weak let released = model
+        var calls = gate.calls.makeAsyncIterator()
+        let load = try #require(model?.loadNextPage())
+        let call = try #require(await calls.next())
+
+        model = nil
+        #expect(released == nil)
+        #expect(load.isCancelled)
+
+        call.reply.resume(returning: PagedResults(results: items(1...2), total: 2, limit: 2, page: 0))
+        await load.value
+    }
+
     @Test func failedPageIsRetriedExplicitly() async {
         let fail = Locked(true)
         let model = Model(query: "a", pageSize: 2) { _, page, limit in
