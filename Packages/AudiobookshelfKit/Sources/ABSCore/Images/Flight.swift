@@ -7,7 +7,7 @@ import Synchronization
 /// waiter leaves before the result arrives, the flight is abandoned and its task cancelled;
 /// later callers must start a new flight.
 final class Flight<Value: Sendable>: Sendable {
-    /// Thrown by ``join()`` on an abandoned flight.
+    /// Thrown by ``join()`` on an abandoned flight, even once its task has finished.
     struct Abandoned: Error {}
 
     private struct State {
@@ -21,6 +21,8 @@ final class Flight<Value: Sendable>: Sendable {
     private let state = Mutex(State())
 
     var isAbandoned: Bool { state.withLock { $0.isAbandoned } }
+    /// The callers waiting on the result, for tests.
+    var waiterCount: Int { state.withLock { $0.waiters.count } }
 
     /// Starts `operation`, whose result is delivered to every waiter.
     func start(priority: TaskPriority? = nil, _ operation: @escaping @Sendable () async throws -> Value) {
@@ -49,8 +51,10 @@ final class Flight<Value: Sendable>: Sendable {
             try await withCheckedThrowingContinuation { continuation in
                 let (immediate, orphan) = state.withLock {
                     state -> (Result<Value, any Error>?, Task<Void, Never>?) in
-                    if let result = state.result { return (result, nil) }
+                    // Abandonment first: an operation that ignored cancellation may still have
+                    // succeeded, but late callers must start a new flight.
                     if state.isAbandoned { return (.failure(Abandoned()), nil) }
+                    if let result = state.result { return (result, nil) }
                     if Task.isCancelled {
                         // A caller cancelled before joining may be the flight's only one.
                         guard state.waiters.isEmpty else { return (.failure(CancellationError()), nil) }
@@ -111,6 +115,10 @@ actor AsyncSemaphore {
     init(permits: Int) {
         self.permits = permits
     }
+
+    /// Free permits and queued waiters, for tests.
+    var availablePermits: Int { permits }
+    var waiterCount: Int { waiters.count }
 
     func acquire() async throws {
         try Task.checkCancellation()
