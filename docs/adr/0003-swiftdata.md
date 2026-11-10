@@ -236,10 +236,14 @@ Model notes:
     Afterwards `serverBaseline` becomes the server's values. Comparisons allow 1 s
     for `currentTime` and `duration`, 0.001 for `progress` and `ebookProgress`,
     and are exact otherwise.
-  - **Clearing.** After a successful PATCH the store copies the sent groups into
-    `serverBaseline` and clears their flags, but only for groups whose
-    `<group>EditedAt` still equals the value that was sent; a change made during
-    the request stays dirty.
+  - **Clearing.** The PATCH is built from a snapshot of the dirty groups' values
+    and their `<group>EditedAt`. After it succeeds, the store always copies the
+    sent snapshot values into `serverBaseline` for every sent group, because the
+    server now holds them. It then clears a group's flag only if its
+    `<group>EditedAt` still equals the snapshot's. A group edited during the
+    request stays dirty with its newer local values, and the next fetch sees the
+    server matching the advanced baseline, so the edit is kept and sent rather
+    than treated as a conflict.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
@@ -472,7 +476,9 @@ Ongoing checks:
   false and its pending-sync DTO carries no audio fields; merge tests cover an
   offline ebook edit plus an audio-only server change (the ebook edit is kept and
   stays dirty) and dirty audio followed by a later local ebook edit while the
-  server's audio changed (the server's audio wins).
+  server's audio changed (the server's audio wins); an edit made while its PATCH
+  is in flight advances the baseline to the sent values, stays dirty, and survives
+  the next fetch.
 - `mise run test:kit` under Swift 6 strict concurrency, with no Sendable warnings.
 - Review checks: `import SwiftData` only in `ABSData`, `ABSAppModel` (view models
   using `ResultsObserver`/`HistoryObserver`), app-target views and the widget; no `@Model` type in a public store signature; `cloudKitDatabase: .none`
