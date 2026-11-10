@@ -51,7 +51,11 @@ public struct Redactor: Sendable, Equatable {
                 let found = original.range(of: secret, options: .literal, range: search)
                 guard found.location != NSNotFound else { break }
                 ranges.append(found)
-                search = NSRange(location: found.upperBound, length: whole.upperBound - found.upperBound)
+                // Resume just after the start so overlapping occurrences are found too; merging
+                // combines them. Each search costs about the secret's length, so this stays linear
+                // in the number of occurrences.
+                let next = found.location + 1
+                search = NSRange(location: next, length: whole.upperBound - next)
             }
         }
 
@@ -112,8 +116,13 @@ public struct Redactor: Sendable, Equatable {
         // Bearer credentials, whether a JWT or an opaque token.
         Rule(#"\bBearer\s+(?<value>[^\s,;"']+)"#),
         // Token and OAuth (PKCE) query parameters, in URLs or bare `name=value` text.
+        // The value runs to the next `&`, `#`, or whitespace. It may contain any other character that's
+        // valid unescaped in a query (`'`, `!`, `*`, `(`, `)`, `~`, `$`, `,`, `;`, `:`, `@`, `/`, `?`);
+        // `"`, `<`, and `>` aren't, so they end the value and `"…"` or `<…>` around a URL survives. A
+        // closing `)` or `'` around a URL is redacted with the value: hiding one extra character is
+        // safer than leaking a value that legitimately contains it.
         Rule(
-            #"(?:^|[?&;\s])(?:access_?token|refresh_?token|token|code_verifier|code)=(?<value>[^&#\s"']*)"#,
+            #"(?:^|[?&;\s])(?:access_?token|refresh_?token|token|code_verifier|code)=(?<value>[^&#\s"<>]*)"#,
             options: [.caseInsensitive, .anchorsMatchLines]
         ),
         // JSON passwords, including escaped characters such as `\"`.

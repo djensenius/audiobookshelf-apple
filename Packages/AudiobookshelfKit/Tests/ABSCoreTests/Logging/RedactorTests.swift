@@ -130,4 +130,23 @@ private func base64URL(_ json: String) -> String {
             #expect(Log.redact(text) == text)
         }
     }
+
+    @Test func redactsOverlappingSecretOccurrences() {
+        #expect(Redactor(secrets: ["abcdea"]).redact("abcdeabcdea") == "<redacted>")
+        // "aa" is below the minimum secret length, so use a 4-character self-overlapping secret.
+        #expect(Redactor(secrets: ["aaaa"]).redact("xaaaaaay") == "x<redacted>y")
+    }
+
+    @Test(arguments: ["'opaque-secret'", "a!b*c(d)e~f$g,h;i:j@k/l?m", "(paren)"])
+    func redactsQueryValuesWithReservedCharacters(value: String) {
+        #expect(Log.redact("/cb?code=\(value)&state=ok") == "/cb?code=<redacted>&state=ok")
+    }
+
+    @Test func keepsDelimitersAroundURLs() {
+        #expect(
+            Log.redact(#"open "https://a.example/x?token=abc" now"#)
+                == #"open "https://a.example/x?token=<redacted>" now"#)
+        #expect(Log.redact("see <https://a.example/x?token=abc>.") == "see <https://a.example/x?token=<redacted>>.")
+        #expect(Log.redact("/x?token=abc#frag") == "/x?token=<redacted>#frag")
+    }
 }
