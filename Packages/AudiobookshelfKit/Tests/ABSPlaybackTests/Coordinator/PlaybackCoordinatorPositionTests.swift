@@ -173,6 +173,23 @@ struct PlaybackCoordinatorPositionTests {
         #expect(coordinator.isPlaying)
     }
 
+    @Test func resumedSeekLandingIsReportedAfterTwoInterruptions() async throws {
+        await coordinator.play(itemID: "A", startTime: 1000)
+        engine.seekResults = [.interrupted, .interrupted]
+        #expect(await coordinator.seek(to: 2000) == nil)
+        let resumed = h.events.count
+
+        await coordinator.resume()
+        #expect(engine.pendingSeekTarget == 2000)
+        engine.landPendingSeek()
+
+        #expect(
+            h.events.since(resumed) == [
+                .playbackStarted, .didSeek(time: 2000), .tick(time: 2000),
+            ])
+        #expect(seekTimes.filter { $0 == 2000 }.count == 1)
+    }
+
     @Test func resumeAfterTheEndStillSeeksToAnInterruptedTarget() async {
         await coordinator.play(itemID: "A", startTime: 3500)
         engine.finish()
@@ -215,5 +232,7 @@ struct PlaybackCoordinatorPositionTests {
         #expect(engine.seeks == [2000, 3000])
         #expect(coordinator.currentTime == 3000)
         #expect(coordinator.isPlaying)
+        engine.onEvent?(.tick(3001))
+        #expect(seekTimes == [1000, 3000])
     }
 }

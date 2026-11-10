@@ -129,8 +129,8 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var lastPlayedSavedAt: Date?
     /// The media played to its end; the next play starts again from 0.
     @ObservationIgnored private var reachedEnd = false
-    /// The load's initial seek was interrupted and hasn't landed: its `didSeek` is still owed.
-    @ObservationIgnored private var awaitingInitialLanding = false
+    /// A seek was interrupted and hasn't landed yet, so its `didSeek` is still owed.
+    @ObservationIgnored private var awaitingSeekLanding = false
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
     @ObservationIgnored private var resumingIntent: Int?
@@ -392,7 +392,7 @@ public final class PlaybackCoordinator {
         // An interrupted initial seek stays pending with the engine paused at 0: `.loaded` carries
         // its target, and `.didSeek` waits for the landing (see `handle(_:)`).
         let landed = engine.pendingSeekTarget == nil
-        awaitingInitialLanding = !landed
+        awaitingSeekLanding = !landed
         emit(.loaded(time: position))
         guard current == generation, phase == .loaded else { return }
         if landed { emit(.didSeek(time: engine.currentTime)) }
@@ -494,13 +494,19 @@ public final class PlaybackCoordinator {
             let current = generation
             let target = engine.timeline?.clamp(time) ?? max(time, 0)
             reachedEnd = false
-            guard await engine.seek(to: target) == .completed, current == generation, phase == .loaded else {
+            awaitingSeekLanding = true
+            let result = await engine.seek(to: target)
+            guard current == generation, phase == .loaded else { return nil }
+            guard result == .completed else {
+                awaitingSeekLanding = engine.pendingSeekTarget != nil
                 return nil
             }
-            awaitingInitialLanding = false
             let landed = engine.currentTime
-            emit(.didSeek(time: landed))
-            saveLastPlayed()
+            if awaitingSeekLanding {
+                awaitingSeekLanding = false
+                emit(.didSeek(time: landed))
+                saveLastPlayed()
+            }
             return landed
         case .unloaded:
             let finite = time.isFinite ? max(time, 0) : 0
@@ -578,9 +584,8 @@ public final class PlaybackCoordinator {
         guard phase == .loaded else { return }
         switch event {
         case .tick(let time):
-            if awaitingInitialLanding, engine.pendingSeekTarget == nil {
-                // The interrupted initial seek has landed: the engine retried it as playback started.
-                awaitingInitialLanding = false
+            if awaitingSeekLanding, engine.pendingSeekTarget == nil {
+                awaitingSeekLanding = false
                 emit(.didSeek(time: engine.currentTime))
                 guard phase == .loaded else { return }
                 saveLastPlayed()
@@ -612,11 +617,11 @@ public final class PlaybackCoordinator {
 
     private func startEngine() {
         engine.setRate(Float(rate))
-        error = nil
         engine.play()
         // The engine can refuse at once (the audio session won't activate): it has then cleared
         // the request and reported `.failed`.
         guard engine.isPlaybackRequested else { return }
+        error = nil
         emit(.playbackStarted)
     }
 
@@ -636,7 +641,7 @@ public final class PlaybackCoordinator {
     /// Closes the current session (if any) and unloads the engine.
     private func tearDown(reason: SessionCloseReason) {
         let wasLoaded = phase == .loaded
-        awaitingInitialLanding = false
+        awaitingSeekLanding = false
         if wasLoaded {
             unloadedPosition = position
             unloadedDuration = engine.duration

@@ -53,4 +53,33 @@ struct PlaybackCoordinatorPlaybackStartTests {
         #expect(coordinator.error == activationFailure)
         #expect(h.events.since(paused) == [.failed(activationFailure)])
     }
+
+    @Test(arguments: [false, true])
+    func refusedResumePreservesTheExistingEngineFailure(recoverySeek: Bool) async {
+        await coordinator.play(itemID: "A", startTime: 1000)
+        coordinator.pause()
+        let failure = AudioEngineError.audioSessionActivationFailed(
+            description: recoverySeek ? "Seek recovery failed" : "Resume failed")
+        let expectedError = PlaybackCoordinatorError.engine(failure)
+
+        if recoverySeek {
+            _ = coordinator.addObserver { event in
+                if case .didSeek(let time) = event, time == 2000 {
+                    engine.onEvent?(.failed(failure))
+                }
+            }
+            engine.seekResults = [.interrupted]
+            #expect(await coordinator.seek(to: 2000) == nil)
+        } else {
+            engine.onEvent?(.failed(failure))
+        }
+
+        let startedCount = h.events.events.filter { $0 == .playbackStarted }.count
+        engine.silentlyRefusingPlays = 1
+        await coordinator.resume()
+
+        #expect(coordinator.error == expectedError)
+        #expect(!engine.isPlaybackRequested)
+        #expect(h.events.events.filter { $0 == .playbackStarted }.count == startedCount)
+    }
 }

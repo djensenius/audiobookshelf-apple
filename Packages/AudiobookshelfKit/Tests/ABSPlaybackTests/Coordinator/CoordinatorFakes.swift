@@ -71,6 +71,8 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     var seekResults: [SeekResult] = []
     /// How many of the next plays fail synchronously, as an audio session activation failure does.
     var failingPlays = 0
+    /// How many plays are silently refused while a prior engine failure remains sticky.
+    var silentlyRefusingPlays = 0
     private var generation = 0
 
     func load(_ source: AudioEngineSource, at time: Double) async throws(AudioEngineError) {
@@ -98,6 +100,12 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func play() {
+        if silentlyRefusingPlays > 0 {
+            silentlyRefusingPlays -= 1
+            isPlaybackRequested = false
+            state = .paused
+            return
+        }
         if failingPlays > 0 {
             failingPlays -= 1
             isPlaybackRequested = false
