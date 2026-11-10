@@ -190,13 +190,12 @@ private struct CreatedUser: Decodable, Sendable {
 /// The root user's session, signed in once per process. It creates and deletes the per-test users.
 actor ContractAdmin {
     static let shared = ContractAdmin()
-    private var cached: ContractSession?
+    private let cache = ContractLoadCache<ContractSession>()
 
     func session() async throws -> ContractSession {
-        if let cached { return cached }
-        let session = try await ContractServer.require().signIn()
-        cached = session
-        return session
+        try await cache.value {
+            try await ContractServer.require().signIn()
+        }
     }
 }
 
@@ -215,27 +214,100 @@ struct SeedData: Sendable {
 
 actor ContractSeed {
     static let shared = ContractSeed()
-    private var cached: SeedData?
+    private let cache = ContractLoadCache<SeedData>()
 
     func data() async throws -> SeedData {
-        if let cached { return cached }
-        let client = try await ContractAdmin.shared.session().client
-        let libraries = try await client.send(LibraryEndpoints.libraries()).libraries
-        let books = try #require(libraries.first { $0.mediaType == .book })
-        let podcasts = try #require(libraries.first { $0.mediaType == .podcast })
-        let bookItems = try await client.send(LibraryEndpoints.items(libraryID: books.id))
-        let podcastItems = try await client.send(LibraryEndpoints.items(libraryID: podcasts.id))
-        func bookID(titled title: String) throws -> String {
-            try #require(bookItems.results.first { $0.book?.metadata.title == title }, "Seeded book \(title)").id
+        try await cache.value {
+            let client = try await ContractAdmin.shared.session().client
+            let libraries = try await client.send(LibraryEndpoints.libraries()).libraries
+            let books = try #require(libraries.first { $0.mediaType == .book })
+            let podcasts = try #require(libraries.first { $0.mediaType == .podcast })
+            let bookItems = try await client.send(LibraryEndpoints.items(libraryID: books.id))
+            let podcastItems = try await client.send(LibraryEndpoints.items(libraryID: podcasts.id))
+            func bookID(titled title: String) throws -> String {
+                try #require(bookItems.results.first { $0.book?.metadata.title == title }, "Seeded book \(title)").id
+            }
+            let podcast = try #require(podcastItems.results.first)
+            let expanded = try await client.send(ItemEndpoints.item(id: podcast.id))
+            let episode = try #require(expanded.podcast?.episodes?.first)
+            return SeedData(
+                taleID: try bookID(titled: "The Synthetic Tale"), singleFileID: try bookID(titled: "Single File Tale"),
+                podcastID: podcast.id, episodeID: episode.id, bookLibraryID: books.id, podcastLibraryID: podcasts.id)
         }
-        let podcast = try #require(podcastItems.results.first)
-        let expanded = try await client.send(ItemEndpoints.item(id: podcast.id))
-        let episode = try #require(expanded.podcast?.episodes?.first)
-        let data = SeedData(
-            taleID: try bookID(titled: "The Synthetic Tale"), singleFileID: try bookID(titled: "Single File Tale"),
-            podcastID: podcast.id, episodeID: episode.id, bookLibraryID: books.id, podcastLibraryID: podcasts.id)
-        cached = data
-        return data
+    }
+}
+
+/// Shares one asynchronous load among actor callers and caches only a successful result.
+actor ContractLoadCache<Value: Sendable> {
+    private var cached: Value?
+    private struct Flight {
+        let id: UUID
+        var waiters: [UUID: CheckedContinuation<Value, any Error>]
+    }
+    private var inFlight: Flight?
+
+    var waiterCount: Int { inFlight?.waiters.count ?? 0 }
+
+    func value(loading load: @escaping @Sendable () async throws -> Value) async throws -> Value {
+        try Task.checkCancellation()
+        if let cached { return cached }
+
+        let loadID: UUID
+        if let inFlight {
+            loadID = inFlight.id
+        } else {
+            loadID = UUID()
+        }
+
+        let waiterID = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if let cached {
+                    continuation.resume(returning: cached)
+                } else if var flight = inFlight {
+                    flight.waiters[waiterID] = continuation
+                    inFlight = flight
+                } else {
+                    inFlight = Flight(id: loadID, waiters: [waiterID: continuation])
+                    Task { [weak self] in
+                        let result: Result<Value, any Error>
+                        do {
+                            result = .success(try await load())
+                        } catch {
+                            result = .failure(error)
+                        }
+                        await self?.finish(loadID, with: result)
+                    }
+                }
+            }
+        } onCancel: {
+            Task { await self.cancel(waiterID, for: loadID) }
+        }
+    }
+
+    private func cancel(_ waiterID: UUID, for loadID: UUID) {
+        guard var flight = inFlight, flight.id == loadID,
+            let continuation = flight.waiters.removeValue(forKey: waiterID)
+        else { return }
+        inFlight = flight
+        continuation.resume(throwing: CancellationError())
+    }
+
+    private func finish(_ loadID: UUID, with result: Result<Value, any Error>) {
+        guard let flight = inFlight, flight.id == loadID else { return }
+        inFlight = nil
+
+        switch result {
+        case .success(let value):
+            cached = value
+            for continuation in flight.waiters.values {
+                continuation.resume(returning: value)
+            }
+        case .failure(let error):
+            for continuation in flight.waiters.values {
+                continuation.resume(throwing: error)
+            }
+        }
     }
 }
 
