@@ -59,17 +59,45 @@ import UniformTypeIdentifiers
         #expect(await store.size == 0)
     }
 
-    @Test func undecodableStoredFileIsDeleted() async throws {
-        let (pipeline, store) = await harness.make(isOnline: { false })
+    @Test func damagedStoredFileIsDeletedAndRefetched() async throws {
+        let host = PipelineHarness.pngRoute()
+        let (pipeline, store) = await harness.make(host: host)
         let key = harness.key()
-        let file = store.directory.appending(path: "\(key.serverID.uuidString)/\(key.fileStem).webp")
+        let file = store.directory.appending(path: "\(key.serverID.uuidString)/\(key.fileStem).png")
         try FileManager.default.createDirectory(
             at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data("not an image".utf8).write(to: file)
+        try TestImages.data(width: 600, height: 960).prefix(100).write(to: file)
+        _ = try await pipeline.image(for: key, pixelBox: gridBox)
+        #expect(ImageStubProtocol.route(host)?.requests.count == 1)
+        #expect(await ImageDecoder.isImage(file))
+    }
+
+    @Test func secondResponseIsRejectedWithoutOrphanedFiles() async throws {
+        let body = TestImages.data(width: 600, height: 960)
+        let host = ImageStubProtocol.register(
+            .init(
+                body: body, mimeType: "multipart/x-mixed-replace; boundary=frame", chunkSize: body.count / 2 + 1,
+                chunkDelay: .zero, repeatsResponse: true))
+        let (pipeline, _) = await harness.make(host: host)
         await #expect(throws: ImagePipelineError.unsupportedImage) {
-            try await pipeline.image(for: key, pixelBox: gridBox)
+            try await pipeline.image(for: harness.key(), pixelBox: gridBox)
         }
-        #expect(!FileManager.default.fileExists(atPath: file.path))
+        let left = (try? FileManager.default.contentsOfDirectory(atPath: pipeline.temporaryFolder.path)) ?? []
+        #expect(left.isEmpty)
+    }
+
+    @Test func removedServerFetchesNothingUntilItsBuilderIsSetAgain() async throws {
+        let host = PipelineHarness.pngRoute()
+        let (pipeline, store) = await harness.make(host: host)
+        await pipeline.removeServer(harness.serverID)
+        let external = harness.key(url: URL(string: "https://\(host)/cover.png"))
+        await #expect(throws: ImagePipelineError.noRequest) {
+            try await pipeline.image(for: external, pixelBox: gridBox)
+        }
+        let folder = store.directory.appending(path: harness.serverID.uuidString)
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
+        await pipeline.setRequestBuilder(TestRequestBuilder(host: host), for: harness.serverID)
+        _ = try await pipeline.image(for: harness.key(), pixelBox: gridBox)
     }
 
     @Test func removingAServerCancelsItsFetchesAndPurgesItsImages() async throws {
@@ -86,7 +114,7 @@ import UniformTypeIdentifiers
         await ImageStubProtocol.wait(for: host) { $0.requests.count == 1 }
         await pipeline.removeServer(harness.serverID)
         gate.open()
-        await #expect(throws: (any Error).self) { try await loading.value }
+        await #expect(throws: CancellationError.self) { try await loading.value }
         #expect(await store.size == 0)
         #expect(await pipeline.memoryCost.lru == 0)
     }

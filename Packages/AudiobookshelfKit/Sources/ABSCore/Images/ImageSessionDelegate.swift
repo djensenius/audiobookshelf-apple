@@ -8,12 +8,15 @@ import Synchronization
 /// ``RedirectPolicy`` to every hop. Callbacks are routed by task to an ``ImageDownload``.
 final class ImageSessionDelegate: NSObject, URLSessionDataDelegate, Sendable {
     private let downloads = Mutex<[Int: ImageDownload]>([:])
+    /// This session's folder of temporary downloads, created on demand.
+    let temporaryFolder = FileManager.default.temporaryDirectory.appending(
+        path: "ImageDownloads-\(UUID().uuidString)", directoryHint: .isDirectory)
 
     /// Loads `request` on `session`, whose delegate must be `self`, into a temporary file that
     /// the caller owns. Cancelling the calling task cancels the load.
     func download(_ request: URLRequest, session: URLSession) async throws -> (URL, URLResponse) {
         let task = session.dataTask(with: request)
-        let download = ImageDownload(original: request)
+        let download = ImageDownload(original: request, folder: temporaryFolder)
         downloads.withLock { $0[task.taskIdentifier] = download }
         defer { _ = downloads.withLock { $0.removeValue(forKey: task.taskIdentifier) } }
         return try await withTaskCancellationHandler {
@@ -69,10 +72,12 @@ final class ImageDownload: Sendable {
     }
 
     private let original: URLRequest
+    private let folder: URL
     private let state = Mutex(State())
 
-    init(original: URLRequest) {
+    init(original: URLRequest, folder: URL = FileManager.default.temporaryDirectory) {
         self.original = original
+        self.folder = folder
     }
 
     /// Stores the caller's continuation; returns `false` (having resumed it) if the load already
@@ -115,9 +120,11 @@ final class ImageDownload: Sendable {
         } else {
             failure = state.withLock { state -> (any Error)? in
                 guard state.outcome == nil else { return CancellationError() }
-                let file = FileManager.default.temporaryDirectory.appending(
-                    path: "image-\(UUID().uuidString).download")
+                // A second response (a multipart body) would orphan the first file.
+                guard state.file == nil else { return ImagePipelineError.unsupportedImage }
+                let file = folder.appending(path: "image-\(UUID().uuidString).download")
                 do {
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                     guard FileManager.default.createFile(atPath: file.path, contents: nil) else {
                         throw CocoaError(.fileWriteUnknown)
                     }

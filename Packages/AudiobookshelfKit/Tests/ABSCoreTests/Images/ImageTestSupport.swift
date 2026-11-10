@@ -47,6 +47,12 @@ final class ImageStubProtocol: URLProtocol {
         var finalChunkGate: Gate?
         /// The `Content-Length` header: the body size by default, `nil` to omit it.
         var contentLength: Int?? = .none
+        /// More response headers, such as `Set-Cookie`.
+        var headers: [String: String] = [:]
+        /// Answers with a 302 to this URL instead of the body.
+        var redirectTo: String?
+        /// Sends the response again after the first chunk, like a multipart body.
+        var repeatsResponse = false
         var requests: [URLRequest] = []
         var stopped = 0
         var chunksSent = 0
@@ -142,8 +148,21 @@ final class ImageStubProtocol: URLProtocol {
     }
 
     private func deliver(_ route: Route, url: URL, host: String) async {
+        if let location = route.redirectTo, let next = URL(string: location) {
+            var headers = route.headers
+            headers["Location"] = location
+            guard !markDone(),
+                let response = HTTPURLResponse(
+                    url: url, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: headers)
+            else { return }
+            // Like URLSession, propose the original request (and its headers) at the new URL.
+            var proposed = request
+            proposed.url = next
+            client?.urlProtocol(self, wasRedirectedTo: proposed, redirectResponse: response)
+            return
+        }
         let length = route.contentLength ?? route.body.count
-        var headers = ["Content-Type": route.mimeType]
+        var headers = route.headers.merging(["Content-Type": route.mimeType]) { $1 }
         headers["Content-Length"] = length.map(String.init)
         guard !isDone.withLock({ $0 }),
             let response = HTTPURLResponse(
@@ -159,6 +178,9 @@ final class ImageStubProtocol: URLProtocol {
             let end = min(offset + chunkSize, route.body.count)
             client?.urlProtocol(self, didLoad: route.body.subdata(in: offset..<end))
             Self.update(host) { $0.chunksSent += 1 }
+            if route.repeatsResponse, offset == 0 {
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            }
             offset = end
         }
         guard !markDone() else { return }

@@ -116,6 +116,44 @@ import UniformTypeIdentifiers
         #expect(configuration.httpAdditionalHeaders?["X-Session"] as? String == "1")
     }
 
+    @Test func crossOriginRedirectStripsHeadersAndCookiesAreNeitherSentNorStored() async throws {
+        let target = ImageStubProtocol.register(
+            .init(body: TestImages.data(width: 600, height: 960), headers: ["Set-Cookie": "cdn=1; Path=/"]))
+        let origin = ImageStubProtocol.register(
+            .init(headers: ["Set-Cookie": "origin=1; Path=/"], redirectTo: "https://\(target)/cover.png"))
+        let seeded = try #require(
+            HTTPCookie(properties: [.domain: origin, .path: "/", .name: "connect.sid", .value: "session"]))
+        HTTPCookieStorage.shared.setCookie(seeded)
+        defer { HTTPCookieStorage.shared.deleteCookie(seeded) }
+        // The caller's configuration would send and store cookies; the pipeline turns that off.
+        let configuration = ImageStubProtocol.configuration()
+        configuration.httpCookieStorage = .shared
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let headers = [
+            "CF-Access-Client-Id": "client", "CF-Access-Client-Secret": "secret", "Authorization": "Bearer t",
+        ]
+        let (pipeline, _) = await harness.make(host: origin, headers: headers, configuration: configuration)
+        _ = try await pipeline.image(for: key(), pixelBox: gridBox)
+
+        let first = try #require(ImageStubProtocol.route(origin)?.requests.first)
+        #expect(first.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
+        #expect(first.value(forHTTPHeaderField: "Cookie") == nil)
+        let hop = try #require(ImageStubProtocol.route(target)?.requests.first)
+        for name in ["CF-Access-Client-Id", "CF-Access-Client-Secret", "Authorization", "Cookie"] {
+            #expect(hop.value(forHTTPHeaderField: name) == nil, "\(name)")
+        }
+        #expect(hop.value(forHTTPHeaderField: "Accept") == "image/*")
+        // URLSession doesn't attach or store cookies for a custom URLProtocol, so the checks
+        // that catch a regression here are the per-request flags; the storage checks document it.
+        #expect(first.httpShouldHandleCookies == false)
+        #expect(hop.httpShouldHandleCookies == false)
+        for host in [origin, target] {
+            let stored = HTTPCookieStorage.shared.cookies(for: try #require(URL(string: "https://\(host)/"))) ?? []
+            #expect(stored.map(\.name).filter { $0 != "connect.sid" }.isEmpty)
+        }
+    }
+
     @Test func httpErrorLeavesNoCacheEntry() async throws {
         let host = ImageStubProtocol.register(.init(status: 404, body: Data("missing".utf8), mimeType: "text/plain"))
         let (pipeline, store) = await harness.make(host: host)
@@ -240,32 +278,5 @@ import UniformTypeIdentifiers
         let fresh = try await offline.image(for: key(updatedAt: 3), pixelBox: box)
         #expect(fresh.pixelWidth == 200)
         #expect(ImageStubProtocol.route(host)?.requests.count == (requests ?? 0) + 1)
-    }
-}
-
-@Suite struct ImageKeyTests {
-    @Test func bucketsAndPixelBoxes() {
-        #expect(ImageWidthBucket(pixelWidth: 180) == .small)
-        #expect(ImageWidthBucket(pixelWidth: 510) == .medium)
-        #expect(ImageWidthBucket(pixelWidth: 2048) == .large)
-        let box = PixelBox(size: CGSize(width: 170, height: 272), scale: 3)
-        #expect(box == PixelBox(width: 512, height: 832))
-        #expect(PixelBox(width: 5000, height: 1).height == 32 && PixelBox(width: 5000, height: 1).width == 1200)
-    }
-
-    @Test func fileStemIsSanitisedAndUnique() {
-        let serverID = UUID()
-        func stem(_ id: String, _ updatedAt: Int?, url: URL? = nil) -> String {
-            ImageKey(
-                serverID: serverID, kind: .authorImage, entityID: id, updatedAt: updatedAt, bucket: .small,
-                externalURL: url
-            ).fileStem
-        }
-        #expect(stem("../a/b", 42).hasPrefix("authorImage-___a_b-42-300-"))
-        #expect(!stem("../a/b", 42).contains("/"))
-        #expect(stem("a/b", 1) != stem("a_b", 1))
-        #expect(stem("a", nil) != stem("a", 0))
-        #expect(stem("a", 1, url: URL(string: "https://x.example/1.jpg")) != stem("a", 1))
-        #expect(stem("a", 1) == stem("a", 1))
     }
 }

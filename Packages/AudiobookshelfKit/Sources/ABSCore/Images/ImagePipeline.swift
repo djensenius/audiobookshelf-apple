@@ -20,6 +20,8 @@ public actor ImagePipeline {
     private let decodeSlots: AsyncSemaphore
     private let largeDecodeSlot = AsyncSemaphore(permits: 1)
     private var builders: [UUID: any ImageRequestBuilding] = [:]
+    /// Servers removed since their builder was last set, which nothing may fetch for.
+    private var removedServers: Set<UUID> = []
     private var fetches: [FetchKey: Flight<FetchedFile>] = [:]
     private var decodes: [MemoryKey: Flight<DecodedBitmap>] = [:]
     /// Network requests started, for tests.
@@ -59,12 +61,15 @@ public actor ImagePipeline {
     deinit {
         // The session retains its delegate until invalidated.
         session.invalidateAndCancel()
+        try? FileManager.default.removeItem(at: sessionDelegate.temporaryFolder)
     }
 
     /// Sets the request builder (`MediaURLBuilder`) for one server connection, or removes it.
-    /// Replace it whenever the connection's address or custom headers change.
+    /// Replace it whenever the connection's address or custom headers change. Setting a builder
+    /// re-enables fetching for a server passed to ``removeServer(_:)``.
     public func setRequestBuilder(_ builder: (any ImageRequestBuilding)?, for serverID: UUID) {
         builders[serverID] = builder
+        if builder != nil { removedServers.remove(serverID) }
     }
 
     /// The image for `key`, downsampled to fit `pixelBox`. Keep the returned wrapper for as long
@@ -116,10 +121,11 @@ public actor ImagePipeline {
 
     /// Forgets a removed server: its request builder, in-flight fetches and decodes (which are
     /// cancelled), memory entries and cached files. Fetches already running can't write to the
-    /// store afterwards.
+    /// store afterwards, and new ones fail until a builder is set again.
     // TODO(#143): wait for the server's file leases before deleting its folder.
     public func removeServer(_ serverID: UUID) async {
         builders[serverID] = nil
+        removedServers.insert(serverID)
         for (key, flight) in fetches where key.key.serverID == serverID {
             flight.cancel()
             fetches[key] = nil
@@ -136,6 +142,8 @@ public actor ImagePipeline {
     var memoryCost: (lru: Int, combined: Int) { (memory.totalCost, ledger.total) }
     /// Decodes waiting for memory, for tests.
     var memoryWaiterCount: Int { ledger.waiterCount }
+    /// The folder of this pipeline's temporary downloads, for tests.
+    nonisolated var temporaryFolder: URL { sessionDelegate.temporaryFolder }
 
     // MARK: Decode
 
@@ -170,29 +178,30 @@ public actor ImagePipeline {
             }
         }
         try Task.checkCancellation()
-        let info: ImageDecoder.SourceInfo
+        var cgImage: CGImage
         do {
-            info = try await ImageDecoder.inspect(file.url)
-        } catch ImagePipelineError.unsupportedImage where file.isStored {
-            await fileStore.discard(file.url)
-            throw ImagePipelineError.unsupportedImage
-        }
-        let cost = ImageDecoder.estimatedCost(of: info, box: memoryKey.box, bucket: memoryKey.key.bucket)
-        try await reserveMemory(cost)
-        reserved = cost
-        if memoryKey.box.isLarge || info.needsNormalizing {
-            try await largeDecodeSlot.acquire()
-            holdsLarge = true
-            largeDecodeCount += 1
-        }
-        var cgImage = try await ImageDecoder.decode(info, box: memoryKey.box, bucket: memoryKey.key.bucket)
-        if ImageDecoder.needsNormalizing(cgImage) {
-            if !holdsLarge {
+            let info = try await ImageDecoder.inspect(file.url)
+            let cost = ImageDecoder.estimatedCost(of: info, box: memoryKey.box, bucket: memoryKey.key.bucket)
+            try await reserveMemory(cost)
+            reserved = cost
+            if memoryKey.box.isLarge || info.needsNormalizing {
                 try await largeDecodeSlot.acquire()
                 holdsLarge = true
                 largeDecodeCount += 1
             }
-            cgImage = try await ImageDecoder.normalize(cgImage)
+            cgImage = try await ImageDecoder.decode(info, box: memoryKey.box, bucket: memoryKey.key.bucket)
+            if ImageDecoder.needsNormalizing(cgImage) {
+                if !holdsLarge {
+                    try await largeDecodeSlot.acquire()
+                    holdsLarge = true
+                    largeDecodeCount += 1
+                }
+                cgImage = try await ImageDecoder.normalize(cgImage)
+            }
+        } catch ImagePipelineError.unsupportedImage where file.isStored {
+            // A damaged cached file: delete it, and refetch once (as for a vanished file).
+            await fileStore.discard(file.url)
+            throw skipsDownloaded ? ImagePipelineError.unsupportedImage : .fileMissing
         }
         try Task.checkCancellation()
         let image = DecodedBitmap(cgImage, ledger: ledger)
@@ -293,6 +302,8 @@ public actor ImagePipeline {
     }
 
     private func download(_ key: ImageKey) async throws -> FetchedFile {
+        // A removed server's external covers would recreate its folder.
+        guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
         let built: URLRequest?
         if let builder = builders[key.serverID] {
             built = builder.imageRequest(for: key.source)
