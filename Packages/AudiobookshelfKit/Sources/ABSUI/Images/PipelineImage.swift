@@ -189,8 +189,8 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
             // On first appearance `size` is zero and `request` nil, so `onAppear` has nothing to
             // look up; `onGeometryChange` then sets the size during the first layout, and
             // `onChange` reads the memory cache in that same update, so a hit is on the first
-            // frame (PipelineImageHostingTests checks this on macOS). `onAppear` covers a view
-            // that returns with its size kept. `.task` loads only what missed.
+            // frame (PipelineImageHostingTests checks this on macOS and iOS). `onAppear` covers a
+            // view that returns with its size kept. `.task` loads only what missed.
             .onAppear { begin(request) }
             .onChange(of: request) { _, newRequest in begin(newRequest) }
             .task(id: request) { await load(request) }

@@ -575,6 +575,18 @@ static, unauthenticated remote images (none are planned).
     is no cover, a logo placeholder on failure, and a 0.3 s fade-in.
   - Only an image loaded from disk or the network fades in. A memory hit shows
     at full opacity on the first frame, and failures and removals don't animate.
+  - `PipelineImageHostingTests` checks the first frame by hosting
+    `PipelineImage`: in `NSHostingView` on macOS (`mise run test:kit`), and in
+    a `UIHostingController` in a window on the iOS Simulator. CI runs only the
+    macOS check. Run the iOS one locally from `Packages/AudiobookshelfKit`:
+
+    ```sh
+    udid=$(xcrun simctl list devices available | grep -E '^ +iPhone Duo [(]' | tail -n 1 | grep -oE '[0-9A-F-]{36}')
+    xcodebuild test -scheme AudiobookshelfKit \
+      -destination "platform=iOS Simulator,id=$udid" \
+      -derivedDataPath ../../.build/xcode-ios \
+      -only-testing:ABSUITests/PipelineImageHostingTests
+    ```
   - When the aspect ratio differs from the library's (1.6 or 1) by more than
     0.15, show the image aspect-fit over a blurred fill of itself.
   - `CoverPalette` computes the average colour with `CIAreaAverage` on the
