@@ -3,7 +3,9 @@
 #
 # State lives in issue markers, not a mirror branch: the newest issue labelled
 # $SYNC_LABEL whose body contains `<!-- upstream-sync:head=<sha> -->` records the
-# last upstream commit that was reported. See docs/upstream-sync.md.
+# last upstream commit that was reported. Only issues opened by trusted authors
+# (GitHub Actions, the repository owner, $UPSTREAM_SYNC_TRUSTED_AUTHORS) count.
+# See docs/upstream-sync.md.
 set -euo pipefail
 
 # Byte-wise, locale-independent text handling (sed, awk, sort, and bash patterns
@@ -20,6 +22,7 @@ PROJECT_TOKEN="${PROJECT_TOKEN:-}"
 DRY_RUN="${DRY_RUN:-false}"
 MAX_COMMITS="${MAX_COMMITS:-150}"
 MAX_FILES="${MAX_FILES:-300}"
+UPSTREAM_SYNC_TRUSTED_AUTHORS="${UPSTREAM_SYNC_TRUSTED_AUTHORS:-}"
 MAX_BODY_CHARS=60000
 
 DOCS_PATH="docs/upstream-sync.md"
@@ -45,6 +48,17 @@ lower() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+# Normalize an issue author login: lowercase, and map gh's "app/<name>" form to
+# the REST "<name>[bot]" form (e.g. app/github-actions -> github-actions[bot]).
+normalize_author() {
+  local login
+  login="$(lower "$1")"
+  if [[ "$login" == app/* ]]; then
+    login="${login#app/}[bot]"
+  fi
+  printf '%s' "$login"
+}
+
 # --- Validate configuration -------------------------------------------------
 
 [[ "$UPSTREAM_REPO" =~ $REPO_RE ]] || die "UPSTREAM_REPO must look like owner/repo (got '$UPSTREAM_REPO')"
@@ -65,6 +79,20 @@ if [[ "$(lower "$GH_REPO")" == "$(lower "$UPSTREAM_REPO")" ]]; then
   die "GH_REPO resolved to the upstream repository ($GH_REPO); set GH_REPO to the target repository"
 fi
 
+# Authors whose issues may carry upstream-sync markers. Anyone can open an issue,
+# so marker issues from other authors are ignored rather than trusted (or fatal).
+trusted_authors="github-actions[bot],$(normalize_author "${GH_REPO%%/*}")"
+IFS=',' read -r -a extra_authors <<<"$UPSTREAM_SYNC_TRUSTED_AUTHORS"
+for author in ${extra_authors[@]+"${extra_authors[@]}"}; do
+  author="${author//[[:space:]]/}"
+  [[ -n "$author" ]] || continue
+  author="$(normalize_author "$author")"
+  [[ "$author" =~ ^[a-z0-9-]+(\[bot\])?$ ]] ||
+    die "UPSTREAM_SYNC_TRUSTED_AUTHORS must be a comma-separated list of GitHub logins (got '$author')"
+  trusted_authors+=",$author"
+done
+export TRUSTED_AUTHORS="$trusted_authors"
+
 tmp="$(mktemp -d)"
 cleanup() {
   rm -rf "$tmp"
@@ -74,32 +102,44 @@ trap cleanup EXIT
 # --- Determine the range ----------------------------------------------------
 
 # List issues whose body mentions "upstream-sync:head=" as TSV lines:
-#   createdAt, number, labelled with $SYNC_LABEL (1/0), last valid head marker or "-".
+#   createdAt, number, labelled with $SYNC_LABEL (1/0), last valid head marker or "-",
+#   opened by a trusted author (1/0), normalized author login.
 marker_jq() {
-  printf '%s' '.[] | select((.body // "") | contains("upstream-sync:head="))
+  # shellcheck disable=SC2016 # $trusted and $author are jq variables, not shell ones.
+  printf '%s' 'def norm: ascii_downcase | if startswith("app/") then .[4:] + "[bot]" else . end;
+    (env.TRUSTED_AUTHORS | split(",")) as $trusted
+    | .[] | select((.body // "") | contains("upstream-sync:head="))
+    | ((.author.login // "") | norm) as $author
     | [.createdAt, (.number | tostring), '"$1"',
-       (([(.body // "") | match("<!-- upstream-sync:head=([0-9a-f]{40}) -->"; "g")] | last | .captures[0].string) // "-")]
+       (([(.body // "") | match("<!-- upstream-sync:head=([0-9a-f]{40}) -->"; "g")] | last | .captures[0].string) // "-"),
+       (if $author != "" and any($trusted[]; . == $author) then "1" else "0" end), $author]
     | @tsv'
 }
 
 # Recent labelled issues (not subject to search-index lag) ...
 gh issue list --repo "$GH_REPO" --label "$SYNC_LABEL" --state all --limit 100 \
-  --json number,body,createdAt --jq "$(marker_jq '"1"')" >"$tmp/markers.raw"
+  --json number,body,createdAt,author --jq "$(marker_jq '"1"')" >"$tmp/markers.raw"
 # ... plus any issue with a marker, labelled or not.
 SYNC_LABEL="$SYNC_LABEL" gh issue list --repo "$GH_REPO" --state all --limit 100 \
-  --search '"upstream-sync:head=" in:body sort:created-desc' --json number,body,createdAt,labels \
+  --search '"upstream-sync:head=" in:body sort:created-desc' --json number,body,createdAt,labels,author \
   --jq "$(marker_jq '(if any(.labels[]?; .name == env.SYNC_LABEL) then "1" else "0" end)')" >>"$tmp/markers.raw"
 
-# Newest first, one line per issue. The newest labelled issue mentioning a marker,
-# or the newest issue with a valid marker if that is newer, decides the base.
+# Newest first, one line per issue, ignoring issues from untrusted authors. The
+# newest labelled issue mentioning a marker, or the newest issue with a valid
+# marker if that is newer, decides the base.
 sort -r "$tmp/markers.raw" | awk -F '\t' '!seen[$2]++' >"$tmp/markers"
-latest_marker="$(awk -F '\t' '$3 == "1" || $4 != "-" { print; exit }' "$tmp/markers")"
+while IFS=$'\t' read -r _ issue _ _ trusted author; do
+  if [[ "$trusted" != 1 ]]; then
+    log "Ignoring $GH_REPO#$issue: it mentions upstream-sync:head= but its author (${author:-unknown}) is not trusted (see $DOCS_PATH)"
+  fi
+done <"$tmp/markers"
+latest_marker="$(awk -F '\t' '$5 == "1" && ($3 == "1" || $4 != "-") { print; exit }' "$tmp/markers")"
 
 if [[ -z "$latest_marker" ]]; then
   base="$UPSTREAM_BASELINE"
   log "No issue with an upstream-sync marker found; using baseline $base"
 else
-  IFS=$'\t' read -r _ marker_issue marker_labelled base <<<"$latest_marker"
+  IFS=$'\t' read -r _ marker_issue marker_labelled base _ <<<"$latest_marker"
   if [[ "$marker_labelled" != 1 ]]; then
     die "Issue $GH_REPO#$marker_issue has the newest upstream-sync marker but is not labelled $SYNC_LABEL; re-apply the label or set SYNC_LABEL (see $DOCS_PATH)"
   fi
@@ -146,7 +186,8 @@ git -c log.showSignature=false log --no-color --no-use-mailmap --encoding=UTF-8 
 # Sanitize text that ends up in the issue:
 # - escape & first so entities like &#64; / &#35; cannot smuggle in @ or #,
 #   then neutralize HTML and escape table pipes;
-# - send github.com links through redirect.github.com;
+# - send github.com links through redirect.github.com (scheme and host matched
+#   case-insensitively; bracket classes because BSD sed has no I flag);
 # - break owner/repo#123 references with a zero-width space, and turn bare
 #   #123 / GH-123 into upstream links whose text is not auto-referenced;
 # - break @mentions with a zero-width space so upstream users are not pinged.
@@ -155,7 +196,7 @@ sed -E \
   -e 's/</\&lt;/g' \
   -e 's/>/\&gt;/g' \
   -e 's/[|]/\\|/g' \
-  -e 's~https?://(www\.)?github\.com/~https://redirect.github.com/~g' \
+  -e 's~[Hh][Tt][Tt][Pp]([Ss])?://([Ww][Ww][Ww]\.)?[Gg][Ii][Tt][Hh][Uu][Bb]\.[Cc][Oo][Mm]/~https://redirect.github.com/~g' \
   -e "s~([[:alnum:]_/])#([0-9])~\\1#${ZWSP}\\2~g" \
   -e "s~(^|[^[:alnum:]_/])#([0-9]+)~\\1[${UPSTREAM_REPO}#\\2](${REF_URL}/\\2)~g" \
   -e "s~(^|[^[:alnum:]_])GH-([0-9]+)~\\1[${UPSTREAM_REPO}#\\2](${REF_URL}/\\2)~g" \
@@ -181,9 +222,19 @@ sed -E \
 
 # --- Referenced upstream issues and pull requests ---------------------------
 
-cut -d "$US" -f 2 "$tmp/log.raw" |
-  { grep -oE 'Merge pull request #[0-9]+|\(#[0-9]+\)' || true; } |
-  { grep -oE '[0-9]+' || true; } |
+# The same reference forms the sanitizer recognizes: bare #123 and GH-123, plus
+# owner/repo#123 for the upstream repository (owner/repo case-insensitive).
+cut -d "$US" -f 2 "$tmp/log.raw" >"$tmp/subjects"
+upstream_ref_re="$(lower "$UPSTREAM_REPO")"
+upstream_ref_re="${upstream_ref_re//./\\.}"
+{
+  grep -oE '(^|[^[:alnum:]_/])#[0-9]+' "$tmp/subjects" || true
+  grep -oE '(^|[^[:alnum:]_])GH-[0-9]+' "$tmp/subjects" || true
+  tr '[:upper:]' '[:lower:]' <"$tmp/subjects" |
+    { grep -oE "(^|[^[:alnum:]_./-])${upstream_ref_re}#[0-9]+" || true; }
+} |
+  { grep -oE '[0-9]+$' || true; } |
+  awk '{ n = $0 + 0; if (n > 0) print n }' |
   sort -n -u >"$tmp/prs"
 
 if [[ -s "$tmp/prs" ]]; then
