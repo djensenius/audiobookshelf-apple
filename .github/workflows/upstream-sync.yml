@@ -1,0 +1,39 @@
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "23 10 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Print the issue in the job log and summary instead of creating it
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Report new upstream commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Report upstream changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run || false }}
+          PROJECT_TOKEN: ${{ secrets.UPSTREAM_SYNC_PROJECT_TOKEN }}
+        run: scripts/upstream-sync.sh
