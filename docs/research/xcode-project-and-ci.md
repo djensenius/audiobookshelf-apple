@@ -701,7 +701,8 @@ Official docs read, from developer.apple.com/documentation/xcode: "Writing custo
 - Put the directory next to the Xcode project, which here means the repo root.
 - Script names (top level only): `ci_post_clone.sh`, `ci_pre_xcodebuild.sh`, `ci_post_xcodebuild.sh`.
 - Use `chmod +x` and a shebang, otherwise they run as `zsh <file>`.
-- No `sudo`. Files created by one script are not available to the others.
+- No `sudo`.
+- Each script runs in its own shell process, so exported environment variables and shell state do not carry over to later scripts. Files written to disk (for example a tool installed in `ci_post_clone.sh`) do persist for later scripts in the same build action.
 - `ci_post_xcodebuild.sh` runs even if the build fails.
 
 **Environment variables.**
