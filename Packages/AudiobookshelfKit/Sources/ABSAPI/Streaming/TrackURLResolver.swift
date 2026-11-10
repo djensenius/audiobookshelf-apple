@@ -66,7 +66,7 @@ public enum TrackURLResolutionError: Error, Sendable, Hashable {
     case noTracks
     /// The server chose HLS, which can't carry the connection's custom headers.
     case transcodeUnavailableWithCustomHeaders
-    /// A URL couldn't be built, or the HLS track has no server-relative `contentUrl`.
+    /// A URL couldn't be built, or the HLS track's `contentUrl` isn't `/hls/<session id>/output.m3u8`.
     case invalidContentURL
     /// The token fallback needs the file inode, which the track's `contentUrl` doesn't contain.
     case missingFileReference
@@ -78,8 +78,8 @@ public enum TrackURLResolutionError: Error, Sendable, Hashable {
 ///   with the track's MIME type as an override. Below 2.26.3, a podcast episode track with a
 ///   `null` index can't be addressed that way and uses `/api/items/{id}/file/{ino}` with
 ///   ``TrackAuthentication/accessTokenQuery`` instead.
-/// - Transcode (`playMethod` 2): `<server>` + `audioTracks[0].contentUrl`, the session's HLS
-///   playlist, with no credentials. Not available when the connection has custom headers.
+/// - Transcode (`playMethod` 2): `<server>/hls/{id}/output.m3u8`, the session's HLS playlist,
+///   with no credentials, after checking that `audioTracks[0].contentUrl` is exactly that path. Not available when the connection has custom headers.
 ///
 /// Never uses `AVURLAssetHTTPHeaderFieldsKey`; the engine creates plain `AVURLAsset`s, or uses
 /// the resource loader when ``StreamPlan/transport`` says so.
@@ -103,9 +103,9 @@ public enum TrackURLResolver {
                 tracks: tracks)
         case .transcode:
             guard !usesCustomHeaders else { throw .transcodeUnavailableWithCustomHeaders }
-            guard let path = first.contentUrl, path.hasPrefix("/"), !path.hasPrefix("//") else {
-                throw .invalidContentURL
-            }
+            // The server always sends this exact path; anything else could leave the base path.
+            let path = "/hls/\(pathSegment(session.id))/output.m3u8"
+            guard first.contentUrl == path else { throw .invalidContentURL }
             let track = PlayableTrack(
                 url: try url(base: base, path: path), mimeType: nil, startOffset: 0, duration: first.duration,
                 authentication: .session)
@@ -149,5 +149,50 @@ public enum TrackURLResolver {
         let raw = String(segments[segments.count - 1])
         let ino = raw.removingPercentEncoding ?? raw
         return ino.isEmpty ? nil : ino
+    }
+}
+
+// Session ids are capabilities (ADR 0007): descriptions, debug output and mirrors never show them.
+extension PlayableTrack: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    /// The URL with the session id in `/public/session/<id>/…` and `/hls/<id>/…` replaced.
+    public var redactedURL: String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return "<redacted>" }
+        var segments = components.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
+            .map(String.init)
+        for index in segments.indices.dropLast() {
+            let isPublicSession = segments[index] == "session" && index > 0 && segments[index - 1] == "public"
+            if isPublicSession || segments[index] == "hls" { segments[index + 1] = "<redacted>" }
+        }
+        components.percentEncodedPath = ""
+        components.percentEncodedQuery = nil
+        return (components.string ?? "") + segments.joined(separator: "/")
+    }
+
+    public var description: String {
+        "PlayableTrack(url: \(redactedURL), mimeType: \(mimeType ?? "nil"), startOffset: \(startOffset), "
+            + "duration: \(duration), authentication: \(authentication))"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "url": redactedURL, "mimeType": mimeType as Any, "startOffset": startOffset, "duration": duration,
+                "authentication": authentication,
+            ], displayStyle: .struct)
+    }
+}
+
+extension StreamPlan: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "StreamPlan(kind: \(kind), transport: \(transport), tracks: [\(tracks.map(\.description).joined(separator: ", "))])"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(self, children: ["kind": kind, "transport": transport, "tracks": tracks], displayStyle: .struct)
     }
 }

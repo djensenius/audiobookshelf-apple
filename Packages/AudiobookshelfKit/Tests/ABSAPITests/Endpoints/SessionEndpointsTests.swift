@@ -25,6 +25,16 @@ private let deviceInfo: DeviceInfo = {
     return info
 }()
 
+private let localSessionID = "8c1d6a52-6b6f-4f0e-9a43-3d0c1e2f4a5b"
+private let otherLocalSessionID = "0e6f4b1a-2c3d-4e5f-8a9b-c0d1e2f3a4b5"
+
+private func localSession(
+    id: String = localSessionID, playMethod: PlayMethod = .local, startedAt: Int? = 1_762_732_800_000
+) -> PlaybackSession {
+    PlaybackSession(
+        id: id, libraryItemId: "li-1", mediaType: .book, playMethod: playMethod, startedAt: startedAt)
+}
+
 @Suite struct SessionEndpointsTests {
     @Test func startBookSessionSendsADR0007Body() async throws {
         let server = StubServer { _ in .json(multiTrackSessionJSON) }
@@ -122,7 +132,7 @@ private let deviceInfo: DeviceInfo = {
             startTime: 10, currentTime: 52.5, startedAt: 1_762_732_800_000, updatedAt: 1_762_732_842_500)
 
         _ = try await makeClient(server).send(
-            SessionEndpoints.syncLocal(LocalPlaybackSessionPayload(session: session, includeDeviceInfo: true)))
+            SessionEndpoints.syncLocal(LocalPlaybackSessionPayload(session: session, deviceInfo: deviceInfo)))
 
         let sent = try #require(server.requests.first)
         #expect(sent.httpMethod == "POST")
@@ -147,20 +157,19 @@ private let deviceInfo: DeviceInfo = {
     @Test func syncLocalAllBatchesSessionsWithOneDeviceInfo() async throws {
         let server = StubServer { _ in
             .json(
-                #"{"results":[{"id":"a","success":true,"progressSynced":true},"#
-                    + #"{"id":"b","success":false,"error":"Media item not found"}]}"#)
+                #"{"results":[{"id":"\#(localSessionID)","success":true,"progressSynced":true},"#
+                    + #"{"id":"\#(otherLocalSessionID)","success":false,"error":"Media item not found"}]}"#)
         }
-        let sessions = ["a", "b"].map {
-            LocalPlaybackSessionPayload(
-                session: PlaybackSession(
-                    id: $0, libraryItemId: "li-\($0)", mediaType: .book, playMethod: .local, deviceInfo: deviceInfo),
-                includeDeviceInfo: false)
+        let sessions = [localSessionID, otherLocalSessionID].map {
+            PlaybackSession(
+                id: $0, libraryItemId: "li-\($0)", mediaType: .book, playMethod: .local, deviceInfo: deviceInfo,
+                startedAt: 1_762_732_800_000)
         }
 
         let response = try await makeClient(server).send(
             SessionEndpoints.syncLocalAll(LocalPlaybackSessionBatch(sessions: sessions, deviceInfo: deviceInfo)))
 
-        #expect(response.results.map(\.id) == ["a", "b"])
+        #expect(response.results.map(\.id) == [localSessionID, otherLocalSessionID])
         #expect(response.results[0].progressSynced == true)
         #expect(response.results[1].success == false)
         #expect(response.results[1].error == "Media item not found")
@@ -169,7 +178,11 @@ private let deviceInfo: DeviceInfo = {
         let json = try jsonBody(sent)
         #expect((json["deviceInfo"] as? [String: String])?["deviceId"] == "DEVICE-UUID")
         let sentSessions = try #require(json["sessions"] as? [[String: Any]])
-        #expect(sentSessions.map { $0["id"] as? String } == ["a", "b"])
+        #expect(sentSessions.map { $0["id"] as? String } == [localSessionID, otherLocalSessionID])
+        #expect(sentSessions.allSatisfy { $0["playMethod"] as? Int == 3 })
+        #expect(sentSessions.allSatisfy { $0["startedAt"] as? Int == 1_762_732_800_000 })
+        // Never updated: `updatedAt` falls back to `startedAt`.
+        #expect(sentSessions.allSatisfy { $0["updatedAt"] as? Int == 1_762_732_800_000 })
         #expect(sentSessions.allSatisfy { $0["deviceInfo"] == nil && $0["episodeId"] == nil })
         #expect(sentSessions.allSatisfy { $0["mediaPlayer"] as? String == "AVPlayer" })
     }
@@ -189,5 +202,79 @@ private let deviceInfo: DeviceInfo = {
         #expect(session.audioTracks.map(\.mimeType) == ["audio/mpeg", "audio/mpeg", "audio/mpeg"])
         #expect(session.audioTracks.last?.endOffset == 5400.75)
         #expect(session.libraryItem == nil)
+    }
+
+    @Test func decodesExpandedLibraryItemAndTrackMetadata() throws {
+        let session = try JSONDecoder().decode(PlaybackSession.self, from: Data(expandedSessionJSON.utf8))
+        let item = try #require(session.libraryItem)
+        #expect(item.id == "li-book-2")
+        #expect(item.mediaType == .book)
+        guard case .book(let book)? = item.media else {
+            Issue.record("Expected book media")
+            return
+        }
+        #expect(book.tracks?.count == 2)
+        #expect(session.audioTracks.map { $0.metadata?.filename } == ["01.mp3", "02.mp3"])
+        #expect(session.audioTracks.first?.metadata?.path == "/audiobooks/Two/01.mp3")
+        #expect(session.audioTracks.first?.metadata?.mtimeMs == 1_700_000_001_000.5)
+        let plan = try TrackURLResolver.resolve(
+            session: session, features: ServerFeatures(version: ServerVersion(2, 37, 2)),
+            configuration: APIClientConfiguration(baseURL: try #require(URL(string: "https://abs.example"))))
+        #expect(plan.tracks.count == 2)
+    }
+
+    @Test func syncReportReplacesNonFiniteAndNegativeValues() throws {
+        let report = PlaybackSyncReport(currentTime: .nan, timeListened: -3, duration: .infinity)
+        #expect(report == PlaybackSyncReport(currentTime: 0, timeListened: 0, duration: 0))
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Double])
+        #expect(json == ["currentTime": 0, "timeListened": 0, "duration": 0])
+        #expect(PlaybackSyncReport(currentTime: 5, timeListened: 1, duration: 9).currentTime == 5)
+    }
+
+    @Test func syncAndCloseOfAGoneSessionAreNotFound() async throws {
+        let server = StubServer { _ in .text("Not Found", status: 404) }
+        let client = try makeClient(server)
+        let report = PlaybackSyncReport(currentTime: 1, timeListened: 1, duration: 2)
+        await #expect(throws: APIError.notFound) {
+            _ = try await client.send(SessionEndpoints.sync(sessionID: "gone", report: report))
+        }
+        await #expect(throws: APIError.notFound) {
+            _ = try await client.send(SessionEndpoints.close(sessionID: "gone", report: report))
+        }
+        await #expect(throws: APIError.notFound) {
+            _ = try await client.send(SessionEndpoints.close(sessionID: "gone"))
+        }
+    }
+
+    @Test func localPayloadEncodesStartedAtAndUpdatedAt() throws {
+        let payload = try LocalPlaybackSessionPayload(session: localSession(), deviceInfo: deviceInfo)
+        let json = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any])
+        #expect(json["startedAt"] as? Int == 1_762_732_800_000)
+        #expect(json["updatedAt"] as? Int == 1_762_732_800_000)
+        #expect(json["playMethod"] as? Int == 3)
+    }
+
+    @Test func localPayloadRejectsInvalidSessions() throws {
+        #expect(throws: LocalSessionPayloadError.missingStartedAt) {
+            try LocalPlaybackSessionPayload(session: localSession(startedAt: nil), deviceInfo: deviceInfo)
+        }
+        #expect(throws: LocalSessionPayloadError.notLocal(.directPlay)) {
+            try LocalPlaybackSessionPayload(session: localSession(playMethod: .directPlay), deviceInfo: deviceInfo)
+        }
+        #expect(throws: LocalSessionPayloadError.invalidID("local-1")) {
+            try LocalPlaybackSessionPayload(session: localSession(id: "local-1"), deviceInfo: deviceInfo)
+        }
+        #expect(throws: LocalSessionPayloadError.missingDeviceID) {
+            try LocalPlaybackSessionPayload(session: localSession(), deviceInfo: DeviceInfo(deviceId: ""))
+        }
+        #expect(throws: LocalSessionPayloadError.missingStartedAt) {
+            try LocalPlaybackSessionBatch(
+                sessions: [localSession(), localSession(startedAt: nil)], deviceInfo: deviceInfo)
+        }
+        #expect(throws: LocalSessionPayloadError.missingDeviceID) {
+            try LocalPlaybackSessionBatch(sessions: [localSession()], deviceInfo: DeviceInfo())
+        }
     }
 }

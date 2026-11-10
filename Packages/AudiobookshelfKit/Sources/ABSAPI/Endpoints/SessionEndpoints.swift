@@ -32,16 +32,36 @@ public struct PlaybackStartRequest: Encodable, Sendable, Hashable {
 
 /// The body of `/api/session/:id/sync` and of a final `/api/session/:id/close`. The server adds
 /// `timeListened` (wall-clock seconds since the last acknowledged report) to the session's total.
+///
+/// Non-finite or negative values become `0`: `JSONEncoder` can't encode NaN or infinity, and an
+/// HLS item's duration is often indefinite.
 public struct PlaybackSyncReport: Encodable, Sendable, Hashable {
-    public var currentTime: Double
-    public var timeListened: Double
-    public var duration: Double
+    public let currentTime: Double
+    public let timeListened: Double
+    public let duration: Double
 
     public init(currentTime: Double, timeListened: Double, duration: Double) {
-        self.currentTime = currentTime
-        self.timeListened = timeListened
-        self.duration = duration
+        self.currentTime = Self.sanitized(currentTime)
+        self.timeListened = Self.sanitized(timeListened)
+        self.duration = Self.sanitized(duration)
     }
+
+    private static func sanitized(_ value: Double) -> Double {
+        value.isFinite && value > 0 ? value : 0
+    }
+}
+
+/// Why a session can't be uploaded with `/api/session/local` or `/api/session/local-all`.
+public enum LocalSessionPayloadError: Error, Sendable, Hashable {
+    /// Only locally played sessions (`playMethod` 3) are uploaded.
+    case notLocal(PlayMethod)
+    /// The id must be a UUID so resends update the same server record (ADR 0007).
+    case invalidID(String)
+    /// The server compares `updatedAt` with its progress; without it, stale local progress would
+    /// overwrite newer server progress.
+    case missingStartedAt
+    /// Without a `deviceId` the server creates a new device row for every upload.
+    case missingDeviceID
 }
 
 /// A locally played session reported with `POST /api/session/local` or
@@ -49,27 +69,36 @@ public struct PlaybackSyncReport: Encodable, Sendable, Hashable {
 /// the same record) and replaces `userId`, `serverVersion`, and, for new sessions,
 /// `deviceInfo` with its own values.
 public struct LocalPlaybackSessionPayload: Encodable, Sendable, Hashable {
-    public var id: String
-    public var libraryItemId: String
-    public var episodeId: String?
-    public var mediaType: MediaType
-    public var displayTitle: String?
-    public var displayAuthor: String?
-    public var duration: Double
-    public var playMethod: PlayMethod
-    public var mediaPlayer: String
-    public var startTime: Double
-    public var currentTime: Double
-    public var timeListening: Double
+    public let id: String
+    public let libraryItemId: String
+    public let episodeId: String?
+    public let mediaType: MediaType
+    public let displayTitle: String?
+    public let displayAuthor: String?
+    public let duration: Double
+    public let playMethod: PlayMethod
+    public let mediaPlayer: String
+    public let startTime: Double
+    public let currentTime: Double
+    public let timeListening: Double
     /// Epoch milliseconds.
-    public var startedAt: Int?
-    /// Epoch milliseconds. The server keeps its own progress when that is newer.
-    public var updatedAt: Int?
+    public let startedAt: Int
+    /// Epoch milliseconds; `startedAt` when the session was never updated. The server keeps its
+    /// own progress when that is newer.
+    public let updatedAt: Int
     /// Sent with `/session/local`; `/session/local-all` sends one `deviceInfo` for the batch.
-    public var deviceInfo: DeviceInfo?
+    public let deviceInfo: DeviceInfo?
 
-    /// - Parameter includeDeviceInfo: `false` for sessions in a `/session/local-all` batch.
-    public init(session: PlaybackSession, includeDeviceInfo: Bool) {
+    /// A payload for `POST /api/session/local`.
+    public init(session: PlaybackSession, deviceInfo: DeviceInfo) throws(LocalSessionPayloadError) {
+        try Self.validate(deviceInfo)
+        try self.init(validating: session, deviceInfo: deviceInfo)
+    }
+
+    init(validating session: PlaybackSession, deviceInfo: DeviceInfo?) throws(LocalSessionPayloadError) {
+        guard session.playMethod == .local else { throw .notLocal(session.playMethod) }
+        guard UUID(uuidString: session.id) != nil else { throw .invalidID(session.id) }
+        guard let startedAt = session.startedAt else { throw .missingStartedAt }
         id = session.id
         libraryItemId = session.libraryItemId
         episodeId = session.episodeId
@@ -82,19 +111,29 @@ public struct LocalPlaybackSessionPayload: Encodable, Sendable, Hashable {
         startTime = session.startTime
         currentTime = session.currentTime
         timeListening = session.timeListening
-        startedAt = session.startedAt
-        updatedAt = session.updatedAt
-        deviceInfo = includeDeviceInfo ? session.deviceInfo : nil
+        self.startedAt = startedAt
+        updatedAt = session.updatedAt ?? startedAt
+        self.deviceInfo = deviceInfo
+    }
+
+    static func validate(_ deviceInfo: DeviceInfo) throws(LocalSessionPayloadError) {
+        guard let deviceID = deviceInfo.deviceId, !deviceID.isEmpty else { throw .missingDeviceID }
     }
 }
 
 /// The body of `POST /api/session/local-all`.
 public struct LocalPlaybackSessionBatch: Encodable, Sendable, Hashable {
-    public var sessions: [LocalPlaybackSessionPayload]
-    public var deviceInfo: DeviceInfo?
+    public let sessions: [LocalPlaybackSessionPayload]
+    public let deviceInfo: DeviceInfo
 
-    public init(sessions: [LocalPlaybackSessionPayload], deviceInfo: DeviceInfo?) {
-        self.sessions = sessions
+    /// Validates every session like ``LocalPlaybackSessionPayload/init(session:deviceInfo:)``.
+    public init(sessions: [PlaybackSession], deviceInfo: DeviceInfo) throws(LocalSessionPayloadError) {
+        try LocalPlaybackSessionPayload.validate(deviceInfo)
+        var payloads: [LocalPlaybackSessionPayload] = []
+        for session in sessions {
+            payloads.append(try LocalPlaybackSessionPayload(validating: session, deviceInfo: nil))
+        }
+        self.sessions = payloads
         self.deviceInfo = deviceInfo
     }
 }
@@ -131,12 +170,15 @@ public enum SessionEndpoints {
         Endpoint(.get, "/api/session/\(pathSegment(id))")
     }
 
-    /// `POST /api/session/:id/sync`.
+    /// `POST /api/session/:id/sync`. Throws ``APIError/notFound`` when the session is no longer
+    /// open on the server (restart, 36-hour idle, or a newer session from this device).
     public static func sync(sessionID: String, report: PlaybackSyncReport) -> Endpoint<EmptyResponse> {
         Endpoint(.post, "/api/session/\(pathSegment(sessionID))/sync", body: report)
     }
 
-    /// `POST /api/session/:id/close`, applying `report` first when given.
+    /// `POST /api/session/:id/close`, applying `report` first when given. Throws
+    /// ``APIError/notFound`` when the session is no longer open; a retried close that gets a 404
+    /// may already have been applied (ADR 0007 reconciliation).
     public static func close(sessionID: String, report: PlaybackSyncReport? = nil) -> Endpoint<EmptyResponse> {
         Endpoint(.post, "/api/session/\(pathSegment(sessionID))/close", body: report)
     }

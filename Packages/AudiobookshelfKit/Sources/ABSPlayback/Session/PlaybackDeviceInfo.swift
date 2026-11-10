@@ -42,12 +42,13 @@ public enum PlaybackDeviceInfo {
         return info
     }
 
-    /// The body for starting a session on this device with `AVPlayer`.
+    /// The body for starting a session on this device with `AVPlayer`. The first call reads the
+    /// device ID from the Keychain off the caller's actor.
     public static func startRequest(
         deviceIdentifiers: any DeviceIdentifying, forceTranscode: Bool = false
-    ) -> PlaybackStartRequest {
+    ) async -> PlaybackStartRequest {
         PlaybackStartRequest(
-            deviceInfo: make(deviceID: deviceIdentifiers.deviceIdentifier()),
+            deviceInfo: make(deviceID: await deviceIdentifiers.deviceIdentifier()),
             supportedMimeTypes: SupportedAudioMIMETypes.current(), forceTranscode: forceTranscode)
     }
 

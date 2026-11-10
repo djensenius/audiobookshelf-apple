@@ -7,7 +7,7 @@ import Testing
 
 private struct FixedDeviceIdentifier: DeviceIdentifying {
     let value: String
-    func deviceIdentifier() -> String { value }
+    func deviceIdentifier() async -> String { value }
 }
 
 @Suite struct PlaybackDeviceInfoTests {
@@ -45,14 +45,14 @@ private struct FixedDeviceIdentifier: DeviceIdentifying {
         #expect(PlaybackDeviceInfo.operatingSystemVersion().split(separator: ".").count == 3)
     }
 
-    @Test func startRequestUsesStableDeviceIDAndRuntimeTypes() {
+    @Test func startRequestUsesStableDeviceIDAndRuntimeTypes() async {
         let ids = FixedDeviceIdentifier(value: "DEVICE-UUID")
-        let request = PlaybackDeviceInfo.startRequest(deviceIdentifiers: ids)
+        let request = await PlaybackDeviceInfo.startRequest(deviceIdentifiers: ids)
         #expect(request.deviceInfo.deviceId == "DEVICE-UUID")
         #expect(request.mediaPlayer == "AVPlayer")
         #expect(request.forceDirectPlay == false)
         #expect(request.forceTranscode == false)
         #expect(request.supportedMimeTypes == SupportedAudioMIMETypes.current())
-        #expect(PlaybackDeviceInfo.startRequest(deviceIdentifiers: ids, forceTranscode: true).forceTranscode)
+        #expect(await PlaybackDeviceInfo.startRequest(deviceIdentifiers: ids, forceTranscode: true).forceTranscode)
     }
 }

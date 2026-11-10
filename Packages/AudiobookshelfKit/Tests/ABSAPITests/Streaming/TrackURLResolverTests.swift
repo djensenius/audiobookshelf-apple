@@ -122,8 +122,13 @@ private func hlsSession(contentUrl: String? = "/hls/sess-hls/output.m3u8") -> Pl
         #expect(track.authorizedURL(accessToken: "secret") == track.url)
     }
 
-    @Test(arguments: [nil, "", "hls/x/output.m3u8", "//evil.example/hls/x.m3u8", "https://evil.example/x.m3u8"])
-    func transcodeRejectsMissingOrAbsoluteContentURL(contentUrl: String?) throws {
+    @Test(arguments: [
+        nil, "", "hls/sess-hls/output.m3u8", "//evil.example/hls/sess-hls/output.m3u8",
+        "https://evil.example/hls/sess-hls/output.m3u8", "/hls/../../api/me", "/hls/x/output.m3u8?token=a",
+        "/hls/%2e%2e/x", "/hls/other-session/output.m3u8", "/hls/sess-hls/output.m3u8?token=a",
+        "/hls/sess-hls/../../api/me", "/hls/sess-hls/output.m3u8#x", "/hls/sess-hls/sub/output.m3u8",
+    ])
+    func transcodeRejectsAnythingButTheSessionPlaylist(contentUrl: String?) throws {
         #expect(throws: TrackURLResolutionError.invalidContentURL) {
             try TrackURLResolver.resolve(
                 session: hlsSession(contentUrl: contentUrl), features: current, configuration: configuration())
@@ -137,6 +142,38 @@ private func hlsSession(contentUrl: String? = "/hls/sess-hls/output.m3u8") -> Pl
         #expect(plan.kind == .directPlay)
         #expect(plan.transport == .customHeaderResourceLoader)
         #expect(plan.tracks.allSatisfy { $0.url.scheme == "https" && $0.url.query() == nil })
+    }
+
+    @Test func customHeadersWithTokenFallbackEpisode() throws {
+        let plan = try TrackURLResolver.resolve(
+            session: episodeSession(index: nil), features: beforeNullIndexFix,
+            configuration: configuration(customHeaders: ["CF-Access-Client-Id": "id"]))
+        #expect(plan.kind == .directPlay)
+        #expect(plan.transport == .customHeaderResourceLoader)
+        let track = try #require(plan.tracks.first)
+        #expect(track.authentication == .accessTokenQuery)
+        #expect(track.url.absoluteString == "https://abs.example/abs/api/items/li-9/file/77%2F8")
+    }
+
+    @Test func descriptionsRedactSessionIDs() throws {
+        let direct = try TrackURLResolver.resolve(
+            session: try decodeMultiTrackSession(), features: current, configuration: configuration())
+        let hls = try TrackURLResolver.resolve(session: hlsSession(), features: current, configuration: configuration())
+        for plan in [direct, hls] {
+            var dumped = ""
+            dump(plan, to: &dumped)
+            let outputs = [
+                String(describing: plan), String(reflecting: plan), dumped, String(describing: plan.tracks[0]),
+                String(reflecting: plan.tracks[0]),
+            ]
+            for output in outputs {
+                #expect(!output.contains("3f2b8e4c"))
+                #expect(!output.contains("sess-hls"))
+                #expect(output.contains("<redacted>"))
+            }
+        }
+        #expect(direct.tracks[0].redactedURL == "https://abs.example/abs/public/session/<redacted>/track/1")
+        #expect(hls.tracks[0].redactedURL == "https://abs.example/abs/hls/<redacted>/output.m3u8")
     }
 
     @Test func customHeadersWithTranscodeFail() throws {
