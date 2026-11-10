@@ -95,7 +95,7 @@ public actor APIClient {
     }
 
     /// Replaces the connection's custom headers.
-    /// - Throws: ``CustomHeaderError`` if a header is reserved (`Authorization` or `Cookie`).
+    /// - Throws: ``CustomHeaderError`` if a header is reserved.
     public func setCustomHeaders(_ headers: [String: String]) throws(CustomHeaderError) {
         try configuration.setCustomHeaders(headers)
     }

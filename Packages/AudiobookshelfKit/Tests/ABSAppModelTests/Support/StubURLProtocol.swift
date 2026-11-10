@@ -31,6 +31,8 @@ final class StubURLProtocol: URLProtocol {
     private struct Route {
         var handler: Handler
         var requests: [URLRequest] = []
+        /// Held requests the client cancelled before the gate opened.
+        var abandoned: [URLRequest] = []
         var cookieStorage: HTTPCookieStorage?
         /// One-shot gates by path.
         var gates: [String: StubGate] = [:]
@@ -58,6 +60,11 @@ final class StubURLProtocol: URLProtocol {
         routes.withLock { $0[host]?.requests ?? [] }
     }
 
+    /// Held requests that were cancelled before their gate opened, so they were never answered.
+    static func abandonedRequests(host: String) -> [URLRequest] {
+        routes.withLock { $0[host]?.abandoned ?? [] }
+    }
+
     override class func canInit(with request: URLRequest) -> Bool {
         guard let host = request.url?.host() else { return false }
         return routes.withLock { $0[host] != nil }
@@ -83,6 +90,11 @@ final class StubURLProtocol: URLProtocol {
         let box = UncheckedProtocol(value: self)
         gate.hold {
             DispatchQueue.global().async {
+                // Cancelling a task cancels its `URLSessionTask` at once, before the gate opens.
+                if let task = box.value.task, task.state != .running, let host = request.url?.host() {
+                    Self.routes.withLock { $0[host]?.abandoned.append(request) }
+                    return
+                }
                 box.value.respond(to: request, handler: handler, cookieStorage: cookieStorage)
             }
         }
