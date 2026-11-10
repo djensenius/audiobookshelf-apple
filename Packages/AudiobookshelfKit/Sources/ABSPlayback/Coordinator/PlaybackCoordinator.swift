@@ -764,6 +764,11 @@ public final class PlaybackCoordinator {
     }
 
     /// Adds a jump so the position shown stays within the item, and it and the resume agree.
+    ///
+    /// While a restored item is still resolving its start, the jump is clamped against the saved
+    /// record's position, not the position eventually resolved. For example, with a record at 3590
+    /// of 3600, +30 keeps only +10, so a resolved 1000 becomes 1010. This is intentional: the
+    /// position shown and the result stay consistent with what the user saw.
     private func addClampedJump(_ offset: Double) {
         pendingJumpOffset = Self.clamp(unloadedPositionAfterJumps + offset, to: unloadedDuration) - unloadedPosition
     }
