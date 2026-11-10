@@ -731,7 +731,7 @@ public final class AccountManager {
         // A sign-in that saved a newer session while this saved: it clears a sign-out when it marks
         // the connection used, unless that came first, so clear this one by its date. One recorded
         // after this check marks the connection used after this save finished, so that clears it.
-        if signInGenerations[id, default: 0] > generation {
+        if signInGenerations[id, default: 0] > generation, expiredGenerations[id, default: 0] <= generation {
             _ = try? await store.clearSignedOut(id: id, savedAt: savedAt)
         }
         await reloadConnections()

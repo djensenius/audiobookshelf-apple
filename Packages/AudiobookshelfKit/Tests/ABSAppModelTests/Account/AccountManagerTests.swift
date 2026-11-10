@@ -1601,6 +1601,54 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(relaunched.state.user?.connectionID == id && relaunched.lastError == nil)
     }
 
+    @Test func olderExpiryDoesNotClearANewerExpiredSessionSignOut() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let firstClient = try #require(manager.client)
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed) { data in
+            // The delete keeps the custom headers, so it writes the item without the session.
+            data.map { !String(decoding: $0, as: UTF8.self).contains("accessToken") } ?? true
+        }
+
+        let olderExpiry = StubGate()
+        let newerExpiry = StubGate()
+        var expirySaves = 0
+        manager.willSaveExpiry = {
+            expirySaves += 1
+            if expirySaves == 1 {
+                await olderExpiry.pass()
+            } else {
+                await newerExpiry.pass()
+            }
+        }
+
+        server.revokeSession()
+        let firstRequest = Task { _ = try await firstClient.send(AuthEndpoints.authorize()) }
+        await olderExpiry.arrived()
+
+        // A newer sign-in, and its own expiry, happen while the older handler waits to save.
+        _ = try await signIn(manager, to: server)
+        let secondClient = try #require(manager.client)
+        server.revokeSession()
+        let secondRequest = Task { _ = try await secondClient.send(AuthEndpoints.authorize()) }
+        await newerExpiry.arrived()
+        newerExpiry.open()
+        await #expect(throws: APIError.sessionExpired) { try await secondRequest.value }
+        #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+
+        // The older save happens last. Its cleanup must not clear the newer expiry's sign-out.
+        olderExpiry.open()
+        await #expect(throws: APIError.sessionExpired) { try await firstRequest.value }
+        #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+
+        server.update { $0.isOffline = true }
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        #expect(relaunched.state == .signedOut && relaunched.connections.first?.signedOutAt != nil)
+    }
+
     @Test func signInStoppedByAnExpiryKeepsTheSignOutTheExpirySaved() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()
