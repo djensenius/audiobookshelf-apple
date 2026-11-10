@@ -317,6 +317,29 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
+    @Test func scopedSignOutProceedsWhileSourceIsRestoring() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let flushGate = Gate()
+        harness.playback.flushGate = flushGate
+        defer { flushGate.open() }
+
+        harness.lifecycle.requestSignOut(of: try #require(harness.playback.context))
+        #expect(
+            await eventually {
+                harness.log.entries.contains("playback.flush") && harness.clock.sleeperCount == 1
+            })
+        harness.source.publishUnobserved(.restoring)
+        #expect(harness.source.phase == .restoring)
+        flushGate.open()
+        // Queue a transition after the request so its logout and teardown have completed.
+        await harness.lifecycle.performAccountChange {}
+
+        #expect(harness.log.count(of: "accounts.logout") == 1)
+        #expect(harness.source.phase == .signedOut)
+        #expect(harness.lifecycle.gate == .connect)
+    }
+
     @Test func signOutRequestedAfterAnExpiryEndsTheSessionAsExpired() async throws {
         let harness = Harness()
         try await harness.started()

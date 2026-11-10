@@ -294,7 +294,7 @@ public final class SessionLifecycle {
         }
         if let identity = session?.context.identity { gate = .signingOut(from: identity) }
         await endFlushing(.signOut)
-        if let expectedIdentity, !sourceIsActive(expectedIdentity) {
+        if let expectedIdentity, sourceHasLeft(expectedIdentity) {
             await reconcile()
             return nil
         }
@@ -487,11 +487,6 @@ public final class SessionLifecycle {
         case .restoring: false
         case .active(let current, _): current != identity
         }
-    }
-
-    private func sourceIsActive(_ identity: SessionIdentity) -> Bool {
-        guard case .active(let current, _) = source.phase else { return false }
-        return current == identity
     }
 
     /// Ends the running session, without a flush, if the source has left it before its
