@@ -245,6 +245,10 @@ public final class ConnectViewModel {
     /// custom headers unencrypted.
     public func connectWithoutEncryption() async {
         guard phase == .address, case .httpsUnavailable(let fallback)? = failure else { return }
+        guard ServerAddress.connectionCandidates(for: address).contains(fallback) else {
+            await submitAddress()
+            return
+        }
         address = fallback.description
         let attempt = next()
         guard let request = startValidation() else { return }

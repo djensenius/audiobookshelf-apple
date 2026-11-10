@@ -185,6 +185,45 @@ private struct Fixture {
         #expect(accounts.activeConnection?.address == fallback.description)
     }
 
+    enum AddressEdit: CaseIterable, Sendable {
+        case otherServer, reverseProxy, port, explicitHTTPS
+    }
+
+    @Test(arguments: AddressEdit.allCases)
+    func staleHTTPFallbackDoesNotReplaceEditedAddress(edit: AddressEdit) async throws {
+        let fixture = try Fixture()
+        let otherServer = StubServer()
+        let host = fixture.server.host
+        fixture.server.update { $0.httpsFails = true }
+        let model = fixture.model(fixture.makeAccounts())
+        model.address = host
+        model.customHeaders = [CustomHeader(name: "X-Proxy", value: "original-secret")]
+        await model.submitAddress()
+        let fallback = try #require(ServerAddress("http://\(host)"))
+        try #require(model.failure == .httpsUnavailable(fallback))
+
+        fixture.server.update { $0.httpsFails = false }
+        let editedAddress: String
+        switch edit {
+        case .otherServer: editedAddress = otherServer.host
+        case .reverseProxy: editedAddress = "\(host)/abs"
+        case .port: editedAddress = "\(host):13378"
+        case .explicitHTTPS: editedAddress = "https://\(host)"
+        }
+        model.address = editedAddress
+        model.customHeaders = [CustomHeader(name: "X-Proxy", value: "edited-secret")]
+        await model.connectWithoutEncryption()
+
+        let expected = try #require(ServerAddress(editedAddress))
+        #expect(model.phase == .login && model.failure == nil)
+        #expect(model.address == editedAddress && model.server?.address == expected)
+        let requests = fixture.server.requests + otherServer.requests
+        #expect(requests.count == 2 && requests.allSatisfy { $0.url?.scheme == "https" })
+        let editedRequests = requests.filter { $0.value(forHTTPHeaderField: "X-Proxy") == "edited-secret" }
+        #expect(editedRequests.count == 1)
+        #expect(editedRequests.first?.url?.absoluteString == "\(expected.description)/status")
+    }
+
     /// The path can deny a named server too (split DNS). Custom headers must not turn a
     /// permission failure into an offer to retry them unencrypted.
     @Test(arguments: [nil, 13_378] as [Int?])
