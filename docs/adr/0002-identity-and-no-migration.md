@@ -167,7 +167,10 @@ encrypted." Add a reachable demo server URL and account to the same section.
   to their own entitlements files.
 - Changing the bundle ID, team, App Group or keychain group later loses user data and
   sign-ins; it needs a new ADR.
-- `test:app` must keep overriding `CODE_SIGN_ENTITLEMENTS` while it signs ad hoc. CI
+- `test:app` must keep overriding the app target's `ABS_MACOS_ENTITLEMENTS` setting (which
+  feeds `CODE_SIGN_ENTITLEMENTS[sdk=macosx*]`) while it signs ad hoc. Overriding
+  `CODE_SIGN_ENTITLEMENTS` itself on the command line also hits SwiftPM resource-bundle
+  targets, where the relative path doesn't resolve. CI
   builds (`build:ios`, `build:macos`, `test:ios`) don't sign (`CODE_SIGNING_ALLOWED=NO`),
   so they don't need the team.
 
