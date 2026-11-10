@@ -12,6 +12,9 @@ public struct ProgressBaseline: Codable, Sendable, Hashable {
     public var isFinished: Bool
     public var finishedAt: Date?
     public var ebookLocation: String?
+    /// An unseeded PATCH omitted location: it is unknown until a server read, not known-null.
+    /// Optional for existing stored baselines, which keep their original known-value semantics.
+    public var ebookLocationIsUnknown: Bool?
     public var ebookProgress: Double?
     public var lastUpdate: Date
 
@@ -80,6 +83,7 @@ public struct ProgressSend: Codable, Sendable, Hashable {
     }
 
     public struct Ebook: Codable, Sendable, Hashable {
+        /// `nil` omits this field from PATCH, preserving the server's location; it does not clear it.
         public var ebookLocation: String?
         public var ebookProgress: Double?
         public var editedAt: Date

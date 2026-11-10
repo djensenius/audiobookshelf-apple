@@ -20,15 +20,14 @@ extension MediaProgress {
 }
 
 extension ProgressSend {
-    /// The PATCH body for the one group this send carries. The app has no such mapping yet, so
-    /// this mirrors what `MediaProgressUpdate` documents.
+    /// The PATCH body for one group, mirroring `ProgressSyncer`'s transport mapping.
     fileprivate var update: MediaProgressUpdate? {
         if let audio {
             return .audio(currentTime: audio.currentTime, duration: audio.duration, progress: audio.progress)
         }
         if let finished { return .finished(finished.isFinished, at: finished.finishedAt) }
-        if let ebook, let location = ebook.ebookLocation {
-            return .ebook(location: location, progress: ebook.ebookProgress ?? 0)
+        if let ebook {
+            return .ebook(location: ebook.ebookLocation, progress: ebook.ebookProgress ?? 0)
         }
         return nil
     }
@@ -225,6 +224,45 @@ struct LocalProgressContractTests {
             #expect(!local.needsServerSync)
             #expect(local.currentTime == 10)
             #expect(try await row.send().isEmpty)
+        }
+    }
+
+    @Test(
+        "an omitted ebook location is retained without overwriting a newer edit",
+        arguments: [false, true], [ProgressGroups(), .audio, .finished, [.audio, .finished]])
+    func omittedEbookLocation(seeded: Bool, preceding: ProgressGroups) async throws {
+        let seed = try await ContractSeed.shared.data()
+        try await ContractServer.require().withUser { session in
+            let row = try SyncedRow(session, itemID: seed.taleID)
+            try await session.patch(seed.taleID, .ebook(location: "retained", progress: 0.2))
+            let server = try await row.serverRow()
+            try await row.edit(
+                ProgressEdit(
+                    audio: preceding.contains(.audio) ? Self.audio.audio : nil,
+                    isFinished: preceding.contains(.finished) ? false : nil,
+                    ebook: .init(location: nil, progress: 0.4)),
+                seededFrom: seeded ? server : nil, at: Date(timeIntervalSince1970: 1_000_000_000))
+            for group in [ProgressGroups.audio, .finished] where preceding.contains(group) {
+                let earlier = try #require(try await row.store.beginSend(for: row.key))
+                #expect(earlier.values.groups == group)
+                try await session.patch(seed.taleID, #require(earlier.values.update))
+                try await row.store.completeSend(earlier, serverLastUpdate: nil)
+            }
+            let patch = try #require(try await row.store.beginSend(for: row.key))
+            try await session.patch(seed.taleID, #require(patch.values.update))
+            try await row.edit(
+                ProgressEdit(ebook: .init(location: "newer", progress: 0.8)),
+                at: Date(timeIntervalSince1970: 1_000_000_001))
+            try await row.store.completeSend(patch, serverLastUpdate: nil)
+            try await row.confirm()
+            #expect(try await row.serverRow().ebookLocation == "retained")
+            #expect(try await row.local().ebookLocation == "newer")
+            #expect(try await row.local().ebookProgress == 0.8)
+            #expect(try await row.local().ebookDirty)
+            #expect(try await row.send() == [.ebook])
+            try await row.confirm()
+            #expect(try await row.local().serverBaseline == row.serverRow().baseline)
+            #expect(try await row.local().needsServerSync == false)
         }
     }
 

@@ -93,6 +93,12 @@ private let server = "https://abs.example/abs"
         #expect(body["ebookProgress"] as? Double == 0.25)
     }
 
+    @Test func ebookWithoutLocationStillSendsProgress() throws {
+        let body = try json(.ebook(location: nil, progress: 0))
+        #expect(Set(body.keys) == ["ebookProgress"])
+        #expect(body["ebookProgress"] as? Double == 0)
+    }
+
     @Test func hideFromContinueListeningSendsOneKey() throws {
         let body = try json(.hideFromContinueListening(true))
         #expect(Set(body.keys) == ["hideFromContinueListening"])
