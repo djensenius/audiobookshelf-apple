@@ -1,6 +1,9 @@
 {
+  "ButtonCopyAll": "Copy All",
+  "ButtonExport": "Export",
   "ButtonOpenSettings": "Open Settings",
   "ButtonRetry": "Retry",
+  "ButtonShare": "Share",
   "LabelAbridged": "Abridged",
   "LabelAllowSeekingOnMediaControlsHelp": "Lets you change the playback position from the Lock Screen, Control Center and other system media controls.",
   "LabelHistoryEventAccessibility": "{0} at {1}, {2}",
@@ -16,6 +19,13 @@
   "LabelHistoryPlayFromHint": "Plays from this time.",
   "LabelHistorySyncFailed": "Server sync failed",
   "LabelHistorySynced": "Synced with the server",
+  "LabelLogCategory": "Category",
+  "LabelLogLevelDebug": "Debug",
+  "LabelLogLevelError": "Error",
+  "LabelLogLevelFault": "Fault",
+  "LabelLogLevelInfo": "Info",
+  "LabelLogLevelNotice": "Notice",
+  "LabelLogMinimumLevel": "Minimum level",
   "LabelThemeSystem": "System",
   "LabelToday": "Today",
   "LabelYesterday": "Yesterday",
@@ -25,5 +35,8 @@
   "MessageHistoryLoadFailed": "Couldn't load the history.",
   "MessageLanguageSettingsHelp": "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region.",
   "MessageLanguageSettingsHelpMac": "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications.",
+  "MessageLogsCopied": "Copied the logs",
+  "MessageLogsCurrentLaunchOnly": "These logs cover only the current launch of the app. Tokens are always removed.",
+  "MessageLogsLoadFailed": "Couldn't load the logs.",
   "MessageNoHistory": "No History"
 }
