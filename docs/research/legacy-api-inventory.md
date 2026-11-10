@@ -5,7 +5,7 @@ JS requests: plugins/nativeHttp.js, plugins/axios.js. Swift: ios/App/Shared/util
 
 | Method | Path | Use / reference |
 |---|---|---|
-| GET | /api/authorize | connect/authorize; components/connection/ServerConnectForm.vue:923 |
+| POST | /api/authorize | connect/authorize; components/connection/ServerConnectForm.vue:923 |
 | POST | /logout | store/user.js:158 |
 | POST | /auth/refresh (x-refresh-token header) | token refresh; nativeHttp.js, axios.js, ApiClient.swift |
 | GET | /ping | ApiClient.swift |

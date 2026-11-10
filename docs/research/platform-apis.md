@@ -696,7 +696,7 @@ for try await msg in stream {                 // wrap task.receive() in a loop
 
 ## 9. Cross-cutting recommendations
 1. **Playback core:** build one `@MainActor` player (AVQueuePlayer-based) shared by the phone UI, CarPlay scene, widgets/controls and App Intents. Make the choice between NowPlaying and `MPNowPlayingInfoCenter` once, and use it for iOS, macOS and CarPlay. Gate `AVAudioSession` with `#if os(iOS)`.
-2. **Streaming auth:** prefer direct play with the tokenless `/public/session/…` route (server ≥ 2.22). Use `?token=` for covers and downloads. Treat HLS transcode as a fallback with the private-header workaround, and test it on each OS release.
+2. **Streaming auth:** prefer direct play with the tokenless `/public/session/…` route (server ≥ 2.22). Use `?token=` for covers and downloads. Treat HLS transcode as a fallback that must use a supported authentication mechanism (for example `AVAssetResourceLoaderDelegate` or a tokenised URL); the legacy app's private `AVURLAssetHTTPHeaderFieldsKey` workaround describes old behaviour only and must not be used. The streaming ADR decides the mechanism.
 3. **Downloads:** background `URLSession` plus the SwiftData download records, with `.backgroundTask(.urlSession)` as the relaunch hook.
 4. **Duo:** use size classes, `ReservedRegion` and `ArrangementView`, and avoid pose-specific logic. Ship Duo screenshots before April 2027.
 5. **Auth and sync:** OIDC via `WebAuthenticationSession`, and the Socket.IO `auth` / `init` / `user_item_progress_updated` flow on a hand-rolled websocket client. This needs no SPM dependency.
@@ -712,7 +712,7 @@ for try await msg in stream {                 // wrap task.receive() in a loop
 - The OIDC cookie and session handling is inferred from express-session and `getAuthorizationUrl`. I did not read the callback validation code.
 - Whether the server accepts a redirect scheme other than `audiobookshelf://oauth` is unverified.
 - iOS interruption and route-change notification details (section 3.2) come from knowledge and were not re-checked against headers.
-- CarPlay and Duo behaviour can't be validated in the iOS Simulator under Xcode 27.2 (CarPlay needs a USB device in Device Hub). Duo needs Device Hub (27.1+), with the caveats in 1.6.
+- CarPlay can't be launched from Xcode 27.2's Device Hub simulator (a known issue; it needs a USB device there). The classic CarPlay simulator routes in §2.7 remain available. Duo layouts can be tested on the iPhone Duo simulator (27.1+; see `xcode-project-and-ci.md` §6), with the caveats in §1.6.
 - ZIPFoundation: I did not build it under Swift 6.4 or Xcode 27.2. The Swift 6 / Sendable status of `Archive` is unverified.
 - The server's actual Socket.IO ping defaults are assumed to be Socket.IO's stock 25000 / 20000 / 1e6, because the server passes no options. The `connectTimeout` (about 45 s) is from knowledge.
 - The default value of `URLSessionWebSocketTask.maximumMessageSize` is from knowledge (about 1 MiB), so set it explicitly.
