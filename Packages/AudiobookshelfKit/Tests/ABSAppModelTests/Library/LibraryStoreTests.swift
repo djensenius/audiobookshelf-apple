@@ -447,6 +447,61 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func modelFailuresFromBeforeAClearAreCancellations() async throws {
+        enum Lifecycle: CaseIterable { case clear, switchAccount, none }
+        for lifecycle in Lifecycle.allCases {
+            try await withLibrarySettings { settings in
+                let shelvesGate = GatedCalls<String, [Shelf]>()
+                let itemsGate = GatedCalls<Int, PagedResults<LibraryItem>>()
+                let detailsGate = GatedCalls<String, LibraryWithFilterData>()
+                var slow = service([makeLibrary("books")])
+                slow.shelvesHandler = { id in try await shelvesGate.call(id) }
+                slow.itemsHandler = { _, query in try await itemsGate.call(query.page ?? 0) }
+                slow.libraryHandler = { id in try await detailsGate.call(id) }
+                var shelfCalls = shelvesGate.calls.makeAsyncIterator()
+                var itemCalls = itemsGate.calls.makeAsyncIterator()
+                var detailCalls = detailsGate.calls.makeAsyncIterator()
+                let store = LibraryStore(settings: settings)
+                await store.connect(client: slow, connectionKey: serverA)
+                let shelves = try #require(store.makeShelves(libraryID: "books"))
+                let itemList = try #require(store.makeItemList(libraryID: "books"))
+
+                let shelvesLoad = Task { await shelves.load() }
+                let shelfCall = try #require(await shelfCalls.next())
+                let itemsLoad = try #require(itemList.loadNextPage())
+                let itemCall = try #require(await itemCalls.next())
+                let detailsLoad = Task { try await store.loadDetails(libraryID: "books") }
+                let detailCall = try #require(await detailCalls.next())
+
+                switch lifecycle {
+                case .clear: store.clear()
+                case .switchAccount: await store.connect(client: service([]), connectionKey: serverB)
+                case .none: break
+                }
+                shelfCall.reply.resume(throwing: TestError.offline)
+                itemCall.reply.resume(throwing: TestError.offline)
+                detailCall.reply.resume(throwing: TestError.offline)
+                await shelvesLoad.value
+                await itemsLoad.value
+                let detailsResult = await detailsLoad.result
+
+                if lifecycle == .none {
+                    // A failure for the current account still shows.
+                    #expect(shelves.error is TestError)
+                    #expect(itemList.error is TestError)
+                    #expect(throws: TestError.self) { try detailsResult.get() }
+                } else {
+                    #expect(shelves.error == nil, "\(lifecycle)")
+                    #expect(itemList.error == nil, "\(lifecycle)")
+                    #expect(throws: CancellationError.self, "\(lifecycle)") { try detailsResult.get() }
+                    #expect(store.error == nil, "\(lifecycle)")
+                }
+                #expect(!shelves.isLoading)
+                #expect(!itemList.isLoading)
+            }
+        }
+    }
+
     @Test func progressRequestedForThePreviousAccountIsDropped() async throws {
         try await withLibrarySettings { settings in
             let store = LibraryStore(settings: settings)

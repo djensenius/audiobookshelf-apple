@@ -146,7 +146,7 @@ public final class LibraryStore {
     /// Loads a library with its filter data and stores it under its ID.
     ///
     /// Throws `CancellationError` when the store was cleared or connected to another account
-    /// meanwhile. When several loads of the same library overlap, the last one started is kept;
+    /// meanwhile, whether the request succeeded or failed. When several loads of the same library overlap, the last one started is kept;
     /// a response to a load started before a successful ``refresh()`` is returned but not stored.
     @discardableResult
     public func loadDetails(libraryID: String) async throws -> LibraryWithFilterData {
@@ -155,7 +155,14 @@ public final class LibraryStore {
         detailRequestCount += 1
         let request = detailRequestCount
         latestDetailRequests[libraryID] = request
-        let loaded = try await client.library(id: libraryID)
+        let loaded: LibraryWithFilterData
+        do {
+            loaded = try await client.library(id: libraryID)
+        } catch {
+            // A failure for a cleared account is reported as cancellation, like its response.
+            guard generation == self.generation else { throw CancellationError() }
+            throw error
+        }
         guard generation == self.generation else { throw CancellationError() }
         if latestDetailRequests[libraryID] == request {
             details[libraryID] = loaded
@@ -184,7 +191,7 @@ public final class LibraryStore {
     /// The model requests through the store's current ``client``, so reconnecting the same
     /// account with a new client (new tokens or server address) retargets it without recreating
     /// it. While the store is cleared or serves another account, its requests fail with
-    /// `CancellationError`, and so do responses to requests started before a ``clear()``.
+    /// `CancellationError`, and so do responses and failures of requests started before a ``clear()``.
     public func makeShelves(libraryID: String) -> PersonalizedShelvesModel? {
         guard client != nil, let connectionKey else { return nil }
         return PersonalizedShelvesModel(
@@ -237,8 +244,8 @@ public final class LibraryStore {
 }
 
 /// Forwards to the client a ``LibraryStore`` holds for one account when each request starts.
-/// A response that arrives after the store was cleared or switched accounts throws
-/// `CancellationError`, so the model doesn't apply it.
+/// A response or failure that arrives after the store was cleared or switched accounts throws
+/// `CancellationError`, so the model neither applies nor shows it.
 private struct StoreClient: LibraryService {
     weak var store: LibraryStore?
     let connectionKey: LibraryConnectionKey
@@ -248,10 +255,22 @@ private struct StoreClient: LibraryService {
     ) async throws -> Response {
         guard let store else { throw CancellationError() }
         let (client, generation) = try await store.client(for: connectionKey)
-        let response = try await request(client)
-        guard let store = self.store else { throw CancellationError() }
-        try await store.checkServing(connectionKey, generation: generation)
+        let response: Response
+        do {
+            response = try await request(client)
+        } catch {
+            // A failure after a clear or account switch belongs to the previous account: report
+            // cancellation instead, so the model doesn't show it.
+            try await checkServing(generation: generation)
+            throw error
+        }
+        try await checkServing(generation: generation)
         return response
+    }
+
+    private func checkServing(generation: Int) async throws {
+        guard let store else { throw CancellationError() }
+        try await store.checkServing(connectionKey, generation: generation)
     }
 
     func libraries() async throws -> [Library] { try await send { try await $0.libraries() } }
