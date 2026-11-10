@@ -119,6 +119,9 @@ public actor APIClient {
                 // Always handled, whatever the send budget: the refreshed pair is rejected, so the
                 // session is over unless a different one replaced it in the meantime.
                 guard let current = await expireSession(rejected: tokens) else { throw APIError.sessionExpired }
+                // A pair another request refreshed from the rejected one is still this chain's
+                // refreshed session, so its rejection expires too instead of refreshing again.
+                if outcome(current, after: tokens, since: tokensGeneration).didRefresh { refreshedPair = current }
                 next = current
             } else {
                 guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }
