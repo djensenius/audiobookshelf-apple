@@ -19,9 +19,15 @@ import SwiftUI
 /// ```
 ///
 /// The view owns its ``ConnectViewModel`` for as long as it's shown, so a parent's update
-/// doesn't restart the flow, and cancels the work in progress when it disappears. `onFinish`
-/// runs once, when the model reaches ``ConnectViewModel/Phase/done``. The flow saves nothing
-/// itself: ``AccountManager`` stores the connection, session and custom headers.
+/// doesn't restart the flow, and cancels the work in progress when it disappears, except an
+/// OpenID sign-in, whose browser can hide it. `onFinish` runs once, when the model reaches
+/// ``ConnectViewModel/Phase/done``. The flow saves nothing itself: ``AccountManager`` stores the
+/// connection, session and custom headers.
+///
+/// Keep the view mounted until `onFinish`: the gate must not switch away on
+/// ``AccountState/restoring``, which resuming a saved server passes through. Removing the view
+/// cancels the flow, but a resume it started isn't stopped and can still make that account
+/// active.
 struct ConnectFlowView: View {
     @State private var model: ConnectViewModel
     private let onFinish: () -> Void
@@ -61,15 +67,20 @@ struct ConnectFlowStack: View {
         .onChange(of: model.phase, initial: true) { _, phase in
             if phase == .done { onFinish() }
         }
-        .onDisappear { model.cancel() }
+        // Not during OpenID sign-in: presenting the browser can make the flow disappear.
+        .onDisappear { if model.phase != .signingIn(.openID) { model.cancel() } }
         // Back from Settings after turning local network access on.
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { retryAfterLocalNetworkDenied() }
         }
         #if os(macOS)
             // The scene phase may stay active while System Settings is in front.
-            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                retryAfterLocalNetworkDenied()
+            .task {
+                for await _ in NotificationCenter.default.notifications(
+                    named: NSApplication.didBecomeActiveNotification)
+                {
+                    retryAfterLocalNetworkDenied()
+                }
             }
         #endif
     }

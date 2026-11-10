@@ -210,8 +210,9 @@ public final class ConnectViewModel {
 
     /// Stops the check or sign-in in progress, for example when the flow is dismissed, and returns
     /// to the step it started from. A sign-in cancelled before it finished leaves the active
-    /// account unchanged. A saved session that's being resumed isn't stopped, but its result is
-    /// dropped.
+    /// account unchanged, though one stopped late may be the server restored at the next launch
+    /// (see ``AccountManager/connect(local:username:password:)``). A saved session that's being
+    /// resumed isn't stopped, but its result is dropped.
     public func cancel() {
         guard isBusy else { return }
         next()
@@ -236,7 +237,8 @@ public final class ConnectViewModel {
     public func submitAddress() async {
         guard phase == .address else { return }
         let attempt = next()
-        await run { await self.validate(attempt: attempt) }
+        guard let request = startValidation() else { return }
+        await run { await self.validate(request, attempt: attempt) }
     }
 
     /// After ``ConnectFailure/httpsUnavailable(_:)``, connects to the `http` address, sending the
@@ -245,7 +247,8 @@ public final class ConnectViewModel {
         guard phase == .address, case .httpsUnavailable(let fallback)? = failure else { return }
         address = fallback.description
         let attempt = next()
-        await run { await self.validate(attempt: attempt) }
+        guard let request = startValidation() else { return }
+        await run { await self.validate(request, attempt: attempt) }
     }
 
     /// Resumes a saved server's session. Its status is read first with its saved custom headers;
@@ -332,31 +335,36 @@ public final class ConnectViewModel {
 
     // MARK: - Private
 
-    private func validate(attempt: Int) async {
+    /// Checks the custom headers and the typed address, then moves to ``Phase/validating``, or
+    /// sets ``failure``. Synchronous, so a second call in the same turn finds the flow busy.
+    private func startValidation() -> (address: String, headers: [String: String])? {
         lastAction = .validate
         let headers: [String: String]
         do {
             headers = try Self.headers(from: customHeaders)
         } catch {
             failure = error
-            return
+            return nil
         }
         guard !ServerAddress.connectionCandidates(for: address).isEmpty else {
             failure = .invalidAddress
-            return
+            return nil
         }
-        let typed = address
         failure = nil
         phase = .validating
+        return (address, headers)
+    }
+
+    private func validate(_ request: (address: String, headers: [String: String]), attempt: Int) async {
         do {
-            let server = try await backend.validate(address: typed, customHeaders: headers)
+            let server = try await backend.validate(address: request.address, customHeaders: request.headers)
             guard isCurrent(attempt) else { return }
             self.server = server
             password = ""
             phase = .login
         } catch {
             guard isCurrent(attempt) else { return }
-            let failure = await failure(for: error, address: typed)
+            let failure = await failure(for: error, address: request.address)
             guard isCurrent(attempt) else { return }
             self.failure = failure
             phase = .address

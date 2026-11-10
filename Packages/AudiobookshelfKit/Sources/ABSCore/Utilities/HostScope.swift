@@ -30,13 +30,11 @@ public enum HostScope: Sendable, Hashable {
         }
     }
 
-    /// Whether reaching `host` may need local network access: a local address, or any name
-    /// but `localhost`, since split DNS, `.lan`, `.home.arpa` or `.internal` names can resolve
-    /// to a local address.
+    /// Whether reaching `host` may need local network access: anything but loopback. Split DNS,
+    /// `.lan`, `.home.arpa` or `.internal` names can resolve to a local address, and a network
+    /// can use a public range locally, so the path's reason decides, not this classification.
     public static func mayUseLocalNetwork(host: String) -> Bool {
-        let host = normalized(host)
-        if let scope = addressScope(of: host) { return scope == .localNetwork }
-        return host != "localhost"
+        HostScope(host: host) != .loopback
     }
 
     private static func normalized(_ host: String) -> String {

@@ -22,6 +22,9 @@ private final class FakeBackend: ConnectBackend {
     var validationGate: AsyncStream<Void>?
     /// When set, resuming waits for a value.
     var resumeGate: AsyncStream<Void>?
+    /// When set, both sign-ins wait for a value, or until cancelled.
+    var signInGate: AsyncStream<Void>?
+    private(set) var signInStarts = 0
     private(set) var resumeCalls = 0
     private(set) var validated: [(address: String, headers: [String: String])] = []
     private(set) var passwordSignIns: [String] = []
@@ -40,11 +43,15 @@ private final class FakeBackend: ConnectBackend {
     }
 
     func signIn(to server: ConnectServer, username: String, password: String) async throws {
+        signInStarts += 1
+        if let signInGate { for await _ in signInGate { break } }
         passwordSignIns.append("\(username):\(password)")
         if let signInError { throw signInError }
     }
 
     func signIn(openIDTo server: ConnectServer, authenticator: any WebAuthenticator) async throws {
+        signInStarts += 1
+        if let signInGate { for await _ in signInGate { break } }
         _ = try await authenticator.authenticate(server.address.url, callbackScheme: OIDCLoginService.callbackScheme)
         openIDSignIns += 1
     }
@@ -297,11 +304,12 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.phase == .login && model.failure == nil)
     }
 
-    /// Names may resolve to a local address; loopback and public addresses can't be.
+    /// Only loopback is skipped: names may resolve to a local address, and the path's reason
+    /// decides for any other address.
     @Test(arguments: [
         ("https://abs.example.com", true), ("http://nas.lan", true), ("http://nas.local", true),
         ("http://192.168.1.20", true), ("http://localhost:3333", false), ("http://127.0.0.1", false),
-        ("http://8.8.8.8", false), ("http://134744072", false),
+        ("http://8.8.8.8", true), ("http://134744072", true),
     ])
     func unreachableServerWithLocalNetworkAllowedCannotConnect(address: String, checks: Bool) async {
         backend.validateError = ServerValidationError.cannotConnect(.cannotConnectToHost)
@@ -362,6 +370,26 @@ private func connection(username: String = "david", address: String = "https://a
         model.addServer()
         await model.retry()
         #expect(model.phase == .address && backend.validated.count == 1)
+    }
+
+    /// The check starts before the first call suspends, so a second one in the same turn
+    /// finds the flow busy.
+    @Test func secondSubmitOrRetryInTheSameTurnIsIgnored() async {
+        backend.validateError = ServerValidationError.cannotConnect(.cannotConnectToHost)
+        let (model, _) = model(denied: true)
+        model.address = "http://192.168.1.20:13378"
+        let first = Task { await model.submitAddress() }
+        let second = Task { await model.submitAddress() }
+        await first.value
+        await second.value
+        #expect(backend.validated.count == 1 && model.failure == .localNetworkDenied)
+
+        backend.validateError = nil
+        let retry = Task { await model.retry() }
+        let again = Task { await model.retry() }
+        await retry.value
+        await again.value
+        #expect(backend.validated.count == 2 && model.phase == .login)
     }
 
     @Test func savedServerWithSessionIsResumed() async {
@@ -472,5 +500,28 @@ private func connection(username: String = "david", address: String = "https://a
         open.yield()
         await task.value
         #expect(model.phase == .address && model.server == nil && model.failure == nil)
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+    func cancellingASignInReturnsToLogin(openID: Bool) async {
+        backend.status.authMethods = [.local, .openID]
+        let model = await loginModel()
+        model.username = "david"
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        backend.signInGate = gate
+        let task = Task {
+            if openID {
+                await model.signInWithOpenID(using: FakeAuthenticator())
+            } else {
+                await model.signIn()
+            }
+        }
+        while backend.signInStarts == 0 { await Task.yield() }
+        #expect(model.phase == .signingIn(openID ? .openID : .password))
+        model.cancel()
+        #expect(model.phase == .login && !model.isBusy)
+        open.yield()
+        await task.value
+        #expect(model.phase == .login && model.failure == nil && model.server != nil)
     }
 }
