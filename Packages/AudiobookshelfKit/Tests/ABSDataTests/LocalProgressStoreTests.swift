@@ -217,6 +217,56 @@ import Testing
         #expect(try await reread.progress(for: key)?.unacknowledgedSends == [patch.values])
     }
 
+    /// A failed acknowledgement save leaves the row as an unacknowledged send (like a lost
+    /// response): still dirty with its newer edit and evidence, no hold, and server values then
+    /// go through the usual rules (an older one keeps the edit, a newer one wins the conflict).
+    @Test(arguments: [false, true])
+    func failedAcknowledgementSaveKeepsTheRowPending(_ serverIsNewer: Bool) async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.recordEdit(Self.seek(300), for: key, now: Self.at(2))
+        let queued = await store.captureGeneration()
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.completeSend(patch, serverLastUpdate: nil) }
+
+        let failed = try #require(try await store.progress(for: key))
+        #expect(failed.currentTime == 300)
+        #expect(failed.audioDirty)
+        #expect(failed.audioEditedAt == Self.at(2))
+        #expect(failed.serverBaseline?.currentTime == 100)
+        #expect(failed.unacknowledgedSends == [patch.values])
+        #expect(await store.needsConfirmationFetch.isEmpty)
+
+        // Queued before the settlement: dropped.
+        let early = try await store.applyServerProgress(
+            [key: Self.server(currentTime: 900, lastUpdate: Self.at(50))], capturedAt: queued, source: .socket)
+        #expect(early.isEmpty)
+        #expect(try await store.progress(for: key) == failed)
+
+        // The PATCH's own echo and another device's older write keep the newer edit.
+        for server in [Self.server(currentTime: 200, lastUpdate: Self.at(1.5)), Self.server(lastUpdate: Self.at(1.6))] {
+            let capture = await store.captureGeneration()
+            try await store.applyServerProgress([key: server], capturedAt: capture, source: .socket)
+            let row = try #require(try await store.progress(for: key))
+            #expect(row.currentTime == 300)
+            #expect(row.audioDirty)
+            #expect(row.audioEditedAt == Self.at(2))
+        }
+
+        guard serverIsNewer else {
+            #expect(try await store.beginSend(for: key)?.values.audio?.currentTime == 300)
+            return
+        }
+        let capture = await store.captureGeneration()
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 900, lastUpdate: Self.at(3))], capturedAt: capture, source: .socket)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 900)
+        #expect(!row.audioDirty)
+    }
+
     // MARK: - Stale and in-flight server values
 
     @Test func fetchIssuedBeforeLocalSeekChangesNothing() async throws {
