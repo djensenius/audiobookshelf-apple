@@ -441,19 +441,34 @@ private func query(_ request: URLRequest?) -> [String: String] {
     }
 
     @Test(arguments: [
-        ("/login?error=Unauthorized", "Unauthorized"), ("/abs/login?error=Unauthorized", "Unauthorized"),
-        ("https://abs.example:443/login?error=Unauthorized", "Unauthorized"),
-        ("http://abs.example/login?error=Unauthorized", nil),
-        ("https://abs.example:8443/login?error=Unauthorized", nil),
-        ("https://evil.example/login?error=Unauthorized", nil), ("/login/other?error=Unauthorized", nil),
+        // The server's root-relative refusal redirect, for a root server and a subfolder server.
+        ("https://abs.example", "/login?error=Unauthorized", "Unauthorized"),
+        ("https://abs.example/", "/login?error=Unauthorized", "Unauthorized"),
+        ("https://abs.example/abs", "/login?error=Unauthorized", "Unauthorized"),
+        ("https://abs.example/abs/", "/login?error=Unauthorized", "Unauthorized"),
+        // The server's base path plus `/login`, with or without trailing slashes on the base path.
+        ("https://abs.example/abs", "/abs/login?error=Unauthorized", "Unauthorized"),
+        ("https://abs.example/abs/", "/abs/login?error=Unauthorized", "Unauthorized"),
+        ("https://abs.example/abs//", "/abs/login?error=Unauthorized", "Unauthorized"),
+        ("https://abs.example/abs", "https://abs.example:443/login?error=Unauthorized", "Unauthorized"),
+        // Not this server's login page.
+        ("https://abs.example/abs", "/another-app/login?error=Unauthorized", nil),
+        ("https://abs.example", "/another-app/login?error=Unauthorized", nil),
+        ("https://abs.example/abs", "/abs/another-app/login?error=Unauthorized", nil),
+        ("https://abs.example/abs", "/login/?error=Unauthorized", nil),
+        ("https://abs.example/abs", "/login/other?error=Unauthorized", nil),
+        ("https://abs.example", "/abs/login?error=Unauthorized", nil),
+        ("https://abs.example/abs", "http://abs.example/login?error=Unauthorized", nil),
+        ("https://abs.example/abs", "https://abs.example:8443/login?error=Unauthorized", nil),
+        ("https://abs.example/abs", "https://evil.example/login?error=Unauthorized", nil),
     ])
-    func refusalMessageNeedsServerLoginPage(location: String, message: String?) throws {
+    func refusalMessageNeedsServerLoginPage(server: String, location: String, message: String?) throws {
         let callback = try #require(URL(string: "https://abs.example/abs/auth/openid/callback?state=s"))
         let response = try #require(
             HTTPURLResponse(
                 url: callback, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": location]))
-        let server = try #require(URL(string: "https://abs.example/abs"))
-        #expect(OIDCLoginService.refusal(from: response, server: server) == .serverRefused(message: message))
+        let serverURL = try #require(URL(string: server))
+        #expect(OIDCLoginService.refusal(from: response, server: serverURL) == .serverRefused(message: message))
     }
 
     @Test func forbiddenCallbackIsAccessDenied() async throws {

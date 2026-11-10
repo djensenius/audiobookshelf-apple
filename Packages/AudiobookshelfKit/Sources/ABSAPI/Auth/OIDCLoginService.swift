@@ -217,14 +217,22 @@ public struct OIDCLoginService: Sendable {
     /// identity provider refuses, a user that isn't allowed or doesn't exist) with
     /// `302 /login?error=<message>&autoLaunch=0`: `passportCallback` treats the request as
     /// mobile only if `req.session[…].mobile === true`, but `mobile` holds the redirect URI.
-    /// The message is read only from a redirect to the server's own `…/login` page.
+    /// The message is read only from a redirect to the server's own login page: same origin, and
+    /// a path of exactly `/login` (what the server sends, even under a subfolder) or the
+    /// server's base path plus `/login`.
     static func refusal(from response: HTTPURLResponse, server: URL) -> OIDCLoginError {
         guard
             let location = response.value(forHTTPHeaderField: "Location")
                 .flatMap({ URL(string: $0, relativeTo: response.url)?.absoluteURL }),
-            sameOrigin(location, server), location.path(percentEncoded: true).hasSuffix("/login")
+            sameOrigin(location, server), isLoginPath(location.path(percentEncoded: true), server: server)
         else { return .serverRefused(message: nil) }
         return .serverRefused(message: displayText(queryValue("error", in: location), limit: 200))
+    }
+
+    private static func isLoginPath(_ path: String, server: URL) -> Bool {
+        var basePath = Substring(server.path(percentEncoded: true))
+        while basePath.hasSuffix("/") { basePath = basePath.dropLast() }
+        return path == "/login" || path == basePath + "/login"
     }
 
     private static func sameOrigin(_ url: URL, _ other: URL) -> Bool {

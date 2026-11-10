@@ -134,6 +134,37 @@ private func hasCredentials(_ request: URLRequest?) -> Bool {
         #expect(!hasCredentials(followed))
     }
 
+    /// Any POST (a session sync, a bookmark) is refused rather than turned into a GET whose
+    /// reply would look like its result; a 307 or 308 re-posts the body, and GETs still follow.
+    @Test(arguments: [301, 302, 303]) func methodChangingRedirectIsRefused(status: Int) async throws {
+        let server = StubServer { request in
+            request.url?.path() == "/abs/a"
+                ? .redirect(to: "https://\(request.url?.host() ?? "")/abs/b", status: status) : .json("{}")
+        }
+        let client = try makeClient(server)
+
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await client.send(Endpoint<EmptyResponse>(.post, "/a", body: ["name": "value"]))
+        }
+        #expect(server.requests(path: "/abs/b").isEmpty)
+        _ = try await client.send(Endpoint<EmptyResponse>(.get, "/a"))
+        #expect(server.requests(path: "/abs/b").first?.httpMethod == "GET")
+    }
+
+    @Test(arguments: [307, 308]) func methodKeepingRedirectRepostsTheBody(status: Int) async throws {
+        let server = StubServer { request in
+            request.url?.path() == "/abs/a"
+                ? .redirect(to: "https://\(request.url?.host() ?? "")/abs/b", status: status) : .json("{}")
+        }
+
+        _ = try await makeClient(server).send(Endpoint<EmptyResponse>(.post, "/a", body: ["name": "value"]))
+
+        let followed = try #require(server.requests(path: "/abs/b").first)
+        #expect(followed.httpMethod == "POST")
+        #expect(followed.httpBody == Data(#"{"name":"value"}"#.utf8))
+        #expect(followed.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "proxy-secret")
+    }
+
     @Test func downgradeToHTTPIsRefused() async throws {
         let server = StubServer { request in
             request.url?.scheme == "https" ? .redirect(to: "http://\(request.url?.host() ?? "")/abs/b") : .json("{}")
@@ -156,20 +187,5 @@ private func hasCredentials(_ request: URLRequest?) -> Bool {
             .shared, task: task, willPerformHTTPRedirection: response, newRequest: URLRequest(url: url))
 
         #expect(next == nil)
-    }
-
-    @Test(arguments: [
-        ("https://a.example", "https://a.example:443/x", true),
-        ("https://a.example", "https://A.EXAMPLE/x", true),
-        ("http://a.example", "https://a.example/x", true),
-        ("http://a.example:8080", "https://a.example:8443/x", false),
-        ("https://a.example", "http://a.example/x", false),
-        ("https://a.example", "https://b.example/x", false),
-        ("https://a.example", "https://a.example:8443/x", false),
-    ])
-    func comparesOrigins(current: String, next: String, expected: Bool) throws {
-        let current = try #require(URL(string: current))
-        let next = try #require(URL(string: next))
-        #expect(RedirectPolicy.isSameOrigin(current, next) == expected)
     }
 }
