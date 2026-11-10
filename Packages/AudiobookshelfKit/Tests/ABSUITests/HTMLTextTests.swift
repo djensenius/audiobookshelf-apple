@@ -43,7 +43,7 @@ import Testing
     }
 
     @Test func lineBreaks() {
-        #expect(plain("a<br>b<br/>c<BR />d") == "a\nb\nc\nd")
+        #expect(plain("a<br>b<br/>c<BR />d</br>e") == "a\nb\nc\nd\ne")
         #expect(plain("<br><br>a<br>") == "a")
     }
 
@@ -56,6 +56,12 @@ import Testing
         #expect(plain("<p>Intro</p><ul><li>One</li><li>Two</li></ul><p>End</p>") == "Intro\n\n• One\n• Two\n\nEnd")
     }
 
+    @Test func listItemWhitespaceIsCollapsed() {
+        #expect(plain("<ul>\n<li>\n  A\n</li></ul>") == "• A")
+        #expect(plain("<ol>\n  <li>  A  </li>\n  <li>\tB</li>\n</ol>") == "1. A\n2. B")
+        #expect(plain("<ul><li></li></ul>") == "•")
+    }
+
     @Test func orderedList() {
         #expect(plain("<ol><li>One<li>Two</ol>") == "1. One\n2. Two")
     }
@@ -63,6 +69,29 @@ import Testing
     @Test func nestedLists() {
         let html = "<ul><li>A<ol><li>x</li><li>y</li></ol></li><li>B</li></ul>"
         #expect(plain(html) == "• A\n    1. x\n    2. y\n• B")
+    }
+
+    @Test func deepNestingIsBounded() {
+        let depth = 10_000
+        let value = plain(String(repeating: "<ul><li>x", count: depth))
+        // At most 3 indent levels (12 spaces) + "• x\n" per item.
+        #expect(value.count <= depth * 16)
+        #expect(value.hasSuffix("            • x"))
+        let deepOrdered = plain(
+            String(repeating: "<ol><li>x", count: 100) + String(repeating: "</ol>", count: 100) + "end")
+        #expect(deepOrdered.hasSuffix("x\n\nend"))
+    }
+
+    @Test func largeInputsStayFast() {
+        let clock = ContinuousClock()
+        let elapsed = clock.measure {
+            #expect(plain(String(repeating: "<br>", count: 100_000) + "a") == "a")
+            #expect(plain("a" + String(repeating: "<br>", count: 100_000) + "b").count == 100_002)
+            let styled = HTMLText.attributedString(from: String(repeating: "<b>a</b><i>b</i> ", count: 20_000))
+            #expect(styled.characters.count == 60_000 - 1)
+        }
+        // Linear work takes well under a second; the old quadratic builder took tens of seconds.
+        #expect(elapsed < .seconds(15))
     }
 
     // MARK: Inline styles
@@ -113,6 +142,9 @@ import Testing
             #"<a href=" javascript:alert(1)">x</a>"#,
             #"<a href="&#106;avascript:alert(1)">x</a>"#,
             #"<a href="java&#x09;script:alert(1)">x</a>"#,
+            #"<a href="java&#x0A;script:alert(1)">x</a>"#,
+            #"<a href="https:evil.com">x</a>"#,
+            #"<a href="https:\\evil.com">x</a>"#,
             #"<a href="data:text/html,<script>alert(1)</script>">x</a>"#,
             #"<a href="vbscript:msgbox">x</a>"#,
             #"<a href="file:///etc/passwd">x</a>"#,
@@ -147,6 +179,11 @@ import Testing
         #expect(plain("a<SCRIPT type=text/javascript>alert(1)</SCRIPT >b") == "ab")
         #expect(plain("a<style>p { color: red }</style>b") == "ab")
         #expect(plain("a<noscript>no</noscript><iframe src=x>frame</iframe>b") == "ab")
+    }
+
+    @Test func otherElementsKeepTheirText() {
+        #expect(plain("<title>T</title> <textarea>x</textarea> <select>y") == "T x y")
+        #expect(plain("<svg><text>s</text></svg> <object>o</object> <head>h</head>") == "s o h")
     }
 
     @Test func scriptClosingTagMustMatchName() {
@@ -192,10 +229,17 @@ import Testing
 
     @Test func invalidNumericEntitiesBecomeReplacementCharacter() {
         #expect(plain("&#0;&#xD800;&#x110000;") == "\u{FFFD}\u{FFFD}\u{FFFD}")
+        #expect(plain("&#99999999999;&#xFFFFFFFFFF;") == "\u{FFFD}\u{FFFD}")
+    }
+
+    @Test func numericEntitiesRequireDigits() {
+        #expect(plain("&#+65;&#-65;&#x+41;&#;&#x;&#٣;") == "&#+65;&#-65;&#x+41;&#;&#x;&#٣;")
     }
 
     @Test func unknownOrMalformedEntitiesAreKept() {
         #expect(plain("&foo; &amp &#xZZ; AT&T") == "&foo; &amp &#xZZ; AT&T")
+        // References without `;` are not decoded.
+        #expect(plain("&lt b &#65 c") == "&lt b &#65 c")
     }
 
     @Test func escapedMarkupStaysText() {

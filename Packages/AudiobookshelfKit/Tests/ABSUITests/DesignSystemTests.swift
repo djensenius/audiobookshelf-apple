@@ -21,10 +21,43 @@ import Testing
         #expect(AppTheme.allCases.filter(\.usesTrueBlack) == [.black])
     }
 
-    @Test func blackThemeUsesTrueBlackBackground() {
-        #expect(ABSColor.background(for: .black) == .black)
-        #expect(ABSColor.surface(for: .black) == .black)
-        #expect(ABSColor.background(for: .dark) != .black)
+    private func resolved(
+        _ color: ABSThemedColor,
+        scheme: ColorScheme,
+        theme: AppTheme = .system
+    ) -> Color.Resolved {
+        var environment = EnvironmentValues()
+        environment.colorScheme = scheme
+        environment.absTheme = theme
+        return color.resolve(in: environment).resolve(in: environment)
+    }
+
+    private func rgb(_ red: Double, _ green: Double, _ blue: Double) -> Color.Resolved {
+        Color.rgb(red, green, blue).resolve(in: EnvironmentValues())
+    }
+
+    @Test func themedColorsResolvePerAppearance() {
+        #expect(resolved(ABSColor.background, scheme: .light) == rgb(255, 255, 255))
+        #expect(resolved(ABSColor.background, scheme: .dark) == rgb(56, 56, 56))
+        #expect(resolved(ABSColor.foreground, scheme: .light) == rgb(37, 37, 37))
+        #expect(resolved(ABSColor.foreground, scheme: .dark) == rgb(230, 237, 243))
+    }
+
+    @Test func blackThemeResolvesLegacyBlackPalette() {
+        let black = Color.black.resolve(in: EnvironmentValues())
+        #expect(resolved(ABSColor.background, scheme: .dark, theme: .black) == black)
+        #expect(resolved(ABSColor.surface, scheme: .dark, theme: .black) == black)
+        #expect(resolved(ABSColor.secondarySurface, scheme: .dark, theme: .black) == black)
+        #expect(resolved(ABSColor.border, scheme: .dark, theme: .black) == rgb(55, 62, 65))
+        #expect(resolved(ABSColor.mutedForeground, scheme: .dark, theme: .black) == rgb(120, 126, 132))
+        #expect(resolved(ABSColor.background, scheme: .dark, theme: .dark) == rgb(56, 56, 56))
+    }
+
+    @Test func themeEnvironmentDefaultsToSystem() {
+        var environment = EnvironmentValues()
+        #expect(environment.absTheme == .system)
+        environment.absTheme = .black
+        #expect(environment.absTheme == .black)
     }
 
     @Test func timestampMatchesLegacy() {
@@ -37,10 +70,32 @@ import Testing
         let elapsed = DurationStyle.elapsed()
         #expect(elapsed.string(93_784, locale: english) == "1d 2h 3m 4s")
         #expect(elapsed.string(3_600, locale: english) == "1h")
-        #expect(elapsed.string(65.7, locale: english) == "1m 5s")
+        #expect(elapsed.string(65.7, locale: english) == "1m 6s")
+        #expect(elapsed.string(59.5, locale: english) == "1m")
         #expect(DurationStyle.elapsed(useDays: false).string(93_784, locale: english) == "26h 3m 4s")
         #expect(DurationStyle.elapsed(showSeconds: false).string(3_690, locale: english) == "1h 2m")
         #expect(DurationStyle.elapsed(showSeconds: false).string(3_660 + 29, locale: english) == "1h 1m")
+        // Legacy only rounds up when the minute-of-hour is non-zero.
+        #expect(DurationStyle.elapsed(showSeconds: false).string(3_630, locale: english) == "1h")
+    }
+
+    @Test func elapsedEdgeCasesMatchLegacy() {
+        let english = Locale(identifier: "en_US")
+        for value in [0, -5, .nan, .infinity, 0.4] as [TimeInterval] {
+            #expect(DurationStyle.elapsed().string(value, locale: english) == "", "\(value)")
+            #expect(DurationStyle.elapsed().accessibilityString(value, locale: english) == "", "\(value)")
+        }
+        #expect(DurationStyle.elapsed(showSeconds: false).string(29, locale: english) == "")
+        #expect(DurationStyle.elapsed(showSeconds: false).string(45, locale: english) == "")
+        #expect(DurationStyle.elapsed().string(1e20, locale: english).isEmpty == false)
+    }
+
+    @Test func timestampEdgeCases() {
+        let english = Locale(identifier: "en_US")
+        for value in [0, -5, .nan, .infinity] as [TimeInterval] {
+            #expect(DurationStyle.timestamp.string(value) == "0:00", "\(value)")
+            #expect(DurationStyle.timestamp.accessibilityString(value, locale: english) == "0 seconds", "\(value)")
+        }
     }
 
     @Test func durationAccessibilityIsSpokenInWords() {

@@ -1,17 +1,26 @@
 import SwiftUI
 
 /// Text limited to a few lines with a Read more / Read less toggle, shown only when the
-/// text is actually truncated. Use ``init(html:collapsedLineLimit:)`` for server
-/// descriptions.
+/// text is actually truncated. Collapses again when the text changes.
+///
+/// ``init(html:collapsedLineLimit:)`` parses the HTML off the main actor once per distinct
+/// `html` value and caches the result, so it is cheap to re-create from a parent's `body`.
+/// Parsing is linear in the input; the text is empty until the first parse finishes.
 public struct ExpandableText: View {
-    private let text: AttributedString
+    private enum Source: Hashable {
+        case attributed(AttributedString)
+        case html(String)
+    }
+
+    private let source: Source
     private let collapsedLineLimit: Int
+    @State private var parsedHTML: (html: String, text: AttributedString)?
     @State private var isExpanded = false
     @State private var fullHeight: CGFloat = 0
     @State private var collapsedHeight: CGFloat = 0
 
     public init(_ text: AttributedString, collapsedLineLimit: Int = 4) {
-        self.text = text
+        source = .attributed(text)
         self.collapsedLineLimit = collapsedLineLimit
     }
 
@@ -21,7 +30,15 @@ public struct ExpandableText: View {
 
     /// Renders the safe subset of `html` supported by ``HTMLText``.
     public init(html: String, collapsedLineLimit: Int = 4) {
-        self.init(HTMLText.attributedString(from: html), collapsedLineLimit: collapsedLineLimit)
+        source = .html(html)
+        self.collapsedLineLimit = collapsedLineLimit
+    }
+
+    private var text: AttributedString {
+        switch source {
+        case .attributed(let text): text
+        case .html(let html): parsedHTML?.html == html ? parsedHTML?.text ?? AttributedString() : AttributedString()
+        }
     }
 
     private var isTruncated: Bool { fullHeight > collapsedHeight + 1 }
@@ -56,6 +73,16 @@ public struct ExpandableText: View {
                 }
                 .buttonStyle(.borderless)
             }
+        }
+        .onChange(of: source) { isExpanded = false }
+        .task(id: source) {
+            guard case .html(let html) = source, parsedHTML?.html != html else { return }
+            let parsed = await Task.detached(priority: .userInitiated) {
+                HTMLText.attributedString(from: html)
+            }
+            .value
+            guard !Task.isCancelled else { return }
+            parsedHTML = (html, parsed)
         }
     }
 }

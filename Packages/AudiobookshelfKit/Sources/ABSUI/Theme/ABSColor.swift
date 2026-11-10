@@ -1,35 +1,44 @@
 import ABSCore
 import SwiftUI
 
-#if canImport(UIKit)
-    import UIKit
-#elseif canImport(AppKit)
-    import AppKit
-#endif
-
-/// Semantic colours, adapted from the legacy `tailwind.css` palette for system light and
-/// dark appearance. The `black` theme uses the true-black variants from
-/// ``background(for:)`` and ``surface(for:)``.
+/// Semantic colours from the legacy `tailwind.css` palette, with light, dark and true-black
+/// (``AppTheme/black``) variants.
+///
+/// The themed colours are ``ABSThemedColor`` shape styles that resolve from the view's
+/// `colorScheme` and `absTheme` environment values, so set the theme with `absTheme(_:)`.
+/// Presentations that don't inherit the environment (some sheets, new macOS windows) must
+/// apply `absTheme(_:)` again.
 public enum ABSColor {
     /// The app's accent colour from the app target's `AccentColor` asset.
     public static let accent = Color.accentColor
 
     /// Screen background (legacy `bg`).
-    public static let background = Color(light: .rgb(255, 255, 255), dark: .rgb(56, 56, 56))
+    public static let background = ABSThemedColor(light: .rgb(255, 255, 255), dark: .rgb(56, 56, 56), black: .black)
     /// Bars, sheets and cards (legacy `primary`).
-    public static let surface = Color(light: .rgb(222, 222, 222), dark: .rgb(35, 35, 35))
+    public static let surface = ABSThemedColor(light: .rgb(222, 222, 222), dark: .rgb(35, 35, 35), black: .black)
     /// Grouped rows and inputs (legacy `secondary`).
-    public static let secondarySurface = Color(light: .rgb(246, 248, 250), dark: .rgb(47, 48, 48))
+    public static let secondarySurface = ABSThemedColor(
+        light: .rgb(246, 248, 250), dark: .rgb(47, 48, 48), black: .black
+    )
     /// Primary text (legacy `fg`).
-    public static let foreground = Color(light: .rgb(37, 37, 37), dark: .rgb(230, 237, 243))
+    public static let foreground = ABSThemedColor(
+        light: .rgb(37, 37, 37), dark: .rgb(230, 237, 243), black: .rgb(230, 237, 243)
+    )
     /// Secondary text (legacy `fg-muted`).
-    public static let mutedForeground = Color(light: .rgb(101, 109, 118), dark: .rgb(142, 147, 153))
+    public static let mutedForeground = ABSThemedColor(
+        light: .rgb(101, 109, 118), dark: .rgb(142, 147, 153), black: .rgb(120, 126, 132)
+    )
     /// Separators and outlines (legacy `border`).
-    public static let border = Color(light: .rgb(189, 191, 191), dark: .rgb(75, 85, 89))
+    public static let border = ABSThemedColor(
+        light: .rgb(189, 191, 191), dark: .rgb(75, 85, 89), black: .rgb(55, 62, 65))
     /// Unfilled part of progress bars and sliders (legacy `track`).
-    public static let track = Color(light: .rgb(189, 191, 191), dark: .rgb(107, 114, 128))
+    public static let track = ABSThemedColor(
+        light: .rgb(189, 191, 191), dark: .rgb(107, 114, 128), black: .rgb(107, 114, 128)
+    )
     /// Buffered part of the playback track (legacy `track-buffered`).
-    public static let trackBuffered = Color(light: .rgb(129, 131, 131), dark: .rgb(75, 85, 99))
+    public static let trackBuffered = ABSThemedColor(
+        light: .rgb(129, 131, 131), dark: .rgb(75, 85, 99), black: .rgb(75, 85, 99)
+    )
 
     public static let error = Color.rgb(255, 82, 82)
     public static let info = Color.rgb(33, 150, 243)
@@ -37,15 +46,24 @@ public enum ABSColor {
     public static let warning = Color.rgb(251, 140, 0)
     /// Listening progress on covers (legacy `yellow-400`).
     public static let progress = Color.rgb(250, 204, 21)
+}
 
-    /// The screen background for `theme`: true black for ``AppTheme/black``.
-    public static func background(for theme: AppTheme) -> Color {
-        theme.usesTrueBlack ? .black : background
+/// A colour that resolves per appearance and app theme: `black` for ``AppTheme/black``,
+/// otherwise `light` or `dark` by colour scheme.
+public struct ABSThemedColor: ShapeStyle, Hashable, Sendable {
+    public let light: Color
+    public let dark: Color
+    public let black: Color
+
+    public init(light: Color, dark: Color, black: Color) {
+        self.light = light
+        self.dark = dark
+        self.black = black
     }
 
-    /// The surface colour for `theme`: true black for ``AppTheme/black``.
-    public static func surface(for theme: AppTheme) -> Color {
-        theme.usesTrueBlack ? .black : surface
+    public func resolve(in environment: EnvironmentValues) -> Color {
+        if environment.absTheme.usesTrueBlack { return black }
+        return environment.colorScheme == .dark ? dark : light
     }
 }
 
@@ -69,7 +87,7 @@ extension EnvironmentValues {
 }
 
 extension View {
-    /// Applies `theme`'s colour scheme and makes the theme available to `absBackground()`.
+    /// Applies `theme`'s colour scheme and makes the theme available to ``ABSColor``.
     public func absTheme(_ theme: AppTheme) -> some View {
         preferredColorScheme(theme.colorScheme)
             .environment(\.absTheme, theme)
@@ -77,36 +95,11 @@ extension View {
 
     /// Fills the background with the themed screen background, true black for the black theme.
     public func absBackground() -> some View {
-        modifier(ThemedBackground())
-    }
-}
-
-private struct ThemedBackground: ViewModifier {
-    @Environment(\.absTheme) private var theme
-
-    func body(content: Content) -> some View {
-        content.background(ABSColor.background(for: theme), ignoresSafeAreaEdges: .all)
+        background(ABSColor.background, ignoresSafeAreaEdges: .all)
     }
 }
 
 extension Color {
-    /// A colour that resolves to `light` or `dark` with the current appearance.
-    public init(light: Color, dark: Color) {
-        #if canImport(UIKit)
-            self.init(
-                uiColor: UIColor { traits in
-                    traits.userInterfaceStyle == .dark ? UIColor(dark) : UIColor(light)
-                }
-            )
-        #elseif canImport(AppKit)
-            self.init(
-                nsColor: NSColor(name: nil) { appearance in
-                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? NSColor(dark) : NSColor(light)
-                }
-            )
-        #endif
-    }
-
     static func rgb(_ red: Double, _ green: Double, _ blue: Double) -> Color {
         Color(.sRGB, red: red / 255, green: green / 255, blue: blue / 255)
     }

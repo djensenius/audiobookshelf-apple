@@ -29,7 +29,8 @@ public enum HTMLText {
     }
 
     /// Decodes named (a common subset) and numeric character references. Unknown or
-    /// malformed references are kept as written; invalid code points become U+FFFD.
+    /// malformed references, and references without a trailing `;`, are kept as written;
+    /// invalid code points become U+FFFD.
     static func decodeEntities(_ text: String) -> String {
         guard text.contains("&") else { return text }
         var result = ""
@@ -53,15 +54,18 @@ public enum HTMLText {
 
     private static func decodeReference(_ name: Substring) -> Character? {
         if name.hasPrefix("#") {
-            let digits = name.dropFirst()
-            let value: UInt32?
+            var digits = name.dropFirst()
+            var radix = 10
             if digits.first == "x" || digits.first == "X" {
-                value = UInt32(digits.dropFirst(), radix: 16)
-            } else {
-                value = UInt32(digits, radix: 10)
+                digits = digits.dropFirst()
+                radix = 16
             }
-            guard let value else { return nil }
-            guard value != 0, let scalar = Unicode.Scalar(value) else { return "\u{FFFD}" }
+            let isDigit: (Character) -> Bool = { $0.isASCII && (radix == 16 ? $0.isHexDigit : $0.isWholeNumber) }
+            guard !digits.isEmpty, digits.allSatisfy(isDigit) else { return nil }
+            // Overflowing references saturate to U+FFFD, as in browsers.
+            guard let value = UInt32(digits, radix: radix), value != 0, let scalar = Unicode.Scalar(value) else {
+                return "\u{FFFD}"
+            }
             return Character(scalar)
         }
         return namedEntities[String(name)]
@@ -85,8 +89,7 @@ private struct HTMLParser {
 
     /// Elements whose content is not text and is dropped.
     private static let rawTextElements: Set<String> = [
-        "script", "style", "template", "noscript", "iframe", "object", "svg", "math", "textarea",
-        "title", "head", "select",
+        "script", "style", "template", "noscript", "iframe",
     ]
     private static let paragraphElements: Set<String> = [
         "p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "table",
@@ -252,6 +255,7 @@ private struct HTMLParser {
         case "b", "strong": output.bold = max(output.bold - 1, 0)
         case "i", "em": output.italic = max(output.italic - 1, 0)
         case "a": _ = output.links.popLast()
+        case "br": output.lineBreak()
         case "ul", "ol": output.closeList()
         case "li": output.ensureBreaks(1)
         case _ where Self.paragraphElements.contains(name): output.ensureBreaks(2)
@@ -322,7 +326,8 @@ private struct HTMLParser {
     }
 }
 
-/// Accumulates styled text, collapsing whitespace and tracking line breaks.
+/// Accumulates plain text plus a list of styled runs, then builds the `AttributedString`
+/// once in ``finish()``, so the cost stays linear in the input size.
 private struct OutputBuilder {
     var bold = 0
     var italic = 0
@@ -333,20 +338,39 @@ private struct OutputBuilder {
         var next = 1
     }
 
+    private struct Style: Equatable {
+        var bold = false
+        var italic = false
+        var link: URL?
+    }
+
+    /// Deeper lists are flattened into the deepest one, so hostile nesting can't blow up the output.
+    private static let maxListDepth = 16
+    /// Indentation stops growing after this many levels.
+    private static let maxIndentLevel = 3
+
     private var lists: [List] = []
-    private var result = AttributedString()
+    private var flattenedLists = 0
+    private var text = ""
+    private var runs: [(scalarCount: Int, style: Style)] = []
     private var isEmpty = true
+    private var atLineStart = true
     private var trailingNewlines = 0
     private var pendingSpace = false
 
-    private var attributes: AttributeContainer {
-        var container = AttributeContainer()
-        var intent: InlinePresentationIntent = []
-        if bold > 0 { intent.insert(.stronglyEmphasized) }
-        if italic > 0 { intent.insert(.emphasized) }
-        if !intent.isEmpty { container.inlinePresentationIntent = intent }
-        if let link = links.last ?? nil { container.link = link }
-        return container
+    private var style: Style {
+        Style(bold: bold > 0, italic: italic > 0, link: links.last ?? nil)
+    }
+
+    private mutating func append(_ string: String, style: Style = Style()) {
+        guard !string.isEmpty else { return }
+        text += string
+        let count = string.unicodeScalars.count
+        if let last = runs.indices.last, runs[last].style == style {
+            runs[last].scalarCount += count
+        } else {
+            runs.append((count, style))
+        }
     }
 
     mutating func appendText(_ text: String) {
@@ -356,22 +380,26 @@ private struct OutputBuilder {
                 pendingSpace = true
                 continue
             }
-            if pendingSpace, !chunk.isEmpty || (!isEmpty && trailingNewlines == 0) {
+            if pendingSpace, !chunk.isEmpty || (!isEmpty && !atLineStart) {
                 chunk.append(" ")
             }
             pendingSpace = false
             chunk.append(character)
         }
         guard !chunk.isEmpty else { return }
-        result += AttributedString(chunk, attributes: attributes)
+        append(chunk, style: style)
         isEmpty = false
+        atLineStart = false
         trailingNewlines = 0
     }
 
+    /// A line break; ignored before any text, so the result never starts with one.
     mutating func lineBreak() {
         pendingSpace = false
-        result += AttributedString("\n")
+        guard !isEmpty else { return }
+        append("\n")
         trailingNewlines += 1
+        atLineStart = true
     }
 
     /// Ends the current line or paragraph so that at least `count` line breaks precede the next text.
@@ -383,17 +411,25 @@ private struct OutputBuilder {
 
     mutating func openList(ordered: Bool) {
         ensureBreaks(lists.isEmpty ? 2 : 1)
-        lists.append(List(ordered: ordered))
+        if lists.count < Self.maxListDepth {
+            lists.append(List(ordered: ordered))
+        } else {
+            flattenedLists += 1
+        }
     }
 
     mutating func closeList() {
-        _ = lists.popLast()
+        if flattenedLists > 0 {
+            flattenedLists -= 1
+        } else {
+            _ = lists.popLast()
+        }
         ensureBreaks(lists.isEmpty ? 2 : 1)
     }
 
     mutating func listItem() {
         ensureBreaks(1)
-        let indent = String(repeating: "    ", count: max(lists.count - 1, 0))
+        let indent = String(repeating: "    ", count: min(max(lists.count - 1, 0), Self.maxIndentLevel))
         let marker: String
         if let last = lists.indices.last, lists[last].ordered {
             marker = "\(lists[last].next). "
@@ -401,16 +437,42 @@ private struct OutputBuilder {
         } else {
             marker = "• "
         }
-        result += AttributedString(indent + marker)
+        append(indent + marker)
         isEmpty = false
+        atLineStart = true
         trailingNewlines = 0
         pendingSpace = false
     }
 
-    /// The result without leading or trailing line breaks.
+    /// The result without trailing line breaks or spaces.
     mutating func finish() -> AttributedString {
-        while result.characters.first == "\n" { result.characters.removeFirst() }
-        while result.characters.last == "\n" { result.characters.removeLast() }
+        var trimmed = 0
+        while let last = text.unicodeScalars.last, last == "\n" || last == " " {
+            text.unicodeScalars.removeLast()
+            trimmed += 1
+        }
+        while trimmed > 0, let last = runs.indices.last {
+            let removed = min(trimmed, runs[last].scalarCount)
+            runs[last].scalarCount -= removed
+            trimmed -= removed
+            if runs[last].scalarCount == 0 { runs.removeLast() }
+        }
+
+        var result = AttributedString(text)
+        var start = result.startIndex
+        for run in runs {
+            let end = result.unicodeScalars.index(start, offsetBy: run.scalarCount)
+            if run.style != Style() {
+                var container = AttributeContainer()
+                var intent: InlinePresentationIntent = []
+                if run.style.bold { intent.insert(.stronglyEmphasized) }
+                if run.style.italic { intent.insert(.emphasized) }
+                if !intent.isEmpty { container.inlinePresentationIntent = intent }
+                if let link = run.style.link { container.link = link }
+                result[start..<end].mergeAttributes(container)
+            }
+            start = end
+        }
         return result
     }
 }
