@@ -59,6 +59,10 @@ jobs:
       - name: Test AudiobookshelfKit
         run: mise run test:kit
 
+      - name: Slow AudiobookshelfKit tests
+        if: github.event_name == 'push'
+        run: mise run test:kit:slow
+
       - name: Build for iOS Simulator
         run: mise run build:ios
 
