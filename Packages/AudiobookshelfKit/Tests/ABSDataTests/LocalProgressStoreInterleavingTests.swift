@@ -62,6 +62,8 @@ private struct StoreInterleaving {
     let key: MediaKey
     var rng: SeededGenerator
     var log: [String] = []
+    /// Invariants found broken during a step, reported by ``check()``.
+    private var violations: [String] = []
     private var milliseconds: Double = 0
     /// Positions 10 s apart: comparisons allow 1 s.
     private var nextValue: Double = 20
@@ -176,7 +178,8 @@ private struct StoreInterleaving {
             try await store.applyServerProgress([key: event], capturedAt: capture, source: .socket)
             log.append("\(Int(milliseconds)) ms: socket \(event.currentTime)\(held ? " held" : "")")
             if held, try await store.progress(for: key)?.currentTime != before?.currentTime {
-                log.append("\(Int(milliseconds)) ms: VIOLATION: a held socket value became the row's value")
+                violations.append("a held socket value \(event.currentTime) became the row's value")
+                log.append("\(Int(milliseconds)) ms: VIOLATION: \(violations[violations.count - 1])")
             }
         case 75..<83:
             fetches.append(Fetch(captured: await store.captureGeneration(), generation: generation))
@@ -201,7 +204,7 @@ private struct StoreInterleaving {
 
     /// The invariants; returns a description of the first one violated.
     mutating func check() async throws -> String? {
-        if log.last?.hasPrefix("VIOLATION") == true { return log.last }
+        if let violation = violations.first { return violation }
         guard let row = try await store.progress(for: key) else { return "the row is gone" }
         let value = row.currentTime
         if let edit = pending, value != edit.value {
