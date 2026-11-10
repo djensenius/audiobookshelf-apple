@@ -112,6 +112,12 @@ import Testing
                 "LabelAddedAt" : {
                   "extractionState" : "manual",
                   "localizations" : {
+                    "de" : {
+                      "stringUnit" : {
+                        "state" : "new",
+                        "value" : "Added At"
+                      }
+                    },
                     "en" : {
                       "stringUnit" : {
                         "state" : "translated",
@@ -148,6 +154,27 @@ import Testing
     @Test func listsLocalesWithStringsSourceFirst() throws {
         let result = try CatalogBuilder.build(files: files)
         #expect(result.locales == ["en", "de"])
+    }
+
+    @Test func fillsUntranslatedKeysWithEnglishMarkedNew() throws {
+        let files = [
+            LocaleFile(
+                name: "en-us", strings: ["ButtonCancel": "Cancel", "HeaderWelcome": "Welcome, {0}", "Empty": "E"]),
+            LocaleFile(
+                name: "fi", strings: ["ButtonCancel": "Peruuta", "HeaderWelcome": "Tervetuloa, {0", "Empty": " "]),
+        ]
+        let json = try CatalogBuilder.build(files: files).json
+        let catalog = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        let strings = try #require(catalog?["strings"] as? [String: [String: Any]])
+        func unit(_ key: String, _ locale: String) -> [String: String]? {
+            let localizations = strings[key]?["localizations"] as? [String: [String: [String: String]]]
+            return localizations?[locale]?["stringUnit"]
+        }
+        #expect(unit("ButtonCancel", "fi") == ["state": "translated", "value": "Peruuta"])
+        // Skipped (malformed) and empty translations both fall back to English.
+        #expect(unit("HeaderWelcome", "fi") == ["state": "new", "value": "Welcome, %1$@"])
+        #expect(unit("Empty", "fi") == ["state": "new", "value": "E"])
+        #expect(unit("Empty", "en") == ["state": "translated", "value": "E"])
     }
 
     @Test func warnsAboutSkippedTranslations() throws {

@@ -48,6 +48,7 @@ message asking for an entry in `LocaleMapping.overrides`; then add the new ident
   `AttributedString(markdown:)`.
 - Empty translations are skipped. So is a translation that uses a placeholder its English
   string doesn't have, or a malformed one such as `{0`; the importer prints a warning.
+  Skipped keys get the English fill described below.
 - Output is deterministic (sorted keys, Xcode's JSON layout), so rerunning is a no-op.
 
 There are no plurals in the legacy strings. RTL and pseudo-locale checks are out of scope
@@ -55,9 +56,16 @@ for now.
 
 ## Missing translations
 
-A key a language hasn't translated is not written to that language. At runtime the
-compiled tables return the key itself for it (Foundation doesn't fall back to English per
-key), so always look strings up through `L10n.string`, which falls back to English.
+Keys a language hasn't translated in Weblate show English. For every locale in the
+catalog, the importer writes the English value with `state: "new"` for each key that is
+missing, empty, or skipped, and real translations with `state: "translated"`. Xcode's
+catalog editor therefore lists those strings as "new" (untranslated), and its
+per-language progress stays accurate.
+
+Without the fill, the compiled tables return the key name (`ButtonAllow`) for an
+untranslated key: Foundation doesn't fall back to English per key, and the compiler
+writes the key itself for missing format strings. `L10n.string` also falls back to the
+English table if a lookup returns the key, as a safety net.
 
 ## Locale mapping
 

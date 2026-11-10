@@ -10,9 +10,9 @@ public enum L10n {
     /// The string for `key`, with the legacy `{0}`, `{1}`, … placeholders replaced by
     /// `arguments` in order.
     ///
-    /// `locale` picks the language; `nil` uses the app's preferred localization. A key a
-    /// language hasn't translated yet falls back to English: the compiled tables return the
-    /// key itself for those, not the source string.
+    /// `locale` picks the language; `nil` uses the app's preferred localization. The importer
+    /// fills untranslated keys with English; if a lookup still returns the key itself, this
+    /// falls back to the English table.
     ///
     /// Values may contain Markdown such as `**bold**`; render it with
     /// `AttributedString(markdown:)`.

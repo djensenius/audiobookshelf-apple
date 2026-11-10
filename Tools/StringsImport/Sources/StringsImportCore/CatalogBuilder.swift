@@ -32,7 +32,8 @@ public struct LocaleFile: Sendable, Equatable {
 public struct CatalogBuildResult: Sendable {
     /// The `.xcstrings` file contents.
     public var json: String
-    /// Apple identifiers with at least one string, source language first, then sorted.
+    /// Apple identifiers with at least one translated string, source language first, then
+    /// sorted. Each of them has every key: untranslated ones get the English value.
     public var locales: [String]
     /// Translations that were skipped or converted with leftovers, for the log.
     public var warnings: [String]
@@ -77,6 +78,16 @@ public enum CatalogBuilder {
             }
         }
 
+        // A key a locale hasn't translated gets the English value marked "new". Without it
+        // the compiled table returns the key name (Foundation doesn't fall back per key).
+        let others = locales.subtracting([sourceLanguage]).sorted()
+        for key in entries.keys {
+            guard let english = entries[key]?.localizations[sourceLanguage]?.stringUnit.value else { continue }
+            for locale in others where entries[key]?.localizations[locale] == nil {
+                entries[key]?.localizations[locale] = Localization(stringUnit: StringUnit(state: "new", value: english))
+            }
+        }
+
         let catalog = Catalog(sourceLanguage: sourceLanguage, strings: entries, version: "1.0")
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -86,7 +97,6 @@ public enum CatalogBuilder {
         } catch {
             throw .invalidFile(fileName: sourceFileName, reason: "could not encode the catalog: \(error)")
         }
-        let others = locales.subtracting([sourceLanguage]).sorted()
         return CatalogBuildResult(
             json: String(decoding: data, as: UTF8.self) + "\n",
             locales: [sourceLanguage] + others,
