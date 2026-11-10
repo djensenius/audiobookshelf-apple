@@ -73,6 +73,13 @@ public struct ServerValidator: Sendable {
         } catch let error as APIError {
             throw Self.loginError(error)
         }
+        return try await Self.loginResult(from: reply, client: client)
+    }
+
+    /// Turns a sign-in response (`POST /login` or `GET /auth/openid/callback`) into a
+    /// ``LoginResult``, applying the version gate and requiring both tokens. If the response is
+    /// refused, the session the server just created is logged out through `client`, best effort.
+    static func loginResult(from reply: APIResponse<Data>, client: APIClient) async throws -> LoginResult {
         guard !(300..<400).contains(reply.httpResponse.statusCode) else {
             throw ServerValidationError.loginRedirected
         }
@@ -217,7 +224,7 @@ public struct ServerValidator: Sendable {
         }
     }
 
-    private static func genericError(_ error: APIError) -> ServerValidationError {
+    static func genericError(_ error: APIError) -> ServerValidationError {
         switch error {
         case .network(let code) where certificateErrors.contains(code): .untrustedCertificate
         case .network(let code): .cannotConnect(code)
@@ -352,8 +359,8 @@ public enum ServerValidationError: Error, Sendable, Equatable, LocalizedError {
     }
 }
 
-/// The token provider for the unauthenticated clients the validator creates.
-private struct SignedOutTokenProvider: TokenProvider {
+/// The token provider for the unauthenticated clients the validator and OpenID sign-in create.
+struct SignedOutTokenProvider: TokenProvider {
     func tokens() async -> AuthTokens? { nil }
     func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool { false }
     func expireSession(ifCurrent rejected: AuthTokens) async -> Bool { false }
