@@ -281,9 +281,17 @@ Model notes:
 - **Pending sessions** store `startTime` (the legacy app didn't send it; the
   `local-all` DTO in #33 (P1-10) decides whether the upload includes it). The
   `deviceInfo` object (device id, model, client version) is not stored; it is
-  rebuilt when the upload is sent. After a successful `local-all` upload, the
-  legacy rule applies: delete the sessions that are not `isActive` (all of them on
-  the first sync after login).
+  rebuilt when the upload is sent. Deletion after a `local-all` upload is decided
+  per session, never from the batch's HTTP status: the server answers with
+  `results[]` (`id`, `success`, `error`), and only a session whose own result is
+  `success: true` may be deleted. Sessions with a failed or missing result stay
+  pending and are retried on later syncs; after 5 failed results (e.g. `Media item
+  not found` for an item deleted on the server) the session is discarded and logged,
+  so it can't stay pending forever. Each upload records the `updatedAt` it sent for every session; a session
+  changed while the upload was in flight (its `updatedAt` no longer matches) is
+  kept and sent again on the next sync. Within those rules the legacy rule applies:
+  only sessions that are not `isActive` are deleted (all acknowledged ones on the
+  first sync after login).
 - **History** stays on the device, as in the legacy app. Events older than 90 days
   are deleted at launch.
 - **Connections:** the session to restore is the connected record with the latest
