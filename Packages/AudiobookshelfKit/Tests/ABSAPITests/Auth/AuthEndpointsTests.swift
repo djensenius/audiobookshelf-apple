@@ -113,6 +113,25 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         #expect(logout.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
     }
 
+    @Test func endpointCookieIsCombinedWithTheJar() async throws {
+        let server = StubServer { _ in .json(#"{"redirect_url":null}"#) }
+        let client = try makeClient(server)
+        let jar = try #require(client.cookieStorage)
+        for (name, value) in [("lb", "1"), ("auth_method", "stale"), ("refresh_token", "cookie-token")] {
+            jar.setCookie(
+                try #require(
+                    HTTPCookie(properties: [.name: name, .value: value, .domain: server.host, .path: "/"])))
+        }
+        var logout = AuthEndpoints.logout(refreshToken: "refresh-1")
+        logout.headers["cookie"] = "auth_method=openid; openid_id_token=id"
+
+        _ = try await client.send(logout)
+
+        let request = try #require(server.requests(path: "/abs/logout").first)
+        #expect(request.value(forHTTPHeaderField: "Cookie") == "lb=1; auth_method=openid; openid_id_token=id")
+        #expect(request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+    }
+
     @Test func logoutWithAnEmptyJarSendsNoCookies() async throws {
         let server = StubServer { _ in .json(#"{"redirect_url":null}"#) }
         let client = try makeClient(server)
