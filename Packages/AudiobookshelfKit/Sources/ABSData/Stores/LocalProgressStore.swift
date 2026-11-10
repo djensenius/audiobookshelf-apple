@@ -11,10 +11,13 @@ public struct ProgressGeneration: Sendable, Hashable, Comparable {
     public static func < (lhs: ProgressGeneration, rhs: ProgressGeneration) -> Bool { lhs.value < rhs.value }
 }
 
-/// A progress PATCH to send: only the groups in `values` (the dirty groups when it was taken).
+/// A progress PATCH to send: one group (`values.groups`), with its values when it was taken.
 public struct ProgressPatch: Sendable, Equatable {
     public var key: MediaKey
     public var values: ProgressSend
+    /// Identifies this send; settling a patch that is no longer the row's send in flight does
+    /// nothing.
+    public let token: UUID
 }
 
 /// The server's per-session answer to `POST /api/session/local-all`.
@@ -26,17 +29,25 @@ public enum SessionUploadResult: Sendable, Equatable {
 /// The only writer of `LocalMediaProgress` and `PendingLocalSession` (ADR 0003).
 ///
 /// Progress follows the ADR 0003 sync rules: local edits mark only the field groups they touch,
-/// a PATCH carries only dirty groups, at most one PATCH is in flight per row, and server
-/// progress is merged per group (``applyServerProgress(_:capturedAt:)``) after dropping values
-/// captured before the row's last local edit or PATCH settlement.
-@ModelActor public actor LocalProgressStore {
-    /// Pending sessions are discarded after this many failed upload results.
+/// each PATCH carries one dirty group (audio, then finished, then ebook; #53), at most one PATCH
+/// is in flight per row, and server progress is merged per group
+/// (``applyServerProgress(_:capturedAt:)``) after dropping values captured before the row's last
+/// local edit or PATCH settlement. Every write is saved through ``commit(_:)``, which rolls the
+/// context back when it fails; in-memory bookkeeping changes only after a successful save.
+@ModelActor public actor LocalProgressStore: StoreActor {
+    /// Pending sessions are discarded after this many counted upload failures.
     public static let maxUploadFailures = 5
+    /// At most one failure per session is counted in this interval.
+    public static let uploadFailureWindow: TimeInterval = 60 * 60
+    /// This many consecutive uploads without a result for a session count as one failure.
+    public static let missingResultsPerFailure = 3
+
+    var pendingCommitFailure: (any Error)?
 
     // In memory only: no fetch or PATCH outlives the process.
     private var generation: UInt64 = 0
     private var rowGenerations: [String: UInt64] = [:]
-    private var inFlight: [String: ProgressGroups] = [:]
+    private var inFlight: [String: (token: UUID, groups: ProgressGroups)] = [:]
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "persistence")
 
@@ -62,29 +73,31 @@ public enum SessionUploadResult: Sendable, Equatable {
         localLibraryItemID: UUID? = nil,
         now: Date = .now
     ) throws -> LocalMediaProgressDTO {
-        let row: LocalMediaProgress
-        var state: ProgressSyncState
-        if let existing = try fetchRow(key) {
-            row = existing
-            state = ProgressSyncState(existing)
-        } else {
-            row = LocalMediaProgress(
-                key: key.rawValue,
-                serverConnectionID: key.serverConnectionID,
-                libraryItemId: key.libraryItemId,
-                episodeId: key.episodeId,
-                startedAt: now,
-                lastUpdate: now
-            )
-            modelContext.insert(row)
-            state = serverProgress.map(ProgressSyncState.init(seed:)) ?? ProgressSyncState(lastUpdate: now)
+        let saved = try commit {
+            let row: LocalMediaProgress
+            var state: ProgressSyncState
+            if let existing = try fetchRow(key) {
+                row = existing
+                state = ProgressSyncState(existing)
+            } else {
+                row = LocalMediaProgress(
+                    key: key.rawValue,
+                    serverConnectionID: key.serverConnectionID,
+                    libraryItemId: key.libraryItemId,
+                    episodeId: key.episodeId,
+                    startedAt: now,
+                    lastUpdate: now
+                )
+                modelContext.insert(row)
+                state = serverProgress.map(ProgressSyncState.init(seed:)) ?? ProgressSyncState(lastUpdate: now)
+            }
+            if let localLibraryItemID { row.localLibraryItemID = localLibraryItemID }
+            state.apply(edit, now: now)
+            state.write(to: row)
+            return LocalMediaProgressDTO(row)
         }
-        if let localLibraryItemID { row.localLibraryItemID = localLibraryItemID }
-        state.apply(edit, now: now)
-        state.write(to: row)
-        try modelContext.save()
         advance(key)
-        return LocalMediaProgressDTO(row)
+        return saved
     }
 
     /// Merges server progress (from `/api/me`, an expanded item, `/api/me/progress/:id` or a
@@ -96,52 +109,72 @@ public enum SessionUploadResult: Sendable, Equatable {
         _ updates: [MediaKey: ProgressBaseline],
         capturedAt: ProgressGeneration
     ) throws -> Set<MediaKey> {
-        var merged: Set<MediaKey> = []
-        for (key, server) in updates {
-            if let edited = rowGenerations[key.rawValue], edited > capturedAt.value { continue }
-            guard let row = try fetchRow(key) else { continue }
-            var state = ProgressSyncState(row)
-            guard state.merge(server, excluding: inFlight[key.rawValue] ?? []) else { continue }
-            state.write(to: row)
-            merged.insert(key)
+        try commit {
+            var merged: Set<MediaKey> = []
+            for (key, server) in updates {
+                if let edited = rowGenerations[key.rawValue], edited > capturedAt.value { continue }
+                guard let row = try fetchRow(key) else { continue }
+                var state = ProgressSyncState(row)
+                guard state.merge(server, excluding: inFlight[key.rawValue]?.groups ?? []) else { continue }
+                state.write(to: row)
+                merged.insert(key)
+            }
+            return merged
         }
-        if !merged.isEmpty { try modelContext.save() }
-        return merged
     }
 
-    /// Takes a snapshot of the row's dirty groups for a PATCH and records it as unacknowledged.
-    /// Returns `nil` when there is no row, nothing is dirty, or a PATCH for the row is already in
-    /// flight. Settle every returned patch with ``completeSend(_:serverLastUpdate:)`` or
-    /// ``failSend(_:error:)``.
+    /// Takes a snapshot of the row's next dirty group (audio, then finished, then ebook) for a
+    /// PATCH and records it as unacknowledged. Returns `nil` when there is no row, nothing is
+    /// dirty, or a PATCH for the row is already in flight. Settle every returned patch with
+    /// ``completeSend(_:serverLastUpdate:)`` or ``failSend(_:error:)``, then call this again for
+    /// the next group.
     public func beginSend(for key: MediaKey, now: Date = .now) throws -> ProgressPatch? {
-        guard inFlight[key.rawValue] == nil, let row = try fetchRow(key) else { return nil }
-        var state = ProgressSyncState(row)
-        guard let send = state.beginSend() else { return nil }
-        state.write(to: row)
-        row.lastSyncAttemptAt = now
-        try modelContext.save()
-        inFlight[key.rawValue] = send.groups
-        return ProgressPatch(key: key, values: send)
+        guard inFlight[key.rawValue] == nil else { return nil }
+        let send: ProgressSend? = try commit {
+            guard let row = try fetchRow(key) else { return nil }
+            var state = ProgressSyncState(row)
+            guard let send = state.beginSend() else { return nil }
+            state.write(to: row)
+            row.lastSyncAttemptAt = now
+            return send
+        }
+        guard let send else { return nil }
+        let patch = ProgressPatch(key: key, values: send, token: UUID())
+        inFlight[key.rawValue] = (patch.token, send.groups)
+        return patch
     }
 
     /// The PATCH succeeded. `serverLastUpdate` is the response's `lastUpdate`, when it has one.
-    public func completeSend(_ patch: ProgressPatch, serverLastUpdate: Date?) throws {
+    /// Returns `false`, changing nothing, when `patch` is not the row's send in flight (a late or
+    /// repeated response for a send already settled).
+    @discardableResult
+    public func completeSend(_ patch: ProgressPatch, serverLastUpdate: Date?) throws -> Bool {
+        guard inFlight[patch.key.rawValue]?.token == patch.token else { return false }
+        // Settled even when the save fails: the send stays recorded, so a later fetch still
+        // recognises its echo.
         defer { settle(patch.key) }
-        guard let row = try fetchRow(patch.key) else { return }
-        var state = ProgressSyncState(row)
-        state.acknowledge(patch.values, serverLastUpdate: serverLastUpdate)
-        state.write(to: row)
-        row.lastSyncError = nil
-        try modelContext.save()
+        try commit {
+            guard let row = try fetchRow(patch.key) else { return }
+            var state = ProgressSyncState(row)
+            state.acknowledge(patch.values, serverLastUpdate: serverLastUpdate)
+            state.write(to: row)
+            row.lastSyncError = nil
+        }
+        return true
     }
 
     /// The PATCH failed or its response was lost. The send stays recorded as unacknowledged, and
-    /// the next attempt sends the then-current values.
-    public func failSend(_ patch: ProgressPatch, error: String?) throws {
+    /// the next attempt sends the then-current values. Returns `false`, changing nothing, when
+    /// `patch` is not the row's send in flight.
+    @discardableResult
+    public func failSend(_ patch: ProgressPatch, error: String?) throws -> Bool {
+        guard inFlight[patch.key.rawValue]?.token == patch.token else { return false }
         defer { settle(patch.key) }
-        guard let row = try fetchRow(patch.key) else { return }
-        row.lastSyncError = error
-        try modelContext.save()
+        try commit {
+            guard let row = try fetchRow(patch.key) else { return }
+            row.lastSyncError = error
+        }
+        return true
     }
 
     public func progress(for key: MediaKey) throws -> LocalMediaProgressDTO? {
@@ -160,29 +193,36 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Links the row to a downloaded item, or unlinks it (`nil`) when the download is deleted.
     @discardableResult
     public func setLocalLibraryItemID(_ id: UUID?, for key: MediaKey) throws -> Bool {
-        guard let row = try fetchRow(key) else { return false }
-        row.localLibraryItemID = id
-        try modelContext.save()
-        return true
+        try commit {
+            guard let row = try fetchRow(key) else { return false }
+            row.localLibraryItemID = id
+            return true
+        }
     }
 
     @discardableResult
     public func deleteProgress(for key: MediaKey) throws -> Bool {
-        guard let row = try fetchRow(key) else { return false }
-        modelContext.delete(row)
-        try modelContext.save()
-        rowGenerations[key.rawValue] = nil
-        return true
+        let deleted = try commit {
+            guard let row = try fetchRow(key) else { return false }
+            modelContext.delete(row)
+            return true
+        }
+        if deleted { rowGenerations[key.rawValue] = nil }
+        return deleted
     }
 
     /// Deletes synced rows that don't belong to a download. Returns the number deleted.
     @discardableResult
     public func pruneSynced() throws -> Int {
         let predicate = #Predicate<LocalMediaProgress> { !$0.needsServerSync && $0.localLibraryItemID == nil }
-        let keys = try modelContext.fetch(FetchDescriptor(predicate: predicate)).map(\.key)
-        guard !keys.isEmpty else { return 0 }
-        try modelContext.delete(model: LocalMediaProgress.self, where: predicate)
-        try modelContext.save()
+        // Row by row: a batch delete bypasses the context, so a failed save couldn't roll it back.
+        let keys = try commit {
+            let rows = try modelContext.fetch(FetchDescriptor(predicate: predicate))
+            for row in rows {
+                modelContext.delete(row)
+            }
+            return rows.map(\.key)
+        }
         for key in keys where inFlight[key] == nil {
             rowGenerations[key] = nil
         }
@@ -191,11 +231,15 @@ public enum SessionUploadResult: Sendable, Equatable {
 
     // MARK: - Pending sessions
 
-    /// Inserts the session, or updates the one with the same `id` in place.
+    /// Inserts the session, or updates the one with the same `id` in place. The upload
+    /// bookkeeping (`uploadAttempts`, `lastUploadError`) is never taken from `session`; only
+    /// ``settleSessionUpload(sent:results:isFirstSync:now:)`` changes it.
     public func saveSession(_ session: PendingLocalSessionDTO) throws {
-        if let existing = try fetchSession(id: session.id) {
-            session.write(to: existing)
-        } else {
+        try commit {
+            if let existing = try fetchSession(id: session.id) {
+                session.write(to: existing)
+                return
+            }
             let model = PendingLocalSession(
                 id: session.id,
                 serverConnectionID: session.key.serverConnectionID,
@@ -210,7 +254,6 @@ public enum SessionUploadResult: Sendable, Equatable {
             session.write(to: model)
             modelContext.insert(model)
         }
-        try modelContext.save()
     }
 
     public func session(id: String) throws -> PendingLocalSessionDTO? {
@@ -228,18 +271,23 @@ public enum SessionUploadResult: Sendable, Equatable {
 
     @discardableResult
     public func deleteSession(id: String) throws -> Bool {
-        guard let session = try fetchSession(id: id) else { return false }
-        modelContext.delete(session)
-        try modelContext.save()
-        return true
+        try commit {
+            guard let session = try fetchSession(id: id) else { return false }
+            modelContext.delete(session)
+            return true
+        }
     }
 
     /// Applies the per-session results of a `local-all` upload; never the batch's HTTP status.
     ///
-    /// A session is deleted only when its own result is a success, it wasn't changed while the
-    /// upload was in flight (its `updatedAt` still equals the one sent), and it isn't active
-    /// (active ones too on the first sync after login). A failure is counted, and the session is
-    /// discarded after ``maxUploadFailures`` failures. Sessions with no result stay pending.
+    /// - A success resets the session's upload bookkeeping. The session is deleted only when it
+    ///   wasn't changed while the upload was in flight (its `updatedAt` still equals the one
+    ///   sent) and isn't active (active ones too on the first sync after login).
+    /// - A failure counts toward discarding the session, and ``missingResultsPerFailure``
+    ///   consecutive uploads without a result count as one failure, but only when the session
+    ///   wasn't changed during the upload (newer data may succeed) and no failure was counted in
+    ///   the last ``uploadFailureWindow``. After ``maxUploadFailures`` counted failures the
+    ///   session is discarded and logged.
     ///
     /// - Parameter sent: The `updatedAt` sent for each session, by id.
     /// - Returns: The ids of the deleted sessions.
@@ -247,19 +295,40 @@ public enum SessionUploadResult: Sendable, Equatable {
     public func settleSessionUpload(
         sent: [String: Date],
         results: [String: SessionUploadResult],
-        isFirstSync: Bool
+        isFirstSync: Bool,
+        now: Date = .now
     ) throws -> Set<String> {
-        var deleted: Set<String> = []
-        for (id, sentUpdatedAt) in sent {
-            guard let result = results[id], let session = try fetchSession(id: id) else { continue }
-            switch result {
-            case .success:
-                guard session.updatedAt == sentUpdatedAt, !session.isActive || isFirstSync else { continue }
-                modelContext.delete(session)
-                deleted.insert(id)
-            case .failure(let message):
+        try commit {
+            var deleted: Set<String> = []
+            for (id, sentUpdatedAt) in sent {
+                guard let session = try fetchSession(id: id) else { continue }
+                let unchanged = session.updatedAt == sentUpdatedAt
+                let message: String?
+                switch results[id] {
+                case .success:
+                    session.uploadAttempts = 0
+                    session.lastUploadError = nil
+                    session.lastUploadFailureAt = nil
+                    session.missingUploadResults = 0
+                    if unchanged, !session.isActive || isFirstSync {
+                        modelContext.delete(session)
+                        deleted.insert(id)
+                    }
+                    continue
+                case .failure(let error):
+                    session.missingUploadResults = 0
+                    message = error
+                case nil:
+                    guard unchanged else { continue }
+                    session.missingUploadResults += 1
+                    guard session.missingUploadResults >= Self.missingResultsPerFailure else { continue }
+                    message = "No upload result"
+                }
+                guard unchanged, Self.canCountFailure(after: session.lastUploadFailureAt, now: now) else { continue }
+                session.missingUploadResults = 0
                 session.uploadAttempts += 1
                 session.lastUploadError = message
+                session.lastUploadFailureAt = now
                 if session.uploadAttempts >= Self.maxUploadFailures {
                     Self.logger.error(
                         "Discarding session \(id, privacy: .public) after \(session.uploadAttempts) failed uploads: \(message ?? "", privacy: .public)"
@@ -268,9 +337,13 @@ public enum SessionUploadResult: Sendable, Equatable {
                     deleted.insert(id)
                 }
             }
+            return deleted
         }
-        try modelContext.save()
-        return deleted
+    }
+
+    private static func canCountFailure(after last: Date?, now: Date) -> Bool {
+        guard let last else { return true }
+        return now.timeIntervalSince(last) >= uploadFailureWindow
     }
 
     // MARK: - Private

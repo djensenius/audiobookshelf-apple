@@ -35,6 +35,15 @@ import Testing
         return try #require(send, sourceLocation: sourceLocation)
     }
 
+    /// Records the dirty groups as one unacknowledged entry. `beginSend()` sends one group at a
+    /// time, but the merge rules handle entries with several groups too.
+    @discardableResult
+    private static func recordMixedSend(_ state: inout ProgressSyncState) -> ProgressSend {
+        let send = state.dirtyValues
+        state.unacknowledgedSends.append(send)
+        return send
+    }
+
     /// A row seeded from server progress at `t0`.
     private static func seeded() -> ProgressSyncState {
         ProgressSyncState(seed: server(lastUpdate: t0))
@@ -54,9 +63,11 @@ import Testing
         #expect(values.finished == nil)
         #expect(values.ebook == .init(ebookLocation: "epubcfi(/6/8)", ebookProgress: 0.4, editedAt: Self.at(10)))
 
-        state.apply(ProgressEdit(isFinished: true), now: Self.at(20))
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(20.000_6))
         #expect(state.dirty == [.ebook, .finished])
-        #expect(state.finishedAt == Self.at(20))
+        // Truncated to whole milliseconds, as the server stores it.
+        #expect(state.finishedAt == ProgressSyncState.wholeMilliseconds(Self.at(20.000_6)))
+        #expect(state.finishedAt != Self.at(20.000_6))
         state.apply(ProgressEdit(isFinished: false), now: Self.at(30))
         #expect(state.finishedAt == nil)
     }
@@ -147,26 +158,25 @@ import Testing
         state.apply(Self.seek(200), now: Self.at(10))
         state.apply(Self.page("epubcfi(/6/8)", 0.4), now: Self.at(10))
         let send = try Self.send(&state)
-        #expect(send.groups == [.audio, .ebook])
-        // Edited while the PATCH is in flight; finished is dirty but wasn't sent.
+        // One group per PATCH, audio first (#53).
+        #expect(send.groups == .audio)
+        // Edited while the PATCH is in flight.
         state.apply(Self.seek(260), now: Self.at(20))
-        state.apply(ProgressEdit(isFinished: true), now: Self.at(20))
 
         state.acknowledge(send, serverLastUpdate: Self.at(15))
-        #expect(state.dirty == [.audio, .finished])
+        #expect(state.dirty == [.audio, .ebook])
         #expect(state.currentTime == 260)
         #expect(state.serverBaseline?.currentTime == 200)
-        #expect(state.serverBaseline?.ebookLocation == "epubcfi(/6/8)")
-        #expect(state.serverBaseline?.isFinished == false)
+        #expect(state.serverBaseline?.ebookLocation == "epubcfi(/6/2)")
         #expect(state.serverBaseline?.lastUpdate == Self.at(15))
         #expect(state.unacknowledgedSends.isEmpty)
+        // The ebook group is sent next; audio waits for it.
+        #expect(state.nextSendGroup == .audio)
 
         // The next fetch shows the acknowledged values: the newer edit is kept, not a conflict.
-        let fetched = Self.server(
-            currentTime: 200, ebookLocation: "epubcfi(/6/8)", ebookProgress: 0.4, lastUpdate: Self.at(15))
-        state.merge(fetched)
+        state.merge(Self.server(currentTime: 200, lastUpdate: Self.at(15)))
         #expect(state.currentTime == 260)
-        #expect(state.dirty == [.audio, .finished])
+        #expect(state.dirty == [.audio, .ebook])
     }
 
     @Test func acknowledgeWithoutBaselineUsesRowValuesForUnsentGroups() throws {
@@ -240,22 +250,21 @@ import Testing
 
     @Test func truncatedGroupKeepsLocalOnUnmatchedServerValue() throws {
         var state = Self.seeded()
-        state.apply(Self.page("p0", 0.2), now: Self.at(1))
-        state.apply(Self.seek(150), now: Self.at(1))
         for index in 0...ProgressSend.historyLimit {
             state.apply(Self.page("p\(index)", 0.2), now: Self.at(Double(2 + index)))
             try Self.send(&state)
         }
-        #expect(state.truncated == [.audio, .ebook])
+        #expect(state.truncated == .ebook)
         // An unmatched, newer server ebook value may be a dropped send: local wins and stays dirty.
         state.merge(Self.server(ebookLocation: "unknown", lastUpdate: Self.at(500)))
         #expect(state.ebookLocation == "p\(ProgressSend.historyLimit)")
         #expect(state.dirty.contains(.ebook))
 
-        // A successful PATCH clears the truncation flags.
+        // A successful PATCH of the group clears its truncation flag and evidence.
         let send = try Self.send(&state)
         state.acknowledge(send, serverLastUpdate: Self.at(600))
         #expect(state.truncated.isEmpty)
+        #expect(state.unacknowledgedSends.isEmpty)
     }
 
     @Test func untruncatedGroupStillResolvesConflictsByTime() throws {
@@ -281,7 +290,7 @@ import Testing
         var state = Self.seeded()
         state.apply(Self.seek(200), now: Self.at(10))
         state.apply(Self.page("A", 0.3), now: Self.at(10))
-        let sendA = try Self.send(&state)
+        let sendA = Self.recordMixedSend(&state)
         #expect(sendA.groups == [.audio, .ebook])
         state.apply(Self.page("E2", 0.5), now: Self.at(20))
 
@@ -307,10 +316,10 @@ import Testing
         var state = Self.seeded()
         state.apply(Self.seek(200), now: Self.at(10))
         state.apply(Self.page("A", 0.3), now: Self.at(10))
-        try Self.send(&state)
+        Self.recordMixedSend(&state)
         state.apply(Self.seek(300), now: Self.at(20))
         state.apply(Self.page("B", 0.4), now: Self.at(20))
-        let sendB = try Self.send(&state)
+        let sendB = Self.recordMixedSend(&state)
 
         // Ebook echoes A, audio is unchanged from the baseline: only A's ebook is pruned.
         state.merge(Self.server(ebookLocation: "A", ebookProgress: 0.3, lastUpdate: Self.at(30)))
@@ -319,6 +328,272 @@ import Testing
         #expect(state.unacknowledgedSends[0].audio?.currentTime == 200)
         #expect(state.unacknowledgedSends[1] == sendB)
         #expect(state.dirty == [.audio, .ebook])
+    }
+
+    /// The #37 scenario when A carried only the ebook group: an ebook edit, PATCH A (response
+    /// lost), a newer ebook edit, then fetches. Another device's audio change doesn't touch the
+    /// ebook evidence, and A's ebook echo is still recognised.
+    @Test func ebookOnlySendEvidenceSurvivesUnrelatedFetches() throws {
+        var state = Self.seeded()
+        state.apply(Self.page("A", 0.3), now: Self.at(10))
+        let sendA = try Self.send(&state)
+        #expect(sendA.groups == .ebook)
+        state.apply(Self.page("E2", 0.5), now: Self.at(20))
+
+        state.merge(Self.server(currentTime: 700, lastUpdate: Self.at(30)))
+        #expect(state.unacknowledgedSends == [sendA])
+        state.merge(Self.server(currentTime: 800, ebookLocation: "A", ebookProgress: 0.3, lastUpdate: Self.at(90)))
+        #expect(state.ebookLocation == "E2")
+        #expect(state.dirty == .ebook)
+        #expect(state.currentTime == 800)
+        #expect(state.unacknowledgedSends.isEmpty)
+    }
+
+    // MARK: - Single-group sends
+
+    @Test func sendsOneGroupAtATimeInOrder() throws {
+        var state = Self.seeded()
+        state.apply(Self.page("A", 0.3), now: Self.at(1))
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(1))
+        state.apply(Self.seek(200), now: Self.at(1))
+        var order: [ProgressGroups] = []
+        while let send = state.beginSend() {
+            order.append(send.groups)
+            state.acknowledge(send, serverLastUpdate: Self.at(Double(2 + order.count)))
+        }
+        #expect(order == [.audio, .finished, .ebook])
+        #expect(state.dirty.isEmpty)
+        #expect(state.unacknowledgedSends.isEmpty)
+    }
+
+    @Test func acknowledgeClearsOnlyTheSentGroupsEvidence() throws {
+        var state = Self.seeded()
+        for index in 0...ProgressSend.historyLimit {
+            state.apply(Self.page("p\(index)", 0.2), now: Self.at(Double(1 + index)))
+            try Self.send(&state)
+        }
+        #expect(state.truncated == .ebook)
+        state.apply(Self.seek(200), now: Self.at(50))
+        let audio = try Self.send(&state)
+        state.acknowledge(audio, serverLastUpdate: Self.at(60))
+        #expect(state.truncated == .ebook)
+        // The audio send pushed out one more ebook entry; its ack removed only the audio entry.
+        #expect(state.unacknowledgedSends.count == ProgressSend.historyLimit - 1)
+        #expect(state.unacknowledgedSends.allSatisfy { $0.groups == .ebook })
+        #expect(state.dirty == .ebook)
+    }
+
+    @Test func identicalRetriesDoNotFillTheHistory() throws {
+        var state = Self.seeded()
+        state.apply(Self.seek(200), now: Self.at(1))
+        for _ in 0..<10 {
+            try Self.send(&state)  // Each attempt fails.
+        }
+        #expect(state.unacknowledgedSends.count == 1)
+        #expect(state.truncated.isEmpty)
+    }
+
+    @Test func doubleAcknowledgeIsIdempotent() throws {
+        var state = Self.seeded()
+        state.apply(Self.seek(200), now: Self.at(1))
+        state.apply(Self.page("A", 0.3), now: Self.at(1))
+        let send = try Self.send(&state)
+        state.acknowledge(send, serverLastUpdate: Self.at(5))
+        let once = state
+        state.acknowledge(send, serverLastUpdate: Self.at(5))
+        #expect(state == once)
+    }
+
+    @Test func acknowledgeNeverMovesBaselineTimeBack() throws {
+        var state = Self.seeded()
+        state.merge(Self.server(lastUpdate: Self.at(50)))
+        state.apply(Self.seek(200), now: Self.at(60))
+        let send = try Self.send(&state)
+        state.acknowledge(send, serverLastUpdate: Self.at(40))
+        #expect(state.serverBaseline?.lastUpdate == Self.at(50))
+    }
+
+    @Test func acknowledgeWithoutBaselineThenFreshFetchTakesOtherGroups() throws {
+        var state = ProgressSyncState(lastUpdate: Self.t0)
+        state.apply(Self.page("a", 0.2), now: Self.at(1))
+        let send = try Self.send(&state)
+        state.acknowledge(send, serverLastUpdate: nil)
+        // The server's other groups differ from the defaults the baseline was filled with.
+        let fetched = Self.server(
+            currentTime: 500, isFinished: true, finishedAt: Self.at(2), ebookLocation: "a", ebookProgress: 0.2,
+            lastUpdate: Self.at(3))
+        let changed = state.merge(fetched)
+        #expect(changed)
+        #expect(state.currentTime == 500)
+        #expect(state.isFinished)
+        #expect(state.ebookLocation == "a")
+        #expect(state.dirty.isEmpty)
+        #expect(state.serverBaseline == fetched)
+    }
+
+    @Test func finishedEchoMatchesAtMillisecondResolution() throws {
+        var state = Self.seeded()
+        let tapped = Date(timeIntervalSince1970: 1_800_000_123.456_789)
+        state.apply(ProgressEdit(isFinished: true), now: tapped)
+        try Self.send(&state)  // The response is lost.
+        // The server echoes epoch milliseconds.
+        let echo = Self.server(
+            isFinished: true, finishedAt: Date(timeIntervalSince1970: 1_800_000_123_456 / 1000),
+            lastUpdate: tapped.addingTimeInterval(1))
+        state.merge(echo)
+        #expect(state.dirty.isEmpty)
+        #expect(state.unacknowledgedSends.isEmpty)
+    }
+
+    @Test func serverWinningAConflictDropsTheGroupsEvidence() throws {
+        var state = Self.seeded()
+        state.apply(Self.seek(200), now: Self.at(10))
+        state.apply(Self.page("A", 0.3), now: Self.at(10))
+        Self.recordMixedSend(&state)
+        // Another device wrote later: the server wins audio; the ebook entry stays.
+        state.merge(Self.server(currentTime: 900, lastUpdate: Self.at(30)))
+        #expect(state.currentTime == 900)
+        #expect(state.dirty == .ebook)
+        #expect(state.unacknowledgedSends.map(\.groups) == [.ebook])
+    }
+
+    // MARK: - Server side effects (#53)
+
+    /// Finished progress, seek back, PATCH A (audio) in flight, the user marks it finished, and
+    /// the server un-finishes when applying A. The user's "finished" must survive.
+    @Test func userFinishSurvivesServerUnfinishFromAudioPatch() throws {
+        var state = ProgressSyncState(
+            seed: Self.server(currentTime: 1000, isFinished: true, finishedAt: Self.t0, lastUpdate: Self.t0))
+        state.apply(Self.seek(300), now: Self.at(10))
+        let sendA = try Self.send(&state)
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(20))
+        state.acknowledge(sendA, serverLastUpdate: Self.at(30))
+
+        state.merge(Self.server(currentTime: 300, lastUpdate: Self.at(30)))
+        #expect(state.isFinished)
+        #expect(state.dirty == .finished)
+        let finish = try Self.send(&state)
+        #expect(finish.finished?.isFinished == true)
+        state.acknowledge(finish, serverLastUpdate: Self.at(40))
+        #expect(state.dirty.isEmpty)
+        #expect(state.truncated.isEmpty)
+    }
+
+    /// The mirror: the user un-finishes and seeks near the end; the server auto-finishes when
+    /// applying the audio PATCH, whose response is lost.
+    @Test func userUnfinishSurvivesServerAutoFinishFromLostAudioPatch() throws {
+        var state = ProgressSyncState(
+            seed: Self.server(currentTime: 1000, isFinished: true, finishedAt: Self.t0, lastUpdate: Self.t0))
+        state.apply(ProgressEdit(isFinished: false), now: Self.at(10))
+        state.apply(Self.seek(995), now: Self.at(10))
+        try Self.send(&state)  // Audio; the server auto-finishes, the response is lost.
+
+        state.merge(Self.server(currentTime: 995, isFinished: true, finishedAt: Self.at(15), lastUpdate: Self.at(15)))
+        #expect(state.isFinished == false)
+        #expect(state.dirty == .finished)
+        let unfinish = try Self.send(&state)
+        #expect(unfinish.finished?.isFinished == false)
+    }
+
+    // MARK: - Interleavings
+
+    /// Random interleavings of edits, sends, outcomes and fetches against a simulated server
+    /// that changes only through our PATCHes.
+    @Test func randomInterleavingsKeepTheInvariants() throws {
+        var random = SeededGenerator(seed: 37)
+        var state = ProgressSyncState(seed: Self.server(lastUpdate: Self.t0))
+        var server = Self.server(lastUpdate: Self.t0)
+        var expected = state
+        var inFlight: ProgressSend?
+        var clock = 1.0
+        for step in 0..<500 {
+            clock += 1
+            let now = Self.at(clock)
+            switch Int.random(in: 0..<6, using: &random) {
+            case 0, 1:
+                let edit = Self.randomEdit(step: step, using: &random)
+                state.apply(edit, now: now)
+                expected.apply(edit, now: now)
+            case 2:
+                if inFlight == nil { inFlight = state.beginSend() }
+            case 3:
+                guard let send = inFlight else { break }
+                inFlight = nil
+                let outcome = Int.random(in: 0..<3, using: &random)
+                if outcome < 2 { Self.applyPatch(send, to: &server, at: now) }
+                if outcome == 0 {
+                    state.acknowledge(send, serverLastUpdate: now)
+                    let once = state
+                    state.acknowledge(send, serverLastUpdate: now)
+                    #expect(state == once, "double ack at step \(step)")
+                }
+            default:
+                state.merge(server, excluding: inFlight?.groups ?? [])
+            }
+            for group in ProgressGroups.each {
+                #expect(Self.values(group, of: state) == Self.values(group, of: expected), "reverted at \(step)")
+                if Self.values(group, of: state) != Self.values(group, of: server) {
+                    #expect(state.dirty.contains(group), "unsynced but clean at step \(step)")
+                }
+            }
+            #expect(state.unacknowledgedSends.count <= ProgressSend.historyLimit)
+        }
+    }
+
+    private static func randomEdit(step: Int, using random: inout SeededGenerator) -> ProgressEdit {
+        switch Int.random(in: 0..<3, using: &random) {
+        case 0: seek(Double(2 * step % 999))
+        case 1: ProgressEdit(isFinished: Bool.random(using: &random))
+        default: page("loc\(step)", Double(step % 100) / 100)
+        }
+    }
+
+    private static func applyPatch(_ send: ProgressSend, to server: inout ProgressBaseline, at now: Date) {
+        if let audio = send.audio {
+            server.currentTime = audio.currentTime
+            server.progress = audio.progress
+            server.duration = audio.duration
+        }
+        if let finished = send.finished {
+            server.isFinished = finished.isFinished
+            server.finishedAt = finished.finishedAt
+        }
+        if let ebook = send.ebook {
+            server.ebookLocation = ebook.ebookLocation
+            server.ebookProgress = ebook.ebookProgress
+        }
+        server.lastUpdate = now
+    }
+
+    private static func values(_ group: ProgressGroups, of state: ProgressSyncState) -> [String] {
+        switch group {
+        case .audio: ["\(state.currentTime)", "\(state.progress)", "\(state.duration)"]
+        case .finished: ["\(state.isFinished)", "\(String(describing: state.finishedAt))"]
+        default: ["\(String(describing: state.ebookLocation))", "\(String(describing: state.ebookProgress))"]
+        }
+    }
+
+    private static func values(_ group: ProgressGroups, of server: ProgressBaseline) -> [String] {
+        switch group {
+        case .audio: ["\(server.currentTime)", "\(server.progress)", "\(server.duration)"]
+        case .finished: ["\(server.isFinished)", "\(String(describing: server.finishedAt))"]
+        default: ["\(String(describing: server.ebookLocation))", "\(String(describing: server.ebookProgress))"]
+        }
+    }
+}
+
+/// A deterministic generator (SplitMix64) for reproducible interleavings.
+struct SeededGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) { state = seed }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var value = state
+        value = (value ^ (value >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        value = (value ^ (value >> 27)) &* 0x94D0_49BB_1331_11EB
+        return value ^ (value >> 31)
     }
 }
 

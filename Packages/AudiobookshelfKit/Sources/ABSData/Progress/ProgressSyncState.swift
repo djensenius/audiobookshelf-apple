@@ -73,6 +73,13 @@ extension ProgressSend {
         }
     }
 
+    /// Only `group`'s values, for a single-group PATCH.
+    func only(_ group: ProgressGroups) -> ProgressSend {
+        var send = self
+        send.remove(ProgressGroups.all.subtracting(group))
+        return send
+    }
+
     mutating func remove(_ group: ProgressGroups) {
         if group.contains(.audio) { audio = nil }
         if group.contains(.finished) { finished = nil }
@@ -82,6 +89,20 @@ extension ProgressSend {
 
 /// The sync bookkeeping of one `LocalMediaProgress` row as a value, so the ADR 0003 rules (local
 /// edits, sends, acknowledgements and merges) are pure functions tested without a store.
+///
+/// Each PATCH carries one group, audio first, then finished, then ebook (#53: the server
+/// mishandles audio and finished in one body).
+///
+/// Conflicts compare the device clock (`<group>EditedAt`) with the server clock (`lastUpdate`), so
+/// a device whose clock runs ahead of the server's wins conflicts it should lose, and one running
+/// behind loses them.
+///
+/// The `<group>HistoryTruncated` flags (``truncated``) mean "the server's value for the group may
+/// come from our own sends, so the dirty local value wins". They are set when a send entry is
+/// dropped from the full list, and when the server may have changed the group as a side effect
+/// of our PATCH of the other one (#53: an audio PATCH can un-finish or auto-finish, a finished one
+/// can reset `currentTime`). A group's flag clears when its own send is acknowledged or it stops
+/// being dirty.
 struct ProgressSyncState: Sendable, Equatable {
     var currentTime: Double = 0
     var progress: Double = 0
@@ -126,7 +147,8 @@ struct ProgressSyncState: Sendable, Equatable {
         }
         if let finished = edit.isFinished {
             isFinished = finished
-            finishedAt = finished ? now : nil
+            // Whole milliseconds, as the server stores it, so its echo compares equal.
+            finishedAt = finished ? Self.wholeMilliseconds(now) : nil
             dirty.insert(.finished)
             finishedEditedAt = now
         }
@@ -160,12 +182,18 @@ struct ProgressSyncState: Sendable, Equatable {
 
     // MARK: - Sending
 
-    /// Snapshots the dirty groups for a PATCH and records it in `unacknowledgedSends` before it is
-    /// sent; `nil` when nothing is dirty. When the list is full, the oldest entry is dropped and
-    /// the truncation flag of each group it carried is set.
+    /// The group the next PATCH carries: the first dirty one of audio, finished and ebook.
+    var nextSendGroup: ProgressGroups? { ProgressGroups.each.first { dirty.contains($0) } }
+
+    /// Snapshots the next dirty group (``nextSendGroup``) for a PATCH and records it in
+    /// `unacknowledgedSends` before it is sent; `nil` when nothing is dirty. An identical earlier
+    /// entry (a retry of the same values and edit) is moved to the end rather than repeated. When
+    /// the list is full, the oldest entry is dropped and the truncation flag of each group it
+    /// carried is set.
     mutating func beginSend() -> ProgressSend? {
-        guard !dirty.isEmpty else { return nil }
-        let send = dirtyValues
+        guard let group = nextSendGroup else { return nil }
+        let send = dirtyValues.only(group)
+        unacknowledgedSends.removeAll { $0 == send }
         while unacknowledgedSends.count >= ProgressSend.historyLimit {
             truncated.formUnion(unacknowledgedSends.removeFirst().groups)
         }
@@ -174,8 +202,9 @@ struct ProgressSyncState: Sendable, Equatable {
     }
 
     /// The PATCH carrying `send` succeeded: the server now holds the sent values, so they become
-    /// the baseline, the send history and truncation flags are cleared, and each sent group stops
-    /// being dirty unless it was edited again while the request was in flight.
+    /// the baseline, the sent groups' entries and truncation flags are cleared, and each sent
+    /// group stops being dirty unless it was edited again while the request was in flight. Other
+    /// groups keep their evidence. Acknowledging the same send twice changes nothing more.
     mutating func acknowledge(_ send: ProgressSend, serverLastUpdate: Date?) {
         // Without a baseline the groups that weren't sent take the row's values (the seeded or
         // merged server values, or defaults when the server had none).
@@ -193,13 +222,15 @@ struct ProgressSyncState: Sendable, Equatable {
             baseline.ebookLocation = ebook.ebookLocation
             baseline.ebookProgress = ebook.ebookProgress
         }
-        if let serverLastUpdate { baseline.lastUpdate = serverLastUpdate }
+        if let serverLastUpdate { baseline.lastUpdate = max(baseline.lastUpdate, serverLastUpdate) }
         serverBaseline = baseline
-        unacknowledgedSends = []
-        truncated = []
-        for group in ProgressGroups.each where send.groups.contains(group) && editedAt(group) == send.editedAt(group) {
+        let sent = send.groups
+        dropEvidence(sent)
+        truncated.subtract(sent)
+        for group in ProgressGroups.each where sent.contains(group) && editedAt(group) == send.editedAt(group) {
             dirty.remove(group)
         }
+        shieldSideEffects(of: sent)
     }
 
     // MARK: - Merging server progress
@@ -211,6 +242,13 @@ struct ProgressSyncState: Sendable, Equatable {
     @discardableResult
     mutating func merge(_ server: ProgressBaseline, excluding excluded: ProgressGroups = []) -> Bool {
         if let baseline = serverBaseline, server.lastUpdate < baseline.lastUpdate { return false }
+        // An echo of our audio or finished PATCH may carry the server's side effect on the other
+        // group, so shield that group before resolving it.
+        for group in ProgressGroups.each where !excluded.contains(group) && dirty.contains(group) {
+            if unacknowledgedSends.contains(where: { Self.matches(server, $0, group) }) {
+                shieldSideEffects(of: group)
+            }
+        }
         for group in ProgressGroups.each where !excluded.contains(group) {
             resolve(group, server: server)
         }
@@ -241,16 +279,40 @@ struct ProgressSyncState: Sendable, Equatable {
                 unacknowledgedSends[older].remove(group)
             }
             unacknowledgedSends.removeAll { $0.groups.isEmpty }
-            if editedAt(group) == sentEditedAt { dirty.remove(group) }
+            if editedAt(group) == sentEditedAt { markClean(group) }
             return
         }
-        // The server value may be one of our dropped sends.
+        // The server value may be one of our dropped sends, or a side effect of our PATCH.
         if truncated.contains(group) { return }
         // A real conflict. `server.lastUpdate` is row-wide, an upper bound on when the group
         // changed, so ties and unknown edit times favour the server.
         if let edited = editedAt(group), edited > server.lastUpdate { return }
         take(group, from: server)
+        markClean(group)
+        // Our older sends of the group can no longer be the server's value; drop them so they
+        // can't match another device's value later.
+        dropEvidence(group)
+    }
+
+    /// #53: the server applies an audio PATCH by un-finishing or auto-finishing, and a finished
+    /// PATCH by resetting `currentTime`. When `sent` carried one of them, a pending local edit of
+    /// the other wins over the server's value until its own send is acknowledged.
+    private mutating func shieldSideEffects(of sent: ProgressGroups) {
+        if sent.contains(.audio), dirty.contains(.finished) { truncated.insert(.finished) }
+        if sent.contains(.finished), dirty.contains(.audio) { truncated.insert(.audio) }
+    }
+
+    private mutating func markClean(_ group: ProgressGroups) {
         dirty.remove(group)
+        truncated.remove(group)
+    }
+
+    /// Removes `groups` from every unacknowledged entry, dropping entries left empty.
+    private mutating func dropEvidence(_ groups: ProgressGroups) {
+        for index in unacknowledgedSends.indices {
+            unacknowledgedSends[index].remove(groups)
+        }
+        unacknowledgedSends.removeAll { $0.groups.isEmpty }
     }
 
     // MARK: - Helpers
@@ -286,7 +348,7 @@ struct ProgressSyncState: Sendable, Equatable {
     }
 
     // Comparisons allow 1 s for `currentTime` and `duration` and 0.001 for `progress` and
-    // `ebookProgress`. Dates allow 1 ms, because the server stores milliseconds.
+    // `ebookProgress`. Dates compare exactly at the server's resolution, whole milliseconds.
 
     static func matches(_ server: ProgressBaseline, _ other: ProgressBaseline, _ group: ProgressGroups) -> Bool {
         switch group {
@@ -332,9 +394,19 @@ struct ProgressSyncState: Sendable, Equatable {
     private static func datesMatch(_ lhs: Date?, _ rhs: Date?) -> Bool {
         switch (lhs, rhs) {
         case (nil, nil): true
-        case (let lhs?, let rhs?): abs(lhs.timeIntervalSince(rhs)) < 0.001
+        case (let lhs?, let rhs?): milliseconds(lhs) == milliseconds(rhs)
         default: false
         }
+    }
+
+    /// The nearest whole millisecond, absorbing floating-point error in already-whole values.
+    private static func milliseconds(_ date: Date) -> Int64 {
+        Int64((date.timeIntervalSince1970 * 1000).rounded())
+    }
+
+    /// `date` truncated to whole milliseconds, as the server stores it.
+    static func wholeMilliseconds(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: (date.timeIntervalSince1970 * 1000).rounded(.down) / 1000)
     }
 }
 

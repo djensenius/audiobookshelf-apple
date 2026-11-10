@@ -131,6 +131,92 @@ import Testing
         #expect(fetched.audioDirty)
     }
 
+    @Test func lateCompletionOfSupersededPatchIsIgnored() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patchA = try #require(try await store.beginSend(for: key))
+        #expect(try await store.failSend(patchA, error: "timed out"))
+        try await store.recordEdit(Self.seek(300), for: key, now: Self.at(2))
+        let patchB = try #require(try await store.beginSend(for: key))
+        #expect(patchB.token != patchA.token)
+
+        // A's success arrives late, while B is in flight: nothing changes.
+        let before = try await store.progress(for: key)
+        #expect(try await store.completeSend(patchA, serverLastUpdate: Self.at(3)) == false)
+        #expect(try await store.failSend(patchA, error: "again") == false)
+        #expect(try await store.progress(for: key) == before)
+        #expect(try await store.beginSend(for: key) == nil)
+
+        #expect(try await store.completeSend(patchB, serverLastUpdate: Self.at(4)))
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.serverBaseline?.currentTime == 300)
+        #expect(row.dirtyGroups.isEmpty)
+    }
+
+    @Test func duplicateAcknowledgeIsIgnored() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        #expect(try await store.completeSend(patch, serverLastUpdate: Self.at(2)))
+        try await store.recordEdit(Self.seek(300), for: key, now: Self.at(3))
+        let before = try await store.progress(for: key)
+        #expect(try await store.completeSend(patch, serverLastUpdate: Self.at(2)) == false)
+        #expect(try await store.progress(for: key) == before)
+    }
+
+    @Test func audioAndFinishedAreSentSeparatelyAndOnlyTheFailedOneIsResent() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(990), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        try await store.recordEdit(ProgressEdit(isFinished: true), for: key, now: Self.at(1))
+        let audio = try #require(try await store.beginSend(for: key))
+        #expect(audio.values.groups == .audio)
+        #expect(try await store.completeSend(audio, serverLastUpdate: Self.at(2)))
+
+        let finished = try #require(try await store.beginSend(for: key))
+        #expect(finished.values.groups == .finished)
+        #expect(try await store.failSend(finished, error: "offline"))
+        var row = try #require(try await store.progress(for: key))
+        #expect(row.dirtyGroups == .finished)
+        #expect(row.unacknowledgedSends == [finished.values])
+
+        let retry = try #require(try await store.beginSend(for: key))
+        #expect(retry.values.groups == .finished)
+        #expect(try await store.completeSend(retry, serverLastUpdate: Self.at(3)))
+        row = try #require(try await store.progress(for: key))
+        #expect(row.dirtyGroups.isEmpty)
+        #expect(row.needsServerSync == false)
+        #expect(row.unacknowledgedSends.isEmpty)
+    }
+
+    @Test func failedCommitRollsBackSendAndEdit() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.beginSend(for: key) }
+        #expect(await store.hasUncommittedChanges == false)
+        #expect(try await store.progress(for: key)?.unacknowledgedSends.isEmpty == true)
+
+        let generation = await store.captureGeneration()
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) {
+            try await store.recordEdit(Self.seek(300), for: key, now: Self.at(2))
+        }
+        #expect(await store.hasUncommittedChanges == false)
+        #expect(await store.captureGeneration() == generation)
+        #expect(try await store.progress(for: key)?.currentTime == 200)
+
+        // No phantom in-flight send: the row can be sent and the next save commits only it.
+        let patch = try #require(try await store.beginSend(for: key))
+        #expect(patch.values.audio?.currentTime == 200)
+        let reread = LocalProgressStore(modelContainer: store.modelContainer)
+        #expect(try await reread.progress(for: key)?.unacknowledgedSends == [patch.values])
+    }
+
     // MARK: - Stale and in-flight server values
 
     @Test func fetchIssuedBeforeLocalSeekChangesNothing() async throws {
@@ -272,12 +358,10 @@ import Testing
         let changed = session("changed", startedAt: Self.at(2), updatedAt: Self.at(2))
         let active = session("active", startedAt: Self.at(3), updatedAt: Self.at(3), isActive: true)
         let failed = session("failed", startedAt: Self.at(4), updatedAt: Self.at(4))
-        let missing = session("missing", startedAt: Self.at(5), updatedAt: Self.at(5))
-        for item in [done, changed, active, failed, missing] {
+        for item in [done, changed, active, failed] {
             try await store.saveSession(item)
         }
-        var sent = Dictionary(
-            uniqueKeysWithValues: [done, changed, active, failed, missing].map { ($0.id, $0.updatedAt) })
+        var sent = Dictionary(uniqueKeysWithValues: [done, changed, active, failed].map { ($0.id, $0.updatedAt) })
         // Changed while the upload was in flight.
         var newer = changed
         newer.updatedAt = Self.at(20)
@@ -286,25 +370,102 @@ import Testing
         let results: [String: SessionUploadResult] = [
             "done": .success, "changed": .success, "active": .success, "failed": .failure("Media item not found"),
         ]
-        let deleted = try await store.settleSessionUpload(sent: sent, results: results, isFirstSync: false)
+        let now = Self.at(100)
+        let deleted = try await store.settleSessionUpload(sent: sent, results: results, isFirstSync: false, now: now)
         #expect(deleted == ["done"])
         let failedRow = try #require(try await store.session(id: "failed"))
         #expect(failedRow.uploadAttempts == 1)
         #expect(failedRow.lastUploadError == "Media item not found")
-        #expect(try await store.session(id: "missing")?.uploadAttempts == 0)
 
-        // The first sync after login also deletes acknowledged active sessions.
+        // The first sync after login also deletes acknowledged active sessions. A second failure
+        // within the hour isn't counted.
         sent["changed"] = Self.at(20)
-        let firstSync = try await store.settleSessionUpload(sent: sent, results: results, isFirstSync: true)
+        let firstSync = try await store.settleSessionUpload(
+            sent: sent, results: results, isFirstSync: true, now: now.addingTimeInterval(60))
         #expect(firstSync == ["changed", "active"])
+        #expect(try await store.session(id: "failed")?.uploadAttempts == 1)
 
-        // Two failures so far; discarded after the fifth.
-        #expect(try await store.session(id: "failed")?.uploadAttempts == 2)
-        for _ in 3..<LocalProgressStore.maxUploadFailures {
-            try await store.settleSessionUpload(sent: sent, results: results, isFirstSync: false)
+        // One failure per window; discarded after the fifth.
+        let window = LocalProgressStore.uploadFailureWindow
+        for round in 2..<LocalProgressStore.maxUploadFailures {
+            let later = now.addingTimeInterval(Double(round) * window)
+            #expect(
+                try await store.settleSessionUpload(sent: sent, results: results, isFirstSync: false, now: later)
+                    .isEmpty)
+            #expect(try await store.session(id: "failed")?.uploadAttempts == round)
         }
-        #expect(try await store.session(id: "failed")?.uploadAttempts == 4)
-        #expect(try await store.settleSessionUpload(sent: sent, results: results, isFirstSync: false) == ["failed"])
-        #expect(try await store.pendingSessions(for: Fixtures.connectionID).map(\.id) == ["missing"])
+        let last = now.addingTimeInterval(Double(LocalProgressStore.maxUploadFailures) * window)
+        #expect(
+            try await store.settleSessionUpload(sent: sent, results: results, isFirstSync: false, now: last) == [
+                "failed"
+            ])
+        #expect(try await store.pendingSessions(for: Fixtures.connectionID).isEmpty)
+    }
+
+    @Test func missingResultsCountAsOneFailureAfterThree() async throws {
+        let (store, _) = try makeStore()
+        let missing = session("missing", startedAt: Self.at(1), updatedAt: Self.at(1))
+        try await store.saveSession(missing)
+        let sent = ["missing": missing.updatedAt]
+        for round in 1...LocalProgressStore.missingResultsPerFailure {
+            try await store.settleSessionUpload(
+                sent: sent, results: [:], isFirstSync: false, now: Self.at(Double(round)))
+            let row = try #require(try await store.session(id: "missing"))
+            let counted = round == LocalProgressStore.missingResultsPerFailure
+            #expect(row.uploadAttempts == (counted ? 1 : 0))
+            #expect(row.lastUploadError == (counted ? "No upload result" : nil))
+        }
+    }
+
+    @Test func failureOfSessionChangedDuringUploadIsNotCounted() async throws {
+        let (store, _) = try makeStore()
+        var item = session("s", startedAt: Self.at(1), updatedAt: Self.at(1))
+        try await store.saveSession(item)
+        let sent = ["s": item.updatedAt]
+        item.updatedAt = Self.at(5)
+        try await store.saveSession(item)
+        for round in 0..<(LocalProgressStore.maxUploadFailures + 1) {
+            let later = Self.at(Double(round) * LocalProgressStore.uploadFailureWindow * 2)
+            try await store.settleSessionUpload(
+                sent: sent, results: ["s": .failure("x")], isFirstSync: false, now: later)
+            try await store.settleSessionUpload(sent: sent, results: [:], isFirstSync: false, now: later)
+        }
+        let row = try #require(try await store.session(id: "s"))
+        #expect(row.uploadAttempts == 0)
+        #expect(row.lastUploadError == nil)
+    }
+
+    @Test func successResetsAttemptsOfKeptActiveSession() async throws {
+        let (store, _) = try makeStore()
+        let active = session("active", startedAt: Self.at(1), updatedAt: Self.at(1), isActive: true)
+        try await store.saveSession(active)
+        let sent = ["active": active.updatedAt]
+        try await store.settleSessionUpload(sent: sent, results: ["active": .failure("boom")], isFirstSync: false)
+        #expect(try await store.session(id: "active")?.uploadAttempts == 1)
+
+        #expect(
+            try await store.settleSessionUpload(sent: sent, results: ["active": .success], isFirstSync: false).isEmpty)
+        let row = try #require(try await store.session(id: "active"))
+        #expect(row.uploadAttempts == 0)
+        #expect(row.lastUploadError == nil)
+    }
+
+    @Test func saveSessionKeepsUploadBookkeeping() async throws {
+        let (store, _) = try makeStore()
+        var item = session("s", startedAt: Self.at(1), updatedAt: Self.at(1))
+        try await store.saveSession(item)
+        try await store.settleSessionUpload(
+            sent: ["s": item.updatedAt], results: ["s": .failure("boom")], isFirstSync: false)
+
+        // The caller's copy still has the defaults; saving it must not reset the bookkeeping.
+        item.currentTime = 99
+        item.updatedAt = Self.at(2)
+        item.uploadAttempts = 0
+        item.lastUploadError = nil
+        try await store.saveSession(item)
+        let row = try #require(try await store.session(id: "s"))
+        #expect(row.currentTime == 99)
+        #expect(row.uploadAttempts == 1)
+        #expect(row.lastUploadError == "boom")
     }
 }

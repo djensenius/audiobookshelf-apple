@@ -144,7 +144,9 @@ public struct PendingLocalSessionDTO: Sendable, Equatable, Identifiable {
     public var timeListening: Double
     public var currentTime: Double
     public var isActive: Bool
+    /// Read from the store; `LocalProgressStore.saveSession(_:)` ignores it.
     public var uploadAttempts: Int
+    /// Read from the store; `LocalProgressStore.saveSession(_:)` ignores it.
     public var lastUploadError: String?
 
     public init(
@@ -208,7 +210,8 @@ extension PendingLocalSessionDTO {
         )
     }
 
-    /// Copies every field except `id` into `session`.
+    /// Copies the session's data into `session`: every field except `id`, `uploadAttempts` and
+    /// `lastUploadError`, which only `LocalProgressStore.settleSessionUpload` changes.
     func write(to session: PendingLocalSession) {
         session.serverConnectionID = key.serverConnectionID
         session.libraryItemId = key.libraryItemId
@@ -225,7 +228,5 @@ extension PendingLocalSessionDTO {
         session.timeListening = timeListening
         session.currentTime = currentTime
         session.isActive = isActive
-        session.uploadAttempts = uploadAttempts
-        session.lastUploadError = lastUploadError
     }
 }
