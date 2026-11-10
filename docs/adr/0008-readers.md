@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-09
-- Issue: #TBD
+- Issue: #100 (P6-10)
 
 ## Context
 
@@ -199,12 +199,13 @@ dependency.
    in the app" state with "Open in…" and "Read in browser" actions. Revisit with a
    vendored libarchive (BSD) only if users ask for it. Never use RARLAB `unrar`.
 5. **MOBI/AZW3: dropped from in-app reading for v1.** Use the same unsupported state
-   plus the server's send-to-device action. Follow-up: evaluate foliate-js `mobi.js`
-   inside the epub.js WKWebView host. Do not port the legacy koodo-derived `mobi.js`.
+   plus the server's send-to-device action (P6-11c #103). Follow-up: evaluate
+   foliate-js `mobi.js` inside the epub.js WKWebView host. Do not port the legacy
+   koodo-derived `mobi.js`.
 6. **Theming.** Use the legacy setting set: theme `black`/`dark`/`light`, font
    `serif`/`sans-serif`, font scale, line spacing, text stroke and spread
    `auto`/`none`.
-   - Add a "match system" default for the theme.
+   - Add `sepia` (P6-12 #104 scope) and a "match system" default for the theme.
    - EPUB applies these as epub.js theme rules (the legacy `themeRules`). PDF and
      comics only change the chrome and page background.
 7. **Two-page spreads**
@@ -217,12 +218,40 @@ dependency.
    - PDF uses `PDFView.displayMode = .twoUp` with `displaysAsBook` under the same
      width rule.
    - Comics stay single-page in v1, as in the legacy app.
+8. **Code placement.** This follows [`docs/architecture.md`](../architecture.md) and
+   ADR 0001. No new module is added.
+   - **Views** live in the app target under `Audiobookshelf/Features/Reader/`. That
+     covers `ReaderContainer` (P6-11a #101), `PDFReaderView` (P6-11b #102),
+     `EPUBReaderView` with its `WKWebView` wrapper, scheme handler and
+     `@MainActor` message handler (P6-12 #104), and `ComicReaderView` (P6-13 #105).
+   - **Logic** lives in `ABSAppModel/Reader/`, so `swift test` covers it without
+     WebKit:
+     - `EbookProgressModel` and the format router (P6-11a #101);
+     - `ebookLocation` parsing and validation (`epubcfi` prefix, 1-based page
+       numbers sent as a number or a string);
+     - the `ComicArchive` actor and the web-compatible page ordering (P6-13 #105).
+       This replaces P6-13's "ABSUI or a reader module" wording, because `ABSUI`
+       is for shared components and a new module would need its own ADR.
+   - **Bundled JS** lives in `Audiobookshelf/Features/Reader/EPUB/Web/`. It holds the
+     reader page and bridge script, `epub.min.js` 0.3.93 and `jszip.min.js` 3.10.x,
+     unmodified. Each upstream licence file sits next to its script
+     (`LICENSE-epubjs`, `LICENSE-jszip`). The synchronized folder copies them into
+     the app bundle.
+   - **Licence notices.** P6-12 #104 must add a repo-root `THIRD_PARTY_NOTICES.md`
+     that lists:
+     - epub.js: BSD-2-Clause, © FuturePress.
+     - JSZip: dual-licensed MIT or GPLv3. We use it under MIT.
+
+     P6-13 #105 adds the ZIPFoundation (MIT) entry.
+   - **SPM dependencies.** ZIPFoundation, pinned for CBZ in P6-13 #105, remains the
+     only approved package. EPUB and PDF add none.
 
 Readium remains the fallback if epub.js becomes unworkable, but only together with a
 macOS story and a CFI translator. Re-evaluate when Readium ships AppKit support.
 
-The engine choice and the MOBI/CBR policy need the owner's sign-off (issue
-acceptance criterion).
+**Sign-off.** The coordinator accepted the engine (WKWebView + epub.js 0.3.93) and
+the v1 policy that CBR and MOBI/AZW3 are unsupported in the app. Merging this ADR is
+the acceptance. The owner can supersede it with a new ADR.
 
 ## Consequences
 
@@ -232,14 +261,18 @@ acceptance criterion).
   client's version and rerun the CFI round-trip tests.
 - Reader UI is SwiftUI chrome around a `WKWebView` (EPUB), a `PDFView` (PDF) or a
   native image pager (CBZ). This needs one platform wrapper each for UIKit and AppKit.
-- WebKit rendering must be on screen to progress, because `requestAnimationFrame` is
-  paused otherwise. Reader UI tests must run in a hosted app.
+- WebKit rendering must be on screen to progress, because offscreen WebKit pauses
+  `requestAnimationFrame`, which drives epub.js's render queue.
   `WKPreferences.inactiveSchedulingPolicy = .none` did not help offscreen.
+  - Reader UI tests must run in a **hosted app** with the reader on screen, not in a
+    bare `WKWebView`.
+  - Package tests cover only the pure logic in `ABSAppModel/Reader/`.
+  - Never ship the `setTimeout` rAF shim used in the spike.
 - MOBI/AZW3 and CBR users lose in-app reading compared with the legacy app. Release
   notes must say so, and the item page must show the unsupported state instead of a
   broken reader.
-- Third-party notices must include epub.js (BSD-2-Clause) and JSZip (MIT, used under
-  MIT).
+- `THIRD_PARTY_NOTICES.md` must include epub.js (BSD-2-Clause) and JSZip (MIT or
+  GPLv3, used under MIT) from P6-12 #104, and ZIPFoundation (MIT) from P6-13 #105.
 - macOS sandbox: the reader needs only the existing network-client entitlement, and
   custom-scheme loading needs no extra entitlement.
 
@@ -258,22 +291,21 @@ deleted) with Xcode 27.2 and Swift 6.4.2 on macOS 27.2.
 | The same bridge code compiled for iOS (`swiftc -swift-version 6 -target arm64-apple-ios27.0-simulator -typecheck`) | ✅ no diagnostics |
 | WebKit scheduling | `requestAnimationFrame` never fired for an offscreen or unattended window, even with `inactiveSchedulingPolicy = .none`. The harness used a `setTimeout` rAF shim (test-only) |
 
-**Still to do before closing the issue:**
+**Runtime validation moved to the implementing issues.** These checks could not be
+run in the spike. They are acceptance criteria of the issues below:
 
-- A CFI round trip against a live web client. Save in the web reader, open in the
-  app, save in the app, then reopen in the web reader. Use a real server and EPUB.
-- A running iOS sample app (only a typecheck was done).
-- Owner sign-off.
-
-These are recorded as the remaining acceptance criteria.
+| Check | Performed in |
+| --- | --- |
+| Live web-client CFI round trip with a real server and EPUB: save in the web reader, open in the app, save in the app, reopen in the web reader. Run on iOS and macOS | **performed in #104** (P6-12) |
+| In-app run of the epub.js reader on iOS (the spike only typechecked the iOS bridge) and on macOS, inside the reader container from #101 (P6-11a) | **performed in #104** (P6-12) |
+| EPUB two-page spread on iPad, Mac, and Duo spanned with a hinge-width gap (`minSpreadWidth`, reserved regions) | **performed in #104** (P6-12) |
+| PDFKit two-up (`.twoUp`, `displaysAsBook`) on wide layouts, and the 1-based page `ebookLocation` round trip with the web client | **performed in #102** (P6-11b) |
+| CBZ page ordering identical to the web client (last number in the basename, unnumbered images last), with fixture tests | **performed in #105** (P6-13) |
 
 **Assumed, not verified:**
 
-- The JSZip MIT licence choice.
-- `minSpreadWidth` behaviour on Duo with a hinge gap.
-- The PDFKit two-up behaviour.
 - libarchive's RAR licence status. It comes from libarchive's documentation and
-  knowledge, not a code audit.
+  knowledge, not a code audit. It is relevant only if CBR is revisited.
 
 ## References
 
