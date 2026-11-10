@@ -617,10 +617,14 @@ A path may be the `.xcodeproj` directory or the inner `project.xcproj`. Everythi
 - **No `--verify` flag.** Upstream issue #20 requests one, and it is still open.
 - **Comments.** I did not test whether JSON5 comments survive formatting. Since the tool decodes and re-encodes, assume they are dropped.
 
-CI check (also fails on invalid input, because the formatter exits non-zero):
+CI check. Run the formatter and `diff` as separate steps, so a formatter failure
+(exit 255 on invalid input) fails the check. In a plain pipeline the shell reports
+only `diff`'s status, so an empty project file would pass (both inputs empty):
 
 ```sh
-xcprojformatter Audiobookshelf.xcodeproj | diff -u Audiobookshelf.xcodeproj/project.xcproj -
+canonical="$(mktemp)"
+xcprojformatter Audiobookshelf.xcodeproj >"$canonical" || exit 1
+diff -u Audiobookshelf.xcodeproj/project.xcproj "$canonical"
 # or auto-fix: xcprojformatter --update Audiobookshelf.xcodeproj
 ```
 
