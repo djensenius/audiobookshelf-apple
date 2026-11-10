@@ -9,12 +9,16 @@ public struct DownloadLocations: Sendable {
     public let downloadsRoot: URL
     /// `Application Support/ResumeData/`, for ``ResumeDataVault``.
     public let resumeDataRoot: URL
+    /// `Application Support/Transfers/`: one empty marker per part, written when its current
+    /// transfer starts (see ``markTransferStart(partID:)``).
+    let transfersRoot: URL
 
     /// - Parameter root: the directory that holds `Downloads/` and `ResumeData/`; tests pass a
     ///   temporary directory.
     public init(root: URL = .applicationSupportDirectory) {
         downloadsRoot = root.appending(path: "Downloads", directoryHint: .isDirectory)
         resumeDataRoot = root.appending(path: "ResumeData", directoryHint: .isDirectory)
+        transfersRoot = root.appending(path: "Transfers", directoryHint: .isDirectory)
     }
 
     public enum PathError: Error, Equatable {
@@ -63,6 +67,32 @@ public struct DownloadLocations: Sendable {
     static func fileSize(at url: URL) -> Int64? {
         (try? URL(filePath: url.path(percentEncoded: false)).resourceValues(forKeys: [.fileSizeKey]).fileSize)
             .map(Int64.init)
+    }
+
+    // MARK: - Transfer generations
+
+    /// Records that a new transfer of `partID` starts now. A file at the part's destination
+    /// modified after this marker was moved there by that transfer; an older one wasn't.
+    func markTransferStart(partID: UUID) throws {
+        try FileManager.default.createDirectory(at: transfersRoot, withIntermediateDirectories: true)
+        try Data().write(
+            to: transferMarker(partID: partID), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// Ends `partID`'s transfer generation, so no file at its destination counts as moved by it.
+    func clearTransferMarker(partID: UUID) {
+        try? FileManager.default.removeItem(at: transferMarker(partID: partID))
+    }
+
+    /// When `partID`'s current transfer started, or `nil` without a marker.
+    func transferStart(partID: UUID) -> Date? {
+        // A fresh URL, so no cached values are read.
+        try? URL(filePath: transferMarker(partID: partID).path(percentEncoded: false))
+            .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+    }
+
+    private func transferMarker(partID: UUID) -> URL {
+        transfersRoot.appending(path: partID.uuidString, directoryHint: .notDirectory)
     }
 
     /// Whether `error`, or an error it wraps, is `NSFileWriteOutOfSpaceError` or `ENOSPC`.
