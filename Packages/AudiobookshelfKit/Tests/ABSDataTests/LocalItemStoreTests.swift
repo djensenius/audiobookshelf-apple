@@ -43,12 +43,18 @@ import Testing
             media: Fixtures.bookSnapshot, parts: parts)
     }
 
-    private func episodeDownload(_ episode: LocalMediaSnapshot.Episode) -> DownloadRecordDTO {
+    /// An episode download, titled like the engine titles it: after the episode.
+    private func episodeDownload(
+        _ episode: LocalMediaSnapshot.Episode, directory: String = "li_2", partEpisodeId: String?? = .none
+    ) -> DownloadRecordDTO {
         DownloadRecordDTO(
             key: MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_2", episodeId: episode.id),
-            mediaType: .podcast, title: "The Podcast", relativeDirectory: "li_2",
+            mediaType: .podcast, title: episode.title, relativeDirectory: directory,
             media: LocalMediaSnapshot(metadata: .init(title: "The Podcast"), episodes: [episode]),
-            parts: [part(.audio, "\(episode.id).mp3", episodeId: episode.id, directory: "li_2")])
+            parts: [
+                part(
+                    .audio, "\(episode.id).mp3", episodeId: partEpisodeId ?? episode.id, directory: directory)
+            ])
     }
 
     private var bookParts: [DownloadPartDTO] {
@@ -139,11 +145,75 @@ import Testing
         #expect(again.files.first { $0.episodeId == "ep_1" }?.id == first.files[0].id)
         #expect(Set(again.media.episodes.map(\.id)) == ["ep_1", "ep_2"])
 
-        let deleted = try await store.deleteEpisode(itemID: first.id, episodeId: "ep_1")
-        #expect(deleted.map(\.relativePath) == ["li_2/ep_1.mp3"])
+        let deleted = try #require(try await store.deleteEpisode(itemID: first.id, episodeId: "ep_1"))
+        #expect(deleted.removedFiles.map(\.relativePath) == ["li_2/ep_1.mp3"])
+        #expect(deleted.itemIsEmpty == false)
         let remaining = try #require(try await store.item(id: first.id))
         #expect(remaining.files.map(\.episodeId) == ["ep_2"])
         #expect(remaining.media.episodes.map(\.id) == ["ep_2"])
+
+        // A missing episode removes nothing; the last one leaves the item empty.
+        let missing = try await store.deleteEpisode(itemID: first.id, episodeId: "ep_9")
+        #expect(missing == LocalItemStore.EpisodeDeletion(removedFiles: [], itemIsEmpty: false))
+        let last = try #require(try await store.deleteEpisode(itemID: first.id, episodeId: "ep_2"))
+        #expect(last.removedFiles.map(\.episodeId) == ["ep_2"])
+        #expect(last.itemIsEmpty)
+        #expect(try await store.item(id: first.id)?.files.isEmpty == true)
+        #expect(try await store.deleteEpisode(itemID: UUID(), episodeId: "ep_2") == nil)
+    }
+
+    @Test func podcastItemKeepsPodcastTitleAndDirectory() async throws {
+        let (store, _) = try makeStore()
+        let episode1 = Fixtures.podcastSnapshot.episodes[0]
+        var episode2 = episode1
+        episode2.id = "ep_2"
+        episode2.title = "Episode 2"
+
+        let first = try await store.upsertFromDownload(episodeDownload(episode1), now: now)
+        #expect(first.title == "The Podcast")
+        #expect(first.relativeDirectory == "li_2")
+        // A later episode download with another directory doesn't move the item, and a part
+        // without an episode id still files under the download's episode.
+        let second = try await store.upsertFromDownload(
+            episodeDownload(episode2, directory: "elsewhere", partEpisodeId: .some(nil)), now: now)
+        #expect(second.title == "The Podcast")
+        #expect(second.relativeDirectory == "li_2")
+        #expect(second.files.first { $0.relativePath == "elsewhere/ep_2.mp3" }?.episodeId == "ep_2")
+    }
+
+    @Test func upsertFromDownloadRequiresEveryPartCompleted() async throws {
+        let (store, _) = try makeStore()
+        var parts = bookParts
+        parts[1].state = .running
+        await #expect(throws: LocalItemStore.StoreError.incompleteDownload) {
+            try await store.upsertFromDownload(bookDownload(parts: parts))
+        }
+        await #expect(throws: LocalItemStore.StoreError.incompleteDownload) {
+            try await store.upsertFromDownload(bookDownload(parts: []))
+        }
+        #expect(try await store.allItems().isEmpty)
+    }
+
+    @Test func failedSaveIsRolledBackAndNotCommittedLater() async throws {
+        let (store, container) = try makeStore()
+        let item = try await store.upsertFromDownload(bookDownload(parts: bookParts), now: now)
+
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.deleteItem(id: item.id) }
+        #expect(await store.hasUncommittedChanges == false)
+        // A failed multi-object write leaves nothing behind either.
+        var other = bookDownload(parts: bookParts)
+        other.key = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_5")
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.upsertFromDownload(other) }
+        #expect(await store.hasUncommittedChanges == false)
+
+        // A later, unrelated save doesn't commit the failed changes.
+        #expect(try await store.updateCover(itemID: item.id, relativePath: nil, updatedAt: nil))
+        let context = ModelContext(container)
+        #expect(try context.fetchCount(FetchDescriptor<LocalLibraryItem>()) == 1)
+        #expect(try context.fetchCount(FetchDescriptor<LocalFile>()) == 3)
+        #expect(try await store.item(id: item.id)?.coverRelativePath == nil)
     }
 
     @Test func listsAndUpdatesCover() async throws {

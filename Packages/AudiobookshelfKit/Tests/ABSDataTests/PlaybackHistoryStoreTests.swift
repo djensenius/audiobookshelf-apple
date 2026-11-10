@@ -89,4 +89,41 @@ import Testing
         #expect(try await store.pruneExpired(now: now) == 1)
         #expect(try await store.events(for: key) == [recent, boundary])
     }
+
+    @Test func pruneExpiredAcrossMediaKeys() async throws {
+        let store = try makeStore()
+        let book = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_1")
+        let other = MediaKey(serverConnectionID: UUID(), libraryItemId: "li_7")
+        let old = now.addingTimeInterval(-PlaybackHistoryStore.retention - 60)
+        let keptBook = event(key: book, at: now)
+        let keptOther = event(key: other, at: now.addingTimeInterval(-60))
+        for item in [event(at: old), event(key: book, at: old), event(key: other, at: old), keptBook, keptOther] {
+            try await store.record(item)
+        }
+        #expect(try await store.pruneExpired(now: now) == 3)
+        #expect(try await store.events(for: key).isEmpty)
+        #expect(try await store.events(for: book) == [keptBook])
+        #expect(try await store.events(for: other) == [keptOther])
+    }
+
+    @Test func eventsAreLimitedToTheNewest() async throws {
+        let store = try makeStore()
+        let events = (0..<5).map { event(at: now.addingTimeInterval(Double($0))) }
+        for item in events {
+            try await store.record(item)
+        }
+        #expect(try await store.events(for: key, limit: 2) == [events[4], events[3]])
+        #expect(try await store.events(for: key).count == 5)
+    }
+
+    @Test func failedSaveIsRolledBack() async throws {
+        let store = try makeStore()
+        let kept = event(at: now)
+        try await store.record(kept)
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.deleteEvents(for: key) }
+        #expect(await store.hasUncommittedChanges == false)
+        try await store.record(event(at: now.addingTimeInterval(1)))
+        #expect(try await store.events(for: key).count == 2)
+    }
 }

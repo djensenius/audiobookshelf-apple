@@ -97,7 +97,9 @@ import Testing
         let created = try await login(store)
         // History alone doesn't retain a connection, and synced progress doesn't either.
         let context = ModelContext(container)
-        context.insert(Fixtures.historyEvent())
+        let history = Fixtures.historyEvent()
+        history.serverConnectionID = created.id
+        context.insert(history)
         let synced = Fixtures.progress(key: MediaKey(serverConnectionID: created.id, libraryItemId: "li_1").rawValue)
         synced.serverConnectionID = created.id
         context.insert(synced)
@@ -106,6 +108,23 @@ import Testing
         #expect(try await store.remove(id: created.id) == .deleted)
         #expect(try await store.connection(id: created.id) == nil)
         #expect(try await store.remove(id: created.id) == .notFound)
+        // History rows keep the deleted connection's id for display.
+        let events = try ModelContext(container).fetch(FetchDescriptor<PlaybackHistoryEvent>())
+        #expect(events.map(\.id) == [history.id])
+        #expect(events.map(\.serverConnectionID) == [created.id])
+    }
+
+    @Test func failedSaveIsRolledBackAndNotCommittedLater() async throws {
+        let (store, _) = try makeStore()
+        let created = try await login(store)
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.remove(id: created.id) }
+        #expect(await store.hasUncommittedChanges == false)
+
+        // A later, unrelated save doesn't commit the failed deletion.
+        #expect(try await store.updateServerVersion(id: created.id, "2.30.0"))
+        let other = ServerConnectionStore(modelContainer: store.modelContainer)
+        #expect(try await other.connection(id: created.id)?.serverVersion == "2.30.0")
     }
 
     @Test(arguments: RetainedRecord.allCases)

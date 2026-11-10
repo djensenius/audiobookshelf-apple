@@ -3,22 +3,38 @@ import Foundation
 import SwiftData
 
 /// The only writer of `LocalLibraryItem` and `LocalFile` (ADR 0003).
-@ModelActor public actor LocalItemStore {
+@ModelActor public actor LocalItemStore: StoreActor {
     public enum StoreError: Error, Equatable {
         /// The download's server connection doesn't exist, so the item's server address and
         /// user are unknown.
         case connectionNotFound(UUID)
+        /// Some of the download's parts haven't completed.
+        case incompleteDownload
     }
 
-    /// Turns a completed download into a local item, idempotently.
+    /// What ``deleteEpisode(itemID:episodeId:now:)`` removed.
+    public struct EpisodeDeletion: Sendable, Equatable {
+        /// The deleted files, to remove from disk (empty when the episode had none).
+        public var removedFiles: [LocalFileDTO]
+        /// Whether the item has no files left, so the caller can delete it.
+        public var itemIsEmpty: Bool
+    }
+
+    var pendingCommitFailure: (any Error)?
+
+    /// Turns a completed download into a local item, idempotently, in one transaction.
     ///
     /// The item is looked up by `[serverConnectionID, libraryItemId]` and updated in place
     /// (keeping its `id` and `addedAt`), or inserted. Audio and ebook parts become files; a file
     /// with the same relative path keeps its `id`, and files of the same download (the whole book,
     /// or the same podcast episode) that the download no longer has are deleted. For podcasts the
-    /// downloaded episode is merged into the item's snapshot, so other episodes stay. A cover part
-    /// sets `coverRelativePath`.
+    /// downloaded episode is merged into the item's snapshot, so other episodes stay; the item's
+    /// title is the podcast's (`media.metadata.title`, not the episode download's `title`) and its
+    /// `relativeDirectory` is set when it is created and never moved. A cover part sets
+    /// `coverRelativePath`.
     ///
+    /// - Throws: ``StoreError/incompleteDownload`` unless every part completed, and
+    ///   ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist.
     /// - Parameter coverUpdatedAt: The server's cover timestamp; `nil` keeps the stored one.
     @discardableResult
     public func upsertFromDownload(
@@ -26,45 +42,50 @@ import SwiftData
         coverUpdatedAt: Date? = nil,
         now: Date = .now
     ) throws -> LocalLibraryItemDTO {
+        guard download.isComplete else { throw StoreError.incompleteDownload }
         let key = download.key
-        guard let connection = try fetchConnection(id: key.serverConnectionID) else {
-            throw StoreError.connectionNotFound(key.serverConnectionID)
-        }
+        let isEpisode = key.episodeId != nil
+        let title = isEpisode ? download.media.metadata.title : download.title
         let coverPath = download.parts.last { $0.kind == .cover }?.destinationRelativePath
-        let files = download.parts.compactMap(Self.file(from:))
-
-        let item: LocalLibraryItem
-        if let existing = try fetchItem(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId) {
-            item = existing
-            item.media = Self.merging(download.media, into: existing.media, episodeId: key.episodeId)
-            reconcileFiles(of: item, with: files, episodeId: key.episodeId)
-        } else {
-            item = LocalLibraryItem(
-                serverConnectionID: key.serverConnectionID,
-                serverAddress: connection.address,
-                serverUserId: connection.userId,
-                libraryItemId: key.libraryItemId,
-                mediaType: download.mediaType,
-                title: download.title,
-                relativeDirectory: download.relativeDirectory,
-                addedAt: now,
-                media: download.media
-            )
-            modelContext.insert(item)
-            item.files = files.map(Self.makeModel)
+        let files = download.parts.compactMap { Self.file(from: $0, episodeId: key.episodeId) }
+        return try commit {
+            guard let connection = try fetchConnection(id: key.serverConnectionID) else {
+                throw StoreError.connectionNotFound(key.serverConnectionID)
+            }
+            let item: LocalLibraryItem
+            if let existing = try fetchItem(
+                serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+            {
+                item = existing
+                item.media = Self.merging(download.media, into: existing.media, episodeId: key.episodeId)
+                reconcileFiles(of: item, with: files, episodeId: key.episodeId)
+                if !isEpisode { item.relativeDirectory = download.relativeDirectory }
+            } else {
+                item = LocalLibraryItem(
+                    serverConnectionID: key.serverConnectionID,
+                    serverAddress: connection.address,
+                    serverUserId: connection.userId,
+                    libraryItemId: key.libraryItemId,
+                    mediaType: download.mediaType,
+                    title: title,
+                    relativeDirectory: download.relativeDirectory,
+                    addedAt: now,
+                    media: download.media
+                )
+                modelContext.insert(item)
+                item.files = files.map(Self.makeModel)
+            }
+            item.serverAddress = connection.address
+            item.serverUserId = connection.userId
+            item.mediaType = download.mediaType.rawValue
+            item.title = title
+            let authors = download.media.metadata.authors
+            item.authorName = authors.isEmpty ? nil : authors.joined(separator: ", ")
+            if let coverPath { item.coverRelativePath = coverPath }
+            if let coverUpdatedAt { item.coverUpdatedAt = coverUpdatedAt }
+            item.updatedAt = now
+            return LocalLibraryItemDTO(item)
         }
-        item.serverAddress = connection.address
-        item.serverUserId = connection.userId
-        item.mediaType = download.mediaType.rawValue
-        item.title = download.title
-        item.relativeDirectory = download.relativeDirectory
-        let authors = download.media.metadata.authors
-        item.authorName = authors.isEmpty ? nil : authors.joined(separator: ", ")
-        if let coverPath { item.coverRelativePath = coverPath }
-        if let coverUpdatedAt { item.coverUpdatedAt = coverUpdatedAt }
-        item.updatedAt = now
-        try modelContext.save()
-        return LocalLibraryItemDTO(item)
     }
 
     public func item(id: UUID) throws -> LocalLibraryItemDTO? {
@@ -93,29 +114,33 @@ import SwiftData
         updatedAt: Date?,
         now: Date = .now
     ) throws -> Bool {
-        guard let item = try fetchItem(id: itemID) else { return false }
-        item.coverRelativePath = relativePath
-        item.coverUpdatedAt = updatedAt
-        item.updatedAt = now
-        try modelContext.save()
-        return true
+        try commit {
+            guard let item = try fetchItem(id: itemID) else { return false }
+            item.coverRelativePath = relativePath
+            item.coverUpdatedAt = updatedAt
+            item.updatedAt = now
+            return true
+        }
     }
 
-    /// Removes one downloaded podcast episode: its files and its snapshot entry. Returns the
-    /// deleted files so the caller can remove them from disk.
+    /// Removes one downloaded podcast episode, its files and its snapshot entry, in one
+    /// transaction. Returns the deleted files, so the caller can remove them from disk, and
+    /// whether the item is now empty, so the caller can delete it; `nil` when the item doesn't
+    /// exist.
     @discardableResult
-    public func deleteEpisode(itemID: UUID, episodeId: String, now: Date = .now) throws -> [LocalFileDTO] {
-        guard let item = try fetchItem(id: itemID) else { return [] }
-        let removed = item.files.filter { $0.episodeId == episodeId }
-        let deleted = removed.map(LocalFileDTO.init)
-        for file in removed {
-            modelContext.delete(file)
+    public func deleteEpisode(itemID: UUID, episodeId: String, now: Date = .now) throws -> EpisodeDeletion? {
+        try commit {
+            guard let item = try fetchItem(id: itemID) else { return nil }
+            let removed = item.files.filter { $0.episodeId == episodeId }
+            let deleted = removed.map(LocalFileDTO.init)
+            for file in removed {
+                modelContext.delete(file)
+            }
+            item.files.removeAll { $0.episodeId == episodeId }
+            item.media.episodes.removeAll { $0.id == episodeId }
+            item.updatedAt = now
+            return EpisodeDeletion(removedFiles: deleted, itemIsEmpty: item.files.isEmpty)
         }
-        item.files.removeAll { $0.episodeId == episodeId }
-        item.media.episodes.removeAll { $0.id == episodeId }
-        item.updatedAt = now
-        try modelContext.save()
-        return deleted
     }
 
     /// Deletes the item and, by cascade, its files. Returns what was deleted so the caller can
@@ -123,16 +148,19 @@ import SwiftData
     /// doesn't exist.
     @discardableResult
     public func deleteItem(id: UUID) throws -> LocalLibraryItemDTO? {
-        guard let item = try fetchItem(id: id) else { return nil }
-        let deleted = LocalLibraryItemDTO(item)
-        modelContext.delete(item)
-        try modelContext.save()
-        return deleted
+        try commit {
+            guard let item = try fetchItem(id: id) else { return nil }
+            let deleted = LocalLibraryItemDTO(item)
+            modelContext.delete(item)
+            return deleted
+        }
     }
 
     // MARK: - Private
 
-    private static func file(from part: DownloadPartDTO) -> LocalFileDTO? {
+    /// The file for an audio or ebook part. An episode download's files always carry its
+    /// episode id, even when the part doesn't.
+    private static func file(from part: DownloadPartDTO, episodeId: String?) -> LocalFileDTO? {
         let kind: LocalFileKind
         switch part.kind {
         case .audio: kind = .audio
@@ -147,7 +175,7 @@ import SwiftData
             size: max(part.bytesWritten, part.expectedBytes),
             serverIno: part.serverIno,
             trackIndex: part.trackIndex,
-            episodeId: part.episodeId
+            episodeId: part.episodeId ?? episodeId
         )
     }
 
@@ -180,7 +208,8 @@ import SwiftData
     }
 
     /// Updates files with the same relative path in place, inserts new ones, and deletes the
-    /// download's old files (same `episodeId`) that it no longer has.
+    /// download's old files (same `episodeId`) that it no longer has. Runs inside the caller's
+    /// ``commit(_:)`` transaction.
     private func reconcileFiles(of item: LocalLibraryItem, with files: [LocalFileDTO], episodeId: String?) {
         let wantedPaths = Set(files.map(\.relativePath))
         var kept: [LocalFile] = []
@@ -214,6 +243,7 @@ import SwiftData
     private func fetchItems(_ descriptor: FetchDescriptor<LocalLibraryItem>) throws -> [LocalLibraryItemDTO] {
         var descriptor = descriptor
         descriptor.sortBy = [SortDescriptor(\.addedAt, order: .reverse), SortDescriptor(\.libraryItemId)]
+        descriptor.relationshipKeyPathsForPrefetching = [\.files]
         return try modelContext.fetch(descriptor).map(LocalLibraryItemDTO.init)
     }
 

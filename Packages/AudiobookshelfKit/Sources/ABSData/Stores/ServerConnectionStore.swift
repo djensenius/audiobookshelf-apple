@@ -7,7 +7,9 @@ import SwiftData
 /// Connections are looked up by their natural key, the normalized address and the server's user
 /// id, so logging in again to a removed connection reuses its `id`: the Keychain entry and every
 /// record that refers to it by `serverConnectionID` stay associated.
-@ModelActor public actor ServerConnectionStore {
+@ModelActor public actor ServerConnectionStore: StoreActor {
+    var pendingCommitFailure: (any Error)?
+
     /// What ``remove(id:now:)`` did.
     public enum RemovalOutcome: Sendable, Equatable {
         /// The connection had no retained records and was deleted.
@@ -29,28 +31,29 @@ import SwiftData
         serverVersion: String?,
         now: Date = .now
     ) throws -> ServerConnectionDTO {
-        let record: ServerConnectionRecord
-        if let existing = try fetchRecord(address: address.description, userId: userId) {
-            record = existing
-            record.username = username
-            record.authMethod = authMethod.rawValue
-            record.serverVersion = serverVersion
-        } else {
-            record = ServerConnectionRecord(
-                address: address.description,
-                userId: userId,
-                username: username,
-                authMethod: authMethod,
-                serverVersion: serverVersion,
-                createdAt: now
-            )
-            modelContext.insert(record)
+        try commit {
+            let record: ServerConnectionRecord
+            if let existing = try fetchRecord(address: address.description, userId: userId) {
+                record = existing
+                record.username = username
+                record.authMethod = authMethod.rawValue
+                record.serverVersion = serverVersion
+            } else {
+                record = ServerConnectionRecord(
+                    address: address.description,
+                    userId: userId,
+                    username: username,
+                    authMethod: authMethod,
+                    serverVersion: serverVersion,
+                    createdAt: now
+                )
+                modelContext.insert(record)
+            }
+            record.lastUsedAt = now
+            record.isDisconnected = false
+            record.disconnectedAt = nil
+            return ServerConnectionDTO(record)
         }
-        record.lastUsedAt = now
-        record.isDisconnected = false
-        record.disconnectedAt = nil
-        try modelContext.save()
-        return ServerConnectionDTO(record)
     }
 
     public func connection(id: UUID) throws -> ServerConnectionDTO? {
@@ -83,18 +86,20 @@ import SwiftData
     /// doesn't exist.
     @discardableResult
     public func markUsed(id: UUID, at date: Date = .now) throws -> Bool {
-        guard let record = try fetchRecord(id: id) else { return false }
-        record.lastUsedAt = date
-        try modelContext.save()
-        return true
+        try commit {
+            guard let record = try fetchRecord(id: id) else { return false }
+            record.lastUsedAt = date
+            return true
+        }
     }
 
     @discardableResult
     public func updateServerVersion(id: UUID, _ version: String?) throws -> Bool {
-        guard let record = try fetchRecord(id: id) else { return false }
-        record.serverVersion = version
-        try modelContext.save()
-        return true
+        try commit {
+            guard let record = try fetchRecord(id: id) else { return false }
+            record.serverVersion = version
+            return true
+        }
     }
 
     /// Removes a connection without orphaning its records. A connection with retained records
@@ -102,17 +107,25 @@ import SwiftData
     /// kept, keeping its `id`, and marked disconnected; any other connection is deleted, and
     /// history rows keep its old id for display. The caller removes the Keychain credentials and
     /// resume-data blobs in both cases.
+    ///
+    /// A download started while the connection is being removed is resolved by the stores'
+    /// existence checks: `DownloadStore.upsertRecord(_:now:)` and
+    /// `LocalItemStore.upsertFromDownload(_:coverUpdatedAt:now:)` throw `connectionNotFound`
+    /// once the row is deleted, and a record saved first makes this method keep the row.
+    ///
+    /// A disconnected connection whose retained records are later removed is not deleted here;
+    /// that needs a cleanup pass (#73).
     public func remove(id: UUID, now: Date = .now) throws -> RemovalOutcome {
-        guard let record = try fetchRecord(id: id) else { return .notFound }
-        if try hasRetainedRecords(connectionID: id) {
-            record.isDisconnected = true
-            record.disconnectedAt = now
-            try modelContext.save()
-            return .disconnected
+        try commit {
+            guard let record = try fetchRecord(id: id) else { return .notFound }
+            if try hasRetainedRecords(connectionID: id) {
+                record.isDisconnected = true
+                record.disconnectedAt = now
+                return .disconnected
+            }
+            modelContext.delete(record)
+            return .deleted
         }
-        modelContext.delete(record)
-        try modelContext.save()
-        return .deleted
     }
 
     // MARK: - Private
