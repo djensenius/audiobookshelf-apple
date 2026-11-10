@@ -392,6 +392,7 @@ private final class CookieJars: Sendable {
                 return redirect
             case ("/abs/status", true): return .json(statusLocal)
             case ("/abs/login", true): return .json(authResponseJSON())
+            case ("/abs/api/authorize", true): return .json(authResponseJSON(tokens: false))
             default: return .redirect(to: "https://\(url.host() ?? "")/challenge", status: 302)
             }
         }
@@ -403,6 +404,18 @@ private final class CookieJars: Sendable {
 
         let result = try await validator.login(to: validated, username: "david", password: "pw")
         #expect(result.tokens.accessToken == "access-new")
+        #expect(jars.count == 1)
+
+        // The account's client keeps the configuration and the jar, so the proxy lets it through.
+        let account = validated.makeClient(
+            tokenProvider: InMemoryTokenProvider(result.tokens), sessionConfiguration: server.sessionConfiguration())
+        #expect(account.cookieStorage === validated.cookieStorage)
+        let configuration = await account.configuration
+        #expect(configuration.baseURL == validated.configuration.baseURL)
+        #expect(configuration.customHeaders == validated.configuration.customHeaders)
+        _ = try await validator.authorize(with: account)
+        let authorize = try #require(server.requests(path: "/abs/api/authorize").first)
+        #expect(authorize.value(forHTTPHeaderField: "Authorization") == "Bearer access-new")
         #expect(jars.count == 1)
 
         // A new validation starts with an empty jar and its own redirect.

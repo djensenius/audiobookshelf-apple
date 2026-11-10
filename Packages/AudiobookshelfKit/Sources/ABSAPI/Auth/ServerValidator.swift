@@ -389,11 +389,27 @@ public struct ValidatedServer: Sendable {
     /// Warn before sign-in.
     public let fellBackToHTTP: Bool
     /// The cookie jar of the validation's `/status` requests, reused by
-    /// ``ServerValidator/login(to:username:password:)``. A new validation has a new jar.
+    /// ``ServerValidator/login(to:username:password:)`` and ``makeClient(tokenProvider:sessionConfiguration:)``.
+    /// A new validation has a new jar.
     let cookieStorage: HTTPCookieStorage?
 
     /// Whether credentials would be sent unencrypted.
     public var isInsecure: Bool { address.url.scheme == "http" }
+
+    /// The client for the account signed in to this server: ``configuration`` (base URL and
+    /// custom headers) and the validation's cookie jar, so a cookie a proxy or load balancer set
+    /// during validation or sign-in keeps being sent.
+    ///
+    /// The jar is in memory only. A client made on a later launch (from a saved connection)
+    /// starts with an empty jar; recovering from a proxy that then challenges again is #172.
+    /// - Parameter sessionConfiguration: Tests pass a configuration with stub protocol classes.
+    public func makeClient(
+        tokenProvider: any TokenProvider, sessionConfiguration: URLSessionConfiguration = .absConnection()
+    ) -> APIClient {
+        APIClient(
+            configuration: configuration, tokenProvider: tokenProvider, sessionConfiguration: sessionConfiguration,
+            cookieStorage: cookieStorage)
+    }
 }
 
 /// A successful `POST /login`.
