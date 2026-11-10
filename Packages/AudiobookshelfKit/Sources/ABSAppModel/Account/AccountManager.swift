@@ -109,7 +109,8 @@ public final class AccountManager {
     /// The credentials generation of each connection's latest sign-in in this process.
     @ObservationIgnored private var signInGenerations: [UUID: Int] = [:]
     @ObservationIgnored private var operation = 0
-    /// The connection the current restore, switch or sign-in is making active, until it is.
+    /// The connection the current restore, switch or sign-in is making active, until that call
+    /// returns, so removing it cancels the call at any stage.
     @ObservationIgnored private var pendingConnectionID: UUID?
     /// Counts ``logout()`` calls, so a sign-in can tell that it was signed out while running.
     @ObservationIgnored private var logouts = 0
@@ -164,6 +165,7 @@ public final class AccountManager {
         _ result: LoginResult, to server: ValidatedServer, method: ServerAuthMethod, logoutsBefore: Int
     ) async throws {
         let operation = begin()
+        defer { if isCurrent(operation) { pendingConnectionID = nil } }
         let session = StoredSession(tokens: result.tokens, openIDSession: result.openIDSession)
         var saved: (id: UUID, credentials: ConnectionCredentials, generation: Int)?
         do {
@@ -223,6 +225,7 @@ public final class AccountManager {
     /// nothing to restore. Call again to reconnect from offline.
     public func restoreSession() async {
         let operation = begin()
+        defer { if isCurrent(operation) { pendingConnectionID = nil } }
         state = .restoring
         lastError = nil
         await reloadConnections()
@@ -247,9 +250,11 @@ public final class AccountManager {
     /// - Throws: ``AccountError`` if the connection isn't saved or has no session, or the
     ///   ``KeychainError`` if the session can't be read. The state is then unchanged, unless this
     ///   superseded a restore or switch: then it's offline with the active connection, or signed
-    ///   out if none is active.
+    ///   out if none is active. `CancellationError` if a newer call superseded it, including
+    ///   ``remove(_:)`` of this connection.
     public func `switch`(to id: UUID) async throws {
         let operation = begin()
+        defer { if isCurrent(operation) { pendingConnectionID = nil } }
         pendingConnectionID = id
         let connection: ServerConnectionDTO
         let client: APIClient
@@ -262,13 +267,12 @@ public final class AccountManager {
             try ensureCurrent(operation)
             connection = found
         } catch {
-            if isCurrent(operation) {
-                pendingConnectionID = nil
-                // A superseded restore or switch won't finish. Keep a connection it was activating
-                // or reconnecting, unverified, as offline does.
-                if state == .restoring, let active = activeConnection {
+            // A superseded restore or switch won't finish. Keep a connection it was activating or
+            // reconnecting, unverified, as offline does.
+            if isCurrent(operation), state == .restoring {
+                if let active = activeConnection {
                     goOffline(active, client: self.client, error: nil)
-                } else if state == .restoring {
+                } else {
                     signOutLocally(error: nil)
                 }
             }
@@ -286,6 +290,7 @@ public final class AccountManager {
             Log.auth.error("Couldn't mark a connection used: \(String(describing: type(of: error)), privacy: .public)")
         }
         await reloadConnections()
+        try ensureCurrent(operation)
     }
 
     /// Signs out of the active connection, or if none is active, of the one being restored,
@@ -405,7 +410,6 @@ public final class AccountManager {
 
     /// Ends a restore that failed before authorizing.
     private func restoreFailed(_ connection: ServerConnectionDTO?, error: any Error) {
-        pendingConnectionID = nil
         switch error {
         case let error as KeychainError:
             Log.auth.error("Couldn't read the saved session: \(error.description, privacy: .public)")
@@ -462,7 +466,6 @@ public final class AccountManager {
     private func setActive(_ connection: ServerConnectionDTO, client: APIClient) {
         activeConnection = connection
         self.client = client
-        pendingConnectionID = nil
         authorization = nil
         features = nil
     }
@@ -471,7 +474,6 @@ public final class AccountManager {
     private func goOffline(_ connection: ServerConnectionDTO, client: APIClient?, error: AccountError?) {
         activeConnection = connection
         self.client = client
-        pendingConnectionID = nil
         authorization = nil
         features = connection.serverVersion.flatMap(ServerFeatures.init(serverVersion:))
         lastError = error

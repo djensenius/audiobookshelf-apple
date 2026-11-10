@@ -109,6 +109,22 @@ import Testing
         #expect(try await store.markUsed(id: UUID()) == false)
     }
 
+    @Test func markUsedSkipsDisconnectedConnections() async throws {
+        let (store, container) = try makeStore()
+        let created = try await login(store, at: now)
+        let context = ModelContext(container)
+        RetainedRecord.download.insert(connectionID: created.id, into: context)
+        try context.save()
+        #expect(try await store.remove(id: created.id) == .disconnected)
+
+        #expect(try await store.markUsed(id: created.id, at: now.addingTimeInterval(30)) == false)
+        #expect(try await store.connection(id: created.id)?.lastUsedAt == now)
+        #expect(try await store.connectionToRestore() == nil)
+
+        _ = try await login(store, at: now.addingTimeInterval(60))
+        #expect(try await store.markUsed(id: created.id, at: now.addingTimeInterval(90)))
+    }
+
     @Test func removeWithoutRetainedRecordsDeletes() async throws {
         let (store, container) = try makeStore()
         let created = try await login(store)

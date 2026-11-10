@@ -87,11 +87,11 @@ import SwiftData
     }
 
     /// Marks the connection as the latest used (switching servers). Returns `false` when it
-    /// doesn't exist.
+    /// doesn't exist or ``remove(id:now:)`` disconnected it, which only a new login undoes.
     @discardableResult
     public func markUsed(id: UUID, at date: Date = .now) throws -> Bool {
         try commit {
-            guard let record = try fetchRecord(id: id) else { return false }
+            guard let record = try fetchRecord(id: id), !record.isDisconnected else { return false }
             record.lastUsedAt = date
             return true
         }
