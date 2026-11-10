@@ -43,7 +43,7 @@ topic ADR PRs for a reserved number don't edit it).
 | --- | --- | --- | --- |
 | [0000](0000-template.md) | Template | [#21](https://github.com/djensenius/audiobookshelf-apple/issues/21) (P0-05) | — |
 | [0001](0001-architecture.md) | Architecture: modules, app layout, and concurrency | [#21](https://github.com/djensenius/audiobookshelf-apple/issues/21) (P0-05) | Accepted |
-| [0002](0002-identity-and-no-migration.md) | App identity and no data migration | [#18](https://github.com/djensenius/audiobookshelf-apple/issues/18) (P0-03) | Reserved |
+| [0002](0002-identity-and-no-migration.md) | App identity and no data migration | [#18](https://github.com/djensenius/audiobookshelf-apple/issues/18) (P0-03) | Accepted |
 | [0003](0003-swiftdata.md) | SwiftData schema, versioning, and actor boundaries | [#35](https://github.com/djensenius/audiobookshelf-apple/issues/35) (P1-12) | Reserved |
 | [0004](0004-navigation.md) | Navigation architecture for iPhone, iPad, iPhone Duo and Mac | [#41](https://github.com/djensenius/audiobookshelf-apple/issues/41) (P3-01) | Reserved |
 | [0005](0005-images.md) | Cover and image loading and caching | [#42](https://github.com/djensenius/audiobookshelf-apple/issues/42) (P3-02) | Reserved |
