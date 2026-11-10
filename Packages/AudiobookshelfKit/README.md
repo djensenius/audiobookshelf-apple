@@ -28,7 +28,7 @@ See [docs/architecture.md](../../docs/architecture.md) for the full rules.
 
 ## Resources
 
-- `ABSUI` processes `Sources/ABSUI/Resources/` (string catalog). The package's
+- `ABSUI` processes `Sources/ABSUI/Resources/` (the string catalog arrives with the localization issue). The package's
   default localization is `en`.
 - `ABSCoreTests`, `ABSAPITests`, and `ABSPlaybackTests` copy their `Fixtures/`
   folder; load files with
