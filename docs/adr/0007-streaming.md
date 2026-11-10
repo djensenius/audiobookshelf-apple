@@ -218,11 +218,15 @@ Cons:
    - **Recovery on any item failure, stall, or HTTP error.** `GET /api/session/{id}` is **authoritative**: `openSessionMiddleware` returns 404 only when the session is no longer open (`SessionController.js:338-349`).
      1. **Session gone (404).** Session loss. Re-open the session in the same mode and resume at the last known position.
      2. **Session exists, HLS segment 404.** The segment is not ready yet. That happens while ffmpeg is still producing it, or after an unbuffered seek makes the server reset the transcode: `HlsRouter` returns 404 for a missing `.ts` and may restart ffmpeg at the requested segment, emitting socket `stream_reset {startTime, streamId}` (`server/routers/HlsRouter.js:74-94`).
-        - Retry segment readiness with exponential backoff: 0.5 s, 1 s, 2 s, 4 s, 8 s. That is at most 5 retries and about 15.5 s in total, then the attempt is abandoned. Retry by re-seeking the current item to the current time. The playlist URL and session stay unchanged.
-        - If a `stream_reset` for this session arrives, seek to its `startTime` and restart the backoff once.
+        - Retry segment readiness with exponential backoff: 0.5 s, 1 s, 2 s, 4 s, 8 s. That is at most 5 retries and about 15.5 s in total, then the attempt is abandoned. The playlist URL and server session stay unchanged on every retry. Each retry depends on the item's state:
+          - **Item not failed** (stalled, `AVPlayerItem.status != .failed`): re-seek the current item to the saved position.
+          - **Item failed** (`AVPlayerItem.status == .failed`, which a seek cannot recover): create a new `AVURLAsset` and `AVPlayerItem` for the same playlist URL, replace the current item, and seek to the saved position.
+          - **Player failed** (`AVPlayer.status == .failed`): also create a new player before inserting the item. Re-attach observers and the rate.
+          - Re-seeks and item or player recreations all draw on the same retry budget.
+        - If a `stream_reset` for this session arrives, move the saved position to its `startTime`, apply it with the same item-state rule, and restart the backoff once.
         - After the bounds are exhausted, re-check the session. If it still exists, close it and re-open it in the same mode at the last known position. Do this at most once, then surface an error.
      3. **Session exists, direct-play decode or format error.** Examples: `AVError.fileFormatNotRecognized`, `.decodeFailed`. Close the session and re-open it once with `forceTranscode: true`, resuming at the current position. This matches legacy behaviour.
-     4. **Session exists, other network errors** on direct play: retry with the same bounded backoff, then surface an error. Never transcode because of a network error.
+     4. **Session exists, other network errors** on direct play: retry with the same bounded backoff and the same item-state rule (re-seek, or recreate a failed item or player), then surface an error. Never transcode because of a network error.
    - **Detecting the failure on a plain `AVURLAsset`.** AVFoundation does not hand the app the HTTP response:
      - Observe `AVPlayerItem.status == .failed` and `AVPlayerItemFailedToPlayToEndTime` (`AVPlayerItemFailedToPlayToEndTimeErrorKey`).
      - On a failure or a stall (`AVPlayerItemPlaybackStalled`), read the `AVPlayerItem.errorLog()` events (`AVPlayerItemNewErrorLogEntry`). For HTTP failures, `errorStatusCode` and `errorComment` usually carry the HTTP status, for example `404` with "HTTP 404: File Not Found" in `CoreMediaErrorDomain`. This is typical for HLS. Whether progressive items fill the error log is unverified.
