@@ -750,6 +750,122 @@ struct AudioEngineTests {
             })
     }
 
+    private static func activationFailures(_ events: [AudioEngineEvent]) -> Int {
+        events.count { if case .failed(.audioSessionActivationFailed) = $0 { true } else { false } }
+    }
+
+    @Test(.tags(.realtimeAudio)) func activationFailureWhilePlayingPausesAndPlayRetries() async throws {
+        let fixture = try AudioFixture()
+        let session = FakeAudioSession()
+        let engine = makeEngine(session: session)
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        try await engine.load(fixture.source, at: 0)
+        engine.play()
+        #expect(await eventually { engine.state == .playing })
+
+        // A repeated play() whose activation fails must not leave the player running unrequested.
+        session.activationError = FakeAudioSession.ActivationError()
+        engine.play()
+        #expect(engine.player.rate == 0)
+        #expect(!engine.isPlaybackRequested)
+        #expect(await eventually { engine.state == .paused && engine.player.timeControlStatus == .paused })
+        #expect(Self.activationFailures(events) == 1)
+
+        // Nothing starts the player later without a new play(): a completed seek stays paused.
+        let activations = session.activations
+        #expect(await engine.seek(to: 4) == .completed)
+        #expect(engine.player.rate == 0)
+        #expect(session.activations == activations)
+
+        // The next play() activates again.
+        session.activationError = nil
+        engine.play()
+        #expect(session.activations == activations + 1)
+        #expect(engine.isPlaybackRequested)
+        #expect(await eventually { engine.state == .playing })
+    }
+
+    @Test func activationFailureDuringLoadAutoPlayStaysPaused() async throws {
+        let fixture = try AudioFixture()
+        let session = FakeAudioSession()
+        session.activationError = FakeAudioSession.ActivationError()
+        let engine = makeEngine(session: session)
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+
+        let load = Task { try await engine.load(fixture.source, at: 4) }
+        try await waitUntil { engine.state == .loading }
+        engine.play()
+        try await load.value
+
+        #expect(session.activations == 1)
+        #expect(Self.activationFailures(events) == 1)
+        #expect(engine.player.rate == 0)
+        #expect(!engine.isPlaybackRequested)
+        #expect(engine.state == .paused)
+        #expect(engine.currentTime == 4)
+    }
+
+    @Test func activationFailureOnInterruptionResumeStaysPaused() async throws {
+        let fixture = try AudioFixture()
+        let session = FakeAudioSession()
+        let engine = makeEngine(session: session)
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        let handler = AudioInterruptionHandler(engine: engine)
+        try await engine.load(fixture.source, at: 0)
+        engine.play()
+
+        handler.handle(.interruptionBegan)
+        session.activationError = FakeAudioSession.ActivationError()
+        handler.handle(.interruptionEnded(shouldResume: true))
+
+        #expect(Self.activationFailures(events) == 1)
+        #expect(engine.player.rate == 0)
+        #expect(!engine.isPlaybackRequested)
+        #expect(engine.state == .paused)
+        // The resume was used up: a second recommendation does not try again.
+        session.activationError = nil
+        handler.handle(.interruptionEnded(shouldResume: true))
+        #expect(!engine.isPlaybackRequested)
+        #expect(engine.player.rate == 0)
+    }
+
+    @Test func playDuringSupersededSeekIsHonouredByTheLastSeek() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        try await engine.load(fixture.source, at: 0)
+        let seeker = engine.itemSeeker
+        var gate: CheckedContinuation<Void, Never>?
+        var isFirst = true
+        engine.itemSeeker = { item, time, tolerance in
+            let finished = await seeker(item, time, tolerance)
+            if isFirst {
+                isFirst = false
+                await withCheckedContinuation { gate = $0 }
+            }
+            return finished
+        }
+
+        // The first seek's completion is held; play() is requested while it is pending.
+        let first = Task { await engine.seek(to: 1) }
+        try await waitUntil { gate != nil }
+        engine.play()
+        #expect(engine.state == .buffering)
+        #expect(engine.player.rate == 0)
+
+        // A second seek supersedes it and honours the request when it completes.
+        #expect(await engine.seek(to: 2) == .completed)
+        #expect(engine.player.rate == 1)
+        gate?.resume()
+        #expect(await first.value == .superseded)
+        #expect(engine.isPlaybackRequested)
+        #expect(engine.player.rate == 1)
+        #expect(engine.pendingSeekTarget == nil)
+        #expect(engine.currentTime >= 2 && engine.currentTime < 3)
+    }
+
     @Test(.tags(.realtimeAudio)) func systemRateChangeCountsAsPause() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()
