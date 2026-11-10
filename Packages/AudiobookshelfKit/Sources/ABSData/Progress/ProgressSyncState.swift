@@ -263,6 +263,14 @@ struct ProgressSyncState: Sendable, Equatable {
         shieldSideEffects(of: sent, unseeded: unseeded)
     }
 
+    /// A PATCH taken from a deleted row for the same media may still reach the server (and may
+    /// create its progress, with side effects on every group), and this row holds no evidence of
+    /// it: each pending edit keeps its local value until its own send is acknowledged, as when
+    /// evidence was truncated.
+    mutating func shieldFromObsoleteSend() {
+        truncated.formUnion(dirty)
+    }
+
     // MARK: - Merging server progress
 
     /// Merges server progress, group by group, except the `excluded` groups (those carried by a

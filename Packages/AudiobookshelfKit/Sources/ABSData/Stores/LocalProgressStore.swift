@@ -213,7 +213,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// The PATCH succeeded. `serverLastUpdate` is the response's `lastUpdate`, when it has one.
     /// Returns `false`, changing nothing, when `patch` is not the row's send in flight (a late or
     /// repeated response for a send already settled). A row deleted and recreated for the same
-    /// key since ``beginSend(for:now:)`` is left unchanged; the send is still settled.
+    /// key since ``beginSend(for:now:)`` isn't acknowledged, but its pending edits are shielded
+    /// from the old PATCH's echo; the send is still settled.
     @discardableResult
     public func completeSend(_ patch: ProgressPatch, serverLastUpdate: Date?) throws -> Bool {
         guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
@@ -221,8 +222,13 @@ public enum SessionUploadResult: Sendable, Equatable {
         // recognises its echo.
         defer { settle(patch.key) }
         let acknowledged = try commit {
-            guard let row = try fetchRow(patch.key), row.persistentModelID == flight.row else { return false }
+            guard let row = try fetchRow(patch.key) else { return false }
             var state = ProgressSyncState(row)
+            guard row.persistentModelID == flight.row else {
+                state.shieldFromObsoleteSend()
+                state.write(to: row)
+                return false
+            }
             state.acknowledge(patch.values, serverLastUpdate: serverLastUpdate)
             state.write(to: row)
             row.lastSyncError = nil
@@ -245,7 +251,13 @@ public enum SessionUploadResult: Sendable, Equatable {
         guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
         defer { settle(patch.key) }
         try commit {
-            guard let row = try fetchRow(patch.key), row.persistentModelID == flight.row else { return }
+            guard let row = try fetchRow(patch.key) else { return }
+            guard row.persistentModelID == flight.row else {
+                var state = ProgressSyncState(row)
+                state.shieldFromObsoleteSend()
+                state.write(to: row)
+                return
+            }
             row.lastSyncError = error
         }
         return true

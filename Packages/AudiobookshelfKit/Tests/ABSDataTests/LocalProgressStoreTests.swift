@@ -268,8 +268,9 @@ import Testing
     }
 
     /// A row deleted while its PATCH is in flight and recreated before the response: the
-    /// response settles the send but doesn't touch the new row, whether its edit has the sent
-    /// edit's time (would be cleared) or a later one (would get the old baseline and a hold).
+    /// response settles the send without acknowledging the new row, whether its edit has the
+    /// sent edit's time (would be cleared) or a later one (would get the old baseline and a
+    /// hold), and the old PATCH's delayed echo can't replace the new edit.
     @Test(arguments: [false, true], [1.0, 5.0])
     func responseForADeletedRowLeavesItsReplacementAlone(_ succeeds: Bool, _ recreatedAt: TimeInterval)
         async throws
@@ -289,9 +290,26 @@ import Testing
         } else {
             #expect(try await store.failSend(patch, error: "offline"))
         }
-        #expect(try await store.progress(for: key) == recreated)
+        let settled = try #require(try await store.progress(for: key))
+        #expect(settled.currentTime == 300)
+        #expect(settled.audioDirty)
+        #expect(settled.serverBaseline == recreated?.serverBaseline)
         #expect(await store.needsConfirmationFetch.isEmpty)
-        #expect(try await store.beginSend(for: key)?.values.audio?.currentTime == 300)
+
+        // The old PATCH committed after the new edit; its delayed echo (or a fetch) doesn't
+        // replace the new edit, which is still sent.
+        for source in [ServerProgressSource.socket, .fetch] {
+            let capture = await store.captureGeneration()
+            try await store.applyServerProgress(
+                [key: Self.server(currentTime: 200, lastUpdate: Self.at(6))], capturedAt: capture, source: source)
+            let row = try #require(try await store.progress(for: key))
+            #expect(row.currentTime == 300)
+            #expect(row.audioDirty)
+        }
+        let next = try #require(try await store.beginSend(for: key))
+        #expect(next.values.audio?.currentTime == 300)
+        #expect(try await store.completeSend(next, serverLastUpdate: Self.at(7)))
+        #expect(try await store.progress(for: key)?.needsServerSync == false)
     }
 
     /// Server values merged while a PATCH is in flight update the row in place; the response
