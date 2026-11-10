@@ -10,7 +10,8 @@ import Foundation
 /// through `LocalFile.trackIndex` and `LocalFile.episodeId`.
 public struct LocalMediaSnapshot: Codable, Sendable, Hashable {
     /// The snapshot version written by this build.
-    public static let currentVersion = 1
+    /// Version 2 added ``coverUpdatedAt``.
+    public static let currentVersion = 2
 
     public var snapshotVersion: Int
     public var metadata: Metadata
@@ -19,6 +20,8 @@ public struct LocalMediaSnapshot: Codable, Sendable, Hashable {
     public var ebookFile: EbookFile?
     /// For podcasts, the downloaded episodes.
     public var episodes: [Episode]
+    /// The server's cover timestamp when the snapshot was taken; `nil` in version 1 snapshots.
+    public var coverUpdatedAt: Date?
 
     public init(
         snapshotVersion: Int = LocalMediaSnapshot.currentVersion,
@@ -26,7 +29,8 @@ public struct LocalMediaSnapshot: Codable, Sendable, Hashable {
         chapters: [Chapter] = [],
         audioTracks: [AudioTrack] = [],
         ebookFile: EbookFile? = nil,
-        episodes: [Episode] = []
+        episodes: [Episode] = [],
+        coverUpdatedAt: Date? = nil
     ) {
         self.snapshotVersion = snapshotVersion
         self.metadata = metadata
@@ -34,6 +38,7 @@ public struct LocalMediaSnapshot: Codable, Sendable, Hashable {
         self.audioTracks = audioTracks
         self.ebookFile = ebookFile
         self.episodes = episodes
+        self.coverUpdatedAt = coverUpdatedAt
     }
 
     public struct Metadata: Codable, Sendable, Hashable {
