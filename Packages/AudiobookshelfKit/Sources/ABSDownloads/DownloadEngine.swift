@@ -139,6 +139,7 @@ public actor DownloadEngine {
     private let beforeStoppingSiblings: (@Sendable (UUID) async -> Void)?
     private let afterPermanentFailure: (@Sendable (UUID) async -> Void)?
     private let startFoundSettling: (@Sendable (Set<UUID>) async -> Void)?
+    private let adoptionStarted: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
 
@@ -262,7 +263,8 @@ public actor DownloadEngine {
         cancelKeepingResumeData: @escaping @Sendable (URLSessionDownloadTask) async -> Data?,
         beforeStoppingSiblings: (@Sendable (UUID) async -> Void)? = nil,
         afterPermanentFailure: (@Sendable (UUID) async -> Void)? = nil,
-        startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil
+        startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
+        adoptionStarted: (@Sendable (UUID) async -> Void)? = nil
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
         (progress, progressContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(100))
@@ -284,6 +286,7 @@ public actor DownloadEngine {
         self.beforeStoppingSiblings = beforeStoppingSiblings
         self.afterPermanentFailure = afterPermanentFailure
         self.startFoundSettling = startFoundSettling
+        self.adoptionStarted = adoptionStarted
         registry.register(self)
     }
 
@@ -339,8 +342,13 @@ public actor DownloadEngine {
     /// - Parameter resettingBudgetOf: the parts whose retry budget starts over, if they aren't
     ///   settling; `nil` for every part in `partIDs`. The replay of a failure that overlapped a
     ///   start passes the failing part only: its siblings were reset when the start began.
-    private func start(partIDs: [UUID], resumingRecordID: UUID?, resettingBudgetOf: Set<UUID>? = nil) async {
-        guard await ensureSession() else { return }
+    private func start(
+        partIDs: [UUID], resumingRecordID: UUID?, resettingBudgetOf: Set<UUID>? = nil,
+        activationOwnsSession: Bool = false
+    ) async {
+        // A replay from a failure held during reattachment runs inside performActivation's task.
+        // Waiting for ensureSession here would make that task wait for itself.
+        if !activationOwnsSession, !(await ensureSession()) { return }
         let records: [DownloadRecordDTO]
         do {
             records = try await loadRecords()
@@ -375,7 +383,7 @@ public actor DownloadEngine {
             }
         }
         for partID in partIDs where tasks[partID] == nil && !settlingParts.contains(partID) {
-            await launch(partID)
+            await launch(partID, activationOwnsSession: activationOwnsSession)
         }
     }
 
@@ -577,7 +585,7 @@ public actor DownloadEngine {
                 task.cancel()
                 continue
             }
-            await reattach(download, partID: partID)
+            await reattach(download, partID: partID, activationOwnsSession: true)
         }
         // A part left running without a transfer: either its transfer moved the file, but iOS
         // ended the process before the completion was saved, or the app ended before the system
@@ -636,12 +644,13 @@ public actor DownloadEngine {
     /// it. Activation doesn't complete the part from that file (see ``isStillRunning(_:)``), and
     /// the next transfer starts a new generation, so the file isn't reused (see
     /// ``movedFileSize(_:_:)``).
-    private func reattach(_ task: URLSessionDownloadTask, partID: UUID) async {
+    private func reattach(_ task: URLSessionDownloadTask, partID: UUID, activationOwnsSession: Bool = false) async {
         adopting.insert(task.taskIdentifier)
+        if let adoptionStarted { await adoptionStarted(partID) }
         await decideAdoption(of: task, partID: partID)
         adopting.remove(task.taskIdentifier)
         if let result = heldResults.removeValue(forKey: task.taskIdentifier) {
-            await handleCompletion(task, result)
+            await handleCompletion(task, result, activationOwnsSession: activationOwnsSession)
         }
     }
 
@@ -798,7 +807,10 @@ public actor DownloadEngine {
     /// - Parameters:
     ///   - rejectedAccessToken: after a 401, the token that was rejected.
     ///   - notBefore: the task's `earliestBeginDate`, for a retry created in the background.
-    private func launch(_ partID: UUID, rejectedAccessToken: String? = nil, notBefore: Date? = nil) async {
+    private func launch(
+        _ partID: UUID, rejectedAccessToken: String? = nil, notBefore: Date? = nil,
+        activationOwnsSession: Bool = false
+    ) async {
         if let stop = stopping[partID] { await stop.value }
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
             !settling.contains(partID), !pendingRecordFailures.contains(context.recordID)
@@ -808,7 +820,9 @@ public actor DownloadEngine {
             return
         }
         guard let destination = context.destination else {
-            await failPermanently(partID, code: .invalidDestination, message: "The download's destination is invalid.")
+            await failPermanently(
+                partID, code: .invalidDestination, message: "The download's destination is invalid.",
+                activationOwnsSession: activationOwnsSession)
             return
         }
         let token = UUID()
@@ -830,7 +844,9 @@ public actor DownloadEngine {
         } catch {
             logError("Couldn't start a download", error)
             if launching[partID] == token {
-                await retry(partID, code: .store, message: "Couldn't save the download's state.", transferFailed: false)
+                await retry(
+                    partID, code: .store, message: "Couldn't save the download's state.", transferFailed: false,
+                    activationOwnsSession: activationOwnsSession)
             }
             return
         }
@@ -852,14 +868,16 @@ public actor DownloadEngine {
             if launching[partID] == token {
                 await failPermanently(
                     partID, code: .customHeadersUnsupported,
-                    message: "Downloads from a server that needs custom headers aren't supported yet.")
+                    message: "Downloads from a server that needs custom headers aren't supported yet.",
+                    activationOwnsSession: activationOwnsSession)
             }
             return
         } catch {
             if launching[partID] == token {
                 await retry(
                     partID, code: .credentials,
-                    message: "Couldn't authorize the download: \(error.localizedDescription)", transferFailed: false)
+                    message: "Couldn't authorize the download: \(error.localizedDescription)", transferFailed: false,
+                    activationOwnsSession: activationOwnsSession)
             }
             return
         }
@@ -1000,7 +1018,9 @@ public actor DownloadEngine {
         }
     }
 
-    private func handleCompletion(_ task: URLSessionTask, _ result: DownloadTaskResult) async {
+    private func handleCompletion(
+        _ task: URLSessionTask, _ result: DownloadTaskResult, activationOwnsSession: Bool = false
+    ) async {
         if ignoredTasks.remove(task.taskIdentifier) != nil { return }
         guard let partID = task.partID, contexts[partID] != nil else { return }
         let current = tasks[partID]
@@ -1012,7 +1032,7 @@ public actor DownloadEngine {
         }
         if current == nil, !settling.contains(partID), let download = task as? URLSessionDownloadTask {
             hold(result, of: task, partID: partID)
-            await reattach(download, partID: partID)
+            await reattach(download, partID: partID, activationOwnsSession: activationOwnsSession)
             return
         }
         if case .moved(let bytes) = result {
@@ -1037,44 +1057,57 @@ public actor DownloadEngine {
         case .moved:
             return
         case .httpStatus(401):
-            await handleUnauthorized(partID, task: task)
+            await handleUnauthorized(partID, task: task, activationOwnsSession: activationOwnsSession)
         case .httpStatus(let status) where status == 0 || status == 408 || status == 429 || status >= 500:
-            await retry(partID, code: .transfer, message: "The server returned HTTP \(status).")
+            await retry(
+                partID, code: .transfer, message: "The server returned HTTP \(status).",
+                activationOwnsSession: activationOwnsSession)
         case .httpStatus(let status):
-            await failPermanently(partID, code: .httpStatus, message: "The server returned HTTP \(status).")
+            await failPermanently(
+                partID, code: .httpStatus, message: "The server returned HTTP \(status).",
+                activationOwnsSession: activationOwnsSession)
         case .redirectedUnauthorized:
             await failPermanently(
                 partID, code: .redirectedUnauthorized,
-                message: "The download was redirected, and its sign-in isn't sent to the new address.")
+                message: "The download was redirected, and its sign-in isn't sent to the new address.",
+                activationOwnsSession: activationOwnsSession)
         case .offOrigin:
-            await failPermanently(partID, code: .offOrigin, message: "The download was redirected to another server.")
+            await failPermanently(
+                partID, code: .offOrigin, message: "The download was redirected to another server.",
+                activationOwnsSession: activationOwnsSession)
         case .unexpectedContent(let type):
-            await retry(partID, code: .unexpectedContent, message: "The server sent \(type) instead of the file.")
+            await retry(
+                partID, code: .unexpectedContent, message: "The server sent \(type) instead of the file.",
+                activationOwnsSession: activationOwnsSession)
         case .sizeMismatch(let expected, let actual):
             let message =
                 expected > 0
                 ? "The file has \(actual) bytes instead of \(expected)."
                 : "The server didn't send the whole file (\(actual) bytes)."
-            await retry(partID, code: .sizeMismatch, message: message)
+            await retry(partID, code: .sizeMismatch, message: message, activationOwnsSession: activationOwnsSession)
         case .moveFailed(let message, let isOutOfSpace):
             if isOutOfSpace {
-                await failPermanently(partID, code: .outOfSpace, message: message)
+                await failPermanently(
+                    partID, code: .outOfSpace, message: message, activationOwnsSession: activationOwnsSession)
             } else {
-                await retry(partID, code: .fileSystem, message: message)
+                await retry(
+                    partID, code: .fileSystem, message: message, activationOwnsSession: activationOwnsSession)
             }
         case .failed(let failure):
-            await handleTransferFailure(partID, task: task, failure)
+            await handleTransferFailure(
+                partID, task: task, failure, activationOwnsSession: activationOwnsSession)
         }
     }
 
     private func handleTransferFailure(
-        _ partID: UUID, task: URLSessionTask, _ failure: DownloadTransferFailure
+        _ partID: UUID, task: URLSessionTask, _ failure: DownloadTransferFailure, activationOwnsSession: Bool = false
     ) async {
         if let data = failure.resumeData {
             contexts[partID]?.hasResumeData = seal(data, partID: partID, task: task)
         }
         if failure.isOutOfSpace {
-            await failPermanently(partID, code: .outOfSpace, message: failure.message)
+            await failPermanently(
+                partID, code: .outOfSpace, message: failure.message, activationOwnsSession: activationOwnsSession)
             return
         }
         if failure.isSessionInUse {
@@ -1083,7 +1116,7 @@ public actor DownloadEngine {
             return
         }
         guard failure.isBackgroundCancellation || failure.isSessionDisconnected else {
-            await retry(partID, code: .transfer, message: failure.message)
+            await retry(partID, code: .transfer, message: failure.message, activationOwnsSession: activationOwnsSession)
             return
         }
         // Not the transfer's fault: restart it without counting a failure, a few times.
@@ -1091,7 +1124,7 @@ public actor DownloadEngine {
         let restarts = freeRestarts[partID, default: 0] + 1
         freeRestarts[partID] = restarts
         guard restarts <= Self.maxFreeRestarts else {
-            await retry(partID, code: .transfer, message: failure.message)
+            await retry(partID, code: .transfer, message: failure.message, activationOwnsSession: activationOwnsSession)
             return
         }
         if failure.isSessionDisconnected { deferredLaunches.insert(partID) }
@@ -1114,7 +1147,9 @@ public actor DownloadEngine {
     /// Resume data replays the rejected header, so it is deleted. A 401 for the current token
     /// recreates the task from a fresh request once; a 401 for a token that has since been
     /// replaced doesn't count.
-    private func handleUnauthorized(_ partID: UUID, task: URLSessionTask) async {
+    private func handleUnauthorized(
+        _ partID: UUID, task: URLSessionTask, activationOwnsSession: Bool = false
+    ) async {
         guard let context = contexts[partID] else { return }
         vault.delete(partID: partID)
         contexts[partID]?.hasResumeData = false
@@ -1124,7 +1159,8 @@ public actor DownloadEngine {
         let current = await credentials.currentCredentials(for: context.connectionID)?.accessToken
         let isStale = current != nil && current != rejected
         if !isStale, !authRetried.insert(partID).inserted {
-            await failPermanently(partID, code: .unauthorized, message: message)
+            await failPermanently(
+                partID, code: .unauthorized, message: message, activationOwnsSession: activationOwnsSession)
             return
         }
         await persistIdle(partID) {
@@ -1133,7 +1169,7 @@ public actor DownloadEngine {
         }
         // In the background the new task is created before a wake is released (see `retry`).
         if isInBackground {
-            await launch(partID, rejectedAccessToken: rejected)
+            await launch(partID, rejectedAccessToken: rejected, activationOwnsSession: activationOwnsSession)
         } else {
             Task { [weak self] in await self?.launch(partID, rejectedAccessToken: rejected) }
         }
@@ -1268,13 +1304,16 @@ public actor DownloadEngine {
     /// - Parameter transferFailed: `false` when no request could be made (the credentials or
     ///   the store failed); then the retry always waits in the process.
     private func retry(
-        _ partID: UUID, code: DownloadFailureCode, message: String, transferFailed: Bool = true
+        _ partID: UUID, code: DownloadFailureCode, message: String, transferFailed: Bool = true,
+        activationOwnsSession: Bool = false
     ) async {
         guard let context = contexts[partID] else { return }
         let failure = failures[partID, default: 0] + 1
         failures[partID] = failure
         guard let delay = retryPolicy.delay(beforeRetry: failure, random: random()) else {
-            await failPermanently(partID, code: code, message: message, retryCount: failure)
+            await failPermanently(
+                partID, code: code, message: message, retryCount: failure,
+                activationOwnsSession: activationOwnsSession)
             return
         }
         await persistIdle(partID) {
@@ -1286,7 +1325,8 @@ public actor DownloadEngine {
             .partFailed(partID: partID, recordID: context.recordID, code: code, message: message, willRetry: true))
         if isInBackground, transferFailed {
             let seconds = Double(delay.components.seconds) + Double(delay.components.attoseconds) / 1e18
-            await launch(partID, notBefore: now().addingTimeInterval(seconds))
+            await launch(
+                partID, notBefore: now().addingTimeInterval(seconds), activationOwnsSession: activationOwnsSession)
             return
         }
         let clock = clock
@@ -1314,9 +1354,12 @@ public actor DownloadEngine {
     /// A start of the part that overlapped the failure (a plain ``start(partIDs:)``, or
     /// ``resume(recordID:)`` before, during or after any part of it) is replayed once the
     /// failure is settled: the part restarts with a fresh retry budget, and for a resume so do
-    /// the siblings the failure stopped. A part is replayed once per resume.
+    /// the siblings the failure stopped. A part is replayed once per resume. If activation is
+    /// handling the failure while reattaching a task, the replay reuses its session instead of
+    /// awaiting the activation task that is already handling it.
     private func failPermanently(
-        _ partID: UUID, code: DownloadFailureCode, message: String, retryCount: Int? = nil
+        _ partID: UUID, code: DownloadFailureCode, message: String, retryCount: Int? = nil,
+        activationOwnsSession: Bool = false
     ) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
         let resumeGenerationAtStart = resumeGenerations[context.recordID, default: 0]
@@ -1374,7 +1417,9 @@ public actor DownloadEngine {
             }
             // The replay carries the user's reset for the part it skipped: its budget was
             // persisted as used up by this failure, after any reset the start made.
-            await start(partIDs: replayParts, resumingRecordID: nil, resettingBudgetOf: [partID])
+            await start(
+                partIDs: replayParts, resumingRecordID: nil, resettingBudgetOf: [partID],
+                activationOwnsSession: activationOwnsSession)
         }
         if let afterPermanentFailure { await afterPermanentFailure(partID) }
     }

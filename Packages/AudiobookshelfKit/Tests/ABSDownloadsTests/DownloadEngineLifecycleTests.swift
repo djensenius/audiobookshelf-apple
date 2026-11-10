@@ -14,6 +14,11 @@ import Testing
         case pause
         case delete
     }
+    enum ActivationRetryFailure: String, CaseIterable, Sendable {
+        case exhaustedRetry
+        case inlineRetryLaunch
+        case replaySiblingLaunch
+    }
 
     @Test func reattachesToSurvivingTasksAndRestartsOrphans() async throws {
         let previous = StubGate()
@@ -1260,6 +1265,122 @@ import Testing
         #expect(part.lastError == "The server returned HTTP 404.")
         #expect(try await harness.store.record(id: record.id)?.state == .failed)
         #expect(harness.requests.count == 1)
+    }
+
+    /// Retry failures raised while activation reattaches a survivor must not make a background
+    /// wake wait for its own activation. This covers exhausted retries and failed launches from
+    /// both the inline retry and replay paths.
+    @Test(.timeLimit(.minutes(1)), arguments: ActivationRetryFailure.allCases)
+    func retryFailureDuringAdoptionWithPendingResumeDoesNotDeadlockBackgroundWake(
+        scenario: ActivationRetryFailure
+    ) async throws {
+        let survivorGate = StubGate()
+        let replay = StubGate()
+        let never = StubGate()
+        let counter = PathCounter()
+        let isInlineRetryLaunch = scenario == .inlineRetryLaunch
+        let isReplaySiblingLaunch = scenario == .replaySiblingLaunch
+        let customHeaders = isInlineRetryLaunch ? ["CF-Access-Client-Secret": "secret"] : [:]
+        let harness = try await DownloadHarness(customHeaders: customHeaders) { request in
+            let count = counter.next(request)
+            if request.url?.path().contains("/file/1/") == true {
+                let status = isReplaySiblingLaunch ? 404 : 500
+                return count == 1 ? .status(status, body: Data(), gate: survivorGate) : .status(200, gate: replay)
+            }
+            return .status(200, gate: never)
+        }
+        let failing = UUID()
+        let sibling = UUID()
+        let parts = isInlineRetryLaunch ? [failing] : [failing, sibling]
+        let record = try await harness.addRecord(parts: parts, state: .downloading)
+        let failingRetryCount = isInlineRetryLaunch ? 3 : scenario == .exhaustedRetry ? 5 : 0
+        _ = try await harness.store.updatePart(partID: failing, retryCount: failingRetryCount)
+        if isReplaySiblingLaunch {
+            _ = try await harness.store.updatePart(partID: sibling, retryCount: 5)
+            harness.credentials.failCredentials(onCall: 2)
+        }
+        let base = harness.base
+        let (adopting, adoptingContinuation) = AsyncStream.makeStream(of: UUID.self)
+        let proceed = StubGate()
+        let (resumeReads, resumeReadStarted) = AsyncStream.makeStream(of: Void.self)
+        let engine = harness.makeEngine(
+            readRecord: { store, id in
+                resumeReadStarted.yield()
+                return try await store.record(id: id)
+            },
+            adoptionStarted: { partID in
+                adoptingContinuation.yield(partID)
+                await withCheckedContinuation { continuation in proceed.run { continuation.resume() } }
+            },
+            prepare: { stub in
+                let url = URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!
+                stub.leaveTask(URLRequest(url: url), description: failing.uuidString)
+            })
+
+        // A background wake waits before it decides the survivor's adoption.
+        let waking = Task { await engine.handleBackgroundEvents() }
+        #expect(await adopting.first { _ in true } == failing)
+        let resuming = Task { try await engine.resume(recordID: record.id) }
+        _ = await resumeReads.first { _ in true }
+
+        // The result is held while activation adopts the survivor.
+        harness.session?.finishBackgroundEvents()
+        await engine.processPendingEvents()
+        #expect(await engine.unclaimedBackgroundFinishes == 1)
+        survivorGate.open()
+        await harness.waitForCompletions(1)
+        await engine.processPendingEvents()
+        proceed.open()
+
+        let (finished, finishedContinuation) = AsyncStream.makeStream(of: Bool.self)
+        let completion = Task {
+            await waking.value
+            let resumed = (try? await resuming.value) ?? false
+            await engine.waitForRestart()
+            let requestsMatch =
+                isInlineRetryLaunch
+                ? harness.requestCount(file: 1) == 1 && harness.requestCount(file: 2) == 0
+                : harness.requestCount(file: 1) >= 2 && harness.requestCount(file: 2) == 1
+            finishedContinuation.yield(resumed && requestsMatch)
+        }
+        let timeout = Task {
+            do {
+                try await Task.sleep(for: .seconds(5))
+            } catch {
+                return
+            }
+            finishedContinuation.yield(false)
+        }
+        let replayFinished = await finished.first { _ in true } ?? false
+        timeout.cancel()
+        if !replayFinished {
+            waking.cancel()
+            resuming.cancel()
+            completion.cancel()
+        }
+        #expect(replayFinished)
+        guard replayFinished else { return }
+        if isInlineRetryLaunch {
+            #expect(try await harness.store.record(id: record.id)?.state == .failed)
+            #expect(try await harness.store.part(id: failing)?.state == .failed)
+            #expect(harness.credentials.calls.count >= 1)
+            #expect(harness.requestCount(file: 1) == 1)
+            #expect(harness.requestCount(file: 2) == 0)
+            return
+        }
+        #expect(try await harness.store.record(id: record.id)?.state == .downloading)
+        let failingPart = try #require(try await harness.store.part(id: failing))
+        #expect(failingPart.state == .running)
+        #expect(failingPart.retryCount == 0)
+        let siblingPart = try #require(try await harness.store.part(id: sibling))
+        #expect(siblingPart.state == .running)
+        #expect(siblingPart.retryCount == 0)
+        #expect(harness.requestCount(file: 1) >= 2)
+        #expect(harness.requestCount(file: 2) == 1)
+
+        replay.open()
+        never.open()
+        #expect(await engine.nextRecordComplete() != nil)
     }
 
     @Test func unsavedRecordFailureBlocksRestartsUntilSaved() async throws {

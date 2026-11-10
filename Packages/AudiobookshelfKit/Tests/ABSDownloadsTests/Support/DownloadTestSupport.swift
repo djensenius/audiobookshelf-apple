@@ -11,6 +11,7 @@ import Synchronization
 final class FakeCredentials: DownloadCredentialProviding {
     let configuration: APIClientConfiguration
     private let state = Mutex<(token: Int, calls: [String?])>((1, []))
+    private let failingCalls = Mutex<Set<Int>>([])
     /// Runs before ``credentials(for:replacing:)`` returns.
     let hook = Mutex<(@Sendable () async -> Void)?>(nil)
 
@@ -20,6 +21,10 @@ final class FakeCredentials: DownloadCredentialProviding {
 
     /// The `rejectedAccessToken` of each ``credentials(for:replacing:)`` call.
     var calls: [String?] { state.withLock { $0.calls } }
+
+    func failCredentials(onCall call: Int) {
+        failingCalls.withLock { _ = $0.insert(call) }
+    }
 
     /// Simulates a token refresh by another part of the app.
     func rotate() {
@@ -31,12 +36,13 @@ final class FakeCredentials: DownloadCredentialProviding {
     }
 
     func credentials(for connectionID: UUID, replacing rejected: String?) async throws -> DownloadCredentials {
-        let token = state.withLock { state in
+        let (token, call) = state.withLock { state in
             state.calls.append(rejected)
             if let rejected, rejected == "token-\(state.token)" { state.token += 1 }
-            return state.token
+            return (state.token, state.calls.count)
         }
         if let hook = hook.withLock({ $0 }) { await hook() }
+        if failingCalls.withLock({ $0.remove(call) != nil }) { throw TestError() }
         return DownloadCredentials(configuration: configuration, accessToken: "token-\(token)")
     }
 }
@@ -311,6 +317,7 @@ final class DownloadHarness: Sendable {
         beforeStoppingSiblings: (@Sendable (UUID) async -> Void)? = nil,
         afterPermanentFailure: (@Sendable (UUID) async -> Void)? = nil,
         startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
+        adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
         listing: (@Sendable () async -> Void)? = nil,
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
@@ -327,7 +334,7 @@ final class DownloadHarness: Sendable {
             readRecord: readRecord ?? { try await $0.record(id: $1) },
             cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() },
             beforeStoppingSiblings: beforeStoppingSiblings, afterPermanentFailure: afterPermanentFailure,
-            startFoundSettling: startFoundSettling)
+            startFoundSettling: startFoundSettling, adoptionStarted: adoptionStarted)
     }
 
     func sessionFactory(

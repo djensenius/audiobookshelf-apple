@@ -176,6 +176,17 @@ iOS.
   fails for good again, that failure is final and fails the download, even while the
   resume is still starting. A newer failure of another part (the download is `failed`
   again) is not overwritten by the replay of an older resume.
+- If a surviving transfer fails permanently while `activate()` is adopting it and a
+  `resume(recordID:)` is pending, the failure replay uses the already-created session
+  inside activation rather than waiting on `ensureSession()` (which would wait for that
+  same activation). Activation and a background wake therefore remain pending until the
+  replay has created the retry transfer. This also applies when a retryable transfer
+  response exhausts its persisted retry budget, the inline background retry fails while
+  preparing its request, or a launch initiated by that replay fails while a sibling is
+  still pending. The deterministic regression
+  `retryFailureDuringAdoptionWithPendingResumeDoesNotDeadlockBackgroundWake` covers all
+  three paths during a background wake, with a five-second timeout so a regression fails
+  rather than hanging the suite.
 - If `nsurlsessiond` disconnects the session (`backgroundSessionWasDisconnected`, or the
   session becomes invalid), the engine creates it again after a retry delay (1–2, 2–4,
   then 4–8 seconds) and restarts the affected parts without counting a failure. After
