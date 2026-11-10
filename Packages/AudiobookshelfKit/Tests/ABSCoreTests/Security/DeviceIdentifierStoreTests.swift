@@ -185,6 +185,56 @@ private func counter(prefix: String) -> @Sendable () -> String {
         #expect(state.items[DeviceIdentifierStore.repairItems[0]] == Data("id-1".utf8))
     }
 
+    /// Two callers share a failing load; the first handles it (fallback) and a retry then stores
+    /// the Keychain ID before the delayed second caller resumes. It must get the stored ID.
+    @Test func delayedWaiterOfAFailedLoadReturnsTheStoredID() async throws {
+        let keychain = InMemoryKeychain()
+        keychain.state.withLock { $0.failure = KeychainError(status: errSecInteractionNotAllowed) }
+        let (bothJoined, openBothJoined) = AsyncStream<Void>.makeStream()
+        let (secondGate, openSecondGate) = AsyncStream<Void>.makeStream()
+        let counts = Mutex((joined: 0, finished: 0))
+        let store = DeviceIdentifierStore(
+            keychain: keychain, makeIdentifier: counter(prefix: "fallback"),
+            testHook: { event in
+                switch event {
+                case .joinedLoad:
+                    let joined = counts.withLock {
+                        $0.joined += 1
+                        return $0.joined
+                    }
+                    if joined == 2 { openBothJoined.finish() }
+                case .loadFinished:
+                    let finished = counts.withLock {
+                        $0.finished += 1
+                        return $0.finished
+                    }
+                    if finished == 1 {
+                        for await _ in bothJoined {}  // Hold the shared load open until both wait on it.
+                    } else if finished == 2 {
+                        for await _ in secondGate {}  // The delayed second waiter.
+                    }
+                }
+            })
+        let (results, resultSink) = AsyncStream<String>.makeStream()
+        for _ in 0..<2 {
+            Task {
+                resultSink.yield(await store.deviceIdentifier())
+            }
+        }
+        var iterator = results.makeAsyncIterator()
+        let fallback = try #require(await iterator.next())
+        #expect(fallback == "fallback-1")
+
+        keychain.state.withLock { $0.failure = nil }
+        let stored = await store.deviceIdentifier()
+        #expect(stored == "fallback-2")  // `makeIdentifier` also creates the persisted ID.
+        #expect(store.cachedDeviceIdentifier == stored)
+
+        openSecondGate.finish()
+        #expect(await iterator.next() == stored)
+        #expect(counts.withLock { $0.joined } == 3)
+    }
+
     @Test func keychainFailureFallsBackWithoutPersistingAndRetriesLater() async {
         let keychain = InMemoryKeychain()
         keychain.state.withLock { $0.failure = KeychainError(status: errSecInteractionNotAllowed) }

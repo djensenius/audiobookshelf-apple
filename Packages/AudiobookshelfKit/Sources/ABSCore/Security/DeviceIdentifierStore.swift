@@ -49,16 +49,33 @@ public final class DeviceIdentifierStore: DeviceIdentifying {
         case wait(Load)
     }
 
+    /// Points where tests can hold a caller to force an interleaving.
+    enum TestEvent: Sendable {
+        /// The caller is about to wait on the shared load.
+        case joinedLoad
+        /// The shared load finished; the caller hasn't handled the result yet.
+        case loadFinished
+    }
+
     private let keychain: any KeychainStoring
     private let makeIdentifier: @Sendable () -> String
+    private let testHook: (@Sendable (TestEvent) async -> Void)?
     private let state = Mutex(State())
 
-    public init(
+    public convenience init(
         keychain: any KeychainStoring = KeychainStore(),
         makeIdentifier: @escaping @Sendable () -> String = { UUID().uuidString }
     ) {
+        self.init(keychain: keychain, makeIdentifier: makeIdentifier, testHook: nil)
+    }
+
+    init(
+        keychain: any KeychainStoring, makeIdentifier: @escaping @Sendable () -> String,
+        testHook: (@Sendable (TestEvent) async -> Void)?
+    ) {
         self.keychain = keychain
         self.makeIdentifier = makeIdentifier
+        self.testHook = testHook
     }
 
     /// The ID if it has already been loaded from the Keychain.
@@ -79,7 +96,12 @@ public final class DeviceIdentifierStore: DeviceIdentifying {
         case .cached(let stored): return stored
         case .wait(let pending): load = pending
         }
-        switch await load.value {
+        await testHook?(.joinedLoad)
+        let result = await load.value
+        await testHook?(.loadFinished)
+        // Another caller may have handled this load and a retry may have stored the ID since, so
+        // both paths prefer `state.stored` over this (possibly stale) result.
+        switch result {
         case .success(let loaded):
             return state.withLock { state in
                 if state.loading == load { state.loading = nil }
@@ -88,15 +110,19 @@ public final class DeviceIdentifierStore: DeviceIdentifying {
                 return stored
             }
         case .failure(let error):
-            Self.logger.error(
-                "Keychain unavailable (OSStatus \(error.status, privacy: .public)); using a per-process device ID")
-            return state.withLock { state in
+            let (identifier, isFallback) = state.withLock { state in
                 if state.loading == load { state.loading = nil }
-                if let fallback = state.fallback { return fallback }
+                if let stored = state.stored { return (stored, false) }
+                if let fallback = state.fallback { return (fallback, true) }
                 let fallback = makeIdentifier()
                 state.fallback = fallback
-                return fallback
+                return (fallback, true)
             }
+            if isFallback {
+                Self.logger.error(
+                    "Keychain unavailable (OSStatus \(error.status, privacy: .public)); using a per-process device ID")
+            }
+            return identifier
         }
     }
 
