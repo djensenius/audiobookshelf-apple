@@ -17,10 +17,13 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
         guard !trimmed.isEmpty else { return nil }
 
         let candidate: String
-        if trimmed.contains("://") {
+        if trimmed.range(of: "^[A-Za-z][A-Za-z0-9+.-]*://", options: .regularExpression) != nil {
             candidate = trimmed
             isSchemeInferred = false
         } else {
+            // `https:/host` or `http:host` is a mistyped scheme, not a host named `https`.
+            let lowercased = trimmed.lowercased()
+            guard !lowercased.hasPrefix("http:"), !lowercased.hasPrefix("https:") else { return nil }
             candidate = "https://" + Self.bracketingBareIPv6(trimmed)
             isSchemeInferred = true
         }
@@ -28,7 +31,7 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
         guard var components = URLComponents(string: candidate),
             let scheme = components.scheme?.lowercased(),
             scheme == "http" || scheme == "https",
-            let host = components.percentEncodedHost, !host.isEmpty,
+            let host = components.encodedHost, !host.isEmpty,
             components.user == nil, components.password == nil
         else { return nil }
         if let port = components.port {
@@ -39,7 +42,7 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
         }
 
         components.scheme = scheme
-        components.percentEncodedHost = host.lowercased()
+        components.encodedHost = Self.lowercasingHost(host)
         components.query = nil
         components.fragment = nil
         var path = components.percentEncodedPath
@@ -50,8 +53,11 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
         self.url = url
     }
 
-    /// The addresses to try, in order, when connecting to user input. Like the legacy app,
-    /// plain `http` is only tried when the user typed no scheme, and only after `https`.
+    /// The addresses to try, in order, when connecting to user input. Like the legacy app
+    /// (`ServerConnectForm.vue` `tryServerUrl`), plain `http` is only tried when the user typed
+    /// no scheme, and only after `https`. Callers fall back to `http` only on a transport
+    /// failure, never after an HTTP status response, and never follow an `https` → `http`
+    /// redirect when the user typed `https`.
     public static func connectionCandidates(for input: String) -> [ServerAddress] {
         guard let address = ServerAddress(input) else { return [] }
         guard address.isSchemeInferred,
@@ -70,6 +76,13 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
     public static func == (lhs: ServerAddress, rhs: ServerAddress) -> Bool { lhs.url == rhs.url }
 
     public func hash(into hasher: inout Hasher) { hasher.combine(url) }
+
+    /// Lowercases the host, except an IPv6 zone ID (after `%25`), which is case-sensitive
+    /// (RFC 6874).
+    private static func lowercasingHost(_ host: String) -> String {
+        guard host.hasPrefix("["), let zone = host.range(of: "%25") else { return host.lowercased() }
+        return host[..<zone.lowerBound].lowercased() + host[zone.lowerBound...]
+    }
 
     /// `fe80::1%en0/abs` becomes `[fe80::1%25en0]/abs`. A bare IPv6 literal can't carry a port.
     private static func bracketingBareIPv6(_ input: String) -> String {

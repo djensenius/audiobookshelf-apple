@@ -21,6 +21,10 @@ import Testing
         ("2001:db8::1", "https://[2001:db8::1]"),
         ("2001:db8::1/abs/", "https://[2001:db8::1]/abs"),
         ("fe80::1%en0", "https://[fe80::1%25en0]"),
+        ("[FE80::1%25EN0]", "https://[fe80::1%25EN0]"),
+        ("abs.example.com/x?u=http://y", "https://abs.example.com/x"),
+        ("https://Bücher.Example", "https://xn--bcher-kva.example"),
+        ("example.com:", "https://example.com"),
     ])
     func normalizes(input: String, expected: String) throws {
         let address = try #require(ServerAddress(input))
@@ -30,7 +34,8 @@ import Testing
 
     @Test(arguments: [
         "", "   ", "ftp://example.com", "https://", "https://:80", "https://user:pw@example.com",
-        "https://example.com:0", "https://example.com:70000", "file:///tmp",
+        "https://example.com:0", "https://example.com:70000", "file:///tmp", "https:/host", "HTTP:host",
+        "https:host:13378",
     ])
     func rejects(input: String) {
         #expect(ServerAddress(input) == nil)
