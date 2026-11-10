@@ -390,23 +390,80 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(tokens.expiredCount == 0)
     }
 
-    @Test func unauthorizedFromStrippedRefreshHopKeepsSession() async throws {
-        let originHost = StubServer.uniqueHost()
-        let other = StubServer { _ in .redirect(to: "https://\(originHost)/abs/refresh-final", status: 307) }
-        let origin = StubServer(host: originHost) { request in
+    /// A refresh redirected off the origin is refused before the other host is contacted, whatever
+    /// that host would answer (a 401, or tokens of its own).
+    @Test(arguments: [
+        StubResponse.text("Unauthorized", status: 401),
+        .json(#"{"user":{"accessToken":"access-evil","refreshToken":"refresh-evil"}}"#),
+    ])
+    func crossOriginRefreshRedirectIsRefused(otherResponse: StubResponse) async throws {
+        let other = StubServer { _ in otherResponse }
+        let origin = StubServer { request in
             request.url?.path() == refreshPath
                 ? .redirect(to: "https://\(other.host)/x", status: 307) : .text("Unauthorized", status: 401)
         }
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(origin, tokens: tokens)
 
-        await #expect(throws: APIError.unauthorized(message: "Unauthorized")) {
+        await #expect(throws: APIError.redirectRefused(status: 307)) {
             try await client.send(Endpoint<OK>(.get, "/api/me"))
         }
-        let final = try #require(origin.requests(path: "/abs/refresh-final").first)
-        #expect(final.value(forHTTPHeaderField: "x-refresh-token") == nil)
+        #expect(other.requests.isEmpty)
+        #expect(origin.requests(path: "/abs/api/me").count == 1)
         #expect(tokens.current == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
+        #expect(tokens.updates.isEmpty)
         #expect(tokens.expiredCount == 0)
+    }
+
+    @Test func sameOriginRefreshRedirectIsFollowed() async throws {
+        let server = StubServer { request in
+            switch (request.url?.path(), request.value(forHTTPHeaderField: "Authorization")) {
+            case (refreshPath, _):
+                .redirect(to: "https://\(request.url?.host() ?? "")/abs/auth/refresh-v2", status: 307)
+            case ("/abs/auth/refresh-v2", _): .json(refreshedJSON)
+            case (_, "Bearer access-2"): .json(#"{"ok":true}"#)
+            default: .text("Unauthorized", status: 401)
+            }
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/me")) == OK(ok: true))
+        let followed = try #require(server.requests(path: "/abs/auth/refresh-v2").first)
+        #expect(followed.httpMethod == "POST")
+        #expect(followed.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+        #expect(tokens.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+    }
+
+    @Test func refreshBetweenTokenReadAndSendCountsAsThisRequestsRefresh() async throws {
+        let server = StubServer { request in
+            switch (request.url?.path(), request.value(forHTTPHeaderField: "x-refresh-token")) {
+            case (refreshPath, "refresh-1"): return .json(refreshedJSON)
+            case (refreshPath, _): return .json(#"{"user":{"accessToken":"access-3","refreshToken":"refresh-3"}}"#)
+            default: break
+            }
+            let accepted =
+                request.url?.path() == "/abs/api/other"
+                && request.value(forHTTPHeaderField: "Authorization") == "Bearer access-2"
+            return accepted ? .json(#"{"ok":true}"#) : .text("Unauthorized", status: 401)
+        }
+        // Read 1 is the first request's initial read: it returns pair 1 but is held while another
+        // request refreshes pair 1 to pair 2, so the first request sends pair 1 after that refresh.
+        let tokens = GatedTokenProvider(holdingCall: 1)
+        let client = try makeClient(server, tokens: tokens)
+
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        try await waitUntil { tokens.isHolding }
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
+        tokens.release()
+
+        // The refresh to pair 2 counts for the first request too, so pair 2 being rejected ends
+        // the session instead of refreshing again.
+        await #expect(throws: APIError.sessionExpired) { try await first.value }
+        #expect(server.requests(path: refreshPath).count == 1)
+        #expect(server.requests(path: "/abs/api/me").count == 2)
+        #expect(tokens.inner.current == nil)
+        #expect(tokens.inner.expiredCount == 1)
     }
 
     @Test func replacementSessionGetsItsOwnRefreshBeforeExpiry() async throws {

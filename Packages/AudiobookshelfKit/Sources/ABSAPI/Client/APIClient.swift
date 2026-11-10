@@ -9,7 +9,8 @@ import Foundation
 /// session and ``APIError/sessionExpired`` is thrown. If the user signs out or in again while a
 /// refresh is in flight, its result is discarded and waiting requests throw `CancellationError`.
 /// Redirects follow ``RedirectPolicy``; a 401 from a hop that was stripped of credentials is
-/// thrown as ``APIError/unauthorized(message:)`` and never refreshes or ends the session.
+/// thrown as ``APIError/unauthorized(message:)`` and never refreshes or ends the session. The
+/// refresh itself only follows same-origin redirects, so tokens only come from the server.
 public actor APIClient {
     public private(set) var configuration: APIClientConfiguration
     private let tokenProvider: any TokenProvider
@@ -95,6 +96,9 @@ public actor APIClient {
             return try handle(reply.data, reply.http, for: endpoint)
         }
 
+        // The refresh generation before `tokens` was read. A 401 for `tokens` reuses any refresh
+        // completed after that, including one that finished between the read and the send.
+        var tokensGeneration = refreshGeneration
         guard var tokens = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
         // The pair a refresh produced for this request. That pair being rejected ends the
         // session; any other pair (for example from a new sign-in) gets its own refresh first.
@@ -104,13 +108,13 @@ public actor APIClient {
         var sendsLeft = 4
         while true {
             sendsLeft -= 1
-            let sentGeneration = refreshGeneration
             let reply = try await perform(authorized(request, tokens.accessToken), followsRedirects: followsRedirects)
             // A 401 from a hop that never received the token says nothing about the token.
             guard reply.http.statusCode == 401, !reply.credentialsStripped else {
                 return try handle(reply.data, reply.http, for: endpoint)
             }
             let next: AuthTokens
+            let nextGeneration = refreshGeneration
             if tokens == refreshedPair {
                 // Always handled, whatever the send budget: the refreshed pair is rejected, so the
                 // session is over unless a different one replaced it in the meantime.
@@ -118,23 +122,24 @@ public actor APIClient {
                 next = current
             } else {
                 guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }
-                let outcome = try await refreshedTokens(replacing: tokens, sentAt: sentGeneration)
+                let outcome = try await refreshedTokens(replacing: tokens, readAt: tokensGeneration)
                 if outcome.didRefresh { refreshedPair = outcome.tokens }
                 next = outcome.tokens
             }
             guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }
             tokens = next
+            tokensGeneration = nextGeneration
             try Task.checkCancellation()
         }
     }
 
     // MARK: - Token refresh
 
-    /// Returns the tokens to retry with after `rejected` got a 401 on a send made at refresh
-    /// generation `sent`: joins a refresh of the same pair if one is running, reuses one that
-    /// completed after the send, or starts one. The result is always the provider's current
+    /// Returns the tokens to retry with after `rejected` got a 401, where `rejected` was read at
+    /// refresh generation `sent`: joins a refresh of the same pair if one is running, reuses one
+    /// that completed after the read, or starts one. The result is always the provider's current
     /// pair, so a sign-out or new sign-in since the refresh wins.
-    private func refreshedTokens(replacing rejected: AuthTokens, sentAt sent: Int) async throws -> RefreshOutcome {
+    private func refreshedTokens(replacing rejected: AuthTokens, readAt sent: Int) async throws -> RefreshOutcome {
         var hasRereadStaleTokens = false
         while true {
             if let flight = refreshFlights[rejected] {
@@ -206,7 +211,11 @@ public actor APIClient {
         request.setValue(tokens.refreshToken, forHTTPHeaderField: "x-refresh-token")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let reply = try await perform(request, followsRedirects: true)
+        // Only same-origin redirects are followed: a hop off the origin never receives the refresh
+        // token, so anything it returns (including tokens) must not be trusted. Such a redirect is
+        // declined and surfaces as `.redirectRefused`.
+        let reply = try await perform(request, followsRedirects: true, staysOnOrigin: true)
+        guard !reply.credentialsStripped else { throw APIError.invalidResponse }
         let data = reply.data
         switch reply.http.statusCode {
         case 200..<300:
@@ -232,9 +241,6 @@ public actor APIClient {
             completedRefreshes.append(CompletedRefresh(from: tokens, to: refreshed, generation: refreshGeneration))
             if completedRefreshes.count > Self.completedRefreshLimit { completedRefreshes.removeFirst() }
             return
-        case 401 where reply.credentialsStripped:
-            // The hop that answered never received the refresh token, so it can't have rejected it.
-            throw Self.error(status: 401, data: data)
         case 401:
             // The server only answers 401 for a bad refresh token; a 403 here comes from a proxy
             // or firewall and must not sign the user out.
@@ -301,8 +307,12 @@ public actor APIClient {
         let credentialsStripped: Bool
     }
 
-    private func perform(_ request: URLRequest, followsRedirects: Bool) async throws -> Reply {
-        let chain = followsRedirects ? RedirectChainDelegate() : nil
+    /// - Parameter staysOnOrigin: Declines any redirect that would leave the origin (and so be
+    ///   stripped of credentials) instead of following it without them.
+    private func perform(
+        _ request: URLRequest, followsRedirects: Bool, staysOnOrigin: Bool = false
+    ) async throws -> Reply {
+        let chain = followsRedirects ? RedirectChainDelegate(staysOnOrigin: staysOnOrigin) : nil
         let delegate: any URLSessionTaskDelegate = chain ?? RedirectSuppressingDelegate()
         let data: Data
         let response: URLResponse
