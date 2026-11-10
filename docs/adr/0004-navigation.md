@@ -20,7 +20,7 @@ The legacy Nuxt app uses a custom shell:
 
 - `layouts/default.vue` stacks an app bar, the page, a fixed audio player and global modals.
 - `components/app/Appbar.vue` holds a back button, a library picker, cast, search and a side-drawer button.
-- `components/home/BookshelfNavBar.vue` has a second bar with library sections. Book libraries show Home, Library, Series, Collections, Authors and Playlists. Podcast libraries show Home, Latest, Library and Add.
+- `components/home/BookshelfNavBar.vue` has a second bar with library sections. Book libraries show Home, Library, Series, Collections and Authors. Podcast libraries show Home, Latest, Library and Add (admins only). Playlists is added for **both** types when the user has playlists (`BookshelfNavBar.vue` lines 116–125, outside the book/podcast branch), and `pages/playlist/_id.vue` plays podcast episodes as well as books.
 - `components/app/SideDrawer.vue` links to Account, Stats, Local media, Downloads, Settings, Logs, the web client and server switching.
 
 Routes are untyped URL paths such as `/item/:id`, `/series/:id`, `/collection/:id`, `/playlist/:id`, `/media/:id/history` and `/localMedia/...`. The full page list is in [the legacy feature inventory](../research/legacy-feature-inventory.md).
@@ -121,8 +121,9 @@ WindowGroup(id: "main")                       // iOS + macOS, one Router per win
       ├─ Tab "Home"       NavigationStack(path: $router[path: .home])      // [Route]
       ├─ Tab "Library"    NavigationStack(path: $router[path: .library])
       ├─ TabSection "Browse" .defaultVisibility(.hidden, for: .tabBar)   // sidebar only
-      │    Series · Collections · Authors · Playlists   (books)
-      │    Latest · Add podcast                         (podcasts)
+      │    Series · Collections · Authors               (books)
+      │    Latest · Add podcast (admins)                (podcasts)
+      │    Playlists                                    (both, if the user has any)
       ├─ Tab "Downloads"  NavigationStack(path: $router[path: .downloads])
       ├─ Tab "Account"    NavigationStack(path: $router[path: .account])
       └─ Tab(role: .search) "Search" NavigationStack(...).searchable(...)
@@ -179,6 +180,7 @@ The visible destination (for example an item pushed from Series) is therefore un
   - A **Library** menu on the Mac.
 - Switching libraries resets the paths of the library-scoped tabs: Home, Library, the section tabs and Search. Downloads and Account are kept.
 - Switching between a book and a podcast library also repairs the selection, because the two have different sections (see Context):
+  - Supported sections: book libraries have Series, Collections, Authors and Playlists; podcast libraries have Latest, Add podcast (admins only) and Playlists. Playlists is valid for both types, so it is kept across a book ↔ podcast switch.
   - If `selectedTab` is a section the new library does not have (for example `.authors` in a podcast library, or `.latest` in a book library), `Router` selects `.library`.
   - If the Library root's selected section is unsupported, it resets to that library's default section (the grid).
   - Home, Library, Search, Downloads and Account exist for both types and are kept.
