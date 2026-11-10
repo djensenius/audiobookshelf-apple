@@ -115,6 +115,115 @@ final class SignallingClock: Clock {
     }
 }
 
+/// A clock whose sleeps announce themselves on ``started`` and last until ``fire()`` or cancellation.
+final class FiringClock: Clock {
+    typealias Instant = ContinuousClock.Instant
+
+    let started: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+    private let sleepers = Mutex<[UUID: CheckedContinuation<Void, any Error>]>([:])
+
+    init() {
+        (started, continuation) = AsyncStream.makeStream()
+    }
+
+    var now: Instant { ContinuousClock.now }
+    var minimumResolution: Duration { .zero }
+
+    /// Ends every sleep that has started.
+    func fire() {
+        let waiting = sleepers.withLock { sleepers in
+            defer { sleepers = [:] }
+            return Array(sleepers.values)
+        }
+        for sleeper in waiting { sleeper.resume() }
+    }
+
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (sleeper: CheckedContinuation<Void, any Error>) in
+                let isCancelled = sleepers.withLock { sleepers in
+                    if Task.isCancelled { return true }
+                    sleepers[id] = sleeper
+                    return false
+                }
+                if isCancelled {
+                    sleeper.resume(throwing: CancellationError())
+                } else {
+                    continuation.yield()
+                }
+            }
+        } onCancel: {
+            sleepers.withLock { $0.removeValue(forKey: id) }?.resume(throwing: CancellationError())
+        }
+    }
+}
+
+/// Holds chosen parts at the point of a permanent failure where the part's own failure is
+/// saved but its siblings aren't stopped yet, and reports where each failure ends.
+final class FailureSeams: Sendable {
+    /// The parts that reached the hold, in order.
+    let held: AsyncStream<UUID>
+    /// The parts whose permanent failure has been handled completely, in order.
+    let settled: AsyncStream<UUID>
+    /// The parts a start found settling, in order.
+    let foundSettling: AsyncStream<Set<UUID>>
+    private let heldContinuation: AsyncStream<UUID>.Continuation
+    private let settledContinuation: AsyncStream<UUID>.Continuation
+    private let foundSettlingContinuation: AsyncStream<Set<UUID>>.Continuation
+    private let holding = Mutex<Set<UUID>>([])
+    private let gate = StubGate()
+
+    init() {
+        (held, heldContinuation) = AsyncStream.makeStream()
+        (settled, settledContinuation) = AsyncStream.makeStream()
+        (foundSettling, foundSettlingContinuation) = AsyncStream.makeStream()
+    }
+
+    /// Holds the next failure of each part, once.
+    func hold(_ partIDs: UUID...) {
+        holding.withLock { $0.formUnion(partIDs) }
+    }
+
+    func release() {
+        gate.open()
+    }
+
+    func nextHeld() async -> UUID? { await held.first { _ in true } }
+    func nextSettled() async -> UUID? { await settled.first { _ in true } }
+    func nextFoundSettling() async -> Set<UUID>? { await foundSettling.first { _ in true } }
+
+    var beforeStoppingSiblings: @Sendable (UUID) async -> Void {
+        { [self] partID in
+            guard holding.withLock({ $0.remove(partID) != nil }) else { return }
+            heldContinuation.yield(partID)
+            await withCheckedContinuation { continuation in gate.run { continuation.resume() } }
+        }
+    }
+
+    var afterPermanentFailure: @Sendable (UUID) async -> Void {
+        { [self] partID in settledContinuation.yield(partID) }
+    }
+
+    var startFoundSettling: @Sendable (Set<UUID>) async -> Void {
+        { [self] partIDs in foundSettlingContinuation.yield(partIDs) }
+    }
+}
+
+/// Counts each path's requests, so a handler can answer one path's first request differently.
+final class PathCounter: Sendable {
+    private let counts = Mutex<[String: Int]>([:])
+
+    /// The request's number among those for its path, from 1.
+    func next(_ request: URLRequest) -> Int {
+        counts.withLock { counts in
+            counts[request.url?.path() ?? "", default: 0] += 1
+            return counts[request.url?.path() ?? "", default: 0]
+        }
+    }
+}
+
 /// An engine over an in-memory store, a stub server and a temporary directory.
 final class DownloadHarness: Sendable {
     let host = "\(UUID().uuidString.lowercased()).stub.test"
@@ -166,6 +275,11 @@ final class DownloadHarness: Sendable {
     var requests: [URLRequest] { StubDownloadProtocol.requests(host: host) }
     var session: StubDownloadSession? { sessions.withLock { $0.last } }
 
+    /// How many requests the stub has seen for the file with this `ino` (part N has ino N).
+    func requestCount(file ino: Int) -> Int {
+        requests.filter { $0.url?.path().contains("/file/\(ino)/") == true }.count
+    }
+
     /// Returns once the stub has seen `count` requests; the suite's time limit bounds the wait.
     func waitForRequests(_ count: Int) async {
         guard requests.count < count else { return }
@@ -196,6 +310,7 @@ final class DownloadHarness: Sendable {
         cancel: (@Sendable (URLSessionDownloadTask) async -> Data?)? = nil,
         beforeStoppingSiblings: (@Sendable (UUID) async -> Void)? = nil,
         afterPermanentFailure: (@Sendable (UUID) async -> Void)? = nil,
+        startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
         listing: (@Sendable () async -> Void)? = nil,
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
@@ -211,8 +326,8 @@ final class DownloadHarness: Sendable {
             registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() },
             readRecord: readRecord ?? { try await $0.record(id: $1) },
             cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() },
-            beforeStoppingSiblings: beforeStoppingSiblings ?? { _ in },
-            afterPermanentFailure: afterPermanentFailure ?? { _ in })
+            beforeStoppingSiblings: beforeStoppingSiblings, afterPermanentFailure: afterPermanentFailure,
+            startFoundSettling: startFoundSettling)
     }
 
     func sessionFactory(

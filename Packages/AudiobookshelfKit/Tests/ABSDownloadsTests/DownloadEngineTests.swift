@@ -225,6 +225,28 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    /// A resume leaves a part whose completion is waiting to be saved alone, with its retry timer:
+    /// nothing else would save it before the next activation.
+    @Test func resumeKeepsTheRetryOfAnUnsavedCompletion() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let clock = FiringClock()
+        let engine = harness.makeEngine(clock: clock)
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        await harness.store.failNextCommit(with: TestError())
+        try await postMovedFile(partID, harness: harness, engine: engine)
+        _ = await clock.started.first { _ in true }
+
+        #expect(try await engine.resume(recordID: record.id))
+        clock.fire()
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
     @Test func backgroundWakeSavesCompletionsBeforeItEnds() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { _ in .status(200, gate: gate) }

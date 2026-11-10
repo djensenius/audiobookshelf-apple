@@ -135,8 +135,10 @@ public actor DownloadEngine {
     private let readRecords: @Sendable (DownloadStore) async throws -> [DownloadRecordDTO]
     private let readRecord: @Sendable (DownloadStore, UUID) async throws -> DownloadRecordDTO?
     private let cancelKeepingResumeData: @Sendable (URLSessionDownloadTask) async -> Data?
-    private let beforeStoppingSiblings: @Sendable (UUID) async -> Void
-    private let afterPermanentFailure: @Sendable (UUID) async -> Void
+    /// Test seams, optional so production makes no actor hop for them.
+    private let beforeStoppingSiblings: (@Sendable (UUID) async -> Void)?
+    private let afterPermanentFailure: (@Sendable (UUID) async -> Void)?
+    private let startFoundSettling: (@Sendable (Set<UUID>) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
 
@@ -166,12 +168,9 @@ public actor DownloadEngine {
     /// Parts being completed or failed for good; they keep their context (so a concurrent
     /// read doesn't bring back their old state) but can't launch.
     private var settling: Set<UUID> = []
-    /// Parts a ``start(partIDs:)`` asked for while they were settling; one that was failing for
-    /// good starts once that is settled.
-    private var startsAfterSettling: Set<UUID> = []
-    /// The requests above that came from a plain start rather than a record resume.
+    /// Parts a plain ``start(partIDs:)`` (not a record resume) asked for while they were
+    /// settling; one that was failing for good starts once that is settled.
     private var plainStartsAfterSettling: Set<UUID> = []
-    var startsAfterSettlingCount: Int { startsAfterSettling.count }
     /// Moved files whose completion couldn't be saved yet, with their sizes. The part stays
     /// settling until ``saveCompletion(_:)`` succeeds.
     private var unsavedCompletions: [UUID: Int64] = [:]
@@ -259,8 +258,9 @@ public actor DownloadEngine {
         readRecords: @escaping @Sendable (DownloadStore) async throws -> [DownloadRecordDTO],
         readRecord: @escaping @Sendable (DownloadStore, UUID) async throws -> DownloadRecordDTO?,
         cancelKeepingResumeData: @escaping @Sendable (URLSessionDownloadTask) async -> Data?,
-        beforeStoppingSiblings: @escaping @Sendable (UUID) async -> Void = { _ in },
-        afterPermanentFailure: @escaping @Sendable (UUID) async -> Void = { _ in }
+        beforeStoppingSiblings: (@Sendable (UUID) async -> Void)? = nil,
+        afterPermanentFailure: (@Sendable (UUID) async -> Void)? = nil,
+        startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
         (progress, progressContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(100))
@@ -281,6 +281,7 @@ public actor DownloadEngine {
         self.cancelKeepingResumeData = cancelKeepingResumeData
         self.beforeStoppingSiblings = beforeStoppingSiblings
         self.afterPermanentFailure = afterPermanentFailure
+        self.startFoundSettling = startFoundSettling
         registry.register(self)
     }
 
@@ -320,15 +321,23 @@ public actor DownloadEngine {
     }
 
     /// Starts (or restarts) the given parts; parts that are already transferring are left
-    /// alone. Retry counts start over, in the store too. Set their records to `queued` (or
-    /// `downloading`) first: ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses parts
-    /// of `paused` and `failed` records, and a `failed` state the engine couldn't save is
-    /// dropped. A part being failed for good starts once that is settled.
+    /// alone, apart from their retry budget, which starts over (in the store too) for every
+    /// part that isn't settling. A part being completed or failed for good is skipped entirely:
+    /// a completion's save retry keeps its timer, and a failure for good starts the part once it
+    /// is settled, with the budget reset then. Set their records to `queued` (or `downloading`)
+    /// first: ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses parts of `paused`
+    /// and `failed` records, and a `failed` state the engine couldn't save is dropped.
+    ///
+    /// A plain start of some parts of a record doesn't restart the siblings that a failure it
+    /// overlaps stopped; only ``resume(recordID:)`` does.
     public func start(partIDs: [UUID]) async {
-        await start(partIDs: partIDs, resumingRecordID: nil, resetRetryBudget: true)
+        await start(partIDs: partIDs, resumingRecordID: nil, resettingBudgetOf: nil)
     }
 
-    private func start(partIDs: [UUID], resumingRecordID: UUID?, resetRetryBudget: Bool = true) async {
+    /// - Parameter resettingBudgetOf: the parts whose retry budget starts over, if they aren't
+    ///   settling; `nil` for every part in `partIDs`. The replay of a failure that overlapped a
+    ///   start passes the failing part only: its siblings were reset when the start began.
+    private func start(partIDs: [UUID], resumingRecordID: UUID?, resettingBudgetOf: Set<UUID>? = nil) async {
         guard await ensureSession() else { return }
         let records: [DownloadRecordDTO]
         do {
@@ -346,22 +355,21 @@ public actor DownloadEngine {
             if let recordID = contexts[partID]?.recordID { pendingRecordFailures.remove(recordID) }
             if settling.contains(partID) { settlingParts.insert(partID) }
         }
-        startsAfterSettling.formUnion(settlingParts)
         if let resumingRecordID {
             resumingRecords.remove(resumingRecordID)
         } else {
             plainStartsAfterSettling.formUnion(settlingParts)
         }
+        if let startFoundSettling, !settlingParts.isEmpty { await startFoundSettling(settlingParts) }
         let retried = Set(records.flatMap(\.parts).filter { $0.retryCount > 0 }.map(\.id))
-        if resetRetryBudget {
-            for partID in partIDs {
-                retries.removeValue(forKey: partID)?.cancel()
-                let hasFailed = failures.removeValue(forKey: partID) != nil || retried.contains(partID)
-                freeRestarts[partID] = nil
-                authRetried.remove(partID)
-                if hasFailed {
-                    await persist { _ = try await $0.updatePart(partID: partID, retryCount: 0) }
-                }
+        let resets = resettingBudgetOf ?? Set(partIDs)
+        for partID in partIDs where resets.contains(partID) && !settlingParts.contains(partID) {
+            retries.removeValue(forKey: partID)?.cancel()
+            let hasFailed = failures.removeValue(forKey: partID) != nil || retried.contains(partID)
+            freeRestarts[partID] = nil
+            authRetried.remove(partID)
+            if hasFailed {
+                await persist { _ = try await $0.updatePart(partID: partID, retryCount: 0) }
             }
         }
         for partID in partIDs where tasks[partID] == nil && !settlingParts.contains(partID) {
@@ -1172,7 +1180,6 @@ public actor DownloadEngine {
         }
         guard unsavedCompletions.removeValue(forKey: partID) != nil else { return }
         locations.clearTransferMarker(partID: partID)
-        startsAfterSettling.remove(partID)
         plainStartsAfterSettling.remove(partID)
         forget(partID)
         settling.remove(partID)
@@ -1209,9 +1216,10 @@ public actor DownloadEngine {
     }
 
     /// Saves a record's `failed` state; when it can't, the record's parts can't launch until a
-    /// later ``reconcile()`` saves it.
-    private func saveRecordFailure(_ recordID: UUID) async {
-        guard !resumingRecords.contains(recordID) else {
+    /// later ``reconcile()`` saves it. A resume pending for the record owns it and skips the
+    /// write, unless `ownsFailure`.
+    private func saveRecordFailure(_ recordID: UUID, ownsFailure: Bool = false) async {
+        guard ownsFailure || !resumingRecords.contains(recordID) else {
             pendingRecordFailures.remove(recordID)
             return
         }
@@ -1297,30 +1305,38 @@ public actor DownloadEngine {
 
     /// Fails the part and its record for good, and stops the record's other parts, keeping
     /// their resume data, so a retry of the record continues them. The record fails first
-    /// unless a resume already owns it; a concurrent launch of another part is refused until
-    /// failure is saved. A ``start(partIDs:)`` of the part meanwhile starts it once this is done.
+    /// unless a resume already owns it (an attempt the replay below launched for that resume
+    /// fails it regardless: its failure is final); a concurrent launch of another part is
+    /// refused until failure is saved.
+    ///
+    /// A start of the part that overlapped the failure (a plain ``start(partIDs:)``, or
+    /// ``resume(recordID:)`` before, during or after any part of it) is replayed once the
+    /// failure is settled: the part restarts with a fresh retry budget, and for a resume so do
+    /// the siblings the failure stopped. A part is replayed once per resume.
     private func failPermanently(
         _ partID: UUID, code: DownloadFailureCode, message: String, retryCount: Int? = nil
     ) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
         let resumeGenerationAtStart = resumeGenerations[context.recordID, default: 0]
         let resumeWasPendingAtStart = resumingRecords.contains(context.recordID)
+        let isReplayedAttempt = replayedResumeGenerationByPart[partID] == resumeGenerationAtStart
         tasks[partID] = nil
         retries.removeValue(forKey: partID)?.cancel()
-        await saveRecordFailure(context.recordID)
+        await saveRecordFailure(context.recordID, ownsFailure: isReplayedAttempt)
         await persistIdle(partID) {
             try await $0.setPartState(
                 .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData,
                 retryCount: retryCount)
         }
-        await beforeStoppingSiblings(partID)
+        if let beforeStoppingSiblings { await beforeStoppingSiblings(partID) }
         let siblings = contexts.filter { $0.value.recordID == context.recordID && $0.key != partID }.map(\.key)
         await stop(partIDs: siblings, keepingResumeData: true)
         forget(partID)
         settling.remove(partID)
+        // A failure raised by this part's own launch ends that launch, so the replay can start it.
+        launching[partID] = nil
         updateContinuation.yield(
             .partFailed(partID: partID, recordID: context.recordID, code: code, message: message, willRetry: false))
-        startsAfterSettling.remove(partID)
         let wasPlainStart = plainStartsAfterSettling.remove(partID) != nil
         let resumeGeneration = resumeGenerations[context.recordID, default: 0]
         let resumeNeedsReplay =
@@ -1333,28 +1349,32 @@ public actor DownloadEngine {
                 ? ([partID] + siblings.filter { !settling.contains($0) })
                 : [partID]
             for replayPart in replayParts {
-                startsAfterSettling.remove(replayPart)
                 plainStartsAfterSettling.remove(replayPart)
             }
+            // F1's `failed` write is enqueued at the store before the `queued` of any resume that
+            // registers after it, so a `failed` seen here is newer than a resume's `queued`: only
+            // a replay due to a plain start may overwrite it (its own failure made it `failed`).
+            let replayable: Set<DownloadState> =
+                resumeNeedsReplay ? [.queued, .downloading] : [.queued, .downloading, .failed]
             do {
-                guard
-                    try await store.setState(
-                        .queued, forRecord: context.recordID, expecting: [.queued, .downloading, .failed])
+                guard try await store.setState(.queued, forRecord: context.recordID, expecting: replayable)
                 else {
-                    await afterPermanentFailure(partID)
+                    if let afterPermanentFailure { await afterPermanentFailure(partID) }
                     return
                 }
             } catch {
                 logError("Couldn't resume a download after its failure settled", error)
-                await afterPermanentFailure(partID)
+                if let afterPermanentFailure { await afterPermanentFailure(partID) }
                 return
             }
             if resumeNeedsReplay {
                 replayedResumeGenerationByPart[partID] = resumeGeneration
             }
-            await start(partIDs: replayParts, resumingRecordID: nil, resetRetryBudget: false)
+            // The replay carries the user's reset for the part it skipped: its budget was
+            // persisted as used up by this failure, after any reset the start made.
+            await start(partIDs: replayParts, resumingRecordID: nil, resettingBudgetOf: [partID])
         }
-        await afterPermanentFailure(partID)
+        if let afterPermanentFailure { await afterPermanentFailure(partID) }
     }
 
     // MARK: - Helpers

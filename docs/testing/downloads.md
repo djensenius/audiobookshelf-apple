@@ -148,8 +148,10 @@ iOS.
   fails. The count is saved with the part (`retryCount`), so a relaunch continues it: a
   part that failed twice before the app was terminated waits 4–8 seconds after its next
   failure, and one that used up its retries fails for good. Only starting the download
-  again (`start(partIDs:)` or `resume(recordID:)`) starts the count over; `activate()`
-  doesn't. In the foreground the engine waits out the delay itself. After `deactivate()`
+  again (`start(partIDs:)` or `resume(recordID:)`) starts the count over, or the restart
+  that completes such a start (below); `activate()` doesn't. A part being completed or
+  failed for good is skipped by the reset. In the foreground the engine waits out the
+  delay itself. After `deactivate()`
   (and during a background wake) it creates the part's next task at once, with the delay
   as the task's `earliestBeginDate`, before it lets the wake end: iOS may suspend the
   process afterwards, and the system starts that task on time without it. A relaunch
@@ -164,8 +166,15 @@ iOS.
   `store` code.
 - When a part fails for good, the engine stops the download's other parts, keeps their
   resume data, and marks the download failed. Starting it again continues those parts. A
-  `resume(recordID:)` that comes while those parts are still stopping also restarts the
-  part that failed, once its failure is recorded.
+  `resume(recordID:)` that overlaps any part of the failure (before the failure is saved,
+  while the siblings are stopping, or after) restarts the part that failed, with a fresh
+  retry count, and every sibling the failure stopped, once the failure is settled. A
+  plain `start(partIDs:)` that overlaps the failure restarts only the parts it named, not
+  the siblings (starting a `failed` record's parts without `resume(recordID:)` is not
+  supported). The replay happens once per part for each resume: if the restarted part
+  fails for good again, that failure is final and fails the download, even while the
+  resume is still starting. A newer failure of another part (the download is `failed`
+  again) is not overwritten by the replay of an older resume.
 - If `nsurlsessiond` disconnects the session (`backgroundSessionWasDisconnected`, or the
   session becomes invalid), the engine creates it again after a retry delay (1–2, 2–4,
   then 4–8 seconds) and restarts the affected parts without counting a failure. After
