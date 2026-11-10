@@ -316,7 +316,15 @@ public final class AudioEngine: AudioEngineProtocol {
 
     private func clearQueue() {
         player.removeAllItems()
-        for entry in queued.values { entry.statusObservation.invalidate() }
+        for entry in queued.values {
+            entry.statusObservation.invalidate()
+            // A failed asset stays failed. A prefetched item can fail without being reported (it
+            // is reported when the queue reaches it), so evict here too: the rebuild that follows
+            // gets a fresh asset.
+            if entry.item.status == .failed, assets[entry.trackIndex] === entry.item.asset {
+                assets[entry.trackIndex] = nil
+            }
+        }
         queued = [:]
         queueGeneration += 1
         pendingItemFailure = nil
