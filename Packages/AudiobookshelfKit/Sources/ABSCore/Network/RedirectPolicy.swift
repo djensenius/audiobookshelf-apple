@@ -13,6 +13,10 @@ import Foundation
 ///   `Content-Type`, and it doesn't use the cookie jar. Every later hop of that task is
 ///   stripped too, even back on the origin.
 /// - A hop from `https` to `http`, or to a non-HTTP scheme, is refused.
+/// - A hop that changes the method is refused: `URLSession` turns a POST into a GET on a 301
+///   or 302, and any method but HEAD into a GET on a 303, so the request (a logout, a session
+///   sync) would never be delivered while the GET's reply looked like its result. A 307 or 308
+///   keeps the method and body and is followed.
 public enum RedirectPolicy {
     public struct Hop: Sendable {
         public let request: URLRequest
@@ -31,6 +35,7 @@ public enum RedirectPolicy {
             let toScheme = to.scheme?.lowercased(), toScheme == "http" || toScheme == "https"
         else { return nil }
         if from.scheme?.lowercased() == "https", toScheme == "http" { return nil }
+        if (proposed.httpMethod ?? "GET") != (original.httpMethod ?? "GET") { return nil }
 
         guard !wasStripped, isSameOrigin(origin, from), isSameOrigin(from, to) else {
             return Hop(request: stripped(proposed, url: to), isStripped: true)
