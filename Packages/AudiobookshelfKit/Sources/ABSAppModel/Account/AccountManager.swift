@@ -128,6 +128,9 @@ public final class AccountManager {
     /// choosing one, so a test can sign out in that window. The store calls there can't be held
     /// from outside: SwiftData runs them on the calling thread, the main actor.
     @ObservationIgnored var restoreWillChooseConnection: (@MainActor () async -> Void)?
+    /// A test seam: an expiry awaits it after signing out locally and before it saves the sign-out,
+    /// so a test can sign in again in that window.
+    @ObservationIgnored var willSaveExpiry: (@MainActor () async -> Void)?
     /// A test seam: restoring or switching to a signed-out connection awaits it before reading the
     /// session whose delete it retries, so a test can save a session in that window.
     @ObservationIgnored var willReadSignedOutSession: (@MainActor () async -> Void)?
