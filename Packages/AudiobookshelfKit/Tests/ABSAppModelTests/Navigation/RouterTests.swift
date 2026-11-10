@@ -9,7 +9,7 @@ private let podcastSections = AppTab.sections(for: .podcast)
 @MainActor
 private func routerInBookLibrary() -> Router {
     let router = Router(serverID: "server-1", userID: "user-1")
-    router.selectLibrary(id: "books", mediaType: .book, supportedSections: bookSections)
+    router.selectLibrary(id: "books", kind: .book, supportedSections: bookSections)
     return router
 }
 
@@ -79,6 +79,20 @@ private func routerInBookLibrary() -> Router {
         #expect(router.librarySection == .collections)
     }
 
+    @Test func compactTransferLeavesOtherSectionPathsAlone() {
+        let router = routerInBookLibrary()
+        router.selectedTab = .series
+        router[path: .series] = [.series(id: "se_1")]
+        router[path: .authors] = [.author(id: "au_1")]
+        router[path: .collections] = [.collection(id: "co_1")]
+
+        router.normalize(isCompact: true)
+
+        #expect(router[path: .authors] == [.author(id: "au_1")])
+        #expect(router[path: .collections] == [.collection(id: "co_1")])
+        #expect(router[path: .series] == [])
+    }
+
     @Test func normalizeLeavesOtherStatesAlone() {
         let router = routerInBookLibrary()
         router.selectedTab = .series
@@ -117,7 +131,7 @@ private func routerInBookLibrary() -> Router {
             router[path: tab] = [.item(id: tab.rawValue)]
         }
 
-        router.selectLibrary(id: "books-2", mediaType: .book, supportedSections: bookSections)
+        router.selectLibrary(id: "books-2", kind: .book, supportedSections: bookSections)
 
         #expect(router.libraryID == "books-2")
         for tab in AppTab.allCases {
@@ -133,9 +147,67 @@ private func routerInBookLibrary() -> Router {
         let router = routerInBookLibrary()
         router[path: .home] = [.item(id: "li_1")]
 
-        router.selectLibrary(id: "books", mediaType: .book, supportedSections: bookSections)
+        router.selectLibrary(id: "books", kind: .book, supportedSections: bookSections)
 
         #expect(router[path: .home] == [.item(id: "li_1")])
+    }
+
+    @Test func firstLibraryKeepsExistingPaths() {
+        let router = Router()
+        router[path: .home] = [.item(id: "li_1")]
+        router[path: .library] = [.series(id: "se_1")]
+
+        router.selectLibrary(id: "books", kind: .book, supportedSections: bookSections)
+
+        #expect(router[path: .home] == [.item(id: "li_1")])
+        #expect(router[path: .library] == [.series(id: "se_1")])
+    }
+
+    @Test func reselectingWithFewerSectionsClearsTheirPaths() {
+        let router = routerInBookLibrary()
+        router.librarySection = .playlists
+        router[path: .library] = [.playlist(id: "pl_1")]
+        router[path: .playlists] = [.playlist(id: "pl_2")]
+        router[path: .series] = [.series(id: "se_1")]
+        router[path: .home] = [.item(id: "li_1")]
+
+        let withoutPlaylists = AppTab.sections(for: .book, canAddPodcast: false, hasPlaylists: false)
+        router.selectLibrary(id: "books", kind: .book, supportedSections: withoutPlaylists)
+
+        #expect(router.librarySection == nil)
+        #expect(router[path: .library] == [])
+        #expect(router[path: .playlists] == [])
+        #expect(router[path: .series] == [.series(id: "se_1")])
+        #expect(router[path: .home] == [.item(id: "li_1")])
+    }
+
+    // MARK: Library requests
+
+    @Test func requestedLibraryIsPendingUntilSelected() {
+        let router = routerInBookLibrary()
+        router[path: .home] = [.item(id: "li_1")]
+
+        router.requestLibrary(id: "podcasts")
+
+        #expect(router.pendingLibraryID == "podcasts")
+        #expect(router.libraryID == "books")
+        #expect(router[path: .home] == [.item(id: "li_1")])
+
+        router.selectLibrary(id: "other", kind: .book, supportedSections: bookSections)
+        #expect(router.pendingLibraryID == "podcasts")
+
+        router.selectLibrary(id: "podcasts", kind: .podcast, supportedSections: podcastSections)
+        #expect(router.pendingLibraryID == nil)
+        #expect(router.libraryID == "podcasts")
+    }
+
+    @Test func identityChangeDropsThePendingLibrary() {
+        let router = routerInBookLibrary()
+        router.requestLibrary(id: "podcasts")
+
+        router.resetForIdentityChange(serverID: "server-2", userID: "user-2")
+
+        #expect(router.pendingLibraryID == nil)
     }
 
     @Test func switchingToAPodcastLibraryRepairsBookSections() {
@@ -143,7 +215,7 @@ private func routerInBookLibrary() -> Router {
         router.selectedTab = .authors
         router.librarySection = .series
 
-        router.selectLibrary(id: "podcasts", mediaType: .podcast, supportedSections: podcastSections)
+        router.selectLibrary(id: "podcasts", kind: .podcast, supportedSections: podcastSections)
 
         #expect(router.selectedTab == .library)
         #expect(router.librarySection == nil)
@@ -152,11 +224,11 @@ private func routerInBookLibrary() -> Router {
 
     @Test func switchingToABookLibraryRepairsPodcastSections() {
         let router = Router()
-        router.selectLibrary(id: "podcasts", mediaType: .podcast, supportedSections: podcastSections)
+        router.selectLibrary(id: "podcasts", kind: .podcast, supportedSections: podcastSections)
         router.selectedTab = .latest
         router.librarySection = .addPodcast
 
-        router.selectLibrary(id: "books", mediaType: .book, supportedSections: bookSections)
+        router.selectLibrary(id: "books", kind: .book, supportedSections: bookSections)
 
         #expect(router.selectedTab == .library)
         #expect(router.librarySection == nil)
@@ -167,7 +239,7 @@ private func routerInBookLibrary() -> Router {
         router.selectedTab = .playlists
         router.librarySection = .playlists
 
-        router.selectLibrary(id: "podcasts", mediaType: .podcast, supportedSections: podcastSections)
+        router.selectLibrary(id: "podcasts", kind: .podcast, supportedSections: podcastSections)
 
         #expect(router.selectedTab == .playlists)
         #expect(router.librarySection == .playlists)
@@ -177,7 +249,7 @@ private func routerInBookLibrary() -> Router {
         for tab in [AppTab.home, .library, .search, .downloads, .account] {
             let router = routerInBookLibrary()
             router.selectedTab = tab
-            router.selectLibrary(id: "podcasts", mediaType: .podcast, supportedSections: podcastSections)
+            router.selectLibrary(id: "podcasts", kind: .podcast, supportedSections: podcastSections)
             #expect(router.selectedTab == tab)
         }
     }
@@ -185,12 +257,12 @@ private func routerInBookLibrary() -> Router {
     @Test func supportedSectionsAlsoApplyPermissions() {
         let router = Router()
         let all = AppTab.sections(for: .podcast, canAddPodcast: true, hasPlaylists: true)
-        router.selectLibrary(id: "podcasts", mediaType: .podcast, supportedSections: all)
+        router.selectLibrary(id: "podcasts", kind: .podcast, supportedSections: all)
         router.selectedTab = .addPodcast
         router.librarySection = .playlists
 
         let limited = AppTab.sections(for: .podcast, canAddPodcast: false, hasPlaylists: false)
-        router.selectLibrary(id: "podcasts", mediaType: .podcast, supportedSections: limited)
+        router.selectLibrary(id: "podcasts", kind: .podcast, supportedSections: limited)
 
         #expect(router.selectedTab == .library)
         #expect(router.librarySection == nil)

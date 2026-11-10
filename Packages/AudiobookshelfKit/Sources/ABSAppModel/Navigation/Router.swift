@@ -24,6 +24,13 @@ public final class Router {
     /// The Library root's selected section; `nil` is the default grid. In compact width this
     /// replaces the sidebar-only section tabs.
     public var librarySection: AppTab?
+    /// A library a deep link asked for, until the scene resolves it. A link carries only the
+    /// ID, so the scene (S7a) looks up the library's kind and sections and calls
+    /// ``selectLibrary(id:kind:supportedSections:)``, which clears this.
+    ///
+    /// Other pending requests, such as S2's `pendingPlayLink`, must also be stored properties
+    /// declared here: extensions can't add stored properties.
+    public private(set) var pendingLibraryID: String?
     /// One typed path per tab. Bind stacks through ``subscript(path:)``.
     public private(set) var paths: [AppTab: [Route]] = [:]
 
@@ -46,7 +53,9 @@ public final class Router {
     }
 
     /// Adapts the selection to the size class. The view calls this with
-    /// `horizontalSizeClass == .compact` whenever the size class changes.
+    /// `horizontalSizeClass == .compact` when it appears, after restoring a snapshot and
+    /// whenever the size class changes: a snapshot saved in regular width can select a
+    /// section tab that compact width doesn't show.
     ///
     /// Compact width has no section tabs, so a selected section moves into Library: it
     /// becomes ``librarySection`` and its path replaces Library's (the old Library path wasn't
@@ -61,32 +70,45 @@ public final class Router {
         selectedTab = .library
     }
 
+    /// Asks the scene to switch to library `id`, for a deep link that knows only the ID.
+    /// Sets ``pendingLibraryID``; nothing else changes until the scene resolves it.
+    public func requestLibrary(id: String) {
+        pendingLibraryID = id
+    }
+
     /// Shows library `id` in this scene.
     ///
-    /// Switching to another library resets the library-scoped paths (Home, Library, Search
-    /// and the sections) and keeps Downloads and Account. Either way, a selected tab or
-    /// Library section that isn't in `supportedSections` falls back to Library or the default
-    /// grid, which repairs the selection after a book ↔ podcast switch.
+    /// Switching from another library resets the library-scoped paths (Home, Library, Search
+    /// and the sections) and keeps Downloads and Account. The first library a scene gets
+    /// (when ``libraryID`` is `nil`) keeps them. Either way, a selected tab or Library section
+    /// that isn't in `supportedSections` falls back to Library or the default grid, and the
+    /// paths of unsupported sections are cleared, which repairs the selection after a book ↔
+    /// podcast switch or a permission change. Clears a matching ``pendingLibraryID``.
     ///
     /// - Parameter supportedSections: the sections the library shows for this user, usually
     ///   ``AppTab/sections(for:canAddPodcast:hasPlaylists:)``.
-    public func selectLibrary(id: String, mediaType: LibraryKind?, supportedSections: Set<AppTab>) {
-        if id != libraryID {
+    public func selectLibrary(id: String, kind: LibraryKind?, supportedSections: Set<AppTab>) {
+        if let current = libraryID, id != current {
             for tab in AppTab.allCases where tab.isLibraryScoped {
                 self[path: tab] = []
             }
         }
         libraryID = id
-        libraryKind = mediaType
+        libraryKind = kind
+        if pendingLibraryID == id { pendingLibraryID = nil }
         repairSections(supported: supportedSections)
     }
 
     /// Starts over for another server or user: every path, the library and the presentation
-    /// state go back to their defaults.
+    /// state go back to their defaults, and any pending request is dropped.
+    ///
+    /// It takes the new server and user IDs because the router's identity decides which
+    /// snapshots it accepts; without them, every later snapshot would be discarded.
     public func resetForIdentityChange(serverID: String?, userID: String?) {
         self.serverID = serverID
         self.userID = userID
         resetNavigation()
+        pendingLibraryID = nil
         isFullPlayerPresented = false
         isQueueInspectorPresented = false
     }
@@ -106,12 +128,19 @@ public final class Router {
         libraryKind = kind
     }
 
+    /// Falls back from unsupported sections: the selected tab to Library, the Library section
+    /// to the default grid (dropping the Library path, which came from that section), and
+    /// clears the paths of unsupported section tabs.
     func repairSections(supported: Set<AppTab>) {
         if selectedTab.isSection, !supported.contains(selectedTab) {
             selectedTab = .library
         }
         if let section = librarySection, !section.isSection || !supported.contains(section) {
             librarySection = nil
+            self[path: .library] = []
+        }
+        for tab in AppTab.sections where !supported.contains(tab) {
+            self[path: tab] = []
         }
     }
 }

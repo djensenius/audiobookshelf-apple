@@ -30,6 +30,56 @@ extension Router {
             self.paths = paths
             self.isQueueInspectorPresented = isQueueInspectorPresented
         }
+
+        /// Decodes `paths` leniently, so a snapshot from a newer build still restores: tabs this
+        /// build doesn't know are skipped, and each path is cut at its first route that doesn't
+        /// decode, keeping the screens before it.
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            serverID = try container.decodeIfPresent(String.self, forKey: .serverID)
+            userID = try container.decodeIfPresent(String.self, forKey: .userID)
+            selectedTab = try container.decode(AppTab.self, forKey: .selectedTab)
+            libraryID = try container.decodeIfPresent(String.self, forKey: .libraryID)
+            libraryKind = try container.decodeIfPresent(LibraryKind.self, forKey: .libraryKind)
+            librarySection = try container.decodeIfPresent(AppTab.self, forKey: .librarySection)
+            isQueueInspectorPresented = try container.decode(Bool.self, forKey: .isQueueInspectorPresented)
+
+            paths = [:]
+            let pathsContainer = try container.nestedContainer(keyedBy: TabKey.self, forKey: .paths)
+            for key in pathsContainer.allKeys {
+                guard let tab = AppTab(rawValue: key.stringValue),
+                    var routes = try? pathsContainer.nestedUnkeyedContainer(forKey: key)
+                else { continue }
+                var path: [Route] = []
+                while !routes.isAtEnd, let route = try? routes.decode(Route.self) {
+                    path.append(route)
+                }
+                if !path.isEmpty { paths[tab] = path }
+            }
+        }
+
+        private struct TabKey: CodingKey {
+            var stringValue: String
+            var intValue: Int? { nil }
+            init(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { nil }
+        }
+    }
+
+    /// ``snapshot`` as JSON, for `@SceneStorage`; `nil` only if encoding fails.
+    public var snapshotData: Data? {
+        try? JSONEncoder().encode(snapshot)
+    }
+
+    /// Restores ``snapshot`` from `@SceneStorage` JSON. Missing or unreadable data starts the
+    /// scene from the defaults, like a snapshot of another server or user.
+    public func restore(from data: Data?) {
+        guard let data, let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else {
+            resetNavigation()
+            isQueueInspectorPresented = false
+            return
+        }
+        self.snapshot = snapshot
     }
 
     /// The scene's navigation state, for `@SceneStorage`.
@@ -38,7 +88,8 @@ extension Router {
     /// server or user is discarded and the scene starts from the defaults. `librarySection`
     /// is restored before the paths and validated against the library's kind, as a library
     /// switch would; unsupported sections fall back to Library and the default grid, and
-    /// their paths are dropped. The full player's presentation is never changed.
+    /// their paths are dropped, as is a Library path that belonged to a dropped section. The
+    /// full player's presentation is never changed. Call ``normalize(isCompact:)`` afterwards.
     public var snapshot: Snapshot {
         get {
             Snapshot(
@@ -58,7 +109,9 @@ extension Router {
             selectedTab = newValue.selectedTab
             librarySection = newValue.librarySection
             repairSections(supported: supported)
+            let droppedSection = newValue.librarySection != nil && librarySection == nil
             for (tab, path) in newValue.paths where !tab.isSection || supported.contains(tab) {
+                if tab == .library, droppedSection { continue }
                 self[path: tab] = path
             }
             isQueueInspectorPresented = newValue.isQueueInspectorPresented
