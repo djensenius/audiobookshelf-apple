@@ -1,0 +1,19 @@
+[tools]
+actionlint = "1.7.12"
+shellcheck = "0.11.0"
+
+[tasks.lint]
+description = "Run all repository linters"
+depends = ["lint:shell", "lint:actions"]
+
+[tasks."lint:shell"]
+description = "Lint shell scripts with ShellCheck"
+run = "shellcheck scripts/*.sh"
+
+[tasks."lint:actions"]
+description = "Lint GitHub Actions workflows with actionlint"
+run = "actionlint"
+
+[tasks."upstream:check"]
+description = "Preview the upstream-sync issue without creating it"
+run = "DRY_RUN=true scripts/upstream-sync.sh"
