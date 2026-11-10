@@ -1,0 +1,122 @@
+import ABSAPI
+import ABSCore
+import ABSData
+import Foundation
+
+/// A saved position for an item: server progress, local progress or the last-played record.
+public struct ProgressCandidate: Sendable, Hashable {
+    public var currentTime: Double
+    /// When the position was saved; `nil` counts as older than any dated candidate.
+    public var updatedAt: Date?
+    public var isFinished: Bool
+
+    public init(currentTime: Double, updatedAt: Date?, isFinished: Bool = false) {
+        self.currentTime = currentTime
+        self.updatedAt = updatedAt
+        self.isFinished = isFinished
+    }
+}
+
+/// Where a fresh session starts (ADR 0007 point 7: newer progress wins).
+public enum ResumePosition {
+    /// - An explicit start time (a chapter, a bookmark) is used as is, with no rewind.
+    /// - Otherwise the newest candidate wins (the first one on a tie), rewound by ``AutoRewind`` for
+    ///   the time since it was saved. A finished item starts from `0`.
+    /// - The result is clamped to `0...duration` when the duration is known.
+    public static func startTime(
+        explicit: Double?, candidates: [ProgressCandidate], duration: Double, now: Date, autoRewind: Bool
+    ) -> Double {
+        let time: Double
+        if let explicit {
+            time = explicit
+        } else if let newest = candidates.filter({ $0.currentTime.isFinite }).max(by: isOlder) {
+            time =
+                newest.isFinished
+                ? 0
+                : AutoRewind.resumeTime(
+                    currentTime: newest.currentTime, lastPlayed: newest.updatedAt, now: now, isEnabled: autoRewind)
+        } else {
+            time = 0
+        }
+        let finite = time.isFinite ? max(time, 0) : 0
+        return duration > 0 ? min(finite, duration) : finite
+    }
+
+    private static func isOlder(_ lhs: ProgressCandidate, _ rhs: ProgressCandidate) -> Bool {
+        switch (lhs.updatedAt, rhs.updatedAt) {
+        case (nil, .some): true
+        case (.some(let left), .some(let right)): left < right
+        default: false
+        }
+    }
+}
+
+/// Why playback couldn't start or stopped.
+public enum PlaybackCoordinatorError: Error, Sendable, Equatable {
+    /// The path is metered and the streaming setting is "ask": ask the user, then call
+    /// `play(…, allowingMeteredNetwork: true)`. No session was started.
+    case streamingNeedsConfirmation(MeteredReason)
+    /// The path is metered and the streaming setting is "never". No session was started.
+    case streamingNotAllowed(MeteredReason)
+    case sessionStartFailed(APIError)
+    case streamUnavailable(StreamResolutionError)
+    /// The engine couldn't load the media.
+    case engine(AudioEngineError)
+    /// An item or the player failed while loading or playing.
+    case playback(PlaybackFailure)
+    /// Any other error, by description.
+    case unexpected(String)
+
+    init(engineError: AudioEngineError) {
+        switch engineError {
+        case .itemFailed(_, let failure), .playerFailed(let failure): self = .playback(failure)
+        default: self = .engine(engineError)
+        }
+    }
+}
+
+/// Why a server session is being closed.
+public enum SessionCloseReason: Sendable, Hashable {
+    /// Another item was played.
+    case itemChanged
+    /// ``PlaybackCoordinator/stop()``.
+    case stopped
+    /// The engine couldn't load the session's media.
+    case loadFailed
+}
+
+/// A session being closed, as handed to observers and ``PlaybackCoordinator/finalCloseReport``.
+public struct ClosingSession: Sendable, Hashable {
+    public let sessionID: String
+    public let key: MediaKey
+    /// The last confirmed global position.
+    public let currentTime: Double
+    public let duration: Double
+    public let reason: SessionCloseReason
+}
+
+/// What happened, for code that follows playback without owning it: progress sync and history
+/// (P2-06b), Now Playing (P2-07) and the sleep timer (P2-08).
+public enum PlaybackCoordinatorEvent: Sendable, Equatable {
+    /// The current media changed; `nil` after ``PlaybackCoordinator/stop()``.
+    case itemChanged(MediaKey?)
+    /// A server session became the current one.
+    case sessionStarted(sessionID: String, key: MediaKey)
+    /// The engine loaded the media at `time`, after the resume seek (including auto-rewind).
+    case loaded(time: Double)
+    case playbackStarted
+    case paused(time: Double)
+    /// A seek completed and playback is at `time`.
+    case didSeek(time: Double)
+    /// The engine's periodic time update while media is loaded.
+    case tick(time: Double)
+    case ended
+    case failed(PlaybackCoordinatorError)
+    /// Emitted before the close request is sent; every ``sessionStarted(sessionID:key:)`` gets one.
+    case sessionWillClose(ClosingSession)
+}
+
+/// Identifies an observer added with ``PlaybackCoordinator/addObserver(_:)``.
+public struct PlaybackObserverToken: Sendable, Hashable {
+    let id = UUID()
+}
