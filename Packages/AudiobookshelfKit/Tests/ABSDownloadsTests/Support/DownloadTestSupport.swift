@@ -182,13 +182,14 @@ final class DownloadHarness: Sendable {
     ///   behind as a previous launch would.
     func makeEngine(
         retryPolicy: RetryPolicy = .default,
+        clock: (any Clock<Duration>)? = nil,
         registry: DownloadEngineRegistry? = nil,
         readRecords: (@Sendable (DownloadStore) async throws -> [DownloadRecordDTO])? = nil,
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
         DownloadEngine(
             store: store, localItems: localItems, credentials: credentials, vault: vault, locations: locations,
-            retryPolicy: retryPolicy, networkAccess: { NetworkAccess(policy: .always) }, clock: clock,
+            retryPolicy: retryPolicy, networkAccess: { NetworkAccess(policy: .always) }, clock: clock ?? self.clock,
             now: { .now }, random: { 0.5 }, makeSession: sessionFactory(prepare: prepare),
             registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() })
     }

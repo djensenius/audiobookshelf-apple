@@ -15,7 +15,7 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     case redirectedUnauthorized
     /// A redirect left the server; the body was discarded.
     case offOrigin
-    /// The body was an HTML page, not the file.
+    /// The body was an error page or message (HTML, text, JSON or XML), not the file.
     case unexpectedContent
     /// The body's size isn't the file's size.
     case sizeMismatch
@@ -25,12 +25,13 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     case outOfSpace
     /// No credentials: the connection is signed out or the refresh failed.
     case credentials
-    /// The download's state couldn't be saved.
+    /// The download's state couldn't be saved. Counts as a failure, so the part fails for
+    /// good with this code once the retries are used up.
     case store
     /// The part's destination path is invalid.
     case invalidDestination
-    /// Another process holds the background session; downloads stop until the app is
-    /// launched again.
+    /// Another process holds the background session; downloads stop until the next
+    /// ``DownloadEngine/activate()``.
     case sessionInUse
     /// The background session kept disconnecting; downloads wait for the next
     /// ``DownloadEngine/activate()``.
@@ -66,7 +67,8 @@ public struct DownloadProgress: Sendable, Equatable {
 ///   after a relaunch; the store's `taskIdentifier` is only a cache.
 /// - A task is only created once ``DownloadStore/beginRunning(partID:expecting:now:)`` has
 ///   moved its part to `running`, so a launch from a stale read can't restart a part that has
-///   since completed, been stopped, failed for good or been deleted.
+///   since completed, been stopped, failed for good or been deleted. A transfer that survived
+///   a relaunch is only adopted the same way; otherwise it stops, keeping its resume data.
 /// - Requests carry `Authorization: Bearer` and the custom headers, never `?token=`. The
 ///   access token is refreshed (or checked) before each task is created or resumed; a 401 for
 ///   the current token recreates the task from a fresh request once.
@@ -132,7 +134,7 @@ public actor DownloadEngine {
     private var freeRestarts: [UUID: Int] = [:]
     /// Session recreations since the last moved file or ``activate()``.
     private var sessionRecreations = 0
-    /// Another process holds the session identifier; set for the rest of the process.
+    /// Another process holds the session identifier; set until the next ``activate()``.
     private var isSessionInUse = false
     private var contexts: [UUID: PartContext] = [:]
     private var tasks: [UUID: URLSessionDownloadTask] = [:]
@@ -150,6 +152,8 @@ public actor DownloadEngine {
     private var ignoredTasks: Set<Int> = []
     private var throttle = ProgressThrottle()
     private var backgroundWaiters: [CheckedContinuation<Void, Never>] = []
+    /// The restart of queued parts that the last ``activate()`` began.
+    private var restart: Task<Void, Never>?
     /// Events-finished calls that came before their wake asked for them.
     private(set) var unclaimedBackgroundFinishes = 0
 
@@ -214,7 +218,8 @@ public actor DownloadEngine {
     /// Creates the session if needed, reattaches to the transfers that survived a relaunch,
     /// and restarts the parts of `queued` and `downloading` records that have no transfer.
     /// Call it when the app comes to the foreground. It also resets the restarts that don't
-    /// count as failures, and lets a lost session be created again.
+    /// count as failures, lets a lost session be created again, and tries once more to create
+    /// a session that another process held.
     ///
     /// - Returns: `false` when the downloads couldn't be read (nothing was cancelled or
     ///   restarted, and a later call tries again) or another process holds the session.
@@ -222,6 +227,7 @@ public actor DownloadEngine {
     public func activate() async -> Bool {
         freeRestarts.removeAll()
         sessionRecreations = 0
+        isSessionInUse = false
         guard await ensureSession() else { return false }
         restartsQueuedParts = true
         delegate.post(.restartQueued)
@@ -289,6 +295,32 @@ public actor DownloadEngine {
                 try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
             }
         }
+    }
+
+    /// Pauses a download: its record becomes `paused`, then its transfers stop, keeping their
+    /// resume data.
+    ///
+    /// - Returns: `false` when the record doesn't exist.
+    @discardableResult
+    public func pause(recordID: UUID) async throws -> Bool {
+        guard try await store.setState(.paused, forRecord: recordID),
+            let record = try await store.record(id: recordID)
+        else { return false }
+        await stop(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), keepingResumeData: true)
+        return true
+    }
+
+    /// Resumes a paused or failed download: its record is queued again, then its parts that
+    /// haven't completed start, continuing from their resume data.
+    ///
+    /// - Returns: `false` when the record doesn't exist.
+    @discardableResult
+    public func resume(recordID: UUID) async throws -> Bool {
+        guard try await store.setState(.queued, forRecord: recordID),
+            let record = try await store.record(id: recordID)
+        else { return false }
+        await start(partIDs: record.parts.filter { $0.state != .completed }.map(\.id))
+        return true
     }
 
     /// Deletes the resume data of every part of `connectionID`'s downloads, for sign-out,
@@ -373,11 +405,7 @@ public actor DownloadEngine {
                 task.cancel()
                 continue
             }
-            tasks[partID] = download
-            await persist {
-                try await $0.setPartState(.running, partID: partID, taskIdentifier: download.taskIdentifier)
-            }
-            if download.state == .suspended { download.resume() }
+            await reattach(download, partID: partID)
         }
         // A part left running without a transfer (the app ended before the system kept it)
         // is queued again, so a restart can begin it.
@@ -400,6 +428,44 @@ public actor DownloadEngine {
                 await self.handle(event)
             }
         }
+    }
+
+    /// Adopts a transfer that survived a relaunch once
+    /// ``DownloadStore/beginRunning(partID:expecting:now:)`` allows it. If the record was
+    /// stopped or failed for good, the transfer is cancelled keeping its resume data, as
+    /// ``stop(partIDs:keepingResumeData:)`` does; if the part completed or was deleted, it is
+    /// cancelled. When the store can't be written, the transfer is adopted.
+    private func reattach(_ task: URLSessionDownloadTask, partID: UUID) async {
+        // Adopted before the write, so its events are handled while the write is under way.
+        tasks[partID] = task
+        var adopts = true
+        do {
+            adopts = try await store.beginRunning(partID: partID, expecting: [.queued, .running, .failed], now: now())
+        } catch {
+            logError("Couldn't record a surviving download", error)
+        }
+        guard tasks[partID] === task else { return }
+        guard adopts else {
+            // A deleted or completed part's transfer is cancelled; when the read fails, it stops.
+            var isGone = false
+            do {
+                isGone = try await store.part(id: partID).map { $0.state == .completed } ?? true
+            } catch {
+                logError("Couldn't read a surviving download", error)
+            }
+            guard tasks[partID] === task else { return }
+            if isGone {
+                tasks[partID] = nil
+                ignoredTasks.insert(task.taskIdentifier)
+                task.cancel()
+                forget(partID)
+            } else {
+                await stop(partIDs: [partID], keepingResumeData: true)
+            }
+            return
+        }
+        await persist { try await $0.setPartState(.running, partID: partID, taskIdentifier: task.taskIdentifier) }
+        if task.state == .suspended, tasks[partID] === task { task.resume() }
     }
 
     /// Lets the session's tasks finish, then creates it again (on ``sessionInvalidated()``).
@@ -441,12 +507,12 @@ public actor DownloadEngine {
     }
 
     /// Another process holds the session identifier (`backgroundSessionInUseByAnotherProcess`):
-    /// no session of this process can work, so the engine stops creating one until the app is
-    /// launched again.
+    /// no session of this process can work, so the engine stops creating one until the next
+    /// ``activate()``.
     private func sessionHeldByAnotherProcess() {
         guard !isSessionInUse else { return }
         isSessionInUse = true
-        Log.downloads.fault("Another process holds the download session; downloads stop until the app is relaunched")
+        Log.downloads.fault("Another process holds the download session; downloads stop until the app is opened again")
         updateContinuation.yield(
             .sessionUnavailable(code: .sessionInUse, message: "Another process is using the download session."))
         dropSession()
@@ -610,7 +676,7 @@ public actor DownloadEngine {
         case .sessionInvalidated:
             sessionInvalidated()
         case .restartQueued:
-            Task { [weak self] in await self?.restartQueuedParts() }
+            restart = Task { [weak self] in await self?.restartQueuedParts() }
         case .barrier(let continuation):
             continuation.resume()
         }
@@ -620,6 +686,13 @@ public actor DownloadEngine {
     func processPendingEvents() async {
         guard isEventLoopRunning else { return }
         await withCheckedContinuation { delegate.post(.barrier($0)) }
+    }
+
+    /// Returns once the restart of queued parts that the last ``activate()`` began has launched
+    /// them. For tests.
+    func waitForRestart() async {
+        await processPendingEvents()
+        await restart?.value
     }
 
     private func handleProgress(_ task: URLSessionTask, bytesWritten: Int64, expectedBytes: Int64) async {

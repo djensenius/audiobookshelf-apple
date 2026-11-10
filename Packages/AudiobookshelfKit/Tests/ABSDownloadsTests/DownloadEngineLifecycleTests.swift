@@ -205,10 +205,11 @@ import Testing
         #expect(harness.clock.sleeps.prefix(3) == [.milliseconds(1500), .seconds(3), .seconds(6)])
     }
 
-    @Test func sessionInUseByAnotherProcessStopsDownloads() async throws {
+    @Test func sessionInUseByAnotherProcessWaitsForActivation() async throws {
         let gate = StubGate()
-        let harness = try await DownloadHarness { _ in
-            .failure(code: NSURLErrorBackgroundSessionInUseByAnotherProcess, gate: gate)
+        let harness = try await DownloadHarness {
+            $0.stubCount <= 2
+                ? .failure(code: NSURLErrorBackgroundSessionInUseByAnotherProcess, gate: gate) : .status(200)
         }
         let first = UUID()
         let second = UUID()
@@ -226,11 +227,14 @@ import Testing
         await engine.processPendingEvents()
         #expect(try await harness.store.part(id: first)?.state == .queued)
         #expect(try await harness.store.part(id: second)?.state == .queued)
-        // No session is created again in this process.
-        #expect(await engine.activate() == false)
+        // No session is created again until the next activation, which tries once more.
         await engine.start(partIDs: [first])
         #expect(harness.sessions.withLock { $0.count } == 1)
         #expect(harness.requests.count == 2)
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.sessions.withLock { $0.count } == 2)
+        #expect(harness.requests.count == 4)
     }
 
     @Test func backgroundWakeDoesNotRestartButActivateDoes() async throws {
@@ -308,6 +312,20 @@ import Testing
         harness.session?.finishBackgroundEvents()
         await engine.processPendingEvents()
         #expect(await engine.unclaimedBackgroundFinishes == 0)
+    }
+
+    @Test func timedOutWaitLeavesNoEntry() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let registry = DownloadEngineRegistry()
+
+        // The timer fires before anything registers: the wait gives up and leaves nothing.
+        #expect(await registry.engine(timeout: .seconds(10), clock: RecordingClock()) == nil)
+        #expect(registry.waiterCount == 0)
+
+        let engine = harness.makeEngine(registry: registry)
+        #expect(registry.waiterCount == 0)
+        #expect(await registry.engine(timeout: .seconds(10), clock: RecordingClock()) === engine)
+        #expect(registry.waiterCount == 0)
     }
 
     @Test(arguments: [true, false])
@@ -412,6 +430,96 @@ import Testing
         #expect(part.state == .queued)
         #expect(part.taskIdentifier == nil)
         #expect(!harness.fileExists("li_1/2.mp3"))
+    }
+
+    @Test func requeuedFailedRecordResumesItsSiblings() async throws {
+        let gate = StubGate()
+        let seen = Mutex<Set<String>>([])
+        // A resumed task repeats the last fresh request, so only each path's first answer fails.
+        let harness = try await DownloadHarness { request in
+            let path = request.url?.path() ?? ""
+            guard seen.withLock({ $0.insert(path).inserted }) else { return .status(200) }
+            return path.contains("/file/1/")
+                ? .status(404, body: Data(), gate: gate) : .failure(resumeData: Data("resume-b".utf8))
+        }
+        let failing = UUID()
+        let sibling = UUID()
+        let record = try await harness.addRecord(parts: [failing, sibling])
+        let engine = harness.makeEngine(clock: SignallingClock())
+        await engine.start(partIDs: [failing, sibling])
+        #expect(await engine.nextFailure(willRetry: true) != nil)
+
+        gate.open()
+
+        #expect(await engine.nextPermanentFailure() != nil)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        #expect(try await harness.store.part(id: sibling)?.hasResumeData == true)
+        try await harness.store.setState(.queued, forRecord: record.id)
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.session?.resumedData == [Data("resume-b".utf8)])
+    }
+
+    @Test(arguments: [DownloadState.paused, .failed])
+    func activateDoesNotRestartStoppedRecords(state: DownloadState) async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: state)
+        let engine = harness.makeEngine()
+
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+
+        #expect(harness.requests.isEmpty)
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+    }
+
+    @Test(arguments: [DownloadState.paused, .failed])
+    func reattachStopsTransfersOfStoppedRecords(state: DownloadState) async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: state, partState: .running)
+        let base = harness.base
+        let engine = harness.makeEngine(prepare: { stub in
+            let url = URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!
+            stub.leaveTask(URLRequest(url: url), description: partID.uuidString)
+        })
+
+        #expect(await engine.activate())
+        await harness.waitForCompletions(1)
+        await engine.waitForRestart()
+
+        #expect(harness.session?.leftovers.withLock { $0.first?.state } == .completed)
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
+        #expect(part.taskIdentifier == nil)
+        #expect(try await harness.store.record(id: record.id)?.state == state)
+        #expect(harness.credentials.calls.isEmpty)
+        #expect(!harness.fileExists("li_1/1.mp3"))
+    }
+
+    @Test func pauseStopsAndResumeContinues() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(200, gate: gate) : .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+
+        #expect(try await engine.pause(recordID: record.id))
+        gate.open()
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+        #expect(harness.requests.count == 1)
+        #expect(try await engine.resume(recordID: record.id))
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 2)
+        #expect(try await engine.pause(recordID: UUID()) == false)
     }
 
     @Test func activationFinalisesCompletedRecords() async throws {

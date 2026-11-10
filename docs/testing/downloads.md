@@ -12,9 +12,11 @@ each time it comes to the foreground (the composition root, P4-02). The app alre
 `DownloadEngine.deactivate()` when its scene goes to the background. Until an engine
 exists, the static `DownloadEngine.handleBackgroundEvents()` waits up to 10 seconds for
 one, then returns; the events stay in `nsurlsessiond` for the next session. To pause or
-retry a download, the app sets the record's state first (`paused` before `stop`, `queued`
-before `start`): the engine only starts a part after `DownloadStore.beginRunning` accepts
-it, which refuses parts of paused, failed and completed downloads.
+resume a download, the app calls `pause(recordID:)` or `resume(recordID:)`, which set the
+record's state before stopping or starting its parts. The engine only starts a part after
+`DownloadStore.beginRunning` accepts it, which refuses parts of paused, failed and
+completed downloads; a transfer that survived a relaunch is only adopted the same way, and
+otherwise cancelled, keeping its resume data.
 
 ## Before you start
 
@@ -51,9 +53,10 @@ the background when it finishes.
    the transfer finishes.
 5. When it finishes, iOS relaunches the app in the background (`sessionSendsLaunchEvents`)
    and runs the `.backgroundTask(.urlSession(...))` handler. The engine recreates the
-   session, checks the response (200 or 206, not `text/html`, the expected size), moves
-   the file, records its size, and only then lets the handler return. A background wake
-   doesn't restart other queued parts; that waits for `activate()` in the foreground.
+   session, checks the response (200 or 206, not an HTML, text, JSON or XML error body,
+   the expected size), moves the file, records its size, and only then lets the handler
+   return. A background wake doesn't restart other queued parts; that waits for
+   `activate()` in the foreground.
 6. Open the app. Check that:
    - the item shows as downloaded and nothing restarts. Once every part of a download
      has completed, the engine turns it into a local item and deletes the download
@@ -127,11 +130,12 @@ iOS.
 
 ## Failures
 
-- The engine only accepts a 200 or 206 response. Another status, a `text/html` body, or
-  a file whose size differs from the expected length never reaches `Downloads/`. The
-  exception is a size that matches the length the server declared (`Content-Length`, or
-  the total in a 206's `Content-Range`): the file changed since the download was planned,
-  so the engine keeps it and records the new size as the expected size.
+- The engine only accepts a 200 or 206 response. Another status, an HTML, text, JSON or
+  XML body (an error page or message), or a file whose size differs from the expected
+  length never reaches `Downloads/`. The exception is a size that matches the length the
+  server declared (`Content-Length`, or the total in a 206's `Content-Range`): the file
+  changed since the download was planned, so the engine keeps it and records the new size
+  as the expected size.
 - A 401 triggers one token refresh and one new task for the part. A second 401 in a row
   fails the part. The count starts over once the part gets a successful response, and a
   401 for a token that was already replaced doesn't count.
@@ -140,6 +144,9 @@ iOS.
   fails.
 - A full disk, any other status (such as 404 or 204), or a response from another origin
   fails the part at once.
+- If the download's state can't be saved when a part starts, that counts as a failure
+  and is retried like the others; after the fifth retry the part fails for good with the
+  `store` code.
 - When a part fails for good, the engine stops the download's other parts, keeps their
   resume data, and marks the download failed. Starting it again continues those parts.
 - If `nsurlsessiond` disconnects the session (`backgroundSessionWasDisconnected`, or the
@@ -149,7 +156,7 @@ iOS.
   the next `activate()`.
 - If another process holds the session (`backgroundSessionInUseByAnotherProcess`), the
   engine queues the parts, logs a fault, reports it, and creates no session until the
-  app is launched again.
+  next `activate()`, which tries once more.
 - If the resume data can't be read (the Keychain or the file is unavailable, for
   example while the device is locked), the part starts from 0% without counting a
   failure, and the resume data is kept for a later attempt.

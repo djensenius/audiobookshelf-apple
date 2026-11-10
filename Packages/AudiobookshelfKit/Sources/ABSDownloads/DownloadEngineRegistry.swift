@@ -25,6 +25,11 @@ final class DownloadEngineRegistry: Sendable {
         state.withLock { $0.engine }
     }
 
+    /// Callers waiting for an engine, and timeouts their caller hasn't seen yet. For tests.
+    var waiterCount: Int {
+        state.withLock { $0.waiters.count }
+    }
+
     /// Makes `engine` the one returned from now on and hands it to the waiting callers.
     func register(_ engine: DownloadEngine) {
         let waiting = state.withLock { state in
