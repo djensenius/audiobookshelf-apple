@@ -79,6 +79,8 @@ public final class PlaybackCoordinator {
     /// hasn't landed (an interrupted one stays pending); else the position play will resume from,
     /// moved by any jumps not yet applied.
     public var currentTime: Double { phase == .loaded ? position : unloadedPositionAfterJumps }
+    /// The loaded seek target, observable independently of the ticking engine clock.
+    var pendingSeekTarget: Double? { phase == .loaded ? engine.pendingSeekTarget : nil }
     /// A sample suitable for listening credit, unlike `currentTime` which may be a seek target.
     public var confirmedPlaybackTime: Double? {
         guard phase == .loaded else { return closingPlaybackTime }
@@ -149,7 +151,7 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var lastPlayedSavedAt: Date?
     /// The media played to its end; the next play starts again from 0.
     @ObservationIgnored private var reachedEnd = false
-    /// A seek was interrupted and hasn't landed yet, so its `didSeek` is still owed.
+    /// A seek's `didSeek` is still owed: after `loaded`, and only once the target lands.
     @ObservationIgnored private var awaitingSeekLanding = false
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
@@ -441,11 +443,10 @@ public final class PlaybackCoordinator {
         }
         // An interrupted initial seek stays pending with the engine paused at 0: `.loaded` carries
         // its target, and `.didSeek` waits for the landing (see `handle(_:)`).
-        let landed = engine.pendingSeekTarget == nil
         emit(.loaded(time: position))
         guard current == generation, phase == .loaded else { return }
-        // A newer seek or a tick may already have reported the landing during the catch-up seek.
-        if landed, awaitingSeekLanding {
+        // Even a newer seek or tick during catch-up must report its landing after `loaded`.
+        if engine.pendingSeekTarget == nil, awaitingSeekLanding {
             awaitingSeekLanding = false
             emit(.didSeek(time: engine.currentTime))
         }
@@ -558,11 +559,11 @@ public final class PlaybackCoordinator {
             let result = await engine.seek(to: target)
             guard current == generation, phase == .loaded else { return nil }
             guard result == .completed else {
-                awaitingSeekLanding = engine.pendingSeekTarget != nil
+                awaitingSeekLanding = isFinishingLoad || engine.pendingSeekTarget != nil
                 return nil
             }
             let landed = engine.currentTime
-            if awaitingSeekLanding {
+            if awaitingSeekLanding, !isFinishingLoad {
                 awaitingSeekLanding = false
                 emit(.didSeek(time: landed))
                 saveLastPlayed()
@@ -600,7 +601,9 @@ public final class PlaybackCoordinator {
             if isResolvingStart || unloadedDuration == 0 { pendingJumpOffset += offset } else { addClampedJump(offset) }
             return nil
         case .unloaded:
-            if let pendingStartTime { return await seek(to: pendingStartTime + offset) }
+            if let pendingStartTime {
+                return await seek(to: Self.clamp(pendingStartTime, to: unloadedDuration) + offset)
+            }
             addClampedJump(offset)
             return unloadedPositionAfterJumps
         case .idle:
@@ -689,7 +692,7 @@ public final class PlaybackCoordinator {
         guard phase == .loaded else { return }
         switch event {
         case .tick(let time):
-            if awaitingSeekLanding, engine.pendingSeekTarget == nil {
+            if awaitingSeekLanding, !isFinishingLoad, engine.pendingSeekTarget == nil {
                 awaitingSeekLanding = false
                 emit(.didSeek(time: engine.currentTime))
                 guard phase == .loaded else { return }

@@ -142,12 +142,19 @@ struct BridgeHarness {
         #expect(session.applicationPrimaryRequests == 1)
     }
 
-    @Test func directUnloadedPositionChangesPublishAfterObservationRegisters() async throws {
+    @Test(arguments: [false, true])
+    func directPositionChangesPublishAfterObservationRegisters(loaded: Bool) async throws {
         let b = try BridgeHarness()
         b.h.lastPlayed.record = b.h.record("a", position: 120, age: 5)
         b.coordinator.restoreLastPlayed()
+        if loaded {
+            await b.coordinator.resume()
+            await b.controller.activationTask?.value
+            b.coordinator.pause()
+            b.h.engine.seekResults = [.interrupted, .interrupted, .interrupted]
+        }
         let session = try b.session
-        // This is applied by the observation callback, after it re-registers for the restored phase.
+        // This is applied by the observation callback, after it re-registers for the current phase.
         b.settings.value.jumpForwardTime = 45
         await yieldUntil { b.controller.publishedCommands?.skipForwardInterval == 45 }
         await b.controller.artworkTask?.value
@@ -162,9 +169,10 @@ struct BridgeHarness {
 
         #expect(b.controller.state?.elapsed == 585, "Published elapsed: \(b.controller.state?.elapsed ?? -1)")
         #expect(b.h.events.events == events)
-        #expect(b.h.service.starts.isEmpty)
-        #expect(b.h.engine.loads.isEmpty)
-        #expect(session.applicationPrimaryRequests == 0)
+        #expect(b.h.service.starts == (loaded ? ["a"] : []))
+        #expect(b.h.engine.loads.count == (loaded ? 1 : 0))
+        #expect(session.applicationPrimaryRequests == (loaded ? 1 : 0))
+        if loaded { #expect(b.coordinator.confirmedPlaybackTime == nil) }
     }
 
     @Test func loadedTicksMatchingExtrapolationDoNotRepublishSnapshots() async throws {

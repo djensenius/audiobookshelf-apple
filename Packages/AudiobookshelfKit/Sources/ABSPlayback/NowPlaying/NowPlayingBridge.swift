@@ -145,14 +145,15 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
         controller.update(state)
     }
 
-    /// Observes settings, rate, play state and unloaded position, which can change without events.
-    /// Loaded position follows coordinator events instead, avoiding observation work for every tick.
+    /// Observes settings, rate, play state, pending seeks and unloaded position without events.
+    /// The loaded clock follows coordinator events, avoiding observation work for every tick.
     private func trackSettingsAndRate() {
         guard !isInvalidated else { return }
         let settings = withObservationTracking {
             _ = coordinator?.rate
             _ = coordinator?.isPlaying
             _ = coordinator?.isBuffering
+            _ = coordinator?.pendingSeekTarget
             if let coordinator, coordinator.phase != .loaded { _ = coordinator.currentTime }
             return readSettings()
         } onChange: { [weak self] in

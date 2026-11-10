@@ -113,32 +113,43 @@ struct PlaybackCoordinatorJumpTests {
     }
 
     @Test(
-        arguments: [false, true],
+        arguments: [(false, false), (true, false), (false, true), (true, true)],
         [
             (4000.0, -15.0, 3585.0), (-100.0, 15.0, 15.0), (Double.nan, 15.0, 15.0),
             (Double.infinity, 15.0, 15.0), (-Double.infinity, 15.0, 15.0),
         ])
     func jumpsDuringEngineLoadNormalizeAbsoluteTargets(
-        supersedingSeek: Bool, sample: (target: Double, jump: Double, landing: Double)
+        mode: (supersedingSeek: Bool, failedLoad: Bool), sample: (target: Double, jump: Double, landing: Double)
     ) async throws {
         let gate = Gate()
         engine.loadGates = [gate]
         let coordinator = coordinator
-        let play = Task { await coordinator.play(itemID: "a", startTime: supersedingSeek ? nil : sample.target) }
+        let play = Task { await coordinator.play(itemID: "a", startTime: mode.supersedingSeek ? nil : sample.target) }
         await yieldUntil { engine.loads.count == 1 }
-        #expect(engine.loads.last?.time == (supersedingSeek || sample.target != 4000 ? 0 : 3600))
+        #expect(engine.loads.last?.time == (mode.supersedingSeek || sample.target != 4000 ? 0 : 3600))
 
-        if supersedingSeek { await coordinator.seek(to: sample.target) }
+        if mode.supersedingSeek { await coordinator.seek(to: sample.target) }
+        if mode.failedLoad {
+            engine.loadError = .emptyTimeline
+            gate.open()
+            await play.value
+            #expect(coordinator.phase == .unloaded)
+        }
         await coordinator.jump(by: sample.jump)
         // Invalid jumps must neither replace nor corrupt the finite offset.
         for offset in [Double.nan, Double.infinity, -Double.infinity] {
             #expect(await coordinator.jump(by: offset) == nil)
         }
         #expect(coordinator.currentTime == sample.landing)
-        gate.open()
-        await play.value
+        if mode.failedLoad {
+            engine.loadError = nil
+            await coordinator.resume()
+        } else {
+            gate.open()
+            await play.value
+        }
 
-        #expect(engine.seeks == [sample.landing])
+        #expect(engine.seeks == (mode.failedLoad ? [] : [sample.landing]))
         #expect(
             coordinator.currentTime == sample.landing,
             "Landed at \(coordinator.currentTime), expected \(sample.landing)")
@@ -247,18 +258,52 @@ struct PlaybackCoordinatorJumpTests {
         #expect(h.events.events.filter { if case .didSeek = $0 { true } else { false } } == [.didSeek(time: 530)])
     }
 
-    @Test func aNewJumpSupersedesTheCatchUpSeekAndReportsOneLanding() async throws {
+    @Test(arguments: ["completed", "tick", "superseded"])
+    func aNewJumpSupersedesTheCatchUpSeekAndReportsOneLanding(landing: String) async throws {
+        let service = StubProgressSyncService(serverConnectionID: h.connectionID)
+        let clock = h.clock
+        let syncer = ProgressSyncer(
+            source: coordinator, service: service, store: h.progressStore,
+            clock: ProgressSyncClock(now: { clock.now }, uptime: { clock.now.timeIntervalSince1970 }))
         let (play, seekGate) = await playHeldInCatchUpSeek()
-        #expect(await coordinator.jump(by: 30) == 60)
+        if landing == "superseded" {
+            let gate = Gate()
+            engine.seekGates = [gate]
+            let coordinator = coordinator
+            let older = Task { await coordinator.jump(by: 15) }
+            await yieldUntil { engine.seeks.last == 45 }
+            #expect(await coordinator.jump(by: 15) == 60)
+            gate.open()
+            #expect(await older.value == nil)
+        } else {
+            if landing == "tick" { engine.seekResults = [.interrupted] }
+            #expect(await coordinator.jump(by: 30) == (landing == "tick" ? nil : 60))
+            if landing == "tick" { engine.landPendingSeek() }
+        }
         seekGate.open()
         await play.value
 
-        #expect(engine.seeks == [30, 60])
+        #expect(engine.seeks == (landing == "superseded" ? [30, 45, 60] : [30, 60]))
         #expect(engine.currentTime == 60)
         #expect(coordinator.currentTime == 60)
-        #expect(h.events.events.contains(.loaded(time: 60)))
-        #expect(h.events.events.filter { if case .didSeek = $0 { true } else { false } } == [.didSeek(time: 60)])
+        let landings = h.events.events.filter {
+            if case .loaded = $0 { return true }
+            if case .didSeek = $0 { return true }
+            return false
+        }
+        #expect(landings == [.loaded(time: 60), .didSeek(time: 60)])
         #expect(startCount == 1)
+
+        h.clock.advance(by: 1)
+        engine.currentTime = 61
+        engine.onEvent?(.tick(61))
+        await syncer.flush()
+        #expect(try await h.progressStore.progress(for: h.key("a"))?.currentTime == 61)
+        await coordinator.seek(to: 60)
+        await syncer.waitForIdle()
+        let stored = try await h.progressStore.progress(for: h.key("a"))
+        #expect(stored?.currentTime == 60, "Stored \(stored?.currentTime ?? -1) after seeking back to 60")
+        #expect(service.reports.last?.currentTime == 60)
     }
 
     // MARK: - Play intent
