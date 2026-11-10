@@ -18,16 +18,24 @@ public protocol ShakeDetecting: AnyObject {
     private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "ShakeDetector")
 
     /// Feeds CoreMotion accelerometer samples to a ``ShakeRecognizer``.
+    ///
+    /// Updates stop when iOS suspends the app, which it likely does once the timer paused playback in the
+    /// background: a shake during the grace period probably needs the app in the foreground (check on a device).
     @MainActor
     public final class ShakeDetector: ShakeDetecting {
         /// The Android `SENSOR_DELAY_UI` rate.
         static let updateInterval: TimeInterval = 0.06
+        /// Apple recommends one motion manager per app.
+        private static let sharedMotionManager = CMMotionManager()
 
-        private let motionManager = CMMotionManager()
+        private let motionManager: CMMotionManager
         private var recognizer: ShakeRecognizer?
         private var onShake: (@MainActor () -> Void)?
 
-        public init() {}
+        /// - Parameter motionManager: The app's motion manager, if it has one; otherwise a shared one.
+        public init(motionManager: CMMotionManager? = nil) {
+            self.motionManager = motionManager ?? Self.sharedMotionManager
+        }
 
         isolated deinit {
             motionManager.stopAccelerometerUpdates()
@@ -47,6 +55,7 @@ public protocol ShakeDetecting: AnyObject {
                 let acceleration = data.acceleration
                 let sample = AccelerationSample(
                     x: acceleration.x, y: acceleration.y, z: acceleration.z, timestamp: data.timestamp)
+                // Safe: the handler runs on `OperationQueue.main`, which executes on the main thread.
                 MainActor.assumeIsolated { self?.receive(sample) }
             }
         }

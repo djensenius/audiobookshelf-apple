@@ -20,6 +20,7 @@ public struct AutoSleepPolicy: Sendable, Hashable {
         }
 
         /// Parses 24-hour `HH:mm`, the format of the `autoSleepTimerStartTime` and `autoSleepTimerEndTime` settings.
+        // TODO: Parse with `AppSettings.minutesSinceMidnight` once #142 lands.
         public init?(_ text: String) {
             let parts = text.split(separator: ":", omittingEmptySubsequences: false)
             guard parts.count == 2,
@@ -33,6 +34,8 @@ public struct AutoSleepPolicy: Sendable, Hashable {
             self.hour = hour
             self.minute = minute
         }
+
+        fileprivate static let midnight = TimeOfDay(validHour: 0, minute: 0)
 
         public static func < (lhs: TimeOfDay, rhs: TimeOfDay) -> Bool {
             (lhs.hour, lhs.minute) < (rhs.hour, rhs.minute)
@@ -49,8 +52,9 @@ public struct AutoSleepPolicy: Sendable, Hashable {
 
     /// The policy for the default settings: off, 22:00–06:00, 15 minutes, no rewind.
     public static let disabled = AutoSleepPolicy(
-        isEnabled: false, start: TimeOfDay(validHour: 22, minute: 0), end: TimeOfDay(validHour: 6, minute: 0),
-        mode: .duration(900))
+        isEnabled: false, start: TimeOfDay(AppSettings.Default.autoSleepTimerStartTime) ?? .midnight,
+        end: TimeOfDay(AppSettings.Default.autoSleepTimerEndTime) ?? .midnight,
+        mode: SleepTimerMode(settingsLength: AppSettings.Default.sleepTimerLength))
 
     public init(
         isEnabled: Bool = true, start: TimeOfDay, end: TimeOfDay, mode: SleepTimerMode,

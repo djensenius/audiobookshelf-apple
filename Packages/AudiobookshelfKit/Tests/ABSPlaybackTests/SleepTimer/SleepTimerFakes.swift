@@ -30,10 +30,11 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
         isPlaying = false
     }
 
-    func play(rewindingBy seconds: Double) {
+    func play(rewindingBy seconds: Double) async -> Double? {
         plays.append(seconds)
         currentTime = max(currentTime - seconds, 0)
         isPlaying = true
+        return currentTime
     }
 
     func setVolume(_ volume: Float) {

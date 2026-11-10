@@ -29,33 +29,31 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
         (1, 0.6, 3), (2.76, 0.25, 5), (5.4, 0.1, 8),
     ]
 
-    private var engine: AVAudioEngine?
+    /// Synthesized once.
+    private static let chime = makeChime()
+
+    /// One engine and node for every chime; the engine stops between chimes.
+    private var output: (engine: AVAudioEngine, node: AVAudioPlayerNode)?
     private var chimeGeneration = 0
 
     public init() {}
 
     public func playChime() {
-        guard let buffer = Self.makeChime() else { return }
-        let engine = AVAudioEngine()
-        let node = AVAudioPlayerNode()
-        engine.attach(node)
-        node.volume = Self.chimeVolume
+        guard let buffer = Self.chime, let output = chimeOutput(format: buffer.format) else { return }
         do {
-            try engine.connectNode(node, to: engine.mainMixerNode, format: buffer.format)
-            try engine.start()
+            try output.engine.start()
         } catch {
             logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
             return
         }
-        self.engine?.stop()
-        self.engine = engine
         chimeGeneration += 1
         let generation = chimeGeneration
-        node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+        output.node.stop()
+        output.node.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
             Task { @MainActor in self?.chimeDidFinish(generation) }
         }
         do {
-            try node.playAudio()
+            try output.node.playAudio()
         } catch {
             logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
             chimeDidFinish(generation)
@@ -68,10 +66,25 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
         #endif
     }
 
+    private func chimeOutput(format: AVAudioFormat) -> (engine: AVAudioEngine, node: AVAudioPlayerNode)? {
+        if let output { return output }
+        let engine = AVAudioEngine()
+        let node = AVAudioPlayerNode()
+        engine.attach(node)
+        node.volume = Self.chimeVolume
+        do {
+            try engine.connectNode(node, to: engine.mainMixerNode, format: format)
+        } catch {
+            logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+        output = (engine, node)
+        return output
+    }
+
     private func chimeDidFinish(_ generation: Int) {
         guard generation == chimeGeneration else { return }
-        engine?.stop()
-        engine = nil
+        output?.engine.stop()
     }
 
     /// A mono bell: decaying inharmonic partials over an 880 Hz fundamental with a 5 ms attack. Peaks below 1.

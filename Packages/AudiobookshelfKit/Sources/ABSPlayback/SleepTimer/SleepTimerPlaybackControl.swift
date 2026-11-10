@@ -1,7 +1,8 @@
 import Foundation
 
-/// The playback a ``SleepTimer`` controls. ``AudioEngineSleepTimerControl`` adapts ``AudioEngine``; the playback
-/// coordinator may conform itself so that pauses and resumes go through it.
+/// The playback a ``SleepTimer`` controls. ``AudioEngineSleepTimerControl`` adapts an engine directly; the playback
+/// coordinator (#52) should conform itself instead, so that pauses and resumes go through its interruption
+/// handling and Now Playing updates.
 @MainActor
 public protocol SleepTimerPlaybackControl: AnyObject {
     /// Whether audio is playing; an end-of-chapter timer only expires in a paused state at the end of the media.
@@ -14,18 +15,19 @@ public protocol SleepTimerPlaybackControl: AnyObject {
     var timeline: PlaybackTimeline? { get }
     func pause()
     /// Resumes playback after moving back `seconds` (no move for `0`): shaking during the grace period after expiry.
-    func play(rewindingBy seconds: Double)
+    /// Returns where playback resumed, or `nil` when the rewind didn't land (then it doesn't play).
+    func play(rewindingBy seconds: Double) async -> Double?
     /// Sets the output volume, `0...1`, for the fade-out. The timer restores `1` when it ends.
     func setVolume(_ volume: Float)
 }
 
-/// Controls an ``AudioEngine`` directly. The engine keeps the volume on whichever player is current, including one
-/// that replaced a failed player mid-fade.
+/// Controls an engine directly, bypassing interruption handling and Now Playing. ``AudioEngine`` keeps the volume on
+/// whichever player is current, including one that replaced a failed player mid-fade.
 @MainActor
 public final class AudioEngineSleepTimerControl: SleepTimerPlaybackControl {
-    private weak var engine: AudioEngine?
+    private weak var engine: (any AudioEngineProtocol)?
 
-    public init(engine: AudioEngine) {
+    public init(engine: any AudioEngineProtocol) {
         self.engine = engine
     }
 
@@ -38,18 +40,14 @@ public final class AudioEngineSleepTimerControl: SleepTimerPlaybackControl {
         engine?.pause()
     }
 
-    public func play(rewindingBy seconds: Double) {
-        guard let engine else { return }
-        guard seconds > 0, let timeline = engine.timeline else {
-            engine.play()
-            return
+    public func play(rewindingBy seconds: Double) async -> Double? {
+        guard let engine else { return nil }
+        if seconds > 0, let timeline = engine.timeline {
+            let target = timeline.jumpBackward(from: engine.currentTime, by: seconds)
+            guard await engine.seek(to: target) == .completed else { return nil }
         }
-        let target = timeline.jumpBackward(from: engine.currentTime, by: seconds)
-        Task { [weak engine] in
-            guard let engine else { return }
-            _ = await engine.seek(to: target)
-            engine.play()
-        }
+        engine.play()
+        return engine.currentTime
     }
 
     public func setVolume(_ volume: Float) {

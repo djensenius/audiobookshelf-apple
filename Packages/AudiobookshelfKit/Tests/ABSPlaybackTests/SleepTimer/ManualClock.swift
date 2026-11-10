@@ -24,6 +24,8 @@ final class ManualClock: Clock {
     private let state = Mutex(State())
 
     var now: Instant { state.withLock { $0.now } }
+    /// Tasks sleeping on the clock.
+    var sleeperCount: Int { state.withLock { $0.sleepers.count } }
     var minimumResolution: Duration { .zero }
 
     func sleep(until deadline: Instant, tolerance: Duration?) async throws {
