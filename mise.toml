@@ -69,6 +69,11 @@ description = "Run AudiobookshelfKit package tests"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm"
 
+[tasks."test:kit:slow"]
+description = "Run slow AudiobookshelfKit tests (OSLogStore integration)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}", ABS_SLOW_TESTS = "1" }
+run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter OSLogStoreIntegrationTests"
+
 [tasks."test:app"]
 description = "Run app tests on macOS"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
