@@ -123,6 +123,18 @@ struct PlaybackCoordinatorPositionTests {
         #expect(seekTimes == [2000])
     }
 
+    @Test func stoppingFromLoadedObserverDoesNotReportASeek() async {
+        _ = coordinator.addObserver { event in
+            if case .loaded = event { coordinator.stop() }
+        }
+
+        await coordinator.play(itemID: "A")
+
+        #expect(coordinator.phase == .idle)
+        #expect(h.events.events.contains(.itemChanged(nil)))
+        #expect(!h.events.events.contains { if case .didSeek = $0 { true } else { false } })
+    }
+
     // MARK: - Resume
 
     @Test(arguments: [nil, 15.0] as [Double?])
@@ -149,6 +161,18 @@ struct PlaybackCoordinatorPositionTests {
         #expect(h.events.since(paused) == [.didSeek(time: 2000), .playbackStarted])
     }
 
+    @Test func resumeRecoversAnInterruptedSeekWhilePlaybackIsStillRequested() async throws {
+        await coordinator.play(itemID: "A", startTime: 1000)
+        engine.seekResults = [.interrupted]
+        #expect(await coordinator.seek(to: 2000) == nil)
+        #expect(engine.isPlaybackRequested && engine.state == .buffering)
+
+        await coordinator.resume()
+
+        #expect(engine.seeks == [2000, 2000])
+        #expect(coordinator.isPlaying)
+    }
+
     @Test func resumeAfterTheEndStillSeeksToAnInterruptedTarget() async {
         await coordinator.play(itemID: "A", startTime: 3500)
         engine.finish()
@@ -161,6 +185,23 @@ struct PlaybackCoordinatorPositionTests {
         #expect(engine.seeks == [2000, 2000])
         #expect(coordinator.currentTime == 2000)
         #expect(coordinator.isPlaying)
+    }
+
+    @Test func endedItemSavedBeforeInterruptedBackwardSeekLandsRestoresItsTarget() async throws {
+        await coordinator.play(itemID: "A", startTime: 3500)
+        engine.finish()
+        engine.seekResults = [.interrupted]
+        #expect(await coordinator.seek(to: 2000) == nil)
+
+        coordinator.saveLastPlayed()
+
+        let saved = try #require(h.lastPlayed.record)
+        #expect(saved.position == 2000)
+        #expect(!saved.isFinished)
+        let relaunched = try CoordinatorHarness(lastPlayed: h.lastPlayed, connectionID: h.connectionID)
+        #expect(relaunched.coordinator.restoreLastPlayed())
+        await relaunched.coordinator.resume()
+        #expect(relaunched.engine.loads.map(\.time) == [2000])
     }
 
     @Test func explicitStartTimeBeatsAnInterruptedTarget() async {

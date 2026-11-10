@@ -36,6 +36,7 @@ struct PlaybackCoordinatorPlaybackStartTests {
         // Playing again, now accepted, is announced.
         await coordinator.resume()
         #expect(coordinator.isPlaying)
+        #expect(coordinator.error == nil)
         #expect(h.events.events.last == .playbackStarted)
         #expect(h.events.events.filter { $0 == .playbackStarted }.count == 1)
     }

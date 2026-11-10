@@ -100,6 +100,20 @@ struct PlaybackCoordinatorProgressSourceTests {
         #expect(engine.loads.map(\.time) == [800])
     }
 
+    @Test func fetchedEbookOnlyProgressDoesNotOverrideSavedAudioPosition() async throws {
+        h.lastPlayed.record = h.record("A", position: 600, age: 3600)
+        service.state.withLock {
+            $0.serverTime["A"] = 0
+            $0.progress["A"] = MediaProgress(
+                id: "p-A", libraryItemId: "A", ebookLocation: "epubcfi(/6/2)", ebookProgress: 0.5,
+                lastUpdate: Int(h.clock.ago(300).timeIntervalSince1970 * 1000))
+        }
+
+        await coordinator.play(itemID: "A")
+
+        #expect(engine.loads.map(\.time) == [570])
+    }
+
     @Test func sessionPositionIsUsedWhenThereIsNoFetchedProgress() async {
         service.state.withLock { $0.serverTime["A"] = 300 }
 

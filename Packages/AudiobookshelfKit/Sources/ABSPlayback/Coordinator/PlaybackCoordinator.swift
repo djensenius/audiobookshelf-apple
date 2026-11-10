@@ -320,10 +320,14 @@ public final class PlaybackCoordinator {
             // Playing again intentionally unfinishes a book, so the next audio PATCH keeps the local flag.
             // Otherwise the position, date and flag all come from the fetched progress: `/play` may
             // have captured an older position than the fetch returned.
-            candidates.append(
-                ProgressCandidate(
-                    currentTime: progress.currentTime, updatedAt: progress.lastUpdate.map(Self.date(ms:)),
-                    isFinished: progress.isFinished))
+            if progress.isFinished || progress.currentTime > 0 || progress.duration > 0 {
+                candidates.append(
+                    ProgressCandidate(
+                        currentTime: progress.currentTime, updatedAt: progress.lastUpdate.map(Self.date(ms:)),
+                        isFinished: progress.isFinished))
+            } else {
+                candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
+            }
         case .success(nil):
             candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
         case .failure(let error):
@@ -390,6 +394,7 @@ public final class PlaybackCoordinator {
         let landed = engine.pendingSeekTarget == nil
         awaitingInitialLanding = !landed
         emit(.loaded(time: position))
+        guard current == generation, phase == .loaded else { return }
         if landed { emit(.didSeek(time: engine.currentTime)) }
         guard current == generation, phase == .loaded else { return }
         saveLastPlayed()
@@ -418,12 +423,16 @@ public final class PlaybackCoordinator {
     private func resumeLoaded(rewindingBy seconds: Double?, startingAt startTime: Double?) async {
         let time = engine.currentTime
         let atEnd = reachedEnd || engine.state == .ended
+        let hasPendingSeek = engine.pendingSeekTarget != nil
         if let startTime, engine.isPlaybackRequested, !atEnd, resumingIntent == nil {
             // Already playing: just move.
             await seek(to: startTime)
             return
         }
-        guard startTime != nil || (resumingIntent == nil && (atEnd || !engine.isPlaybackRequested)) else { return }
+        guard
+            startTime != nil
+                || (resumingIntent == nil && (atEnd || hasPendingSeek || !engine.isPlaybackRequested))
+        else { return }
         resumeIntent += 1
         let intent = resumeIntent
         let current = generation
@@ -484,10 +493,10 @@ public final class PlaybackCoordinator {
         case .loaded:
             let current = generation
             let target = engine.timeline?.clamp(time) ?? max(time, 0)
+            reachedEnd = false
             guard await engine.seek(to: target) == .completed, current == generation, phase == .loaded else {
                 return nil
             }
-            reachedEnd = false
             awaitingInitialLanding = false
             let landed = engine.currentTime
             emit(.didSeek(time: landed))
@@ -603,6 +612,7 @@ public final class PlaybackCoordinator {
 
     private func startEngine() {
         engine.setRate(Float(rate))
+        error = nil
         engine.play()
         // The engine can refuse at once (the audio session won't activate): it has then cleared
         // the request and reported `.failed`.
