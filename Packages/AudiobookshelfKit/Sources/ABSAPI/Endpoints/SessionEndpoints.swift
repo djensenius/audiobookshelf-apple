@@ -66,6 +66,9 @@ public enum LocalSessionPayloadError: Error, Sendable, Hashable {
     case missingStartedAt
     /// Without a `deviceId` the server creates a new device row for every upload.
     case missingDeviceID
+    /// `startTime` or `currentTime` is NaN, infinite or negative: uploading it would move the
+    /// server's progress (ADR 0007: the position never jumps back to 0).
+    case invalidPosition
 }
 
 /// A locally played session reported with `POST /api/session/local` or
@@ -95,27 +98,41 @@ public struct LocalPlaybackSessionPayload: Encodable, Sendable, Hashable {
     public internal(set) var deviceInfo: DeviceInfo?
 
     /// A validated payload for `POST /api/session/local` or, in a ``LocalPlaybackSessionBatch``,
-    /// `POST /api/session/local-all`.
+    /// `POST /api/session/local-all`. Throws for an invalid session, so callers can drop it
+    /// before batching; a non-finite or negative duration or listening time is clamped to `0`.
     public init(session: PlaybackSession, deviceInfo: DeviceInfo) throws(LocalSessionPayloadError) {
         try Self.validate(deviceInfo)
         guard session.playMethod == .local else { throw .notLocal(session.playMethod) }
         guard UUID(uuidString: session.id) != nil else { throw .invalidID(session.id) }
         guard let startedAt = session.startedAt else { throw .missingStartedAt }
+        guard Self.isValidPosition(session.startTime), Self.isValidPosition(session.currentTime) else {
+            throw .invalidPosition
+        }
         id = session.id
         libraryItemId = session.libraryItemId
         episodeId = session.episodeId
         mediaType = session.mediaType
         displayTitle = session.displayTitle
         displayAuthor = session.displayAuthor
-        duration = session.duration
+        duration = Self.clamped(session.duration)
         playMethod = session.playMethod
         mediaPlayer = session.mediaPlayer ?? PlaybackStartRequest.avPlayer
         startTime = session.startTime
         currentTime = session.currentTime
-        timeListening = session.timeListening
+        timeListening = Self.clamped(session.timeListening)
         self.startedAt = startedAt
         updatedAt = session.updatedAt ?? startedAt
         self.deviceInfo = deviceInfo
+    }
+
+    private static func isValidPosition(_ value: Double) -> Bool {
+        value.isFinite && value >= 0
+    }
+
+    /// A non-finite or negative duration or listening time becomes `0`, as in
+    /// ``PlaybackSyncReport``, so the payload always encodes.
+    private static func clamped(_ value: Double) -> Double {
+        value.isFinite && value > 0 ? value : 0
     }
 
     static func validate(_ deviceInfo: DeviceInfo) throws(LocalSessionPayloadError) {

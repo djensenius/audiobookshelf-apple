@@ -299,6 +299,8 @@ public struct OIDCLoginService: Sendable {
         case .http(status: 400, _): OIDCLoginError.sessionLost
         // The identity provider refused the code or verifier.
         case .unauthorized: OIDCLoginError.rejected
+        // The server never answers 403 here, so it is a proxy, as for `/authorize`.
+        case .forbidden: ServerValidationError.accessDenied(status: 403)
         case .http(status: 429, _): ServerValidationError.tooManyAttempts
         case .http(let status, _) where status >= 500: OIDCLoginError.callbackFailed(status: status)
         default: ServerValidator.genericError(error)

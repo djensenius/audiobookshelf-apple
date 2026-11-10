@@ -460,8 +460,8 @@ public final class AccountManager {
                 // Removing the connection deleted its session; that isn't an expiry.
                 signOutLocally(error: removing.contains(connection.id) ? nil : error.map(AccountError.server))
             default:
-                // Connection failures, timeouts, server errors, a proxy's 403 and unexpected
-                // responses.
+                // Connection failures, timeouts, server errors, a proxy's 401 or 403, a refused
+                // redirect and unexpected responses.
                 Log.auth.notice("Offline: \(error?.diagnosticDescription ?? "cancelled", privacy: .public)")
                 goOffline(connection, client: client, error: error.map(AccountError.server))
             }

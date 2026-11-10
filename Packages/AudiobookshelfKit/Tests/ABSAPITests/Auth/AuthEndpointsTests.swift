@@ -37,6 +37,7 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         #expect(!login.followsRedirects)
         let authorize = AuthEndpoints.authorize()
         #expect(authorize.method == .post && authorize.path == "/api/authorize" && authorize.requiresAuthentication)
+        #expect(!authorize.followsRedirects)
         let logout = AuthEndpoints.logout(refreshToken: "refresh-1")
         #expect(logout.method == .post && logout.path == "/logout" && !logout.requiresAuthentication)
         #expect(logout.headers == ["x-refresh-token": "refresh-1"])
