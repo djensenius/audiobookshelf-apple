@@ -1,0 +1,75 @@
+import ABSCore
+import AVFoundation
+import Foundation
+import Testing
+
+@testable import ABSPlayback
+
+/// Short silent WAV tracks generated at test time, so no binary fixtures are committed.
+final class AudioFixture: Sendable {
+    static let trackLength = 3.0
+    static let sampleRate = 8000.0
+
+    let directory: URL
+    let urls: [URL]
+
+    /// `count` tracks of ``trackLength`` seconds each, in a fresh temporary directory.
+    init(trackCount count: Int = 3) throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "ABSPlaybackTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        self.directory = directory
+        urls = try (0..<count).map { try Self.writeTrack(named: "track\($0)", in: directory) }
+    }
+
+    deinit {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    /// Three back-to-back tracks: 0–3, 3–6 and 6–9.
+    var timeline: PlaybackTimeline {
+        PlaybackTimeline(
+            tracks: urls.indices.map {
+                AudioTrack(index: $0 + 1, startOffset: Double($0) * Self.trackLength, duration: Self.trackLength)
+            },
+            chapters: [])
+    }
+
+    var source: AudioEngineSource { AudioEngineSource(timeline: timeline, trackURLs: urls) }
+
+    private static func writeTrack(named name: String, in directory: URL) throws -> URL {
+        let url = directory.appending(path: "\(name).wav")
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false,
+        ]
+        let file = try AVAudioFile(forWriting: url, settings: settings)
+        let frames = AVAudioFrameCount(trackLength * sampleRate)
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frames))
+        buffer.frameLength = frames
+        try file.write(from: buffer)
+        file.close()
+        return url
+    }
+}
+
+/// Polls `condition` on the main actor until it holds or `timeout` passes.
+@MainActor
+func eventually(timeout: Duration = .seconds(3), _ condition: () -> Bool) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !condition() {
+        guard clock.now < deadline else { return false }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return true
+}
+
+/// Records `activate` / `deactivate` calls.
+@MainActor
+final class FakeAudioSession: AudioSessionActivating {
+    private(set) var activations = 0
+    private(set) var deactivations = 0
+
+    func activate() throws { activations += 1 }
+    func deactivate() { deactivations += 1 }
+}
