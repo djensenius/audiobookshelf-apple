@@ -271,7 +271,7 @@ private func makeLossyModel(
         #expect(model.reachedEnd)
     }
 
-    @Test func cancelledRefreshKeepsTheItems() async throws {
+    @Test func cancelledRefreshContinuesTheOldList() async throws {
         let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
         let model = Model(query: "a", pageSize: 2) { query, page, limit in
             try await gate.call(PageRequest(query: query, page: page, limit: limit))
@@ -287,20 +287,89 @@ private func makeLossyModel(
 
         let refresh = try #require(model.refresh())
         let call = try #require(await calls.next())
+        #expect(call.request.page == 0)
         call.reply.resume(throwing: CancellationError())
         await refresh.value
         #expect(model.items == items(1...4))
         #expect(model.error == nil)
         #expect(!model.isLoading)
+        #expect(model.total == 6)
 
-        // A later scroll appends to the kept list instead of replacing it with page 0.
+        // A later scroll loads the old list's next page, not page 0.
         model.itemAppeared(at: 3)
         let next = try #require(model.loadNextPage())
         let nextCall = try #require(await calls.next())
-        #expect(nextCall.request.page == 0)
-        nextCall.reply.resume(returning: PagedResults(results: items(1...2), total: 6, limit: 2, page: 0))
+        #expect(nextCall.request.page == 2)
+        nextCall.reply.resume(returning: PagedResults(results: items(5...6), total: 6, limit: 2, page: 2))
+        await next.value
+        #expect(model.items == items(1...6))
+        #expect(model.reachedEnd)
+    }
+
+    @Test func cancelledRefreshOfACompleteListNeverAppendsTheNewFirstPage() async throws {
+        let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
+        let model = Model(query: "a", pageSize: 2) { query, page, limit in
+            try await gate.call(PageRequest(query: query, page: page, limit: limit))
+        }
+        var calls = gate.calls.makeAsyncIterator()
+        let old = [TestItem(id: "A"), TestItem(id: "B")]
+        let new = [TestItem(id: "C"), TestItem(id: "D")]
+        let first = try #require(model.loadNextPage())
+        try #require(await calls.next()).reply.resume(
+            returning: PagedResults(results: old, total: 2, limit: 2, page: 0))
+        await first.value
+        #expect(model.reachedEnd)
+
+        let cancelled = try #require(model.refresh())
+        try #require(await calls.next()).reply.resume(throwing: CancellationError())
+        await cancelled.value
+        #expect(model.items == old)
+        #expect(model.reachedEnd)
+        #expect(model.loadNextPage() == nil)
+
+        // Retrying the refresh replaces the list.
+        let retry = try #require(model.refresh())
+        let retryCall = try #require(await calls.next())
+        #expect(retryCall.request.page == 0)
+        retryCall.reply.resume(returning: PagedResults(results: new, total: 2, limit: 2, page: 0))
+        await retry.value
+        #expect(model.items == new)
+        #expect(model.reachedEnd)
+    }
+
+    @Test func failedRefreshRollsBackAndReportsTheError() async throws {
+        let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
+        let model = Model(query: "a", pageSize: 2) { query, page, limit in
+            try await gate.call(PageRequest(query: query, page: page, limit: limit))
+        }
+        var calls = gate.calls.makeAsyncIterator()
+        let first = try #require(model.loadNextPage())
+        try #require(await calls.next()).reply.resume(
+            returning: PagedResults(results: items(1...2), total: 4, limit: 2, page: 0))
+        await first.value
+
+        // A refresh replacing an unfinished one keeps the first snapshot.
+        let superseded = try #require(model.refresh())
+        let supersededCall = try #require(await calls.next())
+        let failed = try #require(model.refresh())
+        let failedCall = try #require(await calls.next())
+        supersededCall.reply.resume(returning: PagedResults(results: items(7...8), total: 2, limit: 2, page: 0))
+        await superseded.value
+        failedCall.reply.resume(throwing: TestError.offline)
+        await failed.value
+        #expect(model.error is TestError)
+        #expect(model.items == items(1...2))
+        #expect(model.total == 4)
+        #expect(!model.reachedEnd)
+
+        // Retrying the page continues the old list.
+        let next = try #require(model.loadNextPage())
+        let nextCall = try #require(await calls.next())
+        #expect(nextCall.request.page == 1)
+        nextCall.reply.resume(returning: PagedResults(results: items(3...4), total: 4, limit: 2, page: 1))
         await next.value
         #expect(model.items == items(1...4))
+        #expect(model.reachedEnd)
     }
 
     @Test func releasingTheModelCancelsThePageInFlight() async throws {

@@ -19,7 +19,9 @@ import Observation
 /// Changing the query with ``setQuery(_:)`` (or calling ``reset()``) cancels the page in flight,
 /// clears the list and loads the first page again. ``refresh()`` reloads too, but keeps the list
 /// until the first new page replaces it. Each reset or refresh starts a new generation, and a
-/// response from an earlier generation is never applied.
+/// response from an earlier generation is never applied. If the refresh's first page fails or is
+/// cancelled, the list rolls back to where it was before the refresh: scrolling continues with the
+/// old list's next page, and retrying the refresh means calling ``refresh()`` again.
 ///
 /// A model belongs to one client and account: views create it per account identity (with
 /// `LibraryStore.makeItemList(libraryID:query:)`) and recreate it when the store's
@@ -58,8 +60,18 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     @ObservationIgnored private var indexByID: [Item.ID: Int] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadTask: Task<Void, Never>?
-    /// Set by ``refresh()``: the next page replaces the items instead of being appended.
-    @ObservationIgnored private var replacesItems = false
+    /// Set by ``refresh()`` until its first page lands: the paging state of the items on
+    /// screen, restored if that page fails or is cancelled. While set, the next page replaces the
+    /// items instead of being appended.
+    @ObservationIgnored private var refreshRollback: PagingState?
+
+    private struct PagingState {
+        var nextPage: Int
+        var fetchedCount: Int
+        var total: Int?
+        var reachedEnd: Bool
+        var emptyPagesInARow: Int
+    }
 
     /// - Parameters:
     ///   - pageSize: Items per page; `0` asks for everything in one page.
@@ -92,7 +104,7 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     @discardableResult
     public func reset() -> Task<Void, Never>? {
         restart()
-        replacesItems = false
+        refreshRollback = nil
         items = []
         total = nil
         indexByID = [:]
@@ -104,8 +116,14 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     /// first page's load.
     @discardableResult
     public func refresh() -> Task<Void, Never>? {
+        // A refresh replacing an unfinished one keeps the first snapshot: the items are still
+        // the ones it describes.
+        if refreshRollback == nil {
+            refreshRollback = PagingState(
+                nextPage: nextPage, fetchedCount: fetchedCount, total: total, reachedEnd: reachedEnd,
+                emptyPagesInARow: emptyPagesInARow)
+        }
         restart()
-        replacesItems = true
         return loadNextPage()
     }
 
@@ -169,8 +187,8 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
             nextPage += 1
             fetchedCount += page.rawCount
             var appended = items
-            if replacesItems {
-                replacesItems = false
+            if refreshRollback != nil {
+                refreshRollback = nil
                 appended = []
                 indexByID = [:]
             }
@@ -194,12 +212,18 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
             if !reachedEnd, added == 0, emptyPagesInARow < maxEmptyPagesInARow {
                 loadNextPage()
             }
-        case .failure(let error) where error is CancellationError:
-            // A cancelled refresh keeps the current items; later pages are appended to them (and
-            // deduplicated) rather than replacing the list from a scroll.
-            replacesItems = false
         case .failure(let error):
-            self.error = error
+            // A failed or cancelled refresh keeps the items on screen, so it restores their
+            // paging state: the next page continues the old list instead of appending page 0.
+            if let rollback = refreshRollback {
+                refreshRollback = nil
+                nextPage = rollback.nextPage
+                fetchedCount = rollback.fetchedCount
+                total = rollback.total
+                reachedEnd = rollback.reachedEnd
+                emptyPagesInARow = rollback.emptyPagesInARow
+            }
+            if !(error is CancellationError) { self.error = error }
         }
     }
 }
