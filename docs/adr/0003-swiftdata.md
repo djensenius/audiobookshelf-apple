@@ -389,17 +389,20 @@ Model notes:
   `SwiftDataError.loadIssueModelContainer`, not `.backwardMigration`.
 - **Recovery.** Only a writing process recovers, and only on confirmed damage. When
   the load fails, `DataStack` resets the store only if its first 16 bytes are
-  readable and aren't the SQLite header, or if the Core Data error chain
-  (`NSUnderlyingErrorKey`, `NSDetailedErrors`) holds SQLite error 11 or 26 or an
-  incompatibility code (134100, 134110, 134130, 134140) and no transient error (disk
-  full, I/O, busy, locked, out of memory, read-only, can't open, no permission,
-  any POSIX error). Anything
+  readable and aren't the SQLite header, or if every error in the Core Data chain
+  (`NSUnderlyingErrorKey`, `NSDetailedErrors`) is on an allow-list: SQLite error 11
+  or 26, or an incompatibility code (134100, 134110, 134130, 134140), optionally
+  under a top-level 259. Any other error anywhere (timeouts, busy, locked, I/O,
+  full, permission, POSIX, unknown codes) means the store may be intact. Anything
   else, including an unreadable file (protected data while the device is locked),
   is rethrown and the store left alone. A reset logs a fault and moves the store,
-  then `-wal` and `-shm`, into `Broken/<epoch>-<uuid>/` (keeping only the newest
-  copy). An `INCOMPLETE` marker listing the files is written first and removed
-  last; the next open finishes any marked move (then prunes) before opening, fails
-  if `Broken/` can't be read, and pruning skips marked copies. Downloaded files that are no longer referenced are removed
+  then `-wal` and `-shm`, into `Broken/<store file>/<epoch>-<uuid>/`, keeping only
+  the newest copy. Archives are scoped to their store by path, so resuming and
+  pruning never touch another store's. An `INCOMPLETE` marker is written first and removed last; the next open
+  finishes any marked move (moving the store's fixed file set, never trusting the
+  marker's contents) before opening. Only `ENOENT` confirms a missing marker or
+  file; if `Broken/` or a marker can't be checked, the open fails and nothing is
+  moved or pruned. Pruning is skipped while any copy is incomplete. Downloaded files that are no longer referenced are removed
   by the orphan sweep in #73 (P4-02). The server still holds synced progress.
 
 ### Store location and container
@@ -459,8 +462,10 @@ Model notes:
   before returning an identifier, so it is never temporary
   (`PersistentIdentifier.isTemporary`, iOS/macOS 27).
 - `ModelContext` and `@Model` instances never leave the actor that owns them. Every
-  mutating store method ends with `try modelContext.save()`; changes to several
-  objects use `modelContext.transaction { }`.
+  store write goes through `StoreActor.commit`: it applies the changes, saves once,
+  and rolls the context back if anything throws, so a failed write is never
+  committed by a later save. Bulk deletes go one row at a time, because a batch
+  `delete(model:where:)` can't be rolled back.
 - `mainContext` is read-only by convention. App-target views use `@Query`;
   `@MainActor` view models in `ABSAppModel` use `ResultsObserver` or
   `HistoryObserver`, so `ABSAppModel` may `import SwiftData` (it still defines no

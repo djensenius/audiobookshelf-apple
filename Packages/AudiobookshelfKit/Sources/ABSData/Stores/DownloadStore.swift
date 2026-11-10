@@ -14,6 +14,9 @@ import SwiftData
         case recordIDConflict(UUID)
         /// A part's `id` already belongs to another record's part, or appears twice.
         case partIDConflict(UUID)
+        /// `.completed` was passed to `setPartState`; a completion must carry the file's final
+        /// size, so it goes through ``DownloadStore/completePart(partID:finalBytes:now:)``.
+        case completionNeedsFinalBytes
     }
 
     /// What ``upsertRecord(_:now:)`` saved and removed.
@@ -30,8 +33,10 @@ import SwiftData
     /// `id` and `createdAt`, in one transaction. Parts are matched by `id`: existing ones are
     /// overwritten from the DTO, new ones inserted and missing ones deleted. This whole-DTO write
     /// is only for creating and reconciling a download; the engine's updates go through
-    /// ``updateProgress(partID:bytesWritten:expectedBytes:now:)`` and
-    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)``.
+    /// ``updateProgress(partID:bytesWritten:expectedBytes:now:)``,
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)`` and
+    /// ``completePart(partID:finalBytes:now:)``. A part passed here as `.completed` must carry its
+    /// final size in `bytesWritten`.
     ///
     /// - Throws: ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist, which
     ///   resolves a download racing the connection's removal (see
@@ -151,14 +156,15 @@ import SwiftData
             .map(DownloadPartDTO.init)
     }
 
-    /// Records a part's progress; never changes its state. Returns `false` when the part doesn't
-    /// exist.
+    /// Records a part's progress; never changes its state. Returns `false` without writing when
+    /// the part doesn't exist or is `.completed`: a late, throttled write must not lower the
+    /// byte counts of a finished file, which `LocalItemStore` uses for its size.
     @discardableResult
     public func updateProgress(
         partID: UUID, bytesWritten: Int64, expectedBytes: Int64, now: Date = .now
     ) throws -> Bool {
         try commit {
-            guard let part = try fetchPart(id: partID) else { return false }
+            guard let part = try fetchPart(id: partID), part.stateValue != .completed else { return false }
             part.bytesWritten = bytesWritten
             part.expectedBytes = expectedBytes
             part.record?.updatedAt = now
@@ -169,12 +175,15 @@ import SwiftData
     /// Moves a part to `state` with its task and error, keeping its progress.
     ///
     /// `.completed` is final: leaving it needs `requeue` (an explicit re-download), so a late
-    /// update from a stale task can't undo a completion. Moving to `.failed` counts a retry.
+    /// update from a stale task can't undo a completion. Entering it goes through
+    /// ``completePart(partID:finalBytes:now:)``, which records the final size. Moving to
+    /// `.failed` counts a retry.
     /// `taskIdentifier` is set as given (`nil` clears it) and cleared from any other part that
     /// still has it, as task identifiers restart with each session. `error` becomes `lastError`
     /// (`nil` clears it); `hasResumeData` is kept when `nil`.
     ///
     /// - Returns: `false` when the part doesn't exist or the change was refused.
+    /// - Throws: ``StoreError/completionNeedsFinalBytes`` when `state` is `.completed`.
     @discardableResult
     public func setPartState(
         _ state: DownloadPartState,
@@ -185,9 +194,10 @@ import SwiftData
         requeue: Bool = false,
         now: Date = .now
     ) throws -> Bool {
-        try commit {
+        guard state != .completed else { throw StoreError.completionNeedsFinalBytes }
+        return try commit {
             guard let part = try fetchPart(id: partID) else { return false }
-            if part.stateValue == .completed, state != .completed, !requeue { return false }
+            if part.stateValue == .completed, !requeue { return false }
             if let taskIdentifier {
                 for other in try fetchParts(taskIdentifier: taskIdentifier) where other.id != partID {
                     other.taskIdentifier = nil
@@ -198,6 +208,33 @@ import SwiftData
             part.taskIdentifier = taskIdentifier
             part.lastError = error
             if let hasResumeData { part.hasResumeData = hasResumeData }
+            part.record?.updatedAt = now
+            return true
+        }
+    }
+
+    /// Marks a part `.completed` with its final size, in one write: `bytesWritten` becomes
+    /// `finalBytes`, and so does `expectedBytes` when it was unknown (≤ 0, as
+    /// `NSURLSessionTransferSizeUnknown`). `finalBytes` is authoritative, even below the last
+    /// progress (a throttled write may not have landed), and
+    /// ``updateProgress(partID:bytesWritten:expectedBytes:now:)`` can't change it afterwards.
+    /// The engine takes it from the file it moved in `didFinishDownloadingTo` (its size, or the
+    /// task's `countOfBytesReceived`).
+    ///
+    /// The task identifier, error and resume-data flag are cleared; the caller deletes the part's
+    /// resume-data blob, if any. Completing an already completed part records the new size.
+    ///
+    /// - Returns: `false` when the part doesn't exist.
+    @discardableResult
+    public func completePart(partID: UUID, finalBytes: Int64, now: Date = .now) throws -> Bool {
+        try commit {
+            guard let part = try fetchPart(id: partID) else { return false }
+            part.state = DownloadPartState.completed.rawValue
+            part.bytesWritten = finalBytes
+            if part.expectedBytes <= 0 { part.expectedBytes = finalBytes }
+            part.taskIdentifier = nil
+            part.lastError = nil
+            part.hasResumeData = false
             part.record?.updatedAt = now
             return true
         }

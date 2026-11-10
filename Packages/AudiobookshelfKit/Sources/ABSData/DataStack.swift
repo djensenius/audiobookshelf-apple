@@ -189,20 +189,17 @@ public struct DataStack: Sendable {
     /// Core Data incompatibility codes: 134100 incompatible version hash, 134110 migration
     /// failed, 134130 missing source model, 134140 missing mapping model.
     private static let incompatibilityCodes: Set<Int> = [134_100, 134_110, 134_130, 134_140]
-    /// `NSFileReadNoPermissionError`, `NSFileWriteNoPermissionError`, `NSFileWriteOutOfSpaceError`.
-    private static let transientCocoaCodes: Set<Int> = [257, 513, 640]
-    /// `SQLITE_PERM`, `BUSY`, `LOCKED`, `NOMEM`, `READONLY`, `IOERR`, `FULL`, `CANTOPEN`; corrupt
-    /// is `CORRUPT`, `NOTADB`.
-    private static let transientSQLiteCodes: Set<Int> = [3, 5, 6, 7, 8, 10, 13, 14]
+    /// `SQLITE_CORRUPT`, `SQLITE_NOTADB`.
     private static let corruptSQLiteCodes: Set<Int> = [11, 26]
 
     /// Errors inspected in a load error chain; a longer chain is never confirmed.
     static let maxInspectedErrors = 32
 
-    /// Whether a load error confirms the store can't be used: a Core Data incompatibility or
-    /// SQLite corruption somewhere in the chain (`NSUnderlyingErrorKey`, `NSDetailedErrors`), and
-    /// no transient failure (disk full, I/O, busy, locked, can't open, no permission, or any POSIX
-    /// error) anywhere in it.
+    /// Whether a load error confirms the store can't be used. An allow-list: every error in the
+    /// chain (`NSUnderlyingErrorKey`, `NSDetailedErrors`, `NSMultipleUnderlyingErrorsKey`) must be
+    /// either one carrying SQLite `CORRUPT`/`NOTADB` or, carrying no SQLite code, a Core Data
+    /// incompatibility code (or a top-level 259 wrapping one). Anything else (timeouts, busy, locked, I/O, full, permission, POSIX,
+    /// unknown codes) means the store may be intact, so it isn't confirmed.
     static func isConfirmedIncompatibility(_ error: NSError?) -> Bool {
         var chain: [NSError] = []
         var pending = error.map { [$0] } ?? []
@@ -218,63 +215,85 @@ public struct DataStack: Sendable {
             let code = error.domain == NSSQLiteErrorDomain ? error.code : error.userInfo[NSSQLiteErrorDomain] as? Int
             return code.map { $0 & 0xFF }  // Primary code of an extended result code.
         }
-        let isTransient = chain.contains { error in
-            error.domain == NSPOSIXErrorDomain
-                || (error.domain == NSCocoaErrorDomain && transientCocoaCodes.contains(error.code))
-                || sqliteCode(error).map(transientSQLiteCodes.contains) == true
+        func isConfirming(_ error: NSError) -> Bool {
+            if let code = sqliteCode(error) { return corruptSQLiteCodes.contains(code) }
+            return error.domain == NSCocoaErrorDomain && incompatibilityCodes.contains(error.code)
         }
-        return !isTransient
-            && chain.contains { error in
-                (error.domain == NSCocoaErrorDomain && incompatibilityCodes.contains(error.code))
-                    || sqliteCode(error).map(corruptSQLiteCodes.contains) == true
-            }
+        // A top-level `NSFileReadCorruptFileError` (259) may wrap a confirming error; it never
+        // confirms alone, and nested anywhere else it isn't trusted.
+        let root = chain.first.map { $0.domain == NSCocoaErrorDomain && $0.code == NSFileReadCorruptFileError }
+        let rest = root == true && sqliteCode(chain[0]) == nil ? chain.dropFirst() : chain[...]
+        return !rest.isEmpty && rest.allSatisfy(isConfirming)
     }
 
     static let incompleteMarker = "INCOMPLETE"
 
-    /// Moves the store and its SQLite side files into `Broken/<epoch>-<uuid>/` next to it, then
+    /// `Broken/<store file name>/`: each store's archives live in their own directory, so resuming
+    /// and pruning never touch another store's, whatever its marker says.
+    static func brokenRoot(for url: URL) -> URL {
+        url.deletingLastPathComponent().appending(path: "Broken/\(url.lastPathComponent)", directoryHint: .isDirectory)
+    }
+
+    /// The store and its SQLite side files, main store first.
+    private static func storeFileNames(_ url: URL) -> [String] {
+        let name = url.lastPathComponent
+        return [name, "\(name)-wal", "\(name)-shm"]
+    }
+
+    /// Moves the store and its SQLite side files into `Broken/<store>/<epoch>-<uuid>/` next to it, then
     /// deletes older broken copies so at most one is kept. The move is journaled: an `INCOMPLETE`
-    /// marker listing the files is written first and removed last, and the main store moves
-    /// first, so a crash never leaves a stale WAL beside a missing or new store.
+    /// marker is written first and removed last, and the main store moves first, so a crash never
+    /// leaves a stale WAL beside a missing or new store.
     static func moveStoreAside(at url: URL, now: Date) throws {
-        let brokenRoot = url.deletingLastPathComponent().appending(path: "Broken", directoryHint: .isDirectory)
+        let brokenRoot = brokenRoot(for: url)
         let destination = brokenRoot.appending(
             path: "\(Int(now.timeIntervalSince1970))-\(UUID().uuidString)",
             directoryHint: .isDirectory
         )
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-        let name = url.lastPathComponent
-        let names = [name, "\(name)-wal", "\(name)-shm"].joined(separator: "\n")
+        let names = storeFileNames(url).joined(separator: "\n")
         try Data(names.utf8).write(to: destination.appending(path: incompleteMarker), options: .atomic)
-        try finishMove(into: destination, from: url.deletingLastPathComponent())
+        try finishMove(into: destination, storeURL: url)
         pruneBrokenCopies(in: brokenRoot, keeping: destination.lastPathComponent)
     }
 
-    /// Deletes completed copies except `keeping` (default: the newest by epoch); incomplete copies
-    /// are kept. Best effort.
+    /// Deletes completed copies except `keeping` (default: the newest by epoch). Best effort, and
+    /// skipped entirely when any copy is incomplete or its state can't be read.
     private static func pruneBrokenCopies(in root: URL, keeping: String? = nil) {
-        let completed = ((try? brokenCopies(in: root)) ?? []).filter { !isIncomplete($0) }
+        guard let copies = try? brokenCopies(in: root), let states = try? copies.map(isIncomplete),
+            !states.contains(true)
+        else { return }
         let epoch = { (copy: URL) in Int(copy.lastPathComponent.prefix { $0.isNumber }) ?? 0 }
-        let kept = keeping ?? completed.max { epoch($0) < epoch($1) }?.lastPathComponent
-        for copy in completed where copy.lastPathComponent != kept {
+        let kept = keeping ?? copies.max { epoch($0) < epoch($1) }?.lastPathComponent
+        for copy in copies where copy.lastPathComponent != kept {
             try? FileManager.default.removeItem(at: copy)
         }
     }
 
     /// Completes a move-aside interrupted by a crash or an error, before the store is opened, then
-    /// applies the retention policy. Throws if `Broken/` exists but can't be read.
+    /// applies the retention policy. Throws, opening nothing, if `Broken/` or a marker can't be read.
     static func finishInterruptedMoves(for url: URL) throws {
-        let directory = url.deletingLastPathComponent()
-        let brokenRoot = directory.appending(path: "Broken", directoryHint: .isDirectory)
+        let brokenRoot = brokenRoot(for: url)
         let incomplete = try brokenCopies(in: brokenRoot).filter(isIncomplete)
         for copy in incomplete {
-            try finishMove(into: copy, from: directory)
+            try finishMove(into: copy, storeURL: url)
         }
         if !incomplete.isEmpty { pruneBrokenCopies(in: brokenRoot) }
     }
 
-    private static func isIncomplete(_ copy: URL) -> Bool {
-        FileManager.default.fileExists(atPath: copy.appending(path: incompleteMarker).path(percentEncoded: false))
+    private static func isIncomplete(_ copy: URL) throws -> Bool {
+        try itemExists(at: copy.appending(path: incompleteMarker))
+    }
+
+    /// Whether `url` exists. Only `ENOENT` or `ENOTDIR` (a stray file in `Broken/`) confirm
+    /// absence; any other error, such as no permission or I/O, is thrown. `lstat` reads metadata
+    /// only, so it works on protected files while the device is locked.
+    static func itemExists(at url: URL) throws -> Bool {
+        var info = stat()
+        guard lstat(url.path(percentEncoded: false), &info) != 0 else { return true }
+        let code = errno
+        guard code != ENOENT, code != ENOTDIR else { return false }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(code), userInfo: [NSURLErrorKey: url])
     }
 
     /// The copies in `root`; a missing `root` has none, and any other error is thrown.
@@ -289,16 +308,16 @@ public struct DataStack: Sendable {
         }
     }
 
-    /// Moves each file listed in `destination`'s marker that is still in `directory`, in order,
-    /// then deletes the marker.
-    private static func finishMove(into destination: URL, from directory: URL) throws {
-        let marker = destination.appending(path: incompleteMarker)
-        for name in try String(contentsOf: marker, encoding: .utf8).split(separator: "\n").map(String.init) {
-            let source = directory.appending(path: name)
-            guard FileManager.default.fileExists(atPath: source.path(percentEncoded: false)) else { continue }
+    /// Moves the store's files still next to it into `destination`, main store first, then deletes
+    /// the marker. The marker's contents are informational and never trusted, so a damaged marker
+    /// still resumes the same move.
+    private static func finishMove(into destination: URL, storeURL: URL) throws {
+        for name in storeFileNames(storeURL) {
+            let source = storeURL.deletingLastPathComponent().appending(path: name)
+            guard try itemExists(at: source) else { continue }
             try FileManager.default.moveItem(at: source, to: destination.appending(path: name))
         }
-        try FileManager.default.removeItem(at: marker)
+        try FileManager.default.removeItem(at: destination.appending(path: incompleteMarker))
     }
 
     /// Creates the store directory. On iOS the directory gets
