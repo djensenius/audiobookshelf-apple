@@ -19,6 +19,13 @@ import Testing
         #expect(L10n.string("ButtonCancel", locale: Locale(identifier: "nb")) == "Avbryt")
     }
 
+    /// The playback history's day headers (`PlaybackHistoryView`).
+    @Test func historyDayHeaders() {
+        let english = Locale(identifier: "en")
+        #expect(L10n.string("LabelToday", locale: english) == "Today")
+        #expect(L10n.string("LabelYesterday", locale: english) == "Yesterday")
+    }
+
     @Test func formatsPositionalArguments() {
         let value = L10n.string("LabelNumEpisodesIncomplete", "3", "1", locale: Locale(identifier: "en"))
         #expect(value == "3 episodes, 1 incomplete")
