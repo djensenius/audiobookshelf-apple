@@ -39,22 +39,33 @@ private func stubServer(
     callback: StubResponse = .json(authResponseJSON())
 ) -> StubServer {
     StubServer { request in
-        switch request.url?.path() {
-        case "/abs/status":
-            return .json(status)
-        case "/abs/auth/openid":
-            if let authorize { return authorize }
-            let location = identityProviderURL(state: state)
-            return StubResponse(
-                status: 302, headers: ["Location": location, "Set-Cookie": sessionCookies],
-                redirect: URL(string: location))
-        case "/abs/auth/openid/callback":
-            return callback
-        case "/abs/logout":
-            return .json("{}")
-        default:
-            return .text("Not Found", status: 404)
-        }
+        stubResponse(to: request, status: status, state: state, authorize: authorize, callback: callback)
+    }
+}
+
+/// The OpenID server's answer to `request`.
+private func stubResponse(
+    to request: URLRequest,
+    status: String = statusOpenID,
+    state: String = "server-state",
+    authorize: StubResponse? = nil,
+    callback: StubResponse = .json(authResponseJSON())
+) -> StubResponse {
+    switch request.url?.path() {
+    case "/abs/status":
+        return .json(status)
+    case "/abs/auth/openid":
+        if let authorize { return authorize }
+        let location = identityProviderURL(state: state)
+        return StubResponse(
+            status: 302, headers: ["Location": location, "Set-Cookie": sessionCookies],
+            redirect: URL(string: location))
+    case "/abs/auth/openid/callback":
+        return callback
+    case "/abs/logout":
+        return .json("{}")
+    default:
+        return .text("Not Found", status: 404)
     }
 }
 
@@ -87,21 +98,28 @@ private final class FakeAuthenticator: WebAuthenticator {
 
 private final class ClientCounter: Sendable {
     let count = Mutex(0)
+    let jars = Mutex<[HTTPCookieStorage]>([])
 }
 
 /// Validates the stub server, then signs in with OpenID through one recorded client whose cookie
 /// jar the stub emulates.
 private func login(
     _ server: StubServer, address: String? = nil, authenticator: FakeAuthenticator,
-    clients: ClientCounter = ClientCounter()
+    clients: ClientCounter = ClientCounter(),
+    validationCookies: @escaping @Sendable () -> HTTPCookieStorage? = { nil }
 ) async throws -> LoginResult {
-    let validated = try await ServerValidator(sessionConfiguration: { server.sessionConfiguration() })
-        .validate(address: address ?? "https://\(server.host)/abs")
-    let service = OIDCLoginService { configuration in
+    let validated = try await ServerValidator(
+        sessionConfiguration: { server.sessionConfiguration() }, cookieStorage: validationCookies
+    )
+    .validate(address: address ?? "https://\(server.host)/abs")
+    let service = OIDCLoginService { configuration, cookieStorage in
         let client = APIClient(
             configuration: configuration, tokenProvider: SignedOutTokenProvider(),
-            sessionConfiguration: server.sessionConfiguration())
-        if let jar = client.cookieStorage { server.useCookieStorage(jar) }
+            sessionConfiguration: server.sessionConfiguration(), cookieStorage: cookieStorage)
+        if let jar = client.cookieStorage {
+            server.useCookieStorage(jar)
+            clients.jars.withLock { $0.append(jar) }
+        }
         clients.count.withLock { $0 += 1 }
         return client
     }
@@ -176,6 +194,38 @@ private func query(_ request: URLRequest?) -> [String: String] {
         otherPath.headers["Set-Cookie"] = "openid_id_token=other; Path=/elsewhere; HttpOnly"
         let withoutIDToken = try await login(stubServer(callback: otherPath), authenticator: FakeAuthenticator())
         #expect(withoutIDToken.openIDSession == OpenIDSessionCookies(authMethod: "openid-mobile", idToken: nil))
+    }
+
+    @Test func flowStartsWithTheValidationCookies() async throws {
+        let validationJar = try #require(URLSessionConfiguration.ephemeral.httpCookieStorage)
+        let server = StubServer { request in
+            guard let url = request.url else { return .failure(.badURL) }
+            switch url.path() {
+            case "/abs/status":
+                // The proxy's cookie; the stub transport bypasses the jar, so set it directly.
+                let fields = ["Set-Cookie": "lb=1; Path=/"]
+                validationJar.setCookies(
+                    HTTPCookie.cookies(withResponseHeaderFields: fields, for: url), for: url, mainDocumentURL: nil)
+            case "/abs/auth/openid", "/abs/auth/openid/callback":
+                let cookies = request.value(forHTTPHeaderField: "Cookie") ?? ""
+                guard cookies.contains("lb=1") else {
+                    return .redirect(to: "https://\(url.host() ?? "")/challenge", status: 302)
+                }
+            default: break
+            }
+            return stubResponse(to: request)
+        }
+        let clients = ClientCounter()
+        let result = try await login(
+            server, authenticator: FakeAuthenticator(), clients: clients, validationCookies: { validationJar })
+        #expect(result.tokens.accessToken == "access-new")
+
+        let flowJar = try #require(clients.jars.withLock { $0.first })
+        #expect(flowJar !== validationJar)
+        let flowNames = Set(flowJar.cookies?.map(\.name) ?? [])
+        #expect(flowNames.isSuperset(of: ["lb", "connect.sid", "auth_method"]))
+        // The flow's server session stays out of the jar the account client inherits.
+        #expect(validationJar.cookies?.map(\.name) == ["lb"])
     }
 
     @Test func percentEncodesStateAndCode() async throws {
@@ -427,7 +477,10 @@ private func query(_ request: URLRequest?) -> [String: String] {
         }
         let logout = try #require(server.requests(path: "/abs/logout").first)
         #expect(logout.value(forHTTPHeaderField: "x-refresh-token") == "refresh-new")
-        #expect(logout.value(forHTTPHeaderField: "Cookie") == nil)
+        // Cleanup logout withholds only `refresh_token`, so the header token selects the session;
+        // the sign-in jar's other cookies still reach the server (and any proxy in front of it).
+        #expect(!logout.httpShouldHandleCookies)
+        #expect(logout.value(forHTTPHeaderField: "Cookie") == "auth_method=openid-mobile; connect.sid=s%3Asession-1")
     }
 
     @Test func missingTokensAfterCallback() async throws {

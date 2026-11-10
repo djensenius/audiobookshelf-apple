@@ -188,7 +188,7 @@ public final class AccountManager {
             saved = (connection.id, credentials, stored.generation)
             if let replaced = stored.replaced, replaced.refreshToken != session.refreshToken {
                 // Signed in again: end the session this one replaced, best effort.
-                _ = await serverLogout(replaced, client: makeClient(server.configuration, credentials: nil))
+                _ = await serverLogout(replaced, client: makeClient(server, credentials: nil))
             }
             try ensureCurrent(operation)
             try Task.checkCancellation()
@@ -198,10 +198,10 @@ public final class AccountManager {
             try ensureCurrent(operation)
             try Task.checkCancellation()
             Log.auth.info("Signed in with \(method.rawValue, privacy: .public)")
-            setActive(connection, client: makeClient(server.configuration, credentials: credentials))
+            setActive(connection, client: makeClient(server, credentials: credentials))
             didAuthorize(result.response, features: result.features, connection: connection)
         } catch {
-            let logoutClient = makeClient(server.configuration, credentials: nil)
+            let logoutClient = makeClient(server, credentials: nil)
             if let saved {
                 if await isRemoved(saved.id) {
                     // Nothing else would delete what this sign-in saved for the removed connection.
@@ -530,12 +530,21 @@ public final class AccountManager {
         }
     }
 
+    /// A client for the server just validated, with the validation's cookie jar, so a cookie a
+    /// proxy or load balancer set while validating or signing in keeps being sent. (`POST /logout`
+    /// sends no cookies, so for the logout clients only the configuration matters.)
+    private func makeClient(_ server: ValidatedServer, credentials: ConnectionCredentials?) -> APIClient {
+        server.makeClient(tokenProvider: credentials ?? NoTokens(), sessionConfiguration: sessionConfiguration())
+    }
+
     private func makeClient(_ configuration: APIClientConfiguration, credentials: ConnectionCredentials?) -> APIClient {
         APIClient(
             configuration: configuration, tokenProvider: credentials ?? NoTokens(),
             sessionConfiguration: sessionConfiguration())
     }
 
+    /// A client for a saved connection, with a new, empty cookie jar; recovering from a proxy
+    /// that challenges it again is #172.
     private func makeClient(
         _ connection: ServerConnectionDTO, customHeaders: [String: String], credentials: ConnectionCredentials?
     ) -> APIClient? {

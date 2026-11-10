@@ -1,5 +1,6 @@
 import ABSCore
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSAPI
@@ -34,6 +35,20 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
         case "/abs/login": loginResponse ?? .json(authResponseJSON())
         default: .text("Not Found", status: 404)
         }
+    }
+}
+
+/// Records the cookie jars a validator makes.
+private final class CookieJars: Sendable {
+    private let jars = Mutex<[HTTPCookieStorage]>([])
+
+    var last: HTTPCookieStorage? { jars.withLock { $0.last } }
+    var count: Int { jars.withLock { $0.count } }
+
+    @Sendable func make() -> HTTPCookieStorage? {
+        let jar = URLSessionConfiguration.ephemeral.httpCookieStorage
+        if let jar { jars.withLock { $0.append(jar) } }
+        return jar
     }
 }
 
@@ -169,7 +184,7 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
         #expect(server.requests.allSatisfy { $0.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret" })
     }
 
-    @Test(arguments: ["/abs/status/", "/abs/status?ready=1"])
+    @Test(arguments: ["/abs/status/", "/abs/status?ready=1", "/abs/status?route=a+b&x=%20"])
     func followsRedirectToTheExactStatusURL(location: String) async throws {
         let server = StubServer { request in
             guard request.url?.absoluteString.hasSuffix("/abs/status") == true, let host = request.url?.host() else {
@@ -183,6 +198,36 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
             server.requests.map { $0.url?.absoluteString } == [
                 "https://\(server.host)/abs/status", "https://\(server.host)\(location)",
             ])
+    }
+
+    /// A load balancer that sets a cookie on its redirect back to the same URL. Stub protocols
+    /// bypass the cookie jar (`Set-Cookie` isn't stored and `Cookie` isn't added), so the stub
+    /// plays that part with the latest jar the validator made.
+    @Test func redirectChainSharesOneCookieJar() async throws {
+        let jars = CookieJars()
+        let server = StubServer { request in
+            guard let url = request.url, let jar = jars.last else { return .failure(.badURL) }
+            if jar.cookies(for: url)?.contains(where: { $0.name == "lb" && $0.value == "1" }) == true {
+                return .json(statusLocal)
+            }
+            var redirect = StubResponse.redirect(to: url.absoluteString)
+            redirect.headers["Set-Cookie"] = "lb=1; Path=/"
+            jar.setCookies(
+                HTTPCookie.cookies(withResponseHeaderFields: redirect.headers, for: url), for: url,
+                mainDocumentURL: nil)
+            return redirect
+        }
+        let validator = ServerValidator(
+            sessionConfiguration: { server.sessionConfiguration() }, cookieStorage: jars.make)
+
+        _ = try await validator.validate(address: "https://\(server.host)/abs")
+        #expect(server.requests.count == 2)
+        #expect(jars.count == 1)
+
+        // A new validation starts with an empty jar, so it is redirected again.
+        _ = try await validator.validate(address: "https://\(server.host)/abs")
+        #expect(server.requests.count == 4)
+        #expect(jars.count == 2)
     }
 
     @Test(arguments: [401, 403])
@@ -330,6 +375,56 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
 }
 
 @Suite struct ServerValidatorLoginTests {
+    /// A proxy that sets `lb=1` on a redirect from `/status` and lets `/login` through only with
+    /// it. The stub plays the cookie jar's part (see `redirectChainSharesOneCookieJar`).
+    @Test func loginSendsTheValidationCookies() async throws {
+        let jars = CookieJars()
+        let server = StubServer { request in
+            guard let url = request.url, let jar = jars.last else { return .failure(.badURL) }
+            let hasCookie = jar.cookies(for: url)?.contains { $0.name == "lb" && $0.value == "1" } == true
+            switch (url.path(), hasCookie) {
+            case ("/abs/status", false):
+                var redirect = StubResponse.redirect(to: url.absoluteString)
+                redirect.headers["Set-Cookie"] = "lb=1; Path=/"
+                jar.setCookies(
+                    HTTPCookie.cookies(withResponseHeaderFields: redirect.headers, for: url), for: url,
+                    mainDocumentURL: nil)
+                return redirect
+            case ("/abs/status", true): return .json(statusLocal)
+            case ("/abs/login", true): return .json(authResponseJSON())
+            case ("/abs/api/authorize", true): return .json(authResponseJSON(tokens: false))
+            default: return .redirect(to: "https://\(url.host() ?? "")/challenge", status: 302)
+            }
+        }
+        let validator = ServerValidator(
+            sessionConfiguration: { server.sessionConfiguration() }, cookieStorage: jars.make)
+        let validated = try await validator.validate(address: "https://\(server.host)/abs")
+        #expect(validated.cookieStorage === jars.last)
+        #expect(validator.client(for: validated).cookieStorage === validated.cookieStorage)
+
+        let result = try await validator.login(to: validated, username: "david", password: "pw")
+        #expect(result.tokens.accessToken == "access-new")
+        #expect(jars.count == 1)
+
+        // The account's client keeps the configuration and the jar, so the proxy lets it through.
+        let account = validated.makeClient(
+            tokenProvider: InMemoryTokenProvider(result.tokens), sessionConfiguration: server.sessionConfiguration())
+        #expect(account.cookieStorage === validated.cookieStorage)
+        let configuration = await account.configuration
+        #expect(configuration.baseURL == validated.configuration.baseURL)
+        #expect(configuration.customHeaders == validated.configuration.customHeaders)
+        _ = try await validator.authorize(with: account)
+        let authorize = try #require(server.requests(path: "/abs/api/authorize").first)
+        #expect(authorize.value(forHTTPHeaderField: "Authorization") == "Bearer access-new")
+        #expect(jars.count == 1)
+
+        // A new validation starts with an empty jar and its own redirect.
+        let again = try await validator.validate(address: "https://\(server.host)/abs")
+        #expect(again.cookieStorage !== validated.cookieStorage)
+        #expect(jars.count == 2)
+        #expect(server.requests(path: "/abs/status").count == 4)
+    }
+
     @Test func loginMapsTokensAndFeatures() async throws {
         let server = stubServer(login: .json(authResponseJSON(version: "2.37.2")))
         let validator = validator(server)

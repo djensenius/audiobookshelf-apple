@@ -36,6 +36,9 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
     public var followsRedirects: Bool
     /// When `false`, the request neither sends nor stores the connection's cookies.
     public var sendsCookies: Bool
+    /// Names of the connection's cookies to leave off this request; the others are still sent.
+    /// When not empty, the request's cookies are set by the client and none are stored.
+    public var withheldCookies: Set<String>
 
     public init(
         _ method: HTTPMethod = .get,
@@ -47,6 +50,7 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
         timeout: TimeInterval? = nil,
         followsRedirects: Bool = true,
         sendsCookies: Bool = true,
+        withheldCookies: Set<String> = [],
         as response: Response.Type = Response.self
     ) {
         self.method = method
@@ -58,6 +62,7 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
         self.timeout = timeout
         self.followsRedirects = followsRedirects
         self.sendsCookies = sendsCookies
+        self.withheldCookies = withheldCookies
     }
 }
 

@@ -9,10 +9,22 @@ import Foundation
 /// `CancellationError`.
 public struct ServerValidator: Sendable {
     private let sessionConfiguration: @Sendable () -> URLSessionConfiguration
+    private let makeCookieStorage: @Sendable () -> HTTPCookieStorage?
 
     /// - Parameter sessionConfiguration: Tests return a configuration with stub protocol classes.
     public init(sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() }) {
+        self.init(sessionConfiguration: sessionConfiguration, cookieStorage: { nil })
+    }
+
+    /// - Parameter cookieStorage: Makes the cookie jar shared by one candidate's `/status`
+    ///   redirect chain and the sign-in after it; `nil` for a new in-memory jar. Tests use it
+    ///   to observe the jar.
+    init(
+        sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration,
+        cookieStorage: @escaping @Sendable () -> HTTPCookieStorage?
+    ) {
         self.sessionConfiguration = sessionConfiguration
+        self.makeCookieStorage = cookieStorage
     }
 
     /// Normalizes `input` and reads `GET /status`.
@@ -44,8 +56,10 @@ public struct ServerValidator: Sendable {
             if index > 0, !customHeaders.isEmpty { throw ServerValidationError.httpsUnavailable(candidate) }
             let address: ServerAddress
             let status: ServerStatus
+            let jar = makeCookieStorage() ?? URLSessionConfiguration.ephemeral.httpCookieStorage
             do {
-                (address, status) = try await self.status(at: candidate, customHeaders: customHeaders)
+                (address, status) = try await self.status(
+                    at: candidate, customHeaders: customHeaders, cookieStorage: jar)
             } catch let error as APIError {
                 if index < candidates.count - 1, Self.allowsHTTPFallback(after: error) { continue }
                 throw Self.statusError(error)
@@ -55,7 +69,7 @@ public struct ServerValidator: Sendable {
             return ValidatedServer(
                 configuration: try Self.configuration(address, customHeaders: customHeaders),
                 address: address, status: status, features: features,
-                fellBackToHTTP: index > 0 && address.url.scheme == "http")
+                fellBackToHTTP: index > 0 && address.url.scheme == "http", cookieStorage: jar)
         }
         // `candidates` is not empty, so the loop always returns or throws.
         throw ServerValidationError.invalidAddress
@@ -64,8 +78,13 @@ public struct ServerValidator: Sendable {
     /// Signs in with `POST /login` and returns the user, the token pair to store, and the
     /// server's version gates. If the response is refused (unsupported version, no tokens, or a
     /// body that doesn't decode), the session the server just created is logged out, best effort.
+    ///
+    /// The request uses the cookie jar validation filled, so a cookie a proxy or load balancer
+    /// in front of the server set during validation (a sticky session or a challenge) is sent
+    /// with the password. The jar only ever holds that host's cookies: validation refuses other
+    /// hosts, and `/status` creates no Audiobookshelf session.
     public func login(to server: ValidatedServer, username: String, password: String) async throws -> LoginResult {
-        let client = client(server.configuration)
+        let client = client(for: server)
         let reply: APIResponse<Data>
         do {
             reply = try await client.response(
@@ -146,22 +165,24 @@ public struct ServerValidator: Sendable {
     static let maxStatusRedirects = 5
 
     /// Reads `/status` at `candidate`, following same-host redirects itself so that each hop is
-    /// checked before it is sent and keeps the custom headers. Returns the address the status was
-    /// finally served from.
+    /// checked before it is sent and keeps the custom headers. Every request of the chain shares
+    /// `jar`, new for each candidate, so a load balancer or proxy that sets a cookie on its
+    /// redirect gets it back; nothing is shared with other candidates or validations. Returns the
+    /// address the status was finally served from.
     /// - Throws: `APIError` only when the first request fails, so only that can fall back to
     ///   `http`; otherwise ``ServerValidationError``.
     private func status(
-        at candidate: ServerAddress, customHeaders: [String: String]
+        at candidate: ServerAddress, customHeaders: [String: String], cookieStorage jar: HTTPCookieStorage?
     ) async throws -> (ServerAddress, ServerStatus) {
         let configuration = try Self.configuration(candidate, customHeaders: customHeaders)
-        let reply = try await client(configuration).response(for: Self.statusProbe())
+        let reply = try await client(configuration, cookieStorage: jar).response(for: Self.statusProbe())
         guard (300..<400).contains(reply.httpResponse.statusCode) else {
             return (candidate, try Self.decodeStatus(reply.value))
         }
         // The server answered on this scheme, so a later failure must not fall back to `http`.
         do {
             return try await followStatusRedirects(
-                from: reply.httpResponse, candidate: candidate, customHeaders: customHeaders)
+                from: reply.httpResponse, candidate: candidate, customHeaders: customHeaders, cookieStorage: jar)
         } catch let error as APIError {
             throw Self.statusError(error)
         }
@@ -171,14 +192,15 @@ public struct ServerValidator: Sendable {
     /// `Location` is requested as is (with its query and trailing slash); the server address is
     /// derived from the URL that finally answers.
     private func followStatusRedirects(
-        from first: HTTPURLResponse, candidate: ServerAddress, customHeaders: [String: String]
+        from first: HTTPURLResponse, candidate: ServerAddress, customHeaders: [String: String],
+        cookieStorage: HTTPCookieStorage?
     ) async throws -> (ServerAddress, ServerStatus) {
         var response = first
         var url = first.url ?? candidate.url
         for _ in 0..<Self.maxStatusRedirects {
             url = try Self.redirectTarget(of: response, from: url, candidate: candidate)
             let (configuration, endpoint) = try Self.statusRequest(for: url, customHeaders: customHeaders)
-            let reply = try await client(configuration).response(for: endpoint)
+            let reply = try await client(configuration, cookieStorage: cookieStorage).response(for: endpoint)
             response = reply.httpResponse
             guard (300..<400).contains(response.statusCode) else {
                 let status = try Self.decodeStatus(reply.value)
@@ -219,7 +241,8 @@ public struct ServerValidator: Sendable {
     }
 
     /// The client configuration and endpoint that request exactly `url`: its last path
-    /// component (with any trailing slash) and query, under the rest of the path as base URL.
+    /// component (with any trailing slash) under the rest of the path as base URL. The query
+    /// stays on the base URL as sent, since ``APIClient`` would re-encode query items (`+`).
     private static func statusRequest(
         for url: URL, customHeaders: [String: String]
     ) throws -> (APIClientConfiguration, Endpoint<Data>) {
@@ -227,14 +250,12 @@ public struct ServerValidator: Sendable {
             throw ServerValidationError.notAudiobookshelf
         }
         var endpoint = statusProbe()
-        endpoint.query = components.queryItems ?? []
         var path = components.percentEncodedPath
         let trailingSlash = path.hasSuffix("/") ? "/" : ""
         if !trailingSlash.isEmpty { path.removeLast() }
         let lastSlash = path.lastIndex(of: "/") ?? path.startIndex
         endpoint.path = String(path[lastSlash...]) + trailingSlash
         components.percentEncodedPath = String(path[..<lastSlash])
-        components.query = nil
         components.fragment = nil
         guard let base = components.url else { throw ServerValidationError.notAudiobookshelf }
         do {
@@ -253,10 +274,18 @@ public struct ServerValidator: Sendable {
         }
     }
 
-    private func client(_ configuration: APIClientConfiguration) -> APIClient {
+    /// The client that signs in to `server`, with the cookie jar from its validation.
+    func client(for server: ValidatedServer) -> APIClient {
+        client(server.configuration, cookieStorage: server.cookieStorage)
+    }
+
+    /// - Parameter cookieStorage: `nil` for a new cookie jar.
+    private func client(
+        _ configuration: APIClientConfiguration, cookieStorage: HTTPCookieStorage? = nil
+    ) -> APIClient {
         APIClient(
             configuration: configuration, tokenProvider: SignedOutTokenProvider(),
-            sessionConfiguration: sessionConfiguration())
+            sessionConfiguration: sessionConfiguration(), cookieStorage: cookieStorage)
     }
 
     private static func configuration(
@@ -359,9 +388,28 @@ public struct ValidatedServer: Sendable {
     /// The user typed no scheme, `https` couldn't connect, and the server is used over `http`.
     /// Warn before sign-in.
     public let fellBackToHTTP: Bool
+    /// The cookie jar of the validation's `/status` requests, reused by
+    /// ``ServerValidator/login(to:username:password:)`` and ``makeClient(tokenProvider:sessionConfiguration:)``.
+    /// A new validation has a new jar.
+    let cookieStorage: HTTPCookieStorage?
 
     /// Whether credentials would be sent unencrypted.
     public var isInsecure: Bool { address.url.scheme == "http" }
+
+    /// The client for the account signed in to this server: ``configuration`` (base URL and
+    /// custom headers) and the validation's cookie jar, so a cookie a proxy or load balancer set
+    /// during validation or sign-in keeps being sent.
+    ///
+    /// The jar is in memory only. A client made on a later launch (from a saved connection)
+    /// starts with an empty jar; recovering from a proxy that then challenges again is #172.
+    /// - Parameter sessionConfiguration: Tests pass a configuration with stub protocol classes.
+    public func makeClient(
+        tokenProvider: any TokenProvider, sessionConfiguration: URLSessionConfiguration = .absConnection()
+    ) -> APIClient {
+        APIClient(
+            configuration: configuration, tokenProvider: tokenProvider, sessionConfiguration: sessionConfiguration,
+            cookieStorage: cookieStorage)
+    }
 }
 
 /// A successful `POST /login`.

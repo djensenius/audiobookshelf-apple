@@ -19,6 +19,10 @@ private final class FakeServer: Sendable {
         /// Answers `/api/authorize` with this status, as a proxy might.
         var authorizeStatus: Int?
         var logoutRedirect: String?
+        /// A proxy in front of the server: it puts `lb=1` in this jar on `/status` and refuses
+        /// anything else until the jar holds it. The stub transport doesn't use the client's jar,
+        /// so tests check that the client uses this one.
+        var proxyJar: HTTPCookieStorage?
 
         mutating func issueTokens() {
             issued += 1
@@ -72,6 +76,14 @@ private final class FakeServer: Sendable {
     private func respond(to request: URLRequest) -> StubResponse {
         state.withLock { state in
             guard !state.isOffline else { return .failure(.notConnectedToInternet) }
+            if let jar = state.proxyJar, let url = request.url,
+                jar.cookies(for: url)?.contains(where: { $0.name == "lb" }) != true
+            {
+                guard url.path() == "/abs/status" else { return .json("{}", status: 403) }
+                jar.setCookies(
+                    HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": "lb=1; Path=/"], for: url), for: url,
+                    mainDocumentURL: nil)
+            }
             switch request.url?.path() {
             case "/abs/status":
                 return .json(
@@ -154,10 +166,10 @@ private struct Harness {
     }
 
     func makeManager() -> AccountManager {
-        let openID = OIDCLoginService { configuration in
+        let openID = OIDCLoginService { configuration, cookieStorage in
             let client = APIClient(
                 configuration: configuration, tokenProvider: SignedOutTokenProvider(),
-                sessionConfiguration: StubURLProtocol.sessionConfiguration())
+                sessionConfiguration: StubURLProtocol.sessionConfiguration(), cookieStorage: cookieStorage)
             if let jar = client.cookieStorage, let host = configuration.baseURL.host() {
                 StubURLProtocol.useCookieStorage(jar, host: host)
             }
@@ -226,6 +238,29 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(manager.state.user?.authMethod == .openid)
         let session = try #require(try harness.session(id))
         #expect(session.openIDSession == OpenIDSessionCookies(authMethod: "openid-mobile", idToken: "id.token.sig"))
+    }
+
+    /// A cookie a proxy set during validation keeps being sent: the signed-in client uses the
+    /// validation's jar (checked by identity, as in `loginSendsTheValidationCookies`).
+    @Test(arguments: [false, true])
+    func signedInClientKeepsTheValidationCookieJar(oidc: Bool) async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let jar = try #require(URLSessionConfiguration.ephemeral.httpCookieStorage)
+        server.update { $0.proxyJar = jar }
+        let validated = try await ServerValidator(
+            sessionConfiguration: { StubURLProtocol.sessionConfiguration() }, cookieStorage: { jar }
+        ).validate(address: server.address)
+
+        if oidc {
+            try await manager.connect(oidc: validated, authenticator: FakeAuthenticator())
+        } else {
+            try await manager.connect(local: validated, username: "david", password: "pw")
+        }
+        let client = try #require(manager.client)
+        #expect(client.cookieStorage === jar)
+        #expect(client.cookieStorage?.cookies(for: validated.configuration.baseURL)?.map(\.name) == ["lb"])
     }
 
     @Test func failedSignInIsNotRestoredAndEndsServerSession() async throws {
