@@ -52,7 +52,8 @@ public enum SessionStage: Sendable, Hashable {
 ///   `switchAccount(to:)` and the rest) from these methods, ``flush()`` or the tasks they start
 ///   while the transition runs: that would deadlock, so such a call asserts and does nothing.
 ///   To sign out from there (say, on a rejected request), call
-///   ``SessionLifecycle/requestSignOut()``, which queues it without waiting.
+///   ``SessionLifecycle/requestSignOut(of:)`` with the identity from the ``SessionContext``,
+///   which queues it without waiting and ignores it once that session has ended.
 @MainActor
 public protocol SessionParticipant: AnyObject, Sendable {
     func sessionDidStart(_ context: SessionContext) async

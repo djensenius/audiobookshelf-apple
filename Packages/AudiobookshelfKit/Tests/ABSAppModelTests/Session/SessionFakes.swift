@@ -148,6 +148,8 @@ final class FakeParticipant: SessionParticipant {
     var endGate: Gate?
     /// Runs once inside the next ``sessionDidStart(_:)``.
     var onStart: (@MainActor () async -> Void)?
+    /// Runs inside ``sessionWillEnd(_:)``, after stopping.
+    var onEnd: (@MainActor () -> Void)?
     /// Between start and end; a flush outside a session does nothing.
     private var isRunning = false
 
@@ -172,6 +174,7 @@ final class FakeParticipant: SessionParticipant {
     func sessionWillEnd(_ reason: SessionEndReason) async {
         isRunning = false
         log.record("\(name).end(\(reason))")
+        onEnd?()
         if let endGate {
             await withTaskCancellationHandler {
                 await endGate.wait()

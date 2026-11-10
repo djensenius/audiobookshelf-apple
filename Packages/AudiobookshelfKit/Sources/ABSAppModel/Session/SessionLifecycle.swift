@@ -39,7 +39,7 @@ public enum SessionScenePhase: Sendable, Hashable {
 /// without a flush.
 ///
 /// Transitions run one at a time on the main actor, in call order. Participants must not await
-/// a transition from inside one; they call ``requestSignOut()``, which queues a sign-out
+/// a transition from inside one; they call ``requestSignOut(of:)``, which queues a sign-out
 /// without waiting.
 @MainActor @Observable
 public final class SessionLifecycle {
@@ -54,6 +54,9 @@ public final class SessionLifecycle {
     @ObservationIgnored private var session: RunningSession?
     /// The session ``performAccountChange(_:)`` ended, and its client, while its body runs.
     @ObservationIgnored private var changingFrom: (identity: SessionIdentity, client: APIClient?)?
+    /// How many ``performAccountChange(_:)`` calls are running; the last one to finish follows
+    /// the account.
+    @ObservationIgnored private var accountChanges = 0
     @ObservationIgnored private var launch: Task<Void, Never>?
     @ObservationIgnored private var observation: Task<Void, Never>?
     /// The last queued transition; the next one waits for it.
@@ -61,6 +64,9 @@ public final class SessionLifecycle {
     @ObservationIgnored private var lastTransitionID: UInt64 = 0
     /// The transition whose body is running, matched against ``TransitionScope/transitionID``.
     @ObservationIgnored private var runningTransition: UInt64?
+    /// Reports a transition called from inside a running one, where it can't run. Tests record
+    /// instead of stopping.
+    @ObservationIgnored var reportMisuse: @MainActor (String) -> Void = { assertionFailure($0) }
 
     private struct RunningSession {
         var context: SessionContext
@@ -143,22 +149,33 @@ public final class SessionLifecycle {
     }
 
     /// Flushes and ends the session, then signs out. Does nothing when already signed out.
-    /// From inside a transition, use ``requestSignOut()`` instead.
+    /// From inside a transition, use ``requestSignOut(of:)`` instead.
     /// - Returns: An OpenID end-session URL to open, if the server returned one.
     @discardableResult
     public func signOut() async -> URL? {
         if rejectReentrant("signOut()") {
-            requestSignOut()
+            if let identity = session?.context.identity ?? source.phase.identity {
+                requestSignOut(of: identity)
+            }
             return nil
         }
         return await serialized { await self.performSignOut() }
     }
 
-    /// Queues a sign-out after the transitions already queued, without waiting for it. For
-    /// participants and their tasks, for example on a rejected request. There's no OpenID
-    /// end-session URL to open this way.
-    public func requestSignOut() {
-        _ = enqueue { _ = await self.performSignOut() }
+    /// Queues a sign-out of `identity` after the transitions already queued, without waiting for
+    /// it. For participants and their tasks, for example on a rejected request; pass the
+    /// identity from their ``SessionContext``. When the sign-out's turn comes, it does nothing
+    /// unless `identity` is still the active account, so a request from an ended session can't
+    /// sign out the next one. There's no OpenID end-session URL to open this way.
+    public func requestSignOut(of identity: SessionIdentity) {
+        _ = enqueue {
+            let current = self.session?.context.identity ?? self.source.phase.identity
+            guard current == identity else {
+                Log.auth.info("Ignored a sign-out request from an ended session")
+                return
+            }
+            _ = await self.performSignOut()
+        }
     }
 
     /// Flushes and ends the session, shows ``AuthGate/switching(from:)``, then switches to
@@ -210,9 +227,16 @@ public final class SessionLifecycle {
     /// ``SessionEndReason/switch``, shows ``AuthGate/switching(from:)``, runs `body` (the
     /// connect flow's sign-in), then follows wherever the account ended up, whether `body`
     /// returned, threw or was cancelled. If the account is still the old one, its session starts
-    /// again.
+    /// again. Overlapping calls (say, from two scenes) follow the account once the last one
+    /// finishes.
+    ///
+    /// The gate changes while `body` runs, so present the sign-in UI (the web sign-in's
+    /// presentation anchor) outside the gated content, or keep the current shell on screen
+    /// while the gate is ``AuthGate/switching(from:)``; otherwise the sign-in is torn down
+    /// with the shell.
     public func performAccountChange(_ body: @MainActor () async throws -> Void) async rethrows {
         if rejectReentrant("performAccountChange(_:)") { return }
+        accountChanges += 1
         await serialized {
             guard let running = self.session else { return }
             await self.endForAccountChange()
@@ -228,7 +252,9 @@ public final class SessionLifecycle {
     }
 
     /// Flushes the running session when a scene goes to the background, for at most the flush
-    /// timeout. It doesn't wait for, or hold up, other transitions.
+    /// timeout. It doesn't wait for, or hold up, other transitions. Called from a participant's
+    /// task, its flush tasks carry that task's stale transition ID, which is harmless: they
+    /// start no transitions.
     public func handle(scenePhase: SessionScenePhase) async {
         guard scenePhase == .background, let participants = session?.participants else { return }
         await flush(participants)
@@ -246,6 +272,8 @@ public final class SessionLifecycle {
 
     private func finishAccountChange() async {
         await serialized {
+            self.accountChanges -= 1
+            guard self.accountChanges == 0 else { return }
             self.changingFrom = nil
             await self.reconcile()
         }
@@ -438,7 +466,7 @@ public final class SessionLifecycle {
     private func rejectReentrant(_ operation: StaticString) -> Bool {
         guard isReentrant else { return false }
         Log.auth.fault("\(operation, privacy: .public) was called from inside a session transition")
-        assertionFailure("\(operation) was called from inside a session transition")
+        reportMisuse("\(operation) was called from inside a session transition")
         return true
     }
 
