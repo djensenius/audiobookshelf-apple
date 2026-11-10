@@ -16,6 +16,7 @@ public struct ProgressBadge: View {
                     .foregroundStyle(ABSColor.success)
                     .accessibilityLabel(Text(verbatim: L10n.string("LabelFinished")))
             } else if progress.isInProgress {
+                // The ring's diameter is a `@ScaledMetric`, so it grows with Dynamic Type.
                 ProgressRing(progress: progress.fraction, diameter: 20, lineWidth: 3, tint: ABSColor.progress)
             }
         }

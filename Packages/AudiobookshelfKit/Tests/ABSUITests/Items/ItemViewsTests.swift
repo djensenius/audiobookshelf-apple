@@ -24,7 +24,8 @@ private final class FakeProgressEntry {
             ItemPresentation.accessibilityLabel(item)
                 == "The Gods of Mars, Edgar Rice Burroughs, Barsoom #2")
         #expect(
-            ItemPresentation.accessibilityLabel(frankenstein) == "Frankenstein; or, The Modern Prometheus, Mary Shelley"
+            ItemPresentation.accessibilityLabel(frankenstein)
+                == "Frankenstein; or, The Modern Prometheus, Mary Shelley, Abridged"
         )
     }
 
@@ -95,47 +96,86 @@ private final class FakeProgressEntry {
 
     // MARK: Layout
 
-    private func renderedSize<V: View>(_ view: V, width: CGFloat, _ size: DynamicTypeSize) -> CGSize? {
+    private func renderedSize<V: View>(_ view: V, width: CGFloat) throws -> CGSize {
         let renderer = ImageRenderer(
-            content: view.frame(width: width).environment(\.dynamicTypeSize, size).environment(
-                \.locale, Locale(identifier: "en_US")))
-        guard let image = renderer.cgImage else { return nil }
+            content: view.frame(width: width).environment(\.locale, Locale(identifier: "en_US")))
+        renderer.scale = 1
+        let image = try #require(renderer.cgImage)
         return CGSize(width: image.width, height: image.height)
     }
 
-    @Test func viewsLayOutToANonZeroSizeAtNormalAndLargestTextSizes() throws {
+    // macOS has no Dynamic Type, so these compare layouts that don't depend on the text size.
+    @Test func cardHeightHoldsTheCoverTheTitleAndTheMissingIndicator() throws {
+        let serverID = UUID()
+        func card(_ item: ItemSummary) -> some View { ItemCard(item: item, serverID: serverID) { _ in } }
+        let plain = try renderedSize(card(frankenstein), width: 160)
+        // A 1.6 cover at 160 pt wide is 256 pt tall; the title and subtitle add to it.
+        #expect(plain.width == 160 && plain.height > 256 + 20)
+        let missing = try renderedSize(card(ItemSummary(item: SampleLibrary.missing)), width: 160)
+        #expect(missing.height > plain.height)
+    }
+
+    @Test func squareCoversMakeShorterCardsThanBookCovers() throws {
+        let serverID = UUID()
+        func card(_ item: ItemSummary) -> some View { ItemCard(item: item, serverID: serverID) { _ in } }
+        let book = try renderedSize(card(frankenstein), width: 160)
+        let episode = try renderedSize(card(ItemSummary(item: SampleLibrary.episodeItems[0])), width: 160)
+        #expect(episode.height < book.height)
+    }
+
+    @Test func aShelfWithItemsIsTallerThanAnEmptyOne() throws {
         let serverID = UUID()
         let books = SampleLibrary.books.map { ItemSummary(item: $0) }
-        let series = SeriesSummary(series: SampleLibrary.series[0])
-        let author = AuthorSummary(author: SampleLibrary.authors[0])
-        for size in [DynamicTypeSize.large, .accessibility5] {
-            let card = ItemCard(item: books[2], serverID: serverID, progress: ItemProgress(fraction: 0.4)) { _ in }
-            let row = ItemRow(item: books[2], serverID: serverID, progress: ItemProgress(fraction: 1, isFinished: true))
-            { _ in }
-            let shelf = ShelfRow(title: "Shelf", elements: books, onShowAll: {}) { item in
-                ItemCard(item: item, serverID: serverID) { _ in }
-            }
-            let empty = ShelfRow(title: "Empty", elements: [ItemSummary]()) { item in
-                ItemCard(item: item, serverID: serverID) { _ in }
-            }
-            let grid = ItemGrid(elements: books) { item in ItemCard(item: item, serverID: serverID) { _ in } }
-            let seriesCard = SeriesCard(series: series, serverID: serverID) {}
-            let authorCard = AuthorCard(author: author, serverID: serverID) {}
-            let badge = ProgressBadge(progress: ItemProgress(fraction: 0.5))
+        let full = try renderedSize(
+            ShelfRow(title: "Shelf", elements: books) { ItemCard(item: $0, serverID: serverID) { _ in } }, width: 360)
+        let empty = try renderedSize(
+            ShelfRow(title: "Shelf", elements: [ItemSummary]()) { ItemCard(item: $0, serverID: serverID) { _ in } },
+            width: 360)
+        #expect(full.height > empty.height + 200)
+    }
 
-            for (name, rendered) in [
-                ("card", renderedSize(card, width: 160, size)),
-                ("row", renderedSize(row, width: 360, size)),
-                ("shelf", renderedSize(shelf, width: 360, size)),
-                ("empty shelf", renderedSize(empty, width: 360, size)),
-                ("grid", renderedSize(grid, width: 360, size)),
-                ("series", renderedSize(seriesCard, width: 160, size)),
-                ("author", renderedSize(authorCard, width: 120, size)),
-                ("badge", renderedSize(badge, width: 40, size)),
-            ] {
-                let measured = try #require(rendered, "\(name) at \(size)")
-                #expect(measured.width > 0 && measured.height > 0, "\(name) at \(size)")
-            }
+    @Test func seriesAndAuthorCardsAreTallerThanTheirCover() throws {
+        let serverID = UUID()
+        let series = try renderedSize(
+            SeriesCard(series: SeriesSummary(series: SampleLibrary.series[0]), serverID: serverID) {}, width: 160)
+        #expect(series.height > 256)
+        let author = try renderedSize(
+            AuthorCard(author: AuthorSummary(author: SampleLibrary.authors[0]), serverID: serverID) {}, width: 120)
+        #expect(author.height > 150)
+    }
+
+    // MARK: Series have no progress
+
+    @Test func aCollapsedSeriesShowsNoProgressEvenWhenItsFirstBookHasSome() {
+        let series = ItemSummary(
+            id: "series-s", itemID: "li_first", seriesID: "s", kind: .series, title: "Barsoom", bookCount: 3)
+        let finished = ItemProgress(fraction: 1, isFinished: true)
+        let reader = ItemProgressReader { itemID, _ in itemID == "li_first" ? finished : nil }
+        #expect(ItemPresentation.progress(for: series, explicit: nil, reader: reader) == nil)
+        #expect(ItemPresentation.progress(for: series, explicit: finished, reader: reader) == nil)
+        let shown = ItemPresentation.progress(for: series, explicit: nil, reader: reader)
+        #expect(
+            ItemPresentation.accessibilityValue(series, progress: shown, locale: Locale(identifier: "en_US")) == "")
+        // Books and episodes still read it.
+        let book = ItemSummary(id: "li_first", itemID: "li_first", kind: .book, title: "B")
+        #expect(ItemPresentation.progress(for: book, explicit: nil, reader: reader) == finished)
+        #expect(
+            ItemPresentation.progress(for: book, explicit: ItemProgress(fraction: 0.2), reader: reader)?.fraction == 0.2
+        )
+    }
+
+    // MARK: Explicit, abridged and missing are spoken
+
+    @Test func labelSpeaksExplicitAndAbridgedOnlyWhenSet() {
+        func label(explicit: Bool, abridged: Bool) -> String {
+            ItemPresentation.accessibilityLabel(
+                ItemSummary(
+                    id: "i", itemID: "i", kind: .book, title: "T", subtitle: "A", seriesText: "S #1",
+                    isExplicit: explicit, isAbridged: abridged))
         }
+        #expect(label(explicit: false, abridged: false) == "T, A, S #1")
+        #expect(label(explicit: true, abridged: false) == "T, A, S #1, Explicit")
+        #expect(label(explicit: false, abridged: true) == "T, A, S #1, Abridged")
+        #expect(label(explicit: true, abridged: true) == "T, A, S #1, Explicit, Abridged")
     }
 }

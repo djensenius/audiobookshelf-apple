@@ -68,6 +68,8 @@ import Testing
 
     @Test func collapsedSeriesOnlyOpens() {
         #expect(kinds(summary(kind: .series, audio: false), ItemProgress(fraction: 0.5)) == [.openDetails])
+        #expect(
+            kinds(summary(kind: .series, audio: false), ItemProgress(fraction: 1, isFinished: true)) == [.openDetails])
     }
 
     @Test func actionsAreInMenuOrderWithoutDuplicates() {

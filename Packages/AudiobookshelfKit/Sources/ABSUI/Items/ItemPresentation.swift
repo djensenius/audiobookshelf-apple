@@ -39,9 +39,22 @@ enum ItemPresentation {
         L10n.string("SharedBookCount", count.formatted())
     }
 
-    /// Title, subtitle and series, as one VoiceOver label.
+    /// Title, subtitle, series, then "Explicit" and "Abridged" when set, as one VoiceOver label.
     static func accessibilityLabel(_ item: ItemSummary) -> String {
-        [item.title, subtitle(item), item.seriesText].compactMap(\.self).joined(separator: ", ")
+        [
+            item.title, subtitle(item), item.seriesText,
+            item.isExplicit ? L10n.string("LabelExplicit") : nil,
+            item.isAbridged ? L10n.string("LabelAbridged") : nil,
+        ]
+        .compactMap(\.self).joined(separator: ", ")
+    }
+
+    /// The progress a cell shows: the explicit one, else the reader's. A collapsed series has none:
+    /// its `itemID` is its first book, whose progress isn't the series'.
+    @MainActor
+    static func progress(for item: ItemSummary, explicit: ItemProgress?, reader: ItemProgressReader) -> ItemProgress? {
+        guard item.kind != .series else { return nil }
+        return explicit ?? reader(itemID: item.itemID, episodeID: item.episodeID)
     }
 
     /// "Finished", or "Progress, 42%", and "Missing" for a missing item; empty for none.
@@ -109,5 +122,20 @@ private struct ItemHoverModifier: ViewModifier {
 extension View {
     func itemHover() -> some View {
         modifier(ItemHoverModifier())
+    }
+}
+
+/// A red warning icon with "Missing", shown on cards and rows of missing items. Not colour alone.
+struct MissingIndicator: View {
+    var body: some View {
+        Label {
+            Text(verbatim: L10n.string("LabelMissing"))
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(ABSColor.error)
+        // The cell speaks the state in its accessibility value.
+        .accessibilityHidden(true)
     }
 }

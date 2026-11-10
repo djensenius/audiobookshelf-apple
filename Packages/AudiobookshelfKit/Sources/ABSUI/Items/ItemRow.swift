@@ -25,7 +25,7 @@ public struct ItemRow: View {
     }
 
     public var body: some View {
-        let progress = progress ?? progressReader(itemID: item.itemID, episodeID: item.episodeID)
+        let progress = ItemPresentation.progress(for: item, explicit: progress, reader: progressReader)
         Button {
             perform(.openDetails)
         } label: {
@@ -53,6 +53,7 @@ public struct ItemRow: View {
                     if let duration = item.duration {
                         DurationText(seconds: duration, style: .elapsed(showSeconds: false))
                     }
+                    if item.isMissing { MissingIndicator() }
                 }
                 .font(.caption)
                 .foregroundStyle(ABSColor.mutedForeground)

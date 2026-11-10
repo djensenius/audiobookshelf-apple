@@ -23,11 +23,12 @@ public struct ItemActionMenu: View {
 }
 
 extension View {
-    /// Adds `actions` as a context menu and, with the same titles, as VoiceOver actions.
+    /// Adds `actions` as a context menu and, with the same titles, as VoiceOver actions. The
+    /// VoiceOver list omits ``ItemActionKind/openDetails``, which the default activation performs.
     public func itemActions(_ actions: [ItemAction], perform: @escaping (ItemActionKind) -> Void) -> some View {
         contextMenu { ItemActionMenu(actions: actions, perform: perform) }
             .accessibilityActions {
-                ForEach(actions) { action in
+                ForEach(actions.filter { $0.kind != .openDetails }) { action in
                     Button(ItemPresentation.title(action.kind)) { perform(action.kind) }
                 }
             }

@@ -54,6 +54,11 @@ import Testing
         #expect(ItemSummary(item: book()).seriesText == nil)
     }
 
+    @Test func unnamedSeriesShowsOnlyItsSequenceOrNothing() {
+        #expect(ItemSummary(item: book(series: Series(id: "s", name: "", sequence: "2"))).seriesText == "#2")
+        #expect(ItemSummary(item: book(series: Series(id: "s", name: ""))).seriesText == nil)
+    }
+
     @Test func explicitAndAbridgedFlagsCarryOver() {
         let item = book(metadata: { BookMetadata(title: $0, explicit: true, abridged: true) })
         let summary = ItemSummary(item: item)

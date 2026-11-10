@@ -2,6 +2,9 @@ import Foundation
 
 /// Deterministic public-domain sample data for previews, tests and demo mode. IDs are stable
 /// and nothing here reads the clock or a random source.
+///
+/// This ships in release builds because previews and `ABSUITests` use it, so `#if DEBUG` isn't
+/// an option. Nothing on a production path may use it, except demo mode (#46).
 public enum SampleLibrary {
     public static let libraryID = "lib_sample"
 

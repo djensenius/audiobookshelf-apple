@@ -33,7 +33,7 @@ public struct ItemCard: View {
     }
 
     public var body: some View {
-        let progress = progress ?? progressReader(itemID: item.itemID, episodeID: item.episodeID)
+        let progress = ItemPresentation.progress(for: item, explicit: progress, reader: progressReader)
         Button {
             perform(.openDetails)
         } label: {
@@ -56,6 +56,7 @@ public struct ItemCard: View {
                 }
                 .font(.caption)
                 .foregroundStyle(ABSColor.mutedForeground)
+                if item.isMissing { MissingIndicator() }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(.rect)

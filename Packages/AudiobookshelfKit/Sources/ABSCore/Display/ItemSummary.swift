@@ -25,7 +25,8 @@ public struct CoverRef: Sendable, Hashable {
         self.externalURL = externalURL
     }
 
-    /// `nil` when the item has no `coverPath`.
+    /// `nil` when the item has no `coverPath`. Only `http(s)` paths become an external URL; the
+    /// local cover of a downloaded item is added together with the downloads UI.
     public init?(item: LibraryItem) {
         guard let path = item.media?.coverPath, !path.isEmpty else { return nil }
         var external: URL?
@@ -98,7 +99,7 @@ public struct ItemSummary: Sendable, Hashable, Identifiable {
     ///
     /// A podcast item becomes an episode when `episode` is given or the item carries a
     /// `recentEpisode` (episode shelves); it then shows the episode's title and duration and the
-    /// podcast's title, cover and explicit flag.
+    /// podcast's title, cover and explicit flag (`PodcastEpisode` has no explicit field of its own).
     public init(item: LibraryItem, episode: PodcastEpisode? = nil) {
         let unplayable = item.isMissing || item.isInvalid
         let cover = CoverRef(item: item)
@@ -164,8 +165,11 @@ public struct ItemSummary: Sendable, Hashable, Identifiable {
     /// first series, else the server's flattened `seriesName` (which already ends in `#<sequence>`).
     private static func seriesText(item: LibraryItem, metadata: BookMetadata) -> String? {
         if let series = item.series ?? metadata.series?.first {
-            guard let sequence = nonEmpty(series.sequence) else { return series.name }
-            return "\(series.name) #\(sequence)"
+            let sequence = nonEmpty(series.sequence)
+            // An unnamed series shows just its sequence, or nothing.
+            guard let name = nonEmpty(series.name) else { return sequence.map { "#\($0)" } }
+            guard let sequence else { return name }
+            return "\(name) #\(sequence)"
         }
         return nonEmpty(metadata.seriesName)
     }
