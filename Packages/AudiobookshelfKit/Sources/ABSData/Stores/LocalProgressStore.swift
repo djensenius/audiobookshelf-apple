@@ -2,6 +2,28 @@ import ABSCore
 import Foundation
 import OSLog
 import SwiftData
+import Synchronization
+
+/// Opaque in-process ordering for one writer/key's playback intent, reserved before suspension.
+/// Successive playback scopes must share the same LocalProgressStore; tokens are not persisted.
+public struct PlaybackPositionToken: Sendable, Equatable {
+    fileprivate let writer: UUID
+    fileprivate let key: MediaKey
+    fileprivate let sequence: UInt64
+}
+
+public enum PlaybackPositionCommitResult: Sendable, Equatable {
+    case committed
+    /// A strictly newer token already committed. This call made no write.
+    case supersededByCommittedPosition
+}
+
+public enum PlaybackPositionCommitError: Error, Sendable, Equatable {
+    case wrongWriter
+    case wrongKey
+    /// The latest committed token is single-use, even when passed the same audio again.
+    case tokenAlreadyCommitted
+}
 
 /// A point in `LocalProgressStore`'s edit history, captured when a progress fetch is issued or a
 /// socket progress event is received. Server values are dropped for rows edited or settled since.
@@ -46,6 +68,10 @@ public enum SessionUploadResult: Sendable, Equatable {
 /// local edit or PATCH settlement. Every write is saved through ``commit(_:)``, which rolls the
 /// context back when it fails; in-memory bookkeeping changes only after a successful save.
 @ModelActor public actor LocalProgressStore: StoreActor {
+    private nonisolated let playbackWriterID = UUID()
+    private nonisolated let playbackSequence = Mutex<UInt64>(0)
+    /// One successful watermark per key, never pending reservations or a history of tokens.
+    private var committedPlaybackPositions: [MediaKey: UInt64] = [:]
     /// Pending sessions are discarded after this many counted upload failures.
     public static let maxUploadFailures = 5
     /// At most one failure per session is counted in this interval.
@@ -89,6 +115,33 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
     public func captureGeneration() -> ProgressGeneration {
         ProgressGeneration(value: generation)
+    }
+
+    /// Reserves order synchronously at intent capture, not when a delayed write reaches the actor.
+    public nonisolated func reservePlaybackPosition(for key: MediaKey) -> PlaybackPositionToken {
+        let sequence = playbackSequence.withLock {
+            $0 += 1
+            return $0
+        }
+        return PlaybackPositionToken(writer: playbackWriterID, key: key, sequence: sequence)
+    }
+
+    /// Atomically checks playback order, commits through `recordEdit`, and advances the successful
+    /// watermark. No await separates those operations. Failed writes/reservations do not supersede
+    /// anything. Repeating the latest committed token throws; older tokens return superseded
+    /// without writing, irrespective of their payload. Generic `recordEdit` semantics are unchanged.
+    public func recordPlaybackPosition(
+        _ audio: ProgressEdit.Audio, for key: MediaKey, token: PlaybackPositionToken, now: Date
+    ) throws -> PlaybackPositionCommitResult {
+        guard token.writer == playbackWriterID else { throw PlaybackPositionCommitError.wrongWriter }
+        guard token.key == key else { throw PlaybackPositionCommitError.wrongKey }
+        if let committed = committedPlaybackPositions[key] {
+            if token.sequence < committed { return .supersededByCommittedPosition }
+            if token.sequence == committed { throw PlaybackPositionCommitError.tokenAlreadyCommitted }
+        }
+        try recordEdit(ProgressEdit(audio: audio), for: key, now: now)
+        committedPlaybackPositions[key] = token.sequence
+        return .committed
     }
 
     /// Records a local change, creating the row when needed.

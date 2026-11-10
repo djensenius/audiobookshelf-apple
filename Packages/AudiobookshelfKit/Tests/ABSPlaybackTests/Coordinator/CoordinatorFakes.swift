@@ -194,9 +194,13 @@ final class StubSessionService: PlaybackSessionService {
         var closeGates: [String: Gate] = [:]
         var startError: APIError?
         var resolveError: (any Error)?
+        var resolveGate: Gate?
+        var resolutions = 0
+        var canceledResolutions = 0
         var closeError: APIError?
         var starts: [String] = []
         var closes: [String] = []
+        var canceledCloses: [String] = []
         var closeReports: [String: PlaybackSyncReport] = [:]
         var log: [String] = []
         var count = 0
@@ -263,6 +267,12 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
+        let gate = state.withLock {
+            $0.resolutions += 1
+            return $0.resolveGate
+        }
+        await gate?.wait()
+        if Task.isCancelled { state.withLock { $0.canceledResolutions += 1 } }
         if let error = state.withLock({ $0.resolveError }) { throw error }
         if let stream = state.withLock({ $0.streamOverride }) { return stream }
         let tracks = session.audioTracks.map { track in
@@ -282,6 +292,7 @@ final class StubSessionService: PlaybackSessionService {
             return (state.closeGates.removeValue(forKey: id), state.closeError)
         }
         await gate?.wait()
+        if Task.isCancelled { state.withLock { $0.canceledCloses.append(id) } }
         state.withLock { state in
             state.openSessions.removeAll { $0 == id }
             state.log.append("close \(id) done")
@@ -334,6 +345,9 @@ final class InMemoryLastPlayedStore: LastPlayedStoring {
 /// finish) unless `elapsesImmediately` is set.
 final class TestSleep: Sendable {
     private let immediate = Mutex(false)
+    private let calls = Mutex<[Duration]>([])
+
+    var durations: [Duration] { calls.withLock { $0 } }
 
     var elapsesImmediately: Bool {
         get { immediate.withLock { $0 } }
@@ -341,6 +355,7 @@ final class TestSleep: Sendable {
     }
 
     func sleep(_ duration: Duration) async {
+        calls.withLock { $0.append(duration) }
         if elapsesImmediately { return }
         try? await Task.sleep(for: .seconds(3600))
     }

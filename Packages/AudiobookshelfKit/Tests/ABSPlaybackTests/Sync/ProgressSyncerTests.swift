@@ -421,7 +421,14 @@ struct ProgressSyncerTests {
         #expect(closes["a-1"] == PlaybackSyncReport(currentTime: 20, timeListened: 5, duration: 3600))
         #expect(closes["b-2"] == PlaybackSyncReport(currentTime: 4, timeListened: 4, duration: 3600))
         #expect(s.service.reports.map(\.timeListened) == [15])
-        #expect(try await s.store.pendingSync(for: s.h.connectionID).isEmpty)
+        // Close now unconditionally commits audio positions, even for clean/missing rows.
+        // A close acknowledgement is not a PATCH acknowledgement or full-report durability.
+        let pending = try await s.store.pendingSync(for: s.h.connectionID)
+        #expect(
+            Dictionary(uniqueKeysWithValues: pending.map { ($0.key.libraryItemId, $0.currentTime) }) == [
+                "a": 20, "b": 4,
+            ])
+        #expect(try await s.coordinator.waitForClose().sessions.allSatisfy(\.audioPositionCommitted))
     }
 
     @Test func closeBringsAPendingRowUpToDate() async throws {

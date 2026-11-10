@@ -124,9 +124,9 @@ public enum PlaybackCoordinatorEvent: Sendable, Equatable {
     case tick(time: Double)
     case ended
     case failed(PlaybackCoordinatorError)
-    /// Every ``sessionStarted(sessionID:key:)`` gets one. Emitted on the main actor right after
-    /// the close `Task` is created; the request goes out only once the main actor is free, so
-    /// observers see this first.
+    /// Every ``sessionStarted(sessionID:key:)`` gets one, after the synchronous final handoff.
+    /// An allowed close request starts only once the main actor is free, so observers see this
+    /// first. No-network account end deliberately skips transport, not the loaded position receipt.
     case sessionWillClose(ClosingSession)
 }
 
