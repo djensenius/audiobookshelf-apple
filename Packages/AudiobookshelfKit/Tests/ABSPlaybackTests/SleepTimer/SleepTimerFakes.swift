@@ -45,14 +45,17 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
     func seek(to time: Double) async -> Double? {
         seeks.append(time)
         if holdsSeeks { await withCheckedContinuation { heldSeek = $0 } }
+        heldSeek = nil
         guard seeksLand else { return nil }
         currentTime = time
         return time
     }
 
-    func finishSeek() {
+    /// Lets a held seek return, and waits until its caller has carried on: a resumed continuation can reach the main
+    /// actor after jobs queued later, so a barrier task wouldn't do.
+    func finishSeek() async {
         heldSeek?.resume()
-        heldSeek = nil
+        await until { heldSeek == nil }
     }
 
     func setVolume(_ volume: Float) {
@@ -89,12 +92,12 @@ final class FakeShakeDetector: ShakeDetecting {
     func shake() { onShake?() }
 }
 
-/// Yields until `condition` holds; the timer's tasks need a few turns of the executors to run. Never sleeps.
+/// Yields until `condition` holds; the timer's tasks need a few turns of the executors to run. Never sleeps. Bounded
+/// by wall-clock time, not yields: a loaded machine can starve the pool threads that resume ``ManualClock`` sleepers.
 @MainActor
 func until(_ condition: () -> Bool, sourceLocation: SourceLocation = #_sourceLocation) async {
-    for _ in 0..<100_000 where !condition() {
-        await Task.yield()
-    }
+    let deadline = ContinuousClock.now + .seconds(10)
+    while !condition(), ContinuousClock.now < deadline { await Task.yield() }
     if !condition() { Issue.record("Condition never held", sourceLocation: sourceLocation) }
 }
 
