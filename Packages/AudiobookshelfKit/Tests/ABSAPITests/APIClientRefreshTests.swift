@@ -701,6 +701,145 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(tokens.inner.expiredCount == 0)
     }
 
+    // MARK: Refresh lineage across concurrent requests
+
+    /// Refresh tokens 1 -> 2 -> 3 -> 4; access tokens follow. `/api/slow` answers after 300 ms.
+    private func lineageServer(accepts: @escaping @Sendable (String?, String?) -> Bool) -> StubServer {
+        StubServer { request in
+            let path = request.url?.path()
+            let authorization = request.value(forHTTPHeaderField: "Authorization")
+            if path == refreshPath {
+                let generation = Int(request.value(forHTTPHeaderField: "x-refresh-token")?.dropFirst(8) ?? "") ?? 0
+                let next = generation + 1
+                return .json(#"{"user":{"accessToken":"access-\#(next)","refreshToken":"refresh-\#(next)"}}"#)
+            }
+            let delay: Duration? = path == "/abs/api/slow" ? .milliseconds(300) : nil
+            return accepts(path, authorization)
+                ? .json(#"{"ok":true}"#, delay: delay) : .json("{}", status: 401, delay: delay)
+        }
+    }
+
+    /// (a) A request sent with pair 1 whose 401 arrives after another request refreshed 1 -> 2
+    /// retries with pair 2 without refreshing again.
+    @Test func lateUnauthorizedRetriesWithOtherRequestsRefresh() async throws {
+        let server = lineageServer { _, authorization in authorization == "Bearer access-2" }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let late = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
+        try await waitUntil { server.requests(path: "/abs/api/slow").count == 1 }
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/me")) == OK(ok: true))
+
+        #expect(try await late.value == OK(ok: true))
+        let sent = server.requests(path: "/abs/api/slow").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-1", "Bearer access-2"])
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
+    /// (a') If pair 2 is then rejected too, the late request ends the session: pair 2 came from a
+    /// refresh after it read pair 1.
+    @Test func lateUnauthorizedThenRejectedRefreshExpires() async throws {
+        let server = lineageServer { path, authorization in
+            path == "/abs/api/me" && authorization == "Bearer access-2"
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let late = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
+        try await waitUntil { server.requests(path: "/abs/api/slow").count == 1 }
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/me")) == OK(ok: true))
+
+        await #expect(throws: APIError.sessionExpired) { try await late.value }
+        #expect(server.requests(path: refreshPath).count == 1)
+        #expect(tokens.expiredCount == 1)
+    }
+
+    /// (b) A request refreshes 1 -> 2 and its retry with pair 2 is slow to be rejected; meanwhile
+    /// another request refreshes 2 -> 3. Pair 3 descends from this request's refresh, so its
+    /// rejection ends the session instead of refreshing 3 -> 4.
+    @Test func lineageSurvivesAnotherRefreshDuringRetry() async throws {
+        let server = StubServer { request in
+            let path = request.url?.path()
+            let authorization = request.value(forHTTPHeaderField: "Authorization")
+            if path == refreshPath {
+                let generation = Int(request.value(forHTTPHeaderField: "x-refresh-token")?.dropFirst(8) ?? "") ?? 0
+                let next = generation + 1
+                return .json(#"{"user":{"accessToken":"access-\#(next)","refreshToken":"refresh-\#(next)"}}"#)
+            }
+            if path == "/abs/api/other", authorization == "Bearer access-3" { return .json(#"{"ok":true}"#) }
+            let delay: Duration? =
+                path == "/abs/api/me" && authorization == "Bearer access-2" ? .milliseconds(300) : nil
+            return .json("{}", status: 401, delay: delay)
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        try await waitUntil { server.requests(path: "/abs/api/me").count == 2 }
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
+
+        await #expect(throws: APIError.sessionExpired) { try await first.value }
+        let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
+        #expect(refreshTokens == ["refresh-1", "refresh-2"])
+        let sent = server.requests(path: "/abs/api/me").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-1", "Bearer access-2", "Bearer access-3"])
+        #expect(tokens.current == nil)
+        #expect(tokens.expiredCount == 1)
+    }
+
+    /// (c) The request that started a refresh is cancelled while it waits; the refresh still
+    /// completes, and a request whose 401 arrives afterwards uses it, then expires when the
+    /// refreshed pair is rejected.
+    @Test func cancelledRefreshStarterKeepsLineageForOthers() async throws {
+        let server = StubServer { request in
+            switch request.url?.path() {
+            case refreshPath: .json(refreshedJSON, delay: .milliseconds(200))
+            case "/abs/api/slow": .json("{}", status: 401, delay: .milliseconds(400))
+            default: .text("Unauthorized", status: 401)
+            }
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let late = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
+        let starter = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        starter.cancel()
+
+        await #expect(throws: CancellationError.self) { try await starter.value }
+        await #expect(throws: APIError.sessionExpired) { try await late.value }
+        #expect(server.requests(path: refreshPath).count == 1)
+        let sent = server.requests(path: "/abs/api/slow").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-1", "Bearer access-2"])
+        #expect(tokens.updates == [AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")])
+        #expect(tokens.expiredCount == 1)
+    }
+
+    /// (c) Two refreshes in flight for different sessions: the old session's refresh is
+    /// discarded, the new session's refresh is this request's, and its rejection expires.
+    @Test func concurrentRefreshesOfDifferentSessionsKeepSeparateLineage() async throws {
+        let replacement = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
+        let server = StubServer { request in
+            guard request.url?.path() == refreshPath else { return .text("Unauthorized", status: 401) }
+            return request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-new"
+                ? .json(#"{"user":{"accessToken":"access-new-2","refreshToken":"refresh-new-2"}}"#)
+                : .json(refreshedJSON, delay: .milliseconds(300))
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let old = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        tokens.signIn(replacement)
+        await #expect(throws: APIError.sessionExpired) { try await client.send(Endpoint<OK>(.get, "/api/other")) }
+
+        await #expect(throws: CancellationError.self) { try await old.value }
+        let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
+        #expect(refreshTokens == ["refresh-1", "refresh-new"])
+        #expect(tokens.current == nil)
+        #expect(tokens.expiredCount == 1)
+    }
+
     @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {
         let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(400)))
         let tokens = InMemoryTokenProvider()
