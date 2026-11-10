@@ -125,7 +125,7 @@ import Testing
 
         let capture = await store.captureGeneration()
         try await store.applyServerProgress(
-            [key: Self.server(currentTime: 200, lastUpdate: Self.at(3))], capturedAt: capture)
+            [key: Self.server(currentTime: 200, lastUpdate: Self.at(3))], capturedAt: capture, source: .fetch)
         let fetched = try #require(try await store.progress(for: key))
         #expect(fetched.currentTime == 300)
         #expect(fetched.audioDirty)
@@ -227,7 +227,7 @@ import Testing
         try await store.recordEdit(Self.seek(300), for: key, now: Self.at(2))
         let before = try await store.progress(for: key)
         let merged = try await store.applyServerProgress(
-            [key: Self.server(currentTime: 900, lastUpdate: Self.at(50))], capturedAt: capture)
+            [key: Self.server(currentTime: 900, lastUpdate: Self.at(50))], capturedAt: capture, source: .fetch)
         #expect(merged.isEmpty)
         #expect(try await store.progress(for: key) == before)
     }
@@ -242,7 +242,7 @@ import Testing
         let before = try await store.progress(for: key)
         #expect(
             try await store.applyServerProgress(
-                [key: Self.server(currentTime: 900, lastUpdate: Self.at(50))], capturedAt: capture
+                [key: Self.server(currentTime: 900, lastUpdate: Self.at(50))], capturedAt: capture, source: .fetch
             )
             .isEmpty)
         #expect(try await store.progress(for: key) == before)
@@ -258,7 +258,7 @@ import Testing
         // A socket echo of the PATCH (newer `lastUpdate`, older values) received after the seek.
         let capture = await store.captureGeneration()
         try await store.applyServerProgress(
-            [key: Self.server(currentTime: 200, lastUpdate: Self.at(5))], capturedAt: capture)
+            [key: Self.server(currentTime: 200, lastUpdate: Self.at(5))], capturedAt: capture, source: .socket)
         var row = try #require(try await store.progress(for: key))
         #expect(row.currentTime == 300)
         #expect(row.audioDirty)
@@ -275,6 +275,50 @@ import Testing
         #expect(try await store.beginSend(for: key)?.values.audio?.currentTime == 300)
     }
 
+    /// The PATCH's 200 has no body, so its server time is unknown. A socket event received after
+    /// the acknowledgement may have been emitted before the PATCH was applied; whatever its
+    /// `lastUpdate` (equal to the baseline's, later, or earlier), it can't roll the acknowledged
+    /// value back.
+    @Test(arguments: [0, 0.5, -1] as [TimeInterval])
+    func socketValueEmittedBeforeAckedPatchIsIgnored(_ offset: TimeInterval) async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.completeSend(patch, serverLastUpdate: nil)
+
+        let capture = await store.captureGeneration()
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 100, lastUpdate: Self.at(offset))], capturedAt: capture, source: .socket)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 200)
+        #expect(row.dirtyGroups.isEmpty)
+        #expect(row.serverBaseline?.currentTime == 200)
+    }
+
+    /// Another device's later value still arrives: by socket once the acknowledged value has been
+    /// seen, by any fetch, or at once when the response had a server time.
+    @Test(arguments: ["echo", "fetch", "timed"])
+    func newerValueAfterAckedPatchIsTaken(_ path: String) async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.completeSend(patch, serverLastUpdate: path == "timed" ? Self.at(2) : nil)
+
+        let capture = await store.captureGeneration()
+        if path == "echo" {
+            try await store.applyServerProgress(
+                [key: Self.server(currentTime: 200, lastUpdate: Self.at(2))], capturedAt: capture, source: .socket)
+        }
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 700, lastUpdate: Self.at(9))], capturedAt: capture,
+            source: path == "fetch" ? .fetch : .socket)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 700)
+        #expect(row.dirtyGroups.isEmpty)
+    }
+
     @Test func lostResponseIsRecognisedAfterRelaunch() async throws {
         let (store, container) = try makeStore()
         try await store.recordEdit(
@@ -289,7 +333,7 @@ import Testing
         let relaunched = LocalProgressStore(modelContainer: container)
         let capture = await relaunched.captureGeneration()
         try await relaunched.applyServerProgress(
-            [key: Self.server(currentTime: 200, lastUpdate: Self.at(3))], capturedAt: capture)
+            [key: Self.server(currentTime: 200, lastUpdate: Self.at(3))], capturedAt: capture, source: .fetch)
         let row = try #require(try await relaunched.progress(for: key))
         #expect(row.currentTime == 300)
         #expect(row.audioDirty)
@@ -301,7 +345,9 @@ import Testing
         let (store, _) = try makeStore()
         let capture = await store.captureGeneration()
         #expect(
-            try await store.applyServerProgress([key: Self.server(lastUpdate: Self.t0)], capturedAt: capture).isEmpty)
+            try await store.applyServerProgress(
+                [key: Self.server(lastUpdate: Self.t0)], capturedAt: capture, source: .fetch
+            ).isEmpty)
         #expect(try await store.progress(for: key) == nil)
     }
 

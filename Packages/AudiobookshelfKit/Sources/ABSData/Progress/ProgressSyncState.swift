@@ -467,7 +467,7 @@ struct ProgressSyncState: Sendable, Equatable {
 }
 
 extension ProgressBaseline {
-    fileprivate mutating func copy(_ group: ProgressGroups, from other: ProgressBaseline) {
+    mutating func copy(_ group: ProgressGroups, from other: ProgressBaseline) {
         switch group {
         case .audio:
             currentTime = other.currentTime
