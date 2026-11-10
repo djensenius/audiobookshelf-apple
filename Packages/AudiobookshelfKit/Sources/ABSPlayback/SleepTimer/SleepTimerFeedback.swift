@@ -36,7 +36,11 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
     /// One engine and node for every chime; the engine stops between chimes. Rebuilt after a configuration
     /// change (a route or format change), which stops the engine.
     private var output: (engine: AVAudioEngine, node: AVAudioPlayerNode, observer: any NSObjectProtocol)?
+    /// Counts the outputs built, so a late notification from a dropped engine can't drop its replacement.
+    private(set) var outputGeneration = 0
     private var chimeGeneration = 0
+
+    var hasOutput: Bool { output != nil }
 
     public init() {}
 
@@ -72,7 +76,7 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
         #endif
     }
 
-    private func chimeOutput(format: AVAudioFormat) -> (engine: AVAudioEngine, node: AVAudioPlayerNode)? {
+    func chimeOutput(format: AVAudioFormat) -> (engine: AVAudioEngine, node: AVAudioPlayerNode)? {
         if let output { return (output.engine, output.node) }
         let engine = AVAudioEngine()
         let node = AVAudioPlayerNode()
@@ -84,14 +88,27 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
             logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
             return nil
         }
+        outputGeneration += 1
+        let generation = outputGeneration
         let observer = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
         ) { [weak self] _ in
             // Safe: the observer runs on `OperationQueue.main`, which executes on the main thread.
-            MainActor.assumeIsolated { self?.discardOutput() }
+            MainActor.assumeIsolated { _ = self?.configurationDidChange(generation: generation) }
         }
         output = (engine, node, observer)
         return (engine, node)
+    }
+
+    /// Drops the output in a later main-actor task, not inside the engine's own notification: releasing an
+    /// `AVAudioEngine` there can deadlock, and running the observer on the main queue doesn't prevent that. The
+    /// task drops only the output that posted, because a late or repeated notification mustn't drop a rebuilt one.
+    @discardableResult
+    func configurationDidChange(generation: Int) -> Task<Void, Never> {
+        Task { [weak self] in
+            guard let self, generation == outputGeneration else { return }
+            discardOutput()
+        }
     }
 
     private func discardOutput() {
