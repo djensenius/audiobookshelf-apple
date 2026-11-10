@@ -50,6 +50,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     var duration: Double { timeline?.duration ?? 0 }
     var currentTrackIndex: Int?
     var defaultRate: Float = 1
+    var volume: Float = 1
     var isPlaybackRequested = false
     var pendingSeekTarget: Double?
     var timeline: PlaybackTimeline?
@@ -116,6 +117,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func setRate(_ rate: Float) { defaultRate = rate }
+    func setVolume(_ volume: Float) { self.volume = volume }
 }
 
 /// Sessions per item (ids `<item>-<n>`, unique per start), with optional gates on starts and
