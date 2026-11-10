@@ -5,12 +5,16 @@ import Testing
 
 @MainActor
 struct AudioEngineSleepTimerControlTests {
-    @Test func seeksAndPlaysThroughTheEngine() async {
+    @Test func readsSeeksAndPlaysThroughTheEngine() async {
         let engine = FakeAudioEngine()
         engine.currentTime = 500
+        engine.defaultRate = 1.5
         engine.state = .playing
         let control = AudioEngineSleepTimerControl(engine: engine)
         #expect(control.isPlaying)
+        #expect(control.currentTime == 500)
+        #expect(control.rate == 1.5)
+        #expect(control.timeline == nil)
         #expect(await control.seek(to: 470) == 470)
         engine.seekResult = .superseded
         #expect(await control.seek(to: 400) == nil, "Only where it landed")
@@ -51,14 +55,6 @@ extension AudioEngineTests {
             #expect(await eventually { if case .failed(.playerFailed) = engine.state { true } else { false } })
             #expect(await engine.seek(to: 1) == .completed)
             #expect(players.created.count == 2)
-        }
-
-        @Test func readsTheEngine() {
-            let control = AudioEngineSleepTimerControl(engine: engine)
-            #expect(control.isPlaying == false)
-            #expect(control.currentTime == 0)
-            #expect(control.rate == 1)
-            #expect(control.timeline == nil)
         }
 
         @Test func aPlayerReplacedMidFadeGetsTheFadeVolumeAndCancelRestoresIt() async throws {

@@ -25,39 +25,28 @@ struct AutoSleepPolicyTests {
         #expect(TimeOfDay(text) == nil)
     }
 
-    @Test func windowWithinADay() throws {
-        let policy = try policy("13:00", "15:30")
-        let inside: [(Int, Int)] = [(13, 0), (14, 0), (15, 29)]
-        let outside: [(Int, Int)] = [(12, 59), (15, 30), (23, 0), (0, 0)]
-        for (hour, minute) in inside {
-            #expect(policy.shouldStart(at: try makeDate(2026, 1, 15, hour, minute), calendar: .gregorianUTC))
+    @Test(arguments: [
+        ("13:00", "15:30", ["13:00", "14:00", "15:29"], ["12:59", "15:30", "23:00", "00:00"]),
+        ("22:00", "06:00", ["22:00", "23:30", "00:00", "03:00", "05:59"], ["21:59", "06:00", "12:00", "06:01"]),
+    ])
+    func windowIncludesItsStartButNotItsEnd(start: String, end: String, inside: [String], outside: [String]) throws {
+        let policy = try policy(start, end)
+        for text in inside + outside {
+            let time = try #require(TimeOfDay(text))
+            let date = try makeDate(2026, 1, 15, time.hour, time.minute)
+            #expect(policy.shouldStart(at: date, calendar: .gregorianUTC) == inside.contains(text), "\(text)")
         }
-        for (hour, minute) in outside {
-            #expect(!policy.shouldStart(at: try makeDate(2026, 1, 15, hour, minute), calendar: .gregorianUTC))
-        }
-        let window = policy.window(containing: try makeDate(2026, 1, 15, 14, 0), calendar: .gregorianUTC)
-        #expect(window == DateInterval(start: try makeDate(2026, 1, 15, 13, 0), end: try makeDate(2026, 1, 15, 15, 30)))
     }
 
-    @Test func windowWrapsPastMidnight() throws {
+    @Test func windowOccurrences() throws {
+        let day = try policy("13:00", "15:30").window(
+            containing: try makeDate(2026, 1, 15, 14, 0), calendar: .gregorianUTC)
+        #expect(day == DateInterval(start: try makeDate(2026, 1, 15, 13, 0), end: try makeDate(2026, 1, 15, 15, 30)))
         let policy = try policy("22:00", "06:00")
-        let inside: [(Int, Int)] = [(22, 0), (23, 30), (0, 0), (3, 0), (5, 59)]
-        let outside: [(Int, Int)] = [(21, 59), (6, 0), (12, 0), (6, 1)]
-        for (hour, minute) in inside {
-            #expect(policy.shouldStart(at: try makeDate(2026, 1, 15, hour, minute), calendar: .gregorianUTC))
-        }
-        for (hour, minute) in outside {
-            #expect(!policy.shouldStart(at: try makeDate(2026, 1, 15, hour, minute), calendar: .gregorianUTC))
-        }
-
         let evening = DateInterval(start: try makeDate(2026, 1, 15, 22, 0), end: try makeDate(2026, 1, 16, 6, 0))
         #expect(policy.window(containing: try makeDate(2026, 1, 15, 23, 30), calendar: .gregorianUTC) == evening)
         let morning = DateInterval(start: try makeDate(2026, 1, 14, 22, 0), end: try makeDate(2026, 1, 15, 6, 0))
         #expect(policy.window(containing: try makeDate(2026, 1, 15, 5, 59), calendar: .gregorianUTC) == morning)
-    }
-
-    @Test func windowWrapsAcrossMonthAndYearEnds() throws {
-        let policy = try policy("22:00", "06:00")
         let window = policy.window(containing: try makeDate(2027, 1, 1, 1, 0), calendar: .gregorianUTC)
         #expect(window == DateInterval(start: try makeDate(2026, 12, 31, 22, 0), end: try makeDate(2027, 1, 1, 6, 0)))
     }
@@ -88,13 +77,6 @@ struct AutoSleepPolicyTests {
         #expect(disabled.window(containing: date, calendar: .gregorianUTC) != nil)
     }
 
-    @Test func ignoresRewindsThatArentPositive() throws {
-        let start = try #require(TimeOfDay("22:00"))
-        let end = try #require(TimeOfDay("06:00"))
-        #expect(AutoSleepPolicy(start: start, end: end, mode: .endOfChapter, rewindOnExpiry: 0).rewindOnExpiry == nil)
-        #expect(AutoSleepPolicy(start: start, end: end, mode: .endOfChapter, rewindOnExpiry: 30).rewindOnExpiry == 30)
-    }
-
     @MainActor
     @Test func readsTheSettings() throws {
         let suiteName = "AutoSleepPolicyTests.\(UUID().uuidString)"
@@ -112,7 +94,6 @@ struct AutoSleepPolicyTests {
         settings.sleepTimerLength = 0
         settings.autoSleepTimerAutoRewind = true
         settings.autoSleepTimerAutoRewindTime = 120_000
-        settings.disableShakeToResetSleepTimer = true
         settings.disableSleepTimerFadeOut = true
         settings.disableSleepTimerResetFeedback = true
         settings.enableSleepTimerAlmostDoneChime = true
@@ -121,10 +102,12 @@ struct AutoSleepPolicyTests {
         let expected = AutoSleepPolicy(
             start: try #require(TimeOfDay(hour: 21, minute: 30)), end: try #require(TimeOfDay(hour: 7, minute: 15)),
             mode: .endOfChapter, rewindOnExpiry: 120)
+        let noRewind = AutoSleepPolicy(start: expected.start, end: expected.end, mode: .endOfChapter, rewindOnExpiry: 0)
+        #expect(noRewind.rewindOnExpiry == nil, "Only positive rewinds")
         #expect(
             options
                 == SleepTimerOptions(
-                    fadesOut: false, playsAlmostDoneChime: true, playsResetFeedback: false, shakeSensitivity: nil,
+                    fadesOut: false, playsAlmostDoneChime: true, playsResetFeedback: false,
                     autoSleep: expected))
     }
 }

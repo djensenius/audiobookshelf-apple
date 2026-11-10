@@ -12,7 +12,7 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 public protocol SleepTimerFeedback: AnyObject {
     /// The almost-done chime, ``SleepTimer/chimeLeadTime`` seconds before the timer pauses playback.
     func playChime()
-    /// Confirms that a shake reset the timer.
+    /// Confirms that ``SleepTimer/reset()`` restarted the timer.
     func playResetFeedback()
 }
 
