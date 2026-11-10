@@ -303,6 +303,35 @@ import Testing
         #expect(record.updatedAt == later)
     }
 
+    @Test func updatePartChangesOnlyItsFlags() async throws {
+        let (store, _) = try makeStore()
+        var running = Self.part(state: .running)
+        running.taskIdentifier = 4
+        running.lastError = "lost"
+        running.hasResumeData = true
+        running.bytesWritten = 20
+        running.retryCount = 2
+        let completed = Self.part(trackIndex: 2, filename: "b.mp3")
+        let created = try await store.upsertRecord(
+            Self.record(key: key, parts: [running, completed], state: .downloading), now: now
+        ).record
+        #expect(try await store.completePart(partID: completed.id, finalBytes: 10, now: now))
+        let later = now.addingTimeInterval(5)
+
+        #expect(try await store.updatePart(partID: running.id, hasResumeData: false, now: later))
+        #expect(try await store.updatePart(partID: running.id, retryCount: 0, now: later))
+        let record = try #require(try await store.record(id: created.id))
+        var expected = running
+        expected.hasResumeData = false
+        expected.retryCount = 0
+        #expect(record.parts.first == expected)
+        #expect(record.updatedAt == later)
+
+        #expect(try await store.updatePart(partID: completed.id, retryCount: 3) == false)
+        #expect(try await store.updatePart(partID: UUID(), hasResumeData: false) == false)
+        #expect(try await store.part(id: completed.id)?.retryCount == 0)
+    }
+
     /// The task finishes before its last throttled progress write lands, with an unknown length:
     /// the final size comes with the completion, and a late progress write can't change it.
     @Test func completionBeforeFinalProgressRecordsFinalSize() async throws {

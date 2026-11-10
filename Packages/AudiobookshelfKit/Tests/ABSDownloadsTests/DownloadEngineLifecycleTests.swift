@@ -453,6 +453,62 @@ import Testing
             !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
     }
 
+    /// A part whose transfer fails while its resume data is being discarded keeps that failure
+    /// (and its retry): the discard only clears the part's resume-data flag.
+    @Test func discardResumeDataKeepsAStateWrittenMeanwhile() async throws {
+        let keyStore = FlakyKeyStore()
+        let gate = StubGate()
+        let harness = try await DownloadHarness(keyStore: keyStore) {
+            switch $0.stubCount {
+            case 1: .failure(resumeData: Data("resume-1".utf8))
+            case 2: .failure(resumeData: Data("resume-2".utf8), gate: gate)
+            default: .status(200)
+            }
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let (holding, holdStarted) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let holdsNextRead = Mutex(false)
+        let engine = harness.makeEngine(
+            clock: SignallingClock(),
+            readRecords: { store in
+                let records = try await store.allRecords()
+                if holdsNextRead.withLock({ holds in
+                    defer { holds = false }
+                    return holds
+                }) {
+                    holdStarted.yield()
+                    await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+                }
+                return records
+            })
+        await engine.start(partIDs: [partID])
+        #expect(await engine.nextFailure(willRetry: true) != nil)
+        // The Keychain is unavailable for the restart, so the part runs and keeps its flag.
+        keyStore.failNextLoad()
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(2)
+        try #require(try await harness.store.part(id: partID)?.hasResumeData == true)
+
+        // The discard's read is held while the transfer fails and its retry is scheduled.
+        holdsNextRead.withLock { $0 = true }
+        let discarding = Task { await engine.discardResumeData(connectionID: harness.connectionID) }
+        _ = await holding.first { _ in true }
+        gate.open()
+        #expect(await engine.nextFailure(willRetry: true) != nil)
+        release.open()
+        await discarding.value
+
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .failed)
+        #expect(part.taskIdentifier == nil)
+        #expect(part.lastError != nil)
+        #expect(!part.hasResumeData)
+        #expect(
+            !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
+    }
+
     @Test func partDeletedWhileLaunchingIsNotRequested() async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let partID = UUID()
@@ -522,6 +578,60 @@ import Testing
         #expect(harness.session?.resumedData == [Data("resume-b".utf8)])
     }
 
+    /// A resume while a part fails for good (its sibling's stop still under way) skips the
+    /// failing part, then starts it once the failure is settled.
+    @Test func resumeDuringAPermanentFailureRestartsTheFailingPart() async throws {
+        let first = StubGate()
+        let later = StubGate()
+        let never = StubGate()
+        let seen = Mutex<Set<String>>([])
+        let harness = try await DownloadHarness { request in
+            let path = request.url?.path() ?? ""
+            let isFirst = seen.withLock { $0.insert(path).inserted }
+            if path.contains("/file/1/") {
+                return isFirst ? .status(404, body: Data(), gate: first) : .status(200, gate: later)
+            }
+            return isFirst ? .status(200, gate: never) : .status(200)
+        }
+        let failing = UUID()
+        let sibling = UUID()
+        let record = try await harness.addRecord(parts: [failing, sibling])
+        let (reading, readDone) = AsyncStream.makeStream(of: Void.self)
+        let (cancelling, cancelStarted) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let isWatching = Mutex(false)
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                let records = try await store.allRecords()
+                if isWatching.withLock({ $0 }) { readDone.yield() }
+                return records
+            },
+            cancel: { task in
+                cancelStarted.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+                return await task.cancelByProducingResumeData()
+            })
+        await engine.start(partIDs: [failing, sibling])
+        await harness.waitForRequests(2)
+
+        // The 404 fails the record for good; the sibling's stop is held.
+        first.open()
+        _ = await cancelling.first { _ in true }
+        isWatching.withLock { $0 = true }
+        let resuming = Task { try await engine.resume(recordID: record.id) }
+        // The resume's start has read the downloads; a hop lets it find the failing part settling.
+        _ = await reading.first { _ in true }
+        _ = await engine.backgroundWaiterCount
+        release.open()
+
+        #expect(try await resuming.value)
+        await engine.processPendingEvents()
+        try #require(try await harness.store.part(id: failing)?.state == .running)
+        later.open()
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 4)
+    }
+
     @Test(arguments: [DownloadState.paused, .failed])
     func activateDoesNotRestartStoppedRecords(state: DownloadState) async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
@@ -589,6 +699,39 @@ import Testing
         let part = try #require(try await harness.store.part(id: partID))
         #expect(part.state == .queued)
         #expect(try await harness.store.record(id: record.id)?.state == state)
+        #expect(harness.credentials.calls.isEmpty)
+    }
+
+    /// A survivor of a stopped download that finished after its transfer's start marker moved
+    /// its file into place. Its adoption is refused, so activation doesn't complete the part
+    /// from that file, although the part was running when the downloads were read.
+    @Test(arguments: [DownloadState.paused, .failed])
+    func stoppedSurvivorsFileDoesNotCompleteItsPart(state: DownloadState) async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: state, partState: .running)
+        try harness.locations.markTransferStart(partID: partID)
+        let base = harness.base
+        let box = Mutex<DownloadEngine?>(nil)
+        // The leftover finishes, and its refused adoption is handled, before the tasks are listed.
+        let engine = harness.makeEngine(
+            listing: {
+                await harness.waitForCompletions(1)
+                await box.withLock { $0 }?.processPendingEvents()
+            },
+            prepare: { stub in
+                let url = URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!
+                stub.leaveTask(URLRequest(url: url), description: partID.uuidString)
+            })
+        box.withLock { $0 = engine }
+
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+
+        #expect(harness.fileExists("li_1/1.mp3"))
+        #expect(try await harness.store.record(id: record.id)?.state == state)
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
         #expect(harness.credentials.calls.isEmpty)
     }
 

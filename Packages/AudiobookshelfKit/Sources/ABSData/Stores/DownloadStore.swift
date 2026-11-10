@@ -270,6 +270,24 @@ import SwiftData
         }
     }
 
+    /// Changes a part's resume-data flag and retry count, each when given, in one write. Its
+    /// state, task identifier, error and progress are left as they are, so a change made from an
+    /// older read can't undo a transition written since (a part that failed meanwhile, say).
+    ///
+    /// - Returns: `false` when the part doesn't exist or is `.completed`.
+    @discardableResult
+    public func updatePart(
+        partID: UUID, hasResumeData: Bool? = nil, retryCount: Int? = nil, now: Date = .now
+    ) throws -> Bool {
+        try commit {
+            guard let part = try fetchPart(id: partID), part.stateValue != .completed else { return false }
+            if let hasResumeData { part.hasResumeData = hasResumeData }
+            if let retryCount { part.retryCount = retryCount }
+            part.record?.updatedAt = now
+            return true
+        }
+    }
+
     /// Marks a part `.completed` with its final size, in one write: `bytesWritten` becomes
     /// `finalBytes`, and so does `expectedBytes` when it was unknown (≤ 0, as
     /// `NSURLSessionTransferSizeUnknown`). `finalBytes` is authoritative, even below the last

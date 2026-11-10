@@ -145,7 +145,11 @@ iOS.
   401 for a token that was already replaced doesn't count.
 - 408, 429, 5xx, network errors, an unexpected body or a size mismatch are retried after
   1–2, 2–4, 4–8, 8–16 and 16–32 seconds. If it fails after the fifth retry, the part
-  fails. In the foreground the engine waits out the delay itself. After `deactivate()`
+  fails. The count is saved with the part (`retryCount`), so a relaunch continues it: a
+  part that failed twice before the app was terminated waits 4–8 seconds after its next
+  failure, and one that used up its retries fails for good. Only starting the download
+  again (`start(partIDs:)` or `resume(recordID:)`) starts the count over; `activate()`
+  doesn't. In the foreground the engine waits out the delay itself. After `deactivate()`
   (and during a background wake) it creates the part's next task at once, with the delay
   as the task's `earliestBeginDate`, before it lets the wake end: iOS may suspend the
   process afterwards, and the system starts that task on time without it. A relaunch
@@ -159,7 +163,9 @@ iOS.
   and is retried like the others; after the fifth retry the part fails for good with the
   `store` code.
 - When a part fails for good, the engine stops the download's other parts, keeps their
-  resume data, and marks the download failed. Starting it again continues those parts.
+  resume data, and marks the download failed. Starting it again continues those parts. A
+  `resume(recordID:)` that comes while those parts are still stopping also restarts the
+  part that failed, once its failure is recorded.
 - If `nsurlsessiond` disconnects the session (`backgroundSessionWasDisconnected`, or the
   session becomes invalid), the engine creates it again after a retry delay (1–2, 2–4,
   then 4–8 seconds) and restarts the affected parts without counting a failure. After
@@ -188,6 +194,10 @@ iOS.
   small download, go to the Home Screen, and when the wake stops at the breakpoint, stop
   the app from Xcode. Open the app again: the download completes without a new request in
   the server log.
+- A file already in `Downloads/` only completes its part at activation if the store still
+  has the part running in a download that isn't paused or failed, checked when the file is
+  found. A file that a surviving transfer of a paused or failed download moved stays
+  unused, and the download stays paused or failed.
 - At activation, a part the store has "downloading" without a task is queued again only
   if the store still has it running then: a transfer that failed for good while the
   engine listed the session's tasks keeps its failed state and error.
@@ -212,6 +222,9 @@ iOS.
   session. Its events wait for a later session, and the engine doesn't let them end a later
   wake early, even when they arrive while that wake waits: an abandoned wake's
   events-finished call is matched first.
+- Discarding a connection's resume data (`discardResumeData(connectionID:)`, on sign-out or
+  a credential change) deletes the sealed files and clears only each part's resume-data
+  flag: a part that fails or starts meanwhile keeps its new state, error and retry.
 
 ## Known limits
 

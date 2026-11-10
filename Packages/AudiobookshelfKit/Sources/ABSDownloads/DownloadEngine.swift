@@ -79,8 +79,9 @@ public struct DownloadProgress: Sendable, Equatable {
 ///   the credentials and network access it was created with are current (ADR 0007).
 /// - Failures are retried with ``RetryPolicy`` backoff: in the foreground after a wait in the
 ///   process, in the background as a new task whose `earliestBeginDate` is the delay, created
-///   before the wake is released. When a part fails for good, its record fails and its other
-///   parts stop, keeping their resume data.
+///   before the wake is released. The count is the store's `retryCount`, so it carries over a
+///   relaunch; only ``start(partIDs:)`` (and ``resume(recordID:)``) start it over. When a part
+///   fails for good, its record fails and its other parts stop, keeping their resume data.
 /// - A file a transfer moved into place, but whose completion wasn't saved before the process
 ///   ended, completes its part at the next activation. Only the part's current transfer
 ///   counts: each launch starts a new generation (see ``DownloadLocations``), so a file from an
@@ -163,6 +164,9 @@ public actor DownloadEngine {
     /// Parts being completed or failed for good; they keep their context (so a concurrent
     /// read doesn't bring back their old state) but can't launch.
     private var settling: Set<UUID> = []
+    /// Parts a ``start(partIDs:)`` asked for while they were settling; one that was failing for
+    /// good starts once that is settled.
+    private var startsAfterSettling: Set<UUID> = []
     /// Moved files whose completion couldn't be saved yet, with their sizes. The part stays
     /// settling until ``saveCompletion(_:)`` succeeds.
     private var unsavedCompletions: [UUID: Int64] = [:]
@@ -184,6 +188,9 @@ public actor DownloadEngine {
     /// Records being finalised, so a completion and ``activate()`` don't finalise one twice.
     private var finalising: Set<UUID> = []
     private var retries: [UUID: Task<Void, Never>] = [:]
+    /// Failures counted toward ``RetryPolicy``'s limit: the store's `retryCount`, read with the
+    /// part's context, so a relaunch doesn't start the count over. ``start(partIDs:)`` resets
+    /// both.
     private var failures: [UUID: Int] = [:]
     private var authRetried: Set<UUID> = []
     /// Tasks of the current session whose completion is ignored (cancelled or not ours).
@@ -295,26 +302,38 @@ public actor DownloadEngine {
     }
 
     /// Starts (or restarts) the given parts; parts that are already transferring are left
-    /// alone. Retry counts start over. Set their records to `queued` (or `downloading`)
-    /// first: ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses parts of `paused`
-    /// and `failed` records, and a `failed` state the engine couldn't save is dropped.
+    /// alone. Retry counts start over, in the store too. Set their records to `queued` (or
+    /// `downloading`) first: ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses parts
+    /// of `paused` and `failed` records, and a `failed` state the engine couldn't save is
+    /// dropped. A part being failed for good starts once that is settled.
     public func start(partIDs: [UUID]) async {
         guard await ensureSession() else { return }
+        let records: [DownloadRecordDTO]
         do {
-            try await loadRecords()
+            records = try await loadRecords()
         } catch {
             logError("Couldn't read downloads", error)
             return
         }
+        // A settling part is being completed or failed for good. One failing for good stops its
+        // siblings, then forgets its context, so it starts once that is settled
+        // (``failPermanently(_:code:message:)``). Which parts settle is noted before any launch
+        // is awaited.
+        var settlingParts: Set<UUID> = []
         for partID in partIDs {
             if let recordID = contexts[partID]?.recordID { pendingRecordFailures.remove(recordID) }
+            if settling.contains(partID) { settlingParts.insert(partID) }
         }
-        // A settling part is being completed or failed; its retry may be saving its completion.
-        for partID in partIDs where tasks[partID] == nil && !settling.contains(partID) {
+        startsAfterSettling.formUnion(settlingParts)
+        let retried = Set(records.flatMap(\.parts).filter { $0.retryCount > 0 }.map(\.id))
+        for partID in partIDs where tasks[partID] == nil && !settlingParts.contains(partID) {
             retries.removeValue(forKey: partID)?.cancel()
-            failures[partID] = nil
+            let hasFailed = failures.removeValue(forKey: partID) != nil || retried.contains(partID)
             freeRestarts[partID] = nil
             authRetried.remove(partID)
+            if hasFailed {
+                await persist { _ = try await $0.updatePart(partID: partID, retryCount: 0) }
+            }
             await launch(partID)
         }
     }
@@ -333,7 +352,6 @@ public actor DownloadEngine {
             retries.removeValue(forKey: partID)?.cancel()
             launching[partID] = nil
             deferredLaunches.remove(partID)
-            failures[partID] = nil
             authRetried.remove(partID)
             throttle.reset(partID)
             let task = tasks.removeValue(forKey: partID)
@@ -426,18 +444,16 @@ public actor DownloadEngine {
     }
 
     /// Deletes the resume data of every part of `connectionID`'s downloads, for sign-out,
-    /// removal or a credential change (ADR 0003). Their next start is a fresh request.
+    /// removal or a credential change (ADR 0003). Their next start is a fresh request. Only the
+    /// parts' resume-data flags are written, so a part that failed or started since the
+    /// downloads were read keeps its state.
     public func discardResumeData(connectionID: UUID) async {
-        let records = (try? await store.records(serverConnectionID: connectionID)) ?? []
+        let records = ((try? await readRecords(store)) ?? []).filter { $0.key.serverConnectionID == connectionID }
         for part in records.flatMap(\.parts)
         where part.state != .completed && (part.hasResumeData || contexts[part.id]?.hasResumeData == true) {
             vault.delete(partID: part.id)
             contexts[part.id]?.hasResumeData = false
-            await persist {
-                try await $0.setPartState(
-                    part.state, partID: part.id, taskIdentifier: part.taskIdentifier, error: part.lastError,
-                    hasResumeData: false)
-            }
+            await persist { _ = try await $0.updatePart(partID: part.id, hasResumeData: false) }
         }
     }
 
@@ -522,14 +538,18 @@ public actor DownloadEngine {
         }
         // A part left running without a transfer: either its transfer moved the file, but iOS
         // ended the process before the completion was saved, or the app ended before the system
-        // kept the transfer. The first completes; the second is queued again, so a restart can
-        // begin it, but only while the store still has it running: a part that failed for good
-        // while the tasks were listed keeps its state.
+        // kept the transfer. The first completes, but only while the store still has the part
+        // running in a download that isn't stopped: a file moved by a survivor whose adoption
+        // was refused isn't used. The second is queued again, so a restart can begin it, but
+        // only while the store still has it running: a part that failed for good while the
+        // tasks were listed keeps its state.
         for part in records.flatMap(\.parts)
         where part.state == .running && tasks[part.id] == nil && launching[part.id] == nil
             && !settling.contains(part.id)
         {
-            if let context = contexts[part.id], let bytes = movedFileSize(part.id, context) {
+            if let context = contexts[part.id], let bytes = movedFileSize(part.id, context),
+                await isStillRunning(part.id)
+            {
                 Log.downloads.info("A download's file is already in place; completing it without a request")
                 await complete(part.id, bytes: bytes)
             } else {
@@ -537,6 +557,18 @@ public actor DownloadEngine {
             }
         }
         return true
+    }
+
+    /// Whether the store still has `partID` running in a download that isn't stopped or failed
+    /// for good, checked in one write by ``DownloadStore/beginRunning(partID:expecting:now:)``
+    /// (which leaves a running part running). `false` when the store can't be read.
+    private func isStillRunning(_ partID: UUID) async -> Bool {
+        do {
+            return try await store.beginRunning(partID: partID, expecting: [.running], now: now())
+        } catch {
+            logError("Couldn't check a download's state", error)
+            return false
+        }
     }
 
     private func startEventLoop() {
@@ -558,7 +590,8 @@ public actor DownloadEngine {
     /// does; if the part completed or was deleted, it is cancelled. A result it finished with
     /// meanwhile is handled only once the transfer is adopted: otherwise only its resume data
     /// is kept, and a file it moved stays where it is until the part's next transfer replaces
-    /// it (that transfer starts a new generation, so the file isn't reused; see
+    /// it. Activation doesn't complete the part from that file (see ``isStillRunning(_:)``), and
+    /// the next transfer starts a new generation, so the file isn't reused (see
     /// ``movedFileSize(_:_:)``).
     private func reattach(_ task: URLSessionDownloadTask, partID: UUID) async {
         adopting.insert(task.taskIdentifier)
@@ -663,7 +696,8 @@ public actor DownloadEngine {
         dropSession()
     }
 
-    /// Adds a context for each part not yet known that hasn't completed.
+    /// Adds a context for each part not yet known that hasn't completed, with the failures the
+    /// store counted for it.
     @discardableResult
     private func loadRecords() async throws -> [DownloadRecordDTO] {
         let records = try await readRecords(store)
@@ -673,6 +707,7 @@ public actor DownloadEngine {
                 contexts[part.id] = PartContext(
                     recordID: record.id, connectionID: record.key.serverConnectionID, serverPath: part.serverPath,
                     destination: destination, expectedBytes: part.expectedBytes, hasResumeData: part.hasResumeData)
+                failures[part.id] = part.retryCount > 0 ? part.retryCount : nil
                 delegate.setTarget(
                     destination.map { .init(destination: $0, expectedBytes: part.expectedBytes) }, for: part.id)
             }
@@ -1085,6 +1120,7 @@ public actor DownloadEngine {
         }
         guard unsavedCompletions.removeValue(forKey: partID) != nil else { return }
         locations.clearTransferMarker(partID: partID)
+        startsAfterSettling.remove(partID)
         forget(partID)
         settling.remove(partID)
         guard completed else { return }
@@ -1204,7 +1240,8 @@ public actor DownloadEngine {
     /// Fails the part and its record for good, and stops the record's other parts, keeping
     /// their resume data, so a retry of the record continues them. The record fails first, so
     /// a concurrent launch of another part is refused; until that is saved, the engine
-    /// launches none of them.
+    /// launches none of them. A ``start(partIDs:)`` of the part meanwhile (a resume of the
+    /// record while the siblings stop) starts it once this is done.
     private func failPermanently(_ partID: UUID, code: DownloadFailureCode, message: String) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
         tasks[partID] = nil
@@ -1220,6 +1257,10 @@ public actor DownloadEngine {
         settling.remove(partID)
         updateContinuation.yield(
             .partFailed(partID: partID, recordID: context.recordID, code: code, message: message, willRetry: false))
+        // A resume (or start) while the siblings were stopping skipped this part: start it now.
+        if startsAfterSettling.remove(partID) != nil {
+            await start(partIDs: [partID])
+        }
     }
 
     // MARK: - Helpers

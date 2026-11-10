@@ -107,6 +107,44 @@ import Testing
         #expect(harness.credentials.calls == [nil, nil, nil])
     }
 
+    /// Failures counted before a relaunch still count: a new engine continues the backoff from
+    /// the store's retry count and fails for good at the limit. A resume starts the count over.
+    @Test(arguments: [2, 5])
+    func retriesCountedBeforeARelaunchStillCount(earlierRetries: Int) async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(503) : .status(200, gate: gate) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading)
+        for _ in 0..<earlierRetries {
+            _ = try await harness.store.beginRunning(partID: partID, expecting: [.queued, .failed])
+            try await harness.store.setPartState(.failed, partID: partID, taskIdentifier: nil, error: "lost")
+        }
+        try #require(try await harness.store.part(id: partID)?.retryCount == earlierRetries)
+        let engine = harness.makeEngine()
+
+        #expect(await engine.activate())
+
+        let isLast = earlierRetries == RetryPolicy.default.maxRetries
+        let failure = await engine.next {
+            if case .partFailed = $0 { true } else { false }
+        }
+        #expect(
+            failure
+                == .partFailed(
+                    partID: partID, recordID: record.id, code: .transfer, message: "The server returned HTTP 503.",
+                    willRetry: !isLast))
+        if isLast {
+            #expect(harness.requests.count == 1)
+            #expect(try await engine.resume(recordID: record.id))
+        }
+        await harness.waitForRequests(2)
+        // Default policy with random 0.5: the third retry waits half of 8 s plus a quarter.
+        #expect(harness.clock.sleeps == (isLast ? [] : [.seconds(6)]))
+        #expect(try await harness.store.part(id: partID)?.retryCount == (isLast ? 0 : earlierRetries + 1))
+        gate.open()
+        #expect(await engine.nextRecordComplete() != nil)
+    }
+
     @Test func failedRetryStateWriteDoesNotStrandThePart() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(503, gate: gate) : .status(200) }
@@ -526,7 +564,9 @@ import Testing
         let part = try #require(try await harness.store.part(id: partID))
         #expect(part.state == .running)
         #expect(part.hasResumeData)
-        #expect(part.retryCount == failed.retryCount)
+        // A start begins the retry count again.
+        #expect(failed.retryCount == 1)
+        #expect(part.retryCount == 0)
         gate.open()
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.session?.resumedData == [])
