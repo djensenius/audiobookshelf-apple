@@ -191,11 +191,55 @@ struct AudioEngineTests {
 
         engine.play()
         #expect(engine.state == .ended)
+        #expect(engine.isPlaybackRequested)
+
+        // The play request made after the end is honoured by the next seek.
+        #expect(await engine.seek(to: 0.5) == .completed)
+        #expect(engine.currentTrackIndex == 0)
+        #expect(engine.player.items().count == 3)
+        #expect(await eventually { engine.state == .playing })
+    }
+
+    @Test(.tags(.realtimeAudio)) func pauseAfterEndCancelsTheRememberedPlay() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        try await engine.load(fixture.source, at: 8.8)
+        engine.setRate(2)
+        engine.play()
+        #expect(await eventually { engine.state == .ended })
+
+        engine.play()
+        engine.pause()
 
         #expect(await engine.seek(to: 0.5) == .completed)
         #expect(engine.state == .paused)
-        #expect(engine.currentTrackIndex == 0)
-        #expect(engine.player.items().count == 3)
+        #expect(engine.player.rate == 0)
+    }
+
+    @Test(.tags(.realtimeAudio)) func lastTrackEndingAfterAnUnreportedSkipFails() async throws {
+        let fixture = try AudioFixture()
+        try FileManager.default.removeItem(at: fixture.urls[1])
+        // No `currentItem` notifications and no ticks: nothing notices that the queue skipped the
+        // failed track 1 before track 2 plays to its end.
+        let engine = AudioEngine(
+            audioSession: nil, timeObserverInterval: 0.05, makePlayer: { UnobservedAdvancePlayer() })
+        engine.player.isMuted = true
+        engine.player.sourceClock = CMClockGetHostTimeClock()
+        engine.errorLogFetcher = { _ in [] }
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        try await engine.load(fixture.source, at: 2.9)
+        try await waitUntil { engine.player.items().count == 3 && engine.player.items()[1].status == .failed }
+        engine.setRate(2)
+        engine.play()
+
+        #expect(await eventually(timeout: .seconds(4)) { if case .failed = engine.state { true } else { false } })
+        guard case .failed(.itemFailed(trackIndex: 1, _)) = engine.state else {
+            Issue.record("expected itemFailed(1), got \(engine.state)")
+            return
+        }
+        #expect(!events.contains(.endOfMedia))
+        #expect(!engine.isPlaybackRequested)
     }
 
     @Test(.tags(.realtimeAudio)) func skipsNonPlayableTracks() async throws {
@@ -793,7 +837,7 @@ final class FailablePlayer: AVQueuePlayer {
 
 /// An `AVQueuePlayer` that never announces `currentItem` changes, so only the periodic time
 /// observer can notice that the queue advanced.
-final class SilentAdvancePlayer: AVQueuePlayer {
+class SilentAdvancePlayer: AVQueuePlayer {
     override func addObserver(
         _ observer: NSObject, forKeyPath keyPath: String, options: NSKeyValueObservingOptions = [],
         context: UnsafeMutableRawPointer?
@@ -811,6 +855,18 @@ final class SilentAdvancePlayer: AVQueuePlayer {
         guard keyPath != "currentItem" else { return }
         super.removeObserver(observer, forKeyPath: keyPath)
     }
+}
+
+/// A ``SilentAdvancePlayer`` that also never runs periodic time observers, so nothing notices a
+/// queue advance at all.
+final class UnobservedAdvancePlayer: SilentAdvancePlayer {
+    override func addPeriodicTimeObserver(
+        forInterval interval: CMTime, queue: dispatch_queue_t?, using block: @escaping @Sendable (CMTime) -> Void
+    ) -> Any {
+        NSObject()
+    }
+
+    override func removeTimeObserver(_ observer: Any) {}
 }
 
 /// Creates ``FailablePlayer``s for the engine and keeps them.

@@ -134,11 +134,15 @@ public final class AudioEngine: AudioEngineProtocol {
         refreshState()
     }
 
-    /// Starts playback at ``defaultRate``. Does nothing without media, after a failure or once the
-    /// media has ended (seek first).
+    /// Starts playback at ``defaultRate``. Does nothing without media or after a failure. Once the
+    /// media has ended, the request is kept and the next completed seek starts playback.
     public func play() {
-        guard timeline != nil, failure == nil, !hasEnded else { return }
+        guard timeline != nil, failure == nil else { return }
         isPlaybackRequested = true
+        if hasEnded {
+            refreshState()
+            return
+        }
         // Play only once the position is where the user wants it (ADR 0007): a load or seek in
         // flight starts the player when it completes, and an interrupted seek is retried first.
         if isLoading || isSeeking {
@@ -611,9 +615,16 @@ public final class AudioEngine: AudioEngineProtocol {
     }
 
     private func itemDidPlayToEnd(_ id: ObjectIdentifier) {
-        guard let entry = queued[id], let timeline,
+        // A reported or pending failure means playback did not reach the end.
+        guard failure == nil, pendingItemFailure == nil, let entry = queued[id], let timeline,
             entry.trackIndex == queued.values.map(\.trackIndex).max()
         else { return }
+        // So does a failed track the queue skipped without the engine noticing yet.
+        if let skipped = queued.values.filter({ $0.item.status == .failed }).min(by: { $0.trackIndex < $1.trackIndex })
+        {
+            reportItemFailure(trackIndex: skipped.trackIndex, item: skipped.item)
+            return
+        }
         let track = timeline.tracks[entry.trackIndex]
         hasEnded = true
         isPlaybackRequested = false
