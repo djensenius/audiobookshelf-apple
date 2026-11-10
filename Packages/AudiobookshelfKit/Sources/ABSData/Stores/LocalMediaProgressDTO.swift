@@ -52,6 +52,18 @@ public struct LocalMediaProgressDTO: Sendable, Equatable, Identifiable {
 
     /// When `isFinished` was saved, dated like ``audioSavedAt``; `nil` when it never was.
     public var finishedSavedAt: Date? { ProgressSyncState(self).savedAt(.finished) }
+
+    /// Whether `progress` holds the audio position and duration this row last saw from the server
+    /// (``serverBaseline``), to the tolerance a sync merge uses. Then nothing from elsewhere has
+    /// changed the audio, however new `progress.lastUpdate` is: it is row-wide. `false` when the row
+    /// has no baseline.
+    public func serverAudioUnchanged(in progress: MediaProgress) -> Bool {
+        // Only the audio fields are compared.
+        let server = ProgressBaseline(
+            currentTime: progress.currentTime, progress: progress.progress, duration: progress.duration,
+            isFinished: progress.isFinished, lastUpdate: .distantPast)
+        return ProgressSyncState(self).serverUnchanged(.audio, in: server)
+    }
 }
 
 extension LocalMediaProgressDTO {

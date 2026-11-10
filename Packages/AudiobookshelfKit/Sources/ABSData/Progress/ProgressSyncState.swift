@@ -319,7 +319,7 @@ struct ProgressSyncState: Sendable, Equatable {
             return
         }
         // The server hasn't changed the group since we last saw it: keep the local edit.
-        if let baseline = serverBaseline, Self.matches(server, baseline, group) { return }
+        if serverUnchanged(group, in: server) { return }
         // The server value may be one of our dropped sends, or a side effect of our PATCH. Even
         // one matching a send we hold may be the echo of a dropped send with the same value, the
         // held one never delivered: only an acknowledgement (``acknowledge``) settles the group.
@@ -417,6 +417,13 @@ struct ProgressSyncState: Sendable, Equatable {
             guard let baseline = serverBaseline, baseline.duration > 0 || baseline.currentTime > 0 else { return nil }
         }
         return [edited, serverBaseline?.lastUpdate].compactMap { $0 }.max()
+    }
+
+    /// Whether `server` holds the group as the baseline does: nothing from elsewhere has changed it
+    /// since this row last saw the server, whatever `server.lastUpdate`, which is row-wide, says.
+    /// `false` without a baseline.
+    func serverUnchanged(_ group: ProgressGroups, in server: ProgressBaseline) -> Bool {
+        serverBaseline.map { Self.matches(server, $0, group) } ?? false
     }
 
     private mutating func take(_ groups: ProgressGroups, from server: ProgressBaseline) {
