@@ -63,10 +63,23 @@ public actor APIClient {
         tokenProvider: any TokenProvider,
         sessionConfiguration: URLSessionConfiguration = .absConnection()
     ) {
+        self.init(
+            configuration: configuration, tokenProvider: tokenProvider, sessionConfiguration: sessionConfiguration,
+            cookieStorage: nil)
+    }
+
+    /// - Parameter cookieStorage: The cookie jar to use, for example one shared by the clients
+    ///   for the hops of one redirect chain; `nil` for a new jar.
+    init(
+        configuration: APIClientConfiguration,
+        tokenProvider: any TokenProvider,
+        sessionConfiguration: URLSessionConfiguration,
+        cookieStorage: HTTPCookieStorage?
+    ) {
         self.configuration = configuration
         self.tokenProvider = tokenProvider
         let sessionConfiguration = sessionConfiguration.copy() as? URLSessionConfiguration ?? .absConnection()
-        sessionConfiguration.httpCookieStorage = URLSessionConfiguration.ephemeral.httpCookieStorage
+        sessionConfiguration.httpCookieStorage = cookieStorage ?? URLSessionConfiguration.ephemeral.httpCookieStorage
         sessionConfiguration.timeoutIntervalForRequest = configuration.timeout
         session = URLSession(
             configuration: sessionConfiguration, delegate: RedirectPolicyDelegate(), delegateQueue: nil)
