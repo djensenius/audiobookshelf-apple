@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-09
-- Issue: #TBD
+- Issue: #42 (P3-02)
 
 ## Context
 
@@ -23,10 +23,10 @@ choice is [0006](0006-now-playing.md); download mechanics are owned by
   ([`components/covers/AuthorImage.vue`](../../components/covers/AuthorImage.vue),
   lines 57–67). If `media.coverPath` is an absolute `http(s)` URL, it is used
   directly.
-- `?token=` is added only for servers older than 2.17
+- Legacy adds `?token=` for servers older than 2.17
   ([`store/index.js`](../../store/index.js), `getDoesServerImagesRequireToken`, line
-  95). [`ios/App/Shared/util/NowPlayingInfo.swift`](../../ios/App/Shared/util/NowPlayingInfo.swift)
-  (lines 19–36) applies the same rule.
+  95; also [`NowPlayingInfo.swift`](../../ios/App/Shared/util/NowPlayingInfo.swift),
+  lines 19–36). That path is dead code below our 2.26.0 minimum and is not ported.
 - The legacy app never sends `width`, so every cover is the server's default
   400 px rendition, whether it is shown in a 50 pt row or a full-width iPad grid.
   The player passes `raw` and gets the original file at full resolution
@@ -83,14 +83,12 @@ release v2.37.2):
   Every distinct width a client asks for adds a file to the server's disk.
 - `GET /api/authors/:id/image` takes the same parameters
   ([`AuthorController.getImage`](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/controllers/AuthorController.js#L391-L419)).
-- **Authentication:**
-  - Since v2.17.0, `GET` on both image routes needs no authentication
-    ([`Auth.ignorePatterns`, v2.17.0](https://github.com/advplyr/audiobookshelf/blob/v2.17.0/server/Auth.js#L21);
-    [current](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/Auth.js#L21)).
-  - In v2.16.2 they need a JWT, which is accepted from either
-    `Authorization: Bearer` or `?token=`
-    ([v2.16.2 `Auth.js`](https://github.com/advplyr/audiobookshelf/blob/v2.16.2/server/Auth.js#L41)).
-    So older servers do **not** need the token in the URL.
+- **Authentication:** since v2.17.0, `GET` on both image routes needs no
+  authentication
+  ([`Auth.ignorePatterns`, v2.17.0](https://github.com/advplyr/audiobookshelf/blob/v2.17.0/server/Auth.js#L21);
+  [current](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/Auth.js#L21)).
+  The minimum supported server is 2.26.0 ([0007](0007-streaming.md)), so image
+  requests never need a token. The legacy pre-2.17 `?token=` rule is not ported.
 
 **Platform** (verified in the Xcode 27.2 SDKs):
 
@@ -102,13 +100,10 @@ release v2.37.2):
     our minimum OS.
   - It still produces only a SwiftUI `Image`. It has no downsampling and no cache
     of its own beyond the session's `URLCache`.
-- **Now Playing:**
-  - The NowPlaying framework provides
-    `Artwork(id:artworkProvider: @Sendable (CGSize) async throws -> ArtworkRepresentation)`
-    and `ArtworkRepresentation(cgImage:)`.
-  - MediaPlayer provides `MPMediaItemArtwork(boundsSize:requestHandler:)`, which
-    returns a `UIImage` on iOS and an `NSImage` on macOS (`MPMediaItem.h`,
-    lines 222 and 231).
+- **Now Playing:** the NowPlaying framework provides
+  `Artwork(id:artworkProvider: @Sendable (CGSize) async throws -> ArtworkRepresentation)`,
+  and `ArtworkRepresentation` is built with `init(cgImage:)` or `init(data:)`.
+  MediaPlayer is not used ([0006](0006-now-playing.md)).
 - **CarPlay:**
   - `CPListItem` takes a `UIImage`, through `init(text:detailText:image:)` or
     `setImage(_:)`. The size limit is the runtime value
@@ -127,20 +122,19 @@ release v2.37.2):
   - The macOS 27.2 runtime lists `org.webmproject.webp` among
     `CGImageSourceCopyTypeIdentifiers()`.
 - **Image types:** `CGImage` is `Sendable` under Swift 6. It turns into
-  `Image(decorative:scale:orientation:)`, `UIImage(cgImage:scale:orientation:)`,
-  and `NSImage(cgImage:size:)`.
+  `Image(decorative:scale:orientation:)` and `UIImage(cgImage:scale:orientation:)`.
 - **Display scale:** `UIScreen.main` is deprecated (iOS 26), so the scale has to
   come from the environment or trait collection.
 
 ## Decision drivers
 
-1. **Correct auth on every supported server:** per-server custom headers on
-   every image request, no token in URLs, and no credentials sent to third-party
+1. **Correct auth on every supported server (2.26.0+):** per-server custom headers
+   on every image request, no tokens, and no credentials sent to third-party
    hosts.
 2. **Bounded memory** with a 2,000-item library on the smallest iPhone, including
    fast scrolling.
-3. **One image source for SwiftUI, CarPlay (`UIImage`), Now Playing (`CGImage` /
-   `UIImage` / `NSImage`), and widgets.** CarPlay can run with no window scene.
+3. **One image source for SwiftUI, CarPlay (`UIImage`), Now Playing (`CGImage`),
+   and widgets.** CarPlay can run with no window scene.
 4. **Offline:** downloaded items show covers with no network.
 5. **Sharp images at the size shown,** without making the server keep a rendition
    for every possible width.
@@ -151,8 +145,8 @@ release v2.37.2):
 
 ### Option 1: `AsyncImage(request:)` with a tuned `URLCache`
 
-Views use the OS 27 `AsyncImage(request:)` with a per-server `URLRequest` (custom
-headers, and a bearer header for servers older than 2.17). `.asyncImageURLSession`
+Views use the OS 27 `AsyncImage(request:)` with a per-server `URLRequest` carrying
+the server's custom headers. `.asyncImageURLSession`
 points at a session whose `URLCache` lives in the App Group container. Non-view
 consumers (CarPlay, Now Playing, widgets) each fetch through the same session and
 decode on their own.
@@ -194,7 +188,7 @@ The `ImagePipeline` actor does the following:
 - downsamples with ImageIO to the exact pixel size requested;
 - keeps decoded `CGImage`s in a cost-bounded in-memory LRU cache.
 
-A thin SwiftUI `CoverImage` view in `ABSUI` and adapters for CarPlay and Now
+A thin SwiftUI `CoverView` in `ABSUI` and adapters for CarPlay and Now
 Playing all call the pipeline.
 
 - Pros:
@@ -239,14 +233,24 @@ static, unauthenticated remote images (none are planned).
   - the `ImageKey`, `ImageVariant`, and `ImageSource` types;
   - the `CoverFileStore`;
   - the `ImageRequestBuilding` protocol, which maps an `ImageSource` to a
-    `URLRequest`.
-- `ABSAPI` implements `ImageRequestBuilding` per server: base URL including any
-  sub-path, custom headers, and the server-version rule.
-- `ABSUI` provides `CoverImage`, `AuthorImage`, `CoverPlaceholder`, and
-  `CoverPalette`. It receives the pipeline through the SwiftUI environment.
+    `URLRequest`;
+  - the `DownloadedCoverLookup` protocol, which returns the local cover file
+    URL and its `updatedAt` for an `ImageKey`, or `nil`.
+- `ABSAPI` implements `ImageRequestBuilding` in `MediaURLBuilder`, per server:
+  base URL including any sub-path, and custom headers.
+- `ABSAppModel` implements `DownloadedCoverLookup` over ABSData's
+  `LocalItemStore`: the downloaded item's cover relative path, resolved against
+  the downloads folder, and `LocalLibraryItem.coverUpdatedAt`. The pipeline
+  never imports `ABSDownloads` or `ABSData`.
+- `ABSUI` provides `CoverView`, `AuthorImageView`, `GroupCoverView`,
+  `CoverPlaceholder`, and `CoverPalette`. It receives the pipeline through the
+  SwiftUI environment. Issue #43 (P3-03) lists `ABSUI/Images/ImagePipeline.swift`;
+  per the module decision the actor lives in `ABSCore`, and only the views are in
+  `ABSUI`.
 - `ABSPlayback`, `ABSDownloads`, and the CarPlay code in the app target call the
-  pipeline directly.
-- `AppEnvironment` creates the pipeline once per process, outside any scene.
+  pipeline (`cgImage(for:size:)`) directly.
+- `AppEnvironment` creates the pipeline once per process, outside any scene, and
+  injects the `ABSAPI` builder and the `ABSAppModel` lookup.
 
 **Requests:**
 
@@ -262,19 +266,15 @@ static, unauthenticated remote images (none are planned).
   `URLSession`'s `Accept` header. It is also smaller than JPEG.
 - **`ts`:** sending `ts` matches the legacy app, busts any proxy cache, and gets
   the server's `Cache-Control`.
-- **Server-version rule:**
-  - Servers older than 2.17 get `Authorization: Bearer <accessToken>`, never
-    `?token=`.
-  - On a 401 from such a server, the pipeline asks `ABSAPI` to refresh the token
-    once and retries.
-  - Servers at 2.17 or later get no auth header. A 401 or 403 there means the
-    proxy rejected the request (wrong custom headers). The pipeline shows the
-    placeholder and does not retry in a loop.
-- **Custom headers:** every request carries the server's custom headers. They are
-  applied per request, not through `httpAdditionalHeaders`, because one session
-  serves several servers.
+- **Auth:** image requests carry the server's custom headers only. There is no
+  `Authorization` header, no `?token=`, and no token refresh: both image routes
+  are unauthenticated on every supported server (2.26.0+). A 401 or 403 means a
+  proxy rejected the request (wrong custom headers). The pipeline shows the
+  placeholder and does not retry in a loop.
+- **Custom headers:** they are applied per request, not through
+  `httpAdditionalHeaders`, because one session serves several servers.
 - **Absolute `coverPath` URLs** (legacy external covers) are fetched without
-  custom headers or tokens, so credentials never leave the server's origin.
+  custom headers, so credentials never leave the server's origin.
 - **Session:** a dedicated `URLSession` with `urlCache = nil` and
   `requestCachePolicy = .reloadIgnoringLocalCacheData`. Our own file cache is
   authoritative, and versioned keys never need revalidation. The default
@@ -293,8 +293,9 @@ static, unauthenticated remote images (none are planned).
     entries simply age out.
 - **Load order:**
   1. memory LRU;
-  2. downloaded cover file (`ABSDownloads` gives its path, if the item is
-     downloaded);
+  2. downloaded cover file, from the injected `DownloadedCoverLookup`. It is used
+     when the item is downloaded and its `coverUpdatedAt` is not older than the
+     key's `updatedAt`. Offline, it is used whatever its age;
   3. `CoverFileStore`;
   4. network.
 
@@ -314,11 +315,13 @@ static, unauthenticated remote images (none are planned).
     `kCGImageSourceShouldCacheImmediately` all set.
   - The result is a fully decoded `CGImage`, already oriented `.up`.
 - **`CoverFileStore`:**
-  - **Location:** files live at
-    `<App Group container>/Library/Caches/Images/<serverID>/<kind>-<entityID>-<updatedAt>-<bucket>.webp`.
+  - **Location:** the store lives in the App Group container so the widget
+    extension can read it (P5-11b, #89). Files are at
+    `<container for group.org.davidjensenius.Audiobookshelf>/Library/Caches/Images/<serverID>/<kind>-<entityID>-<updatedAt>-<bucket>.webp`.
     Entity IDs are sanitised before use in file names.
   - **Fallback:** if the App Group entitlement is missing (unsigned CI builds,
-    for example), the store uses the app's own `Caches` directory.
+    for example), the store uses the app's own `Caches` directory. Widgets then
+    show placeholders.
   - **Writers:** only the app process writes and evicts. Extensions only read.
   - **Eviction:** LRU by file modification date, which is touched on hits at most
     once per day. Eviction runs at launch and when the app enters the background.
@@ -326,8 +329,7 @@ static, unauthenticated remote images (none are planned).
 - **Rendering:** the pipeline returns `CGImage` plus scale. Each consumer wraps
   it:
   - SwiftUI: `Image(decorative:scale:)`;
-  - CarPlay and MediaPlayer on iOS: `UIImage(cgImage:scale:orientation:)`;
-  - MediaPlayer on macOS: `NSImage(cgImage:size:)`;
+  - CarPlay: `UIImage(cgImage:scale:orientation:)`;
   - NowPlaying framework: `ArtworkRepresentation(cgImage:)`.
 
   Views read the scale from `@Environment(\.displayScale)`, and CarPlay from
@@ -346,28 +348,34 @@ static, unauthenticated remote images (none are planned).
 - **Now Playing:**
   - The current item's artwork is decoded from the 1200 bucket (or the downloaded
     file) and is **pinned**: kept outside the LRU until playback changes.
-  - The `Artwork` provider and the `MPMediaItemArtwork` request handler downsample
-    the pinned image to the size the system asks for.
-  - [0006](0006-now-playing.md) chooses which API is used.
+  - The NowPlaying `Artwork` provider (in `ABSPlayback/NowPlaying/`) downsamples
+    the pinned image to the size the system asks for. It returns
+    `ArtworkRepresentation(cgImage:)`. MediaPlayer is not used
+    ([0006](0006-now-playing.md)).
 - **Offline covers:**
   - `ABSDownloads` downloads the cover with
-    `width=1200&format=jpeg&ts=…` (no token in the URL; same auth rule as above).
+    `width=1200&format=jpeg&ts=…`. It sends custom headers only, as above.
   - It stores the result as `cover.jpg` in the item's download folder, which is
-    not a cache directory, and records `updatedAt`.
+    not a cache directory. It records the relative path and
+    `LocalLibraryItem.coverUpdatedAt` in ABSData, which is what
+    `DownloadedCoverLookup` reads.
   - JPEG keeps exported or shared files portable. 1200 px is enough for the player
     on every device we target.
   - If a later fetch shows a newer `updatedAt`, the cover is refreshed in the
     background.
   - Offline, the pipeline always takes the downloaded file over the network.
-- **Widgets:**
-  - When the widget target lands, its timeline entries carry `ImageKey`s.
-  - The provider reads the 300-bucket file from the shared `CoverFileStore` and
-    downsamples it to the widget's size.
+- **Widgets** (P5-11b, #89):
+  - `WidgetSnapshotWriter` records each snapshot item's `ImageKey` (300 bucket).
+    It makes sure the pipeline has that file in the App Group cover cache, by
+    calling the pipeline, before reloading timelines.
+  - The widget reads covers through the pipeline's App Group cover cache by
+    `ImageKey`. It uses a read-only, cache-only pipeline: no request builder,
+    no memory LRU. It downsamples to the widget's size.
   - It never touches the network, which widgets can't rely on.
   - On a miss it shows the placeholder, and the app fills the file on its next
     run.
-  - The app makes sure the files for "continue listening" items stay present: it
-    re-fetches them on refresh and the LRU never evicts them.
+  - Files for snapshot items are exempt from LRU eviction while they are in the
+    current snapshot.
 - **Placeholders and palette:**
   - Port the legacy states: a generated title and author placeholder when there
     is no cover, a logo placeholder on failure, and a 0.3 s fade-in.
@@ -424,21 +432,28 @@ That fits under 256 MiB without eviction churn.
   contributor-facing rule is to not call `AsyncImage`, `UIImage(data:)`, or
   `NSImage(contentsOf:)` for server images.
 - **Building blocks:**
-  - `ABSUI` gains `CoverImage`, `AuthorImage`, `CoverPlaceholder`, and
-    `CoverPalette`.
-  - `ABSAPI` gains the per-server `ImageRequestBuilding`.
-  - Neither needs a new module dependency.
-- **Server versions and headers:** servers older than 2.17 work through the
-  bearer header, so no token ends up in URLs, logs, or the database. Proxies that
-  require custom headers work for images too, which fixes a legacy gap.
+  - `ABSCore` gains `DownloadedCoverLookup`.
+  - `ABSUI` gains `CoverView`, `AuthorImageView`, `GroupCoverView`,
+    `CoverPlaceholder`, and `CoverPalette`.
+  - `ABSAPI` gains `MediaURLBuilder: ImageRequestBuilding`.
+  - `ABSAppModel` gains the `LocalItemStore`-backed lookup.
+  - ABSData's `LocalLibraryItem` gains `coverUpdatedAt: Date?` (ADR 0003).
+  - None of this needs a new module dependency. `ImagePipeline` depends on
+    neither `ABSDownloads` nor `ABSData`.
+- **Auth:** image requests never carry tokens, so none end up in URLs, logs, the
+  database, or cached files. Proxies that require custom headers work for images
+  too, which fixes a legacy gap.
 - **Server disk:** the server keeps at most three cover renditions per item for
   this app, plus the 1200 px JPEG for downloaded items.
 - **Follow-ups:**
-  - implement the pipeline in ABSCore and the views in ABSUI;
-  - the offline cover in ABSDownloads (`width=1200&format=jpeg`);
-  - the App Group entitlement and identifier, decided with the widget issue;
-  - CarPlay list images;
-  - the Now Playing adapter, after [0006](0006-now-playing.md).
+  - the pipeline and views in #43 (P3-03);
+  - the offline cover (`width=1200&format=jpeg`) in #73 (P4-02);
+  - CarPlay list images in #80 (P5-03);
+  - the widget snapshot and cover read in #89 (P5-11b);
+  - the Now Playing artwork provider in `ABSPlayback/NowPlaying/`
+    ([0006](0006-now-playing.md)).
+  - The App Group is `group.org.davidjensenius.Audiobookshelf` (#18, P0-03).
+    Each target that reads the cover cache needs the entitlement.
 - **Harder:**
   - We own cancellation, eviction, and cross-process file access.
   - Format support depends on ImageIO, so a server returning an exotic format via
@@ -446,26 +461,27 @@ That fits under 256 MiB without eviction churn.
 
 ## Validation
 
-- **Unit tests** (Swift Testing, `ABSCoreTests`):
-  - request building for servers older and newer than 2.17: the bearer header,
-    no `token` query item, custom headers, and no headers for absolute external
-    URLs;
+- **Unit tests** (Swift Testing, `ABSCoreTests` and `ABSAPITests`; in #43):
+  - request building: custom headers present, no `Authorization` header and no
+    `token` query item, and no headers for absolute external URLs;
   - bucket selection;
   - key and file-path construction;
   - deduplication: two concurrent loads produce one `URLProtocol` hit;
   - cancellation when the last waiter leaves;
   - LRU cost accounting and trimming on a simulated memory warning;
-  - the order downloaded file → file store → network;
+  - the order downloaded file (through a fake `DownloadedCoverLookup`, including
+    a stale `coverUpdatedAt`) → file store → network;
   - downsampling a fixture JPEG and WebP to a requested max pixel size.
-- **Spike** before the library grid issue closes:
-  - Scroll a 2,000-item library against a real server on the smallest supported
+- **Memory spike** (performed in #43, P3-03, as an acceptance criterion):
+  - Scroll a large library against a real server on the smallest supported
     iPhone and on an iPad.
   - Record Instruments Allocations and the VM tracker. Pass: image memory stays
     under the table above, with no hitches beyond one frame.
   - Record real encoded sizes per bucket and adjust the disk numbers in a
     follow-up.
-- **CarPlay:** a manual check on a device (the Simulator isn't supported for
-  CarPlay in the Xcode 27.2 Device Hub) that list images appear and are sharp.
+- **CarPlay** (performed in #80, P5-03): a manual check on a device (the
+  Simulator isn't supported for CarPlay in the Xcode 27.2 Device Hub) that list
+  images appear and are sharp.
 - **Review check:** reviewers reject new `AsyncImage` or ad-hoc image loading for
   server images.
 
@@ -478,7 +494,10 @@ That fits under 256 MiB without eviction churn.
     and image sizes.
 - **ADRs:**
   - [0001 Architecture](0001-architecture.md);
+  - [0003 SwiftData](0003-swiftdata.md) (`LocalLibraryItem.coverUpdatedAt`, App
+    Group);
   - [0006 Now Playing](0006-now-playing.md);
+  - [0007 Streaming and minimum server version](0007-streaming.md);
   - [architecture.md](../architecture.md).
 - **Legacy code:**
   - [`components/covers/BookCover.vue`](../../components/covers/BookCover.vue),
@@ -496,8 +515,7 @@ That fits under 256 MiB without eviction churn.
   - [`CacheManager`](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/managers/CacheManager.js#L10-L91);
   - [`AuthorController.getImage`](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/controllers/AuthorController.js#L391-L419);
   - [`Auth.js` (current)](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/Auth.js#L21-L38),
-    [v2.17.0](https://github.com/advplyr/audiobookshelf/blob/v2.17.0/server/Auth.js#L21),
-    [v2.16.2](https://github.com/advplyr/audiobookshelf/blob/v2.16.2/server/Auth.js#L41);
+    [v2.17.0](https://github.com/advplyr/audiobookshelf/blob/v2.17.0/server/Auth.js#L21);
   - [`resizeImage`](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/utils/ffmpegHelpers.js#L78-L98).
 - **SDK headers and interfaces** (Xcode 27.2):
   - `SwiftUI.swiftinterface` (`AsyncImage.init(request:…)`,
@@ -506,7 +524,6 @@ That fits under 256 MiB without eviction churn.
   - `ImageIO/CGImageSource.h`;
   - `CarPlay/CPListItem.h`, `CPListImageRowItemElement.h`, `CPThumbnailImage.h`,
     `CPNowPlayingButton.h`, `CPInterfaceController.h`;
-  - `MediaPlayer/MPMediaItem.h`;
   - `NowPlaying.swiftinterface` (`Artwork`, `ArtworkRepresentation`).
 - **Apple documentation:**
   - [Image I/O](https://developer.apple.com/documentation/imageio);
