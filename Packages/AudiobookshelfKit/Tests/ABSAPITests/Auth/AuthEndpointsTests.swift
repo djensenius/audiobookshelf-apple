@@ -119,6 +119,38 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
         #expect(response.redirectURL == "https://idp.example/logout")
     }
 
+    /// The server builds the end-session URL only from these cookies; the jar's are still not sent.
+    @Test func logoutReplaysOpenIDCookies() async throws {
+        let server = StubServer { _ in .json(#"{"redirect_url":"https://idp.example/logout"}"#) }
+        let cookies = try #require(OpenIDSessionCookies(authMethod: "openid-mobile", idToken: "id.token.sig"))
+        _ = try await makeClient(server).send(AuthEndpoints.logout(refreshToken: "refresh-1", openIDSession: cookies))
+
+        let request = try #require(server.requests(path: "/abs/logout").first)
+        #expect(
+            request.value(forHTTPHeaderField: "Cookie") == "auth_method=openid-mobile; openid_id_token=id.token.sig")
+        #expect(!request.httpShouldHandleCookies)
+        #expect(request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+        #expect(request.value(forHTTPHeaderField: "X-Proxy") == "proxy")
+        let withoutIDToken = try #require(OpenIDSessionCookies(authMethod: "openid-mobile", idToken: nil))
+        #expect(withoutIDToken.headerValue == "auth_method=openid-mobile")
+    }
+
+    @Test func openIDCookiesRejectUnsafeValuesAndAreRedacted() throws {
+        #expect(OpenIDSessionCookies(authMethod: "openid; x=1", idToken: nil) == nil)
+        #expect(OpenIDSessionCookies(authMethod: "openid", idToken: "a b") == nil)
+        #expect(OpenIDSessionCookies(authMethod: "", idToken: nil) == nil)
+        let invalid = Data(#"{"authMethod":"openid\r\nX: y"}"#.utf8)
+        #expect(throws: DecodingError.self) { try JSONDecoder().decode(OpenIDSessionCookies.self, from: invalid) }
+
+        let cookies = try #require(OpenIDSessionCookies(authMethod: "openid-mobile", idToken: "secret-id-token"))
+        #expect(try JSONDecoder().decode(OpenIDSessionCookies.self, from: JSONEncoder().encode(cookies)) == cookies)
+        var dumped = ""
+        dump(cookies, to: &dumped)
+        for text in [String(describing: cookies), String(reflecting: cookies), dumped] {
+            #expect(!text.contains("secret") && text.contains("<redacted>"))
+        }
+    }
+
     @Test func authorizeUsesAccessToken() async throws {
         let server = StubServer { _ in .json(authResponseJSON(tokens: false)) }
         let response = try await makeClient(server).send(AuthEndpoints.authorize())

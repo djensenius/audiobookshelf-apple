@@ -29,10 +29,10 @@ public protocol WebAuthenticator: Sendable {
 /// ``APIClient`` and its cookie jar. The code, verifier, state and tokens are never logged.
 ///
 /// The server's `auth_method=openid-mobile` and `openid_id_token` cookies live only in that
-/// jar, which is discarded after sign-in, so the main client never receives them.
-/// `POST /logout` reads the auth method and ID token only from those cookies to build the
-/// identity provider's end-session `redirect_url`, so a later sign-out gets
-/// `redirect_url: null`.
+/// jar, which is discarded after sign-in. `POST /logout` reads the auth method and ID token only
+/// from those cookies to build the identity provider's end-session `redirect_url`, so their
+/// values are returned in ``LoginResult/openIDSession`` for the account to store and send on
+/// sign-out.
 ///
 /// Methods throw ``OIDCLoginError`` for problems specific to OpenID,
 /// ``ServerValidationError`` for the failures password sign-in shares (connection, version
@@ -100,7 +100,9 @@ public struct OIDCLoginService: Sendable {
         if (300..<400).contains(reply.httpResponse.statusCode) {
             throw Self.refusal(from: reply.httpResponse, server: server.configuration.baseURL)
         }
-        return try await ServerValidator.loginResult(from: reply, client: client)
+        var result = try await ServerValidator.loginResult(from: reply, client: client)
+        result.openIDSession = OpenIDSessionCookies(cookies: client.cookieStorage?.cookies ?? [])
+        return result
     }
 
     // MARK: - Endpoints
