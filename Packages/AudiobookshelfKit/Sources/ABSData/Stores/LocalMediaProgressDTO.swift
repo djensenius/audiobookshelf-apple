@@ -43,6 +43,15 @@ public struct LocalMediaProgressDTO: Sendable, Equatable, Identifiable {
 
     /// The values a PATCH would send now: only the dirty groups, each with its edit time.
     public var dirtyValues: ProgressSend { ProgressSyncState(self).dirtyValues }
+
+    /// When the audio position was saved, for comparing it with progress from elsewhere: its edit
+    /// time while unsent, else the later of that and the server baseline's `lastUpdate` (a merge
+    /// keeps the old edit time). `nil` when the row holds no audio position, such as an ebook-only
+    /// row, whose `currentTime` is only the default 0. `lastUpdate` is not that: ebook edits move it.
+    public var audioSavedAt: Date? { ProgressSyncState(self).savedAt(.audio) }
+
+    /// When `isFinished` was saved, dated like ``audioSavedAt``; `nil` when it never was.
+    public var finishedSavedAt: Date? { ProgressSyncState(self).savedAt(.finished) }
 }
 
 extension LocalMediaProgressDTO {

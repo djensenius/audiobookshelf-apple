@@ -404,6 +404,21 @@ struct ProgressSyncState: Sendable, Equatable {
         }
     }
 
+    /// When the group's current value was saved, to compare with progress from elsewhere. A dirty
+    /// group is dated by its edit time (`lastUpdate` if it has none). A clean group holds the
+    /// server's value, so it is dated by the later of its edit time (a merge keeps the old one) and
+    /// the baseline's `lastUpdate`, which is row-wide and so an upper bound. `nil` when nothing was
+    /// saved: no edit and no baseline, or, for audio, no edit and a baseline without audio (an
+    /// ebook-only server row, whose zero position is not a saved one).
+    func savedAt(_ group: ProgressGroups) -> Date? {
+        let edited = editedAt(group)
+        if dirty.contains(group) { return edited ?? lastUpdate }
+        if group == .audio, edited == nil {
+            guard let baseline = serverBaseline, baseline.duration > 0 || baseline.currentTime > 0 else { return nil }
+        }
+        return [edited, serverBaseline?.lastUpdate].compactMap { $0 }.max()
+    }
+
     private mutating func take(_ groups: ProgressGroups, from server: ProgressBaseline) {
         if groups.contains(.audio) {
             currentTime = server.currentTime
