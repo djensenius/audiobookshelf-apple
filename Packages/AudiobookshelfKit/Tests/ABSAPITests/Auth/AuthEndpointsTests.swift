@@ -195,6 +195,79 @@ private func makeClient(_ server: StubServer, tokens: InMemoryTokenProvider = In
     }
 
     /// The same-host port change and `http` → `https` upgrade on another host are off the origin too.
+    /// A proxy cookie set on a same-origin redirect is stored and sent on the next hop, with the
+    /// jar's other cookies and the endpoint's own, and still without `refresh_token`.
+    @Test func logoutRedirectCarriesTheProxyCookie() async throws {
+        let server = StubServer { request in
+            guard request.url?.path() == "/abs/logout" else { return .json(#"{"redirect_url":null}"#) }
+            var redirect = StubResponse.redirect(to: "https://\(request.url?.host() ?? "")/abs/v2/logout")
+            redirect.headers["Set-Cookie"] = "proxy_session=abc; Path=/"
+            return redirect
+        }
+        let client = try makeClient(server)
+        let jar = try #require(client.cookieStorage)
+        for (name, value) in [("lb", "1"), ("refresh_token", "cookie-token"), ("auth_method", "stale")] {
+            jar.setCookie(
+                try #require(
+                    HTTPCookie(properties: [.name: name, .value: value, .domain: server.host, .path: "/"])))
+        }
+        var logout = AuthEndpoints.logout(refreshToken: "refresh-1")
+        logout.headers["Cookie"] = "auth_method=openid"
+
+        _ = try await client.send(logout)
+
+        let first = try #require(server.requests(path: "/abs/logout").first)
+        let followed = try #require(server.requests(path: "/abs/v2/logout").first)
+        #expect(first.value(forHTTPHeaderField: "Cookie") == "lb=1; auth_method=openid")
+        let cookies = try #require(followed.value(forHTTPHeaderField: "Cookie"))
+        #expect(cookies.hasSuffix("; auth_method=openid"))
+        #expect(
+            Set(cookies.components(separatedBy: "; ")) == ["lb=1", "proxy_session=abc", "auth_method=openid"])
+        #expect(followed.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+        #expect(!followed.httpShouldHandleCookies)
+        #expect(jar.cookies?.contains { $0.name == "proxy_session" && $0.value == "abc" } == true)
+    }
+
+    /// A proxy that sets its cookie and redirects back to the same URL gets it on the retry; a
+    /// `refresh_token` set by the redirect is neither stored nor sent.
+    @Test func logoutRedirectToTheSameURLCarriesTheProxyCookie() async throws {
+        let server = StubServer { request in
+            let cookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
+            guard !cookie.contains("proxy_session=abc") else { return .json(#"{"redirect_url":null}"#) }
+            var redirect = StubResponse.redirect(to: request.url?.absoluteString ?? "", status: 307)
+            redirect.headers["Set-Cookie"] = "proxy_session=abc; Path=/, refresh_token=planted; Path=/"
+            return redirect
+        }
+        let client = try makeClient(server)
+
+        let response = try await client.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+
+        #expect(response == LogoutResponse(redirectURL: nil))
+        let requests = server.requests(path: "/abs/logout")
+        #expect(requests.count == 2)
+        #expect(requests.first?.value(forHTTPHeaderField: "Cookie") == nil)
+        #expect(requests.last?.value(forHTTPHeaderField: "Cookie") == "proxy_session=abc")
+        #expect(requests.last?.httpMethod == "POST")
+        #expect(client.cookieStorage?.cookies?.contains { $0.name == "refresh_token" } == false)
+    }
+
+    /// A cookie set on a redirect off the origin is neither followed nor stored.
+    @Test func logoutCrossOriginRedirectStoresNoCookie() async throws {
+        let other = StubServer { _ in .json(#"{"redirect_url":null}"#) }
+        let server = StubServer { _ in
+            var redirect = StubResponse.redirect(to: "https://\(other.host)/logout", status: 307)
+            redirect.headers["Set-Cookie"] = "proxy_session=abc; Path=/"
+            return redirect
+        }
+        let client = try makeClient(server)
+
+        await #expect(throws: APIError.redirectRefused(status: 307)) {
+            try await client.send(AuthEndpoints.logout(refreshToken: "refresh-1"))
+        }
+        #expect(other.requests.isEmpty)
+        #expect(client.cookieStorage?.cookies?.isEmpty == true)
+    }
+
     @Test func logoutRefusesPortChangesAndOtherHostUpgrades() async throws {
         let other = StubServer { _ in .json(#"{"redirect_url":null}"#) }
         let portChange = StubServer { request in
