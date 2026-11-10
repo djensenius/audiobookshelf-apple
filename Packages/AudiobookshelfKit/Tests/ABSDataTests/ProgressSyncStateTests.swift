@@ -698,6 +698,42 @@ import Testing
         #expect(state.currentTime == 995)
     }
 
+    /// Seeks to 200 (A) and 300 (B) committed with their responses lost; a newer seek back to 200
+    /// (C) failed before reaching the server. A's delayed echo can't acknowledge C, or B's echo
+    /// would then restore 300: C stays pending and is sent again.
+    @Test func echoOfAnOlderSendWithTheSameValueDoesNotAcknowledgeANewerEdit() throws {
+        var state = Self.seeded()
+        for (index, position) in [200.0, 300, 200].enumerated() {
+            state.apply(Self.seek(position), now: Self.at(Double(index + 1)))
+            try Self.send(&state)
+        }
+        state.merge(Self.server(currentTime: 200, lastUpdate: Self.at(4)))  // A's echo.
+        #expect(state.currentTime == 200)
+        #expect(state.dirty == .audio)
+        state.merge(Self.server(currentTime: 300, lastUpdate: Self.at(5)))  // B's echo.
+        #expect(state.currentTime == 200)
+        #expect(state.dirty == .audio)
+        #expect(try Self.send(&state).audio?.currentTime == 200)
+    }
+
+    /// An un-finish (U1) at 995 s was auto-finished, its response lost; the user finished and
+    /// un-finished again (U2), which failed before reaching the server. U1's echo (finished after
+    /// U2's edit) can't acknowledge U2, which would un-finish the item: U2 is sent again.
+    @Test func olderAutoFinishDoesNotAcknowledgeANewerUnfinish() throws {
+        var state = ProgressSyncState(seed: Self.server(currentTime: 995, lastUpdate: Self.t0))
+        state.apply(ProgressEdit(isFinished: false), now: Self.at(1))
+        try Self.send(&state)  // U1.
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(2))
+        state.apply(ProgressEdit(isFinished: false), now: Self.at(3))
+        try Self.send(&state)  // U2.
+        var echo = Self.server(currentTime: 995, isFinished: true, finishedAt: Self.at(4), lastUpdate: Self.at(4))
+        echo.progress = 1
+        state.merge(echo)
+        #expect(!state.isFinished)
+        #expect(state.dirty == .finished)
+        #expect(try Self.send(&state).finished?.isFinished == false)
+    }
+
     /// A finish from before the un-finish edit isn't its normalized echo: the newer edit wins.
     @Test func unfinishAfterAutoFinishIsNotItsEcho() throws {
         var state = ProgressSyncState(seed: Self.server(currentTime: 995, lastUpdate: Self.t0))

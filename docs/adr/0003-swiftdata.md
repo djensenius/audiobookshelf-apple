@@ -313,7 +313,13 @@ Model notes:
       values, the baseline advances to them, that group is removed from that entry and every older one (entries left empty
       are dropped; other groups keep their evidence), and the flag clears only if
       `<group>EditedAt` still equals the entry's. A newer local edit stays dirty
-      and is never rolled back;
+      and is never rolled back. When an older entry matches too, the echo may be
+      that older send's and the newest may never have reached the server: unless
+      sending the newest would leave the server with the same value regardless
+      (no other value of the group sent in between, and not matched through
+      normalization such as an auto-finished un-finish), only the evidence up to
+      the oldest match is settled and the group stays dirty, to be sent again.
+      Re-sending is safe; acknowledging an undelivered edit loses it;
     - dirty, matching neither the baseline nor any entry, while that group's
       `<group>HistoryTruncated` is set: the server value may be one of our dropped
       sends, so the local group wins and stays dirty;
@@ -782,7 +788,9 @@ Ongoing checks:
   arrives by the fetch, or at once by socket when the ack had a server time; a newer edit survives the
   server's normalized echo (an un-finish auto-finished near the end, a created
   `ebookProgress` of 0) after an ack or a lost response, and an unchanged edit
-  takes it; a missing `ebookProgress` is sent as 0, so a page turn made while it
+  takes it; the echo of an older lost send with the same value (a seek back to
+  200 after 300, or an earlier auto-finished un-finish) doesn't acknowledge a
+  newer undelivered edit; a missing `ebookProgress` is sent as 0, so a page turn made while it
   is in flight survives its echo on existing and on created progress; a seeded
   random simulation of the 2.26.0 server (#53 side effects, creation defaults,
   another device, relaunches, stale fetches) keeps every dirty group unless the

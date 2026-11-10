@@ -321,13 +321,25 @@ struct ProgressSyncState: Sendable, Equatable {
         if let baseline = serverBaseline, Self.matches(server, baseline, group) { return }
         // The echo of one of our PATCHes whose response was lost. Only this group's evidence is
         // settled and pruned (from that entry and every older one); other groups keep theirs.
-        if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }) {
+        if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }),
+            let first = unacknowledgedSends.firstIndex(where: { Self.matches(server, $0, group) })
+        {
+            // An older matching send may be the echo's origin, and the newest one may never have
+            // reached the server: unless the newest would leave the server holding the same value
+            // either way (no other value sent in between, and not matched by normalization), only
+            // the evidence up to the oldest match is settled and the edit stays pending.
+            let ambiguous =
+                first < index
+                && (!Self.holdsSentValue(server, unacknowledgedSends[index], group)
+                    || unacknowledgedSends[first..<index].contains {
+                        $0.groups.contains(group) && !Self.matches(server, $0, group)
+                    })
             let sentEditedAt = unacknowledgedSends[index].editedAt(group)
-            for older in 0...index {
+            for older in 0...(ambiguous ? first : index) {
                 unacknowledgedSends[older].remove(group)
             }
             unacknowledgedSends.removeAll { $0.groups.isEmpty }
-            if editedAt(group) == sentEditedAt {
+            if !ambiguous, editedAt(group) == sentEditedAt {
                 take(group, from: server)  // The server's normalized form of our value.
                 markClean(group)
             }
@@ -449,6 +461,14 @@ struct ProgressSyncState: Sendable, Equatable {
             guard let ebook = send.ebook else { return false }
             return ebookMatches(server, ebook.ebookLocation, ebook.ebookProgress)
         }
+    }
+
+    /// Whether `server` holds `send`'s value of `group` as sent, not a normalization of it (an
+    /// auto-finished un-finish, which a repeat applied to the finished progress wouldn't give).
+    private static func holdsSentValue(_ server: ProgressBaseline, _ send: ProgressSend, _ group: ProgressGroups)
+        -> Bool
+    {
+        group != .finished || send.finished?.isFinished == server.isFinished
     }
 
     private static func audioMatches(_ server: ProgressBaseline, _ currentTime: Double, _ duration: Double) -> Bool {
