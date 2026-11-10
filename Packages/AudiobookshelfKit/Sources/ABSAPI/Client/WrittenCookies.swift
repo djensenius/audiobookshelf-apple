@@ -23,7 +23,17 @@ struct WrittenCookies: Sendable {
     /// Stores the cookies a followed redirect `response` sets, as `URLSession` does for requests
     /// whose cookies it handles, except the withheld names, which this request keeps out of the jar.
     func store(from response: HTTPURLResponse) {
-        guard let jar, let url = response.url else { return }
+        Self.store(from: response, in: jar, withholding: withheld)
+    }
+
+    /// Stores the cookies `response` sets in `jar`, except the `withheld` names. Returns the
+    /// cookies it passed to the jar, which may reject them (or, for an expired one, delete the
+    /// stored cookie).
+    @discardableResult
+    static func store(
+        from response: HTTPURLResponse, in jar: HTTPCookieStorage?, withholding withheld: Set<String> = []
+    ) -> [HTTPCookie] {
+        guard let jar, let url = response.url else { return [] }
         var fields: [String: String] = [:]
         for case let (name as String, value as String) in response.allHeaderFields {
             fields[name] = value
@@ -31,5 +41,6 @@ struct WrittenCookies: Sendable {
         let cookies = HTTPCookie.cookies(withResponseHeaderFields: fields, for: url)
             .filter { !withheld.contains($0.name) }
         jar.setCookies(cookies, for: url, mainDocumentURL: nil)
+        return cookies
     }
 }
