@@ -1149,8 +1149,24 @@ struct SleepTimerTests {
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == rewind)
     }
 
+    /// A seek of the user's that supersedes the expiry's seek back to the fade, and is heading for or lands half a
+    /// second from where the fade began, isn't the engine keeping the expiry's seek for its retry: the automatic
+    /// rewind drops, not applied once more.
+    @Test(arguments: [false, true])
+    func aUserSeekNearTheFadeStartDropsTheAutomaticRewind(landed: Bool) async throws {
+        let harness = try expiringHarness(automatic: true)
+        harness.control.holdsSeeks = true
+        await harness.play(from: 1000, to: 1070)
+        await until { harness.control.seeks == [1010] }
+        if landed { harness.control.currentTime = 1010.5 } else { harness.control.userSeekTarget = 1010.5 }
+        harness.control.seeksLand = false
+        await harness.control.finishSeek()
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 0)
+    }
+
     /// A reset before the expiry's seek back to the fade starts takes that seek over, after the automatic rewind,
-    /// and resumes; a seek of the user's still wins. The expiry's task stands down either way.
+    /// and resumes; a seek of the user's still wins, and the grace period comes back. The expiry's task stands down
+    /// either way.
     @Test(arguments: [false, true], [false, true])
     func aResetBeforeTheExpirySeekTakesItOver(automatic: Bool, userSeeks: Bool) async throws {
         let harness = try expiringHarness(automatic: automatic)
@@ -1161,20 +1177,42 @@ struct SleepTimerTests {
         #expect(harness.control.seeks == (userSeeks ? [] : [automatic ? 710 : 1010]))
         #expect(harness.control.plays == (userSeeks ? 0 : 1))
         #expect(harness.timer.isRunning == !userSeeks)
+        #expect(harness.timer.canRestart == userSeeks)
         #expect(harness.feedback.resets == (userSeeks ? 0 : 1))
     }
 
     /// A reset that took over the expiry's seek back to the fade, and whose seek fails, gives it back with the grace
-    /// period and the automatic rewind: the next play reaches back past both.
-    @Test func aFailedResetGivesTheExpirySeekBack() async throws {
+    /// period and the automatic rewind: the next play reaches back past both. An engine that keeps the failed seek
+    /// for its retry (as `AudioEngine` does) is heading for the reset's 710 instead: the play adds no rewind, and the
+    /// retry lands there.
+    @Test(arguments: [false, true])
+    func aFailedResetGivesTheExpirySeekBack(retainsFailedSeeks: Bool) async throws {
+        let harness = try expiringHarness(automatic: true)
+        await harness.playToExpiry(from: 1000, to: 1070)
+        harness.control.seeksLand = false
+        harness.control.retainsFailedSeeks = retainsFailedSeeks
+        #expect(harness.timer.reset())
+        await Task { @MainActor in }.value  // Queued after the expiry's and the reset's tasks, so they have run.
+        #expect(harness.control.seeks == [710])
+        #expect(harness.control.pendingSeekTarget == (retainsFailedSeeks ? 710 : nil))
+        #expect(harness.timer.canRestart)
+        let rewind = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2))
+        #expect(rewind == (retainsFailedSeeks ? 0 : 360))
+        let heading = harness.control.pendingSeekTarget ?? harness.control.currentTime
+        #expect(heading - rewind == 710, "Where the play ends up")
+    }
+
+    /// Another item loading drops the expiry's seek that a failed reset gave back: playback at the same position on
+    /// the new item isn't where the timer paused.
+    @Test func anotherItemDropsTheExpirySeekAFailedResetGaveBack() async throws {
         let harness = try expiringHarness(automatic: true)
         await harness.playToExpiry(from: 1000, to: 1070)
         harness.control.seeksLand = false
         #expect(harness.timer.reset())
         await Task { @MainActor in }.value  // Queued after the expiry's and the reset's tasks, so they have run.
-        #expect(harness.control.seeks == [710])
-        #expect(harness.timer.canRestart)
-        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 360)
+        harness.timer.itemDidChange("b")
+        harness.control.currentTime = 1070
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 0)
     }
 
     /// A play before the expiry's seek back to the fade starts takes that seek over: the rewind it returns reaches
