@@ -553,16 +553,59 @@ import Testing
         #expect(state.nextSendGroup == .audio)
     }
 
+    /// Without server progress, an ebook PATCH would create it with zero audio (#53), so audio
+    /// and finished go first even while they keep failing.
+    @Test func withoutBaselineEbookWaitsForAudio() throws {
+        var state = ProgressSyncState(lastUpdate: Self.t0)
+        state.apply(Self.seek(200), now: Self.at(1))
+        state.apply(Self.page("A", 0.3), now: Self.at(1))
+        #expect(try Self.send(&state).groups == .audio)  // Fails before reaching the server.
+        #expect(try Self.send(&state).groups == .audio)
+        #expect(state.nextSendGroup == .audio)
+    }
+
+    /// An ebook PATCH that creates the server's progress (zero audio, unfinished) can't overwrite
+    /// audio and finished edits made while it was in flight, whether its echo is merged before
+    /// or after the acknowledgement.
+    @Test(arguments: [false, true])
+    func ebookCreatingProgressCannotZeroPendingEdits(acknowledgeFirst: Bool) throws {
+        var state = ProgressSyncState(lastUpdate: Self.t0)
+        state.apply(Self.page("A", 0.3), now: Self.at(1))
+        let ebook = try Self.send(&state)
+        state.apply(Self.seek(200), now: Self.at(2))
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(2))
+        let created = Self.server(currentTime: 0, ebookLocation: "A", ebookProgress: 0.3, lastUpdate: Self.at(5))
+        if acknowledgeFirst {
+            state.acknowledge(ebook, serverLastUpdate: Self.at(5))
+            state.merge(created)
+        } else {
+            state.merge(created, excluding: .ebook)
+            state.acknowledge(ebook, serverLastUpdate: Self.at(5))
+        }
+        #expect(state.currentTime == 200)
+        #expect(state.isFinished)
+        #expect(state.dirty == [.audio, .finished])
+        let audio = try Self.send(&state)
+        #expect(audio.audio?.currentTime == 200)
+    }
+
     // MARK: - Interleavings
 
     /// Random interleavings against a simulated server. A PATCH reaches the server at a random
     /// point between `beginSend()` and its outcome, with the #53 side effects; another device
     /// writes now and then; fetches may be stale.
-    @Test(arguments: [1, 7, 37, 2026, 53] as [UInt64])
+    /// Odd seeds run short episodes that start without server progress, which the first PATCH
+    /// creates. Each run ends by stopping the other device and syncing until nothing is dirty.
+    @Test(arguments: [1, 7, 37, 2026, 53, 54] as [UInt64])
     func randomInterleavingsKeepTheInvariants(seed: UInt64) throws {
-        var sim = Simulation(seed: seed, server: Self.server(lastUpdate: Self.t0))
-        for step in 0..<500 {
-            try sim.step(step, now: Self.at(Double(step + 1)))
+        let seeded = seed.isMultiple(of: 2)
+        for episode in 0..<(seeded ? 1 : 25) {
+            var sim = Simulation(
+                seed: seed &* 1000 &+ UInt64(episode), server: seeded ? Self.server(lastUpdate: Self.t0) : nil)
+            for step in 0..<(seeded ? 500 : 20) {
+                try sim.step(step, now: Self.at(Double(step + 1)))
+            }
+            sim.converge(from: Self.at(1000))
         }
     }
 }
@@ -579,6 +622,8 @@ private struct Simulation {
     var random: SeededGenerator
     var state: ProgressSyncState
     var server: ProgressBaseline
+    /// Whether the server has progress for the media yet.
+    var exists: Bool
     var origins: [Int: Origin] = [:]
     var lastOtherWrite = Date.distantPast
     var inFlight: ProgressSend?
@@ -587,10 +632,15 @@ private struct Simulation {
     var captured: (server: ProgressBaseline, origins: [Int: Origin], epoch: Int)?
     var epoch = 0
 
-    init(seed: UInt64, server: ProgressBaseline) {
+    init(seed: UInt64, server: ProgressBaseline?) {
         random = SeededGenerator(seed: seed)
-        state = ProgressSyncState(seed: server)
-        self.server = server
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        state = server.map { ProgressSyncState(seed: $0) } ?? ProgressSyncState(lastUpdate: start)
+        exists = server != nil
+        self.server =
+            server
+            ?? ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: nil, lastUpdate: start)
     }
 
     mutating func roll(_ count: Int) -> Int { Int.random(in: 0..<count, using: &random) }
@@ -608,8 +658,16 @@ private struct Simulation {
         case 6:
             otherDevice(now: now)
         case 7:
-            captured = (server, origins, epoch)
+            captured = exists ? (server, origins, epoch) : nil
+        case 8 where roll(4) == 0:
+            // A relaunch: the in-flight send is forgotten (its entry stays) and no fetch survives.
+            if roll(2) == 0 { deliver(now: now) }
+            inFlight = nil
+            delivered = nil
+            captured = nil
+            epoch += 1
         default:
+            guard exists else { break }
             if roll(3) == 0, let captured, captured.epoch == epoch {
                 merge(captured.server, origins: captured.origins, fresh: false, step: step)
             } else {
@@ -637,6 +695,11 @@ private struct Simulation {
     mutating func deliver(now: Date) {
         guard let send = inFlight, delivered == nil else { return }
         delivered = now
+        if !exists {
+            // #53: the server creates the progress with defaults for the groups not sent.
+            exists = true
+            for index in 0..<3 { origins[index] = .sideEffect(now) }
+        }
         if let audio = send.audio {
             server.currentTime = audio.currentTime
             server.progress = audio.progress
@@ -694,9 +757,35 @@ private struct Simulation {
         default:
             server.ebookLocation = "other\(roll(1000))"
         }
+        if !exists {
+            exists = true
+            for index in 0..<3 { origins[index] = .other }
+        }
         origins[group] = .other
         server.lastUpdate = now
         lastOtherWrite = now
+    }
+
+    /// Syncs without other writers until nothing is dirty; local then equals the server.
+    mutating func converge(from start: Date) {
+        var now = start
+        for _ in 0..<20 {
+            now += 10
+            if inFlight == nil { inFlight = state.beginSend() }
+            guard let send = inFlight else { break }
+            deliver(now: now)
+            state.acknowledge(send, serverLastUpdate: now)
+            inFlight = nil
+            delivered = nil
+        }
+        if exists { merge(server, origins: origins, fresh: true, step: 9999) }
+        #expect(state.dirty.isEmpty)
+        #expect(state.nextSendGroup == nil)
+        if exists {
+            for group in ProgressGroups.each {
+                #expect(Self.values(group, of: state) == Self.values(group, of: server), "\(group.rawValue)")
+            }
+        }
     }
 
     mutating func merge(_ fetched: ProgressBaseline, origins: [Int: Origin], fresh: Bool, step: Int) {

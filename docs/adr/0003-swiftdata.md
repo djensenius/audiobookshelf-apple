@@ -222,10 +222,12 @@ Model notes:
     `isFinished`, so it can't wipe audio progress made on another device, and
     vice versa. Each PATCH carries one dirty group, in the order audio, finished,
     ebook (#53: the server mishandles audio and finished in one body, and audio
-    must go before finished). Ebook doesn't depend on the others: when the newest
-    unacknowledged send carried audio or finished (it failed or its response was
-    lost) and ebook is dirty, ebook goes next, so a PATCH that keeps failing can't
-    block it.
+    must go before finished). Once a server baseline exists, ebook doesn't depend
+    on the others: when the newest unacknowledged send carried audio or finished
+    (it failed or its response was lost) and ebook is dirty, ebook goes next, so a
+    PATCH that keeps failing can't block it. Without a baseline, ebook waits for
+    audio and finished, because an ebook PATCH for media the server has no
+    progress for creates it with zero audio and unfinished (#53).
   - **Stale server values are dropped before any merge.** `LocalProgressStore`
     keeps an in-memory generation counter and, per row, the generation of its last
     local edit or PATCH settlement. Every fetch (`/api/me`, an expanded item,
@@ -245,7 +247,8 @@ Model notes:
     - dirty, and the server's group equals that group in any entry of
       `unacknowledgedSends` (newest checked first): it is the echo of our own
       PATCH whose response was lost. The baseline advances to those values, that
-      entry and every older entry are removed, and the flag clears only if
+      group is removed from that entry and every older one (entries left empty
+      are dropped; other groups keep their evidence), and the flag clears only if
       `<group>EditedAt` still equals the entry's. A newer local edit stays dirty
       and is never rolled back;
     - dirty, matching neither the baseline nor any entry, while that group's
@@ -310,16 +313,25 @@ Model notes:
   - **Truncation flags and #53 side effects.** A `<group>HistoryTruncated` flag
     means "the server's value for this group may come from our own sends, so the
     dirty local value wins". Besides overflow, it guards against the server's side
-    effects: an audio PATCH can un-finish or auto-finish the item, and a finished
-    PATCH can reset `currentTime`. When one of these groups has been sent while the
-    other is dirty, the other's flag is set, so the server's side effect can't
-    overwrite the pending local edit, at three points:
+    effects: an audio PATCH can un-finish or auto-finish the item, a finished
+    PATCH can reset `currentTime`, and any PATCH for media the server has no
+    progress for creates it with defaults for the other groups. When one of these
+    groups has been sent while the other is dirty (or any group while the row has
+    no baseline), the flags of the affected dirty groups are set, so the server's
+    side effect can't overwrite the pending local edit, at three points:
     - when the send is acknowledged;
     - when a fetch matches it as the echo of a lost send;
     - when server progress is merged while it is in flight.
 
     A flag clears when its group's own send is acknowledged, or when the group
     stops being dirty (an echo settles it or the server wins a conflict).
+
+    Known gaps, accepted:
+    - After a relaunch, the in-flight send is forgotten but its entry stays, so
+      ebook can go once ahead of an old, lost audio entry.
+    - A dirty group can still lose to our own side effect once another device
+      writes the row later than both: the server's `lastUpdate` is then later
+      than the edit, and the time rule lets the server win.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
