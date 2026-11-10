@@ -418,6 +418,9 @@ public struct LoginResult: Sendable {
     /// The pair to store for ``TokenProvider``.
     public let tokens: AuthTokens
     public let features: ServerFeatures
+    /// For an OpenID sign-in, the cookies to store with the tokens for sign-out; `nil` for a
+    /// password sign-in.
+    public internal(set) var openIDSession: OpenIDSessionCookies? = nil
 }
 
 /// A successful `POST /api/authorize`.
