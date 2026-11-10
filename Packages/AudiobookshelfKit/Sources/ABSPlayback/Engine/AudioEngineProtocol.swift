@@ -133,4 +133,8 @@ public protocol AudioEngineProtocol: AnyObject, Observable {
     func seek(to time: Double) async -> SeekResult
     /// Sets ``defaultRate``; applies it immediately when playing. Ignores non-positive or non-finite rates.
     func setRate(_ rate: Float)
+    /// Output volume, `0...1` (the sleep timer fade).
+    var volume: Float { get }
+    /// Sets ``volume``, clamped to `0...1`. Ignores non-finite values.
+    func setVolume(_ volume: Float)
 }
