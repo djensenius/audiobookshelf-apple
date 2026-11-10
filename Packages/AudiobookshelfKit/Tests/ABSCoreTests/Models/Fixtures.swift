@@ -87,7 +87,8 @@ enum Fixtures {
         "addedAt":1699300000000,"updatedAt":1699300000000,"size":3000000,"duration":1500}
         """
 
-    /// `GET /api/items/:id?expanded=1` for a podcast; the second episode has an unknown type.
+    /// `GET /api/items/:id?expanded=1` for a podcast. The second episode has an unknown type, no title,
+    /// and an untitled chapter; the third is malformed (no `id`).
     static let podcast = """
         {"id":"li-pod-1","ino":"2","libraryId":"lib-pods","folderId":"fol-2","path":"/podcasts/Show",\
         "relPath":"Show","isFile":false,"addedAt":1699000000000,"updatedAt":1699300000000,"isMissing":false,\
@@ -97,15 +98,16 @@ enum Fixtures {
         "imageUrl":"https://feed.example.com/art.jpg","itunesPageUrl":null,"itunesId":"123","itunesArtistId":null,\
         "explicit":false,"language":"en","type":"episodic"},"coverPath":"/metadata/items/li-pod-1/cover.jpg",\
         "tags":[],"episodes":[\(podcastEpisode),{"libraryItemId":"li-pod-1","podcastId":"pod-1","id":"ep-2",\
-        "episodeType":"teaser","title":"Teaser","chapters":[]}],"autoDownloadEpisodes":true,\
+        "episodeType":"teaser","chapters":[{"id":0,"start":0,"end":5}]},{"title":"Broken"}],"autoDownloadEpisodes":true,\
         "autoDownloadSchedule":"0 * * * *","lastEpisodeCheck":1699300000000,"maxEpisodesToKeep":0,\
         "maxNewEpisodesToDownload":3,"size":3000000},"libraryFiles":[],"size":3000000}
         """
 
-    /// `GET /api/libraries/:id/personalized?minified=1` (podcast and book shelves, trimmed).
+    /// `GET /api/libraries/:id/personalized?minified=1` (podcast and book shelves, trimmed). The first
+    /// shelf has a malformed entity (no `libraryId`).
     static let shelves = """
         [{"id":"continue-listening","label":"Continue Listening","labelStringKey":"LabelContinueListening",\
-        "type":"book","entities":[\(minifiedBook)],"total":1,"category":"recentlyListened"},\
+        "type":"book","entities":[\(minifiedBook),{"id":"li-bad","mediaType":"book"}],"total":1,"category":"recentlyListened"},\
         {"id":"newest-episodes","label":"Newest Episodes","labelStringKey":"LabelNewestEpisodes","type":"episode",\
         "entities":[{"id":"li-pod-1","libraryId":"lib-pods","mediaType":"podcast","media":{"id":"pod-1",\
         "metadata":{"title":"The Show","author":"Host"},"coverPath":null,"tags":[],"numEpisodes":2},\
@@ -150,5 +152,13 @@ enum Fixtures {
     static let collection = """
         {"id":"col-1","libraryId":"lib-books","name":"Favourites","description":"Best","cover":null,\
         "coverFullPath":null,"books":[\(singleFileBook)],"lastUpdate":1700000200000,"createdAt":1700000100000}
+        """
+
+    /// `GET /api/libraries/:id/items?collapseseries=1&filter=series.<id>` (one item, trimmed).
+    static let collapsedSeriesItem = """
+        {"id":"li-book-3","libraryId":"lib-books","mediaType":"book","media":{"id":"book-3","metadata":\
+        {"title":"Saga Omnibus","seriesName":"Saga"},"numTracks":0},"series":{"id":"se-1","name":"Saga",\
+        "sequence":"1-3"},"collapsedSeries":{"id":"se-2","name":"The Subseries","nameIgnorePrefix":"Subseries",\
+        "sequence":"4","numBooks":2,"libraryItemIds":["li-book-4","li-book-5"]}}
         """
 }

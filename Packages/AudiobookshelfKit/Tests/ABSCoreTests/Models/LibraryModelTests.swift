@@ -99,6 +99,8 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(episode.duration == 1500)
         #expect(episodes[1].episodeType == .unknown("teaser"))
         #expect(episodes[1].audioFile == nil)
+        #expect(episodes[1].title == "")
+        #expect(episodes[1].chapters?.first?.title == "")
     }
 
     @Test func preservesUnknownMediaType() throws {
@@ -121,6 +123,7 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
             Issue.record("Expected library items")
             return
         }
+        #expect(books.map(\.id) == ["li-book-1"])
         #expect(books.first?.book?.metadata.title == "The First Book")
         #expect(shelves[0].labelStringKey == "LabelContinueListening")
 
@@ -147,6 +150,40 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
 
         #expect(shelves[4].type == .unknown("carousel"))
         #expect(shelves[4].entities == .unknown)
+    }
+
+    @Test func decodesSeriesAndCollapsedSeries() throws {
+        let item = try decode(LibraryItem.self, Fixtures.collapsedSeriesItem)
+        #expect(item.series?.id == "se-1")
+        #expect(item.series?.sequence == "1-3")
+        let collapsed = try #require(item.collapsedSeries)
+        #expect(collapsed.name == "The Subseries")
+        #expect(collapsed.nameIgnorePrefix == "Subseries")
+        #expect(collapsed.sequence == "4")
+        #expect(collapsed.numBooks == 2)
+        #expect(collapsed.libraryItemIds == ["li-book-4", "li-book-5"])
+        #expect(try decode(LibraryItem.self, Fixtures.minifiedBook).collapsedSeries == nil)
+    }
+
+    @Test func lossyArraySkipsMalformedElements() throws {
+        let json = #"[{"id":"au-1","name":"One"},{"id":2},"text",null,{"id":"au-3","name":"Three"}]"#
+        let authors = try decode(LossyArray<Author>.self, json)
+        #expect(authors.elements.map(\.id) == ["au-1", "au-3"])
+    }
+
+    @Test func buildsLocalSessionInMemory() {
+        let track = AudioTrack(index: 1, startOffset: 0, duration: 60, contentUrl: "file:///a.m4b")
+        var session = PlaybackSession(
+            id: "local-1", libraryItemId: "li-1", mediaType: .book,
+            mediaMetadata: .book(BookMetadata(title: "Book")), chapters: [Chapter(id: 0, start: 0, end: 60)],
+            duration: 60, playMethod: .local, audioTracks: [track])
+        session.currentTime = 30
+        session.timeListening = 5
+        session.updatedAt = 1_700_000_000_000
+        #expect(session.playMethod == .local)
+        #expect(session.currentTime == 30)
+        #expect(session.audioTracks.first?.endOffset == 60)
+        #expect(session.chapters.first?.title == "")
     }
 
     @Test func decodesPlaybackSession() throws {
@@ -203,5 +240,18 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         let shelves = try decode([Shelf].self, Fixtures.shelves)
         let reencoded = try decode([Shelf].self, String(decoding: encoder.encode(shelves), as: UTF8.self))
         #expect(reencoded == shelves)
+
+        // Unknown values survive a round trip; items of an unknown media type re-encode without `media`.
+        let unknownItem = try decode(
+            LibraryItem.self, #"{"id":"li-x","libraryId":"lib-x","mediaType":"video","media":{"id":"v-1"}}"#)
+        let unknownItemJSON = String(decoding: try encoder.encode(unknownItem), as: UTF8.self)
+        #expect(try decode(LibraryItem.self, unknownItemJSON).mediaType == .unknown("video"))
+        #expect(!unknownItemJSON.contains("\"media\""))
+        let unknownSession = try decode(
+            PlaybackSession.self, #"{"id":"ps-2","libraryItemId":"li-1","mediaType":"video","playMethod":9}"#)
+        let unknownSessionJSON = String(decoding: try encoder.encode(unknownSession), as: UTF8.self)
+        let decodedSession = try decode(PlaybackSession.self, unknownSessionJSON)
+        #expect(decodedSession.playMethod == .unknown(9))
+        #expect(decodedSession.mediaType == .unknown("video"))
     }
 }

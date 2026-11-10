@@ -5,7 +5,9 @@ import Foundation
 /// - expanded (`?expanded=1`): also `size`, and media `tracks`, `duration`, `size`;
 /// - minified (lists, shelves, `?minified=1`): `numFiles`, `size`, and media counts instead of files.
 ///
-/// Personalized shelves may add `recentEpisode`, `numEpisodesIncomplete`, and `progressLastUpdate`.
+/// Personalized shelves may add `recentEpisode`, `numEpisodesIncomplete`, and `progressLastUpdate`;
+/// series-filtered lists and the continue-series shelf add `series`, and lists requested with
+/// `collapseseries=1` add `collapsedSeries`.
 public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
     public let id: String
     public let ino: String?
@@ -31,7 +33,7 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
     public let isMissing: Bool
     public let isInvalid: Bool
     public let mediaType: MediaType
-    /// `nil` when the media type is unknown to this client.
+    /// `nil` when the media type is unknown to this client. Such items re-encode without `media`.
     public let media: LibraryItemMedia?
     public let libraryFiles: [LibraryFile]?
     public let numFiles: Int?
@@ -41,12 +43,54 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
     public let numEpisodesIncomplete: Int?
     /// Epoch milliseconds.
     public let progressLastUpdate: Int?
+    /// The series this item is listed under, with the item's `sequence`.
+    public let series: Series?
+    /// Set when this item stands in for a collapsed series.
+    public let collapsedSeries: CollapsedSeries?
+
+    public init(
+        id: String, ino: String? = nil, oldLibraryItemId: String? = nil, libraryId: String, folderId: String? = nil,
+        path: String? = nil, relPath: String? = nil, isFile: Bool? = nil, mtimeMs: Int? = nil, ctimeMs: Int? = nil,
+        birthtimeMs: Int? = nil, addedAt: Int? = nil, updatedAt: Int? = nil, lastScan: Int? = nil,
+        scanVersion: String? = nil, isMissing: Bool = false, isInvalid: Bool = false, mediaType: MediaType,
+        media: LibraryItemMedia? = nil, libraryFiles: [LibraryFile]? = nil, numFiles: Int? = nil, size: Int? = nil,
+        recentEpisode: PodcastEpisode? = nil, numEpisodesIncomplete: Int? = nil, progressLastUpdate: Int? = nil,
+        series: Series? = nil, collapsedSeries: CollapsedSeries? = nil
+    ) {
+        self.id = id
+        self.ino = ino
+        self.oldLibraryItemId = oldLibraryItemId
+        self.libraryId = libraryId
+        self.folderId = folderId
+        self.path = path
+        self.relPath = relPath
+        self.isFile = isFile
+        self.mtimeMs = mtimeMs
+        self.ctimeMs = ctimeMs
+        self.birthtimeMs = birthtimeMs
+        self.addedAt = addedAt
+        self.updatedAt = updatedAt
+        self.lastScan = lastScan
+        self.scanVersion = scanVersion
+        self.isMissing = isMissing
+        self.isInvalid = isInvalid
+        self.mediaType = mediaType
+        self.media = media
+        self.libraryFiles = libraryFiles
+        self.numFiles = numFiles
+        self.size = size
+        self.recentEpisode = recentEpisode
+        self.numEpisodesIncomplete = numEpisodesIncomplete
+        self.progressLastUpdate = progressLastUpdate
+        self.series = series
+        self.collapsedSeries = collapsedSeries
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, ino, oldLibraryItemId, libraryId, folderId, path, relPath, isFile
         case mtimeMs, ctimeMs, birthtimeMs, addedAt, updatedAt, lastScan, scanVersion
         case isMissing, isInvalid, mediaType, media, libraryFiles, numFiles, size
-        case recentEpisode, numEpisodesIncomplete, progressLastUpdate
+        case recentEpisode, numEpisodesIncomplete, progressLastUpdate, series, collapsedSeries
     }
 
     public init(from decoder: any Decoder) throws {
@@ -80,6 +124,8 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
         recentEpisode = try container.decodeIfPresent(PodcastEpisode.self, forKey: .recentEpisode)
         numEpisodesIncomplete = try container.decodeIfPresent(Int.self, forKey: .numEpisodesIncomplete)
         progressLastUpdate = try container.decodeIfPresent(Int.self, forKey: .progressLastUpdate)
+        series = try container.decodeIfPresent(Series.self, forKey: .series)
+        collapsedSeries = try container.decodeIfPresent(CollapsedSeries.self, forKey: .collapsedSeries)
     }
 
     public var book: Book? {
@@ -88,6 +134,29 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
 
     public var podcast: Podcast? {
         if case .podcast(let podcast) = media { podcast } else { nil }
+    }
+}
+
+/// A series shown as a single item in a list requested with `collapseseries=1`.
+public struct CollapsedSeries: Sendable, Hashable, Codable, Identifiable {
+    public let id: String
+    public let name: String
+    public let nameIgnorePrefix: String?
+    /// The sequence of the item standing in for the series, when the list is filtered by series.
+    public let sequence: String?
+    public let numBooks: Int?
+    public let libraryItemIds: [String]?
+
+    public init(
+        id: String, name: String, nameIgnorePrefix: String? = nil, sequence: String? = nil, numBooks: Int? = nil,
+        libraryItemIds: [String]? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.nameIgnorePrefix = nameIgnorePrefix
+        self.sequence = sequence
+        self.numBooks = numBooks
+        self.libraryItemIds = libraryItemIds
     }
 }
 
@@ -120,6 +189,20 @@ public struct FileMetadata: Sendable, Hashable, Codable, Identifiable {
     public let ctimeMs: Int?
     /// Epoch milliseconds.
     public let birthtimeMs: Int?
+
+    public init(
+        filename: String, ext: String? = nil, path: String, relPath: String? = nil, size: Int? = nil,
+        mtimeMs: Int? = nil, ctimeMs: Int? = nil, birthtimeMs: Int? = nil
+    ) {
+        self.filename = filename
+        self.ext = ext
+        self.path = path
+        self.relPath = relPath
+        self.size = size
+        self.mtimeMs = mtimeMs
+        self.ctimeMs = ctimeMs
+        self.birthtimeMs = birthtimeMs
+    }
 
     public var id: String { path }
 }

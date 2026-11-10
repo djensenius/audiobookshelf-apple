@@ -28,6 +28,38 @@ public struct AudioFile: Sendable, Hashable, Codable, Identifiable {
     public let embeddedCoverArt: String?
     public let mimeType: String?
 
+    public init(
+        index: Int? = nil, ino: String, metadata: FileMetadata? = nil, addedAt: Int? = nil, updatedAt: Int? = nil,
+        trackNumFromMeta: Int? = nil, discNumFromMeta: Int? = nil, trackNumFromFilename: Int? = nil,
+        discNumFromFilename: Int? = nil, manuallyVerified: Bool? = nil, exclude: Bool? = nil, error: String? = nil,
+        format: String? = nil, duration: Double? = nil, bitRate: Int? = nil, language: String? = nil,
+        codec: String? = nil, channels: Int? = nil, channelLayout: String? = nil, chapters: [Chapter]? = nil,
+        embeddedCoverArt: String? = nil, mimeType: String? = nil
+    ) {
+        self.index = index
+        self.ino = ino
+        self.metadata = metadata
+        self.addedAt = addedAt
+        self.updatedAt = updatedAt
+        self.trackNumFromMeta = trackNumFromMeta
+        self.discNumFromMeta = discNumFromMeta
+        self.trackNumFromFilename = trackNumFromFilename
+        self.discNumFromFilename = discNumFromFilename
+        self.manuallyVerified = manuallyVerified
+        self.exclude = exclude
+        self.error = error
+        self.format = format
+        self.duration = duration
+        self.bitRate = bitRate
+        self.language = language
+        self.codec = codec
+        self.channels = channels
+        self.channelLayout = channelLayout
+        self.chapters = chapters
+        self.embeddedCoverArt = embeddedCoverArt
+        self.mimeType = mimeType
+    }
+
     public var id: String { ino }
 }
 
@@ -43,6 +75,20 @@ public struct AudioTrack: Sendable, Hashable, Codable, Identifiable {
     public let codec: String?
     public let metadata: FileMetadata?
 
+    public init(
+        index: Int, startOffset: Double? = nil, duration: Double, title: String? = nil, contentUrl: String? = nil,
+        mimeType: String? = nil, codec: String? = nil, metadata: FileMetadata? = nil
+    ) {
+        self.index = index
+        self.startOffset = startOffset
+        self.duration = duration
+        self.title = title
+        self.contentUrl = contentUrl
+        self.mimeType = mimeType
+        self.codec = codec
+        self.metadata = metadata
+    }
+
     public var id: Int { index }
 
     /// Seconds from the start of the media at which this track ends.
@@ -55,4 +101,23 @@ public struct Chapter: Sendable, Hashable, Codable, Identifiable {
     public let start: Double
     public let end: Double
     public let title: String
+
+    public init(id: Int, start: Double, end: Double, title: String = "") {
+        self.id = id
+        self.start = start
+        self.end = end
+        self.title = title
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, start, end, title
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(Int.self, forKey: .id)
+        start = try container.decode(Double.self, forKey: .start)
+        end = try container.decode(Double.self, forKey: .end)
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? ""
+    }
 }

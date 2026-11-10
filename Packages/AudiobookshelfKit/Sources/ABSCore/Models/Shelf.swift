@@ -33,7 +33,8 @@ public enum ShelfType: Sendable, Hashable, Codable, RawRepresentable {
     }
 }
 
-/// A shelf's entities, whose shape depends on the shelf's `type`.
+/// A shelf's entities, whose shape depends on the shelf's `type`. Entities that fail to decode
+/// are skipped.
 public enum ShelfEntities: Sendable, Hashable, Encodable {
     /// Minified library items (for `book`, `podcast`, and `episode` shelves; episode shelves
     /// set `recentEpisode`).
@@ -79,11 +80,11 @@ public struct Shelf: Sendable, Hashable, Codable, Identifiable {
         total = try container.decodeIfPresent(Int.self, forKey: .total)
         switch type {
         case .book, .podcast, .episode:
-            entities = .libraryItems(try container.decodeIfPresent([LibraryItem].self, forKey: .entities) ?? [])
+            entities = .libraryItems(try container.decodeLossyArrayIfPresent(LibraryItem.self, forKey: .entities) ?? [])
         case .series:
-            entities = .series(try container.decodeIfPresent([Series].self, forKey: .entities) ?? [])
+            entities = .series(try container.decodeLossyArrayIfPresent(Series.self, forKey: .entities) ?? [])
         case .authors:
-            entities = .authors(try container.decodeIfPresent([Author].self, forKey: .entities) ?? [])
+            entities = .authors(try container.decodeLossyArrayIfPresent(Author.self, forKey: .entities) ?? [])
         case .unknown:
             entities = .unknown
         }

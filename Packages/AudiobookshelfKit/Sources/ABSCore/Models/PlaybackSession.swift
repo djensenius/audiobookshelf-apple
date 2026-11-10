@@ -80,7 +80,7 @@ public struct PlaybackSession: Sendable, Hashable, Codable, Identifiable {
     public let bookId: String?
     public let episodeId: String?
     public let mediaType: MediaType
-    /// `nil` when the media type is unknown to this client.
+    /// `nil` when the media type is unknown to this client. Such sessions re-encode without it.
     public let mediaMetadata: MediaMetadata?
     public let chapters: [Chapter]
     public let displayTitle: String?
@@ -94,14 +94,51 @@ public struct PlaybackSession: Sendable, Hashable, Codable, Identifiable {
     /// `YYYY-MM-DD` in the server's time zone.
     public let date: String?
     public let dayOfWeek: String?
-    public let timeListening: Double
+    public var timeListening: Double
     public let startTime: Double
-    public let currentTime: Double
+    public var currentTime: Double
     public let startedAt: Int?
-    public let updatedAt: Int?
+    public var updatedAt: Int?
     public let audioTracks: [AudioTrack]
     /// Expanded library item.
     public let libraryItem: LibraryItem?
+
+    public init(
+        id: String, userId: String? = nil, libraryId: String? = nil, libraryItemId: String, bookId: String? = nil,
+        episodeId: String? = nil, mediaType: MediaType, mediaMetadata: MediaMetadata? = nil, chapters: [Chapter] = [],
+        displayTitle: String? = nil, displayAuthor: String? = nil, coverPath: String? = nil, duration: Double = 0,
+        playMethod: PlayMethod = .directPlay, mediaPlayer: String? = nil, deviceInfo: DeviceInfo? = nil,
+        serverVersion: String? = nil, date: String? = nil, dayOfWeek: String? = nil, timeListening: Double = 0,
+        startTime: Double = 0, currentTime: Double = 0, startedAt: Int? = nil, updatedAt: Int? = nil,
+        audioTracks: [AudioTrack] = [], libraryItem: LibraryItem? = nil
+    ) {
+        self.id = id
+        self.userId = userId
+        self.libraryId = libraryId
+        self.libraryItemId = libraryItemId
+        self.bookId = bookId
+        self.episodeId = episodeId
+        self.mediaType = mediaType
+        self.mediaMetadata = mediaMetadata
+        self.chapters = chapters
+        self.displayTitle = displayTitle
+        self.displayAuthor = displayAuthor
+        self.coverPath = coverPath
+        self.duration = duration
+        self.playMethod = playMethod
+        self.mediaPlayer = mediaPlayer
+        self.deviceInfo = deviceInfo
+        self.serverVersion = serverVersion
+        self.date = date
+        self.dayOfWeek = dayOfWeek
+        self.timeListening = timeListening
+        self.startTime = startTime
+        self.currentTime = currentTime
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+        self.audioTracks = audioTracks
+        self.libraryItem = libraryItem
+    }
 
     enum CodingKeys: String, CodingKey {
         case id, userId, libraryId, libraryItemId, bookId, episodeId, mediaType, mediaMetadata, chapters
