@@ -46,6 +46,10 @@ let package = Package(
         .target(name: "ABSDownloads", dependencies: ["ABSCore", "ABSAPI", "ABSData"]),
         .testTarget(name: "ABSDownloadsTests", dependencies: ["ABSDownloads"]),
 
+        // Opt-in contract tests against a real Audiobookshelf server (`mise run test:server`).
+        // They are skipped unless ABS_TEST_SERVER_URL is set.
+        .testTarget(name: "ABSServerContractTests", dependencies: ["ABSCore", "ABSAPI", "ABSData"]),
+
         // Shared SwiftUI components and design system.
         .target(name: "ABSUI", dependencies: ["ABSCore"], resources: [.process("Resources")]),
         .testTarget(name: "ABSUITests", dependencies: ["ABSUI"]),
