@@ -131,7 +131,8 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
             return
         }
         let key = coordinator.mediaKey
-        if let key, let fresh = Self.metadata(of: coordinator, key: key) {
+        if metadata?.key != key { metadata = nil }
+        if let key, let fresh = Self.metadata(of: coordinator, key: key, includeRestored: metadata == nil) {
             metadata = (key, fresh)
         }
         if coordinator.isPlaying { playedSessionID = coordinator.session?.id }
@@ -175,10 +176,9 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
         var cover: NowPlayingCover?
     }
 
-    /// Metadata from the coordinator's session or restored record for `key`; `nil` when it has
-    /// neither (for example between items, or while a new item's session starts: the coordinator
-    /// keeps no metadata from the play request, so a new item shows blank until its session starts).
-    static func metadata(of coordinator: PlaybackCoordinator, key: MediaKey) -> Metadata? {
+    /// Live session metadata for `key`. A restored record only seeds an empty cache; it must not
+    /// overwrite live metadata when a failed load drops the session but keeps the restored record.
+    static func metadata(of coordinator: PlaybackCoordinator, key: MediaKey, includeRestored: Bool) -> Metadata? {
         if let session = coordinator.session, session.libraryItemId == key.libraryItemId,
             session.episodeId == key.episodeId
         {
@@ -201,7 +201,7 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
             }
             return metadata
         }
-        if let record = coordinator.restoredRecord, record.key == key {
+        if includeRestored, let record = coordinator.restoredRecord, record.key == key {
             return Metadata(
                 title: record.title ?? "", author: record.author ?? "", cover: cover(key: key, path: record.coverPath))
         }

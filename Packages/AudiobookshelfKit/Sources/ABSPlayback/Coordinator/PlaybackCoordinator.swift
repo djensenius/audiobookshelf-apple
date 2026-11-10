@@ -126,10 +126,10 @@ public final class PlaybackCoordinator {
     /// starts. Play intent is `playWhenLoaded` until then.
     @ObservationIgnored private var isFinishingLoad = false
     /// A position chosen while starting or unloaded (a seek, or a play with a start time).
-    @ObservationIgnored private var pendingStartTime: Double?
+    private var pendingStartTime: Double?
     /// Jumps made while starting, or while unloaded without a chosen position; applied after the
-    /// resume position is resolved, so they never replace it. The single source of the jumps: the
-    /// position shown is `unloadedPosition` plus this (clamped while unloaded, see `jump(by:)`).
+    /// resume position is resolved, so they never replace it. Once resolved, the position shown is
+    /// the normalized pending absolute start (or `unloadedPosition`) plus this; see `jump(by:)`.
     private var pendingJumpOffset: Double = 0
     /// A new item is starting and its resume position isn't resolved yet, so jumps (which apply
     /// after it) aren't shown: the position stays 0 rather than jump ahead and snap back.
@@ -879,7 +879,9 @@ public final class PlaybackCoordinator {
     /// starts, its resume position (and duration) isn't known yet, so its jumps show once loaded.
     private var unloadedPositionAfterJumps: Double {
         if phase == .starting, isResolvingStart { return unloadedPosition }
-        return Self.clamp(unloadedPosition + pendingJumpOffset, to: unloadedDuration)
+        let base = Self.clamp(
+            phase == .starting ? pendingStartTime ?? unloadedPosition : unloadedPosition, to: unloadedDuration)
+        return Self.clamp(base + pendingJumpOffset, to: unloadedDuration)
     }
 
     /// Adds a clamped jump relative to a pending absolute seek, otherwise the unloaded position.

@@ -100,6 +100,7 @@ struct PlaybackCoordinatorJumpTests {
         // The resume position is already resolved; hold the engine load, not the session start.
         #expect(await coordinator.seek(to: 1000) == nil)
         #expect(await coordinator.jump(by: -15) == nil)
+        #expect(coordinator.currentTime == 985, "Displayed at \(coordinator.currentTime), expected 985")
         gate.open()
         await play.value
 
@@ -133,6 +134,7 @@ struct PlaybackCoordinatorJumpTests {
         for offset in [Double.nan, Double.infinity, -Double.infinity] {
             #expect(await coordinator.jump(by: offset) == nil)
         }
+        #expect(coordinator.currentTime == sample.landing)
         gate.open()
         await play.value
 

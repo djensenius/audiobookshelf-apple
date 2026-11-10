@@ -188,6 +188,28 @@ struct BridgeHarness {
         #expect(session.applicationPrimaryRequests == 1)
     }
 
+    @Test func pendingAbsoluteSeekAndJumpPublishBeforeEngineLoadCompletes() async throws {
+        let b = try BridgeHarness()
+        let gate = Gate()
+        b.h.engine.loadGates = [gate]
+        let coordinator = b.coordinator
+        let play = Task { await coordinator.play(itemID: "a") }
+        await yieldUntil { b.h.engine.loads.count == 1 }
+        let session = try b.session
+        b.settings.value.jumpForwardTime = 45
+        await yieldUntil { b.controller.publishedCommands?.skipForwardInterval == 45 }
+
+        await coordinator.seek(to: 1000)
+        await yieldUntil { session.snapshot == b.snapshot(.paused, at: 1000) }
+        await coordinator.jump(by: -15)
+        await yieldUntil { session.snapshot == b.snapshot(.paused, at: 985) }
+        #expect(coordinator.currentTime == 985)
+        #expect(session.applicationPrimaryRequests == 0)
+        gate.open()
+        await play.value
+        #expect(session.snapshot == b.snapshot(.playing(rate: 1), at: 985))
+    }
+
     @Test func itemAndChapterChangesRepublishTheContent() async throws {
         let b = try BridgeHarness()
         await b.coordinator.play(itemID: "a")
@@ -658,6 +680,74 @@ struct BridgeHarness {
         #expect(books.count == session.contents.count - failedAt + 1)
         #expect(books.allSatisfy { $0.title == "Title a" })
         #expect(b.covers.all.count == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func restoredMetadataDoesNotReplaceLiveMetadataAfterLoadFailure(podcast: Bool) async throws {
+        let b = try BridgeHarness()
+        var record = b.h.record("a", position: 120, age: 5)
+        record.episodeID = podcast ? "e1" : nil
+        record.author = "Saved author"
+        record.coverPath = "/covers/saved.jpg"
+        b.h.lastPlayed.record = record
+        let show = PodcastMetadata(title: "Live show")
+        let item = LibraryItem(
+            id: "a", libraryId: "lib", mediaType: .podcast,
+            media: .podcast(
+                Podcast(
+                    id: "pod", metadata: show,
+                    episodes: [PodcastEpisode(id: "e1", publishedAt: 1_700_000_000_000)])))
+        b.h.service.state.withLock {
+            $0.metadata["a"] = (
+                podcast ? .podcast(show) : .book(BookMetadata(title: "Live book", narratorName: "Narrator")),
+                podcast ? item : nil
+            )
+        }
+        b.coordinator.restoreLastPlayed()
+        #expect(b.controller.state?.title == "Saved a")
+        await b.controller.artworkTask?.value
+        let gate = Gate()
+        b.h.engine.loadGates = [gate]
+        b.h.engine.loadError = .emptyTimeline
+        let coordinator = b.coordinator
+        let play = Task { await coordinator.resume() }
+        await yieldUntil { b.h.engine.loads.count == 1 }
+        await b.controller.artworkTask?.value
+        var live = try #require(b.controller.publishedContent)
+        #expect(live.title == "Title a")
+        #expect(live.author == (podcast ? "Live show" : "Author"))
+        #expect(live.narrator == (podcast ? nil : "Narrator"))
+        #expect(live.releaseDate == (podcast ? Date(timeIntervalSince1970: 1_700_000_000) : nil))
+        #expect(live.artwork?.key == "\(record.key.rawValue)|/covers/a.jpg")
+
+        gate.open()
+        await play.value
+        await b.controller.artworkTask?.value
+        #expect(coordinator.session == nil)
+        #expect(coordinator.restoredRecord == record)
+        #expect(b.controller.publishedContent == live)
+        #expect(b.controller.state?.title == "Title a", "After failure: \(b.controller.state?.title ?? "")")
+
+        b.h.engine.loadError = nil
+        let retryGate = Gate()
+        b.h.service.state.withLock { $0.startGates["a"] = retryGate }
+        let retry = Task { await coordinator.resume() }
+        await yieldUntil { b.h.service.starts.count == 2 }
+        #expect(b.controller.publishedContent == live)
+        retryGate.open()
+        await retry.value
+        await b.controller.artworkTask?.value
+        live.chapter = .init(current: 1, total: 2)
+        #expect(b.controller.publishedContent == live)
+        #expect(b.covers.all.count == 2)  // Saved cover, then live cover; no rollback or retry reload.
+
+        coordinator.stop()
+        record.title = "Restored again"
+        b.h.lastPlayed.record = record
+        coordinator.restoreLastPlayed()
+        #expect(b.controller.state?.title == "Restored again")
+        #expect(b.controller.state?.narrator == nil)
+        #expect(b.controller.state?.releaseDate == nil)
     }
 
     @Test func anItemSwitchNeverBlanksTheOldItem() async throws {
