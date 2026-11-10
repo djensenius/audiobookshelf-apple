@@ -3,14 +3,15 @@
 # - MediaPlayer (and its Now Playing symbols) is banned in every native source.
 # - NowPlaying / _NowPlaying_AppIntents may be imported only under ABSPlayback/NowPlaying/ and its
 #   tests, ABSPlaybackTests/NowPlaying/.
-# Scans the app, its tests, the widget/extension folder and Packages; legacy ios/ still imports
-# MediaPlayer and is not scanned. Runs on macOS /bin/bash 3.2 with BSD grep (grep -E only).
+# Scans the app, its tests, the widget/extension folder, Packages and Tools; legacy ios/ still imports
+# MediaPlayer and is not scanned. Lines whose first token is a comment marker (//, /*, *) are
+# skipped for the MediaPlayer ban. Fails if grep itself errors (exit > 1). Runs on macOS /bin/bash 3.2 with BSD grep (grep -E only).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 dirs=()
-for d in Audiobookshelf AudiobookshelfTests AudiobookshelfUITests AudiobookshelfWidgets Packages; do
+for d in Audiobookshelf AudiobookshelfTests AudiobookshelfUITests AudiobookshelfWidgets Packages Tools; do
   if [[ -d "$d" ]]; then dirs+=("$d"); fi
 done
 if ((${#dirs[@]} == 0)); then exit 0; fi
@@ -23,14 +24,25 @@ imp='^[[:space:]]*(@[_A-Za-z][_A-Za-z0-9]*(\([^)]*\))?[[:space:]]*)*((public|pac
 end='([.;/[:space:]]|$)'
 mp_symbols='\bMP(NowPlaying|RemoteCommand|MediaItemArtwork|MediaItemProperty|AppEntityIdentifier|SkipInterval|ChangePlayback|ChangeRepeatMode|ChangeShuffleMode|FeedbackCommand|RatingCommand)[A-Za-z]*'
 
+# Runs grep over the scan list into $matches; fails the script if grep errors (rc > 1).
+matches=''
+search() {
+  local rc=0
+  matches=$(grep "${scan[@]}" "$@" "${dirs[@]}") || rc=$?
+  if ((rc > 1)); then
+    echo "error: grep failed (exit $rc); cannot verify ADR 0006" >&2
+    exit "$rc"
+  fi
+}
+
 status=0
-if grep "${scan[@]}" -e "${imp}(MediaPlayer|_MediaPlayer_AppIntents)${end}" -e "${mp_symbols}" "${dirs[@]}" \
-  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'; then
+search -e "${imp}(MediaPlayer|_MediaPlayer_AppIntents)${end}" -e "${mp_symbols}"
+if [[ -n "$matches" ]] && printf '%s\n' "$matches" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)'; then
   echo "error: MediaPlayer Now Playing APIs are banned; use the NowPlaying framework (ADR 0006)" >&2
   status=1
 fi
-if grep "${scan[@]}" -e "${imp}(NowPlaying|_NowPlaying_AppIntents)${end}" "${dirs[@]}" \
-  | grep -vE "${allowed}"; then
+search -e "${imp}(NowPlaying|_NowPlaying_AppIntents)${end}"
+if [[ -n "$matches" ]] && printf '%s\n' "$matches" | grep -vE "${allowed}"; then
   echo "error: import NowPlaying only under ABSPlayback/NowPlaying/ or ABSPlaybackTests/NowPlaying/ (ADR 0006)" >&2
   status=1
 fi

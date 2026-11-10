@@ -95,17 +95,30 @@ import _NowPlaying_AppIntents
         #expect(try #require(try h.session.book).duration == nil)
     }
 
-    @Test func requestsApplicationPrimaryOnceWhenTheSessionStarts() async throws {
+    @Test func requestsApplicationPrimaryOnceOnTheFirstPlayingState() async throws {
         let h = NowPlayingHarness()
-        h.controller.update(F.book())
-        await h.controller.activationTask?.value
         h.controller.update(F.book(isPlaying: false))
-        await h.controller.activationTask?.value
-        #expect(try h.session.applicationPrimaryRequests == 1)
-        #expect(h.sessions.made.count == 1)
-
+        let session = try h.session
+        #expect(session.book != nil)
+        #expect(h.controller.activationTask == nil)
+        // Not playing yet (audio session not active): no primary requests at all.
         await h.controller.requestSystemPrimary()
-        #expect(try h.session.systemPrimaryRequests == 1)
+        #expect(session.primaryRequests.isEmpty)
+
+        h.controller.update(F.book(isPlaying: true))
+        h.controller.update(F.book(isPlaying: false))
+        h.controller.update(F.book(isPlaying: true))
+        await h.controller.activationTask?.value
+        #expect(session.primaryRequests == ["application"])
+        #expect(h.sessions.made.count == 1)
+    }
+
+    @Test func systemPrimaryWaitsForApplicationPrimary() async throws {
+        let h = NowPlayingHarness()
+        h.controller.update(F.book(isPlaying: true))
+        // Not awaiting the activation task first: requestSystemPrimary must order the requests.
+        await h.controller.requestSystemPrimary()
+        #expect(try h.session.primaryRequests == ["application", "system"])
     }
 
     // MARK: Commands
@@ -130,6 +143,34 @@ import _NowPlaying_AppIntents
                 == NowPlayingCommandSet(
                     skipForwardInterval: 30, skipBackwardInterval: 15,
                     supportedRates: [0.5, 0.75, 1.0, 1.25, 1.5, 2], canSeek: false))
+    }
+
+    @Test func commandSpecsMapToTheFrameworkCommands() throws {
+        let h = NowPlayingHarness(
+            settings: NowPlayingSettings(jumpForwardTime: 30, jumpBackwardsTime: 15, chapterTrack: false))
+        h.controller.update(F.book())
+        let commands = try #require(h.controller.publishedCommands)
+        let specs = commands.specs
+        #expect(
+            specs.map(\.kind) == [
+                .play, .pause, .togglePlayPause,
+                .skipForward(preferredIntervals: [30]), .skipBackward(preferredIntervals: [15]),
+                .next, .previous, .changePlaybackRate(supported: [0.5, 0.75, 1.0, 1.25, 1.5, 2]),
+            ])
+        #expect(
+            specs.map { $0.command(7) } == [
+                .play, .pause, .togglePlayPause, .skipForward(7), .skipBackward(7), .nextTrack, .previousTrack,
+                .changeRate(7),
+            ])
+        #expect(try h.session.commandUpdates.last?.count == 8)
+
+        h.controller.settings.allowSeekingOnMediaControls = true
+        let seekSpecs = try #require(h.controller.publishedCommands).specs
+        #expect(seekSpecs.count == 9)
+        #expect(seekSpecs.last?.kind == .seekToPosition)
+        #expect(seekSpecs.last?.command(42) == .seek(42))
+        #expect(try h.session.commandUpdates.last?.count == 9)
+        #expect(try h.session.commandUpdates.count == 2)
     }
 
     @Test func nextAndPreviousTrackJumpByTheUsersIntervals() async throws {
@@ -200,6 +241,18 @@ import _NowPlaying_AppIntents
         try await h.controller.perform(.seek(-5))
         try await h.controller.perform(.seek(7000))
         #expect(h.handler.calls == [.seek(0), .seek(6000)])
+    }
+
+    @Test(arguments: [0, Double.nan])
+    func seekWithUnknownDurationIsOnlyClampedAtZero(_ duration: Double) async throws {
+        let h = NowPlayingHarness(settings: NowPlayingSettings(allowSeekingOnMediaControls: true, chapterTrack: false))
+        var state = F.book(chapter: nil)
+        state.duration = duration
+        h.controller.update(state)
+        try await h.controller.perform(.seek(500))
+        try await h.controller.perform(.seek(-5))
+        try await h.controller.perform(.seek(.nan))
+        #expect(h.handler.calls == [.seek(500), .seek(0), .seek(0)])
     }
 
     // MARK: Redundant updates
@@ -276,6 +329,22 @@ import _NowPlaying_AppIntents
         #expect(session.snapshots.count == 2)
     }
 
+    @Test func lastChapterRunsToTheEndOfTheMedia() throws {
+        let h = NowPlayingHarness(settings: NowPlayingSettings(chapterTrack: true))
+        // The last chapter ends at 5900, short of the 6000 s media.
+        let last = NowPlayingState.Chapter(
+            title: "Epilogue", index: 9, count: 10, range: TimelineRange(start: 5400, end: 5900))
+        h.controller.update(F.book(elapsed: 5890, rate: 2, chapter: last))
+        let session = try h.session
+        #expect(session.book?.duration?.finiteValue == 600)
+        for step in 1...4 {
+            h.clock.advance(by: 2)
+            h.controller.update(F.book(elapsed: 5890 + Double(step) * 4, rate: 2, chapter: last))
+        }
+        #expect(session.snapshots.count == 1)
+        #expect(session.contents.count == 1)
+    }
+
     @Test func chapterTrackSettingChangeRepublishesMetadata() throws {
         let h = NowPlayingHarness()
         h.controller.update(F.book(elapsed: 700))
@@ -338,12 +407,39 @@ import _NowPlaying_AppIntents
         #expect(h.entityCalls.keys == [F.bookKey, F.otherBookKey])
     }
 
-    @Test func missingArtworkLeavesContentUnchanged() async throws {
-        let h = NowPlayingHarness(artwork: { _ in nil })
-        h.controller.update(F.book(artworkKey: "cover-1"))
+    @Test func missingArtworkIsRetriedOnlyOnThePlayStateChange() async throws {
+        let calls = ArtworkCalls()
+        let gate = ArtworkGate()
+        let h = NowPlayingHarness(artwork: { key in
+            calls.record(key)
+            return await gate.load(key)
+        })
+        await gate.resolve("cover-1", with: nil)
+        h.controller.update(F.book(isPlaying: true, artworkKey: "cover-1"))
         await h.controller.artworkTask?.value
-        #expect(try h.session.book?.artwork == nil)
-        #expect(try h.session.contents.count == 1)
+        let session = try h.session
+        #expect(session.book?.artwork == nil)
+        #expect(session.contents.count == 1)
+
+        // Ticks don't retry.
+        for elapsed in [701.5, 703.0, 704.5] {
+            h.clock.advance(by: 1)
+            h.controller.update(F.book(elapsed: elapsed, isPlaying: true, artworkKey: "cover-1"))
+        }
+        await h.controller.artworkTask?.value
+        #expect(calls.all == ["cover-1"])
+
+        // A play-state change retries once.
+        await gate.resolve("cover-1", with: Data([1]))
+        h.controller.update(F.book(elapsed: 704.5, isPlaying: false, artworkKey: "cover-1"))
+        await h.controller.artworkTask?.value
+        #expect(calls.all == ["cover-1", "cover-1"])
+        #expect(session.book?.artwork?.id == "cover-1")
+
+        // Loaded: further play-state changes don't reload.
+        h.controller.update(F.book(elapsed: 704.5, isPlaying: true, artworkKey: "cover-1"))
+        await h.controller.artworkTask?.value
+        #expect(calls.all == ["cover-1", "cover-1"])
     }
 
     // MARK: Clearing

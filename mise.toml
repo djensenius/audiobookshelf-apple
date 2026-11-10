@@ -58,8 +58,14 @@ description = "Rewrite Audiobookshelf.xcodeproj/project.xcproj in canonical form
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "scripts/xcprojformatter.sh --update Audiobookshelf.xcodeproj"
 
+[tasks."build:kit:extension"]
+description = "Build AudiobookshelfKit as application-extension-only code for the iOS Simulator (widgets/extensions)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "swift build --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm-appex --triple arm64-apple-ios27.0-simulator --sdk \"$(xcrun --sdk iphonesimulator --show-sdk-path)\" -Xswiftc -application-extension"
+
 [tasks."build:ios"]
 description = "Build the app for the iOS Simulator"
+depends = ["build:kit:extension"]
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "xcodebuild build -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'generic/platform=iOS Simulator' -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO"
 

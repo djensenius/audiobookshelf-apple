@@ -35,7 +35,7 @@ public enum NowPlayingCommandError: Error, Equatable {
 /// | --- | --- |
 /// | `itemChanged(key)` | `key` set: new item, paused, metadata and artwork reload. `nil`: ``clear()``. |
 /// | `loaded(time:)` | Paused at `time` with the session's duration and chapter. |
-/// | `playbackStarted` | Playing at `rate`; also call ``requestSystemPrimary()`` on iOS when the user started playback in the foreground. |
+/// | `playbackStarted` | Playing at `rate`. The first playing state requests application primary, so the audio session must already be active (the engine activates it before playing). On iOS, then call ``requestSystemPrimary()`` when the user started playback in the foreground. |
 /// | `paused(time:)` | Paused at `time`. |
 /// | `didSeek(time:)` | Elapsed `time`; detected as a seek and pushed. |
 /// | `tick(time:)` | Elapsed `time`; publishes only on a chapter change (or drift past the tolerance). |
@@ -45,6 +45,14 @@ public enum NowPlayingCommandError: Error, Equatable {
 ///
 /// Rate changes made through `setRate` don't emit an event; the integration also updates on the
 /// coordinator's observed `rate`. Settings changes are applied by assigning ``settings``.
+///
+/// The session is created on the first ``update(_:)``, but `requestToBecomeApplicationPrimary()` is
+/// deferred to the first state with `isPlaying == true`: ADR 0006 requires the `.playback` audio
+/// session to be configured and active first, and the player only reports playing after that.
+///
+/// Unavailable in app extensions, where `MediaSession` doesn't exist; extensions trigger playback
+/// through app-process intents instead (ADR 0006).
+@available(iOSApplicationExtension, unavailable)
 @MainActor
 public final class NowPlayingController {
     /// Elapsed time may drift this far (seconds) from the extrapolated position before it's
@@ -81,6 +89,10 @@ public final class NowPlayingController {
     /// The item and artwork key ``artworkTask`` loads, or the last one requested.
     private var artworkRequest: ArtworkRequest?
     private var artworkGeneration = 0
+    /// The last load for ``artworkRequest`` returned no data; retried on the next play-state change.
+    private var artworkLoadFailed = false
+    /// `isPlaying` when ``artworkRequest`` was last (re)tried.
+    private var artworkRequestIsPlaying = false
     private(set) var artworkTask: Task<Void, Never>?
     private(set) var activationTask: Task<Void, Never>?
 
@@ -139,10 +151,9 @@ public final class NowPlayingController {
         }
         self.state = state
         loadArtworkIfNeeded(for: state)
-        if session == nil {
-            let session = makeSession()
-            self.session = session
-            publish()
+        if session == nil { session = makeSession() }
+        publish()
+        if let session, activationTask == nil, state.isPlaying {
             activationTask = Task {
                 do {
                     try await session.becomeApplicationPrimary()
@@ -150,8 +161,6 @@ public final class NowPlayingController {
                     Log.playback.error("Now Playing: couldn't become application primary: \(error, privacy: .public)")
                 }
             }
-        } else {
-            publish()
         }
     }
 
@@ -161,6 +170,7 @@ public final class NowPlayingController {
         artworkTask = nil
         artworkGeneration += 1
         artworkRequest = nil
+        artworkLoadFailed = false
         loadedArtwork = nil
         activationTask?.cancel()
         activationTask = nil
@@ -179,10 +189,13 @@ public final class NowPlayingController {
 
     /// Asks to become the system's Now Playing app (Lock Screen, Control Center). iOS only, and only
     /// effective while the app is in the foreground, so call it when the user starts playback in the
-    /// app. Does nothing on macOS or without a session. Failures are logged, never thrown, so they
-    /// never block playback.
+    /// app, after the playing state was passed to ``update(_:)``. Waits for the application-primary
+    /// request; does nothing before it was made, on macOS, or without a session. Failures are logged,
+    /// never thrown, so they never block playback.
     public func requestSystemPrimary() async {
-        guard let session else { return }
+        guard let activationTask else { return }
+        await activationTask.value
+        guard let session, self.activationTask == activationTask else { return }
         do {
             try await session.becomeSystemPrimary()
         } catch {
@@ -213,9 +226,21 @@ public final class NowPlayingController {
     /// Global time for a position on the published timeline (chapter-relative in chapter-track mode).
     private func globalTime(forPublished position: Double, in state: NowPlayingState) -> Double {
         if settings.chapterTrack, let chapter = state.chapter {
-            return chapter.range.time(forElapsed: position)
+            return chapterTrackRange(of: chapter, in: state).time(forElapsed: position)
         }
-        return TimelineRange(start: 0, end: max(state.duration, 0)).time(forElapsed: position)
+        let position = position.isNaN ? 0 : max(position, 0)
+        // Without a known duration, don't clamp the end (the player clamps to what it can reach).
+        guard state.duration.isFinite, state.duration > 0 else { return position }
+        return min(position, state.duration)
+    }
+
+    /// The chapter's range for chapter-track mode. The last chapter runs to the end of the media (as
+    /// in `PlaybackTimeline.currentChapterIndex(at:)`), so elapsed time is never clamped while it plays.
+    private func chapterTrackRange(of chapter: NowPlayingState.Chapter, in state: NowPlayingState) -> TimelineRange {
+        guard chapter.index == chapter.count - 1, state.duration.isFinite, state.duration > chapter.range.end else {
+            return chapter.range
+        }
+        return TimelineRange(start: chapter.range.start, end: state.duration)
     }
 
     // MARK: Publishing
@@ -263,7 +288,7 @@ public final class NowPlayingController {
 
     private func contentDescriptor(for state: NowPlayingState) -> NowPlayingContentDescriptor {
         let chapterTrack = settings.chapterTrack ? state.chapter : nil
-        let duration = chapterTrack?.range.duration ?? state.duration
+        let duration = chapterTrack.map { chapterTrackRange(of: $0, in: state).duration } ?? state.duration
         return NowPlayingContentDescriptor(
             id: state.key.rawValue,
             isPodcastEpisode: state.isPodcastEpisode,
@@ -278,7 +303,7 @@ public final class NowPlayingController {
 
     private func publishedElapsed(for state: NowPlayingState) -> Double {
         if settings.chapterTrack, let chapter = state.chapter {
-            return chapter.range.elapsed(at: state.elapsed)
+            return chapterTrackRange(of: chapter, in: state).elapsed(at: state.elapsed)
         }
         return state.elapsed.isFinite ? max(state.elapsed, 0) : 0
     }
@@ -294,12 +319,18 @@ public final class NowPlayingController {
 
     private func loadArtworkIfNeeded(for state: NowPlayingState) {
         let request = ArtworkRequest(key: state.key, artworkKey: state.artworkKey)
-        guard request != artworkRequest else { return }
+        if request == artworkRequest {
+            // Retry a failed load at most once per play-state change, never on every tick.
+            guard artworkLoadFailed, state.isPlaying != artworkRequestIsPlaying else { return }
+        } else {
+            loadedArtwork = nil
+        }
         artworkRequest = request
+        artworkRequestIsPlaying = state.isPlaying
+        artworkLoadFailed = false
         artworkTask?.cancel()
         artworkTask = nil
         artworkGeneration += 1
-        loadedArtwork = nil
         guard let artworkKey = state.artworkKey else { return }
         let generation = artworkGeneration
         let provider = artworkProvider
@@ -311,8 +342,12 @@ public final class NowPlayingController {
 
     private func artworkLoaded(_ data: Data?, key: String, generation: Int) {
         // A newer item or artwork key was requested (or the session cleared) while this one loaded.
-        guard generation == artworkGeneration, let data else { return }
-        loadedArtwork = .init(key: key, data: data)
+        guard generation == artworkGeneration else { return }
+        guard let data else {
+            artworkLoadFailed = true
+            return
+        }
+        loadedArtwork = .init(key: key, generation: generation, data: data)
         publish()
     }
 }

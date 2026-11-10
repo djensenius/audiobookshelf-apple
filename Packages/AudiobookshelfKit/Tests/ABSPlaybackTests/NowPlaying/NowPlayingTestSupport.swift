@@ -12,8 +12,10 @@ final class FakeNowPlayingSession: NowPlayingSessionPublishing {
     var contents: [(any MediaContentRepresentable)?] = []
     var snapshots: [MediaPlaybackSnapshot?] = []
     var commandUpdates: [[MediaCommand]] = []
-    var applicationPrimaryRequests = 0
-    var systemPrimaryRequests = 0
+    /// Primary requests in order: "application" or "system".
+    var primaryRequests: [String] = []
+    var applicationPrimaryRequests: Int { primaryRequests.count { $0 == "application" } }
+    var systemPrimaryRequests: Int { primaryRequests.count { $0 == "system" } }
 
     var content: (any MediaContentRepresentable)? { contents.last ?? nil }
     var book: BookContent? { content as? BookContent }
@@ -23,8 +25,8 @@ final class FakeNowPlayingSession: NowPlayingSessionPublishing {
     func setContent(_ content: (any MediaContentRepresentable)?) { contents.append(content) }
     func setPlaybackSnapshot(_ snapshot: MediaPlaybackSnapshot?) { snapshots.append(snapshot) }
     func setCommands(_ commands: [MediaCommand]) { commandUpdates.append(commands) }
-    func becomeApplicationPrimary() async throws { applicationPrimaryRequests += 1 }
-    func becomeSystemPrimary() async throws { systemPrimaryRequests += 1 }
+    func becomeApplicationPrimary() async throws { primaryRequests.append("application") }
+    func becomeSystemPrimary() async throws { primaryRequests.append("system") }
 }
 
 @MainActor
@@ -72,6 +74,13 @@ actor ArtworkGate {
             ready[key] = data
         }
     }
+}
+
+final class ArtworkCalls: Sendable {
+    private let keys = Mutex<[String]>([])
+
+    var all: [String] { keys.withLock { $0 } }
+    func record(_ key: String) { keys.withLock { $0.append(key) } }
 }
 
 final class CallCounter: Sendable {

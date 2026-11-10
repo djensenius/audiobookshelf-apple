@@ -33,7 +33,8 @@ final class NowPlayingSessionModel: MediaSessionRepresentable {
 }
 
 /// Publishes through a real `MediaSession`. Releasing it ends the session (ADR 0006: set the session
-/// reference to `nil` when playback ends).
+/// reference to `nil` when playback ends). `MediaSession` doesn't exist in app extensions.
+@available(iOSApplicationExtension, unavailable)
 @MainActor
 final class MediaSessionPublisher: NowPlayingSessionPublishing {
     static let sessionID = "org.davidjensenius.Audiobookshelf.player"
@@ -86,7 +87,13 @@ struct NowPlayingContentDescriptor: Equatable {
 
     struct LoadedArtwork: Equatable {
         var key: String
+        /// The load that produced ``data``; compared instead of the bytes.
+        var generation: Int
         var data: Data
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.key == rhs.key && lhs.generation == rhs.generation
+        }
     }
 }
 
@@ -96,6 +103,73 @@ struct NowPlayingCommandSet: Equatable {
     var skipBackwardInterval: Double
     var supportedRates: [Double]
     var canSeek: Bool
+
+    /// One spec per framework command, in order. Seek is left out entirely when not allowed: a
+    /// disabled command still "appears in the interface" (ADR 0006).
+    var specs: [NowPlayingCommandSpec] {
+        var specs: [NowPlayingCommandSpec] = [
+            .init(kind: .play), .init(kind: .pause), .init(kind: .togglePlayPause),
+            .init(kind: .skipForward(preferredIntervals: [skipForwardInterval])),
+            .init(kind: .skipBackward(preferredIntervals: [skipBackwardInterval])),
+            .init(kind: .next), .init(kind: .previous),
+            .init(kind: .changePlaybackRate(supported: supportedRates)),
+        ]
+        if canSeek { specs.append(.init(kind: .seekToPosition)) }
+        return specs
+    }
+}
+
+/// One framework `MediaCommand` and the ``NowPlayingCommand`` it routes to; maps 1:1 to
+/// `MediaCommand` in ``makeMediaCommand(perform:)``.
+struct NowPlayingCommandSpec: Equatable {
+    enum Kind: Equatable {
+        case play
+        case pause
+        case togglePlayPause
+        case skipForward(preferredIntervals: [Double])
+        case skipBackward(preferredIntervals: [Double])
+        case next
+        case previous
+        case changePlaybackRate(supported: [Double])
+        case seekToPosition
+    }
+
+    var kind: Kind
+
+    /// The command an invocation routes to; `value` is the interval, rate or position the system
+    /// passes (ignored by commands without one).
+    func command(_ value: Double = 0) -> NowPlayingCommand {
+        switch kind {
+        case .play: .play
+        case .pause: .pause
+        case .togglePlayPause: .togglePlayPause
+        case .skipForward: .skipForward(value)
+        case .skipBackward: .skipBackward(value)
+        // Next and previous track jump, as in the legacy app (AirPods double and triple press).
+        case .next: .nextTrack
+        case .previous: .previousTrack
+        case .changePlaybackRate: .changeRate(value)
+        case .seekToPosition: .seek(value)
+        }
+    }
+
+    @MainActor
+    func makeMediaCommand(perform: @escaping @MainActor (NowPlayingCommand) async throws -> Void) -> MediaCommand {
+        switch kind {
+        case .play: .play { try await perform(command()) }
+        case .pause: .pause { try await perform(command()) }
+        case .togglePlayPause: .togglePlayPause { try await perform(command()) }
+        case .skipForward(let intervals):
+            .skipForward(preferredIntervals: intervals) { try await perform(command($0)) }
+        case .skipBackward(let intervals):
+            .skipBackward(preferredIntervals: intervals) { try await perform(command($0)) }
+        case .next: .next { try await perform(command()) }
+        case .previous: .previous { try await perform(command()) }
+        case .changePlaybackRate(let rates):
+            .changePlaybackRate(supported: rates.map(Float.init)) { try await perform(command(Double($0))) }
+        case .seekToPosition: .seekToPosition { try await perform(command($0)) }
+        }
+    }
 }
 
 /// A remote command, as routed to ``NowPlayingCommandHandling``.
@@ -112,6 +186,8 @@ enum NowPlayingCommand: Equatable {
     case changeRate(Double)
 }
 
+// `appEntityIdentifiers` is unavailable in app extensions.
+@available(iOSApplicationExtension, unavailable)
 extension NowPlayingContentDescriptor {
     /// `BookContent` for books, `PodcastContent` for podcast episodes (ADR 0006).
     func makeContent(entityIdentifiers: [EntityIdentifier]) -> any MediaContentRepresentable {
@@ -137,25 +213,8 @@ extension NowPlayingContentDescriptor {
 }
 
 extension NowPlayingCommandSet {
-    /// Builds the framework commands. Seek is left out entirely when not allowed: a disabled command
-    /// still "appears in the interface" (ADR 0006).
     @MainActor
     func makeCommands(perform: @escaping @MainActor (NowPlayingCommand) async throws -> Void) -> [MediaCommand] {
-        var commands: [MediaCommand] = [
-            .play { try await perform(.play) },
-            .pause { try await perform(.pause) },
-            .togglePlayPause { try await perform(.togglePlayPause) },
-            .skipForward(preferredIntervals: [skipForwardInterval]) { try await perform(.skipForward($0)) },
-            .skipBackward(preferredIntervals: [skipBackwardInterval]) { try await perform(.skipBackward($0)) },
-            .next { try await perform(.nextTrack) },
-            .previous { try await perform(.previousTrack) },
-            .changePlaybackRate(supported: supportedRates.map(Float.init)) {
-                try await perform(.changeRate(Double($0)))
-            },
-        ]
-        if canSeek {
-            commands.append(.seekToPosition { try await perform(.seek($0)) })
-        }
-        return commands
+        specs.map { $0.makeMediaCommand(perform: perform) }
     }
 }
