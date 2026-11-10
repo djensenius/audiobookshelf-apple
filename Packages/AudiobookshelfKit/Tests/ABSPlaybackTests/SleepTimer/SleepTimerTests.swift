@@ -885,6 +885,19 @@ struct SleepTimerTests {
         #expect(harness.feedback.resets == 2)
     }
 
+    /// A shake right after the expiry, before its seek back to the fade starts, takes that seek over, as a reset does.
+    @Test func aShakeBeforeTheExpirySeekTakesItOver() async throws {
+        let harness = try expiringHarness(automatic: true)
+        await harness.playToExpiry(from: 1000, to: 1070)
+        #expect(harness.shake.sensitivity == .medium)
+        harness.shake.shake()
+        await Task { @MainActor in }.value  // Queued after the expiry's and the reset's tasks, so they have run.
+        #expect(harness.control.seeks == [710])
+        #expect(harness.control.plays == 1)
+        #expect(harness.timer.isRunning)
+        #expect(harness.feedback.resets == 1)
+    }
+
     @Test func shakeDetectionFollowsTheTimerAndSettings() {
         let harness = Harness(options: SleepTimerOptions(shakeSensitivity: nil))
         harness.timer.start(.duration(600))
