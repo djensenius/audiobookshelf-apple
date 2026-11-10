@@ -7,6 +7,7 @@ import SwiftUI
 struct AudiobookshelfApp: App {
     /// Shared by every scene. The app shell's `AppEnvironment` (#44) takes it over.
     @State private var settings = AppSettings()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -18,6 +19,10 @@ struct AudiobookshelfApp: App {
         // the download engine has processed every event before the system suspends it again.
         .backgroundTask(.urlSession(DownloadEngine.sessionIdentifier)) {
             await DownloadEngine.handleBackgroundEvents()
+        }
+        // In the background, transfers the system cancels wait for the next activation.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { Task { await DownloadEngine.deactivate() } }
         }
 
         #if os(macOS)

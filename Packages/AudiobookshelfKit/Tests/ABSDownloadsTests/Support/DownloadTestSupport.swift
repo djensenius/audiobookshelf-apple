@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSCore
 import ABSData
+import CryptoKit
 import Foundation
 import Synchronization
 
@@ -33,15 +34,22 @@ final class StubGate: Sendable {
 /// How ``StubDownloadProtocol`` answers one request.
 enum StubReply: Sendable {
     /// Responds with `status` and `body`, from `from` (the request's URL by default), once
-    /// `gate` (if any) opens.
+    /// `gate` (if any) opens. `headers` replace the default `Content-Type` and
+    /// `Content-Length`; an empty value removes a header.
     case status(
-        Int, body: Data = Data("audio-bytes".utf8), contentType: String = "audio/mpeg", from: URL? = nil,
-        gate: StubGate? = nil)
+        Int, body: Data = Data("audio-bytes".utf8), contentType: String = "audio/mpeg",
+        headers: [String: String] = [:], from: URL? = nil, gate: StubGate? = nil)
     /// Responds 200, sends `partialBody`, then fails with `code` and this resume data and
-    /// background cancellation reason.
+    /// background cancellation reason, once `gate` (if any) opens.
     case failure(
         code: Int = NSURLErrorNetworkConnectionLost, resumeData: Data? = nil, cancelReason: Int? = nil,
-        partialBody: Data? = nil)
+        partialBody: Data? = nil, gate: StubGate? = nil)
+
+    var gate: StubGate? {
+        switch self {
+        case .status(_, _, _, _, _, let gate), .failure(_, _, _, _, let gate): gate
+        }
+    }
 }
 
 /// A `URLProtocol` that answers requests for registered hosts and records them. Routes are
@@ -79,7 +87,7 @@ final class StubDownloadProtocol: URLProtocol {
             })
         else { return }
         let reply = handler(request)
-        if case .status(_, _, _, _, let gate?) = reply {
+        if let gate = reply.gate {
             let box = UncheckedProtocol(value: self)
             gate.run { box.value.deliver(reply, url: url) }
         } else {
@@ -94,14 +102,17 @@ final class StubDownloadProtocol: URLProtocol {
     private func deliver(_ reply: StubReply, url: URL) {
         guard !isStopped.withLock({ $0 }), let client else { return }
         switch reply {
-        case .status(let status, let body, let contentType, let from, _):
+        case .status(let status, let body, let contentType, let headers, let from, _):
+            var fields = ["Content-Type": contentType, "Content-Length": "\(body.count)"]
+            for (name, value) in headers {
+                fields[name] = value.isEmpty ? nil : value
+            }
             let response = HTTPURLResponse(
-                url: from ?? url, statusCode: status, httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": contentType, "Content-Length": "\(body.count)"])!
+                url: from ?? url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: fields)!
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client.urlProtocol(self, didLoad: body)
             client.urlProtocolDidFinishLoading(self)
-        case .failure(let code, let resumeData, let cancelReason, let partialBody):
+        case .failure(let code, let resumeData, let cancelReason, let partialBody, _):
             let response = HTTPURLResponse(
                 url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "audio/mpeg"])!
             client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
@@ -131,6 +142,49 @@ extension URLRequest {
     }
 }
 
+/// Forwards to the engine's delegate, then reports each task's completion, so a test can
+/// wait for transfers that end without an update.
+private final class SignallingDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
+    let target: DownloadSessionDelegate
+    let completed: @Sendable () -> Void
+
+    init(target: DownloadSessionDelegate, completed: @escaping @Sendable () -> Void) {
+        self.target = target
+        self.completed = completed
+    }
+
+    func urlSession(
+        _ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL
+    ) {
+        target.urlSession(session, downloadTask: downloadTask, didFinishDownloadingTo: location)
+    }
+
+    func urlSession(
+        _ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64
+    ) {
+        target.urlSession(
+            session, downloadTask: downloadTask, didWriteData: bytesWritten, totalBytesWritten: totalBytesWritten,
+            totalBytesExpectedToWrite: totalBytesExpectedToWrite)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
+        target.urlSession(session, task: task, didCompleteWithError: error)
+        completed()
+    }
+
+    func urlSession(
+        _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest
+    ) async -> URLRequest? {
+        await target.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: request)
+    }
+
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+        target.urlSession(session, didBecomeInvalidWithError: error)
+    }
+}
+
 /// A ``DownloadSession`` over an ephemeral session with ``StubDownloadProtocol``. Resume data
 /// can't be replayed by a stub, so a resumed task repeats the last fresh request, and the
 /// resume data is recorded.
@@ -139,11 +193,16 @@ final class StubDownloadSession: DownloadSession {
     private let delegate: DownloadSessionDelegate?
     private let state = Mutex<(lastRequest: URLRequest?, resumed: [Data])>((nil, []))
 
-    init(delegate: any URLSessionDelegate) {
+    /// - Parameter completed: called after the delegate has handled each task's completion.
+    init(delegate: any URLSessionDelegate, completed: @escaping @Sendable () -> Void = {}) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubDownloadProtocol.self]
-        self.delegate = delegate as? DownloadSessionDelegate
-        session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        let target = delegate as? DownloadSessionDelegate
+        self.delegate = target
+        session = URLSession(
+            configuration: configuration,
+            delegate: target.map { SignallingDelegate(target: $0, completed: completed) } ?? delegate,
+            delegateQueue: nil)
     }
 
     var resumedData: [Data] { state.withLock { $0.resumed } }
@@ -221,6 +280,30 @@ final class FakeCredentials: DownloadCredentialProviding {
 
 struct TestError: Error {}
 
+/// A ``MemoryKeyStore`` whose next read can be made to fail, like a locked Keychain.
+final class FlakyKeyStore: ResumeDataKeyStore {
+    private let keys = MemoryKeyStore()
+    private let failsNextLoad = Mutex(false)
+
+    func failNextLoad() {
+        failsNextLoad.withLock { $0 = true }
+    }
+
+    func loadKey() throws -> SymmetricKey? {
+        if failsNextLoad.withLock({ fails in
+            defer { fails = false }
+            return fails
+        }) {
+            throw TestError()
+        }
+        return try keys.loadKey()
+    }
+
+    func createKey() throws -> SymmetricKey {
+        try keys.createKey()
+    }
+}
+
 /// A clock whose sleeps return at once and are recorded.
 final class RecordingClock: Clock {
     struct Instant: InstantProtocol {
@@ -273,14 +356,22 @@ final class DownloadHarness: Sendable {
     let localItems: LocalItemStore
     let connectionID: UUID
     let credentials: FakeCredentials
-    let keyStore = MemoryKeyStore()
+    let keyStore: any ResumeDataKeyStore
     let clock = RecordingClock()
     let registry = DownloadEngineRegistry()
     let sessions = Mutex<[StubDownloadSession]>([])
     /// Each request the stub sees, in order.
     let requestStream: AsyncStream<URLRequest>
+    /// How many tasks have completed; ``completionStream`` yields after each.
+    let completions = Mutex(0)
+    let completionStream: AsyncStream<Void>
+    private let completionContinuation: AsyncStream<Void>.Continuation
 
-    init(handler: @escaping StubDownloadProtocol.Handler) async throws {
+    init(
+        keyStore: any ResumeDataKeyStore = MemoryKeyStore(), handler: @escaping StubDownloadProtocol.Handler
+    ) async throws {
+        self.keyStore = keyStore
+        (completionStream, completionContinuation) = AsyncStream.makeStream()
         let container = try DataStack(location: .inMemory).container
         let connection = try await ServerConnectionStore(modelContainer: container).upsertLogin(
             address: ServerAddress("https://\(host)/abs")!, userId: "usr_1", username: "reader",
@@ -315,6 +406,15 @@ final class DownloadHarness: Sendable {
         }
     }
 
+    /// Returns once the delegate has handled `count` task completions; the suite's time limit
+    /// bounds the wait. Follow with `processPendingEvents()` for the engine to handle them.
+    func waitForCompletions(_ count: Int) async {
+        guard completions.withLock({ $0 }) < count else { return }
+        for await _ in completionStream where completions.withLock({ $0 }) >= count {
+            return
+        }
+    }
+
     /// - Parameter prepare: runs on the new session before the engine sees it, to leave tasks
     ///   behind as a previous launch would.
     func makeEngine(
@@ -334,7 +434,10 @@ final class DownloadHarness: Sendable {
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadSessionFactory {
         { [self] delegate in
-            let session = StubDownloadSession(delegate: delegate)
+            let session = StubDownloadSession(delegate: delegate) { [weak self] in
+                self?.completions.withLock { $0 += 1 }
+                self?.completionContinuation.yield()
+            }
             prepare(session)
             sessions.withLock { $0.append(session) }
             return session

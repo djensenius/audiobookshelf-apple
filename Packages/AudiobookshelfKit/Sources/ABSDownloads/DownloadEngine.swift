@@ -25,10 +25,16 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     case outOfSpace
     /// No credentials: the connection is signed out or the refresh failed.
     case credentials
-    /// The resume data couldn't be read now (for example the device is locked).
-    case resumeData
+    /// The download's state couldn't be saved.
+    case store
     /// The part's destination path is invalid.
     case invalidDestination
+    /// Another process holds the background session; downloads stop until the app is
+    /// launched again.
+    case sessionInUse
+    /// The background session kept disconnecting; downloads wait for the next
+    /// ``DownloadEngine/activate()``.
+    case sessionLost
 }
 
 /// A durable change the engine reports. Every update is delivered; live progress is on
@@ -40,6 +46,9 @@ public enum DownloadUpdate: Sendable, Equatable {
     case partFailed(partID: UUID, recordID: UUID, code: DownloadFailureCode, message: String, willRetry: Bool)
     /// Every part completed: the record is now the local item `itemID` and was deleted.
     case recordComplete(recordID: UUID, itemID: UUID)
+    /// The engine has no working session (`sessionInUse` or `sessionLost`); the affected
+    /// parts are queued.
+    case sessionUnavailable(code: DownloadFailureCode, message: String)
 }
 
 /// A part's live progress, throttled to about every 1% or 1 second.
@@ -55,6 +64,9 @@ public struct DownloadProgress: Sendable, Equatable {
 ///
 /// - Each task's `taskDescription` is its part ID, which is how tasks are matched to parts
 ///   after a relaunch; the store's `taskIdentifier` is only a cache.
+/// - A task is only created once ``DownloadStore/beginRunning(partID:expecting:now:)`` has
+///   moved its part to `running`, so a launch from a stale read can't restart a part that has
+///   since completed, been stopped, failed for good or been deleted.
 /// - Requests carry `Authorization: Bearer` and the custom headers, never `?token=`. The
 ///   access token is refreshed (or checked) before each task is created or resumed; a 401 for
 ///   the current token recreates the task from a fresh request once.
@@ -65,12 +77,19 @@ public struct DownloadProgress: Sendable, Equatable {
 /// - A complete record becomes a local item (`LocalItemStore.upsertFromDownload(_:)`) and is
 ///   deleted; activation repeats that for complete records left by a crash (ADR 0003).
 ///
-/// Call ``activate()`` when the app comes to the foreground: it restarts the queued parts.
-/// A background wake (``handleBackgroundEvents()``) only handles the session's events. Create
-/// one engine per process: a background session identifier may only be used by one session
-/// at a time.
+/// Call ``activate()`` when the app comes to the foreground: it restarts the queued parts,
+/// and until ``deactivate()`` (when the app goes to the background) a part the user's force
+/// quit cancelled restarts at once. A background wake (``handleBackgroundEvents()``) only
+/// handles the session's events. Create one engine per process: a background session
+/// identifier may only be used by one session at a time.
 public actor DownloadEngine {
     public static let sessionIdentifier = "org.davidjensenius.Audiobookshelf.downloads"
+    /// Restarts per part and activation that don't count as failures (a system cancellation
+    /// or a lost session); later ones go through the ``RetryPolicy``.
+    static let maxFreeRestarts = 3
+    /// Session recreations after it was lost, each after a ``RetryPolicy`` delay, before the
+    /// engine waits for the next ``activate()``.
+    static let maxSessionRecreations = 3
 
     private struct PartContext {
         var recordID: UUID
@@ -106,8 +125,15 @@ public actor DownloadEngine {
     private var session: (any DownloadSession)?
     private var isEventLoopRunning = false
     private var isInvalidatingSession = false
-    /// Set by ``activate()``: parts re-queued by the system are restarted at once.
+    /// Set by ``activate()`` and cleared by ``deactivate()``: a part the user's force quit
+    /// cancelled is restarted at once.
     private var restartsQueuedParts = false
+    /// Restarts that didn't count as failures since ``activate()``.
+    private var freeRestarts: [UUID: Int] = [:]
+    /// Session recreations since the last moved file or ``activate()``.
+    private var sessionRecreations = 0
+    /// Another process holds the session identifier; set for the rest of the process.
+    private var isSessionInUse = false
     private var contexts: [UUID: PartContext] = [:]
     private var tasks: [UUID: URLSessionDownloadTask] = [:]
     /// A token per launch in progress; ``stop(partIDs:keepingResumeData:)`` removes it.
@@ -117,9 +143,6 @@ public actor DownloadEngine {
     /// Parts being completed or failed for good; they keep their context (so a concurrent
     /// read doesn't bring back their old state) but can't launch.
     private var settling: Set<UUID> = []
-    /// Bumped once a part has stopped, completed or failed for good, so a store read that
-    /// overlapped the change is redone rather than bringing back the old state.
-    private var epoch = 0
     private var retries: [UUID: Task<Void, Never>] = [:]
     private var failures: [UUID: Int] = [:]
     private var authRetried: Set<UUID> = []
@@ -190,20 +213,37 @@ public actor DownloadEngine {
 
     /// Creates the session if needed, reattaches to the transfers that survived a relaunch,
     /// and restarts the parts of `queued` and `downloading` records that have no transfer.
-    /// Call it when the app comes to the foreground.
+    /// Call it when the app comes to the foreground. It also resets the restarts that don't
+    /// count as failures, and lets a lost session be created again.
     ///
-    /// - Returns: `false` when the downloads couldn't be read; nothing was cancelled or
-    ///   restarted, and a later call tries again.
+    /// - Returns: `false` when the downloads couldn't be read (nothing was cancelled or
+    ///   restarted, and a later call tries again) or another process holds the session.
     @discardableResult
     public func activate() async -> Bool {
+        freeRestarts.removeAll()
+        sessionRecreations = 0
         guard await ensureSession() else { return false }
         restartsQueuedParts = true
         delegate.post(.restartQueued)
         return true
     }
 
+    /// Call when the app goes to the background: until the next ``activate()``, parts the
+    /// system cancels are queued, not restarted, because a background wake can't start
+    /// transfers reliably.
+    public func deactivate() {
+        restartsQueuedParts = false
+    }
+
+    /// ``deactivate()`` on the process's engine, if it has one.
+    public static func deactivate() async {
+        await DownloadEngineRegistry.shared.current?.deactivate()
+    }
+
     /// Starts (or restarts) the given parts; parts that are already transferring are left
-    /// alone. Retry counts start over.
+    /// alone. Retry counts start over. Set their records to `queued` (or `downloading`)
+    /// first: ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses parts of `paused`
+    /// and `failed` records.
     public func start(partIDs: [UUID]) async {
         guard await ensureSession() else { return }
         do {
@@ -215,6 +255,7 @@ public actor DownloadEngine {
         for partID in partIDs where tasks[partID] == nil {
             retries.removeValue(forKey: partID)?.cancel()
             failures[partID] = nil
+            freeRestarts[partID] = nil
             authRetried.remove(partID)
             await launch(partID)
         }
@@ -222,8 +263,9 @@ public actor DownloadEngine {
 
     /// Cancels the given parts' transfers and queues them again. With `keepingResumeData`
     /// the transfer's resume data is sealed so a later ``start(partIDs:)`` continues it;
-    /// otherwise any resume data is deleted. The caller sets the record's state (for example
-    /// `paused`), so a relaunch doesn't restart it.
+    /// otherwise any resume data is deleted. Set the record's state first (for example
+    /// `paused`): then ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses to start
+    /// its parts again, from a relaunch or a launch already under way.
     public func stop(partIDs: [UUID], keepingResumeData: Bool) async {
         for partID in partIDs {
             retries.removeValue(forKey: partID)?.cancel()
@@ -246,7 +288,6 @@ public actor DownloadEngine {
             await persist {
                 try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
             }
-            epoch += 1
         }
     }
 
@@ -299,17 +340,20 @@ public actor DownloadEngine {
     // MARK: - Session
 
     /// Creates the session once the downloads are read, reattaching to surviving transfers.
-    /// Returns `false` without a session when the read fails; the next call tries again.
+    /// Returns `false` without a session when the read fails (the next call tries again) or
+    /// another process holds the session.
     @discardableResult
     func ensureSession() async -> Bool {
+        guard !isSessionInUse else { return false }
         let activation = activation ?? Task { await performActivation() }
         self.activation = activation
         return await activation.value
     }
 
     private func performActivation() async -> Bool {
+        let records: [DownloadRecordDTO]
         do {
-            try await loadRecords()
+            records = try await loadRecords()
         } catch {
             logError("Couldn't read downloads; not creating the session", error)
             activation = nil
@@ -334,6 +378,14 @@ public actor DownloadEngine {
                 try await $0.setPartState(.running, partID: partID, taskIdentifier: download.taskIdentifier)
             }
             if download.state == .suspended { download.resume() }
+        }
+        // A part left running without a transfer (the app ended before the system kept it)
+        // is queued again, so a restart can begin it.
+        for part in records.flatMap(\.parts)
+        where part.state == .running && tasks[part.id] == nil && launching[part.id] == nil
+            && !settling.contains(part.id)
+        {
+            await persist { try await $0.setPartState(.queued, partID: part.id, taskIdentifier: nil) }
         }
         return true
     }
@@ -363,10 +415,23 @@ public actor DownloadEngine {
         isInvalidatingSession = false
         tasks.removeAll()
         ignoredTasks.removeAll()
+        guard !isSessionInUse else { return }
         Task { [weak self] in await self?.recreateSession() }
     }
 
+    /// Creates the session again after a ``RetryPolicy`` delay, then launches the parts that
+    /// waited for it. After ``maxSessionRecreations`` attempts without a moved file, the
+    /// engine reports the session lost and waits for the next ``activate()``.
     private func recreateSession() async {
+        sessionRecreations += 1
+        guard sessionRecreations <= Self.maxSessionRecreations else {
+            Log.downloads.error("The download session keeps disconnecting; waiting for the app to be opened")
+            updateContinuation.yield(
+                .sessionUnavailable(code: .sessionLost, message: "The download session keeps disconnecting."))
+            return
+        }
+        let delay = retryPolicy.delay(beforeRetry: sessionRecreations, random: random()) ?? .zero
+        if delay > .zero { try? await clock.sleep(for: delay) }
         guard await ensureSession() else { return }
         let deferred = deferredLaunches
         deferredLaunches.removeAll()
@@ -375,15 +440,22 @@ public actor DownloadEngine {
         }
     }
 
+    /// Another process holds the session identifier (`backgroundSessionInUseByAnotherProcess`):
+    /// no session of this process can work, so the engine stops creating one until the app is
+    /// launched again.
+    private func sessionHeldByAnotherProcess() {
+        guard !isSessionInUse else { return }
+        isSessionInUse = true
+        Log.downloads.fault("Another process holds the download session; downloads stop until the app is relaunched")
+        updateContinuation.yield(
+            .sessionUnavailable(code: .sessionInUse, message: "Another process is using the download session."))
+        dropSession()
+    }
+
     /// Adds a context for each part not yet known that hasn't completed.
     @discardableResult
     private func loadRecords() async throws -> [DownloadRecordDTO] {
-        var records: [DownloadRecordDTO] = []
-        for _ in 0..<3 {
-            let start = epoch
-            records = try await readRecords(store)
-            if epoch == start { break }
-        }
+        let records = try await readRecords(store)
         for record in records {
             for part in record.parts where part.state != .completed && contexts[part.id] == nil {
                 let destination = try? locations.fileURL(forRelativePath: part.destinationRelativePath)
@@ -397,37 +469,36 @@ public actor DownloadEngine {
         return records
     }
 
+    /// Launches the queued and failed parts of `queued` and `downloading` records. The read
+    /// may be stale; ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses the parts
+    /// that changed since.
     private func restartQueuedParts() async {
-        for _ in 0..<3 {
-            let start = epoch
-            let records: [DownloadRecordDTO]
-            do {
-                records = try await loadRecords()
-            } catch {
-                logError("Couldn't read downloads", error)
-                return
-            }
-            let candidates = records.filter { $0.state == .queued || $0.state == .downloading }
-                .flatMap(\.parts).filter { $0.state != .completed }.map(\.id)
-            // Once a part settles, the candidates may be stale: read them again.
-            for partID in candidates where epoch == start {
-                await launch(partID)
-            }
-            if epoch == start { return }
+        let records: [DownloadRecordDTO]
+        do {
+            records = try await loadRecords()
+        } catch {
+            logError("Couldn't read downloads", error)
+            return
+        }
+        let candidates = records.filter { $0.state == .queued || $0.state == .downloading }
+            .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed }.map(\.id)
+        for partID in candidates {
+            await launch(partID)
         }
     }
 
     // MARK: - Tasks
 
-    /// Creates and resumes a task for `partID`: from its resume data while it matches the
-    /// fresh request's credentials and network access, otherwise from the fresh request.
+    /// Starts `partID` once ``DownloadStore/beginRunning(partID:expecting:now:)`` allows it, then
+    /// creates and resumes its task: from its resume data while it matches the fresh request's
+    /// credentials and network access, otherwise from the fresh request.
     ///
     /// - Parameter rejectedAccessToken: after a 401, the token that was rejected.
     private func launch(_ partID: UUID, rejectedAccessToken: String? = nil) async {
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
             !settling.contains(partID)
         else { return }
-        guard let session, !isInvalidatingSession else {
+        guard session != nil, !isInvalidatingSession else {
             deferredLaunches.insert(partID)
             return
         }
@@ -438,6 +509,19 @@ public actor DownloadEngine {
         let token = UUID()
         launching[partID] = token
         defer { if launching[partID] == token { launching[partID] = nil } }
+        do {
+            guard try await store.beginRunning(partID: partID, expecting: [.queued, .failed], now: now()) else {
+                // Completed, stopped, failed for good or deleted since it was read.
+                if launching[partID] == token { forget(partID) }
+                return
+            }
+        } catch {
+            logError("Couldn't start a download", error)
+            if launching[partID] == token {
+                await retry(partID, code: .store, message: "Couldn't save the download's state.")
+            }
+            return
+        }
         let request: URLRequest
         do {
             let credentials = try await credentials.credentials(
@@ -448,54 +532,63 @@ public actor DownloadEngine {
             fresh.apply(await networkAccess())
             request = fresh
         } catch {
-            await retry(
-                partID, code: .credentials, message: "Couldn't authorize the download: \(error.localizedDescription)")
+            if launching[partID] == token {
+                await retry(
+                    partID, code: .credentials,
+                    message: "Couldn't authorize the download: \(error.localizedDescription)")
+            }
+            return
+        }
+        guard launching[partID] == token, tasks[partID] == nil, contexts[partID] != nil, !settling.contains(partID)
+        else { return }
+        guard let session, !isInvalidatingSession else {
+            // The session went away meanwhile: start again once it is back.
+            deferredLaunches.insert(partID)
+            await persist { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
             return
         }
         var resumeData: Data?
+        // Resume data that can't be read now (the Keychain or the file is unavailable while the
+        // device is locked) is kept for a later launch; this one starts from the beginning.
+        var keepsResumeData = false
         if contexts[partID]?.hasResumeData == true, rejectedAccessToken == nil {
             do {
                 resumeData = try vault.open(partID: partID, credentialTag: ResumeDataVault.credentialTag(for: request))
             } catch {
-                logError("Couldn't read resume data", error)
-                await retry(partID, code: .resumeData, message: "Couldn't read the download's resume data.")
-                return
+                logError("Couldn't read resume data; starting the part from the beginning", error)
+                keepsResumeData = true
             }
-            if resumeData == nil { contexts[partID]?.hasResumeData = false }
         }
-        guard launching[partID] == token, self.session === session, !isInvalidatingSession, tasks[partID] == nil,
-            contexts[partID] != nil, !settling.contains(partID)
-        else { return }
         let task = resumeData.map(session.downloadTask(withResumeData:)) ?? session.downloadTask(with: request)
         task.taskDescription = partID.uuidString
         tasks[partID] = task
         delegate.setTarget(.init(destination: destination, expectedBytes: context.expectedBytes), for: partID)
         throttle.reset(partID)
-        let started: Bool
+        let recorded: Bool
         do {
-            started = try await store.setPartState(
-                .running, partID: partID, taskIdentifier: task.taskIdentifier, hasResumeData: false, now: now())
+            recorded = try await store.setPartState(
+                .running, partID: partID, taskIdentifier: task.taskIdentifier, hasResumeData: keepsResumeData,
+                now: now())
         } catch {
             logError("Couldn't update a download", error)
-            started = true
+            recorded = true
         }
-        guard started, tasks[partID] === task else {
-            // The part completed, was deleted or was stopped meanwhile; the task never ran.
+        guard recorded, tasks[partID] === task else {
+            // The part was deleted or stopped meanwhile; the task never ran.
             if tasks[partID] === task { tasks[partID] = nil }
             ignoredTasks.insert(task.taskIdentifier)
             task.cancel()
-            if !started { forget(partID) }
+            if !recorded { forget(partID) }
             return
         }
         // The resume data now lives in the task.
-        vault.delete(partID: partID)
-        contexts[partID]?.hasResumeData = false
+        if resumeData != nil { vault.delete(partID: partID) }
+        contexts[partID]?.hasResumeData = keepsResumeData
         if resumeData == nil {
             await persist {
                 try await $0.updateProgress(partID: partID, bytesWritten: 0, expectedBytes: context.expectedBytes)
             }
         }
-        await persist { try await $0.setState(.downloading, forRecord: context.recordID) }
         guard tasks[partID] === task else { return }
         task.resume()
     }
@@ -562,6 +655,7 @@ public actor DownloadEngine {
                 ignoredTasks.insert(current.taskIdentifier)
                 current.cancel()
             }
+            sessionRecreations = 0
             await complete(partID, bytes: bytes)
             return
         }
@@ -613,20 +707,37 @@ public actor DownloadEngine {
             await failPermanently(partID, code: .outOfSpace, message: failure.message)
             return
         }
-        guard failure.isBackgroundCancellation || failure.isSessionLost else {
+        if failure.isSessionInUse {
+            await requeue(partID)
+            sessionHeldByAnotherProcess()
+            return
+        }
+        guard failure.isBackgroundCancellation || failure.isSessionDisconnected else {
             await retry(partID, code: .transfer, message: failure.message)
             return
         }
-        // Not the transfer's fault: queue it again without counting a failure.
+        // Not the transfer's fault: restart it without counting a failure, a few times.
+        if failure.isSessionDisconnected { dropSession() }
+        let restarts = freeRestarts[partID, default: 0] + 1
+        freeRestarts[partID] = restarts
+        guard restarts <= Self.maxFreeRestarts else {
+            await retry(partID, code: .transfer, message: failure.message)
+            return
+        }
+        if failure.isSessionDisconnected { deferredLaunches.insert(partID) }
+        await requeue(partID)
+        // Only a force quit restarts at once: its cancellations arrive when the app is opened
+        // again. The others happen in the background and wait for the next activation.
+        if failure.isForceQuit, restartsQueuedParts {
+            Task { [weak self] in await self?.launch(partID) }
+        }
+    }
+
+    /// Queues the part again without counting a failure.
+    private func requeue(_ partID: UUID) async {
         let hasResumeData = contexts[partID]?.hasResumeData
         await persist {
             try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
-        }
-        if failure.isSessionLost {
-            deferredLaunches.insert(partID)
-            dropSession()
-        } else if restartsQueuedParts {
-            Task { [weak self] in await self?.launch(partID) }
         }
     }
 
@@ -654,21 +765,29 @@ public actor DownloadEngine {
     }
 
     /// Records the moved file's size, then finalises the record once every part completed.
+    /// A size other than the expected one is the length the server declared (the file changed
+    /// since the download was planned), so it becomes the part's expected size.
     private func complete(_ partID: UUID, bytes: Int64) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
         tasks[partID] = nil
         retries.removeValue(forKey: partID)?.cancel()
         vault.delete(partID: partID)
+        let date = now()
+        if context.expectedBytes > 0, bytes != context.expectedBytes {
+            Log.downloads.info("A file's size changed on the server since its download was planned")
+            await persist {
+                try await $0.updateProgress(partID: partID, bytesWritten: bytes, expectedBytes: bytes, now: date)
+            }
+        }
         let completed: Bool
         do {
-            completed = try await store.completePart(partID: partID, finalBytes: bytes, now: now())
+            completed = try await store.completePart(partID: partID, finalBytes: bytes, now: date)
         } catch {
             logError("Couldn't record a finished download", error)
             completed = false
         }
         forget(partID)
         settling.remove(partID)
-        epoch += 1
         guard completed else { return }
         updateContinuation.yield(.partCompleted(partID: partID, recordID: context.recordID))
         if let record = try? await store.record(id: context.recordID), record.isComplete {
@@ -731,21 +850,21 @@ public actor DownloadEngine {
     }
 
     /// Fails the part and its record for good, and stops the record's other parts, keeping
-    /// their resume data, so a retry of the record continues them.
+    /// their resume data, so a retry of the record continues them. The record fails first, so
+    /// a concurrent launch of another part is refused.
     private func failPermanently(_ partID: UUID, code: DownloadFailureCode, message: String) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
         tasks[partID] = nil
         retries.removeValue(forKey: partID)?.cancel()
+        await persist { try await $0.setState(.failed, forRecord: context.recordID) }
         await persist {
             try await $0.setPartState(
                 .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData)
         }
         let siblings = contexts.filter { $0.value.recordID == context.recordID && $0.key != partID }.map(\.key)
         await stop(partIDs: siblings, keepingResumeData: true)
-        await persist { try await $0.setState(.failed, forRecord: context.recordID) }
         forget(partID)
         settling.remove(partID)
-        epoch += 1
         updateContinuation.yield(
             .partFailed(partID: partID, recordID: context.recordID, code: code, message: message, willRetry: false))
     }
@@ -758,6 +877,7 @@ public actor DownloadEngine {
         tasks[partID] = nil
         retries.removeValue(forKey: partID)?.cancel()
         failures[partID] = nil
+        freeRestarts[partID] = nil
         authRetried.remove(partID)
         deferredLaunches.remove(partID)
         throttle.reset(partID)

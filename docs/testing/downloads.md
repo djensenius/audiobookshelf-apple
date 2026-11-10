@@ -8,9 +8,13 @@ protocols. Run these checks on a real device (and once on the Simulator) before 
 release that changes downloads, the session identifier, or the app's scene setup.
 
 These checks need the app to create a `DownloadEngine` at launch and call `activate()`
-each time it comes to the foreground (the composition root, P4-02). Until an engine
+each time it comes to the foreground (the composition root, P4-02). The app already calls
+`DownloadEngine.deactivate()` when its scene goes to the background. Until an engine
 exists, the static `DownloadEngine.handleBackgroundEvents()` waits up to 10 seconds for
-one, then returns; the events stay in `nsurlsessiond` for the next session.
+one, then returns; the events stay in `nsurlsessiond` for the next session. To pause or
+retry a download, the app sets the record's state first (`paused` before `stop`, `queued`
+before `start`): the engine only starts a part after `DownloadStore.beginRunning` accepts
+it, which refuses parts of paused, failed and completed downloads.
 
 ## Before you start
 
@@ -75,9 +79,10 @@ app. The app must recover the next time it opens.
 3. In Console.app, `nsurlsessiond` cancels the task.
 4. Open the app from the Home Screen. Check that:
    - the cancelled task reports `NSURLErrorBackgroundTaskCancelledReasonKey` with the
-     user force quit reason, and the engine queues the part again and restarts it when
-     `activate()` runs. A force quit doesn't count as a failure and doesn't wait for a
-     retry delay;
+     user force quit reason, and the engine queues the part again and restarts it at
+     once (the cancellations arrive after `activate()`). A force quit doesn't count as a
+     failure and doesn't wait for a retry delay; after three such restarts of a part in
+     one activation, further ones count as failures with the usual retry delays;
    - if the server supports range requests, the transfer continues from the resume
      data rather than from 0% (watch the first progress value). Resume data is stored
      encrypted in `ResumeData/` and deleted as soon as the new task starts;
@@ -92,9 +97,13 @@ if needed) before it resumes a part, so a refreshed token also means a fresh sta
 
 The system can also cancel transfers because Background App Refresh is off
 (`backgroundUpdatesDisabled`) or the device is short of resources
-(`insufficientSystemResources`). The engine handles them like a force quit. To check the
+(`insufficientSystemResources`). The engine queues the part again without counting a
+failure, but doesn't restart it until the next `activate()`, when the app comes to the
+foreground: these cancellations happen while the app is in the background. To check the
 first, turn off **Settings > General > Background App Refresh** for the app, start a
-download, and go to the Home Screen. When you open the app again, the part continues.
+download, and go to the Home Screen. When you open the app again, the part continues. If
+the cancellation only reaches the app after it has come to the foreground and finished
+its restart pass, the part waits for the next time the app comes to the foreground.
 
 ## macOS
 
@@ -119,7 +128,10 @@ iOS.
 ## Failures
 
 - The engine only accepts a 200 or 206 response. Another status, a `text/html` body, or
-  a file whose size differs from the expected length never reaches `Downloads/`.
+  a file whose size differs from the expected length never reaches `Downloads/`. The
+  exception is a size that matches the length the server declared (`Content-Length`, or
+  the total in a 206's `Content-Range`): the file changed since the download was planned,
+  so the engine keeps it and records the new size as the expected size.
 - A 401 triggers one token refresh and one new task for the part. A second 401 in a row
   fails the part. The count starts over once the part gets a successful response, and a
   401 for a token that was already replaced doesn't count.
@@ -130,9 +142,17 @@ iOS.
   fails the part at once.
 - When a part fails for good, the engine stops the download's other parts, keeps their
   resume data, and marks the download failed. Starting it again continues those parts.
-- If `nsurlsessiond` loses the session (`backgroundSessionWasDisconnected`,
-  `backgroundSessionInUseByAnotherProcess`, or the session becomes invalid), the engine
-  creates it again and restarts the affected parts without counting a failure.
+- If `nsurlsessiond` disconnects the session (`backgroundSessionWasDisconnected`, or the
+  session becomes invalid), the engine creates it again after a retry delay (1–2, 2–4,
+  then 4–8 seconds) and restarts the affected parts without counting a failure. After
+  three attempts without a finished file, it reports the session as lost and waits for
+  the next `activate()`.
+- If another process holds the session (`backgroundSessionInUseByAnotherProcess`), the
+  engine queues the parts, logs a fault, reports it, and creates no session until the
+  app is launched again.
+- If the resume data can't be read (the Keychain or the file is unavailable, for
+  example while the device is locked), the part starts from 0% without counting a
+  failure, and the resume data is kept for a later attempt.
 
 ## Known limits
 

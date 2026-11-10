@@ -20,6 +20,11 @@ final class DownloadEngineRegistry: Sendable {
 
     private let state = Mutex(State())
 
+    /// The registered engine, if it still exists.
+    var current: DownloadEngine? {
+        state.withLock { $0.engine }
+    }
+
     /// Makes `engine` the one returned from now on and hands it to the waiting callers.
     func register(_ engine: DownloadEngine) {
         let waiting = state.withLock { state in
@@ -44,13 +49,17 @@ final class DownloadEngineRegistry: Sendable {
                 return
             }
             let waiter = state.withLock { state -> Waiter? in
-                let waiter = state.waiters[id]
-                state.waiters[id] = waiter == nil ? .timedOut : nil
-                return waiter
+                if let waiter = state.waiters.removeValue(forKey: id) { return waiter }
+                // The caller hasn't started waiting yet; it returns `nil` when it does.
+                if state.engine == nil { state.waiters[id] = .timedOut }
+                return nil
             }
             if case .waiting(let continuation) = waiter { continuation.resume(returning: nil) }
         }
-        defer { timer.cancel() }
+        defer {
+            timer.cancel()
+            state.withLock { _ = $0.waiters.removeValue(forKey: id) }
+        }
         return await withCheckedContinuation { continuation in
             let found = state.withLock { state -> DownloadEngine?? in
                 if let engine = state.engine { return .some(engine) }

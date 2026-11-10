@@ -108,8 +108,9 @@ import Testing
     }
 
     @Test func sizeMismatchIsRetried() async throws {
+        // Without a declared length, a short body can't be a changed file.
         let harness = try await DownloadHarness {
-            $0.stubCount == 1 ? .status(200, body: Data("short".utf8)) : .status(200)
+            $0.stubCount == 1 ? .status(200, body: Data("short".utf8), headers: ["Content-Length": ""]) : .status(200)
         }
         let partID = UUID()
         let record = try await harness.addRecord(parts: [partID])
@@ -126,10 +127,34 @@ import Testing
         #expect(try Data(contentsOf: harness.fileURL("li_1/1.mp3")) == Data("audio-bytes".utf8))
     }
 
-    @Test(arguments: [200, 401])
-    func offOriginResponseFailsWithoutRefresh(status: Int) async throws {
+    @Test(arguments: [
+        (200, [String: String]()),
+        (206, ["Content-Range": "bytes 0-17/18", "Content-Length": ""]),
+    ])
+    func declaredSizeChangeUpdatesExpectedSize(status: Int, headers: [String: String]) async throws {
+        let body = Data("audio-bytes-longer".utf8)
+        let harness = try await DownloadHarness { _ in .status(status, body: body, headers: headers) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID, UUID()])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        #expect(
+            await engine.next { if case .partCompleted = $0 { true } else { false } }
+                == .partCompleted(partID: partID, recordID: record.id))
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .completed)
+        #expect(part.bytesWritten == 18)
+        #expect(part.expectedBytes == 18)
+        #expect(try Data(contentsOf: harness.fileURL("li_1/1.mp3")) == body)
+        #expect(harness.requests.count == 1)
+    }
+
+    @Test(arguments: [200, 401], [Data("audio-bytes".utf8), Data()])
+    func offOriginResponseFailsWithoutRefresh(status: Int, body: Data) async throws {
         let harness = try await DownloadHarness { _ in
-            .status(status, from: URL(string: "https://cdn.other.test/file.mp3")!)
+            .status(status, body: body, from: URL(string: "https://cdn.other.test/file.mp3")!)
         }
         let partID = UUID()
         try await harness.addRecord(parts: [partID])
@@ -147,9 +172,10 @@ import Testing
         #expect(!harness.fileExists("li_1/1.mp3"))
     }
 
-    @Test func redirectedUnauthorizedFailsWithoutRefresh() async throws {
+    @Test(arguments: [Data("Unauthorized".utf8), Data()])
+    func redirectedUnauthorizedFailsWithoutRefresh(body: Data) async throws {
         let harness = try await DownloadHarness { request in
-            .status(401, from: URL(string: "https://\(request.url!.host()!)/abs/elsewhere")!)
+            .status(401, body: body, from: URL(string: "https://\(request.url!.host()!)/abs/elsewhere")!)
         }
         let partID = UUID()
         try await harness.addRecord(parts: [partID])
@@ -246,19 +272,21 @@ import Testing
 
     private static let resumeData = Data("resume: Bearer token-1, X-Proxy: proxy-secret".utf8)
 
-    /// Fails the part's first transfer with resume data and no retries left; later requests
-    /// get `then`.
+    /// Fails the part's first transfer with resume data and no retries left, then queues its
+    /// record again, as a retry from the app would; later requests get `then`.
     private func failWithResumeData(
+        keyStore: any ResumeDataKeyStore = MemoryKeyStore(),
         then: @escaping @Sendable (URLRequest) -> StubReply = { _ in .status(200) }
     ) async throws -> (DownloadHarness, DownloadEngine, UUID) {
-        let harness = try await DownloadHarness {
+        let harness = try await DownloadHarness(keyStore: keyStore) {
             $0.stubCount == 1 ? .failure(resumeData: Self.resumeData) : then($0)
         }
         let partID = UUID()
-        try await harness.addRecord(parts: [partID])
+        let record = try await harness.addRecord(parts: [partID])
         let engine = harness.makeEngine(retryPolicy: RetryPolicy(baseDelay: .zero, maxDelay: .zero, maxRetries: 0))
         await engine.start(partIDs: [partID])
         #expect(await engine.nextPermanentFailure() != nil)
+        try await harness.store.setState(.queued, forRecord: record.id)
         return (harness, engine, partID)
     }
 
@@ -301,5 +329,30 @@ import Testing
         #expect(harness.session?.resumedData == [Self.resumeData])
         #expect(harness.credentials.calls == [nil, nil, "token-1"])
         #expect(harness.requests.map(\.authorization) == ["Bearer token-1", "Bearer token-1", "Bearer token-2"])
+    }
+
+    @Test func unreadableResumeDataStartsFreshAndKeepsIt() async throws {
+        let keyStore = FlakyKeyStore()
+        let gate = StubGate()
+        let (harness, engine, partID) = try await failWithResumeData(keyStore: keyStore) { _ in
+            .status(200, gate: gate)
+        }
+        let failed = try #require(try await harness.store.part(id: partID))
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        keyStore.failNextLoad()
+
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(2)
+
+        // The Keychain was unavailable: a fresh request, and the blob stays for a later launch.
+        #expect(FileManager.default.fileExists(atPath: blob))
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .running)
+        #expect(part.hasResumeData)
+        #expect(part.retryCount == failed.retryCount)
+        gate.open()
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.session?.resumedData == [])
+        #expect(!FileManager.default.fileExists(atPath: blob))
     }
 }

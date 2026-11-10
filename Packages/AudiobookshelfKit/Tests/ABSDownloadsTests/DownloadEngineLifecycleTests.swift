@@ -9,6 +9,8 @@ import Testing
 
 /// Activation, relaunch, background wakes, session loss and stopping.
 @Suite(.timeLimit(.minutes(1))) struct DownloadEngineLifecycleTests {
+    private static let forceQuit = NSURLErrorCancelledReasonUserForceQuitApplication
+
     @Test func reattachesToSurvivingTasksAndRestartsOrphans() async throws {
         let previous = StubGate()
         let never = StubGate()
@@ -82,14 +84,9 @@ import Testing
         #expect(harness.requests.map(\.authorization) == ["Bearer previous"])
     }
 
-    @Test(arguments: [
-        NSURLErrorCancelledReasonUserForceQuitApplication,
-        NSURLErrorCancelledReasonBackgroundUpdatesDisabled,
-        NSURLErrorCancelledReasonInsufficientSystemResources,
-    ])
-    func systemCancellationRestartsWithoutCountingFailure(reason: Int) async throws {
+    @Test func forceQuitCancellationRestartsAtOnce() async throws {
         let harness = try await DownloadHarness {
-            $0.stubCount == 1 ? .failure(code: NSURLErrorCancelled, cancelReason: reason) : .status(200)
+            $0.stubCount == 1 ? .failure(code: NSURLErrorCancelled, cancelReason: Self.forceQuit) : .status(200)
         }
         let partID = UUID()
         try await harness.addRecord(parts: [partID])
@@ -98,10 +95,7 @@ import Testing
         #expect(await engine.activate())
 
         let update = await engine.next {
-            switch $0 {
-            case .recordComplete, .partFailed: true
-            case .partCompleted: false
-            }
+            if case .partCompleted = $0 { false } else { true }
         }
         guard case .recordComplete = update else {
             Issue.record("Unexpected \(String(describing: update))")
@@ -109,6 +103,75 @@ import Testing
         }
         #expect(harness.clock.sleeps.isEmpty)
         #expect(harness.requests.count == 2)
+    }
+
+    @Test(arguments: [
+        NSURLErrorCancelledReasonBackgroundUpdatesDisabled,
+        NSURLErrorCancelledReasonInsufficientSystemResources,
+    ])
+    func backgroundCancellationWaitsForActivation(reason: Int) async throws {
+        let harness = try await DownloadHarness {
+            $0.stubCount == 1 ? .failure(code: NSURLErrorCancelled, cancelReason: reason) : .status(200)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        #expect(await engine.activate())
+        await harness.waitForCompletions(1)
+        await engine.processPendingEvents()
+
+        #expect(harness.requests.count == 1)
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
+        #expect(part.retryCount == 0)
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.clock.sleeps.isEmpty)
+        #expect(harness.requests.count == 2)
+    }
+
+    @Test func backgroundWakeAfterDeactivateDoesNotRestart() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness {
+            $0.stubCount == 1
+                ? .failure(code: NSURLErrorCancelled, cancelReason: Self.forceQuit, gate: gate) : .status(200)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+
+        await engine.deactivate()
+        let wake = Task { await engine.handleBackgroundEvents() }
+        gate.open()
+        await harness.waitForCompletions(1)
+        await engine.processPendingEvents()
+        harness.session?.finishBackgroundEvents()
+        await wake.value
+
+        #expect(harness.requests.count == 1)
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 2)
+    }
+
+    @Test func systemCancellationsPastTheCapAreRetried() async throws {
+        let harness = try await DownloadHarness {
+            $0.stubCount <= 4 ? .failure(code: NSURLErrorCancelled, cancelReason: Self.forceQuit) : .status(200)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        #expect(await engine.activate())
+
+        #expect(await engine.nextFailure(willRetry: true) != nil)
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.clock.sleeps == [.milliseconds(1500)])
+        #expect(harness.requests.count == 5)
     }
 
     @Test func lostSessionIsRecreated() async throws {
@@ -123,7 +186,51 @@ import Testing
 
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.sessions.withLock { $0.count } == 2)
-        #expect(harness.clock.sleeps.isEmpty)
+        #expect(harness.clock.sleeps == [.milliseconds(1500)])
+    }
+
+    @Test func sessionThatKeepsDisconnectingWaitsForActivation() async throws {
+        let harness = try await DownloadHarness { _ in .failure(code: NSURLErrorBackgroundSessionWasDisconnected) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        let lost = DownloadUpdate.sessionUnavailable(
+            code: .sessionLost, message: "The download session keeps disconnecting.")
+        #expect(await engine.next { $0 == lost } != nil)
+        #expect(harness.sessions.withLock { $0.count } == 4)
+        #expect(harness.requests.count == 4)
+        #expect(harness.clock.sleeps.prefix(3) == [.milliseconds(1500), .seconds(3), .seconds(6)])
+    }
+
+    @Test func sessionInUseByAnotherProcessStopsDownloads() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { _ in
+            .failure(code: NSURLErrorBackgroundSessionInUseByAnotherProcess, gate: gate)
+        }
+        let first = UUID()
+        let second = UUID()
+        try await harness.addRecord(parts: [first, second])
+        let engine = harness.makeEngine()
+        await engine.start(partIDs: [first, second])
+        await harness.waitForRequests(2)
+
+        gate.open()
+
+        let inUse = DownloadUpdate.sessionUnavailable(
+            code: .sessionInUse, message: "Another process is using the download session.")
+        #expect(await engine.next { $0 == inUse } != nil)
+        await harness.waitForCompletions(2)
+        await engine.processPendingEvents()
+        #expect(try await harness.store.part(id: first)?.state == .queued)
+        #expect(try await harness.store.part(id: second)?.state == .queued)
+        // No session is created again in this process.
+        #expect(await engine.activate() == false)
+        await engine.start(partIDs: [first])
+        #expect(harness.sessions.withLock { $0.count } == 1)
+        #expect(harness.requests.count == 2)
     }
 
     @Test func backgroundWakeDoesNotRestartButActivateDoes() async throws {
@@ -209,7 +316,7 @@ import Testing
             $0.stubCount == 1 ? .failure(resumeData: Data("resume".utf8)) : .status(200)
         }
         let partID = UUID()
-        try await harness.addRecord(parts: [partID])
+        let record = try await harness.addRecord(parts: [partID])
         let engine = harness.makeEngine(retryPolicy: RetryPolicy(baseDelay: .zero, maxDelay: .zero, maxRetries: 0))
         await engine.start(partIDs: [partID])
         #expect(await engine.nextPermanentFailure() != nil)
@@ -222,6 +329,7 @@ import Testing
         let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
         #expect(FileManager.default.fileExists(atPath: blob) == keepingResumeData)
 
+        try await harness.store.setState(.queued, forRecord: record.id)
         await engine.start(partIDs: [partID])
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.session?.resumedData == (keepingResumeData ? [Data("resume".utf8)] : []))
