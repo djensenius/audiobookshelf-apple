@@ -15,7 +15,7 @@ depends = ["lint:shell", "lint:actions"]
 
 [tasks."lint:shell"]
 description = "Lint shell scripts with ShellCheck"
-run = "shellcheck scripts/*.sh"
+run = "shellcheck scripts/*.sh ci_scripts/*.sh"
 
 [tasks."lint:actions"]
 description = "Lint GitHub Actions workflows with actionlint"
