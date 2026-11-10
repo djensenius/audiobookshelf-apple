@@ -40,6 +40,11 @@ files, don't add targets without need):
 Each module has a `<Module>Tests` target. Package tests run with `swift test`
 (`mise run test:kit`); they cannot be added to the app scheme.
 
+Read [docs/architecture.md](docs/architecture.md) for the allowed module
+dependencies, the `Features/<Feature>/` layout, `AppEnvironment`, concurrency rules,
+and the testing guide. Significant decisions are recorded as ADRs in
+[docs/adr/](docs/adr/README.md).
+
 Bundle IDs: `org.davidjensenius.Audiobookshelf` and
 `org.davidjensenius.AudiobookshelfTests`. No signing team is committed.
 
