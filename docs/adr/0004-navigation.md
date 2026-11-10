@@ -154,7 +154,7 @@ CarPlay scene (UIKit, CPTemplateApplicationSceneDelegate) // no Router, shares A
 
 The sidebar-only section tabs need a fallback. If the size class becomes compact while a sidebar-only section is selected (for example on an iPhone Duo fold or a narrowed iPad window), `Router.normalize(isCompact: true)` keeps the user on the same screen:
 
-1. It sets that section (for example Series) as the Library root's selected section, so the Library root now shows what the section tab's root showed.
+1. It sets that section (for example Series) as the Library root's selected section (`Router.librarySection`), so the Library root now shows what the section tab's root showed.
 2. It moves the section's path into Library: `paths[.library] = paths[.series]`. This **replaces** any existing Library path. That older Library path was not visible, and keeping it would put an unrelated screen on top.
 3. It clears `paths[.series]` and selects `.library`.
 
@@ -207,11 +207,12 @@ enum Route: Hashable, Codable, Sendable {
 @MainActor @Observable final class Router {
     var selectedTab: AppTab
     var libraryID: String?
+    var librarySection: AppTab?           // Library root's selected section; nil = default grid
     var paths: [AppTab: [Route]]          // one typed path per tab
     var isFullPlayerPresented = false     // per-scene presentation state,
     var isQueueInspectorPresented = false // never stored on the shared player
     subscript(path tab: AppTab) -> [Route] { get set }  // NavigationStack binds $router[path: tab]
-    var snapshot: Snapshot { get set }    // Codable: server/user IDs, tab, libraryID, paths, inspector flag
+    var snapshot: Snapshot { get set }    // Codable: server/user IDs, tab, libraryID, librarySection, paths, inspector flag
     func open(_ link: DeepLink)           // the only entry point for external navigation
     func normalize(isCompact: Bool)       // the view passes horizontalSizeClass == .compact
 }
@@ -297,6 +298,7 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 - `serverID` and `userID`.
 - The selected tab.
 - `libraryID`.
+- `librarySection`, the Library root's selected section, so a restored compact scene keeps its Series (or other section) context at the root and when going Back from a restored detail.
 - The `[AppTab: [Route]]` paths.
 - Whether the queue inspector is shown.
 
@@ -305,6 +307,7 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 **Restore rules**
 
 - The key and the stored `serverID`/`userID` must both match the active session. On a mismatch (for example after the server re-issues a user ID) the snapshot is discarded and the scene starts from the defaults.
+- `librarySection` is restored **before** the paths. It is validated against the restored library's type (book or podcast), using the same rule as library switching: an unsupported or unknown section falls back to the default grid (`nil`).
 - Paths are written when `scenePhase` becomes `.background`, not on every push.
 - A route whose target no longer exists shows `ContentUnavailableView` and is pruned from the path.
 
