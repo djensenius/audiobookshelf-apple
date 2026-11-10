@@ -295,6 +295,28 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
+    @Test func scopedSignOutDoesNotLogOutAnAccountPublishedDuringFlush() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let flushGate = Gate()
+        harness.playback.flushGate = flushGate
+        defer { flushGate.open() }
+
+        harness.lifecycle.requestSignOut(of: try #require(harness.playback.context))
+        #expect(
+            await eventually {
+                harness.log.entries.contains("playback.flush") && harness.clock.sleeperCount == 1
+            })
+        harness.source.publishUnobserved(.active(identityB, isOffline: false))
+        flushGate.open()
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        #expect(!harness.log.entries.contains("accounts.logout"))
+        #expect(harness.source.phase == .active(identityB, isOffline: false))
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
     @Test func signOutRequestedAfterAnExpiryEndsTheSessionAsExpired() async throws {
         let harness = Harness()
         try await harness.started()
@@ -353,6 +375,19 @@ private func teardown(_ reason: String) -> [String] {
 
         await harness.lifecycle.signOut()
 
+        #expect(harness.lifecycle.gate == .storeUnavailable(SessionStoreError(StoreFailure())))
+    }
+
+    @Test func accountChangeDoesNotRecoverAfterRestoreFails() async {
+        let harness = Harness()
+        harness.source.restoreError = StoreFailure()
+        await harness.lifecycle.start()
+
+        await harness.lifecycle.performAccountChange {
+            harness.source.phase = .active(identityB, isOffline: false)
+        }
+
+        #expect(harness.log.entries == ["accounts.restore"])
         #expect(harness.lifecycle.gate == .storeUnavailable(SessionStoreError(StoreFailure())))
     }
 
@@ -887,6 +922,37 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.log.flushes == allFlushes)
         #expect(harness.log.withoutFlushes.isEmpty)
         #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
+    }
+
+    @Test func expiryCancelsABackgroundFlushBeforeEndHooksContinue() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let flushGate = Gate()
+        let endGate = Gate()
+        harness.playback.flushGate = flushGate
+        harness.socket.endGate = endGate
+        defer {
+            flushGate.open()
+            endGate.open()
+        }
+
+        let background = Task { await harness.lifecycle.handle(scenePhase: .background) }
+        #expect(
+            await eventually {
+                harness.log.entries.contains("playback.flush") && harness.clock.sleeperCount == 1
+            })
+        harness.source.expire()
+        #expect(
+            await eventually {
+                harness.log.entries.contains("socket.end(expired)")
+                    && harness.log.entries.contains("playback.flushCancelled")
+            })
+        endGate.open()
+        await background.value
+        #expect(await eventually { harness.lifecycle.gate == .connect })
+
+        #expect(harness.log.entries.contains("playback.flushCancelled"))
+        #expect(harness.log.entries.contains("socket.end(expired)"))
     }
 
     @Test func backgroundWithoutASessionDoesNothing() async {

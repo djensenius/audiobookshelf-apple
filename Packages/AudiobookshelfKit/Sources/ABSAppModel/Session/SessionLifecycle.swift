@@ -65,6 +65,8 @@ public final class SessionLifecycle {
     /// last one finishes; an expiry still ends one.
     @ObservationIgnored private var accountChanges = 0
     @ObservationIgnored private var lastSessionID: UInt64 = 0
+    @ObservationIgnored private var flushWorkers: [UInt64: [UInt64: Task<Void, Never>]] = [:]
+    @ObservationIgnored private var lastFlushWorkerID: UInt64 = 0
     /// The session whose pipeline is starting, before it becomes ``session``.
     @ObservationIgnored private var beginning: SessionContext?
     @ObservationIgnored private var launch: Task<Void, Never>?
@@ -193,7 +195,7 @@ public final class SessionLifecycle {
                 Log.auth.info("Ignored a sign-out request from an ended session")
                 return
             }
-            _ = await self.performSignOut()
+            _ = await self.performSignOut(expectedIdentity: running.context.identity)
         }
     }
 
@@ -280,10 +282,10 @@ public final class SessionLifecycle {
             _ = enqueue { await self.reconcile() }
             return
         }
-        await flush(running.participants)
+        await flush(running.participants, sessionID: running.context.sessionID)
     }
 
-    private func performSignOut() async -> URL? {
+    private func performSignOut(expectedIdentity: SessionIdentity? = nil) async -> URL? {
         await endStaleSession()
         guard source.phase != .signedOut else {
             // Signed out by itself and not reconciled yet: an expiry, not a sign-out.
@@ -292,6 +294,10 @@ public final class SessionLifecycle {
         }
         if let identity = session?.context.identity { gate = .signingOut(from: identity) }
         await endFlushing(.signOut)
+        if let expectedIdentity, !sourceIsActive(expectedIdentity) {
+            await reconcile()
+            return nil
+        }
         showConnect()
         let url = await source.logout()
         await reconcile()
@@ -326,6 +332,7 @@ public final class SessionLifecycle {
 
     /// Brings the session and gate in line with the source, until the source stops changing.
     private func reconcile() async {
+        if case .storeUnavailable = gate { return }
         var handled: AccountSessionPhase?
         var handledClient: APIClient?
         while handled != source.phase || handledClient !== source.client {
@@ -428,6 +435,9 @@ public final class SessionLifecycle {
         guard let running = session else { return }
         session = nil
         running.seed?.cancel()
+        if let workers = flushWorkers.removeValue(forKey: running.context.sessionID) {
+            for worker in workers.values { worker.cancel() }
+        }
         if case .ready = gate {
             let identity = running.context.identity
             gate = reason == .switch ? .switching(from: identity) : .signingOut(from: identity)
@@ -460,12 +470,12 @@ public final class SessionLifecycle {
     /// Flushes and ends the session with `reason`; or, when the source already signed out by
     /// itself (an expiry not reconciled yet), ends it as expired without flushing.
     private func endFlushing(_ reason: SessionEndReason) async {
-        guard let participants = session?.participants else { return }
+        guard let running = session else { return }
         guard source.phase != .signedOut else {
             await end(.expired)
             return
         }
-        await flush(participants)
+        await flush(running.participants, sessionID: running.context.sessionID)
         await end(reason)
     }
 
@@ -477,6 +487,11 @@ public final class SessionLifecycle {
         case .restoring: false
         case .active(let current, _): current != identity
         }
+    }
+
+    private func sourceIsActive(_ identity: SessionIdentity) -> Bool {
+        guard case .active(let current, _) = source.phase else { return false }
+        return current == identity
     }
 
     /// Ends the running session, without a flush, if the source has left it before its
@@ -502,18 +517,22 @@ public final class SessionLifecycle {
 
     /// Flushes `participants` concurrently, for at most `flushTimeout` in all; then cancels the
     /// flushes still running. The timeout doesn't wait for a flush that ignores cancellation.
-    private func flush(_ participants: [any SessionParticipant]) async {
+    private func flush(_ participants: [any SessionParticipant], sessionID: UInt64) async {
         let clock = clock
         let timeout = flushTimeout
         let done = Signal()
-        let worker = Task {
+        lastFlushWorkerID += 1
+        let workerID = lastFlushWorkerID
+        let worker = Task { [weak self] in
             await withTaskGroup(of: Void.self) { group in
                 for participant in participants.reversed() {
                     group.addTask { await participant.flush() }
                 }
             }
+            self?.removeFlushWorker(sessionID: sessionID, workerID: workerID)
             done.fire()
         }
+        flushWorkers[sessionID, default: [:]][workerID] = worker
         let timer = Task {
             try? await clock.sleep(for: timeout)
             done.fire()
@@ -521,6 +540,13 @@ public final class SessionLifecycle {
         await done.wait()
         worker.cancel()
         timer.cancel()
+    }
+
+    private func removeFlushWorker(sessionID: UInt64, workerID: UInt64) {
+        flushWorkers[sessionID]?[workerID] = nil
+        if flushWorkers[sessionID]?.isEmpty == true {
+            flushWorkers[sessionID] = nil
+        }
     }
 
     private func showConnect() {
