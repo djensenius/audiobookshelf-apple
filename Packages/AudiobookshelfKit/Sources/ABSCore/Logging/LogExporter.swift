@@ -52,7 +52,8 @@ public protocol LogEntrySource: Sendable {
 public struct OSLogStoreSource: LogEntrySource {
     public init() {}
 
-    public func entries(subsystem: String, since: Date?) async throws -> [LogEntry] {
+    /// Runs on the concurrent executor so the slow, synchronous read never blocks the caller's actor.
+    @concurrent public func entries(subsystem: String, since: Date?) async throws -> [LogEntry] {
         let store = try OSLogStore(scope: .currentProcessIdentifier)
         let position = since.map { store.position(date: $0) }
         let predicate = NSPredicate(format: "subsystem == %@", subsystem)

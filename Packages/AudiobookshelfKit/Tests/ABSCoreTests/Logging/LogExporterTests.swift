@@ -101,11 +101,22 @@ private func entry(
 }
 
 #if os(macOS)
+    extension Tag {
+        /// Tests that take many seconds; opt in with `ABS_SLOW_TESTS=1`.
+        @Tag static var slow: Self
+    }
+
     /// Writes through `Logger` and reads the entry back from the real `OSLogStore`.
     ///
-    /// Each `OSLogStore` read scans the system log and can take 10–20 seconds.
+    /// Each `OSLogStore` read scans the system log and can take 10–20 seconds, so this only runs
+    /// with `ABS_SLOW_TESTS` set (`mise run test:kit:slow`).
     @Suite struct OSLogStoreIntegrationTests {
-        @Test(.timeLimit(.minutes(2))) func readsBackWrittenEntry() async throws {
+        @Test(
+            .tags(.slow),
+            .enabled(if: ProcessInfo.processInfo.environment["ABS_SLOW_TESTS"] != nil),
+            .timeLimit(.minutes(2))
+        )
+        func readsBackWrittenEntry() async throws {
             let marker = UUID().uuidString
             let since = Date().addingTimeInterval(-1)
             Log.logger(.data).error(
@@ -115,9 +126,9 @@ private func entry(
             let filter = LogFilter(categories: [Log.Category.data], since: since)
             var found: [LogEntry] = []
             // The store can lag slightly behind the write.
-            for _ in 0..<20 where found.isEmpty {
+            for _ in 0..<3 where found.isEmpty {
                 found = try await exporter.entries(matching: filter).filter { $0.message.contains(marker) }
-                if found.isEmpty { try await Task.sleep(for: .milliseconds(100)) }
+                if found.isEmpty { try await Task.sleep(for: .seconds(1)) }
             }
 
             let logged = try #require(found.first)
