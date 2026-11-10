@@ -15,7 +15,7 @@ server, targeting iPhone, iPad, iPhone Duo, Mac, and CarPlay.
 - Swift Package Manager only — no CocoaPods or Capacitor.
 - Xcode 27.2 with the JSON project format.
 - [mise](https://mise.jdx.dev) for tools and tasks (`mise run lint`).
-- Xcode Cloud for TestFlight builds.
+- Xcode Cloud for TestFlight builds ([docs/release.md](docs/release.md)).
 
 ## Building
 
