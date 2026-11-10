@@ -50,6 +50,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     var duration: Double { timeline?.duration ?? 0 }
     var currentTrackIndex: Int?
     var defaultRate: Float = 1
+    var volume: Float = 1
     var isPlaybackRequested = false
     var pendingSeekTarget: Double?
     var timeline: PlaybackTimeline?
@@ -116,6 +117,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func setRate(_ rate: Float) { defaultRate = rate }
+    func setVolume(_ volume: Float) { self.volume = volume }
 }
 
 /// Sessions per item (ids `<item>-<n>`, unique per start), with optional gates on starts and
@@ -129,6 +131,7 @@ final class StubSessionService: PlaybackSessionService {
         var startGates: [String: Gate] = [:]
         var closeGates: [String: Gate] = [:]
         var startError: APIError?
+        var resolveError: (any Error)?
         var closeError: APIError?
         var starts: [String] = []
         var closes: [String] = []
@@ -179,6 +182,7 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
+        if let error = state.withLock({ $0.resolveError }) { throw error }
         let tracks = session.audioTracks.map { track in
             PlayableTrack(
                 url: URL(filePath: "/\(session.id)/\(track.index ?? 0)"), mimeType: track.mimeType,

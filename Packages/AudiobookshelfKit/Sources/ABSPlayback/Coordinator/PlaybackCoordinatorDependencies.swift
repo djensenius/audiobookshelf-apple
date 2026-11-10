@@ -16,7 +16,9 @@ public protocol PlaybackSessionService: Sendable {
     /// or record. Server timestamps are compared with device ones, so clock skew between them can
     /// pick the older position.
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress?
-    /// The URLs to load for `session`. Throws ``StreamResolutionError``.
+    /// The URLs to load for `session`. Throws ``StreamResolutionError`` when they can't be built, and
+    /// `CancellationError` when the caller is cancelled: the coordinator drops that start without
+    /// reporting a failure, and reports any other error as unexpected.
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream
     /// `POST /api/session/:id/close`, applying `report` first when given.
     func closeSession(id: String, report: PlaybackSyncReport?) async throws
@@ -40,7 +42,8 @@ public enum StreamResolutionError: Error, Sendable, Hashable {
     /// The connection has custom headers, which need the resource-loader transport the engine
     /// doesn't have yet (ADR 0007 §6).
     case customHeaderTransportUnavailable
-    /// A token-fallback track needs an access token and the connection has none.
+    /// A token-fallback track needs an access token and the connection has none: it is signed out,
+    /// or the server rejected its refresh token, so the user has to sign in again.
     case missingAccessToken
     /// The stream plan doesn't have a URL for every timeline track.
     case trackCountMismatch

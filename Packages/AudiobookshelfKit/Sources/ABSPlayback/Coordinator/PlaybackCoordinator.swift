@@ -6,7 +6,7 @@ import Observation
 import Synchronization
 import os
 
-private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "PlaybackCoordinator")
+private let logger = Log.playback
 
 /// Turns "play this" into playback, independent of any scene: checks the streaming policy, opens a
 /// server session, loads the engine at the resume position and applies the saved rate. Closes the
@@ -272,6 +272,11 @@ public final class PlaybackCoordinator {
             source = try makeSource(session: session, stream: stream)
         } catch {
             closeInBackground(sessionID: session.id, report: nil)
+            // A cancelled caller abandons the start; that isn't a failure.
+            if error is CancellationError {
+                if current == generation, phase == .starting { phase = .unloaded }
+                return
+            }
             return fail(Self.streamError(error), generation: current)
         }
         guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
