@@ -16,7 +16,7 @@ replacing the Nuxt/Capacitor app this repository was forked from. Track work on 
 | Path | What it is |
 | --- | --- |
 | `Audiobookshelf.xcodeproj/project.xcproj` | Xcode 27.2 JSON project: app target `Audiobookshelf` (iOS, iPadOS, native macOS; no Catalyst) and test target `AudiobookshelfTests` |
-| `Audiobookshelf/` | App sources (synchronized folder), `Info.plist` fragment (background audio, CarPlay scene), macOS entitlements |
+| `Audiobookshelf/` | App sources (synchronized folder), `Info.plist` fragment (ATS, background audio, CarPlay scene), entitlements (`Audiobookshelf.entitlements` macOS, `Audiobookshelf-iOS.entitlements` iOS, `Audiobookshelf-AdHoc.entitlements` for ad hoc `test:app`) |
 | `AudiobookshelfTests/` | App tests (Swift Testing), hosted in the app |
 | `Packages/AudiobookshelfKit/` | Local Swift package with all feature code; one `AudiobookshelfKit` library product exposes every module |
 
@@ -46,14 +46,16 @@ and the testing guide. Significant decisions are recorded as ADRs in
 [docs/adr/](docs/adr/README.md).
 
 Bundle IDs: `org.davidjensenius.Audiobookshelf` and
-`org.davidjensenius.AudiobookshelfTests`. No signing team is committed.
+`org.davidjensenius.AudiobookshelfTests`. Team `9JALHNGRBQ`, automatic signing.
+App Group `group.org.davidjensenius.Audiobookshelf`; keychain access group
+`$(AppIdentifierPrefix)org.davidjensenius.Audiobookshelf`. See
+[ADR 0002](docs/adr/0002-identity-and-no-migration.md).
 
 CarPlay: the scene and `CarPlaySceneDelegate` exist, but the
 `com.apple.developer.carplay-audio` entitlement is not added yet — it requires Apple
-approval. Once granted, add it to a separate iOS entitlements file and set
-`CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]` and `CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]`
-to it, so the macOS sandbox keys in `Audiobookshelf/Audiobookshelf.entitlements`
-don't leak into iOS.
+approval. Once granted, add it to `Audiobookshelf/Audiobookshelf-iOS.entitlements`
+(used for the `iphoneos` and `iphonesimulator` SDKs), not to the macOS
+`Audiobookshelf/Audiobookshelf.entitlements`.
 
 ### Legacy reference
 
@@ -68,7 +70,8 @@ not built:
 | `android/` | Android app — ignore |
 | `strings/` | Translations for 42 locales — the source for localization |
 
-Repository tooling lives in `scripts/`, `.github/workflows/`, and `mise.toml`.
+Repository tooling lives in `scripts/`, `ci_scripts/` (Xcode Cloud),
+`.github/workflows/`, and `mise.toml`.
 
 ## Toolchain
 
@@ -112,7 +115,9 @@ Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing
 - Prefer built-in Apple frameworks. Any new Swift Package Manager dependency must be
   justified in the PR description.
 - Do not add CocoaPods, Carthage, Capacitor, or Fastlane. Releases go through
-  Xcode Cloud.
+  Xcode Cloud ([docs/release.md](docs/release.md)): `ci_scripts/` holds its build
+  scripts, the build number is the Xcode Cloud `CI_BUILD_NUMBER`, and builds are
+  referred to by their TestFlight build number.
 
 ## Pull requests
 

@@ -45,7 +45,9 @@ public struct DeviceInfo: Sendable, Hashable, Codable {
     public var deviceType: String?
     public var manufacturer: String?
     public var model: String?
-    public var sdkVersion: Int?
+    /// Android SDK level. The server sends a string; older or other clients may have sent a number,
+    /// which decodes as its string form.
+    public var sdkVersion: String?
     public var clientName: String?
     public var clientVersion: String?
 
@@ -67,6 +69,42 @@ public struct DeviceInfo: Sendable, Hashable, Codable {
         self.osVersion = osVersion
         self.clientName = clientName
         self.clientVersion = clientVersion
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, userId, deviceId, ipAddress, browserName, browserVersion, osName, osVersion, deviceName
+        case deviceType, manufacturer, model, sdkVersion, clientName, clientVersion
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id)
+        userId = try container.decodeIfPresent(String.self, forKey: .userId)
+        deviceId = try container.decodeIfPresent(String.self, forKey: .deviceId)
+        ipAddress = try container.decodeIfPresent(String.self, forKey: .ipAddress)
+        browserName = try container.decodeIfPresent(String.self, forKey: .browserName)
+        browserVersion = try container.decodeIfPresent(String.self, forKey: .browserVersion)
+        osName = try container.decodeIfPresent(String.self, forKey: .osName)
+        osVersion = try container.decodeIfPresent(String.self, forKey: .osVersion)
+        deviceName = try container.decodeIfPresent(String.self, forKey: .deviceName)
+        deviceType = try container.decodeIfPresent(String.self, forKey: .deviceType)
+        manufacturer = try container.decodeIfPresent(String.self, forKey: .manufacturer)
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+        sdkVersion = try Self.decodeStringOrNumber(container, forKey: .sdkVersion)
+        clientName = try container.decodeIfPresent(String.self, forKey: .clientName)
+        clientVersion = try container.decodeIfPresent(String.self, forKey: .clientVersion)
+    }
+
+    private static func decodeStringOrNumber(
+        _ container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys
+    ) throws -> String? {
+        if let value = try? container.decodeIfPresent(Int.self, forKey: key) {
+            return String(value)
+        }
+        if let value = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return String(value)
+        }
+        return try container.decodeIfPresent(String.self, forKey: key)
     }
 }
 
