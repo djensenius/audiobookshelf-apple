@@ -214,25 +214,16 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Returns `false`, changing nothing, when `patch` is not the row's send in flight (a late or
     /// repeated response for a send already settled). A row deleted and recreated for the same
     /// key since ``beginSend(for:now:)`` isn't acknowledged, but its pending edits are shielded
-    /// from the old PATCH's echo; the send is still settled.
+    /// from the old PATCH's echo; if that can't be saved, the send stays in flight and this
+    /// throws, so retry it.
     @discardableResult
     public func completeSend(_ patch: ProgressPatch, serverLastUpdate: Date?) throws -> Bool {
         guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
-        // Settled even when the save fails: the send stays recorded, so a later fetch still
-        // recognises its echo.
-        defer { settle(patch.key) }
-        let acknowledged = try commit {
-            guard let row = try fetchRow(patch.key) else { return false }
+        let acknowledged = try settle(patch.key, sentFrom: flight.row) { row in
             var state = ProgressSyncState(row)
-            guard row.persistentModelID == flight.row else {
-                state.shieldFromObsoleteSend()
-                state.write(to: row)
-                return false
-            }
             state.acknowledge(patch.values, serverLastUpdate: serverLastUpdate)
             state.write(to: row)
             row.lastSyncError = nil
-            return true
         }
         if acknowledged, serverLastUpdate == nil { awaitingFetch[patch.key.rawValue] = (patch.key, nil) }
         return true
@@ -240,7 +231,8 @@ public enum SessionUploadResult: Sendable, Equatable {
 
     /// The PATCH failed or its response was lost. The send stays recorded as unacknowledged, and
     /// the next attempt sends the then-current values. Returns `false`, changing nothing, when
-    /// `patch` is not the row's send in flight.
+    /// `patch` is not the row's send in flight. Like ``completeSend(_:serverLastUpdate:)``, it
+    /// throws without settling when a recreated row's shield can't be saved; retry it.
     ///
     /// Call this only once the PATCH's `URLSessionTask` has really completed (ADR 0007, #53). The
     /// token stops a late outcome from settling a newer send, but it can't stop an old request
@@ -249,17 +241,7 @@ public enum SessionUploadResult: Sendable, Equatable {
     @discardableResult
     public func failSend(_ patch: ProgressPatch, error: String?) throws -> Bool {
         guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
-        defer { settle(patch.key) }
-        try commit {
-            guard let row = try fetchRow(patch.key) else { return }
-            guard row.persistentModelID == flight.row else {
-                var state = ProgressSyncState(row)
-                state.shieldFromObsoleteSend()
-                state.write(to: row)
-                return
-            }
-            row.lastSyncError = error
-        }
+        try settle(patch.key, sentFrom: flight.row) { $0.lastSyncError = error }
         return true
     }
 
@@ -462,6 +444,38 @@ public enum SessionUploadResult: Sendable, Equatable {
         guard state.merge(server, excluding: inFlight[key.rawValue]?.groups ?? []) else { return false }
         state.write(to: row)
         return true
+    }
+
+    /// Settles the send in flight for `key`, applying `outcome` to the row it was taken from in the
+    /// same save; returns whether that row was there. A row recreated for the key since isn't
+    /// passed to `outcome`: its pending edits are shielded from the old PATCH's echo instead, and
+    /// if that save fails the send stays in flight (its groups still excluded from merges) until a
+    /// retried outcome saves the shield. Otherwise the send is settled even when the save fails:
+    /// it stays recorded in the row, so a later fetch still recognises its echo.
+    @discardableResult
+    private func settle(
+        _ key: MediaKey, sentFrom rowID: PersistentIdentifier, applying outcome: (LocalMediaProgress) -> Void
+    ) throws -> Bool {
+        var shielding = false
+        do {
+            let applied = try commit {
+                guard let row = try fetchRow(key) else { return false }
+                guard row.persistentModelID == rowID else {
+                    shielding = true
+                    var state = ProgressSyncState(row)
+                    state.shieldFromObsoleteSend()
+                    state.write(to: row)
+                    return false
+                }
+                outcome(row)
+                return true
+            }
+            settle(key)
+            return applied
+        } catch {
+            if !shielding { settle(key) }
+            throw error
+        }
     }
 
     private func settle(_ key: MediaKey) {

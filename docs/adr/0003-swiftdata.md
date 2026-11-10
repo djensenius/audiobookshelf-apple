@@ -375,7 +375,10 @@ Model notes:
     The old PATCH may still have committed after the new row's edits, and the new
     row holds no evidence of it, so the outcome sets the truncation flag of each of
     its dirty groups: their echoes can't replace the edits, which keep their values
-    until their own sends are acknowledged. A group edited during the request stays dirty with its newer local values, and the next fetch sees the
+    until their own sends are acknowledged. The flags and the settlement are saved
+    together: if that save fails, the old send stays in flight (its groups still
+    excluded from merges) and the outcome throws, so the sync coordinator retries
+    it. A group edited during the request stays dirty with its newer local values, and the next fetch sees the
     server matching the advanced baseline, so the edit is kept and sent rather
     than treated as a conflict.
   - **Merges during an in-flight PATCH.** While a PATCH for a row is in flight,

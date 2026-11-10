@@ -312,6 +312,46 @@ import Testing
         #expect(try await store.progress(for: key)?.needsServerSync == false)
     }
 
+    /// The shield for a recreated row and the settlement are saved together: when the save fails,
+    /// the old send stays in flight (its echo stays excluded) until a retried outcome saves both.
+    @Test(arguments: [false, true])
+    func failedShieldSaveKeepsTheObsoleteSendInFlight(_ succeeds: Bool) async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        #expect(try await store.deleteProgress(for: key))
+        try await store.recordEdit(
+            Self.seek(300), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(5))
+        let settle = {
+            if succeeds {
+                try await store.completeSend(patch, serverLastUpdate: nil)
+            } else {
+                try await store.failSend(patch, error: "offline")
+            }
+        }
+        let echo = {
+            for source in [ServerProgressSource.socket, .fetch] {
+                let capture = await store.captureGeneration()
+                try await store.applyServerProgress(
+                    [key: Self.server(currentTime: 200, lastUpdate: Self.at(6))], capturedAt: capture, source: source)
+                let row = try #require(try await store.progress(for: key))
+                #expect(row.currentTime == 300)
+                #expect(row.audioDirty)
+            }
+        }
+
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await settle() }
+        #expect(await store.hasUncommittedChanges == false)
+        try await echo()
+        #expect(try await store.beginSend(for: key) == nil)  // The old send is still in flight.
+
+        #expect(try await settle())
+        try await echo()
+        #expect(try await store.beginSend(for: key)?.values.audio?.currentTime == 300)
+    }
+
     /// Server values merged while a PATCH is in flight update the row in place; the response
     /// still acknowledges the sent group and keeps the merged one.
     @Test func serverValueMergedDuringPatchIsKeptByTheAcknowledgement() async throws {
