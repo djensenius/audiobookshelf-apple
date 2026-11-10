@@ -7,6 +7,15 @@ import Testing
 
 @testable import ABSAppModel
 
+extension ConnectionCredentials {
+    /// For tests that don't look at whether the delete failed.
+    fileprivate init(
+        connectionID: UUID, vault: CredentialVault, onExpire: @escaping @MainActor @Sendable (UUID, Int) -> Void
+    ) {
+        self.init(connectionID: connectionID, vault: vault) { id, generation, _ in onExpire(id, generation) }
+    }
+}
+
 /// Records the generations that `onExpire` reports.
 private final class ExpiryRecorder: Sendable {
     private let generations = Mutex<[Int]>([])
@@ -18,7 +27,18 @@ private final class ExpiryRecorder: Sendable {
     var recorded: [Int] { generations.withLock { $0 } }
 }
 
-@Suite struct ConnectionCredentialsTests {
+/// Counts the calls a `@Sendable` closure makes.
+private final class CallCounter: Sendable {
+    private let calls = Mutex(0)
+
+    func record() {
+        calls.withLock { $0 += 1 }
+    }
+
+    var count: Int { calls.withLock { $0 } }
+}
+
+@Suite(.timeLimit(.minutes(1))) struct ConnectionCredentialsTests {
     private let first = AuthTokens(accessToken: "access-1", refreshToken: "refresh-1")
     private let second = AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")
 
@@ -54,6 +74,89 @@ private final class ExpiryRecorder: Sendable {
         #expect(await credentials.tokens() == nil)
         #expect(recorder.recorded == [signedIn + 1])
         #expect(try await credentials.signIn(session, customHeaders: [:]).generation > signedIn + 1)
+    }
+
+    @Test func expiryWithNoRefreshInFlightComparesAndExpiresAtOnce() async throws {
+        let recorder = ExpiryRecorder()
+        let vault = CredentialVault(keychain: InMemoryKeychain())
+        let credentials = ConnectionCredentials(connectionID: UUID(), vault: vault) { _, generation in
+            recorder.record(generation)
+        }
+        let session = StoredSession(tokens: first, openIDSession: nil)
+        let signedIn = try await credentials.signIn(session, customHeaders: [:]).generation
+
+        #expect(await !credentials.expireSessionAfterRefreshes(ifCurrent: second))
+        #expect(recorder.recorded.isEmpty)
+        #expect(await credentials.expireSessionAfterRefreshes(ifCurrent: first))
+        #expect(await credentials.tokens() == nil && recorder.recorded == [signedIn + 1])
+    }
+
+    @Test func expiryWaitsForARefreshThatFailsAndThenExpires() async throws {
+        let recorder = ExpiryRecorder()
+        let vault = CredentialVault(keychain: InMemoryKeychain())
+        let credentials = ConnectionCredentials(connectionID: UUID(), vault: vault) { _, generation in
+            recorder.record(generation)
+        }
+        let session = StoredSession(tokens: first, openIDSession: nil)
+        let signedIn = try await credentials.signIn(session, customHeaders: [:]).generation
+        let refreshing = StubGate()
+        let refresh = Task {
+            try await credentials.refreshTokens(first) {
+                await refreshing.pass()
+                throw URLError(.networkConnectionLost)
+            }
+        }
+        await refreshing.arrived()
+        let joined = StubGate()
+        await credentials.observeRefreshJoins { joined.reach() }
+        let expiring = Task { await credentials.expireSessionAfterRefreshes(ifCurrent: first) }
+        await joined.arrived()
+        // Waiting for the refresh, which hasn't failed yet.
+        #expect(recorder.recorded.isEmpty)
+
+        refreshing.open()
+        await #expect(throws: URLError.self) { try await refresh.value }
+        #expect(await expiring.value)
+        #expect(await credentials.tokens() == nil && recorder.recorded == [signedIn + 1])
+    }
+
+    @Test func refreshOfAPairANewerSignInReplacedIsSkipped() async throws {
+        let vault = CredentialVault(keychain: InMemoryKeychain())
+        let credentials = ConnectionCredentials(connectionID: UUID(), vault: vault) { _, _ in }
+        _ = try await credentials.signIn(StoredSession(tokens: first, openIDSession: nil), customHeaders: [:])
+        _ = try await credentials.signIn(StoredSession(tokens: second, openIDSession: nil), customHeaders: [:])
+        let refreshes = CallCounter()
+
+        // The server rotated `first` away when it issued `second`, so sending it would end that session.
+        try await credentials.refreshTokens(first) { refreshes.record() }
+        #expect(refreshes.count == 0)
+        try await credentials.refreshTokens(second) { refreshes.record() }
+        #expect(refreshes.count == 1)
+    }
+
+    @Test func signOutKeepsASessionANewerCallStored() async throws {
+        let vault = CredentialVault(keychain: InMemoryKeychain())
+        let id = UUID()
+        _ = try await ConnectionCredentials(connectionID: id, vault: vault) { _, _ in }
+            .signIn(StoredSession(tokens: first, openIDSession: nil), customHeaders: [:])
+        let credentials = ConnectionCredentials(connectionID: id, vault: vault) { _, _ in }
+        #expect(try await credentials.loadSession().storedBySignIn == false)
+        // Read from the Keychain, so any call signs out of it.
+        #expect(await credentials.signOut(savedBefore: 1)?.ended?.tokens == first)
+
+        let session = StoredSession(tokens: second, openIDSession: nil)
+        _ = try await credentials.signIn(session, customHeaders: [:], operation: 3)
+        #expect(try await credentials.loadSession().storedBySignIn)
+        #expect(await credentials.holdsSignIn(after: 2))
+        #expect(await !credentials.holdsSignIn(after: 3))
+        #expect(await credentials.signOut(savedBefore: 3) == nil)
+        #expect(try await credentials.load().session == session)
+        #expect(try vault.session(for: id) == session)
+        let signedOut = await credentials.signOut(savedBefore: 4)
+        #expect(signedOut?.ended == session && signedOut?.deleteError == nil)
+        #expect(try vault.session(for: id) == nil)
+        #expect(try await credentials.loadSession().storedBySignIn == false)
+        #expect(await !credentials.holdsSignIn(after: 0))
     }
 
     @Test func corruptItemsReadAsMissing() throws {

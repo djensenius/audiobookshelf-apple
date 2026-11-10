@@ -46,6 +46,7 @@ private enum SupersetSchemaV2: VersionedSchema {
         var lastUsedAt: Date?
         var isDisconnected: Bool
         var disconnectedAt: Date?
+        var signedOutAt: Date?
         var nickname: String?
 
         init(id: UUID) {

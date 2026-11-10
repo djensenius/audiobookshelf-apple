@@ -2,6 +2,7 @@ import ABSCore
 import Foundation
 import Security
 import Synchronization
+import Testing
 
 /// A `KeychainStoring` fake that can be made to fail reads or writes, or to hold a read.
 final class InMemoryKeychain: KeychainStoring {
@@ -37,8 +38,8 @@ final class InMemoryKeychain: KeychainStoring {
     }
 
     /// Holds the next read until the returned gate opens.
-    func holdNextRead() -> KeychainGate {
-        let gate = KeychainGate()
+    func holdNextRead(sourceLocation: SourceLocation = #_sourceLocation) -> KeychainGate {
+        let gate = KeychainGate(sourceLocation: sourceLocation)
         state.withLock { $0.readGate = gate }
         return gate
     }
@@ -91,34 +92,37 @@ final class InMemoryKeychain: KeychainStoring {
 }
 
 /// Holds one Keychain read until ``open()``. The read blocks its thread, as a slow Keychain call
-/// does, so the actor that called it can't run anything else meanwhile.
+/// does, so the actor that called it can't run anything else meanwhile. `ConnectionCredentials`
+/// runs on its own queue, so the blocked thread isn't one that other tests' tasks need.
+///
+/// Bounded as ``StubGate`` is, and the blocked thread also gives up after a while, in case
+/// whatever would open the gate can't run.
 final class KeychainGate: Sendable {
-    private let arrivals = Mutex<(hasArrived: Bool, waiters: [CheckedContinuation<Void, Never>])>((false, []))
-    private let opened = DispatchSemaphore(value: 0)
+    private let gate: StubGate
+    private let sourceLocation: SourceLocation
+
+    init(sourceLocation: SourceLocation = #_sourceLocation) {
+        gate = StubGate(sourceLocation: sourceLocation)
+        self.sourceLocation = sourceLocation
+    }
 
     /// Returns once the read has arrived and is being held.
     func arrived() async {
-        await withCheckedContinuation { continuation in
-            let hasArrived = arrivals.withLock { arrivals in
-                if !arrivals.hasArrived { arrivals.waiters.append(continuation) }
-                return arrivals.hasArrived
-            }
-            if hasArrived { continuation.resume() }
-        }
+        await gate.arrived()
     }
 
     /// Lets the read through, now or when it arrives.
     func open() {
-        opened.signal()
+        gate.open()
     }
 
     fileprivate func hold() {
-        let waiters = arrivals.withLock { arrivals in
-            arrivals.hasArrived = true
-            defer { arrivals.waiters = [] }
-            return arrivals.waiters
+        let opened = DispatchSemaphore(value: 0)
+        gate.hold { opened.signal() }
+        // Twice the gate's timeout, so this only fires if the gate's watchdog couldn't run.
+        let seconds = Int(StubGate.timeout.components.seconds) * 2
+        if opened.wait(timeout: .now() + .seconds(seconds)) == .timedOut {
+            Issue.record("A held Keychain read wasn't let through", sourceLocation: sourceLocation)
         }
-        waiters.forEach { $0.resume() }
-        opened.wait()
     }
 }
