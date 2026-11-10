@@ -16,6 +16,8 @@ private final class InMemoryKeychain: KeychainStoring {
         var failure: KeychainError?
         /// Simulates another process adding the item between this process's read and add.
         var racingValue: Data?
+        /// Runs once, outside the lock, before the next add: lets another store interleave.
+        var beforeAdd: (@Sendable () -> Void)?
     }
 
     let state = Mutex(State())
@@ -30,6 +32,11 @@ private final class InMemoryKeychain: KeychainStoring {
     }
 
     func add(_ data: Data, for item: KeychainItem, accessibility: KeychainAccessibility) throws(KeychainError) -> Bool {
+        let hook = state.withLock { state in
+            defer { state.beforeAdd = nil }
+            return state.beforeAdd
+        }
+        hook?()
         let result: Result<Bool, KeychainError> = state.withLock {
             $0.adds += 1
             if let failure = $0.failure { return .failure(failure) }
@@ -71,7 +78,7 @@ private func counter(prefix: String) -> @Sendable () -> String {
         #expect(await store.deviceIdentifier() == first)
         let state = keychain.state.withLock { $0 }
         #expect(state.adds == 1)
-        #expect(state.reads == 1)
+        #expect(state.reads == 2)  // Read, add, then re-read what was persisted.
         #expect(state.items[DeviceIdentifierStore.item] == Data("id-1".utf8))
         #expect(state.accessibility[DeviceIdentifierStore.item] == .afterFirstUnlockThisDeviceOnly)
     }
@@ -108,8 +115,59 @@ private func counter(prefix: String) -> @Sendable () -> String {
         let store = DeviceIdentifierStore(keychain: keychain, makeIdentifier: counter(prefix: "id"))
         #expect(await store.deviceIdentifier() == "id-1")
         let state = keychain.state.withLock { $0 }
-        #expect(state.deletes == 1)
-        #expect(state.items[DeviceIdentifierStore.item] == Data("id-1".utf8))
+        #expect(state.deletes == 0)
+        #expect(state.items[DeviceIdentifierStore.item] == Data())
+        #expect(state.items[DeviceIdentifierStore.repairItems[0]] == Data("id-1".utf8))
+        #expect(state.accessibility[DeviceIdentifierStore.repairItems[0]] == .afterFirstUnlockThisDeviceOnly)
+        // A later store skips the corrupt slot to the same ID.
+        let next = DeviceIdentifierStore(keychain: keychain, makeIdentifier: counter(prefix: "other"))
+        #expect(await next.deviceIdentifier() == "id-1")
+    }
+
+    @Test func nonUTF8StoredValueIsSkipped() async {
+        let keychain = InMemoryKeychain()
+        keychain.state.withLock { $0.items[DeviceIdentifierStore.item] = Data([0xFF, 0xFE]) }
+        let store = DeviceIdentifierStore(keychain: keychain, makeIdentifier: counter(prefix: "id"))
+        #expect(await store.deviceIdentifier() == "id-1")
+    }
+
+    @Test func everySlotCorruptFallsBackWithoutWriting() async {
+        let keychain = InMemoryKeychain()
+        keychain.state.withLock { state in
+            for slot in [DeviceIdentifierStore.item] + DeviceIdentifierStore.repairItems { state.items[slot] = Data() }
+        }
+        let store = DeviceIdentifierStore(keychain: keychain, makeIdentifier: counter(prefix: "id"))
+        #expect(await store.deviceIdentifier() == "id-1")
+        #expect(store.cachedDeviceIdentifier == nil)
+        #expect(keychain.state.withLock { $0.adds } == 0)
+    }
+
+    /// Two stores (or processes) both see the corrupt item; the second repairs while the first is
+    /// about to add. Neither deletes the other's ID, and both cache the persisted one.
+    @Test(arguments: [true, false])
+    func interleavedRepairsByTwoStoresConverge(otherFinishesFirst: Bool) async throws {
+        let keychain = InMemoryKeychain()
+        keychain.state.withLock { $0.items[DeviceIdentifierStore.item] = Data() }
+        let first = DeviceIdentifierStore(keychain: keychain, makeIdentifier: counter(prefix: "first"))
+        let second = DeviceIdentifierStore(keychain: keychain, makeIdentifier: counter(prefix: "second"))
+        let secondResult = Mutex<String?>(nil)
+        if otherFinishesFirst {
+            // `second` runs its whole repair between `first` reading the corrupt item and adding.
+            keychain.state.withLock { state in
+                state.beforeAdd = { secondResult.withLock { $0 = try? second.loadOrCreate() } }
+            }
+        }
+
+        let firstID = await first.deviceIdentifier()
+        let secondID = otherFinishesFirst ? try #require(secondResult.withLock { $0 }) : await second.deviceIdentifier()
+
+        let persisted = try #require(keychain.state.withLock { $0.items[DeviceIdentifierStore.repairItems[0]] })
+        #expect(firstID == String(decoding: persisted, as: UTF8.self))
+        #expect(secondID == firstID)
+        #expect(first.cachedDeviceIdentifier == firstID)
+        #expect(await second.deviceIdentifier() == firstID)
+        #expect(firstID == (otherFinishesFirst ? "second-1" : "first-1"))
+        #expect(keychain.state.withLock { $0.deletes } == 0)
     }
 
     @Test func concurrentFirstLoadsReplaceAnEmptyValueOnce() async {
@@ -122,9 +180,9 @@ private func counter(prefix: String) -> @Sendable () -> String {
         }
         #expect(ids == ["id-1"])
         let state = keychain.state.withLock { $0 }
-        #expect(state.deletes == 1)
+        #expect(state.deletes == 0)
         #expect(state.adds == 1)
-        #expect(state.items[DeviceIdentifierStore.item] == Data("id-1".utf8))
+        #expect(state.items[DeviceIdentifierStore.repairItems[0]] == Data("id-1".utf8))
     }
 
     @Test func keychainFailureFallsBackWithoutPersistingAndRetriesLater() async {

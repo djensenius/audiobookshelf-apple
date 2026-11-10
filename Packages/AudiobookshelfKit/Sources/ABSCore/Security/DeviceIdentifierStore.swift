@@ -14,12 +14,23 @@ public protocol DeviceIdentifying: Sendable {
 /// closing each other's server sessions.
 ///
 /// The first call reads or creates the ID in a detached task, off the caller's actor, and caches
-/// it; concurrent first callers wait on that one load, and later calls are a cached read. An empty stored value is treated as corrupt and replaced. If the Keychain
-/// fails (for example before first unlock), a per-process fallback ID is returned, the failure
-/// is logged, and the Keychain is tried again on the next call; the fallback is never stored.
+/// it; concurrent first callers wait on that one load, and later calls are a cached read. If the
+/// Keychain fails (for example before first unlock), a per-process fallback ID is returned, the
+/// failure is logged, and the Keychain is tried again on the next call; the fallback is never
+/// stored.
+///
+/// Repair is atomic across stores and processes: the ID lives in the first of a few slots
+/// (``item``, then ``repairItems``) that holds a valid value. A missing slot is filled with
+/// add-if-absent, and a store that loses that race reads the winner's value. A corrupt slot
+/// (empty or not UTF-8) is never deleted or overwritten; every store skips it to the next slot,
+/// so all of them converge on the same persisted ID.
 public final class DeviceIdentifierStore: DeviceIdentifying {
     public static let item = KeychainItem(
         service: "org.davidjensenius.Audiobookshelf.device", account: "deviceIdentifier")
+    /// Fallback slots, used only while every earlier slot holds a corrupt value.
+    public static let repairItems = (1...3).map {
+        KeychainItem(service: item.service, account: "\(item.account).\($0)")
+    }
     public static let accessibility = KeychainAccessibility.afterFirstUnlockThisDeviceOnly
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "DeviceIdentifier")
@@ -89,21 +100,23 @@ public final class DeviceIdentifierStore: DeviceIdentifying {
         }
     }
 
-    /// Runs once at a time per store. Loads from other processes converge: only one add
-    /// succeeds, and the others read its value.
-    private func loadOrCreate() throws(KeychainError) -> String {
-        if let data = try keychain.data(for: Self.item) {
-            let value = String(decoding: data, as: UTF8.self)
-            if !value.isEmpty { return value }
-            try keychain.delete(Self.item)
+    /// The persisted ID. Internal so tests can interleave two stores' repairs.
+    func loadOrCreate() throws(KeychainError) -> String {
+        for slot in [Self.item] + Self.repairItems {
+            if let data = try keychain.data(for: slot) {
+                if let value = Self.validIdentifier(data) { return value }
+                continue  // Corrupt: leave it, so no other store's repair is undone.
+            }
+            _ = try keychain.add(Data(makeIdentifier().utf8), for: slot, accessibility: Self.accessibility)
+            // Whether this add won or another store's did, cache what is persisted.
+            guard let data = try keychain.data(for: slot) else { throw KeychainError(status: errSecItemNotFound) }
+            if let value = Self.validIdentifier(data) { return value }
         }
-        let identifier = makeIdentifier()
-        if try keychain.add(Data(identifier.utf8), for: Self.item, accessibility: Self.accessibility) {
-            return identifier
-        }
-        guard let data = try keychain.data(for: Self.item), !data.isEmpty else {
-            throw KeychainError(status: errSecItemNotFound)
-        }
-        return String(decoding: data, as: UTF8.self)
+        throw KeychainError(status: errSecDecode)
+    }
+
+    private static func validIdentifier(_ data: Data) -> String? {
+        guard let value = String(data: data, encoding: .utf8), !value.isEmpty else { return nil }
+        return value
     }
 }
