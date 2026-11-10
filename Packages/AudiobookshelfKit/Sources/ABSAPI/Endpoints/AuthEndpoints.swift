@@ -43,8 +43,13 @@ public enum AuthEndpoints {
 
     /// `POST /api/authorize`: the signed-in user and server settings for the current access
     /// token. The server only routes `POST`. The response carries no new tokens.
+    ///
+    /// Redirects are not followed: a hop to another origin is sent without the token, so a 200
+    /// from it would not prove the session is valid. A 3xx reaches the caller and fails to
+    /// decode; ``ServerValidator/authorize(with:)`` reports it as
+    /// ``ServerValidationError/loginRedirected``.
     public static func authorize() -> Endpoint<AuthResponse> {
-        Endpoint(.post, "/api/authorize")
+        Endpoint(.post, "/api/authorize", followsRedirects: false)
     }
 
     /// `POST /logout`: invalidates the session that `refreshToken` belongs to.
