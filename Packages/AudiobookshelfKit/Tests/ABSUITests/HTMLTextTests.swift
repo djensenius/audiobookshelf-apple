@@ -205,6 +205,10 @@ import Testing
         #expect(plain("before<template><!-- </template> -->hidden</template>after") == "beforeafter")
         #expect(plain("a<TEMPLATE id=t><Template>x</template>still hidden") == "a")
         #expect(plain("a<template>x<!-- never closed") == "a")
+        #expect(plain(#"<template><div title="<template>">hidden</div></template>after"#) == "after")
+        #expect(plain("<template><div title='<template>'>hidden</div></template>after") == "after")
+        #expect(plain(#"<template><div title="a > </template> b">hidden</div></template>after"#) == "after")
+        #expect(plain(#"<template><div title="unclosed>hidden</template>after"#) == "")
     }
 
     @Test func otherElementsKeepTheirText() {
