@@ -32,8 +32,8 @@ private actor RotatedTokenProvider: TokenProvider {
             : AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")
     }
 
-    func update(_ tokens: AuthTokens) {}
-    func sessionExpired() {}
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) -> Bool { false }
+    func expireSession(ifCurrent rejected: AuthTokens) -> Bool { false }
 }
 
 private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws -> APIClient {
@@ -188,6 +188,53 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(result == OK(ok: true))
         #expect(tokens.expiredCount == 0)
         #expect(tokens.current?.accessToken == "access-3")
+    }
+
+    @Test func signInRacingExpiryKeepsNewSession() async throws {
+        let replacement = AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")
+        let tokens = InMemoryTokenProvider(beforeExpire: { provider in
+            // Lands after the client decided to expire the old pair but before the clear.
+            provider.signIn(replacement)
+        })
+        let server = tokenServer(refresh: .text("Unauthorized", status: 401))
+        let client = try makeClient(server, tokens: tokens)
+
+        let result = try await client.send(Endpoint<OK>(.get, "/api/me"))
+
+        #expect(result == OK(ok: true))
+        #expect(tokens.expiredCount == 0)
+        #expect(tokens.current == replacement)
+    }
+
+    @Test func refreshFinishingAfterSignOutIsDiscarded() async throws {
+        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(200)))
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+
+        let request = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        tokens.signOut()
+
+        await #expect(throws: CancellationError.self) { try await request.value }
+        #expect(tokens.current == nil)
+        #expect(tokens.updates.isEmpty)
+        #expect(server.requests(path: "/abs/api/me").count == 1)
+    }
+
+    @Test func refreshFinishingAfterNewSignInIsDiscarded() async throws {
+        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(200)))
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+        let replacement = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
+
+        let request = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        tokens.signIn(replacement)
+
+        await #expect(throws: CancellationError.self) { try await request.value }
+        #expect(tokens.current == replacement)
+        #expect(tokens.updates.isEmpty)
+        #expect(server.requests(path: "/abs/api/me").count == 1)
     }
 
     @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {

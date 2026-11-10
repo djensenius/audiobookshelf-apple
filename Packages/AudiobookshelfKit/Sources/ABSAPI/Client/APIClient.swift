@@ -5,8 +5,9 @@ import Foundation
 /// Every request carries the connection's custom headers. Authenticated requests carry the
 /// access token; on a 401 the client refreshes the tokens once with `POST /auth/refresh`
 /// (concurrent 401s share a single refresh), persists them through the ``TokenProvider``, and
-/// retries the request once. If the server rejects the refresh token, the provider is told the
-/// session expired and ``APIError/sessionExpired`` is thrown. Redirects follow ``RedirectPolicy``.
+/// retries the request once. If the server rejects the refresh token, the provider ends the
+/// session and ``APIError/sessionExpired`` is thrown. If the user signs out or in again while a
+/// refresh is in flight, its result is discarded and waiting requests throw `CancellationError`. Redirects follow ``RedirectPolicy``.
 public actor APIClient {
     public private(set) var configuration: APIClientConfiguration
     private let tokenProvider: any TokenProvider
@@ -14,9 +15,6 @@ public actor APIClient {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var refreshTask: Task<AuthTokens, any Error>?
-    /// The last token pair reported to ``TokenProvider/sessionExpired()``, so concurrent
-    /// rejections of the same pair report it once.
-    private var expiredTokens: AuthTokens?
 
     /// - Parameter sessionConfiguration: Tests pass a configuration with stub protocol classes.
     ///   It is copied, and the copy always gets its own new cookie jar, so reusing a
@@ -42,6 +40,10 @@ public actor APIClient {
     /// This connection's cookie jar, shared by every request the client sends.
     nonisolated var cookieStorage: HTTPCookieStorage? {
         session.configuration.httpCookieStorage
+    }
+
+    nonisolated var redirectDelegate: RedirectPolicyDelegate? {
+        session.delegate as? RedirectPolicyDelegate
     }
 
     /// Replaces the connection's custom headers.
@@ -123,7 +125,11 @@ public actor APIClient {
                 accessToken: body.user.accessToken,
                 refreshToken: body.user.refreshToken ?? tokens.refreshToken
             )
-            await tokenProvider.update(refreshed)
+            // A sign-out or new sign-in during the refresh wins; this request belonged to the
+            // session that ended, so it is cancelled rather than retried.
+            guard await tokenProvider.replaceTokens(expected: tokens, with: refreshed) else {
+                throw CancellationError()
+            }
             return refreshed
         case 401:
             // The server only answers 401 for a bad refresh token; a 403 here comes from a proxy
@@ -135,17 +141,13 @@ public actor APIClient {
         }
     }
 
-    /// Reports `rejected` as expired unless the stored tokens have changed since it was used
-    /// (for example after the user signed in again). Returns the newer tokens in that case, or
-    /// `nil` when the session is over.
+    /// Ends the session if `rejected` is still current. Otherwise the stored tokens changed
+    /// since it was used (for example the user signed in again) and the newer tokens are
+    /// returned; returns `nil` when the session is over.
     private func expireSession(rejected: AuthTokens) async -> AuthTokens? {
-        let current = await tokenProvider.tokens()
-        guard current == rejected else { return current }
-        if expiredTokens != rejected {
-            expiredTokens = rejected
-            await tokenProvider.sessionExpired()
-        }
-        return nil
+        if await tokenProvider.expireSession(ifCurrent: rejected) { return nil }
+        guard let current = await tokenProvider.tokens(), current != rejected else { return nil }
+        return current
     }
 
     private struct RefreshResponse: Decodable {

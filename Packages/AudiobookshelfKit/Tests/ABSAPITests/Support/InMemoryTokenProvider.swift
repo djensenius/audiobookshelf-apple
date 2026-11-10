@@ -13,9 +13,16 @@ final class InMemoryTokenProvider: TokenProvider {
     }
 
     private let state: Mutex<State>
+    /// Runs at the start of ``expireSession(ifCurrent:)``, before the comparison, to simulate a
+    /// sign-in racing the expiry.
+    private let beforeExpire: (@Sendable (InMemoryTokenProvider) -> Void)?
 
-    init(_ tokens: AuthTokens? = AuthTokens(accessToken: "access-1", refreshToken: "refresh-1")) {
+    init(
+        _ tokens: AuthTokens? = AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"),
+        beforeExpire: (@Sendable (InMemoryTokenProvider) -> Void)? = nil
+    ) {
         state = Mutex(State(current: tokens))
+        self.beforeExpire = beforeExpire
     }
 
     var current: AuthTokens? { state.withLock { $0.current } }
@@ -27,21 +34,30 @@ final class InMemoryTokenProvider: TokenProvider {
         state.withLock { $0.current = tokens }
     }
 
+    func signOut() {
+        state.withLock { $0.current = nil }
+    }
+
     func tokens() async -> AuthTokens? {
         current
     }
 
-    func update(_ tokens: AuthTokens) async {
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
         state.withLock {
-            $0.current = tokens
-            $0.updates.append(tokens)
+            guard $0.current == expected else { return false }
+            $0.current = new
+            $0.updates.append(new)
+            return true
         }
     }
 
-    func sessionExpired() async {
-        state.withLock {
+    func expireSession(ifCurrent rejected: AuthTokens) async -> Bool {
+        beforeExpire?(self)
+        return state.withLock {
+            guard $0.current == rejected else { return false }
             $0.current = nil
             $0.expiredCount += 1
+            return true
         }
     }
 }
