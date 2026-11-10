@@ -135,6 +135,30 @@ private let episodeMatch =
             RecentEpisodesPage.self, #"{"episodes":[{"id":"ep1","title":"Ep 1","podcast":{"id":"p1"}}],"limit":50}"#)
         #expect(page.episodes.map(\.id) == ["ep1"])
         #expect(page.episodes.first?.podcast == nil)
+        #expect(page.rawCount == 1)
+    }
+
+    @Test func recentEpisodesCountAnEntirelyMalformedFullPage() throws {
+        // Derived unit payload, not a server capture: a full wire page must not look exhausted.
+        let page = try decode(
+            RecentEpisodesPage.self, #"{"episodes":[{"title":"Missing ID"},7,null],"limit":"3","page":"2"}"#)
+        #expect(page.episodes.isEmpty)
+        #expect(page.rawCount == 3)
+        #expect(page.rawCount == page.limit)
+        #expect(page.page == 2)
+    }
+
+    @Test(arguments: [
+        #"{}"#,
+        #"{"episodes":null,"limit":null,"page":null}"#,
+        #"{"episodes":[],"limit":"not-an-integer","page":{}}"#,
+    ])
+    func recentEpisodesDefaultMissingNullAndInvalidPaging(json: String) throws {
+        let page = try decode(RecentEpisodesPage.self, json)
+        #expect(page.episodes.isEmpty)
+        #expect(page.rawCount == 0)
+        #expect(page.limit == 0)
+        #expect(page.page == 0)
     }
 
     @Test func bookSearchResults() throws {

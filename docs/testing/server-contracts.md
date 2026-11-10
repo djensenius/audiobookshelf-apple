@@ -53,6 +53,7 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `AuthContractTests` | Status, ping and validation; password login and its JWT pair; `/api/authorize`; a wrong password |
 | `TokenRefreshContractTests` | Refresh and rotation, the old refresh token, concurrent refreshes, refresh before expiry, logout |
 | `LibraryContractTests` | Libraries, minified and expanded books and podcasts, chapters, audio files, tracks, shelves, search, authors, series |
+| `RecentEpisodesContractTests` | Read-only normal/empty pages and book-library 404; strict raw counts, identities, podcast and audio expansions |
 | `CollectionWriteContractTests` | Five collection writes; ordered two-book lifecycle and empty reads; permissions, atomic invalid create, no-ops/errors, version differences and failure teardown |
 | `PlaylistWriteContractTests` | Five owner-only writes; book/episode lifecycles, strict raw membership checks, ownership/access denials, atomic invalid add, safe characterization and exact-ID failure teardown |
 | `PlaybackSessionContractTests` | Start, sync and close; resume; same-device takeover; track URLs and ranges; downloads; local session upload |
@@ -318,6 +319,103 @@ ABS_PLAYLIST_CAPTURE_DIR=$PWD/.build/playlist-captures \
 Both focused live runs executed all 10 playlist tests without skips. The full-server suite's existing
 unrelated series-fixture skip does not imply a playlist skip. Default package-suite server skips are
 not live evidence. These checks do not claim UI, device, playback or full parent-issue acceptance.
+
+## Recent episodes: wire counts and authentic captures
+
+`LibraryEndpoints.recentEpisodes` still sends authenticated
+`GET /api/libraries/:id/recent-episodes?limit=50&page=0` by default.
+`RecentEpisodesPage.rawCount` counts **wire rows**, not successfully decoded episodes:
+it uses the raw unkeyed container count, falling back to decoded count like `PagedResults`.
+The trailing optional initializer argument defaults to `episodes.count`. There is no `total`,
+query clamping, new endpoint or UI paging algorithm. Missing/null episode lists, number/string
+paging leniency and malformed optional podcast tolerance are unchanged.
+
+Both official images were independently inspected and captured on 2026-11-10, **before**
+fixture/decoder edits. All image labels and RepoDigests matched the provenance table above:
+
+| Version / actual `/status.serverVersion` | Revision label | RepoDigest (`sha256:`) |
+| --- | --- | --- |
+| `2.26.0` | `264ae928a9c1af620487488110eec816b14e23ec` | `16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5` |
+| `2.37.2` | `edb1f7efc92ecacdef51aafb4d9d5054ce10604f` | `b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa` |
+
+Container inspection also verified that each running container's image ID matched its inspected
+official image. The completed captures used `abs-contract-e146c642` and `abs-contract-ffee9eb4`.
+The local `.build/recent-episodes-captures/{2.26.0,2.37.2}/` directories retain exact response bytes
+(`normal.json`, `empty.json`, `wrong-library.txt`, `expanded-item.json`, `items.json`, `libraries.json`,
+`status.json`), complete `image.json`/`runtime.json`, `verification.json` and `cleanup.json`.
+The worktree-local `.build/recent-episodes-capture.py` runs the existing harness and only GETs
+after login/standard seed initialization. No extra users, progress or episode mutations are added.
+
+Observed on **both** pins:
+
+- Normal `limit=50&page=0`: exactly one episode, with numeric `limit: 50`, `page: 0`.
+- Empty `limit=1&page=1`: `{"episodes":[],"limit":1,"page":1}`.
+- Book-library GET: HTTP 404. Neither successful response has `total`.
+- The row's episode/library-item/library identities match the scanned seed. Its nested podcast
+  has `metadata.title: "Synthetic Cast"` and `episodes: []`; there is no per-user progress.
+- Both `audioTrack.index` values are **1** (also in expanded-item GET); duration is `20.088` on
+  2.26.0 and `20` on 2.37.2. The content URL identifies the item's audio-file inode.
+- `publishedAt` and `pubDate` are explicitly **null** on this scanned, non-feed seed.
+  One row does not establish publication ordering or multi-row live paging.
+
+The initial controller-only string-echo assumption was disproved by capture. The first local
+capture checks failed on that assumption; their raw proof remains in
+`.build/recent-episodes-initial-captures/`, and both initial containers were removed.
+The full route chain explains the numeric wire values: `ApiRouter.js:92` applies library middleware,
+which calls `Number()` before the controller. String paging is tested only as decoder compatibility.
+
+| Source evidence | 2.26.0 | 2.37.2 |
+| --- | --- | --- |
+| Route and middleware | [route](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/routers/ApiRouter.js#L92), [normalization](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/LibraryController.js#L1469-L1488) | [route](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/routers/ApiRouter.js#L92), [normalization](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/LibraryController.js#L1475-L1494) |
+| Controller | [1285–1298](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/LibraryController.js#L1285-L1298) | [1283–1296](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/LibraryController.js#L1283-L1296) |
+| Selection and serialization | [506–558](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/utils/queries/libraryItemsPodcastFilters.js#L506-L558) | [506–558](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/utils/queries/libraryItemsPodcastFilters.js#L506-L558) |
+| Audio track | [184–190](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/models/PodcastEpisode.js#L184-L190) | [184–191](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/models/PodcastEpisode.js#L184-L191) |
+
+Source selects unfinished episodes in descending publication order. The controller's omitted-limit
+default is numeric zero; source suggests zero rows, **not unlimited**. Omitted limit, invalid numeric
+queries and negative pages were not probed. The native endpoint always supplies its default limit.
+
+The two `ABSAPITests/Fixtures/recent-episodes-*.json` files are complete sanitized normal responses,
+not reconstructed examples: only episode/podcast/item/library IDs, inode and its content URL are
+replaced. Recursive comparison against raw captures verified every key, array length, scalar type
+and other value unchanged, including timestamps and nulls. Checked-in tests require the single raw
+row, exact decoded identities/count, independently decoded episode/podcast/audio track, library ID,
+duration and publication values. Live tests do the same against the real raw GET and production
+endpoint result, so lossy row or optional-podcast failures cannot pass silently.
+Derived mixed/all-malformed payloads are explicitly labeled unit data; they are not live captures.
+
+Executed from the owned worktree with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
+and `MISE_TRUSTED_CONFIG_PATHS=$PWD`; server commands additionally used
+`TMPDIR=$PWD/.build/server-tmp`:
+
+```sh
+python3 .build/recent-episodes-capture.py 2.26.0
+python3 .build/recent-episodes-capture.py 2.37.2
+ABS_RECENT_EPISODES_CAPTURE_DIR=$PWD/.build/recent-episodes-captures \
+  swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+  --filter 'LibraryResponseDecodingTests|LibraryEndpointsTests|RecentEpisodesResponseTests'
+ABS_SERVER_VERSION=2.26.0 scripts/test-server.sh test --filter RecentEpisodesContractTests
+ABS_SERVER_VERSION=2.37.2 scripts/test-server.sh test --filter RecentEpisodesContractTests
+ABS_SERVER_VERSION=2.26.0 mise run test:server
+ABS_SERVER_VERSION=2.37.2 mise run test:server
+mise run lint
+mise run xcproj:check
+mise run test
+git diff --check
+```
+
+Focused package run: 32 tests, no skips. Each focused server run: 3 executed, no skips.
+Each full server run reports 70 tests: **69 executed/passed and one existing series-fixture skip**.
+The unchanged `LibraryContractTests.podcast` index assertion passed on both pins; no correction was
+needed. Default package-suite configuration skips are not live evidence. Mandatory lint, project
+canonicalization and package/tool/macOS app tests passed. No dependencies were manually restored.
+The mandatory package run reported 2,206 tests: 2,137 passed, 69 skipped (67 server configuration,
+one opt-in OSLog test and one Keychain test). Tools: 24 passed, none skipped. App: seven test
+functions passed (21 executions including parameterized cases), one Keychain test skipped.
+Harness traps removed all eight exact owned capture/test containers and their `abs-contract.*`
+data directories, including failed initial capture attempts; raw proof remains local for review.
+SwiftPM may leave its own empty temporary directories/locks in the owned TMPDIR.
+This is API contract acceptance only, not UI/device or parent-issue completion.
 
 ## CI
 
