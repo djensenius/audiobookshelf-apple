@@ -362,9 +362,7 @@ public actor APIClient {
         of tokens: AuthTokens
     ) -> (expiresAt: Date, validUntil: Date, leeway: TimeInterval)? {
         guard let claims = AccessTokenExpiry(token: tokens.accessToken) else { return nil }
-        let state = pairStates[tokens]
-        let pending = state?.pendingReceipts.values
-        let receivedAt = state?.receivedAt ?? (claims.issuedAt == nil ? pending?.max() : pending?.min())
+        let receivedAt = receipt(of: tokens, hasIssuedAt: claims.issuedAt != nil)
         let rawExpiry = Date(timeIntervalSince1970: claims.expiresAt)
         guard let issuedAt = claims.issuedAt else {
             if let receivedAt, rawExpiry.timeIntervalSince(receivedAt) <= Self.accessTokenExpiryLeeway {
@@ -502,22 +500,33 @@ public actor APIClient {
         }
     }
 
+    /// The receipt lookups use for `tokens`: the adopted one, or while none is adopted, those of
+    /// swaps still in progress (the provider may expose the pair before its swap returns).
+    private func receipt(of tokens: AuthTokens, hasIssuedAt: Bool) -> Date? {
+        guard let state = pairStates[tokens] else { return nil }
+        let pending = state.pendingReceipts.values
+        return state.receivedAt ?? (hasIssuedAt ? pending.min() : pending.max())
+    }
+
     /// Adopts a refresh from `old` to `new` whose swap succeeded, with its response's arrival.
-    /// The same access token keeps its receipt even if the refresh token rotated, and is marked
-    /// unchanged; a replaced pair's adopted state is dropped.
+    /// The same access token keeps its receipt even if the refresh token rotated (including one
+    /// whose own swap is still in progress), and is marked unchanged; a replaced pair's adopted
+    /// state is dropped. A late completion whose `new` was already refreshed to another pair
+    /// adopts nothing for it, so superseded pairs don't come back.
     private func adoptRefresh(from old: AuthTokens, to new: AuthTokens, receivedAt: Date) {
         let unchanged = old.accessToken == new.accessToken
         let hasIssuedAt = AccessTokenExpiry(token: new.accessToken)?.issuedAt != nil
-        let receipts = [pairStates[new]?.receivedAt, unchanged ? pairStates[old]?.receivedAt : nil, receivedAt]
-            .compactMap { $0 }
-        var state = pairStates[new] ?? PairState()
-        state.receivedAt = hasIssuedAt ? receipts.min() : receipts.max()
-        if unchanged { state.unchangedAt = receivedAt }
+        let inherited = unchanged ? receipt(of: old, hasIssuedAt: hasIssuedAt) : nil
         if old != new {
             pairStates[old]?.receivedAt = nil
             pairStates[old]?.unchangedAt = nil
             pairStates[old]?.earlyFailureAt = nil
         }
+        guard !completedRefreshes.contains(where: { $0.from == new && $0.to != new }) else { return }
+        let receipts = [pairStates[new]?.receivedAt, inherited, receivedAt].compactMap { $0 }
+        var state = pairStates[new] ?? PairState()
+        state.receivedAt = hasIssuedAt ? receipts.min() : receipts.max()
+        if unchanged { state.unchangedAt = receivedAt }
         pairStates[new] = state
     }
 

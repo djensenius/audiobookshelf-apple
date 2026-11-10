@@ -760,6 +760,8 @@ private final class HeldFirstSwapProvider: TokenProvider {
 
         #expect(try await client.accessToken(replacing: nil) == tokenC)
         #expect(server.requests(path: refreshPath).count == 2)
+        // B was already refreshed to C, so its late completion doesn't bring back its state.
+        #expect(await client.pairStateCount <= 1)
     }
 }
 
@@ -1256,6 +1258,107 @@ private final class HeldTaggedReadProvider: TokenProvider {
         gate.open()
         #expect(try await old.value == tokenT)
 
+        #expect(try await client.accessToken(replacing: nil) == freshToken)
+        #expect(server.requests(path: refreshPath).count == 3)
+    }
+}
+
+/// Wraps an ``InMemoryTokenProvider`` and holds each swap of a pair whose refresh token ends in an
+/// even number, after committing it, until the matching ``release()``.
+private final class HeldEvenSwapProvider: TokenProvider {
+    let inner: InMemoryTokenProvider
+    private let holds = Mutex(0)
+    private let holding = Checkpoint()
+    private let released = Checkpoint()
+
+    init(_ tokens: AuthTokens) {
+        inner = InMemoryTokenProvider(tokens)
+    }
+
+    /// Returns once `count` swaps have been held.
+    func held(_ count: Int) async { await holding.reached(count) }
+    func release() { released.pass() }
+
+    func tokens() async -> AuthTokens? {
+        await inner.tokens()
+    }
+
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
+        guard await inner.replaceTokens(expected: expected, with: new) else { return false }
+        guard let n = Int(expected.refreshToken.split(separator: "-").last ?? ""), n.isMultiple(of: 2) else {
+            return true
+        }
+        let hold = holds.withLock {
+            $0 += 1
+            return $0
+        }
+        holding.pass()
+        await released.reached(hold)
+        return true
+    }
+
+    func expireSession(ifCurrent rejected: AuthTokens) async -> Bool {
+        await inner.expireSession(ifCurrent: rejected)
+    }
+}
+
+@Suite struct APIClientPairStateOverlapTests {
+    /// Repeats the overlap of `lateRefreshDoesNotReplaceNewerReceipt`: each round, an early
+    /// refresh's swap stores the next pair and is held while a 401 refresh replaces that pair, then
+    /// returns late. The table doesn't grow with the rounds.
+    @Test func repeatedLateCompletionsKeepPairStatesBounded() async throws {
+        let t = Int(now.timeIntervalSince1970)
+        // Token n, from a server clock an hour behind: only its receipt keeps it from expiring.
+        let token: @Sendable (Int) -> String = { n in makeJWT(claims: #"{"n":\#(n),"iat":\#(t - 3600),"exp":\#(t)}"#) }
+        let server = StubServer { request in
+            let refresh = request.value(forHTTPHeaderField: "x-refresh-token") ?? ""
+            guard let n = Int(refresh.split(separator: "-").last ?? "") else { return .text("Unexpected", status: 500) }
+            return .json(#"{"user":{"accessToken":"\#(token(n + 1))","refreshToken":"refresh-\#(n + 1)"}}"#)
+        }
+        let tokens = HeldEvenSwapProvider(AuthTokens(accessToken: expiringToken, refreshToken: "refresh-0"))
+        let client = try makeClient(server, tokens: tokens)
+        let clock = TestClock()
+        await client.setNow { clock.read() }
+
+        for round in 0..<5 {
+            let early = Task { try await client.accessToken(replacing: nil) }
+            await tokens.held(round + 1)
+            #expect(try await client.accessToken(replacing: token(2 * round + 1)) == token(2 * round + 2))
+            tokens.release()
+            #expect(try await early.value == token(2 * round + 2))
+            // Brings the current token inside its leeway for the next round.
+            clock.advance(by: 3550)
+        }
+        #expect(server.requests(path: refreshPath).count == 10)
+        #expect(await client.pairStateCount <= 1)
+    }
+
+    /// A→B stores token T (one-hour lifetime, received at t=0) and its swap is held. At t=3500 a
+    /// 401 refresh rotates B's refresh token, returning T again (C). C inherits B's in-progress
+    /// receipt, so T is refreshed once it expires at t=3600.
+    @Test func sameTokenRotationInheritsPendingReceipt() async throws {
+        let t = Int(now.timeIntervalSince1970)
+        let tokenT = makeJWT(claims: #"{"iat":\#(t),"exp":\#(t + 3600)}"#)
+        let server = StubServer { request in
+            switch request.value(forHTTPHeaderField: "x-refresh-token") {
+            case "refresh-1": .json(#"{"user":{"accessToken":"\#(tokenT)","refreshToken":"refresh-2"}}"#)
+            case "refresh-2": .json(#"{"user":{"accessToken":"\#(tokenT)","refreshToken":"refresh-3"}}"#)
+            default: .json(refreshJSON(freshToken))
+            }
+        }
+        let tokens = HeldFirstSwapProvider(AuthTokens(accessToken: expiringToken, refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+        let clock = TestClock()
+        await client.setNow { clock.read() }
+
+        let early = Task { try await client.accessToken(replacing: nil) }
+        await tokens.held()
+        clock.advance(by: 3500)
+        #expect(try await client.accessToken(replacing: tokenT) == tokenT)
+        tokens.release()
+        #expect(try await early.value == tokenT)
+
+        clock.advance(by: 101)
         #expect(try await client.accessToken(replacing: nil) == freshToken)
         #expect(server.requests(path: refreshPath).count == 3)
     }
