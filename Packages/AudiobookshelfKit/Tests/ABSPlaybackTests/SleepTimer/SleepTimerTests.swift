@@ -59,6 +59,8 @@ enum GraceEnd: CaseIterable, Sendable { case graceTask, clockOnly, cancel, anoth
 enum Move: CaseIterable, Sendable { case none, seek, unreportedSeek, anotherItem }
 /// What happens during the seek back to where an expired timer's fade began.
 enum ExpirySeek: CaseIterable, Sendable { case play, manualStart, failure }
+/// What happens before a grace-period reset's rewind seek, or during it.
+enum ResetRace: CaseIterable, Sendable { case cancelBefore, startBefore, itemBefore, cancelDuring, itemDuring }
 
 private func autoOptions(mode: SleepTimerMode = .duration(10), rewind: TimeInterval? = 300) throws -> SleepTimerOptions
 {
@@ -68,7 +70,7 @@ private func autoOptions(mode: SleepTimerMode = .duration(10), rewind: TimeInter
 }
 
 @MainActor
-@Suite(.timeLimit(.minutes(1)))
+@Suite(.serialized, .timeLimit(.minutes(1)))
 struct SleepTimerTests {
     // MARK: - Duration
 
@@ -199,6 +201,16 @@ struct SleepTimerTests {
         #expect(harness.timer.isRunning, "Restarted within the grace period")
     }
 
+    @Test func anItemLoadedBeforeTheExpirySeekIsntSought() async {
+        let harness = Harness(at: 100)
+        harness.timer.start(.duration(30))
+        await harness.play(from: 100, to: 130)
+        #expect(harness.control.pauseCount == 1)
+        harness.timer.itemDidChange("other")
+        await Task { @MainActor in }.value  // Queued after the expiry's seek task, so that has run.
+        #expect(harness.control.seeks.isEmpty)
+    }
+
     @Test func aSeekDuringTheFadeRewindsOnlyToTheSeek() async {
         let harness = Harness(at: 100)
         harness.timer.start(.duration(30))
@@ -244,14 +256,13 @@ struct SleepTimerTests {
         #expect(harness.timer.isRunning == false)
     }
 
-    @Test func endOfChapterWithLessThanTenSecondsLeftUsesTheNextChapter() {
-        let harness = Harness(timeline: chapters, at: 445)
+    /// Under 10 media seconds of the chapter left, at any rate, the next chapter (Android `getChapterEndTime`).
+    @Test(arguments: [(440.0, 1.0, 10.0), (440.5, 1, 559.5), (431, 2, 9.5), (440.5, 2, 279.75)])
+    func endOfChapterWithLessThanTenSecondsLeftUsesTheNextChapter(time: Double, rate: Double, remaining: Double) {
+        let harness = Harness(timeline: chapters, at: time)
+        harness.control.rate = rate
         harness.timer.start(.endOfChapter)
-        #expect(harness.timer.remaining == 555)
-
-        harness.control.currentTime = 440
-        harness.timer.start(.endOfChapter)
-        #expect(harness.timer.remaining == 10)
+        #expect(harness.timer.remaining == remaining)
     }
 
     @Test(arguments: zip([1, 0.75, 1], [447.3, 440, 440]))
@@ -292,6 +303,17 @@ struct SleepTimerTests {
         await harness.advance(1)
         #expect(harness.control.pauseCount == 0)
         #expect(harness.timer.remaining == 550)
+    }
+
+    @Test func playingAcrossAGapBetweenTracksIsntASeek() async {
+        let harness = Harness(timeline: TimelineFixture.gappedTracks.timeline, at: 90)
+        harness.timer.start(.endOfChapter)
+        await harness.play(from: 90, to: 99)
+        #expect(harness.timer.remaining == 1)
+        harness.control.currentTime = 110.5
+        await harness.advance(1)
+        #expect(harness.control.pauseCount == 1, "At the end of the first track")
+        #expect(harness.timer.isRunning == false)
     }
 
     @Test func aSeekDuringTheChapterFadeRestoresTheVolume() {
@@ -560,21 +582,23 @@ struct SleepTimerTests {
         #expect(harness.timer.remaining == 598)
     }
 
-    @Test func deinitStopsTickingAndShakeDetection() async {
+    @Test func deinitStopsTickingShakeDetectionAndRestoresTheVolume() async {
         let clock = ManualClock()
+        let control = FakePlaybackControl()
         let shake = FakeShakeDetector()
         var timer: SleepTimer? = SleepTimer(
-            control: FakePlaybackControl(), feedback: FakeFeedback(), shakeDetector: shake, clock: clock,
+            control: control, feedback: FakeFeedback(), shakeDetector: shake, clock: clock,
             calendar: .gregorianUTC, tickInterval: .seconds(1))
         weak let weakTimer = timer
-        timer?.start(.duration(600))
+        timer?.start(.duration(30))
+        #expect(control.volume == 0.5)
         await until { clock.sleeperCount == 1 }
         #expect(shake.sensitivity == .medium)
 
         timer = nil
         #expect(weakTimer == nil)
         #expect(shake.sensitivity == nil)
-        await until { clock.sleeperCount == 0 }
+        await until { clock.sleeperCount == 0 && control.volume == 1 }
     }
 
     // MARK: - Shake to reset
@@ -698,7 +722,8 @@ struct SleepTimerTests {
         await until { harness.control.seeks == [700] }
         if itemChanges { harness.timer.itemDidChange("other") }
         harness.control.finishSeek()
-        await until { !harness.timer.isRunning }
+        await Task { @MainActor in }.value  // Queued after the seek's end.
+        #expect(harness.timer.isRunning == itemChanges, "Another item keeps the restarted timer")
         #expect(harness.control.plays == 0)
         #expect(harness.feedback.resets == 0)
         #expect(harness.timer.canRestart == !itemChanges)
@@ -709,18 +734,28 @@ struct SleepTimerTests {
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == (itemChanges ? 0 : 300))
     }
 
-    @Test func aCancelDuringAResetsRewindWins() async throws {
+    /// A cancel, a start or another item, before a reset's rewind seek or during it, wins: no seek, or no play.
+    @Test(arguments: ResetRace.allCases)
+    func changesAroundAResetsRewindWin(_ race: ResetRace) async throws {
         let harness = Harness(timeline: chapters, at: 1000, options: try autoOptions())
         _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
         await harness.expire()
         harness.control.holdsSeeks = true
         #expect(harness.timer.reset())
-        await until { harness.control.seeks == [700] }
-        harness.timer.cancel()
+        let isDuring = race == .cancelDuring || race == .itemDuring
+        if isDuring { await until { harness.control.seeks == [700] } }
+        switch race {
+        case .cancelBefore, .cancelDuring: harness.timer.cancel()
+        case .startBefore: harness.timer.start(.duration(600))
+        case .itemBefore, .itemDuring: harness.timer.itemDidChange("other")
+        }
         harness.control.finishSeek()
-        await until { harness.control.currentTime == 700 }
+        await Task { @MainActor in }.value  // Queued after the reset's task and the seek's end.
+        #expect(harness.control.seeks == (isDuring ? [700] : []))
+        #expect(harness.control.currentTime == (isDuring ? 700 : 1000))
         #expect(harness.control.plays == 0)
         #expect(harness.feedback.resets == 0)
+        #expect(harness.timer.isRunning == (race != .cancelBefore && race != .cancelDuring))
     }
 
     @Test func theAutomaticRewindStartsWhereTheFadeBegan() async throws {

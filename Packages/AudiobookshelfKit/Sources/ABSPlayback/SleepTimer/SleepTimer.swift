@@ -33,7 +33,8 @@ public final class SleepTimer {
     public static let gracePeriod: TimeInterval = 120
     /// A running duration timer resets only after this many seconds (Android `checkShouldResetSleepTimer`).
     static let resetGuard: TimeInterval = 3
-    /// An end-of-chapter timer started closer than this to the chapter's end waits for the next one.
+    /// An end-of-chapter timer started with less than this many media seconds of the chapter left waits for the next
+    /// one (Android `getChapterEndTime`, at any rate; legacy iOS had no cutoff).
     static let minimumChapterRemaining: TimeInterval = 10
     /// Subtracting time leaves at least this much.
     static let minimumRemaining: TimeInterval = 1
@@ -145,6 +146,8 @@ public final class SleepTimer {
         tickTask?.cancel()
         graceTask?.cancel()
         if detectingSensitivity != nil { shakeDetector?.stop() }
+        // Torn down mid-fade, the volume would otherwise stay attenuated.
+        if appliedVolume != 1 { control.setVolume(1) }
     }
 
     // MARK: - Commands
@@ -199,8 +202,9 @@ public final class SleepTimer {
 
     /// Resets the timer, for a gesture such as shake to reset. A running timer restarts while audio plays (a
     /// duration only after ``resetGuard`` seconds); during the grace period the expired timer restarts and playback
-    /// resumes after the pending rewind, with the reset feedback once it plays. If that rewind fails, the grace
-    /// period and the rewind come back, unless another item loaded meanwhile. Returns whether it reset.
+    /// resumes after the pending rewind, with the reset feedback once it plays. A cancel, a start or another item
+    /// before that rewind lands wins: nothing resumes (another item keeps the restarted timer). If the rewind fails,
+    /// the grace period and the rewind come back. Returns whether it reset.
     @discardableResult
     public func reset() -> Bool {
         if let run {
@@ -221,8 +225,7 @@ public final class SleepTimer {
         let target = time < control.currentTime ? time : nil
         let id = runID, item = itemID
         Task { [weak self] in
-            await self?.resume(rewindingTo: target, runID: id) {
-                guard $0.itemID == item else { return }
+            await self?.resume(rewindingTo: target, runID: id, item: item) {
                 $0.startGrace(for: expiredRun, until: graceEnd)
                 $0.pendingRewind = rewind
             }
@@ -330,7 +333,7 @@ public final class SleepTimer {
         lastTick = tickTime
         // A jump playback can't explain is a seek that wasn't reported (yet): retarget instead of expiring.
         if let lastPosition {
-            let advance = time - lastPosition
+            let advance = Self.played(in: control.timeline, from: lastPosition, to: time)
             if advance < -Self.seekThreshold || advance > rate * interval + Self.seekThreshold {
                 didSeek(to: time)
                 guard let seeked = self.run else { return }
@@ -390,19 +393,21 @@ public final class SleepTimer {
         pendingRewind = rewind.map { ($0, fadeStart) }
         let item = itemID
         Task { [weak self, control] in
+            guard self?.isCurrent(item) == true else { return }
             let landed = await control.seek(to: fadeStart)
-            guard let self, itemID == item else { return }
+            guard let self, isCurrent(item) else { return }
             pendingRewind?.at = landed ?? control.currentTime
             if let landed { didSeek(to: landed) }
         }
     }
 
-    /// Plays after a grace-period reset, rewinding to `time` first, unless the run changed meanwhile (a cancel
-    /// wins). When the rewind doesn't land, `undo` reopens the grace period and the run stops.
-    private func resume(rewindingTo time: Double?, runID id: Int, undo: (SleepTimer) -> Void) async {
+    /// Plays after a grace-period reset, rewinding to `time` first, unless the run or the item changed before or
+    /// during the seek. When the rewind doesn't land, `undo` reopens the grace period and the run stops.
+    private func resume(rewindingTo time: Double?, runID id: Int, item: String?, undo: (SleepTimer) -> Void) async {
+        guard isCurrent(item, runID: id) else { return }
         var landed: Double? = control.currentTime
         if let time { landed = await control.seek(to: time) }
-        guard runID == id else { return }
+        guard isCurrent(item, runID: id) else { return }
         guard let landed else {
             undo(self)
             stopRun()
@@ -411,6 +416,12 @@ public final class SleepTimer {
         if time != nil { didSeek(to: landed) }
         control.play()
         if options.playsResetFeedback { feedback?.playResetFeedback() }
+    }
+
+    /// Whether work begun on `item`, and during run `id` if given, still applies. Checked before and after a seek,
+    /// so another item loading, or a cancel or start, before it or during it wins.
+    private func isCurrent(_ item: String?, runID id: Int? = nil) -> Bool {
+        itemID == item && (id == nil || id == runID)
     }
 
     /// The pending rewind, consumed; nothing once playback moved away from where it was set.
@@ -500,6 +511,13 @@ public final class SleepTimer {
         control.timeline?.jumpBackward(from: control.currentTime, by: seconds) ?? control.currentTime
     }
 
+    /// Media seconds that play moving forward from `start` to `end`, less the gaps between tracks, so playback
+    /// naturally crossing a gap isn't a seek. Moving back, the plain distance.
+    private static func played(in timeline: PlaybackTimeline?, from start: Double, to end: Double) -> Double {
+        guard let timeline, end > start else { return end - start }
+        return timeline.tracks.reduce(0) { $0 + max(min($1.playbackEnd, end) - max($1.start, start), 0) }
+    }
+
     /// The end of the chapter playing at `time` (or of the gap before the next chapter; of the track without
     /// chapters). When starting with less than ``minimumChapterRemaining`` seconds left, the end of the next one
     /// (Android `getChapterEndTime`).
@@ -507,7 +525,7 @@ public final class SleepTimer {
         guard let timeline = control.timeline, let end = Self.segmentEnd(in: timeline, at: time), end > time else {
             return nil
         }
-        if skippingShortRemainder, (end - time) / rate < Self.minimumChapterRemaining,
+        if skippingShortRemainder, end - time < Self.minimumChapterRemaining,
             let next = Self.segmentEnd(in: timeline, at: end), next > end
         {
             return next
