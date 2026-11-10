@@ -531,8 +531,10 @@ public final class AccountManager {
     }
 
     /// A client for the server just validated, with the validation's cookie jar, so a cookie a
-    /// proxy or load balancer set while validating or signing in keeps being sent. (`POST /logout`
-    /// sends no cookies, so for the logout clients only the configuration matters.)
+    /// proxy or load balancer set while validating or signing in keeps being sent. That includes
+    /// `POST /logout`, which sends the jar's cookies except `refresh_token` (withheld so the
+    /// `x-refresh-token` header names the session to end), follows only same-origin redirects,
+    /// and is best effort, after the local sign-out.
     private func makeClient(_ server: ValidatedServer, credentials: ConnectionCredentials?) -> APIClient {
         server.makeClient(tokenProvider: credentials ?? NoTokens(), sessionConfiguration: sessionConfiguration())
     }

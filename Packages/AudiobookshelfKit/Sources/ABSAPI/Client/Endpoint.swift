@@ -34,10 +34,17 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
     /// When `false`, redirects are not followed and a 3xx response is returned as a success so
     /// the caller can read its `Location` header.
     public var followsRedirects: Bool
+    /// When `true` (and ``followsRedirects`` is), only redirects that stay on the server's
+    /// origin are followed. A hop off the origin, which would be stripped of the request's
+    /// headers and cookies, is declined and the 3xx surfaces as ``APIError/redirectRefused(status:)``
+    /// instead of the other origin's reply being reported as this request's result.
+    public var staysOnOrigin: Bool
     /// When `false`, the request neither sends nor stores the connection's cookies.
     public var sendsCookies: Bool
     /// Names of the connection's cookies to leave off this request; the others are still sent.
-    /// When not empty, the request's cookies are set by the client and none are stored.
+    /// When not empty, the request's cookies are written by the client, including on each followed
+    /// same-origin redirect, whose `Set-Cookie` (except the withheld names) is stored in the jar
+    /// first; the final response's cookies are not stored.
     public var withheldCookies: Set<String>
 
     public init(
@@ -49,6 +56,7 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
         requiresAuthentication: Bool = true,
         timeout: TimeInterval? = nil,
         followsRedirects: Bool = true,
+        staysOnOrigin: Bool = false,
         sendsCookies: Bool = true,
         withheldCookies: Set<String> = [],
         as response: Response.Type = Response.self
@@ -61,6 +69,7 @@ public struct Endpoint<Response: Decodable & Sendable>: Sendable {
         self.requiresAuthentication = requiresAuthentication
         self.timeout = timeout
         self.followsRedirects = followsRedirects
+        self.staysOnOrigin = staysOnOrigin
         self.sendsCookies = sendsCookies
         self.withheldCookies = withheldCookies
     }
