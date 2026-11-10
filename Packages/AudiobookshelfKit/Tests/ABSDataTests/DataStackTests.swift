@@ -1,3 +1,4 @@
+import CoreData
 import Foundation
 import SwiftData
 import Testing
@@ -229,6 +230,7 @@ private enum SupersetSchemaV2: VersionedSchema {
         let stack = try DataStack(
             location: .appGroup,
             allowsSave: true,
+            isAppGroupEntitled: { false },
             groupContainerURL: { nil },
             fallbackDirectory: directory,
             onFallback: { fallbacks += 1 }
@@ -251,10 +253,31 @@ private enum SupersetSchemaV2: VersionedSchema {
             _ = try DataStack(
                 location: .appGroup,
                 allowsSave: false,
+                isAppGroupEntitled: { false },
                 groupContainerURL: { nil },
                 fallbackDirectory: directory
             )
         }
+        #expect(!exists(directory))
+    }
+
+    /// An entitled process whose container can't be resolved must not fall back and split the data.
+    @Test(arguments: [true, false]) func entitledButUnresolvedGroupContainerThrows(allowsSave: Bool) throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        var fallbacks = 0
+
+        #expect(throws: DataStack.LoadError.appGroupContainerUnresolved) {
+            _ = try DataStack(
+                location: .appGroup,
+                allowsSave: allowsSave,
+                isAppGroupEntitled: { true },
+                groupContainerURL: { nil },
+                fallbackDirectory: directory,
+                onFallback: { fallbacks += 1 }
+            )
+        }
+        #expect(fallbacks == 0)
         #expect(!exists(directory))
     }
 
@@ -268,7 +291,6 @@ private enum SupersetSchemaV2: VersionedSchema {
         try writeStore(schema: schema, at: url) {
             $0.insert(UnrelatedSchema.ServerConnectionRecord(id: UUID(), nickname: "other"))
         }
-        #expect(DataStack.isIncompatibleStore(at: url))
 
         let context = ModelContext(try openURL(url).container)
         #expect(try context.fetchCount(FetchDescriptor<ServerConnectionRecord>()) == 0)
@@ -345,7 +367,7 @@ private enum SupersetSchemaV2: VersionedSchema {
             try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path(percentEncoded: false))
         }
 
-        #expect(!DataStack.isIncompatibleStore(at: url))
+        #expect(DataStack.sqliteHeaderMatches(at: url) == nil)
         #expect(throws: (any Error).self) { _ = try openURL(url) }
         #expect(exists(url))
         #expect(brokenCopies(in: directory).isEmpty)
@@ -361,7 +383,95 @@ private enum SupersetSchemaV2: VersionedSchema {
             try context.save()
         }
 
-        #expect(!DataStack.isIncompatibleStore(at: url))
-        #expect(!DataStack.isIncompatibleStore(at: directory.appending(path: "Missing.store")))
+        #expect(DataStack.sqliteHeaderMatches(at: url) == true)
+        #expect(DataStack.sqliteHeaderMatches(at: directory.appending(path: "Missing.store")) == nil)
+    }
+
+    @Test func onlyConfirmedNonTransientErrorsAreIncompatible() {
+        func cocoa(_ code: Int, _ userInfo: [String: Any] = [:]) -> NSError {
+            NSError(domain: NSCocoaErrorDomain, code: code, userInfo: userInfo)
+        }
+        let full = cocoa(134_110, [NSSQLiteErrorDomain: 13])
+        #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: full])))
+        #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(640)])))
+        #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_100, [NSDetailedErrorsKey: [cocoa(513)]])))
+        let ioError = NSError(domain: NSSQLiteErrorDomain, code: 10 | (3 << 8))  // SQLITE_IOERR_WRITE
+        #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: ioError])))
+        let posix = NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))
+        #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: posix])))
+        #expect(!DataStack.isConfirmedIncompatibility(cocoa(259)))
+        #expect(!DataStack.isConfirmedIncompatibility(nil))
+
+        #expect(DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(134_110)])))
+        #expect(DataStack.isConfirmedIncompatibility(cocoa(134_100)))
+        #expect(
+            DataStack.isConfirmedIncompatibility(cocoa(1, [NSDetailedErrorsKey: [cocoa(134_130), cocoa(134_140)]])))
+        #expect(DataStack.isConfirmedIncompatibility(cocoa(259, [NSSQLiteErrorDomain: 26])))
+        #expect(
+            DataStack.isConfirmedIncompatibility(
+                cocoa(259, [NSUnderlyingErrorKey: cocoa(1, [NSSQLiteErrorDomain: 11])])))
+    }
+
+    @Test func errorChainBeyondInspectionLimitIsNeverConfirmed() {
+        /// A linear chain of `count` migration errors whose innermost error is `innermost`.
+        func chain(count: Int, innermost: NSError) -> NSError {
+            (1..<count).reduce(innermost) { inner, _ in
+                NSError(domain: NSCocoaErrorDomain, code: 134_110, userInfo: [NSUnderlyingErrorKey: inner])
+            }
+        }
+        let migration = NSError(domain: NSCocoaErrorDomain, code: 134_110)
+        let full = NSError(domain: NSCocoaErrorDomain, code: 134_110, userInfo: [NSSQLiteErrorDomain: 13])
+        let limit = DataStack.maxInspectedErrors
+
+        #expect(DataStack.isConfirmedIncompatibility(chain(count: limit, innermost: migration)))
+        #expect(!DataStack.isConfirmedIncompatibility(chain(count: limit, innermost: full)))
+        #expect(!DataStack.isConfirmedIncompatibility(chain(count: limit + 1, innermost: full)))
+        #expect(!DataStack.isConfirmedIncompatibility(chain(count: limit + 1, innermost: migration)))
+    }
+
+    /// A crash after the main store moved leaves the marker and the side files; the next open
+    /// finishes the move before creating a fresh store.
+    @Test func interruptedMoveAsideIsCompletedBeforeOpening() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let url = directory.appending(path: "Audiobookshelf.store")
+        do {
+            let context = ModelContext(try DataStack(location: .url(url)).container)
+            context.insert(Fixtures.connection())
+            try context.save()
+        }
+        let copy = directory.appending(path: "Broken/1-CRASHED")
+        try fileManager.createDirectory(at: copy, withIntermediateDirectories: true)
+        let names = ["Audiobookshelf.store", "Audiobookshelf.store-wal", "Audiobookshelf.store-shm"]
+        try Data(names.joined(separator: "\n").utf8).write(to: copy.appending(path: DataStack.incompleteMarker))
+        try fileManager.moveItem(at: url, to: copy.appending(path: names[0]))
+        for name in names.dropFirst() where !exists(directory.appending(path: name)) {
+            try Data("stale".utf8).write(to: directory.appending(path: name))
+        }
+
+        let context = ModelContext(try openURL(url).container)
+        #expect(try context.fetchCount(FetchDescriptor<ServerConnectionRecord>()) == 0)
+        #expect(!exists(copy.appending(path: DataStack.incompleteMarker)))
+        for name in names {
+            #expect(exists(copy.appending(path: name)))
+        }
+    }
+
+    @Test func pruningKeepsIncompleteCopies() throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? fileManager.removeItem(at: directory) }
+        let marked = directory.appending(path: "Broken/1-MARKED")
+        let unmarked = directory.appending(path: "Broken/2-DONE")
+        try fileManager.createDirectory(at: marked, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: unmarked, withIntermediateDirectories: true)
+        try Data("Other.store".utf8).write(to: marked.appending(path: DataStack.incompleteMarker))
+        let url = directory.appending(path: "Audiobookshelf.store")
+        try Data(repeating: 0x5A, count: 64).write(to: url)
+
+        try DataStack.moveStoreAside(at: url, now: Date(timeIntervalSince1970: 3))
+        #expect(exists(marked.appending(path: DataStack.incompleteMarker)))
+        #expect(!exists(unmarked))
+        #expect(brokenCopies(in: directory).count == 2)
+        #expect(!exists(url))
     }
 }
