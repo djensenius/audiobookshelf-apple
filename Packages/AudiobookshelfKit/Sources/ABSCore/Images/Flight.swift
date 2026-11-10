@@ -21,6 +21,8 @@ final class Flight<Value: Sendable>: Sendable {
     private let state = Mutex(State())
 
     var isAbandoned: Bool { state.withLock { $0.isAbandoned } }
+    /// The callers waiting on the result, for tests.
+    var waiterCount: Int { state.withLock { $0.waiters.count } }
 
     /// Starts `operation`, whose result is delivered to every waiter.
     func start(priority: TaskPriority? = nil, _ operation: @escaping @Sendable () async throws -> Value) {
@@ -111,6 +113,10 @@ actor AsyncSemaphore {
     init(permits: Int) {
         self.permits = permits
     }
+
+    /// Free permits and queued waiters, for tests.
+    var availablePermits: Int { permits }
+    var waiterCount: Int { waiters.count }
 
     func acquire() async throws {
         try Task.checkCancellation()
