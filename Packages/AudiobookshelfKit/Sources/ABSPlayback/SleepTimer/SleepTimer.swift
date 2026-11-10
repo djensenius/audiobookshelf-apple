@@ -5,11 +5,11 @@ import Observation
 /// The sleep timer: pauses playback after a duration or at the end of the chapter.
 ///
 /// - A duration counts down only while audio plays (legacy iOS); an end-of-chapter timer pauses when playback
-///   reaches the chapter's end, in wall-clock seconds at the current rate.
+///   reaches the chapter's end, in wall-clock seconds at the current rate, less gaps between tracks.
 /// - The volume fades out over the last ``fadeDuration`` seconds and is restored after the pause. A duration
 ///   timer then seeks back to where the fade began (legacy iOS `AudioPlayer.startFadeOut`).
-/// - The chime plays once per run, ``chimeLeadTime`` seconds before the end; a run that starts with less left,
-///   or jumps past that moment, never chimes.
+/// - The chime plays once per run, ``chimeLeadTime`` seconds before the end. It waits while less is left (after a
+///   short start, until an add or a slower rate lifts it), and a jump past that moment skips it.
 /// - For ``gracePeriod`` seconds after the timer pauses playback, ``reset()`` or playing the same item restarts it.
 /// - ``reset()`` restarts a running timer while audio plays. It is the entry point for a gesture such as shake to
 ///   reset (#147).
@@ -164,9 +164,9 @@ public final class SleepTimer {
         stopRun()
     }
 
-    /// Adds `seconds` of listening time. For end of chapter, the end moves by `seconds` at the current rate,
-    /// up to the end of the media. Unlike Android, a duration isn't capped at the media left: it only counts
-    /// down while audio plays.
+    /// Adds `seconds` of listening time. For end of chapter, the end moves by `seconds` of media at the current rate
+    /// (a gap between tracks in them doesn't play), up to the end of the media. Unlike Android, a duration isn't
+    /// capped at the media left: it only counts down while audio plays.
     public func add(_ seconds: TimeInterval) {
         guard var run, seconds.isFinite, seconds > 0 else { return }
         switch run.goal {
@@ -311,13 +311,17 @@ public final class SleepTimer {
         return true
     }
 
-    /// Stores `run` with what it has left at `time` (default: now): arms the chime above the lead time, tracks
-    /// the fade and applies its volume.
+    /// Stores `run` with what it has left at `time` (default: now): arms the chime above the lead time, skips it
+    /// when a jump (a subtract or seek) lands below it, tracks the fade and applies its volume.
     private func update(_ run: Run, at time: Double? = nil) {
         var run = run
         let time = time ?? control.currentTime
-        let left = Self.remaining(of: run, at: time, rate: rate)
-        if run.chime == .waiting, left > Self.chimeLeadTime { run.chime = .armed }
+        let left = remaining(of: run, at: time)
+        if run.chime == .waiting, left > Self.chimeLeadTime {
+            run.chime = .armed
+        } else if run.chime == .armed, left < Self.chimeLeadTime {
+            run.chime = .played
+        }
         trackFade(of: &run, left: left, at: time)
         self.run = run
         applyVolume(fadeVolume(left))
@@ -346,13 +350,15 @@ public final class SleepTimer {
         lastPosition = time
         // Capped, so a tick that ran late after a suspension doesn't count the time the app didn't play.
         if isPlaying { run.elapsed += min(interval, 2 * Self.seconds(tickInterval)) }
-        let left = Self.remaining(of: run, at: time, rate: rate)
+        let left = remaining(of: run, at: time)
         // While paused only the end of the media expires a timer: a seek may not have landed yet.
         if left <= 0, isPlaying || time >= (control.timeline?.duration ?? 0) {
             self.run = run
             expire()
             return
         }
+        // A slower rate can lift a chapter's time left above the lead time.
+        if run.chime == .waiting, left > Self.chimeLeadTime { run.chime = .armed }
         if run.chime == .armed, left <= Self.chimeLeadTime {
             // Jumping well past the lead time (a subtract or seek) skips the chime instead of playing it late.
             if left <= Self.chimeLeadTime - 2 * Self.seconds(tickInterval) {
@@ -396,7 +402,8 @@ public final class SleepTimer {
         pendingRewind = rewind.map { ($0, fadeStart) }
         let item = itemID, pausedAt = control.currentTime
         Task { [weak self, control] in
-            guard self?.isCurrent(item) == true else { return }
+            // Another item, or a seek that landed before this task ran, wins.
+            guard self?.isCurrent(item) == true, Self.isNear(control.currentTime, pausedAt) else { return }
             let landed = await control.seek(to: fadeStart)
             guard let self, isCurrent(item) else { return }
             pendingRewind?.at = landed ?? pausedAt
@@ -430,8 +437,13 @@ public final class SleepTimer {
     /// The pending rewind, consumed; nothing once playback moved away from where it was set.
     private func takeRewind() -> TimeInterval {
         defer { pendingRewind = nil }
-        guard let pendingRewind, abs(control.currentTime - pendingRewind.at) < 1 else { return 0 }
+        guard let pendingRewind, Self.isNear(control.currentTime, pendingRewind.at) else { return 0 }
         return pendingRewind.seconds
+    }
+
+    /// Whether playback at `time` is still where it was at `position`, give or take a reporting error.
+    private static func isNear(_ time: Double, _ position: Double) -> Bool {
+        abs(time - position) < 1
     }
 
     /// Ends the run (not its grace period), restoring the volume.
@@ -497,14 +509,13 @@ public final class SleepTimer {
         return rate.isFinite && rate > 0 ? rate : 1
     }
 
-    private func remaining(of run: Run) -> TimeInterval {
-        Self.remaining(of: run, at: control.currentTime, rate: rate)
-    }
-
-    private static func remaining(of run: Run, at time: Double, rate: Double) -> TimeInterval {
+    /// What `run` has left at `time` (default: now). For end of chapter, the media seconds that play before its end,
+    /// less gaps between tracks, at the current rate; zero or less once reached.
+    private func remaining(of run: Run, at time: Double? = nil) -> TimeInterval {
         switch run.goal {
         case .length(let length): length - run.elapsed
-        case .chapterEnd(let segmentEnd, let offset): (segmentEnd + offset - time) / rate
+        case .chapterEnd(let segmentEnd, let offset):
+            Self.played(in: control.timeline, from: time ?? control.currentTime, to: segmentEnd + offset) / rate
         }
     }
 
