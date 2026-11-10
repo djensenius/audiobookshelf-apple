@@ -26,7 +26,8 @@ public enum ServerProgressSource: Sendable, Equatable {
     /// check was issued after the row's last settlement, so it includes every acknowledged PATCH.
     case fetch
     /// A socket event (`user_updated`, `user_item_progress_updated`). It may have been emitted
-    /// before an acknowledged PATCH was applied, as the PATCH's 200 has no body.
+    /// before an acknowledged PATCH was applied, as the PATCH's 200 has no body; a value equal to
+    /// the acknowledged one doesn't prove otherwise.
     case socket
 }
 
@@ -58,12 +59,22 @@ public enum SessionUploadResult: Sendable, Equatable {
     private var generation: UInt64 = 0
     private var rowGenerations: [String: UInt64] = [:]
     private var inFlight: [String: (token: UUID, groups: ProgressGroups)] = [:]
-    /// Groups acknowledged without a server time whose value the server hasn't confirmed since.
-    private var unconfirmed: [String: ProgressGroups] = [:]
+    /// Rows acknowledged without a server time that wait for a fetch issued after the
+    /// acknowledgement, with the latest socket value received meanwhile and its capture.
+    private var awaitingFetch: [String: (key: MediaKey, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] =
+        [:]
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "persistence")
 
     // MARK: - Progress
+
+    /// Rows whose PATCH was acknowledged without a server time: fetch each one
+    /// (`GET /api/me/progress/:id`, capturing the generation first) and apply it with
+    /// `source: .fetch`. Until then their socket values are held. Without the fetch a row keeps
+    /// the acknowledged values, which the server holds unless it normalized them.
+    public var needsConfirmationFetch: Set<MediaKey> {
+        Set(awaitingFetch.values.map(\.key))
+    }
 
     /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
     public func captureGeneration() -> ProgressGeneration {
@@ -117,43 +128,48 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// or settled since `capturedAt` are dropped, and groups carried by a PATCH in flight aren't
     /// merged. Returns the keys whose rows were merged.
     ///
-    /// A PATCH's 200 carries no server time, so after an acknowledgement a socket event can hold
-    /// older values with any `lastUpdate`. Until a fetch, or a socket event holding the
-    /// acknowledged value (socket events arrive in order), socket values for the acknowledged
-    /// groups are ignored.
+    /// A PATCH's 200 carries no server time, so after an acknowledgement a socket event may have
+    /// been emitted before the PATCH was applied, with any `lastUpdate`. Until a fetch issued
+    /// after the acknowledgement is applied (``needsConfirmationFetch``), socket values for the
+    /// row aren't merged; the latest is kept and merged after that fetch, where the stale check
+    /// drops it unless it is newer.
     @discardableResult
     public func applyServerProgress(
         _ updates: [MediaKey: ProgressBaseline],
         capturedAt: ProgressGeneration,
         source: ServerProgressSource
     ) throws -> Set<MediaKey> {
-        let (merged, held) = try commit {
+        var recorded: [String: ProgressBaseline] = [:]
+        var confirmed: Set<String> = []
+        let merged = try commit {
             var merged: Set<MediaKey> = []
-            var held: [String: ProgressGroups] = [:]
             for (key, server) in updates {
-                if let edited = rowGenerations[key.rawValue], edited > capturedAt.value { continue }
-                guard let row = try fetchRow(key) else { continue }
-                var state = ProgressSyncState(row)
-                var server = server
-                var stillHeld = source == .fetch ? [] : unconfirmed[key.rawValue] ?? []
-                if let baseline = state.serverBaseline {
-                    for group in ProgressGroups.each where stillHeld.contains(group) {
-                        if ProgressSyncState.matches(server, baseline, group) {
-                            stillHeld.remove(group)
-                        } else {
-                            server.copy(group, from: baseline)
-                        }
-                    }
+                let raw = key.rawValue
+                if let edited = rowGenerations[raw], edited > capturedAt.value { continue }
+                guard let awaiting = awaitingFetch[raw] else {
+                    if try merge(server, into: key) { merged.insert(key) }
+                    continue
                 }
-                guard state.merge(server, excluding: inFlight[key.rawValue]?.groups ?? []) else { continue }
-                state.write(to: row)
-                merged.insert(key)
-                held[key.rawValue] = stillHeld
+                guard source == .fetch else {
+                    recorded[raw] = server
+                    continue
+                }
+                // Passing the generation check, the fetch was issued after the acknowledgement.
+                confirmed.insert(raw)
+                if try merge(server, into: key) { merged.insert(key) }
+                if let latest = awaiting.latest, rowGenerations[raw] ?? 0 <= latest.capturedAt,
+                    try merge(latest.server, into: key)
+                {
+                    merged.insert(key)
+                }
             }
-            return (merged, held)
+            return merged
         }
-        for (key, groups) in held {
-            unconfirmed[key] = groups.isEmpty ? nil : groups
+        for (raw, server) in recorded {
+            awaitingFetch[raw]?.latest = (server, capturedAt.value)
+        }
+        for raw in confirmed {
+            awaitingFetch[raw] = nil
         }
         return merged
     }
@@ -195,9 +211,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             state.write(to: row)
             row.lastSyncError = nil
         }
-        if serverLastUpdate == nil {
-            unconfirmed[patch.key.rawValue, default: []].formUnion(patch.values.groups)
-        }
+        if serverLastUpdate == nil { awaitingFetch[patch.key.rawValue] = (patch.key, nil) }
         return true
     }
 
@@ -252,7 +266,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         if deleted {
             rowGenerations[key.rawValue] = nil
-            unconfirmed[key.rawValue] = nil
+            awaitingFetch[key.rawValue] = nil
         }
         return deleted
     }
@@ -270,7 +284,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             return rows.map(\.key)
         }
         for key in keys {
-            unconfirmed[key] = nil
+            awaitingFetch[key] = nil
             if inFlight[key] == nil { rowGenerations[key] = nil }
         }
         return keys.count
@@ -401,6 +415,16 @@ public enum SessionUploadResult: Sendable, Equatable {
     private func advance(_ key: MediaKey) {
         generation += 1
         rowGenerations[key.rawValue] = generation
+    }
+
+    /// Merges `server` into the row (except groups in flight); `false` when there is no row or the
+    /// values are stale.
+    private func merge(_ server: ProgressBaseline, into key: MediaKey) throws -> Bool {
+        guard let row = try fetchRow(key) else { return false }
+        var state = ProgressSyncState(row)
+        guard state.merge(server, excluding: inFlight[key.rawValue]?.groups ?? []) else { return false }
+        state.write(to: row)
+        return true
     }
 
     private func settle(_ key: MediaKey) {

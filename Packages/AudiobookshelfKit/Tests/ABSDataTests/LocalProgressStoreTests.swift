@@ -296,24 +296,99 @@ import Testing
         #expect(row.serverBaseline?.currentTime == 200)
     }
 
-    /// Another device's later value still arrives: by socket once the acknowledged value has been
-    /// seen, by any fetch, or at once when the response had a server time.
-    @Test(arguments: ["echo", "fetch", "timed"])
-    func newerValueAfterAckedPatchIsTaken(_ path: String) async throws {
+    /// A socket value equal to the acknowledged one doesn't prove it was emitted after the PATCH:
+    /// queued pre-PATCH events of 200 and then 100 leave the row at 200 until a fetch.
+    @Test func equalSocketValueDoesNotReleaseTheHold() async throws {
         let (store, _) = try makeStore()
         try await store.recordEdit(
             Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
         let patch = try #require(try await store.beginSend(for: key))
-        try await store.completeSend(patch, serverLastUpdate: path == "timed" ? Self.at(2) : nil)
+        try await store.completeSend(patch, serverLastUpdate: nil)
+        #expect(await store.needsConfirmationFetch == [key])
 
         let capture = await store.captureGeneration()
-        if path == "echo" {
+        for (time, offset) in [(200.0, 0.5), (100.0, 0.6)] {
             try await store.applyServerProgress(
-                [key: Self.server(currentTime: 200, lastUpdate: Self.at(2))], capturedAt: capture, source: .socket)
+                [key: Self.server(currentTime: time, lastUpdate: Self.at(offset))], capturedAt: capture,
+                source: .socket)
         }
+        #expect(try await store.progress(for: key)?.currentTime == 200)
+        #expect(await store.needsConfirmationFetch == [key])
+
+        // The fetch issued after the ack confirms; the held 100 is older and is dropped.
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 200, lastUpdate: Self.at(2))], capturedAt: capture, source: .fetch)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 200)
+        #expect(row.dirtyGroups.isEmpty)
+        #expect(await store.needsConfirmationFetch.isEmpty)
+    }
+
+    /// The server auto-finishes an un-finish sent fewer than 10 s from the end. Another device's
+    /// later write arrives by socket before the confirming fetch: the fetch's normalized value is
+    /// taken, then the held socket value, which is newer.
+    @Test func confirmingFetchTakesNormalizedValueAndThenNewerSocketValue() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            ProgressEdit(isFinished: false), for: key,
+            serverProgress: Self.server(currentTime: 995, lastUpdate: Self.t0),
+            now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        #expect(patch.values.groups == .finished)
+        try await store.completeSend(patch, serverLastUpdate: nil)
+
+        let capture = await store.captureGeneration()
+        var server = Self.server(currentTime: 995, lastUpdate: Self.at(2))
+        server.isFinished = true
+        server.finishedAt = Self.at(2)
+        var other = server
+        other.ebookLocation = "epubcfi(/6/8)"
+        other.lastUpdate = Self.at(9)
+        try await store.applyServerProgress([key: other], capturedAt: capture, source: .socket)
+        try await store.applyServerProgress([key: server], capturedAt: capture, source: .fetch)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.isFinished)
+        #expect(row.ebookLocation == "epubcfi(/6/8)")
+        #expect(row.dirtyGroups.isEmpty)
+        #expect(await store.needsConfirmationFetch.isEmpty)
+    }
+
+    /// A held socket value captured before a later local edit is dropped, as it would have been
+    /// without the hold.
+    @Test func heldSocketValueCapturedBeforeAnEditIsDropped() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.completeSend(patch, serverLastUpdate: nil)
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 700, lastUpdate: Self.at(9))], capturedAt: await store.captureGeneration(),
+            source: .socket)
+        try await store.recordEdit(Self.seek(300), for: key, now: Self.at(3))
+
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 200, lastUpdate: Self.at(2))], capturedAt: await store.captureGeneration(),
+            source: .fetch)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 300)
+        #expect(row.audioDirty)
+    }
+
+    /// Another device's later value still arrives: by a fetch, or at once by socket when the
+    /// response had a server time.
+    @Test(arguments: [true, false])
+    func newerValueAfterAckedPatchIsTaken(_ timed: Bool) async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.completeSend(patch, serverLastUpdate: timed ? Self.at(2) : nil)
+        #expect(await store.needsConfirmationFetch == (timed ? [] : [key]))
+
+        let capture = await store.captureGeneration()
         try await store.applyServerProgress(
             [key: Self.server(currentTime: 700, lastUpdate: Self.at(9))], capturedAt: capture,
-            source: path == "fetch" ? .fetch : .socket)
+            source: timed ? .socket : .fetch)
         let row = try #require(try await store.progress(for: key))
         #expect(row.currentTime == 700)
         #expect(row.dirtyGroups.isEmpty)

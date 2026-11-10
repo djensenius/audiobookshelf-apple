@@ -257,15 +257,27 @@ Model notes:
     A socket event received after the ack may have been emitted before the PATCH
     was applied, with a `lastUpdate` equal to, later than or earlier than the
     baseline's, and the generation check can't catch it because it is captured on
-    receipt. So, in memory, the groups acknowledged without a server time are held:
-    socket values for them are ignored (the baseline's values stand in) until a
-    socket event holds the acknowledged value (events on one connection arrive in
-    the order the server emitted them, so later ones are newer) or a fetch is
-    applied (a fetch passing the generation check was issued after the ack, so it
-    includes the write). Callers say which source the values came from. Holding
-    only delays another device's newer value until the PATCH's own `user_updated`
-    or the next fetch; it never marks a group dirty, because the server already
-    holds the acknowledged value.
+    receipt. A value equal to the acknowledged one doesn't prove it came after the
+    PATCH either (a queued pre-PATCH event can hold the same value). So, in memory
+    (a new process has a new socket connection, which only carries later events), a
+    row acknowledged without a server time waits for a confirming fetch: its socket
+    values aren't merged, only the latest is kept. The first fetch applied for the
+    row afterwards (it passed the generation check, so it was issued after the ack
+    and includes the write, as the server applies the PATCH before its 200) is
+    merged normally, including the server's normalizations such as an auto-finish;
+    then the kept socket value is merged, unless it was captured before a later
+    local edit or settlement, and the stale check drops it if it is older than the
+    fetch. Callers say which source values came from (`.fetch` or `.socket`).
+    `LocalProgressStore.needsConfirmationFetch` lists the waiting rows: after an
+    ack without a server time, the progress syncer (P2-06d, #158) must capture the
+    generation and issue `GET /api/me/progress/:id` for the row, then apply it with
+    `.fetch`. If that fetch never comes, the row keeps the acknowledged values,
+    which the server holds unless it normalized them; the next fetch (at the
+    latest `/api/me` at launch) brings any normalization or newer write. Socket
+    updates for a waiting row, other groups included, are deferred until then:
+    merging them would advance `serverBaseline.lastUpdate` past the confirming
+    fetch, which the stale check would then drop. Nothing is marked dirty, because
+    the server already holds the acknowledged value.
   - **Merge** (replaces the row-wide rule in
     `ApiClient.syncLocalSessionsWithServer`), for each group when server progress
     arrives:
@@ -728,9 +740,12 @@ Ongoing checks:
   values) arriving after a newer local seek is deferred and leaves the seek dirty
   and unchanged, on both PATCH success and failure; a socket value received after
   an acknowledgement without a server time doesn't roll the acknowledged value
-  back, whether its `lastUpdate` equals, follows or precedes the baseline's, while
-  another device's later value still arrives by socket after the acknowledged
-  value is seen, by any fetch, or at once when the ack had a server time; a newer edit survives the
+  back, whether its `lastUpdate` equals, follows or precedes the baseline's, and
+  pre-PATCH events holding the acknowledged value and then an older one don't
+  release the hold; the confirming fetch takes the server's auto-finish of an
+  un-finish sent near the end and then a newer socket value kept meanwhile, while
+  one captured before a later edit is dropped; another device's later value
+  arrives by the fetch, or at once by socket when the ack had a server time; a newer edit survives the
   server's normalized echo (an un-finish auto-finished near the end, a created
   `ebookProgress` of 0) after an ack or a lost response, and an unchanged edit
   takes it; a missing `ebookProgress` is sent as 0, so a page turn made while it
