@@ -172,4 +172,25 @@ private func base64URL(_ json: String) -> String {
     @Test func findsTokenPairsInsideOtherValues() {
         #expect(Log.redact("/a?a=1;token=s3cret") == "/a?a=1;token=<redacted>")
     }
+
+    @Test func redactsNestedAndRepeatedSensitivePairs() {
+        #expect(Log.redact("a=1;token=s3cret;b=2&c=3") == "a=1;token=<redacted>&c=3")
+        #expect(Log.redact("token=a;code=b;x=1 next") == "token=<redacted> next")
+        #expect(Log.redact("token=a&token=b") == "token=<redacted>&token=<redacted>")
+    }
+
+    /// Redaction must stay linear: before this was fixed, each parameter rescanned the rest of the
+    /// text, so these inputs took seconds. Each now takes milliseconds; the bound is generous.
+    @Test(
+        .timeLimit(.minutes(1)),
+        arguments: [("x=1;", nil), ("?x=1&", nil), ("token=1;", "token=<redacted>")] as [(String, String?)]
+    )
+    func redactsLongParameterRunsInLinearTime(pair: String, expected: String?) {
+        let text = String(repeating: pair, count: 100_000 / pair.utf8.count)
+        var redacted = ""
+        let elapsed = ContinuousClock().measure { redacted = Log.redact(text) }
+        #expect(elapsed < .seconds(2))
+        // `;` doesn't end a value, so the first `token=` value covers the rest of the run.
+        #expect(redacted == (expected ?? text))
+    }
 }

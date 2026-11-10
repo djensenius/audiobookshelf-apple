@@ -41,10 +41,7 @@ public struct Redactor: Sendable, Equatable {
                 ranges.append(match.range(withName: "value"))
             }
         }
-        for match in Self.queryParameter.regex.matches(in: text, range: whole)
-        where Self.isSensitiveParameter(original.substring(with: match.range(withName: "name"))) {
-            ranges.append(match.range(withName: "value"))
-        }
+        ranges += Self.sensitiveParameterValues(in: original)
         for match in Self.jwtCandidate.regex.matches(in: text, range: whole)
         where Self.isJWT(
             header: original.substring(with: match.range(withName: "header")),
@@ -144,21 +141,48 @@ public struct Redactor: Sendable, Equatable {
         return sensitiveParameterNames.contains(decoded.lowercased())
     }
 
-    /// A `name=value` pair at the start of a line or after `?`, `&`, `;`, or whitespace, in URLs or
-    /// bare text. ``isSensitiveParameter(_:)`` checks the `name` group.
+    /// The `name=` part of a `name=value` pair at the start of a line or after `?`, `&`, `;`, or
+    /// whitespace, in URLs or bare text. Names can't contain a separator, so each start position
+    /// scans a disjoint run and matching is linear. Only `name=` is consumed, so a pair inside
+    /// another value (`a=1;token=x`) is still found.
+    private static let parameterName = Rule(#"(?<![^?&;\s])(?<name>[^=&#\s"<>?;]++)="#, options: [])
+
+    /// Value ranges of every parameter whose name is sensitive (see ``isSensitiveParameter(_:)``).
     ///
-    /// The match consumes only `name=` and captures the value in a lookahead, so a pair hidden inside
-    /// another value (`a=1;token=x`) is still found. The value runs to the next `&`, `#`, or
-    /// whitespace. It may contain any other character that's valid unescaped in a query (`'`, `!`,
-    /// `*`, `(`, `)`, `~`, `$`, `,`, `;`, `:`, `@`, `/`, `?`); `"`, `<`, and `>` aren't, so they end the
-    /// value and `"…"` or `<…>` around a URL survives. A closing `)` or `'` around a URL is redacted
-    /// with the value: hiding one extra character is safer than leaking a value that contains it.
-    /// Names can't contain a separator, so each start position scans a disjoint run and matching
-    /// stays linear.
-    private static let queryParameter = Rule(
-        #"(?<![^?&;\s])(?<name>[^=&#\s"<>?;]++)=(?=(?<value>[^&#\s"<>]*))"#,
-        options: []
-    )
+    /// A value runs to the next `&`, `#`, whitespace, `"`, `<`, or `>`. It may contain any other
+    /// character that's valid unescaped in a query (`'`, `!`, `*`, `(`, `)`, `~`, `$`, `,`, `;`, `:`,
+    /// `@`, `/`, `?`); `"`, `<`, and `>` aren't, so `"…"` or `<…>` around a URL survives. A closing
+    /// `)` or `'` around a URL is redacted with the value: hiding one extra character is safer than
+    /// leaking a value that contains it.
+    ///
+    /// Values are scanned only for sensitive names, and never past text already scanned: a value
+    /// that starts inside the previous sensitive value ends at the same terminator, so it's already
+    /// covered. The whole pass is linear in the length of `text`.
+    private static func sensitiveParameterValues(in text: NSString) -> [NSRange] {
+        var ranges: [NSRange] = []
+        var scannedUntil = 0
+        let whole = NSRange(location: 0, length: text.length)
+        for match in parameterName.regex.matches(in: text as String, range: whole) {
+            let valueStart = match.range.upperBound
+            guard valueStart >= scannedUntil,
+                isSensitiveParameter(text.substring(with: match.range(withName: "name")))
+            else { continue }
+            var valueEnd = valueStart
+            while valueEnd < text.length, !isValueTerminator(text.character(at: valueEnd)) {
+                valueEnd += 1
+            }
+            ranges.append(NSRange(location: valueStart, length: valueEnd - valueStart))
+            scannedUntil = valueEnd
+        }
+        return ranges
+    }
+
+    private static func isValueTerminator(_ unit: unichar) -> Bool {
+        switch unit {
+        case 0x22, 0x23, 0x26, 0x3C, 0x3E: true  // " # & < >
+        default: Unicode.Scalar(unit)?.properties.isWhitespace ?? false
+        }
+    }
 
     /// Three dot-separated base64url segments that aren't part of a longer dotted run, such as a
     /// hostname with more labels. ``isJWT(header:claims:)`` checks the `header` and `claims` groups.
