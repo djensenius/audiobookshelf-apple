@@ -82,6 +82,12 @@ enum RedirectPolicy {
 /// response (for example a 401) came from a hop that never saw the credentials.
 final class RedirectChainDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     private let stripped = Mutex(false)
+    private let staysOnOrigin: Bool
+
+    /// - Parameter staysOnOrigin: Declines hops that would be stripped instead of following them.
+    init(staysOnOrigin: Bool = false) {
+        self.staysOnOrigin = staysOnOrigin
+    }
 
     /// Whether any hop of this task was stripped of credentials.
     var credentialsStripped: Bool {
@@ -100,6 +106,7 @@ final class RedirectChainDelegate: NSObject, URLSessionTaskDelegate, Sendable {
                 following: response, to: request, original: task.originalRequest, wasStripped: wasStripped)
         else { return nil }
         if hop.isStripped {
+            if staysOnOrigin { return nil }
             stripped.withLock { $0 = true }
         }
         return hop.request
