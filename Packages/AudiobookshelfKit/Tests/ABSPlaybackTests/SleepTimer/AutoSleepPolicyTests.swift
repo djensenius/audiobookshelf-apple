@@ -89,12 +89,15 @@ struct AutoSleepPolicyTests {
         #expect(defaultOptions.playsAlmostDoneChime == false)
 
         let settings = AppSettings(defaults: defaults)
+        settings.shakeSensitivity = .high
+        #expect(SleepTimerOptions(settings: AppSettings.snapshot(from: defaults)).shakeSensitivity == .high)
         settings.autoSleepTimer = true
         settings.autoSleepTimerStartTime = "21:30"
         settings.autoSleepTimerEndTime = "07:15"
         settings.sleepTimerLength = 0
         settings.autoSleepTimerAutoRewind = true
         settings.autoSleepTimerAutoRewindTime = 120_000
+        settings.disableShakeToResetSleepTimer = true
         settings.disableSleepTimerFadeOut = true
         settings.disableSleepTimerResetFeedback = true
         settings.enableSleepTimerAlmostDoneChime = true
@@ -108,7 +111,7 @@ struct AutoSleepPolicyTests {
         #expect(
             options
                 == SleepTimerOptions(
-                    fadesOut: false, playsAlmostDoneChime: true, playsResetFeedback: false,
+                    fadesOut: false, playsAlmostDoneChime: true, playsResetFeedback: false, shakeSensitivity: nil,
                     autoSleep: expected))
     }
 }

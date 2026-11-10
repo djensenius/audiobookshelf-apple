@@ -88,6 +88,26 @@ final class FakeFeedback: SleepTimerFeedback {
     func playResetFeedback() { resets += 1 }
 }
 
+@MainActor
+final class FakeShakeDetector: ShakeDetecting {
+    private(set) var sensitivity: ShakeSensitivity?
+    private(set) var starts = 0
+    private var onShake: (@MainActor () -> Void)?
+
+    func start(sensitivity: ShakeSensitivity, onShake: @escaping @MainActor () -> Void) {
+        starts += 1
+        self.sensitivity = sensitivity
+        self.onShake = onShake
+    }
+
+    func stop() {
+        sensitivity = nil
+        onShake = nil
+    }
+
+    func shake() { onShake?() }
+}
+
 /// Yields until `condition` holds; the timer's tasks need a few turns of the executors to run. Never sleeps. Bounded
 /// by wall-clock time, not yields: a loaded machine can starve the pool threads that resume ``ManualClock`` sleepers.
 @MainActor

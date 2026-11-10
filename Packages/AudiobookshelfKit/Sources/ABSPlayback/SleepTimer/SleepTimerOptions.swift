@@ -22,6 +22,8 @@ public struct SleepTimerOptions: Sendable, Hashable {
     public var playsAlmostDoneChime: Bool
     /// Confirms a reset with feedback (`disableSleepTimerResetFeedback` off).
     public var playsResetFeedback: Bool
+    /// The sensitivity for shake to reset, or `nil` when `disableShakeToResetSleepTimer` is on.
+    public var shakeSensitivity: ShakeSensitivity?
     /// The automatic timer (the `autoSleepTimer…` settings and `sleepTimerLength`).
     public var autoSleep: AutoSleepPolicy
 
@@ -30,11 +32,13 @@ public struct SleepTimerOptions: Sendable, Hashable {
         fadesOut: Bool = !AppSettings.Default.disableSleepTimerFadeOut,
         playsAlmostDoneChime: Bool = AppSettings.Default.enableSleepTimerAlmostDoneChime,
         playsResetFeedback: Bool = !AppSettings.Default.disableSleepTimerResetFeedback,
+        shakeSensitivity: ShakeSensitivity? = AppSettings.Default.shakeSensitivity,
         autoSleep: AutoSleepPolicy = .disabled
     ) {
         self.fadesOut = fadesOut
         self.playsAlmostDoneChime = playsAlmostDoneChime
         self.playsResetFeedback = playsResetFeedback
+        self.shakeSensitivity = shakeSensitivity
         self.autoSleep = autoSleep
     }
 
@@ -43,6 +47,7 @@ public struct SleepTimerOptions: Sendable, Hashable {
             fadesOut: !settings.disableSleepTimerFadeOut,
             playsAlmostDoneChime: settings.enableSleepTimerAlmostDoneChime,
             playsResetFeedback: !settings.disableSleepTimerResetFeedback,
+            shakeSensitivity: settings.disableShakeToResetSleepTimer ? nil : settings.shakeSensitivity,
             autoSleep: AutoSleepPolicy(settings: settings))
     }
 }
