@@ -51,6 +51,11 @@ public actor APIClient {
     /// The latest pair this client ended the session for because the server rejected its refresh
     /// token, telling that apart from a local sign-out.
     private var serverExpiredPair: AuthTokens?
+    /// Server expirations whose provider call hasn't returned. The provider may clear the tokens
+    /// before it returns, so a caller that finds them gone waits for these before deciding
+    /// whether the server or a local sign-out ended the session.
+    private var pendingExpiries: [Int: Task<Bool, Never>] = [:]
+    private var nextExpiryID = 0
 
     private struct CompletedRefresh {
         let from: AuthTokens
@@ -267,7 +272,10 @@ public actor APIClient {
             guard current == tokens else { return current.accessToken }
             guard now() < expiry.validUntil else { throw error }
             return current.accessToken
-        } catch APIError.sessionExpired where !serverExpiredSession(of: tokens, readAt: readGeneration) {
+        } catch APIError.sessionExpired {
+            // An expiry may have cleared the tokens without having recorded itself yet.
+            while let pending = pendingExpiries.values.first { _ = await pending.value }
+            guard !serverExpiredSession(of: tokens, readAt: readGeneration) else { throw APIError.sessionExpired }
             // The server didn't reject the refresh token of this pair or of any pair refreshed
             // from it, so the session was ended or replaced locally while the refresh ran.
             guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
@@ -473,8 +481,13 @@ public actor APIClient {
             )
             // Recorded before the swap, which may make the new pair visible before it returns,
             // so no lookup sees the new token without its receipt.
+            // A token returned again keeps its first receipt: its claims, so its lifetime, haven't
+            // changed. Without `iat` the receipt only says whether it arrived already expired, so
+            // it's updated.
             let previousReceipt = refreshReceipts[refreshed.accessToken]
-            refreshReceipts[refreshed.accessToken] = receivedAt
+            let keepsReceipt =
+                previousReceipt != nil && AccessTokenExpiry(token: refreshed.accessToken)?.issuedAt != nil
+            if !keepsReceipt { refreshReceipts[refreshed.accessToken] = receivedAt }
             receiptsAwaitingSwap[refreshed.accessToken, default: 0] += 1
             let swapped = await tokenProvider.replaceTokens(expected: tokens, with: refreshed)
             receiptsAwaitingSwap[refreshed.accessToken, default: 1] -= 1
@@ -483,7 +496,7 @@ public actor APIClient {
             // session that ended, so it is cancelled rather than retried.
             guard swapped else {
                 // Undoes the receipt unless a later refresh of the same token replaced it.
-                if refreshReceipts[refreshed.accessToken] == receivedAt {
+                if !keepsReceipt, refreshReceipts[refreshed.accessToken] == receivedAt {
                     refreshReceipts[refreshed.accessToken] = previousReceipt
                 }
                 throw CancellationError()
@@ -509,10 +522,22 @@ public actor APIClient {
     /// since it was used (for example the user signed in again) and the newer tokens are
     /// returned; returns `nil` when the session is over.
     private func expireSession(rejected: AuthTokens) async -> AuthTokens? {
-        if await tokenProvider.expireSession(ifCurrent: rejected) {
-            serverExpiredPair = rejected
-            return nil
+        nextExpiryID += 1
+        let id = nextExpiryID
+        let tokenProvider = tokenProvider
+        // Records the expiry before any waiter in ``accessToken(replacing:)`` resumes. A failed
+        // compare-and-swap (the session already changed) isn't a server expiry.
+        let expiry = Task {
+            var expired = false
+            if await tokenProvider.expireSession(ifCurrent: rejected) {
+                serverExpiredPair = rejected
+                expired = true
+            }
+            pendingExpiries[id] = nil
+            return expired
         }
+        pendingExpiries[id] = expiry
+        if await expiry.value { return nil }
         guard let current = await tokenProvider.tokens(), current != rejected else { return nil }
         return current
     }

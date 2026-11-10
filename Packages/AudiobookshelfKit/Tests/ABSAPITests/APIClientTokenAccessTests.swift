@@ -859,3 +859,108 @@ private final class HeldReadAfterSwapProvider: TokenProvider {
         #expect(server.requests(path: refreshPath).count == 1)
     }
 }
+
+/// Wraps an ``InMemoryTokenProvider``. Once a swap has succeeded, holds a read by a task tagged
+/// with ``isHeldReader`` until ``releaseRead()``; holds every expiration after it has cleared
+/// the tokens until ``releaseExpiry()``.
+private final class HeldExpiryProvider: TokenProvider {
+    @TaskLocal static var isHeldReader = false
+
+    let inner: InMemoryTokenProvider
+    private let swapped = Mutex(false)
+    private let readHolding = Checkpoint()
+    private let readReleased = Checkpoint()
+    private let expiryHolding = Checkpoint()
+    private let expiryReleased = Checkpoint()
+
+    init(_ tokens: AuthTokens) {
+        inner = InMemoryTokenProvider(tokens)
+    }
+
+    func readHeld() async { await readHolding.reached() }
+    func releaseRead() { readReleased.pass() }
+    func expiryHeld() async { await expiryHolding.reached() }
+    func releaseExpiry() { expiryReleased.pass() }
+
+    func tokens() async -> AuthTokens? {
+        if Self.isHeldReader, swapped.withLock({ $0 }) {
+            readHolding.pass()
+            await readReleased.reached()
+        }
+        return await inner.tokens()
+    }
+
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
+        guard await inner.replaceTokens(expected: expected, with: new) else { return false }
+        swapped.withLock { $0 = true }
+        return true
+    }
+
+    func expireSession(ifCurrent rejected: AuthTokens) async -> Bool {
+        let expired = await inner.expireSession(ifCurrent: rejected)
+        expiryHolding.pass()
+        await expiryReleased.reached()
+        return expired
+    }
+}
+
+@Suite struct APIClientTokenReceiptAndExpiryTests {
+    /// A refresh that returns the same token (with `iat`) keeps its first receipt, so the
+    /// token's lifetime isn't restarted: a one-hour token received at t=0 and returned again at
+    /// t=3500 is refreshed once it expires at t=3600.
+    @Test func sameTokenReturnedKeepsOriginalReceipt() async throws {
+        let t = Int(now.timeIntervalSince1970)
+        let token = makeJWT(claims: #"{"iat":\#(t),"exp":\#(t + 3600)}"#)
+        let (client, server, _) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .json(refreshJSON(token)))
+        let clock = TestClock()
+        await client.setNow { clock.read() }
+        let refreshes = { server.requests(path: refreshPath).count }
+
+        #expect(try await client.accessToken(replacing: nil) == token)
+        #expect(refreshes() == 1)
+        clock.advance(by: 3500)
+        #expect(try await client.accessToken(replacing: nil) == token)
+        #expect(refreshes() == 2)
+        clock.advance(by: 101)
+        _ = try await client.accessToken(replacing: nil)
+        #expect(refreshes() == 3)
+    }
+
+    /// The provider clears the tokens before its expiration call returns. A `nil` caller that
+    /// joined the refresh and reads the cleared tokens in that window still gets
+    /// `.sessionExpired`: the server ended the session, not a local sign-out.
+    @Test func callerReadingDuringPendingExpiryGetsSessionExpired() async throws {
+        let gate = StubGate()
+        let server = StubServer { request in
+            request.url?.path == refreshPath
+                ? .json(refreshJSON(freshToken), gate: gate) : .text("Unauthorized", status: 401)
+        }
+        let tokens = HeldExpiryProvider(AuthTokens(accessToken: expiringToken, refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+        await client.setNow { now }
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
+
+        let request = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await gate.arrived()
+        let caller = Task {
+            try await HeldExpiryProvider.$isHeldReader.withValue(true) {
+                try await client.accessToken(replacing: nil)
+            }
+        }
+        await joins.reached()
+        gate.open()
+        // The request retries the refreshed pair, gets another 401 and expires it; the provider
+        // has cleared the tokens but its call hasn't returned.
+        await tokens.readHeld()
+        await tokens.expiryHeld()
+        tokens.releaseRead()
+        // Gives the caller time to classify the error while the expiry is still pending.
+        try await Task.sleep(for: .milliseconds(100))
+        tokens.releaseExpiry()
+
+        await #expect(throws: APIError.sessionExpired) { try await caller.value }
+        await #expect(throws: APIError.sessionExpired) { try await request.value }
+    }
+}
