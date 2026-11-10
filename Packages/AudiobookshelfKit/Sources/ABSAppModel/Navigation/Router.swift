@@ -31,6 +31,15 @@ public final class Router {
     /// Other pending requests, such as S2's `pendingPlayLink`, must also be stored properties
     /// declared here: extensions can't add stored properties.
     public private(set) var pendingLibraryID: String?
+    /// A `play/` link opened in this scene, until the item screen shows its confirmation
+    /// (``PlayLinkDecision``) and clears it. ``open(_:)`` replaces it with every link.
+    public var pendingPlayLink: PlayLink?
+    /// A `search?q=` query opened in this scene, until the Search tab shows it and clears it.
+    public var pendingSearchQuery: String?
+    /// A link for another server connection, waiting for the user to confirm the switch. The
+    /// UI that asks (S6) clears it, and must keep its own copy to reopen after the switch,
+    /// because ``resetForIdentityChange(serverID:userID:)`` clears it too.
+    public var pendingServerSwitch: DeepLink?
     /// One typed path per tab. Bind stacks through ``subscript(path:)``.
     public private(set) var paths: [AppTab: [Route]] = [:]
 
@@ -109,6 +118,9 @@ public final class Router {
         self.userID = userID
         resetNavigation()
         pendingLibraryID = nil
+        pendingPlayLink = nil
+        pendingSearchQuery = nil
+        pendingServerSwitch = nil
         isFullPlayerPresented = false
         isQueueInspectorPresented = false
     }

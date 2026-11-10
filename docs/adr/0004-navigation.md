@@ -276,6 +276,16 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 - In the scene that receives the URL, `RootView.onOpenURL` calls `router.open(_:)`.
 - `.handlesExternalEvents(preferring:allowing:)` sends links to an existing window instead of creating a new one.
 
+**URL format** (`ABSAppModel/Navigation/DeepLink.swift`)
+
+- The legacy app handled only `audiobookshelf://oauth`, so there is no older link format to stay compatible with.
+- The kind is the host (`audiobookshelf://item/li_1`). Without a host (`audiobookshelf:item/li_1`, `audiobookshelf:///item/li_1`) it is the first path segment. Scheme and kind are case-insensitive; IDs are not.
+- Each kind takes exactly one non-empty ID segment (`search` and `downloads` take none); a trailing `/` is ignored. A missing ID, extra segments, an unknown kind or `oauth` gives `nil`.
+- Path segments and query values are percent-decoded, and `+` in a query value is a space. Empty query values count as absent, and the first of a repeated parameter wins.
+- `t=` is seconds (`5025`, `5025.5`) or a clock time (`1:23:45`, `83:45`). Anything else, including negative values, is ignored and the link still opens the item.
+- `Router.open(_:)` opens item, series, author, collection and playlist links in the Library tab, pushing onto its path. `library` calls `requestLibrary(id:)`. `search` selects Search at its root and sets `pendingSearchQuery`. A `server=` that isn't the router's server only sets `pendingServerSwitch`.
+- A paused, loaded play-link target with `t=` asks to play from `t=` (`.confirmPlay`), because resuming would ignore it. Without `t=` it asks to resume.
+
 **Play links never start playback silently.** Any app or web page can open a URL, so `play/` links are limited:
 
 - If the link targets the item (and episode) that is **currently playing**, it is a no-op apart from opening the item screen. It never seeks, even when the link carries `t=`.
