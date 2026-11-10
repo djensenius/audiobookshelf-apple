@@ -9,7 +9,8 @@ import Foundation
 /// session and ``APIError/sessionExpired`` is thrown. If the user signs out or in again while a
 /// refresh is in flight, its result is discarded and waiting requests throw `CancellationError`.
 /// Redirects follow ``RedirectPolicy``; a 401 from a hop that was stripped of credentials is
-/// thrown as ``APIError/unauthorized(message:)`` and never refreshes or ends the session.
+/// thrown as ``APIError/unauthorized(message:)`` and never refreshes or ends the session. The
+/// refresh itself only follows same-origin redirects, so tokens only come from the server.
 public actor APIClient {
     public private(set) var configuration: APIClientConfiguration
     private let tokenProvider: any TokenProvider
@@ -20,12 +21,27 @@ public actor APIClient {
     /// refresh of its own pair (not one left over from a previous sign-in).
     private var refreshFlights: [AuthTokens: RefreshFlight] = [:]
     private var nextFlightID = 0
-    /// Recent successful refreshes as (rejected pair, refreshed pair). They tell a stale token
-    /// read apart from a session that needs refreshing, and whether the current pair descends
-    /// from a rejected one. A refresh that returns the same pair is recorded as `(A, A)`. Edges
-    /// can be appended out of order (a slow provider may return after a later refresh).
-    private var completedRefreshes: [(from: AuthTokens, to: AuthTokens)] = []
-    private static let completedRefreshLimit = 8
+    /// Successful refreshes as (rejected pair, refreshed pair, generation). They tell a
+    /// stale token read apart from a session that needs refreshing, and whether the current pair
+    /// descends from a rejected one. A refresh that returns the same pair is recorded as `(A, A)`.
+    /// Edges can be appended out of order (a slow provider may return after a later refresh).
+    private var completedRefreshes: [CompletedRefresh] = []
+    /// Bumped each time a refresh completes. A request only reuses refreshes that completed
+    /// after it was sent, so an old refresh never stands in for a new 401.
+    private var refreshGeneration = 0
+    /// How many in-flight requests read their tokens at each generation. A refresh is only
+    /// consulted by requests that read before it completed, so `completedRefreshes` keeps every
+    /// refresh newer than the oldest of these and drops the rest (no fixed limit that could drop
+    /// a pair a slow request still needs to trace).
+    private var requestGenerations: [Int: Int] = [:]
+    /// Test hook: called whenever a request starts waiting for a refresh another request started.
+    private var refreshJoinObserver: (@Sendable () -> Void)?
+
+    private struct CompletedRefresh {
+        let from: AuthTokens
+        let to: AuthTokens
+        let generation: Int
+    }
 
     private struct RefreshFlight {
         let id: Int
@@ -86,6 +102,12 @@ public actor APIClient {
             return try handle(reply.data, reply.http, for: endpoint)
         }
 
+        // The refresh generation before `tokens` was read. A 401 for `tokens` reuses any refresh
+        // completed after that, including one that finished between the read and the send.
+        var tokensGeneration = refreshGeneration
+        let readGeneration = tokensGeneration
+        requestGenerations[readGeneration, default: 0] += 1
+        defer { endRequest(readAt: readGeneration) }
         guard var tokens = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
         // The pair a refresh produced for this request. That pair being rejected ends the
         // session; any other pair (for example from a new sign-in) gets its own refresh first.
@@ -95,81 +117,129 @@ public actor APIClient {
         var sendsLeft = 4
         while true {
             sendsLeft -= 1
+            // A refresh that returned the same pair says nothing about the pair's rejection unless it
+            // completed after this send.
+            let sendGeneration = refreshGeneration
             let reply = try await perform(authorized(request, tokens.accessToken), followsRedirects: followsRedirects)
             // A 401 from a hop that never received the token says nothing about the token.
             guard reply.http.statusCode == 401, !reply.credentialsStripped else {
                 return try handle(reply.data, reply.http, for: endpoint)
             }
             let next: AuthTokens
+            let nextGeneration = refreshGeneration
             if tokens == refreshedPair {
+                // Another request may be refreshing this pair. Its result decides the outcome:
+                // expiring now would discard it, and its edge is recorded only once it finishes.
+                // If it refreshed the pair after this send, this rejection is answered and the
+                // request retries with the current pair; if it failed, the pair is still rejected.
+                var refreshedSinceSend = false
+                if let flight = refreshFlights[tokens] {
+                    refreshJoinObserver?()
+                    _ = try? await flight.task.value
+                    refreshedSinceSend = completedRefresh(of: tokens, since: sendGeneration)
+                }
                 // Always handled, whatever the send budget: the refreshed pair is rejected, so the
                 // session is over unless a different one replaced it in the meantime.
-                guard let current = await expireSession(rejected: tokens) else { throw APIError.sessionExpired }
+                let replacement =
+                    refreshedSinceSend ? await tokenProvider.tokens() : await expireSession(rejected: tokens)
+                guard let current = replacement else { throw APIError.sessionExpired }
+                // A pair another request refreshed from the rejected one is still this chain's
+                // refreshed session, so its rejection expires too instead of refreshing again.
+                if outcome(current, after: tokens, since: tokensGeneration, sentAt: sendGeneration).didRefresh {
+                    refreshedPair = current
+                }
                 next = current
             } else {
                 guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }
-                let outcome = try await refreshedTokens(replacing: tokens)
+                let outcome = try await refreshedTokens(
+                    replacing: tokens, readAt: tokensGeneration, sentAt: sendGeneration)
                 if outcome.didRefresh { refreshedPair = outcome.tokens }
                 next = outcome.tokens
             }
             guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }
             tokens = next
+            tokensGeneration = nextGeneration
             try Task.checkCancellation()
         }
     }
 
     // MARK: - Token refresh
 
-    /// Returns the tokens to retry with after `rejected` got a 401: joins a refresh of the same
-    /// pair if one is running, reuses one that already finished, or starts one. The result is
-    /// always the provider's current pair, so a sign-out or new sign-in since the refresh wins.
-    private func refreshedTokens(replacing rejected: AuthTokens) async throws -> RefreshOutcome {
+    /// Returns the tokens to retry with after `rejected` got a 401, where `rejected` was read at
+    /// refresh generation `sent`: joins a refresh of the same pair if one is running, reuses one
+    /// that completed after the read, or starts one. The result is always the provider's current
+    /// pair, so a sign-out or new sign-in since the refresh wins. `sendGeneration` is the generation
+    /// when `rejected` was sent (see ``outcome(_:after:since:sentAt:)``).
+    private func refreshedTokens(
+        replacing rejected: AuthTokens, readAt sent: Int, sentAt sendGeneration: Int
+    ) async throws -> RefreshOutcome {
         var hasRereadStaleTokens = false
         while true {
             if let flight = refreshFlights[rejected] {
+                refreshJoinObserver?()
                 try await flight.task.value
-                return try await currentOutcome(after: rejected)
+                return try await currentOutcome(after: rejected, since: sent, sentAt: sendGeneration)
             }
             guard let current = await tokenProvider.tokens() else { throw APIError.sessionExpired }
             // A refresh may have started during the read above.
             if refreshFlights[rejected] != nil { continue }
             // Either a completed refresh already produced `current`, or it is a different session.
-            let result = outcome(current, after: rejected)
+            let result = outcome(current, after: rejected, since: sent, sentAt: sendGeneration)
             if result.didRefresh || current != rejected { return result }
             // A refresh of `rejected` already finished, so the read predates it; read once more.
-            if !hasRereadStaleTokens, completedRefresh(of: rejected) {
+            if !hasRereadStaleTokens, completedRefresh(of: rejected, since: sent) {
                 hasRereadStaleTokens = true
                 continue
             }
             if let flight = refreshFlights[current] {
+                refreshJoinObserver?()
                 try await flight.task.value
-                return try await currentOutcome(after: rejected)
+                return try await currentOutcome(after: rejected, since: sent, sentAt: sendGeneration)
             }
 
             nextFlightID += 1
-            let flight = RefreshFlight(id: nextFlightID, task: Task { try await refresh(current) })
-            refreshFlights[current] = flight
-            defer {
-                // Only remove this flight's entry, never a newer flight for the same pair.
-                if refreshFlights[current]?.id == flight.id { refreshFlights[current] = nil }
+            let id = nextFlightID
+            let task = Task {
+                // The flight unregisters itself before it finishes, so no request can join it
+                // once it has completed (for example while this request reads the new tokens).
+                // Only this flight's entry is removed, never a newer flight for the same pair.
+                defer { if refreshFlights[current]?.id == id { refreshFlights[current] = nil } }
+                try await refresh(current)
             }
-            try await flight.task.value
-            return try await currentOutcome(after: rejected)
+            refreshFlights[current] = RefreshFlight(id: id, task: task)
+            try await task.value
+            return try await currentOutcome(after: rejected, since: sent, sentAt: sendGeneration)
         }
     }
 
+    /// Lets tests wait until requests are waiting on a running refresh.
+    func observeRefreshJoins(_ observer: @escaping @Sendable () -> Void) {
+        refreshJoinObserver = observer
+    }
+
     /// The provider's current pair after a refresh of `rejected` finished.
-    private func currentOutcome(after rejected: AuthTokens) async throws -> RefreshOutcome {
+    private func currentOutcome(
+        after rejected: AuthTokens, since sent: Int, sentAt sendGeneration: Int
+    ) async throws -> RefreshOutcome {
         guard let current = await tokenProvider.tokens() else { throw APIError.sessionExpired }
-        return outcome(current, after: rejected)
+        return outcome(current, after: rejected, since: sent, sentAt: sendGeneration)
     }
 
     /// `current` counts as refreshed only if it descends from `rejected` through one or more
-    /// completed refreshes (including one that returned the same pair); otherwise it belongs to a
-    /// different session that hasn't been refreshed.
-    private func outcome(_ current: AuthTokens, after rejected: AuthTokens) -> RefreshOutcome {
+    /// refreshes completed after generation `sent` (including one that returned the same pair);
+    /// otherwise it belongs to a different session, or the session needs a new refresh.
+    ///
+    /// A refresh to a different pair after `sent` must have followed the token read (the read
+    /// would otherwise have returned the new pair). A refresh that returned the same pair is
+    /// invisible to the read, so it only counts if it completed after `sendGeneration`, the
+    /// generation when the rejected pair was sent; one that completed before the send didn't cover
+    /// this rejection, which needs a refresh of its own.
+    private func outcome(
+        _ current: AuthTokens, after rejected: AuthTokens, since sent: Int, sentAt sendGeneration: Int
+    ) -> RefreshOutcome {
         var next: [AuthTokens: [AuthTokens]] = [:]
-        for refresh in completedRefreshes {
+        for refresh in completedRefreshes
+        where refresh.generation > (refresh.from == refresh.to ? max(sent, sendGeneration) : sent) {
             next[refresh.from, default: []].append(refresh.to)
         }
         // Walks the edges from `rejected` to a fixed point, so their order doesn't matter.
@@ -181,8 +251,21 @@ public actor APIClient {
         return RefreshOutcome(tokens: current, didRefresh: descendants.contains(current))
     }
 
-    private func completedRefresh(of rejected: AuthTokens) -> Bool {
-        completedRefreshes.contains { $0.from == rejected }
+    private func endRequest(readAt generation: Int) {
+        requestGenerations[generation, default: 1] -= 1
+        if requestGenerations[generation] == 0 { requestGenerations[generation] = nil }
+        pruneCompletedRefreshes()
+    }
+
+    /// Drops refreshes no in-flight request can consult: those completed at or before the oldest
+    /// generation a request read its tokens at (or all of them when no request is in flight).
+    private func pruneCompletedRefreshes() {
+        let oldest = requestGenerations.keys.min() ?? refreshGeneration
+        completedRefreshes.removeAll { $0.generation <= oldest }
+    }
+
+    private func completedRefresh(of rejected: AuthTokens, since sent: Int) -> Bool {
+        completedRefreshes.contains { $0.from == rejected && $0.generation > sent }
     }
 
     private func refresh(_ tokens: AuthTokens) async throws {
@@ -192,7 +275,11 @@ public actor APIClient {
         request.setValue(tokens.refreshToken, forHTTPHeaderField: "x-refresh-token")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let reply = try await perform(request, followsRedirects: true)
+        // Only same-origin redirects are followed: a hop off the origin never receives the refresh
+        // token, so anything it returns (including tokens) must not be trusted. Such a redirect is
+        // declined and surfaces as `.redirectRefused`.
+        let reply = try await perform(request, followsRedirects: true, staysOnOrigin: true)
+        guard !reply.credentialsStripped else { throw APIError.invalidResponse }
         let data = reply.data
         switch reply.http.statusCode {
         case 200..<300:
@@ -214,12 +301,10 @@ public actor APIClient {
             }
             // Recorded before the flight's task finishes, so no request can miss both the
             // flight and its result.
-            completedRefreshes.append((from: tokens, to: refreshed))
-            if completedRefreshes.count > Self.completedRefreshLimit { completedRefreshes.removeFirst() }
+            refreshGeneration += 1
+            completedRefreshes.append(CompletedRefresh(from: tokens, to: refreshed, generation: refreshGeneration))
+            pruneCompletedRefreshes()
             return
-        case 401 where reply.credentialsStripped:
-            // The hop that answered never received the refresh token, so it can't have rejected it.
-            throw Self.error(status: 401, data: data)
         case 401:
             // The server only answers 401 for a bad refresh token; a 403 here comes from a proxy
             // or firewall and must not sign the user out.
@@ -287,8 +372,12 @@ public actor APIClient {
         let credentialsStripped: Bool
     }
 
-    private func perform(_ request: URLRequest, followsRedirects: Bool) async throws -> Reply {
-        let chain = followsRedirects ? RedirectChainDelegate() : nil
+    /// - Parameter staysOnOrigin: Declines any redirect that would leave the origin (and so be
+    ///   stripped of credentials) instead of following it without them.
+    private func perform(
+        _ request: URLRequest, followsRedirects: Bool, staysOnOrigin: Bool = false
+    ) async throws -> Reply {
+        let chain = followsRedirects ? RedirectChainDelegate(staysOnOrigin: staysOnOrigin) : nil
         let delegate: any URLSessionTaskDelegate = chain ?? RedirectSuppressingDelegate()
         let data: Data
         let response: URLResponse
