@@ -47,7 +47,7 @@ Check this on the first build: TestFlight must show the Xcode Cloud build number
 
 ## What to Test notes
 
-After an archive action, `ci_post_xcodebuild.sh` writes
+After an archive action for TestFlight, `ci_post_xcodebuild.sh` writes
 `TestFlight/WhatToTest.en-US.txt` at the repository root, next to the project. Xcode
 Cloud reads that file when it uploads the build and puts its text in TestFlight's "What
 to Test" field
@@ -56,23 +56,34 @@ to Test" field
 The notes contain:
 
 - a `Build <CI_BUILD_NUMBER> (<short commit>)` line;
-- the commits since the previous tag, or the last 20 commits if no tag is reachable.
-  Merge commits are skipped. Each commit is its subject line plus its body, without
+- the last 20 non-merge commits. Tags aren't used, because the repository still has
+  old upstream tags (`v0.9.x-beta`). Each commit is its subject line plus its body, without
   blank lines and without `Co-authored-by`, `Copilot-Session` and `Signed-off-by`
   trailers;
 - at most 4,000 bytes (TestFlight's limit is 4,000 characters). The text is cut at a
   line break.
 
-The script exits 0 and writes nothing when the action isn't an archive (no
-`CI_ARCHIVE_PATH`) or when `xcodebuild` failed (`CI_XCODEBUILD_EXIT_CODE` isn't 0). If
-the clone is shallow, it runs `git fetch --deepen=100`. If that fails, it uses whatever
-history is there. If `git log` fails, it prints a warning and the build goes on without
-notes. `TestFlight/` is in `.gitignore`; don't commit it.
+The notes are optional, so the script never fails the build. It prints
+`Skipping What to Test notes: <reason>`, writes nothing and exits 0 when:
+
+- `CI_APP_STORE_SIGNED_APP_PATH` isn't a directory. Apple's example uses this check:
+  the App Store-signed export only exists after a successful archive whose deployment
+  preparation targets TestFlight or the App Store;
+- `xcodebuild` failed (`CI_XCODEBUILD_EXIT_CODE` isn't 0);
+- `CI_PRIMARY_REPOSITORY_PATH` is empty or unset, or the script can't `cd` into it;
+- `git log` fails, or the notes can't be written. It writes `WhatToTest.en-US.txt.tmp`
+  first and moves it into place, and removes the temp file on failure.
+
+If the clone is shallow, it runs `git fetch --deepen=100`. Prompts are off
+(`GIT_TERMINAL_PROMPT=0`, SSH `BatchMode=yes`), and the connection gives up after a
+20-second SSH connect timeout or 30 seconds below 1,000 bytes/s over HTTP. If the fetch
+fails, it prints a warning and uses whatever history is there. `TestFlight/` is in
+`.gitignore`; don't commit it.
 
 Try the script locally (it writes into the given checkout):
 
 ```sh
-CI_ARCHIVE_PATH=/tmp/x.xcarchive CI_PRIMARY_REPOSITORY_PATH="$PWD" CI_BUILD_NUMBER=0 \
+CI_APP_STORE_SIGNED_APP_PATH=/tmp CI_PRIMARY_REPOSITORY_PATH="$PWD" CI_BUILD_NUMBER=0 \
   ci_scripts/ci_post_xcodebuild.sh && cat TestFlight/WhatToTest.en-US.txt && rm -r TestFlight
 ```
 
@@ -88,7 +99,8 @@ on the fallback:
    `xcodebuild -convert-project 'Xcode 16.0' -project Audiobookshelf.xcodeproj` in the
    Xcode Cloud checkout. That replaces `project.xcproj` with a classic `project.pbxproj`
    (objectVersion 110) before Xcode Cloud runs `xcodebuild`. The script fails if
-   `project.xcproj` is still there afterwards.
+   `project.xcproj` is still there afterwards, or if `project.pbxproj` is missing or
+   empty.
 3. Never commit a converted project. The repository keeps `project.xcproj`, and Xcode
    rejects a project that has both files.
 
@@ -165,7 +177,7 @@ the app › Xcode Cloud):
 | Signing fails with an App Group or keychain-group entitlement error | The App ID is missing the App Groups capability, or the group isn't assigned to it. Fix it in the developer portal (ADR 0002 checklist), then rebuild. |
 | macOS upload is rejected because the build number is too low | A build was uploaded outside Xcode Cloud. Raise Next Build Number in App Store Connect › Xcode Cloud › Settings › Build Number. |
 | TestFlight shows build `(1)` for every build | Xcode Cloud didn't apply its build number. Don't use `agvtool`. Add a CI-only text edit of `"CURRENT_PROJECT_VERSION": "1"` in `project.xcproj` to `ci_post_clone.sh` (in the checkout only, never committed), and record it here. |
-| "What to Test" is empty or old | Check the `ci_post_xcodebuild.sh` log for `Wrote …/WhatToTest.en-US.txt` or a warning. The script only runs its notes step for archive actions that succeeded. |
+| "What to Test" is empty or old | Check the `ci_post_xcodebuild.sh` log for `Wrote …/WhatToTest.en-US.txt` or a `Skipping What to Test notes: …` line, which gives the reason. Notes are only written after a successful archive for TestFlight. |
 | Package resolution fails | Xcode Cloud doesn't resolve packages automatically. Only the local `AudiobookshelfKit` package is used today. If a remote package is added, commit `Audiobookshelf.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`. |
 
 ## References
@@ -176,8 +188,9 @@ the app › Xcode Cloud):
 - [Environment variable reference](https://developer.apple.com/documentation/xcode/environment-variable-reference):
   `CI_PRIMARY_REPOSITORY_PATH` (the clone, for example `/Volumes/workspace/repository`),
   `CI_WORKSPACE_PATH` (for example `/Volumes/workspace`), `CI_BUILD_NUMBER`,
-  `CI_XCODEBUILD_ACTION`, `CI_XCODEBUILD_EXIT_CODE`, and `CI_ARCHIVE_PATH`, which is
-  set only for archive actions.
+  `CI_XCODEBUILD_ACTION`, `CI_XCODEBUILD_EXIT_CODE`, `CI_ARCHIVE_PATH` (archive actions
+  only) and `CI_APP_STORE_SIGNED_APP_PATH` (the export signed for TestFlight and the App
+  Store).
 - [Setting the next build number for Xcode Cloud builds](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
 - [Including notes for testers with a beta release of your app](https://developer.apple.com/documentation/xcode/including-notes-for-testers-with-a-beta-release-of-your-app)
 - [Xcode Cloud workflow reference](https://developer.apple.com/documentation/xcode/xcode-cloud-workflow-reference)

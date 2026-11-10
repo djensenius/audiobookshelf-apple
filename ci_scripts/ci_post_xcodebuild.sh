@@ -1,16 +1,26 @@
 #!/bin/sh
-# Xcode Cloud post-xcodebuild script. For archive actions, writes the TestFlight
+# Xcode Cloud post-xcodebuild script. After an archive for TestFlight, writes the
 # "What to Test" notes (TestFlight/WhatToTest.en-US.txt next to the project) from
-# recent commit messages. See docs/release.md.
+# recent commit messages. See docs/release.md. The notes are optional, so this
+# script never fails the build.
 set -eu
 
-# Xcode Cloud runs this after every action, even a failed one. Only archive
-# actions set CI_ARCHIVE_PATH; do nothing for the others.
-if [ -z "${CI_ARCHIVE_PATH:-}" ] || [ -z "${CI_PRIMARY_REPOSITORY_PATH:-}" ]; then
+skip() {
+  echo "Skipping What to Test notes: $1"
   exit 0
+}
+
+# Xcode Cloud runs this after every action, even a failed one. Gate on the
+# App Store-signed export, as Apple's example does: it exists only after a
+# successful archive whose distribution preparation targets TestFlight.
+if [ -z "${CI_APP_STORE_SIGNED_APP_PATH:-}" ] || [ ! -d "$CI_APP_STORE_SIGNED_APP_PATH" ]; then
+  skip "no TestFlight archive (CI_APP_STORE_SIGNED_APP_PATH is not a directory)"
 fi
 if [ "${CI_XCODEBUILD_EXIT_CODE:-0}" != "0" ]; then
-  exit 0
+  skip "xcodebuild failed (exit code $CI_XCODEBUILD_EXIT_CODE)"
+fi
+if [ -z "${CI_PRIMARY_REPOSITORY_PATH:-}" ]; then
+  skip "CI_PRIMARY_REPOSITORY_PATH is empty or unset"
 fi
 
 MAX_COMMITS=20
@@ -19,30 +29,27 @@ MAX_COMMITS=20
 MAX_CHARS=4000
 export LC_ALL=C
 
-cd "$CI_PRIMARY_REPOSITORY_PATH"
+cd "$CI_PRIMARY_REPOSITORY_PATH" || skip "cannot cd to $CI_PRIMARY_REPOSITORY_PATH"
 notes_dir="$CI_PRIMARY_REPOSITORY_PATH/TestFlight"
 notes_file="$notes_dir/WhatToTest.en-US.txt"
+tmp_file="$notes_file.tmp"
 
-# The clone may be shallow. Deepen it so the log (and the previous tag, if any) is
-# available; carry on with whatever history exists if that fails.
+# The clone may be shallow. Deepen it so the last MAX_COMMITS commits are
+# available, without prompting or hanging; carry on with whatever history exists
+# if that fails.
 if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" = "true" ]; then
-  git fetch --quiet --deepen=100 2>/dev/null || echo "warning: could not deepen the clone" >&2
-fi
-
-# Commits since the previous tag, or the last MAX_COMMITS if no tag is reachable.
-range=HEAD
-if previous_tag="$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null)"; then
-  range="$previous_tag..HEAD"
+  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND='ssh -o BatchMode=yes -o ConnectTimeout=20' \
+    git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 fetch --quiet --deepen=100 2>/dev/null ||
+    echo "warning: could not deepen the clone" >&2
 fi
 
 # Each commit starts with a \037 marker so subjects can be told apart from bodies.
-if ! log="$(git log --no-merges --max-count="$MAX_COMMITS" --format='%x1f%s%n%b' "$range")"; then
-  echo "warning: git log failed; not writing TestFlight notes" >&2
-  exit 0
+if ! log="$(git log --no-merges --max-count="$MAX_COMMITS" --format='%x1f%s%n%b' HEAD)"; then
+  skip "git log failed"
 fi
 
-mkdir -p "$notes_dir"
-{
+mkdir -p "$notes_dir" || skip "cannot create $notes_dir"
+if ! {
   printf 'Build %s (%s)\n' "${CI_BUILD_NUMBER:-?}" "$(git rev-parse --short HEAD)"
   printf '%s\n' "$log" | awk '
     /^[ \t]*$/ { next }
@@ -52,6 +59,13 @@ mkdir -p "$notes_dir"
   '
 } | awk -v max="$MAX_CHARS" '
   { total += length($0) + 1; if (total > max) exit; print }
-' >"$notes_file"
+' >"$tmp_file"; then
+  rm -f "$tmp_file"
+  skip "cannot write $tmp_file"
+fi
+if ! mv -f "$tmp_file" "$notes_file"; then
+  rm -f "$tmp_file"
+  skip "cannot move the notes to $notes_file"
+fi
 
 echo "Wrote $notes_file ($(wc -c <"$notes_file" | tr -d ' ') bytes)"

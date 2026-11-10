@@ -25,4 +25,8 @@ if [ "${ABS_CONVERT_PROJECT:-0}" = "1" ]; then
     echo "error: project.xcproj still exists after conversion" >&2
     exit 1
   fi
+  if [ ! -s "$repo_root/Audiobookshelf.xcodeproj/project.pbxproj" ]; then
+    echo "error: project.pbxproj is missing or empty after conversion" >&2
+    exit 1
+  fi
 fi
