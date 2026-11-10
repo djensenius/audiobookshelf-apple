@@ -4,15 +4,22 @@ import Synchronization
 
 /// What a finished task produced.
 enum DownloadTaskResult: Sendable {
-    /// The file was moved to the part's destination.
+    /// The file was moved to the part's destination; `bytes` is its size.
     case moved(bytes: Int64)
-    /// The server answered with a non-2xx status; the body was discarded.
+    /// The server answered with a status other than 200 or 206; the body was discarded.
     case httpStatus(Int)
+    /// A 401 after a redirect: `URLSession` doesn't forward `Authorization` to the new URL, so
+    /// a refresh can't help.
+    case redirectedUnauthorized
     /// The response came from another origin than the request (a redirect left the server);
     /// the body was discarded.
     case offOrigin
+    /// The body was an HTML page (a proxy or captive portal), not the file.
+    case unexpectedContent(String)
+    /// The body's size isn't the part's expected size.
+    case sizeMismatch(expected: Int64, actual: Int64)
     /// The body couldn't be moved to the destination.
-    case moveFailed(String)
+    case moveFailed(String, isOutOfSpace: Bool)
     /// The transfer failed or was cancelled.
     case failed(DownloadTransferFailure)
 }
@@ -21,14 +28,37 @@ struct DownloadTransferFailure: Sendable {
     var message: String
     /// `NSURLSessionDownloadTaskResumeData`, in the clear: seal it before storing it.
     var resumeData: Data?
-    /// The user force-quit the app, which cancels its background transfers.
-    var isForceQuit: Bool
+    /// The system cancelled the transfer for a reason outside it: the user force-quit the
+    /// app, background updates are off, or the system was short of resources.
+    var isBackgroundCancellation: Bool
+    /// The session lost `nsurlsessiond`, or another process holds it: it must be recreated.
+    var isSessionLost: Bool
+    var isOutOfSpace: Bool
 
     init(_ error: any Error) {
         let urlError = error as? URLError
         message = error.localizedDescription
         resumeData = urlError?.downloadTaskResumeData
-        isForceQuit = urlError?.backgroundTaskCancelledReason == .userForceQuitApplication
+        isBackgroundCancellation = urlError?.backgroundTaskCancelledReason != nil
+        isSessionLost =
+            urlError?.code == .backgroundSessionWasDisconnected
+            || urlError?.code == .backgroundSessionInUseByAnotherProcess
+        isOutOfSpace = Self.isOutOfSpace(error)
+    }
+
+    /// Whether `error`, or an error it wraps, is `NSFileWriteOutOfSpaceError` or `ENOSPC`.
+    static func isOutOfSpace(_ error: any Error) -> Bool {
+        var next: NSError? = error as NSError
+        for _ in 0..<8 {
+            guard let error = next else { return false }
+            if (error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError)
+                || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOSPC))
+            {
+                return true
+            }
+            next = error.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return false
     }
 }
 
@@ -37,9 +67,13 @@ enum DownloadSessionEvent: Sendable {
     case completed(URLSessionTask, DownloadTaskResult)
     /// `urlSessionDidFinishEvents(forBackgroundURLSession:)`.
     case backgroundEventsFinished
-    /// Posted by the engine after reattaching to the session's tasks at launch; it follows
-    /// the events the session had already delivered.
-    case reattached(candidates: [UUID])
+    /// `urlSession(_:didBecomeInvalidWithError:)`: the session must be created again.
+    case sessionInvalidated
+    /// Posted by the engine to restart queued parts once the events delivered before it
+    /// are handled.
+    case restartQueued
+    /// Posted by tests: resumed once every earlier event is handled.
+    case barrier(CheckedContinuation<Void, Never>)
 }
 
 extension URLSessionTask {
@@ -51,11 +85,17 @@ extension URLSessionTask {
 
 /// The background session's delegate. It handles each finished file synchronously (the
 /// system deletes it when the callback returns) and forwards everything else, in order, to
-/// the engine through ``events``.
+/// the engine through ``events``. It outlives sessions: a recreated session gets the same one.
 final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
+    /// Where a part's file goes, and its size when known.
+    struct Target: Sendable {
+        var destination: URL
+        var expectedBytes: Int64
+    }
+
     let events: AsyncStream<DownloadSessionEvent>
     private let continuation: AsyncStream<DownloadSessionEvent>.Continuation
-    private let destinations = Mutex<[UUID: URL]>([:])
+    private let targets = Mutex<[UUID: Target]>([:])
     private let finished = Mutex<[Int: DownloadTaskResult]>([:])
 
     override init() {
@@ -64,30 +104,37 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
     }
 
     /// Where a finished file for `partID` goes; set before its task can finish.
-    func setDestination(_ destination: URL?, for partID: UUID) {
-        destinations.withLock { $0[partID] = destination }
+    func setTarget(_ target: Target?, for partID: UUID) {
+        targets.withLock { $0[partID] = target }
     }
 
     func post(_ event: DownloadSessionEvent) {
         continuation.yield(event)
     }
 
-    /// Checks the response, then moves the file. A non-2xx body or one from another origin
-    /// is never moved into the media location.
+    /// Checks the response, then moves the file. A body that isn't the file (another origin,
+    /// an error status, an HTML page, the wrong size) never reaches the media location.
     func finish(_ task: URLSessionTask, location: URL) -> DownloadTaskResult {
-        let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200..<300).contains(status) else { return .httpStatus(status) }
-        guard let origin = task.originalRequest?.url, let final = task.response?.url,
-            DownloadRequests.isSameOrigin(origin, final)
+        guard let response = task.response as? HTTPURLResponse else { return .httpStatus(0) }
+        guard let requested = task.originalRequest?.url, let answered = response.url,
+            DownloadRequests.isSameOrigin(requested, answered)
         else { return .offOrigin }
-        guard let partID = task.partID, let destination = destinations.withLock({ $0[partID] }) else {
-            return .moveFailed("The download has no destination.")
+        if response.statusCode == 401, answered != requested { return .redirectedUnauthorized }
+        guard response.statusCode == 200 || response.statusCode == 206 else { return .httpStatus(response.statusCode) }
+        if let type = response.mimeType?.lowercased(), type == "text/html" { return .unexpectedContent(type) }
+        guard let partID = task.partID, let target = targets.withLock({ $0[partID] }) else {
+            return .moveFailed("The download has no destination.", isOutOfSpace: false)
+        }
+        let size = DownloadLocations.fileSize(at: location) ?? task.countOfBytesReceived
+        if target.expectedBytes > 0, size != target.expectedBytes {
+            return .sizeMismatch(expected: target.expectedBytes, actual: size)
         }
         do {
-            return .moved(bytes: try DownloadLocations.moveFile(at: location, to: destination))
+            try DownloadLocations.moveFile(at: location, to: target.destination)
         } catch {
-            return .moveFailed(error.localizedDescription)
+            return .moveFailed(error.localizedDescription, isOutOfSpace: DownloadTransferFailure.isOutOfSpace(error))
         }
+        return .moved(bytes: DownloadLocations.fileSize(at: target.destination) ?? task.countOfBytesReceived)
     }
 
     func urlSession(
@@ -112,8 +159,15 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
             continuation.yield(.completed(task, result))
         } else if let error {
             continuation.yield(.completed(task, .failed(DownloadTransferFailure(error))))
+        } else if let result {
+            continuation.yield(.completed(task, result))
         } else {
-            continuation.yield(.completed(task, result ?? .failed(DownloadTransferFailure(URLError(.unknown)))))
+            // No file and no error: an empty error response, or a body the system dropped.
+            let status = (task.response as? HTTPURLResponse)?.statusCode ?? 0
+            let failed = status == 200 || status == 206
+            continuation.yield(
+                .completed(
+                    task, failed ? .failed(DownloadTransferFailure(URLError(.zeroByteResource))) : .httpStatus(status)))
         }
     }
 
@@ -128,5 +182,10 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         continuation.yield(.backgroundEventsFinished)
+    }
+
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
+        finished.withLock { $0.removeAll() }
+        continuation.yield(.sessionInvalidated)
     }
 }

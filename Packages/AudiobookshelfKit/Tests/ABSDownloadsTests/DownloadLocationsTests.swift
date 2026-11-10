@@ -1,0 +1,52 @@
+import Foundation
+import Testing
+
+@testable import ABSDownloads
+
+@Suite struct DownloadLocationsTests {
+    private let root = FileManager.default.temporaryDirectory.appending(path: "locations-\(UUID().uuidString)")
+
+    @Test func resolvesRelativePathsUnderDownloadsRoot() throws {
+        let locations = DownloadLocations(root: root)
+        let url = try locations.fileURL(forRelativePath: "li_1/Chapter 1.mp3")
+        #expect(url == root.appending(path: "Downloads/li_1/Chapter 1.mp3"))
+        #expect(locations.resumeDataRoot.path(percentEncoded: false).hasSuffix("/ResumeData/"))
+    }
+
+    @Test(arguments: [
+        "", "/etc/passwd", "../outside.mp3", "li_1/../../outside.mp3", "./li_1/1.mp3", "li_1//1.mp3", "li_1/",
+    ])
+    func rejectsPathsThatCouldLeaveTheRoot(path: String) {
+        #expect(throws: DownloadLocations.PathError.invalidRelativePath(path)) {
+            try DownloadLocations(root: root).fileURL(forRelativePath: path)
+        }
+    }
+
+    @Test func moveReplacesExistingFile() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        let destination = try DownloadLocations(root: root).fileURL(forRelativePath: "li_1/1.mp3")
+        let first = root.appending(path: "first.tmp")
+        let second = root.appending(path: "second.tmp")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("old".utf8).write(to: first)
+        try Data("newer".utf8).write(to: second)
+
+        try DownloadLocations.moveFile(at: first, to: destination)
+        try DownloadLocations.moveFile(at: second, to: destination)
+
+        #expect(try Data(contentsOf: destination) == Data("newer".utf8))
+        #expect(DownloadLocations.fileSize(at: destination) == 5)
+        #expect(!FileManager.default.fileExists(atPath: second.path(percentEncoded: false)))
+        #expect(DownloadLocations.fileSize(at: root.appending(path: "missing")) == nil)
+    }
+
+    @Test func recognisesOutOfSpaceErrors() {
+        let posix = NSError(domain: NSPOSIXErrorDomain, code: Int(ENOSPC))
+        let wrapped = NSError(
+            domain: NSCocoaErrorDomain, code: NSFileWriteUnknownError, userInfo: [NSUnderlyingErrorKey: posix])
+        #expect(DownloadTransferFailure.isOutOfSpace(CocoaError(.fileWriteOutOfSpace)))
+        #expect(DownloadTransferFailure.isOutOfSpace(wrapped))
+        #expect(!DownloadTransferFailure.isOutOfSpace(CocoaError(.fileWriteNoPermission)))
+        #expect(!DownloadTransferFailure.isOutOfSpace(URLError(.networkConnectionLost)))
+    }
+}

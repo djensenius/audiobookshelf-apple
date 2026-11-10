@@ -7,9 +7,10 @@ session with a stub `URLProtocol`, because background sessions don't support cus
 protocols. Run these checks on a real device (and once on the Simulator) before a
 release that changes downloads, the session identifier, or the app's scene setup.
 
-These checks need the app to create a `DownloadEngine` at launch (the composition
-root, P4-02). Until then `DownloadEngine.handleBackgroundEvents()` returns at once and
-the events wait in `nsurlsessiond`.
+These checks need the app to create a `DownloadEngine` at launch and call `activate()`
+each time it comes to the foreground (the composition root, P4-02). Until an engine
+exists, the static `DownloadEngine.handleBackgroundEvents()` waits up to 10 seconds for
+one, then returns; the events stay in `nsurlsessiond` for the next session.
 
 ## Before you start
 
@@ -46,9 +47,14 @@ the background when it finishes.
    the transfer finishes.
 5. When it finishes, iOS relaunches the app in the background (`sessionSendsLaunchEvents`)
    and runs the `.backgroundTask(.urlSession(...))` handler. The engine recreates the
-   session, moves the file, updates the store, and only then lets the handler return.
+   session, checks the response (200 or 206, not `text/html`, the expected size), moves
+   the file, records its size, and only then lets the handler return. A background wake
+   doesn't restart other queued parts; that waits for `activate()` in the foreground.
 6. Open the app. Check that:
-   - the part shows as completed and nothing restarts;
+   - the item shows as downloaded and nothing restarts. Once every part of a download
+     has completed, the engine turns it into a local item and deletes the download
+     record. If the app stopped between those two steps, the next launch finishes the
+     job;
    - the file is at `Library/Application Support/Downloads/<relative path>` in the app
      container (**Window > Devices and Simulators > Download Container**, or
      `xcrun simctl get_app_container booted org.davidjensenius.Audiobookshelf data` on
@@ -69,17 +75,26 @@ app. The app must recover the next time it opens.
 3. In Console.app, `nsurlsessiond` cancels the task.
 4. Open the app from the Home Screen. Check that:
    - the cancelled task reports `NSURLErrorBackgroundTaskCancelledReasonKey` with the
-     user force quit reason, and the engine queues the part again straight away. A
-     force quit doesn't count as a failure and doesn't wait for a retry delay;
+     user force quit reason, and the engine queues the part again and restarts it when
+     `activate()` runs. A force quit doesn't count as a failure and doesn't wait for a
+     retry delay;
    - if the server supports range requests, the transfer continues from the resume
      data rather than from 0% (watch the first progress value). Resume data is stored
      encrypted in `ResumeData/` and deleted as soon as the new task starts;
    - if there was no resume data, the part starts again from 0%;
    - the part completes and its file is in `Downloads/` as in (a).
 
-Repeat (b) after signing out and back in, or after changing the server's custom headers.
-The old resume data was made with the old credentials, so the engine must throw it away
-and start the part from 0%.
+Repeat (b) after signing out and back in, after changing the server's custom headers, or
+after changing the cellular or Low Data Mode download settings. The old resume data was
+made with other credentials or network settings, so the engine must throw it away and
+start the part from 0%. The engine always gets current credentials (refreshing the token
+if needed) before it resumes a part, so a refreshed token also means a fresh start.
+
+The system can also cancel transfers because Background App Refresh is off
+(`backgroundUpdatesDisabled`) or the device is short of resources
+(`insufficientSystemResources`). The engine handles them like a force quit. To check the
+first, turn off **Settings > General > Background App Refresh** for the app, start a
+download, and go to the Home Screen. When you open the app again, the part continues.
 
 ## macOS
 
@@ -92,16 +107,39 @@ background. The app doesn't rely on being relaunched in the background on macOS.
    result when it recreates the session at launch) or continues from resume data or
    from 0%. It must never stay stuck as "downloading" with no task.
 
-Builds without the App Group entitlement (the ad-hoc macOS build) create the session
-without `sharedContainerIdentifier`. Downloads still land in the app's own Application
-Support folder.
+The session doesn't set `sharedContainerIdentifier`: nothing outside the app reads the
+downloads, and they land in the app's own Application Support folder on every platform.
+
+The ad hoc macOS build has no Keychain access group, so the Keychain refuses the
+resume-data key with `errSecMissingEntitlement` (-34018). The engine logs this once per
+process as a fault (`downloads` category) and doesn't keep resume data, so an interrupted
+part starts again from 0%. Downloads still work. A signed build keeps resume data as on
+iOS.
+
+## Failures
+
+- The engine only accepts a 200 or 206 response. Another status, a `text/html` body, or
+  a file whose size differs from the expected length never reaches `Downloads/`.
+- A 401 triggers one token refresh and one new task for the part. A second 401 in a row
+  fails the part. The count starts over once the part gets a successful response, and a
+  401 for a token that was already replaced doesn't count.
+- 408, 429, 5xx, network errors, an unexpected body or a size mismatch are retried after
+  1–2, 2–4, 4–8, 8–16 and 16–32 seconds. If it fails after the fifth retry, the part
+  fails.
+- A full disk, any other status (such as 404 or 204), or a response from another origin
+  fails the part at once.
+- When a part fails for good, the engine stops the download's other parts, keeps their
+  resume data, and marks the download failed. Starting it again continues those parts.
+- If `nsurlsessiond` loses the session (`backgroundSessionWasDisconnected`,
+  `backgroundSessionInUseByAnotherProcess`, or the session becomes invalid), the engine
+  creates it again and restarts the affected parts without counting a failure.
 
 ## Known limits
 
-- Background sessions follow redirects without asking the app, so the request headers,
-  including the server's custom headers, may reach the redirect target. If the final
-  response comes from a different origin, the engine fails the part for good and never
-  moves the body into `Downloads/`. If a server you support redirects downloads
-  to another host, test with it.
-- A 401 response triggers one token refresh and one new task. A second 401 fails the
-  part.
+- Background sessions follow redirects without asking the app. `URLSession` drops
+  `Authorization` on a redirect, so the bearer token never reaches the target, but the
+  server's custom headers may. If the final response comes from a different origin, the
+  engine fails the part for good and never moves the body into `Downloads/`. A 401 after
+  a redirect fails the part as "redirected, credentials not forwarded" without a token
+  refresh. If a server you support redirects downloads to another host, test with it. A
+  follow-up issue tracks a foreground redirect check before the background task starts.

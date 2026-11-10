@@ -5,8 +5,9 @@ import Testing
 
 @testable import ABSDownloads
 
+/// Transfers: completion, response checks, retries, 401 recovery and resume data.
 @Suite(.timeLimit(.minutes(1))) struct DownloadEngineTests {
-    @Test func movesFinishedFileToContainerRelativeDestination() async throws {
+    @Test func movesFinishedFileAndFinalisesRecord() async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let partID = UUID()
         let record = try await harness.addRecord(parts: [partID])
@@ -14,35 +15,41 @@ import Testing
 
         await engine.start(partIDs: [partID])
 
-        #expect(await engine.nextRecordComplete() == .recordComplete(recordID: record.id))
+        let update = try #require(await engine.nextRecordComplete())
+        guard case .recordComplete(record.id, let itemID) = update else {
+            Issue.record("Unexpected \(update)")
+            return
+        }
         #expect(try Data(contentsOf: harness.fileURL("li_1/1.mp3")) == Data("audio-bytes".utf8))
-        let part = try #require(try await harness.store.part(id: partID))
-        #expect(part.state == .completed)
-        #expect(part.destinationRelativePath == "li_1/1.mp3")
-        #expect(part.bytesWritten == 11)
-        #expect(part.taskIdentifier == nil)
-        #expect(try await harness.store.record(id: record.id)?.state == .downloading)
+        let item = try #require(try await harness.localItems.item(id: itemID))
+        #expect(item.files.map(\.relativePath) == ["li_1/1.mp3"])
+        #expect(item.files.map(\.size) == [11])
+        #expect(try await harness.store.record(id: record.id) == nil)
         let request = try #require(harness.requests.first)
         #expect(harness.requests.count == 1)
-        #expect(request.url?.absoluteString == "https://\(harness.host)/abs/api/items/li_1/file/1/download")
-        #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer token-1")
+        #expect(request.url?.absoluteString == "\(harness.base)/api/items/li_1/file/1/download")
+        #expect(request.authorization == "Bearer token-1")
         #expect(request.value(forHTTPHeaderField: "X-Proxy") == "proxy-secret")
         #expect(harness.credentials.calls == [nil])
+        let progress = await engine.progress.first { _ in true }
+        #expect(progress == DownloadProgress(partID: partID, recordID: record.id, bytesWritten: 11, expectedBytes: 11))
     }
 
-    @Test func errorStatusNeverReachesMediaLocation() async throws {
-        let harness = try await DownloadHarness { _ in .status(404, body: Data("Not Found".utf8)) }
+    @Test(arguments: [404, 204])
+    func errorStatusFailsWithoutTouchingMediaLocation(status: Int) async throws {
+        let harness = try await DownloadHarness { _ in .status(status, body: Data("Nope".utf8)) }
         let partID = UUID()
         let record = try await harness.addRecord(parts: [partID])
         let engine = harness.makeEngine()
 
         await engine.start(partIDs: [partID])
 
-        let message = "The server returned HTTP 404."
+        let message = "The server returned HTTP \(status)."
         #expect(
             await engine.nextPermanentFailure()
-                == .partFailed(partID: partID, recordID: record.id, message: message, willRetry: false))
-        #expect(!FileManager.default.fileExists(atPath: harness.fileURL("li_1/1.mp3").path(percentEncoded: false)))
+                == .partFailed(
+                    partID: partID, recordID: record.id, code: .httpStatus, message: message, willRetry: false))
+        #expect(!harness.fileExists("li_1/1.mp3"))
         let part = try #require(try await harness.store.part(id: partID))
         #expect(part.state == .failed)
         #expect(part.lastError == message)
@@ -50,7 +57,23 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
-    @Test func retriesServerErrorsWithBackoff() async throws {
+    @Test(arguments: [408, 429, 500, 503])
+    func retriesTransientStatus(status: Int) async throws {
+        let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(status) : .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        #expect(await engine.nextFailure(willRetry: true) != nil)
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.clock.sleeps == [.milliseconds(1500)])
+        #expect(harness.requests.count == 2)
+        #expect(harness.fileExists("li_1/1.mp3"))
+    }
+
+    @Test func retriesWithBackoff() async throws {
         let harness = try await DownloadHarness { $0.stubCount <= 2 ? .status(503) : .status(200) }
         let partID = UUID()
         try await harness.addRecord(parts: [partID])
@@ -63,14 +86,88 @@ import Testing
         #expect(harness.clock.sleeps == [.milliseconds(1500), .seconds(3)])
         #expect(harness.requests.count == 3)
         #expect(harness.credentials.calls == [nil, nil, nil])
-        #expect(try await harness.store.part(id: partID)?.retryCount == 2)
-        #expect(FileManager.default.fileExists(atPath: harness.fileURL("li_1/1.mp3").path(percentEncoded: false)))
+    }
+
+    @Test func htmlBodyIsRetried() async throws {
+        let harness = try await DownloadHarness {
+            $0.stubCount == 1 ? .status(200, body: Data("<html>".utf8), contentType: "text/html") : .status(200)
+        }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        #expect(
+            await engine.nextFailure(willRetry: true)
+                == .partFailed(
+                    partID: partID, recordID: record.id, code: .unexpectedContent,
+                    message: "The server sent text/html instead of the file.", willRetry: true))
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(try Data(contentsOf: harness.fileURL("li_1/1.mp3")) == Data("audio-bytes".utf8))
+    }
+
+    @Test func sizeMismatchIsRetried() async throws {
+        let harness = try await DownloadHarness {
+            $0.stubCount == 1 ? .status(200, body: Data("short".utf8)) : .status(200)
+        }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        #expect(
+            await engine.nextFailure(willRetry: true)
+                == .partFailed(
+                    partID: partID, recordID: record.id, code: .sizeMismatch,
+                    message: "The file has 5 bytes instead of 11.", willRetry: true))
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(try Data(contentsOf: harness.fileURL("li_1/1.mp3")) == Data("audio-bytes".utf8))
+    }
+
+    @Test(arguments: [200, 401])
+    func offOriginResponseFailsWithoutRefresh(status: Int) async throws {
+        let harness = try await DownloadHarness { _ in
+            .status(status, from: URL(string: "https://cdn.other.test/file.mp3")!)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        let update = try #require(await engine.nextPermanentFailure())
+        guard case .partFailed(_, _, .offOrigin, _, false) = update else {
+            Issue.record("Unexpected \(update)")
+            return
+        }
+        #expect(harness.credentials.calls == [nil])
+        #expect(harness.requests.count == 1)
+        #expect(!harness.fileExists("li_1/1.mp3"))
+    }
+
+    @Test func redirectedUnauthorizedFailsWithoutRefresh() async throws {
+        let harness = try await DownloadHarness { request in
+            .status(401, from: URL(string: "https://\(request.url!.host()!)/abs/elsewhere")!)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        let update = try #require(await engine.nextPermanentFailure())
+        guard case .partFailed(_, _, .redirectedUnauthorized, _, false) = update else {
+            Issue.record("Unexpected \(update)")
+            return
+        }
+        #expect(harness.credentials.calls == [nil])
+        #expect(harness.requests.count == 1)
     }
 
     @Test func recreatesTaskOnceAfterUnauthorized() async throws {
-        let harness = try await DownloadHarness {
-            $0.value(forHTTPHeaderField: "Authorization") == "Bearer token-1" ? .status(401) : .status(200)
-        }
+        let harness = try await DownloadHarness { $0.authorization == "Bearer token-1" ? .status(401) : .status(200) }
         let partID = UUID()
         try await harness.addRecord(parts: [partID])
         let engine = harness.makeEngine()
@@ -79,12 +176,8 @@ import Testing
 
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.credentials.calls == [nil, "token-1"])
-        #expect(
-            harness.requests.map { $0.value(forHTTPHeaderField: "Authorization") } == [
-                "Bearer token-1", "Bearer token-2",
-            ])
+        #expect(harness.requests.map(\.authorization) == ["Bearer token-1", "Bearer token-2"])
         #expect(harness.clock.sleeps.isEmpty)
-        #expect(try Data(contentsOf: harness.fileURL("li_1/1.mp3")) == Data("audio-bytes".utf8))
     }
 
     @Test func failsAfterSecondUnauthorized() async throws {
@@ -95,18 +188,71 @@ import Testing
 
         await engine.start(partIDs: [partID])
 
-        #expect(await engine.nextPermanentFailure() != nil)
+        let update = try #require(await engine.nextPermanentFailure())
+        guard case .partFailed(_, _, .unauthorized, _, false) = update else {
+            Issue.record("Unexpected \(update)")
+            return
+        }
         #expect(harness.requests.count == 2)
         #expect(harness.credentials.calls == [nil, "token-1"])
-        #expect(!FileManager.default.fileExists(atPath: harness.fileURL("li_1/1.mp3").path(percentEncoded: false)))
+        #expect(!harness.fileExists("li_1/1.mp3"))
+    }
+
+    @Test func recoversFromSeparateUnauthorizedResponses() async throws {
+        // 401, then a transfer that starts and drops, then a 401 for the refreshed token.
+        let harness = try await DownloadHarness {
+            switch $0.stubCount {
+            case 1, 3: .status(401)
+            case 2: .failure(partialBody: Data("audio".utf8))
+            default: .status(200)
+            }
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.credentials.calls == [nil, "token-1", nil, "token-2"])
+        #expect(
+            harness.requests.map(\.authorization) == [
+                "Bearer token-1", "Bearer token-2", "Bearer token-2", "Bearer token-3",
+            ])
+    }
+
+    @Test func unauthorizedForReplacedTokenDoesNotCount() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness {
+            switch $0.stubCount {
+            case 1: .status(401, gate: gate)
+            case 2: .status(401)
+            default: .status(200)
+            }
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        harness.credentials.rotate()
+        gate.open()
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.credentials.calls == [nil, "token-1", "token-2"])
+        #expect(harness.requests.map(\.authorization) == ["Bearer token-1", "Bearer token-2", "Bearer token-3"])
     }
 
     private static let resumeData = Data("resume: Bearer token-1, X-Proxy: proxy-secret".utf8)
 
-    /// Fails the part's first transfer with resume data and no retries left.
-    private func failWithResumeData() async throws -> (DownloadHarness, DownloadEngine, UUID) {
+    /// Fails the part's first transfer with resume data and no retries left; later requests
+    /// get `then`.
+    private func failWithResumeData(
+        then: @escaping @Sendable (URLRequest) -> StubReply = { _ in .status(200) }
+    ) async throws -> (DownloadHarness, DownloadEngine, UUID) {
         let harness = try await DownloadHarness {
-            $0.stubCount == 1 ? .failure(resumeData: Self.resumeData) : .status(200)
+            $0.stubCount == 1 ? .failure(resumeData: Self.resumeData) : then($0)
         }
         let partID = UUID()
         try await harness.addRecord(parts: [partID])
@@ -128,9 +274,9 @@ import Testing
 
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.session?.resumedData == [Self.resumeData])
-        #expect(harness.credentials.calls == [nil])
+        // Credentials are refreshed (or checked) before resuming too.
+        #expect(harness.credentials.calls == [nil, nil])
         #expect(!FileManager.default.fileExists(atPath: blobURL.path(percentEncoded: false)))
-        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
     }
 
     @Test func credentialChangeDiscardsResumeData() async throws {
@@ -141,45 +287,19 @@ import Testing
 
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.session?.resumedData == [])
-        #expect(harness.requests.last?.value(forHTTPHeaderField: "Authorization") == "Bearer token-2")
+        #expect(harness.requests.last?.authorization == "Bearer token-2")
         #expect(
             !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
     }
 
-    @Test func reattachesToSurvivingTasksAndRestartsOrphans() async throws {
-        let harness = try await DownloadHarness { request in
-            switch request.value(forHTTPHeaderField: "Authorization") {
-            case "Bearer previous": .status(200, delay: 0.5)
-            case nil: .status(200, delay: 30)
-            default: .status(200)
-            }
-        }
-        let running = UUID()
-        let orphan = UUID()
-        let record = try await harness.addRecord(parts: [running, orphan], state: .downloading, partState: .running)
-        let base = "https://\(harness.host)/abs"
-        // What a previous launch left in the session: the running part's transfer and one the
-        // engine doesn't know.
-        let engine = harness.makeEngine { stub in
-            var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
-            request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
-            stub.leaveTask(request, description: running.uuidString)
-            stub.leaveTask(URLRequest(url: URL(string: base + "/unknown")!), description: "not a part")
-        }
+    @Test func unauthorizedResumedTaskStartsFresh() async throws {
+        let (harness, engine, partID) = try await failWithResumeData { $0.stubCount == 2 ? .status(401) : .status(200) }
 
-        await engine.activate()
+        await engine.start(partIDs: [partID])
 
-        #expect(await engine.nextRecordComplete() == .recordComplete(recordID: record.id))
-        let downloads = harness.requests.filter { $0.url?.path().hasSuffix("/download") == true }
-        let authorization = Dictionary(
-            uniqueKeysWithValues: downloads.map { ($0.url?.path(), $0.value(forHTTPHeaderField: "Authorization")) })
-        #expect(downloads.count == 2)
-        #expect(authorization["/abs/api/items/li_1/file/1/download"] == "Bearer previous")
-        #expect(authorization["/abs/api/items/li_1/file/2/download"] == "Bearer token-1")
-        #expect(harness.credentials.calls == [nil])
-        let unknown = try #require(harness.session?.leftovers.withLock { $0.last })
-        #expect(unknown.state != .running)
-        #expect(FileManager.default.fileExists(atPath: harness.fileURL("li_1/1.mp3").path(percentEncoded: false)))
-        #expect(FileManager.default.fileExists(atPath: harness.fileURL("li_1/2.mp3").path(percentEncoded: false)))
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.session?.resumedData == [Self.resumeData])
+        #expect(harness.credentials.calls == [nil, nil, "token-1"])
+        #expect(harness.requests.map(\.authorization) == ["Bearer token-1", "Bearer token-1", "Bearer token-2"])
     }
 }

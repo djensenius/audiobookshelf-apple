@@ -1,5 +1,5 @@
+import ABSCore
 import Foundation
-import OSLog
 
 /// Where downloads and sealed resume data live: the app's private container, never the App
 /// Group (ADR 0003). Stored paths are relative to ``downloadsRoot``, so they survive the
@@ -34,15 +34,13 @@ public struct DownloadLocations: Sendable {
         return downloadsRoot.appending(path: path, directoryHint: .notDirectory)
     }
 
-    private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "downloads")
-
-    /// Moves a finished download to `destination`, replacing any file there, and returns its
-    /// size. Synchronous: the system deletes `location` once the delegate callback returns.
+    /// Moves a finished download to `destination`, replacing any file there. Synchronous: the
+    /// system deletes `location` once the delegate callback returns.
     ///
     /// The file gets `completeUntilFirstUserAuthentication` protection so it plays while the
     /// device is locked; failing to set it (for example on a volume without data protection)
     /// is logged, not fatal.
-    static func moveFile(at location: URL, to destination: URL) throws -> Int64 {
+    static func moveFile(at location: URL, to destination: URL) throws {
         let manager = FileManager.default
         try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         if manager.fileExists(atPath: destination.path(percentEncoded: false)) {
@@ -50,14 +48,20 @@ public struct DownloadLocations: Sendable {
         } else {
             try manager.moveItem(at: location, to: destination)
         }
-        let path = destination.path(percentEncoded: false)
         do {
             try manager.setAttributes(
-                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: path)
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: destination.path(percentEncoded: false))
         } catch {
-            logger.error("Couldn't set file protection on a download: \(error, privacy: .public)")
+            Log.downloads.error(
+                "Couldn't set file protection on a download: \(Log.redact(String(describing: error)), privacy: .public)"
+            )
         }
-        let size = try manager.attributesOfItem(atPath: path)[.size] as? NSNumber
-        return size?.int64Value ?? 0
+    }
+
+    /// The size of the file at `url`, or `nil` if it can't be read.
+    static func fileSize(at url: URL) -> Int64? {
+        (try? URL(filePath: url.path(percentEncoded: false)).resourceValues(forKeys: [.fileSizeKey]).fileSize)
+            .map(Int64.init)
     }
 }

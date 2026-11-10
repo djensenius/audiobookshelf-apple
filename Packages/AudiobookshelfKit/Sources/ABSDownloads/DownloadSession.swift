@@ -1,5 +1,4 @@
 import ABSAPI
-import ABSCore
 import Foundation
 
 /// The parts of `URLSession` the engine uses. `URLSession` conforms; tests substitute an
@@ -8,11 +7,15 @@ public protocol DownloadSession: AnyObject, Sendable {
     func downloadTask(with request: URLRequest) -> URLSessionDownloadTask
     func downloadTask(withResumeData resumeData: Data) -> URLSessionDownloadTask
     var allTasks: [URLSessionTask] { get async }
+    /// Lets running tasks finish, then invalidates the session; the delegate then gets
+    /// `urlSession(_:didBecomeInvalidWithError:)`.
+    func finishTasksAndInvalidate()
 }
 
 extension URLSession: DownloadSession {}
 
-/// Creates the engine's session with the engine's delegate. Called once per engine.
+/// Creates the engine's session with the engine's delegate. Called again after the session
+/// is invalidated (for example when it loses `nsurlsessiond`).
 public typealias DownloadSessionFactory = @Sendable (any URLSessionDelegate) -> any DownloadSession
 
 extension URLSessionConfiguration {
@@ -20,14 +23,13 @@ extension URLSessionConfiguration {
     /// while the app is suspended or terminated by the system, and on iOS the app is
     /// relaunched to handle their events.
     ///
-    /// Cookies and the URL cache are off: downloads authenticate with headers only and the
-    /// files are moved out of the session's temporary location.
-    public static func absDownloads(
-        identifier: String = DownloadEngine.sessionIdentifier,
-        sharedContainerIdentifier: String?
-    ) -> URLSessionConfiguration {
+    /// There is no `sharedContainerIdentifier`: only the app uses the session, and the
+    /// delegate moves every file into the app's own container (ADR 0003). Cookies and the URL
+    /// cache are off: downloads authenticate with headers only and the files are moved out of
+    /// the session's temporary location.
+    public static func absDownloads(identifier: String = DownloadEngine.sessionIdentifier) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
-        configuration.sharedContainerIdentifier = sharedContainerIdentifier
+        configuration.sharedContainerIdentifier = nil
         configuration.isDiscretionary = false
         configuration.sessionSendsLaunchEvents = true
         configuration.httpCookieAcceptPolicy = .never
@@ -41,20 +43,9 @@ extension URLSessionConfiguration {
 
 extension DownloadEngine {
     /// The production factory: a background session with ``sessionIdentifier``.
-    ///
-    /// Its `sharedContainerIdentifier` is the App Group when this process is entitled to it,
-    /// so the system stages files where an extension could also reach them; the delegate
-    /// still moves every file into the app container (ADR 0003).
-    public static func backgroundSession(
-        sharedContainerIdentifier: String? = AppSettings.isAppGroupAvailable(AppSettings.appGroupIdentifier)
-            ? AppSettings.appGroupIdentifier : nil
-    ) -> DownloadSessionFactory {
+    public static func backgroundSession() -> DownloadSessionFactory {
         { delegate in
-            URLSession(
-                configuration: .absDownloads(sharedContainerIdentifier: sharedContainerIdentifier),
-                delegate: delegate,
-                delegateQueue: nil
-            )
+            URLSession(configuration: .absDownloads(), delegate: delegate, delegateQueue: nil)
         }
     }
 }
@@ -73,16 +64,24 @@ public struct DownloadCredentials: Sendable {
 
 /// Supplies credentials for download requests; implemented by the account layer, which owns
 /// the Keychain tokens and the ``APIClient`` refresh.
+///
+/// Contract:
+/// - ``currentCredentials(for:)`` reads what is stored and never makes a network request.
+/// - ``credentials(for:replacing:)`` refreshes through the connection's ``APIClient``, so
+///   concurrent callers (several parts, or the app's own API calls) join its single
+///   in-flight refresh instead of starting their own.
 public protocol DownloadCredentialProviding: Sendable {
     /// The connection's stored credentials, without any network request, or `nil` when the
-    /// connection is signed out or removed. Used to check that resume data is still valid.
+    /// connection is signed out or removed. Used to tell a 401 for an old token from one for
+    /// the current token.
     func currentCredentials(for connectionID: UUID) async -> DownloadCredentials?
 
-    /// Credentials for a new task (ADR 0007: refresh before creating each task).
+    /// Credentials for a new or resumed task (ADR 0007: refresh before creating each task).
     ///
-    /// - Parameter rejectedAccessToken: `nil` before a task is created: refresh the access
-    ///   token if it expires soon. After a 401, the token the server rejected: refresh it
-    ///   unless the stored token has already changed.
+    /// - Parameter rejectedAccessToken: `nil` before a task is created or resumed: refresh
+    ///   the access token if it expires soon. After a 401, the token the server rejected:
+    ///   refresh it unless the stored token has already changed. Either way, join the
+    ///   ``APIClient``'s in-flight refresh if there is one.
     /// - Throws: when the connection is signed out or the refresh fails.
     func credentials(for connectionID: UUID, replacing rejectedAccessToken: String?) async throws
         -> DownloadCredentials

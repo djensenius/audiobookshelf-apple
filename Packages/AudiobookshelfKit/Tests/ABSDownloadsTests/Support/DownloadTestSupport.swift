@@ -7,12 +7,42 @@ import Synchronization
 
 @testable import ABSDownloads
 
+/// Holds stub replies back until the test opens it.
+final class StubGate: Sendable {
+    private let state = Mutex<(isOpen: Bool, pending: [@Sendable () -> Void])>((false, []))
+
+    func open() {
+        let pending = state.withLock { state in
+            state.isOpen = true
+            defer { state.pending = [] }
+            return state.pending
+        }
+        for action in pending {
+            action()
+        }
+    }
+
+    func run(_ action: @escaping @Sendable () -> Void) {
+        let runsNow = state.withLock { state in
+            if !state.isOpen { state.pending.append(action) }
+            return state.isOpen
+        }
+        if runsNow { action() }
+    }
+}
+
 /// How ``StubDownloadProtocol`` answers one request.
 enum StubReply: Sendable {
-    /// Responds after `delay` seconds.
-    case status(Int, body: Data = Data("audio-bytes".utf8), delay: TimeInterval = 0)
-    /// Fails after the headers with `NSURLErrorNetworkConnectionLost` and this resume data.
-    case failure(resumeData: Data?)
+    /// Responds with `status` and `body`, from `from` (the request's URL by default), once
+    /// `gate` (if any) opens.
+    case status(
+        Int, body: Data = Data("audio-bytes".utf8), contentType: String = "audio/mpeg", from: URL? = nil,
+        gate: StubGate? = nil)
+    /// Responds 200, sends `partialBody`, then fails with `code` and this resume data and
+    /// background cancellation reason.
+    case failure(
+        code: Int = NSURLErrorNetworkConnectionLost, resumeData: Data? = nil, cancelReason: Int? = nil,
+        partialBody: Data? = nil)
 }
 
 /// A `URLProtocol` that answers requests for registered hosts and records them. Routes are
@@ -50,9 +80,9 @@ final class StubDownloadProtocol: URLProtocol {
             })
         else { return }
         let reply = handler(request)
-        if case .status(_, _, let delay) = reply, delay > 0 {
+        if case .status(_, _, _, _, let gate?) = reply {
             let box = UncheckedProtocol(value: self)
-            DispatchQueue.global().asyncAfter(deadline: .now() + delay) { box.value.deliver(reply, url: url) }
+            gate.run { box.value.deliver(reply, url: url) }
         } else {
             deliver(reply, url: url)
         }
@@ -63,31 +93,30 @@ final class StubDownloadProtocol: URLProtocol {
     }
 
     private func deliver(_ reply: StubReply, url: URL) {
-        guard !isStopped.withLock({ $0 }) else { return }
-        let status: Int
+        guard !isStopped.withLock({ $0 }), let client else { return }
         switch reply {
-        case .status(let code, _, _): status = code
-        case .failure: status = 200
-        }
-        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: [:])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        switch reply {
-        case .status(_, let body, _):
-            client?.urlProtocol(self, didLoad: body)
-            client?.urlProtocolDidFinishLoading(self)
-        case .failure(let resumeData):
+        case .status(let status, let body, let contentType, let from, _):
+            let response = HTTPURLResponse(
+                url: from ?? url, statusCode: status, httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": contentType, "Content-Length": "\(body.count)"])!
+            client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client.urlProtocol(self, didLoad: body)
+            client.urlProtocolDidFinishLoading(self)
+        case .failure(let code, let resumeData, let cancelReason, let partialBody):
+            let response = HTTPURLResponse(
+                url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "audio/mpeg"])!
+            client.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            if let partialBody { client.urlProtocol(self, didLoad: partialBody) }
             var info: [String: Any] = [:]
             info[NSURLSessionDownloadTaskResumeData] = resumeData
-            client?.urlProtocol(
-                self,
-                didFailWithError: NSError(
-                    domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost, userInfo: info))
+            info[NSURLErrorBackgroundTaskCancelledReasonKey] = cancelReason
+            client.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: code, userInfo: info))
         }
     }
 }
 
 // URLProtocol is not Sendable, but the URL loading system lets a protocol call its client
-// from any thread, and the delayed delivery is the only use after `startLoading` returns.
+// from any thread, and the gated delivery is the only use after `startLoading` returns.
 private struct UncheckedProtocol: @unchecked Sendable {
     let value: StubDownloadProtocol
 }
@@ -97,6 +126,10 @@ extension URLRequest {
     var stubCount: Int {
         StubDownloadProtocol.requests(host: url?.host() ?? "").count
     }
+
+    var authorization: String? {
+        value(forHTTPHeaderField: "Authorization")
+    }
 }
 
 /// A ``DownloadSession`` over an ephemeral session with ``StubDownloadProtocol``. Resume data
@@ -104,11 +137,13 @@ extension URLRequest {
 /// resume data is recorded.
 final class StubDownloadSession: DownloadSession {
     let session: URLSession
+    private let delegate: DownloadSessionDelegate?
     private let state = Mutex<(lastRequest: URLRequest?, resumed: [Data])>((nil, []))
 
     init(delegate: any URLSessionDelegate) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubDownloadProtocol.self]
+        self.delegate = delegate as? DownloadSessionDelegate
         session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
 
@@ -122,6 +157,11 @@ final class StubDownloadSession: DownloadSession {
         task.taskDescription = description
         task.resume()
         leftovers.withLock { $0.append(task) }
+    }
+
+    /// What the system does once it has delivered a background wake's events.
+    func finishBackgroundEvents() {
+        delegate?.urlSessionDidFinishEvents(forBackgroundURLSession: session)
     }
 
     func downloadTask(with request: URLRequest) -> URLSessionDownloadTask {
@@ -140,12 +180,18 @@ final class StubDownloadSession: DownloadSession {
     var allTasks: [URLSessionTask] {
         get async { await session.allTasks }
     }
+
+    func finishTasksAndInvalidate() {
+        session.finishTasksAndInvalidate()
+    }
 }
 
 /// Credentials whose token rotates on every forced refresh; records each request for them.
 final class FakeCredentials: DownloadCredentialProviding {
     let configuration: APIClientConfiguration
     private let state = Mutex<(token: Int, calls: [String?])>((1, []))
+    /// Runs before ``credentials(for:replacing:)`` returns.
+    let hook = Mutex<(@Sendable () async -> Void)?>(nil)
 
     init(baseURL: URL) {
         configuration = try! APIClientConfiguration(baseURL: baseURL, customHeaders: ["X-Proxy": "proxy-secret"])
@@ -169,6 +215,7 @@ final class FakeCredentials: DownloadCredentialProviding {
             if let rejected, rejected == "token-\(state.token)" { state.token += 1 }
             return state.token
         }
+        if let hook = hook.withLock({ $0 }) { await hook() }
         return DownloadCredentials(configuration: configuration, accessToken: "token-\(token)")
     }
 }
@@ -186,6 +233,8 @@ final class MemoryKeyStore: ResumeDataKeyStore {
         }
     }
 }
+
+struct TestError: Error {}
 
 /// A clock whose sleeps return at once and are recorded.
 final class RecordingClock: Clock {
@@ -211,16 +260,40 @@ final class RecordingClock: Clock {
     }
 }
 
+/// A clock whose sleeps announce themselves on ``started``, then last until cancelled.
+final class SignallingClock: Clock {
+    typealias Instant = ContinuousClock.Instant
+
+    let started: AsyncStream<Void>
+    private let continuation: AsyncStream<Void>.Continuation
+
+    init() {
+        (started, continuation) = AsyncStream.makeStream()
+    }
+
+    var now: Instant { ContinuousClock.now }
+    var minimumResolution: Duration { .zero }
+
+    func sleep(until deadline: Instant, tolerance: Duration?) async throws {
+        continuation.yield()
+        try await Task.sleep(for: .seconds(3600))
+    }
+}
+
 /// An engine over an in-memory store, a stub server and a temporary directory.
 final class DownloadHarness: Sendable {
     let host = "\(UUID().uuidString.lowercased()).stub.test"
     let root = FileManager.default.temporaryDirectory.appending(path: "downloads-\(UUID().uuidString)")
     let store: DownloadStore
+    let localItems: LocalItemStore
     let connectionID: UUID
     let credentials: FakeCredentials
     let keyStore = MemoryKeyStore()
     let clock = RecordingClock()
+    let registry = DownloadEngineRegistry()
     let sessions = Mutex<[StubDownloadSession]>([])
+    /// Each request the stub sees, in order.
+    let requestStream: AsyncStream<URLRequest>
 
     init(handler: @escaping StubDownloadProtocol.Handler) async throws {
         let container = try DataStack(location: .inMemory).container
@@ -229,33 +302,58 @@ final class DownloadHarness: Sendable {
             authMethod: .local, serverVersion: "2.26.0")
         connectionID = connection.id
         store = DownloadStore(modelContainer: container)
+        localItems = LocalItemStore(modelContainer: container)
         credentials = FakeCredentials(baseURL: URL(string: "https://\(host)/abs")!)
-        StubDownloadProtocol.register(host: host, handler: handler)
+        let (stream, continuation) = AsyncStream.makeStream(of: URLRequest.self)
+        requestStream = stream
+        StubDownloadProtocol.register(host: host) { request in
+            continuation.yield(request)
+            return handler(request)
+        }
     }
 
     deinit {
         try? FileManager.default.removeItem(at: root)
     }
 
+    var base: String { "https://\(host)/abs" }
     var locations: DownloadLocations { DownloadLocations(root: root) }
     var vault: ResumeDataVault { ResumeDataVault(directory: locations.resumeDataRoot, keyStore: keyStore) }
     var requests: [URLRequest] { StubDownloadProtocol.requests(host: host) }
     var session: StubDownloadSession? { sessions.withLock { $0.last } }
 
+    /// Returns once the stub has seen `count` requests; the suite's time limit bounds the wait.
+    func waitForRequests(_ count: Int) async {
+        guard requests.count < count else { return }
+        for await _ in requestStream where requests.count >= count {
+            return
+        }
+    }
+
     /// - Parameter prepare: runs on the new session before the engine sees it, to leave tasks
     ///   behind as a previous launch would.
     func makeEngine(
-        retryPolicy: RetryPolicy = .default, prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
+        retryPolicy: RetryPolicy = .default,
+        registry: DownloadEngineRegistry? = nil,
+        readRecords: (@Sendable (DownloadStore) async throws -> [DownloadRecordDTO])? = nil,
+        prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
         DownloadEngine(
-            store: store, credentials: credentials, vault: vault, locations: locations, retryPolicy: retryPolicy,
-            networkAccess: { NetworkAccess(policy: .always) }, clock: clock, random: { 0.5 },
-            makeSession: { [self] delegate in
-                let session = StubDownloadSession(delegate: delegate)
-                prepare(session)
-                sessions.withLock { $0.append(session) }
-                return session
-            })
+            store: store, localItems: localItems, credentials: credentials, vault: vault, locations: locations,
+            retryPolicy: retryPolicy, networkAccess: { NetworkAccess(policy: .always) }, clock: clock,
+            now: { .now }, random: { 0.5 }, makeSession: sessionFactory(prepare: prepare),
+            registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() })
+    }
+
+    func sessionFactory(
+        prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
+    ) -> DownloadSessionFactory {
+        { [self] delegate in
+            let session = StubDownloadSession(delegate: delegate)
+            prepare(session)
+            sessions.withLock { $0.append(session) }
+            return session
+        }
     }
 
     /// A record of `parts` audio files for `li_1`, saved to the store.
@@ -271,14 +369,18 @@ final class DownloadHarness: Sendable {
                 DownloadPartDTO(
                     id: id, kind: .audio, serverPath: DownloadRequests.filePath(itemID: "li_1", ino: "\(index + 1)"),
                     filename: "\(index + 1).mp3", mimeType: "audio/mpeg", serverIno: "\(index + 1)",
-                    trackIndex: index + 1,
-                    expectedBytes: 11, destinationRelativePath: "li_1/\(index + 1).mp3", state: partState)
+                    trackIndex: index + 1, expectedBytes: 11, bytesWritten: partState == .completed ? 11 : 0,
+                    destinationRelativePath: "li_1/\(index + 1).mp3", state: partState)
             })
         return try await store.upsertRecord(record).record
     }
 
     func fileURL(_ relativePath: String) -> URL {
         locations.downloadsRoot.appending(path: relativePath)
+    }
+
+    func fileExists(_ relativePath: String) -> Bool {
+        FileManager.default.fileExists(atPath: fileURL(relativePath).path(percentEncoded: false))
     }
 }
 
@@ -297,9 +399,13 @@ extension DownloadEngine {
         }
     }
 
-    nonisolated func nextPermanentFailure() async -> DownloadUpdate? {
+    nonisolated func nextFailure(willRetry: Bool) async -> DownloadUpdate? {
         await next {
-            if case .partFailed(_, _, _, false) = $0 { true } else { false }
+            if case .partFailed(_, _, _, _, willRetry) = $0 { true } else { false }
         }
+    }
+
+    nonisolated func nextPermanentFailure() async -> DownloadUpdate? {
+        await nextFailure(willRetry: false)
     }
 }
