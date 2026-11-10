@@ -158,13 +158,16 @@ public actor APIClient {
             }
 
             nextFlightID += 1
-            let flight = RefreshFlight(id: nextFlightID, task: Task { try await refresh(current) })
-            refreshFlights[current] = flight
-            defer {
-                // Only remove this flight's entry, never a newer flight for the same pair.
-                if refreshFlights[current]?.id == flight.id { refreshFlights[current] = nil }
+            let id = nextFlightID
+            let task = Task {
+                // The flight unregisters itself before it finishes, so no request can join it
+                // once it has completed (for example while this request reads the new tokens).
+                // Only this flight's entry is removed, never a newer flight for the same pair.
+                defer { if refreshFlights[current]?.id == id { refreshFlights[current] = nil } }
+                try await refresh(current)
             }
-            try await flight.task.value
+            refreshFlights[current] = RefreshFlight(id: id, task: task)
+            try await task.value
             return try await currentOutcome(after: rejected, since: sent)
         }
     }

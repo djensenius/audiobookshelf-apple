@@ -605,7 +605,10 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(tokens.expiredCount == 1)
     }
 
-    @Test func laterUnauthorizedAfterSamePairRefreshRefreshesAgain() async throws {
+    /// With `gatesPostRefreshRead`, the first request's token read after its refresh is held while
+    /// the second request runs, so the finished flight must not still be joinable.
+    @Test(arguments: [false, true])
+    func laterUnauthorizedAfterSamePairRefreshRefreshesAgain(gatesPostRefreshRead: Bool) async throws {
         // The refresh always returns the same pair. `/api/me` works after one refresh and
         // `/api/other` only after a second one.
         let refreshes = Mutex(0)
@@ -621,15 +624,24 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
                 return .text("Unauthorized", status: 401)
             }
         }
-        let tokens = InMemoryTokenProvider()
+        // Reads 1 and 2 are the first request's initial and pre-refresh reads; read 3 follows
+        // its refresh.
+        let tokens = GatedTokenProvider(holdingCall: gatesPostRefreshRead ? 3 : 0)
         let client = try makeClient(server, tokens: tokens)
 
-        #expect(try await client.send(Endpoint<OK>(.get, "/api/me")) == OK(ok: true))
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        if gatesPostRefreshRead {
+            try await waitUntil { tokens.isHolding }
+        } else {
+            #expect(try await first.value == OK(ok: true))
+        }
         #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
+        tokens.release()
+        #expect(try await first.value == OK(ok: true))
 
         #expect(server.requests(path: refreshPath).count == 2)
-        #expect(tokens.current == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
-        #expect(tokens.expiredCount == 0)
+        #expect(tokens.inner.current == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
+        #expect(tokens.inner.expiredCount == 0)
     }
 
     @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {
