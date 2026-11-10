@@ -82,6 +82,12 @@ enum RedirectPolicy {
 /// response (for example a 401) came from a hop that never saw the credentials.
 final class RedirectChainDelegate: NSObject, URLSessionTaskDelegate, Sendable {
     private let stripped = Mutex(false)
+    private let staysOnOrigin: Bool
+
+    /// - Parameter staysOnOrigin: Declines hops that would be stripped instead of following them.
+    init(staysOnOrigin: Bool = false) {
+        self.staysOnOrigin = staysOnOrigin
+    }
 
     /// Whether any hop of this task was stripped of credentials.
     var credentialsStripped: Bool {
@@ -94,12 +100,19 @@ final class RedirectChainDelegate: NSObject, URLSessionTaskDelegate, Sendable {
         willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest
     ) async -> URLRequest? {
+        RedirectDecisions.report(nextHop(following: response, to: request, task: task), for: task)
+    }
+
+    private func nextHop(following response: HTTPURLResponse, to request: URLRequest, task: URLSessionTask)
+        -> URLRequest?
+    {
         let wasStripped = credentialsStripped
         guard
             let hop = RedirectPolicy.hop(
                 following: response, to: request, original: task.originalRequest, wasStripped: wasStripped)
         else { return nil }
         if hop.isStripped {
+            if staysOnOrigin { return nil }
             stripped.withLock { $0 = true }
         }
         return hop.request
@@ -124,11 +137,11 @@ final class RedirectPolicyDelegate: NSObject, URLSessionTaskDelegate, Sendable {
         guard
             let hop = RedirectPolicy.hop(
                 following: response, to: request, original: task.originalRequest, wasStripped: wasStripped)
-        else { return nil }
+        else { return RedirectDecisions.report(nil, for: task) }
         if hop.isStripped {
             strippedTasks.withLock { _ = $0.insert(id) }
         }
-        return hop.request
+        return RedirectDecisions.report(hop.request, for: task)
     }
 
     // Async `data(for:)` tasks don't forward `didCompleteWithError` to the session delegate, but they do
@@ -141,5 +154,22 @@ final class RedirectPolicyDelegate: NSObject, URLSessionTaskDelegate, Sendable {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         strippedTasks.withLock { _ = $0.remove(task.taskIdentifier) }
+    }
+}
+
+/// Reports every redirect decision made by this module's delegates to an optional observer.
+///
+/// Nothing observes it in production. Tests use it so a stub `URLProtocol` delivers a declined
+/// redirect's 3xx response only once the delegate has declined: `URLSession` gives a protocol no
+/// signal for a declined redirect, and delivering the response before the decision races it.
+enum RedirectDecisions {
+    typealias Observer = @Sendable (_ task: URLSessionTask, _ followed: Bool) -> Void
+
+    static let observer = Mutex<Observer?>(nil)
+
+    /// Reports `next` (the request to follow, or `nil` to decline) for `task` and returns it.
+    static func report(_ next: URLRequest?, for task: URLSessionTask) -> URLRequest? {
+        observer.withLock { $0 }?(task, next != nil)
+        return next
     }
 }
