@@ -14,7 +14,7 @@ when it is unreachable, plus the local bookkeeping for downloads:
 - downloaded items, their files and enough metadata to play them offline;
 - progress made on this device that the server hasn't seen yet (audio and ebook);
 - playback sessions recorded offline, waiting for `POST /api/session/local-all`;
-- background download state, including `resumeData`;
+- background download state, including a reference to encrypted resume data;
 - the per-item playback history shown by `pages/media/_id/history.vue`.
 
 The legacy iOS app keeps all of this, and more, in Realm (schema version 21,
@@ -161,12 +161,12 @@ General rules:
 
 | Model | Key | Other fields | Uniqueness and indexes |
 | --- | --- | --- | --- |
-| `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
+| `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?`, `isDisconnected: Bool`, `disconnectedAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
 | `LocalLibraryItem` | `id: UUID` | `serverConnectionID: UUID`, `serverAddress`, `serverUserId`, `libraryItemId`, `mediaType` (`book`/`podcast`), `title`, `authorName: String?`, `relativeDirectory`, `coverRelativePath: String?`, `coverUpdatedAt: Date?`, `addedAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) files: [LocalFile]` | `#Unique([\.id], [\.serverConnectionID, \.libraryItemId])`; `#Index([\.libraryItemId], [\.serverConnectionID])` |
 | `LocalFile` | `id: UUID` | `item: LocalLibraryItem?` (inverse), `kind` (`audio`/`ebook`), `relativePath`, `filename`, `mimeType`, `size: Int64`, `serverIno: String?`, `trackIndex: Int?` (book track order), `episodeId: String?` (podcast) | `#Unique([\.id])` |
 | `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date` (latest change, for display and ordering only), `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `audioEditedAt: Date?`, `finishedEditedAt: Date?`, `ebookEditedAt: Date?`, `@Attribute(.codable) serverBaseline: ProgressBaseline?`, `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
 | `DownloadRecord` | `id: UUID`, `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `mediaType`, `title`, `state` (`queued`/`downloading`/`paused`/`failed`), `relativeDirectory`, `createdAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) parts: [DownloadPart]` | `#Unique([\.id], [\.key])`; `#Index([\.state])` |
-| `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `@Attribute(.externalStorage) resumeData: Data?`, `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
+| `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `hasResumeData: Bool` (flag only; the sealed blob lives outside the store), `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
 | `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?` | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
 | `PlaybackHistoryEvent` | `id: UUID` | `serverConnectionID: UUID?`, `mediaKey`, `libraryItemId`, `episodeId: String?`, `mediaDisplayTitle`, `name` (`Play`/`Pause`/`Stop`/`Seek`/`Save`/`Finished`/`Sync`), `type` (`Playback`/`Sync`), `details: String?`, `currentTime: Double?`, `serverSyncAttempted: Bool`, `serverSyncSuccess: Bool?`, `serverSyncMessage: String?`, `timestamp: Date` | `#Unique([\.id])`; `#Index([\.mediaKey, \.timestamp])` |
 
@@ -260,6 +260,21 @@ Model notes:
   lookup cache. Requests authenticate with an `Authorization` header added when the
   task is created or resumed (never `?token=`), so only token-free paths are
   stored.
+- **Resume data is never stored raw.** URLSession resume data embeds the archived
+  original and current requests, including the `Authorization` header and custom
+  headers such as `CF-Access-Client-Secret`, so storing it in the shared store
+  would bypass the Keychain-only rule for credentials. A `ResumeDataVault` owned by
+  the download engine (#72, P4-01) seals each blob with CryptoKit `AES.GCM` using
+  one per-install `SymmetricKey`. The key is kept in the Keychain
+  (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, the app's keychain access
+  group, not synchronizable). The ciphertext is written to the app's private
+  container at `Application Support/ResumeData/<part id>.bin`, never the App
+  Group, with file protection `completeUntilFirstUserAuthentication` and excluded
+  from backup. `DownloadPart` keeps only `hasResumeData`. The blob is deleted and
+  the task is recreated from a fresh request (with a refreshed token) when
+  decryption fails, the key is missing, the user signs out, the connection is
+  removed or disconnected, a request gets a 401, or the connection's credentials
+  or custom headers change.
 - **Downloaded files live in the app container, not the App Group.** Widgets never
   read downloaded media files; they get covers through the image cache
   ([ADR 0005](0005-images.md), #89 (P5-11b)).
@@ -271,15 +286,27 @@ Model notes:
   the first sync after login).
 - **History** stays on the device, as in the legacy app. Events older than 90 days
   are deleted at launch.
-- **Connections:** the session to restore is the record with the latest
+- **Connections:** the session to restore is the connected record with the latest
   `lastUsedAt` (replacing `ServerConnectionConfigActiveIndex`). Removing a
-  connection does not delete downloads, progress or history.
+  connection does not delete downloads, progress or history, and must not orphan
+  them:
+  - A connection with retained records (dirty progress, unsent pending sessions,
+    download records or kept downloads) is **not deleted**. It is marked
+    `isDisconnected = true` with `disconnectedAt`, its Keychain credentials are
+    removed and its resume-data blobs are deleted, but it keeps its `id`.
+  - A connection with no retained records is deleted outright. History rows keep
+    its old `serverConnectionID` for display only.
+  - Login looks up the record by normalized `address` and server `userId` and, if
+    it exists, reuses it and clears `isDisconnected`/`disconnectedAt`. Dependent
+    records and derived media keys therefore stay associated, so
+    `pendingSync(for:)` finds the retained dirty progress.
 
 ### What is not persisted in SwiftData
 
 | Data | Where it lives |
 | --- | --- |
 | Access and refresh tokens; custom header values (they may be proxy credentials) | Keychain, account = connection `id.uuidString` (#38, P1-14) |
+| URLSession resume data (embeds request headers) | AES-GCM sealed files in the app container's `Application Support/ResumeData/`; key in the Keychain |
 | Device and player settings (`DeviceSettings`, `PlayerSettings`) | App Group `UserDefaults` through `AppSettings` |
 | Last-used library, per server and user (new scenes and CarPlay start from it) | App Group `UserDefaults` through `AppSettings` |
 | Logs (`LogEntry`) | OSLog, exported by #27 (P1-04) |
@@ -394,7 +421,7 @@ Model notes:
 | `LocalPodcastEpisode` | — | Never written by the legacy app; episodes live in the snapshot |
 | `LocalMediaProgress` | `LocalMediaProgress` | Keyed by media key instead of `localLibraryItemId[-episodeId]`; adds `needsServerSync` and sync bookkeeping; millisecond `Double`s become `Date`s |
 | `DownloadItem` | `DownloadRecord` | Adds `state`; `userMediaProgress` dropped (progress comes from the server or `LocalMediaProgress`) |
-| `DownloadItemPart` | `DownloadPart` | `uri` with a token becomes the token-free `serverPath`; adds `taskIdentifier`, `resumeData` and `retryCount`; `completed`/`moved`/`failed` become `state` |
+| `DownloadItemPart` | `DownloadPart` | `uri` with a token becomes the token-free `serverPath`; adds `taskIdentifier`, `hasResumeData` (blob sealed outside the store) and `retryCount`; `completed`/`moved`/`failed` become `state` |
 | `PlaybackSession` | `PendingLocalSession` | Local-play sessions only, scalars only (no embedded `LibraryItem`) |
 | `LogEntry` | — | OSLog (#27, P1-04) |
 | Android `MediaItemHistory`/`MediaItemEvent` (iOS never implemented `getMediaItemHistory`) | `PlaybackHistoryEvent` | Flattened to one row per event |
@@ -478,7 +505,13 @@ Ongoing checks:
   stays dirty) and dirty audio followed by a later local ebook edit while the
   server's audio changed (the server's audio wins); an edit made while its PATCH
   is in flight advances the baseline to the sent values, stays dirty, and survives
-  the next fetch.
+  the next fetch; deleting a connection with dirty progress and then logging in
+  again to the same address and user returns the same connection `id`, and
+  `pendingSync(for:)` returns the retained progress.
+- #72 (P4-01): a sealed resume-data file on disk contains no plaintext bearer
+  token or custom-header value; a credential or custom-header change, sign-out
+  and a 401 each delete the blob and recreate the task from a fresh request; a
+  missing key or a decrypt failure falls back to a fresh request.
 - `mise run test:kit` under Swift 6 strict concurrency, with no Sendable warnings.
 - Review checks: `import SwiftData` only in `ABSData`, `ABSAppModel` (view models
   using `ResultsObserver`/`HistoryObserver`), app-target views and the widget; no `@Model` type in a public store signature; `cloudKitDatabase: .none`
