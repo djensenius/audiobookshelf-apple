@@ -24,9 +24,10 @@ public enum ABSColor {
     public static let foreground = ABSThemedColor(
         light: .rgb(37, 37, 37), dark: .rgb(230, 237, 243), black: .rgb(230, 237, 243)
     )
-    /// Secondary text (legacy `fg-muted`).
+    /// Secondary text (legacy `fg-muted`). Light and dark are a little darker and lighter
+    /// than legacy so the text meets the WCAG 4.5:1 minimum on every surface above.
     public static let mutedForeground = ABSThemedColor(
-        light: .rgb(101, 109, 118), dark: .rgb(142, 147, 153), black: .rgb(120, 126, 132)
+        light: .rgb(91, 99, 108), dark: .rgb(156, 161, 167), black: .rgb(120, 126, 132)
     )
     /// Separators and outlines (legacy `border`).
     public static let border = ABSThemedColor(

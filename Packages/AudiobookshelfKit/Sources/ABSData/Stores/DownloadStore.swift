@@ -33,6 +33,7 @@ import SwiftData
     /// `id` and `createdAt`, in one transaction. Parts are matched by `id`: existing ones are
     /// overwritten from the DTO, new ones inserted and missing ones deleted. This whole-DTO write
     /// is only for creating and reconciling a download; the engine's updates go through
+    /// ``beginRunning(partID:expecting:now:)``,
     /// ``updateProgress(partID:bytesWritten:expectedBytes:now:)``,
     /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)`` and
     /// ``completePart(partID:finalBytes:now:)``. A part passed here as `.completed` must carry its
@@ -209,6 +210,38 @@ import SwiftData
             part.lastError = error
             if let hasResumeData { part.hasResumeData = hasResumeData }
             part.record?.updatedAt = now
+            return true
+        }
+    }
+
+    /// Starts a part, in one write: moves it from one of `expecting` to `.running`, and its
+    /// record from `.queued` to `.downloading`. The engine creates a transfer only when this
+    /// returns `true`, so a launch from a stale read can't restart a part that has since
+    /// completed, been stopped, failed for good or been deleted.
+    ///
+    /// `expecting` is the states the caller may start the part from: `.queued`, and `.failed`
+    /// for a retry. The change is refused when the part or its record doesn't exist, the part
+    /// is in another state or `.completed` (even if `expecting` has it), or the record is
+    /// `.paused` (stopped) or `.failed` (failed for good). The task identifier and error are
+    /// cleared; the caller records the new task's identifier with
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)``. Progress, the
+    /// retry count and the resume-data flag are kept.
+    ///
+    /// - Returns: whether the part was started.
+    public func beginRunning(partID: UUID, expecting: Set<DownloadPartState>, now: Date = .now) throws -> Bool {
+        try commit {
+            guard let part = try fetchPart(id: partID), let record = part.record, let state = part.stateValue,
+                state != .completed, expecting.contains(state)
+            else { return false }
+            switch record.stateValue {
+            case .queued: record.state = DownloadState.downloading.rawValue
+            case .downloading: break
+            case .paused, .failed, nil: return false
+            }
+            part.state = DownloadPartState.running.rawValue
+            part.taskIdentifier = nil
+            part.lastError = nil
+            record.updatedAt = now
             return true
         }
     }
