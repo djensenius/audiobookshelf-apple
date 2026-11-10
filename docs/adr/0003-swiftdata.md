@@ -244,6 +244,16 @@ Model notes:
     request stays dirty with its newer local values, and the next fetch sees the
     server matching the advanced baseline, so the edit is kept and sent rather
     than treated as a conflict.
+  - **Merges during an in-flight PATCH.** While a PATCH for a row is in flight,
+    server progress for that row (a fetch, `/api/me`, or a socket
+    `user_item_progress_updated` echo of the PATCH itself) is not merged into any
+    group the PATCH carries. The store keeps only the latest such server values
+    as the row's pending server state and merges them once the PATCH settles:
+    after the clearing step on success, or unchanged on failure. Groups the PATCH
+    doesn't carry merge immediately. So a server update can never overwrite a
+    local edit made during the request or clear its dirty flag before the
+    acknowledgement; on success the deferred merge sees the server matching the
+    advanced baseline and keeps the newer local values dirty.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
@@ -513,7 +523,9 @@ Ongoing checks:
   stays dirty) and dirty audio followed by a later local ebook edit while the
   server's audio changed (the server's audio wins); an edit made while its PATCH
   is in flight advances the baseline to the sent values, stays dirty, and survives
-  the next fetch; deleting a connection with dirty progress and then logging in
+  the next fetch; a server echo of an in-flight PATCH (newer `lastUpdate`, older
+  values) arriving after a newer local seek is deferred and leaves the seek dirty
+  and unchanged, on both PATCH success and failure; deleting a connection with dirty progress and then logging in
   again to the same address and user returns the same connection `id`, and
   `pendingSync(for:)` returns the retained progress.
 - #72 (P4-01): a sealed resume-data file on disk contains no plaintext bearer
