@@ -37,40 +37,40 @@ private actor RotatedTokenProvider: TokenProvider {
     func expireSession(ifCurrent rejected: AuthTokens) -> Bool { false }
 }
 
-/// Wraps an ``InMemoryTokenProvider`` and holds the `heldCall`-th `tokens()` read (after taking
-/// its snapshot) until ``release()``, to simulate a slow read that returns an old pair.
+/// Wraps an ``InMemoryTokenProvider`` and holds the `heldCall`th `tokens()` call until
+/// ``release()``, after taking its snapshot (or before, with `readsAfterRelease`). ``held()``
+/// returns once that call is holding. `heldCall: 0` never holds.
 private final class GatedTokenProvider: TokenProvider {
-    private struct State {
-        var calls = 0
-        var isHolding = false
-        var released = false
-    }
-
     let inner = InMemoryTokenProvider()
     private let heldCall: Int
-    private let state = Mutex(State())
+    private let readsAfterRelease: Bool
+    private let calls = Mutex(0)
+    private let holding = Checkpoint()
+    private let released = Checkpoint()
 
-    init(holdingCall heldCall: Int) {
+    init(holdingCall heldCall: Int, readsAfterRelease: Bool = false) {
         self.heldCall = heldCall
+        self.readsAfterRelease = readsAfterRelease
     }
 
-    var isHolding: Bool { state.withLock { $0.isHolding } }
+    func held() async {
+        await holding.reached()
+    }
 
     func release() {
-        state.withLock { $0.released = true }
+        released.pass()
     }
 
     func tokens() async -> AuthTokens? {
-        let snapshot = await inner.tokens()
-        let hold = state.withLock {
-            $0.calls += 1
-            $0.isHolding = $0.calls == heldCall
-            return $0.isHolding
+        let call = calls.withLock {
+            $0 += 1
+            return $0
         }
-        if hold {
-            while !state.withLock({ $0.released }) { try? await Task.sleep(for: .milliseconds(5)) }
-        }
-        return snapshot
+        guard call == heldCall else { return await inner.tokens() }
+        let snapshot = readsAfterRelease ? nil : await inner.tokens()
+        holding.pass()
+        await released.reached()
+        return readsAfterRelease ? await inner.tokens() : snapshot
     }
 
     func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
@@ -82,22 +82,26 @@ private final class GatedTokenProvider: TokenProvider {
     }
 }
 
-/// Wraps an ``InMemoryTokenProvider`` and, after committing its first successful swap, waits for
-/// ``release()`` before returning, so a later refresh can finish first.
-private final class SlowFirstSwapTokenProvider: TokenProvider {
-    private struct State {
-        var swaps = 0
-        var isHolding = false
-        var released = false
+/// Wraps an ``InMemoryTokenProvider`` and, after committing its `heldSwap`th successful swap
+/// (the first by default), waits for ``release()`` before returning, so other work can happen
+/// between the commit and the return. ``held()`` returns once that swap is holding.
+private final class SlowSwapTokenProvider: TokenProvider {
+    let inner = InMemoryTokenProvider()
+    private let heldSwap: Int
+    private let swaps = Mutex(0)
+    private let holding = Checkpoint()
+    private let released = Checkpoint()
+
+    init(holdingSwap heldSwap: Int = 1) {
+        self.heldSwap = heldSwap
     }
 
-    let inner = InMemoryTokenProvider()
-    private let state = Mutex(State())
-
-    var isHolding: Bool { state.withLock { $0.isHolding } }
+    func held() async {
+        await holding.reached()
+    }
 
     func release() {
-        state.withLock { $0.released = true }
+        released.pass()
     }
 
     func tokens() async -> AuthTokens? {
@@ -106,13 +110,13 @@ private final class SlowFirstSwapTokenProvider: TokenProvider {
 
     func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
         guard await inner.replaceTokens(expected: expected, with: new) else { return false }
-        let hold = state.withLock {
-            $0.swaps += 1
-            $0.isHolding = $0.swaps == 1
-            return $0.isHolding
+        let swap = swaps.withLock {
+            $0 += 1
+            return $0
         }
-        if hold {
-            while !state.withLock({ $0.released }) { try? await Task.sleep(for: .milliseconds(5)) }
+        if swap == heldSwap {
+            holding.pass()
+            await released.reached()
         }
         return true
     }
@@ -162,20 +166,27 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     }
 
     @Test func concurrentUnauthorizedRequestsShareOneRefresh() async throws {
-        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(200)))
+        let refreshGate = StubGate()
+        let server = tokenServer(refresh: .json(refreshedJSON, gate: refreshGate))
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
 
         let results = try await withThrowingTaskGroup(of: OK.self) { group in
             for index in 0..<8 {
                 group.addTask { try await client.send(Endpoint<OK>(.get, "/api/items/\(index)")) }
             }
+            // One request starts the refresh; the other seven wait for it before it finishes.
+            await refreshGate.arrived()
+            await joins.reached(7)
+            refreshGate.open()
             return try await group.reduce(into: []) { $0.append($1) }
         }
 
         #expect(results.count == 8)
         let rejected = server.requests.filter { $0.value(forHTTPHeaderField: "Authorization") == "Bearer access-1" }
-        #expect(rejected.count > 1)
+        #expect(rejected.count == 8)
         #expect(server.requests(path: refreshPath).count == 1)
         #expect(tokens.updates.count == 1)
     }
@@ -206,12 +217,15 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     }
 
     @Test func concurrentRetriesRejectedAfterRefreshExpireSessionOnce() async throws {
+        let refreshGate = StubGate()
         let server = StubServer { request in
             request.url?.path() == refreshPath
-                ? .json(refreshedJSON, delay: .milliseconds(100)) : .text("Unauthorized", status: 401)
+                ? .json(refreshedJSON, gate: refreshGate) : .text("Unauthorized", status: 401)
         }
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
 
         let errors = await withTaskGroup(of: APIError?.self) { group in
             for index in 0..<5 {
@@ -224,6 +238,9 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
                     }
                 }
             }
+            await refreshGate.arrived()
+            await joins.reached(4)
+            refreshGate.open()
             return await group.reduce(into: []) { $0.append($1) }
         }
 
@@ -293,13 +310,15 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     }
 
     @Test func refreshFinishingAfterSignOutIsDiscarded() async throws {
-        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(200)))
+        let refreshGate = StubGate()
+        let server = tokenServer(refresh: .json(refreshedJSON, gate: refreshGate))
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         let request = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        await refreshGate.arrived()
         tokens.signOut()
+        refreshGate.open()
 
         await #expect(throws: CancellationError.self) { try await request.value }
         #expect(tokens.current == nil)
@@ -308,14 +327,16 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     }
 
     @Test func refreshFinishingAfterNewSignInIsDiscarded() async throws {
-        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(200)))
+        let refreshGate = StubGate()
+        let server = tokenServer(refresh: .json(refreshedJSON, gate: refreshGate))
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
         let replacement = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
 
         let request = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        await refreshGate.arrived()
         tokens.signIn(replacement)
+        refreshGate.open()
 
         await #expect(throws: CancellationError.self) { try await request.value }
         #expect(tokens.current == replacement)
@@ -325,11 +346,12 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
 
     @Test func newSessionDoesNotJoinOldSessionsRefresh() async throws {
         let replacement = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
+        let oldRefreshGate = StubGate()
         let server = StubServer { request in
             if request.url?.path() == refreshPath {
                 return request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-new"
                     ? .json(#"{"user":{"accessToken":"access-3","refreshToken":"refresh-3"}}"#)
-                    : .json(refreshedJSON, delay: .milliseconds(500))
+                    : .json(refreshedJSON, gate: oldRefreshGate)
             }
             return request.value(forHTTPHeaderField: "Authorization") == "Bearer access-3"
                 ? .json(#"{"ok":true}"#) : .text("Unauthorized", status: 401)
@@ -338,9 +360,10 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         let client = try makeClient(server, tokens: tokens)
 
         let old = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        await oldRefreshGate.arrived()
         tokens.signIn(replacement)
         let result = try await client.send(Endpoint<OK>(.get, "/api/me"))
+        oldRefreshGate.open()
 
         #expect(result == OK(ok: true))
         let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
@@ -453,7 +476,7 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         let client = try makeClient(server, tokens: tokens)
 
         let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { tokens.isHolding }
+        await tokens.held()
         #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
         tokens.release()
 
@@ -503,7 +526,7 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         let client = try makeClient(server, tokens: tokens)
 
         let slow = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { tokens.isHolding }
+        await tokens.held()
         let fast = try await client.send(Endpoint<OK>(.get, "/api/me"))
         tokens.release()
 
@@ -514,12 +537,13 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(tokens.inner.expiredCount == 0)
     }
 
-    /// `/api/slow` answers 401 to `access-1` after a delay; `/api/me` is ``tokenServer(refresh:)``.
-    private func delayedUnauthorizedServer() -> StubServer {
+    /// `/api/slow` answers 401 to `access-1` once `slowGate` opens; `/api/me` is
+    /// ``tokenServer(refresh:)``.
+    private func delayedUnauthorizedServer(slowGate: StubGate) -> StubServer {
         StubServer { request in
             switch (request.url?.path(), request.value(forHTTPHeaderField: "Authorization")) {
             case (refreshPath, _): .json(refreshedJSON)
-            case ("/abs/api/slow", "Bearer access-1"): .json("{}", status: 401, delay: .milliseconds(300))
+            case ("/abs/api/slow", "Bearer access-1"): .json("{}", status: 401, gate: slowGate)
             case (_, "Bearer access-2"), (_, "Bearer access-new"): .json(#"{"ok":true}"#)
             default: .text("Unauthorized", status: 401)
             }
@@ -527,14 +551,16 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     }
 
     @Test func delayedUnauthorizedAfterLogoutDoesNotReuseRefresh() async throws {
-        let server = delayedUnauthorizedServer()
+        let slowGate = StubGate()
+        let server = delayedUnauthorizedServer(slowGate: slowGate)
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         let slow = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
-        try await waitUntil { server.requests(path: "/abs/api/slow").count == 1 }
+        await slowGate.arrived()
         _ = try await client.send(Endpoint<OK>(.get, "/api/me"))
         tokens.signOut()
+        slowGate.open()
 
         await #expect(throws: APIError.sessionExpired) { try await slow.value }
         #expect(server.requests(path: "/abs/api/slow").count == 1)
@@ -543,15 +569,17 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     }
 
     @Test func delayedUnauthorizedAfterNewSignInUsesNewSession() async throws {
-        let server = delayedUnauthorizedServer()
+        let slowGate = StubGate()
+        let server = delayedUnauthorizedServer(slowGate: slowGate)
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
         let replacement = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
 
         let slow = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
-        try await waitUntil { server.requests(path: "/abs/api/slow").count == 1 }
+        await slowGate.arrived()
         _ = try await client.send(Endpoint<OK>(.get, "/api/me"))
         tokens.signIn(replacement)
+        slowGate.open()
 
         #expect(try await slow.value == OK(ok: true))
         let sent = server.requests(path: "/abs/api/slow").map { $0.value(forHTTPHeaderField: "Authorization") }
@@ -595,19 +623,21 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     @Test func delayedUnauthorizedReusesRefreshThatOnlyRotatedRefreshToken() async throws {
         // Each path answers 401 to its first request and 200 afterwards.
         let seen = Mutex<Set<String>>([])
+        let slowGate = StubGate()
         let server = StubServer { request in
             let path = request.url?.path() ?? ""
             if path == refreshPath { return .json(#"{"user":{"accessToken":"access-1","refreshToken":"refresh-2"}}"#) }
             guard seen.withLock({ $0.insert(path).inserted }) else { return .json(#"{"ok":true}"#) }
             return path == "/abs/api/slow"
-                ? .json("{}", status: 401, delay: .milliseconds(300)) : .text("Unauthorized", status: 401)
+                ? .json("{}", status: 401, gate: slowGate) : .text("Unauthorized", status: 401)
         }
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         let slow = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
-        try await waitUntil { server.requests(path: "/abs/api/slow").count == 1 }
+        await slowGate.arrived()
         _ = try await client.send(Endpoint<OK>(.get, "/api/me"))
+        slowGate.open()
 
         #expect(try await slow.value == OK(ok: true))
         #expect(server.requests(path: refreshPath).count == 1)
@@ -628,13 +658,13 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
                 && request.value(forHTTPHeaderField: "Authorization") == "Bearer access-3"
             return accepted ? .json(#"{"ok":true}"#) : .text("Unauthorized", status: 401)
         }
-        let tokens = SlowFirstSwapTokenProvider()
+        let tokens = SlowSwapTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         // The first request's refresh (1 -> 2) commits but returns late; meanwhile another request
         // is rejected with pair 2 and refreshes it (2 -> 3), so the edges are recorded in reverse.
         let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { tokens.isHolding }
+        await tokens.held()
         #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
         tokens.release()
 
@@ -688,7 +718,7 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
 
         let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
         if gatesPostRefreshRead {
-            try await waitUntil { tokens.isHolding }
+            await tokens.held()
         } else {
             #expect(try await first.value == OK(ok: true))
         }
@@ -703,8 +733,11 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
 
     // MARK: Refresh lineage across concurrent requests
 
-    /// Refresh tokens 1 -> 2 -> 3 -> 4; access tokens follow. `/api/slow` answers after 300 ms.
-    private func lineageServer(accepts: @escaping @Sendable (String?, String?) -> Bool) -> StubServer {
+    /// Refresh tokens 1 -> 2 -> 3 -> 4; access tokens follow. `/api/slow` answers once `slowGate`
+    /// opens.
+    private func lineageServer(
+        slowGate: StubGate, accepts: @escaping @Sendable (String?, String?) -> Bool
+    ) -> StubServer {
         StubServer { request in
             let path = request.url?.path()
             let authorization = request.value(forHTTPHeaderField: "Authorization")
@@ -713,22 +746,24 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
                 let next = generation + 1
                 return .json(#"{"user":{"accessToken":"access-\#(next)","refreshToken":"refresh-\#(next)"}}"#)
             }
-            let delay: Duration? = path == "/abs/api/slow" ? .milliseconds(300) : nil
+            let gate = path == "/abs/api/slow" ? slowGate : nil
             return accepts(path, authorization)
-                ? .json(#"{"ok":true}"#, delay: delay) : .json("{}", status: 401, delay: delay)
+                ? .json(#"{"ok":true}"#, gate: gate) : .json("{}", status: 401, gate: gate)
         }
     }
 
     /// (a) A request sent with pair 1 whose 401 arrives after another request refreshed 1 -> 2
     /// retries with pair 2 without refreshing again.
     @Test func lateUnauthorizedRetriesWithOtherRequestsRefresh() async throws {
-        let server = lineageServer { _, authorization in authorization == "Bearer access-2" }
+        let slowGate = StubGate()
+        let server = lineageServer(slowGate: slowGate) { _, authorization in authorization == "Bearer access-2" }
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         let late = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
-        try await waitUntil { server.requests(path: "/abs/api/slow").count == 1 }
+        await slowGate.arrived()
         #expect(try await client.send(Endpoint<OK>(.get, "/api/me")) == OK(ok: true))
+        slowGate.open()
 
         #expect(try await late.value == OK(ok: true))
         let sent = server.requests(path: "/abs/api/slow").map { $0.value(forHTTPHeaderField: "Authorization") }
@@ -739,15 +774,17 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     /// (a') If pair 2 is then rejected too, the late request ends the session: pair 2 came from a
     /// refresh after it read pair 1.
     @Test func lateUnauthorizedThenRejectedRefreshExpires() async throws {
-        let server = lineageServer { path, authorization in
+        let slowGate = StubGate()
+        let server = lineageServer(slowGate: slowGate) { path, authorization in
             path == "/abs/api/me" && authorization == "Bearer access-2"
         }
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         let late = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
-        try await waitUntil { server.requests(path: "/abs/api/slow").count == 1 }
+        await slowGate.arrived()
         #expect(try await client.send(Endpoint<OK>(.get, "/api/me")) == OK(ok: true))
+        slowGate.open()
 
         await #expect(throws: APIError.sessionExpired) { try await late.value }
         #expect(server.requests(path: refreshPath).count == 1)
@@ -758,6 +795,7 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     /// another request refreshes 2 -> 3. Pair 3 descends from this request's refresh, so its
     /// rejection ends the session instead of refreshing 3 -> 4.
     @Test func lineageSurvivesAnotherRefreshDuringRetry() async throws {
+        let retryGate = StubGate()
         let server = StubServer { request in
             let path = request.url?.path()
             let authorization = request.value(forHTTPHeaderField: "Authorization")
@@ -767,16 +805,16 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
                 return .json(#"{"user":{"accessToken":"access-\#(next)","refreshToken":"refresh-\#(next)"}}"#)
             }
             if path == "/abs/api/other", authorization == "Bearer access-3" { return .json(#"{"ok":true}"#) }
-            let delay: Duration? =
-                path == "/abs/api/me" && authorization == "Bearer access-2" ? .milliseconds(300) : nil
-            return .json("{}", status: 401, delay: delay)
+            let gate = path == "/abs/api/me" && authorization == "Bearer access-2" ? retryGate : nil
+            return .json("{}", status: 401, gate: gate)
         }
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { server.requests(path: "/abs/api/me").count == 2 }
+        await retryGate.arrived()
         #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
+        retryGate.open()
 
         await #expect(throws: APIError.sessionExpired) { try await first.value }
         let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
@@ -787,14 +825,136 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(tokens.expiredCount == 1)
     }
 
+    /// A request's retry with its refreshed pair 2 is rejected while another request's refresh of
+    /// pair 2 is in flight: (a) before the provider swaps 2 -> 3, or (b) after the swap but before
+    /// it returns. The rejection waits for that refresh instead of expiring the session (which
+    /// would discard it) and retries once with pair 3. Pair 3 descends from this request's refresh,
+    /// so if it is rejected too the session expires without a third refresh.
+    @Test(arguments: [false, true], [true, false])
+    func retryRejectedDuringOtherRefreshOfRefreshedPairWaitsForIt(
+        swapCommitted: Bool, retryAccepted: Bool
+    ) async throws {
+        let refreshGate = StubGate()  // (a): holds the 2 -> 3 refresh response
+        let retryGate = StubGate()  // holds the 401 for the retry with pair 2
+        let finalGate = StubGate()  // holds the answer for the retry with pair 3
+        let server = StubServer { request in
+            let path = request.url?.path()
+            if path == refreshPath {
+                let generation = Int(request.value(forHTTPHeaderField: "x-refresh-token")?.dropFirst(8) ?? "") ?? 0
+                let next = generation + 1
+                return .json(
+                    #"{"user":{"accessToken":"access-\#(next)","refreshToken":"refresh-\#(next)"}}"#,
+                    gate: generation == 2 && !swapCommitted ? refreshGate : nil)
+            }
+            switch (path, request.value(forHTTPHeaderField: "Authorization")) {
+            case ("/abs/api/me", "Bearer access-2"):
+                return .json("{}", status: 401, gate: retryGate)
+            case ("/abs/api/me", "Bearer access-3"):
+                return retryAccepted
+                    ? .json(#"{"ok":true}"#, gate: finalGate) : .json("{}", status: 401, gate: finalGate)
+            case ("/abs/api/other", "Bearer access-3"):
+                return .json(#"{"ok":true}"#)
+            default:
+                return .json("{}", status: 401)
+            }
+        }
+        // Swap 1 is the first request's 1 -> 2; (b) holds swap 2 (2 -> 3) after committing it.
+        let tokens = SlowSwapTokenProvider(holdingSwap: swapCommitted ? 2 : 0)
+        let client = try makeClient(server, tokens: tokens)
+        // Passes once the first request has handled its retry's 401: it joined the refresh, or
+        // (without waiting for it) finished or sent its next retry.
+        let handled = Checkpoint()
+        await client.observeRefreshJoins { handled.pass() }
+
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await retryGate.arrived()
+        let other = Task { try await client.send(Endpoint<OK>(.get, "/api/other")) }
+        if swapCommitted { await tokens.held() } else { await refreshGate.arrived() }
+        Task {
+            _ = await first.result
+            handled.pass()
+        }
+        Task {
+            await finalGate.arrived()
+            handled.pass()
+        }
+        retryGate.open()
+        await handled.reached()
+        if swapCommitted { tokens.release() } else { refreshGate.open() }
+        #expect(try await other.value == OK(ok: true))
+        finalGate.open()
+
+        if retryAccepted {
+            #expect(try await first.value == OK(ok: true))
+            #expect(tokens.inner.current == AuthTokens(accessToken: "access-3", refreshToken: "refresh-3"))
+            #expect(tokens.inner.expiredCount == 0)
+        } else {
+            await #expect(throws: APIError.sessionExpired) { try await first.value }
+            #expect(tokens.inner.current == nil)
+            #expect(tokens.inner.expiredCount == 1)
+        }
+        let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
+        #expect(refreshTokens == ["refresh-1", "refresh-2"])
+        let sent = server.requests(path: "/abs/api/me").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-1", "Bearer access-2", "Bearer access-3"])
+    }
+
+    /// As above, but the other request's refresh returns pair 2 unchanged. It completed after the
+    /// rejected send, so it answers that rejection: the request retries with pair 2 once instead
+    /// of ending the session the other request just refreshed.
+    @Test func retryRejectedDuringOtherSamePairRefreshRetriesOnce() async throws {
+        let refreshes = Mutex(0)
+        let refreshGate = StubGate()
+        let retryGate = StubGate()
+        let server = StubServer { request in
+            let path = request.url?.path()
+            if path == refreshPath {
+                refreshes.withLock { $0 += 1 }
+                return request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1"
+                    ? .json(refreshedJSON) : .json(#"{"user":{"accessToken":"access-2"}}"#, gate: refreshGate)
+            }
+            guard request.value(forHTTPHeaderField: "Authorization") == "Bearer access-2" else {
+                return .json("{}", status: 401)
+            }
+            if refreshes.withLock({ $0 >= 2 }) { return .json(#"{"ok":true}"#) }
+            return .json("{}", status: 401, gate: path == "/abs/api/me" ? retryGate : nil)
+        }
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+        let handled = Checkpoint()
+        await client.observeRefreshJoins { handled.pass() }
+
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await retryGate.arrived()
+        let other = Task { try await client.send(Endpoint<OK>(.get, "/api/other")) }
+        await refreshGate.arrived()
+        Task {
+            _ = await first.result
+            handled.pass()
+        }
+        retryGate.open()
+        await handled.reached()
+        refreshGate.open()
+
+        #expect(try await other.value == OK(ok: true))
+        #expect(try await first.value == OK(ok: true))
+        #expect(refreshes.withLock { $0 } == 2)
+        let sent = server.requests(path: "/abs/api/me").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-1", "Bearer access-2", "Bearer access-2"])
+        #expect(tokens.current == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+        #expect(tokens.expiredCount == 0)
+    }
+
     /// (c) The request that started a refresh is cancelled while it waits; the refresh still
     /// completes, and a request whose 401 arrives afterwards uses it, then expires when the
     /// refreshed pair is rejected.
     @Test func cancelledRefreshStarterKeepsLineageForOthers() async throws {
+        let refreshGate = StubGate()
+        let slowGate = StubGate()
         let server = StubServer { request in
             switch request.url?.path() {
-            case refreshPath: .json(refreshedJSON, delay: .milliseconds(200))
-            case "/abs/api/slow": .json("{}", status: 401, delay: .milliseconds(400))
+            case refreshPath: .json(refreshedJSON, gate: refreshGate)
+            case "/abs/api/slow": .json("{}", status: 401, gate: slowGate)
             default: .text("Unauthorized", status: 401)
             }
         }
@@ -802,11 +962,14 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         let client = try makeClient(server, tokens: tokens)
 
         let late = Task { try await client.send(Endpoint<OK>(.get, "/api/slow")) }
+        await slowGate.arrived()
         let starter = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        await refreshGate.arrived()
         starter.cancel()
+        refreshGate.open()
 
         await #expect(throws: CancellationError.self) { try await starter.value }
+        slowGate.open()
         await #expect(throws: APIError.sessionExpired) { try await late.value }
         #expect(server.requests(path: refreshPath).count == 1)
         let sent = server.requests(path: "/abs/api/slow").map { $0.value(forHTTPHeaderField: "Authorization") }
@@ -819,19 +982,21 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     /// discarded, the new session's refresh is this request's, and its rejection expires.
     @Test func concurrentRefreshesOfDifferentSessionsKeepSeparateLineage() async throws {
         let replacement = AuthTokens(accessToken: "access-new", refreshToken: "refresh-new")
+        let oldRefreshGate = StubGate()
         let server = StubServer { request in
             guard request.url?.path() == refreshPath else { return .text("Unauthorized", status: 401) }
             return request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-new"
                 ? .json(#"{"user":{"accessToken":"access-new-2","refreshToken":"refresh-new-2"}}"#)
-                : .json(refreshedJSON, delay: .milliseconds(300))
+                : .json(refreshedJSON, gate: oldRefreshGate)
         }
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
 
         let old = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
-        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        await oldRefreshGate.arrived()
         tokens.signIn(replacement)
         await #expect(throws: APIError.sessionExpired) { try await client.send(Endpoint<OK>(.get, "/api/other")) }
+        oldRefreshGate.open()
 
         await #expect(throws: CancellationError.self) { try await old.value }
         let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
@@ -840,17 +1005,182 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(tokens.expiredCount == 1)
     }
 
-    @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {
-        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(400)))
-        let tokens = InMemoryTokenProvider()
+    // MARK: Refresh history retention
+
+    /// A request that read pair 1 holds its stale snapshot while ten other requests each refresh
+    /// the session once (1 -> 2 -> ... -> 11), more refreshes than any fixed history would keep.
+    /// Its late 401 must still see that pair 11 descends from pair 1: it retries with pair 11
+    /// without refreshing again, and if pair 11 is rejected too the session expires.
+    @Test(arguments: [true, false])
+    func lateUnauthorizedAfterManyRefreshesKeepsLineage(lateRetryAccepted: Bool) async throws {
+        let steps = 10
+        let server = StubServer { request in
+            let path = request.url?.path() ?? ""
+            let authorization = request.value(forHTTPHeaderField: "Authorization")
+            if path == refreshPath {
+                let generation = Int(request.value(forHTTPHeaderField: "x-refresh-token")?.dropFirst(8) ?? "") ?? 0
+                let next = generation + 1
+                return .json(#"{"user":{"accessToken":"access-\#(next)","refreshToken":"refresh-\#(next)"}}"#)
+            }
+            // `/api/step/k` rejects only pair k, so each step refreshes exactly once and succeeds.
+            if path.hasPrefix("/abs/api/step/") {
+                let step = path.dropFirst("/abs/api/step/".count)
+                return authorization == "Bearer access-\(step)" ? .json("{}", status: 401) : .json(#"{"ok":true}"#)
+            }
+            let accepted = lateRetryAccepted && authorization != "Bearer access-1"
+            return accepted ? .json(#"{"ok":true}"#) : .json("{}", status: 401)
+        }
+        // Call 1 is the late request's token read; call 2 is its read after the 401, held with
+        // the stale pair 1 while the steps run.
+        let tokens = GatedTokenProvider(holdingCall: 2)
         let client = try makeClient(server, tokens: tokens)
 
+        let late = Task { try await client.send(Endpoint<OK>(.get, "/api/late")) }
+        await tokens.held()
+        for step in 1...steps {
+            #expect(try await client.send(Endpoint<OK>(.get, "/api/step/\(step)")) == OK(ok: true))
+        }
+        tokens.release()
+
+        if lateRetryAccepted {
+            #expect(try await late.value == OK(ok: true))
+            #expect(tokens.inner.current?.accessToken == "access-\(steps + 1)")
+        } else {
+            await #expect(throws: APIError.sessionExpired) { try await late.value }
+            #expect(tokens.inner.current == nil)
+            #expect(tokens.inner.expiredCount == 1)
+        }
+        let sent = server.requests(path: "/abs/api/late").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-1", "Bearer access-\(steps + 1)"])
+        #expect(server.requests(path: refreshPath).count == steps)
+    }
+
+    // MARK: Lineage timing
+
+    /// A refresh completes after a request captured its generation but before its token read, so
+    /// it reads the refreshed pair. That pair was never rejected for this request: its 401 gets
+    /// its own refresh rather than ending the session.
+    @Test func refreshBeforeTokenReadIsNotThisRequestsRefresh() async throws {
+        let server = StubServer { request in
+            let path = request.url?.path()
+            if path == refreshPath {
+                return request.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1"
+                    ? .json(refreshedJSON) : .json(#"{"user":{"accessToken":"access-3","refreshToken":"refresh-3"}}"#)
+            }
+            let accepted: Set<String> = path == "/abs/api/other" ? ["Bearer access-2"] : ["Bearer access-3"]
+            return accepted.contains(request.value(forHTTPHeaderField: "Authorization") ?? "")
+                ? .json(#"{"ok":true}"#) : .text("Unauthorized", status: 401)
+        }
+        // Call 1 is the first request's initial read, held before it reads anything.
+        let tokens = GatedTokenProvider(holdingCall: 1, readsAfterRelease: true)
+        let client = try makeClient(server, tokens: tokens)
+
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await tokens.held()
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
+        tokens.release()
+
+        #expect(try await first.value == OK(ok: true))
+        let sent = server.requests(path: "/abs/api/me").map { $0.value(forHTTPHeaderField: "Authorization") }
+        #expect(sent == ["Bearer access-2", "Bearer access-3"])
+        let refreshTokens = server.requests(path: refreshPath).map { $0.value(forHTTPHeaderField: "x-refresh-token") }
+        #expect(refreshTokens == ["refresh-1", "refresh-2"])
+        #expect(tokens.inner.expiredCount == 0)
+    }
+
+    /// A refresh that returns the same pair completes after a request captured its generation but
+    /// before its token read. The request then sends that pair; the refresh happened before the
+    /// send, so it doesn't answer this 401. The request must try the refresh token itself instead
+    /// of retrying once and ending the session.
+    @Test func samePairRefreshBeforeSendIsNotThisRequestsRefresh() async throws {
+        // The refresh always returns the same pair. `/api/other` works after one refresh and
+        // `/api/me` only after a second one.
+        let refreshes = Mutex(0)
+        let server = StubServer { request in
+            switch request.url?.path() {
+            case refreshPath:
+                refreshes.withLock { $0 += 1 }
+                return .json(#"{"user":{"accessToken":"access-1"}}"#)
+            case "/abs/api/other" where refreshes.withLock({ $0 >= 1 }),
+                "/abs/api/me" where refreshes.withLock({ $0 >= 2 }):
+                return .json(#"{"ok":true}"#)
+            default:
+                return .text("Unauthorized", status: 401)
+            }
+        }
+        // Call 1 is the first request's initial read, held before it reads anything.
+        let tokens = GatedTokenProvider(holdingCall: 1, readsAfterRelease: true)
+        let client = try makeClient(server, tokens: tokens)
+
+        let first = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await tokens.held()
+        #expect(try await client.send(Endpoint<OK>(.get, "/api/other")) == OK(ok: true))
+        tokens.release()
+
+        #expect(try await first.value == OK(ok: true))
+        #expect(server.requests(path: "/abs/api/me").count == 2)
+        #expect(server.requests(path: refreshPath).count == 2)
+        #expect(tokens.inner.current == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
+        #expect(tokens.inner.expiredCount == 0)
+    }
+
+    /// A refresh fails while another request holds the pre-refresh pair. Nothing was refreshed,
+    /// so that request's 401 starts its own refresh (a server error keeps the session), or ends
+    /// the session if the refresh token was rejected.
+    @Test(arguments: [false, true])
+    func failedRefreshWhileOtherRequestHoldsOldPair(refreshTokenRejected: Bool) async throws {
+        let refreshCalls = Mutex(0)
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath {
+                let call = refreshCalls.withLock {
+                    $0 += 1
+                    return $0
+                }
+                if refreshTokenRejected { return .text("Unauthorized", status: 401) }
+                return call == 1 ? .text("Unavailable", status: 503) : .json(refreshedJSON)
+            }
+            return request.value(forHTTPHeaderField: "Authorization") == "Bearer access-2"
+                ? .json(#"{"ok":true}"#) : .text("Unauthorized", status: 401)
+        }
+        // Call 2 is the held request's read after its 401: it keeps pair 1 while the other
+        // request's refresh fails.
+        let tokens = GatedTokenProvider(holdingCall: 2)
+        let client = try makeClient(server, tokens: tokens)
+
+        let held = Task { try await client.send(Endpoint<OK>(.get, "/api/me")) }
+        await tokens.held()
+        await #expect(
+            throws: refreshTokenRejected ? APIError.sessionExpired : APIError.http(status: 503, message: "Unavailable")
+        ) {
+            try await client.send(Endpoint<OK>(.get, "/api/other"))
+        }
+        tokens.release()
+
+        if refreshTokenRejected {
+            await #expect(throws: APIError.sessionExpired) { try await held.value }
+            #expect(tokens.inner.current == nil)
+            #expect(tokens.inner.expiredCount == 1)
+        } else {
+            #expect(try await held.value == OK(ok: true))
+            #expect(tokens.inner.current?.accessToken == "access-2")
+            #expect(tokens.inner.expiredCount == 0)
+        }
+    }
+
+    @Test func cancellingRequestWaitingOnRefreshLeavesOthers() async throws {
+        let refreshGate = StubGate()
+        let server = tokenServer(refresh: .json(refreshedJSON, gate: refreshGate))
+        let tokens = InMemoryTokenProvider()
+        let client = try makeClient(server, tokens: tokens)
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
+
         let starter = Task { try await client.send(Endpoint<OK>(.get, "/api/items/starter")) }
-        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        await refreshGate.arrived()
         let waiter = Task { try await client.send(Endpoint<OK>(.get, "/api/items/waiter")) }
-        try await waitUntil { server.requests(path: "/abs/api/items/waiter").count == 1 }
-        try await Task.sleep(for: .milliseconds(50))
+        await joins.reached()
         waiter.cancel()
+        refreshGate.open()
 
         #expect(try await starter.value == OK(ok: true))
         await #expect(throws: CancellationError.self) { try await waiter.value }
@@ -859,16 +1189,19 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     }
 
     @Test func cancellingRequestThatStartedRefreshLeavesOthers() async throws {
-        let server = tokenServer(refresh: .json(refreshedJSON, delay: .milliseconds(400)))
+        let refreshGate = StubGate()
+        let server = tokenServer(refresh: .json(refreshedJSON, gate: refreshGate))
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
 
         let starter = Task { try await client.send(Endpoint<OK>(.get, "/api/items/starter")) }
-        try await waitUntil { server.requests(path: refreshPath).count == 1 }
+        await refreshGate.arrived()
         let waiter = Task { try await client.send(Endpoint<OK>(.get, "/api/items/waiter")) }
-        try await waitUntil { server.requests(path: "/abs/api/items/waiter").count == 1 }
-        try await Task.sleep(for: .milliseconds(50))
+        await joins.reached()
         starter.cancel()
+        refreshGate.open()
 
         await #expect(throws: CancellationError.self) { try await starter.value }
         #expect(try await waiter.value == OK(ok: true))
@@ -878,9 +1211,12 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
     }
 
     @Test func concurrentRequestsExpireSessionOnce() async throws {
-        let server = tokenServer(refresh: StubResponse(status: 401, delay: .milliseconds(200)))
+        let refreshGate = StubGate()
+        let server = tokenServer(refresh: .text("Unauthorized", status: 401, gate: refreshGate))
         let tokens = InMemoryTokenProvider()
         let client = try makeClient(server, tokens: tokens)
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
 
         let errors = await withTaskGroup(of: APIError?.self) { group in
             for index in 0..<5 {
@@ -893,6 +1229,9 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
                     }
                 }
             }
+            await refreshGate.arrived()
+            await joins.reached(4)
+            refreshGate.open()
             return await group.reduce(into: []) { $0.append($1) }
         }
 
@@ -978,13 +1317,4 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         }
         #expect(tokens.expiredCount == 0)
     }
-}
-
-/// Polls `condition` every 10 ms for up to two seconds.
-private func waitUntil(_ condition: () -> Bool) async throws {
-    for _ in 0..<200 {
-        if condition() { return }
-        try await Task.sleep(for: .milliseconds(10))
-    }
-    Issue.record("Timed out waiting for condition")
 }
