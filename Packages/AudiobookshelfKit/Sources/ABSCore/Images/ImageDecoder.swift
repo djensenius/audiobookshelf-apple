@@ -43,7 +43,9 @@ enum ImageDecoder {
             let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [CFString: Any],
             let width = properties[kCGImagePropertyPixelWidth] as? Int,
             let height = properties[kCGImagePropertyPixelHeight] as? Int, width > 0, height > 0
-        else { throw ImagePipelineError.unsupportedImage }
+        else {
+            throw FileManager.default.fileExists(atPath: url.path) ? ImagePipelineError.unsupportedImage : .fileMissing
+        }
         let limit = ImageCacheLimits.maxSourceDimension
         guard width <= limit, height <= limit else { throw ImagePipelineError.tooLarge }
         let depth = properties[kCGImagePropertyDepth] as? Int ?? 8
@@ -55,6 +57,13 @@ enum ImageDecoder {
         return SourceInfo(
             url: url, width: swapsSides ? height : width, height: swapsSides ? width : height, depth: depth,
             isRGB: model == nil || model == (kCGImagePropertyColorModelRGB as String))
+    }
+
+    /// Whether ImageIO recognises the file's format.
+    @concurrent static func isImage(_ url: URL) async -> Bool {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
+        else { return false }
+        return CGImageSourceGetType(source) != nil
     }
 
     /// The long side of the source aspect-fitted into `box`, never larger than the source or
@@ -95,14 +104,20 @@ enum ImageDecoder {
         return image
     }
 
-    /// Whether `image` isn't 8-bit premultiplied RGBA/BGRA or an 8-bit RGB "skip" layout.
+    /// Whether `image` isn't 8-bit premultiplied (or opaque "skip") RGB in a standard layout:
+    /// alpha-first as BGRA (little-endian) or ARGB (the default order, which is what ImageIO's
+    /// thumbnails use for JPEG and PNG), or alpha-last as RGBA. Anything else (such as ABGR) is
+    /// redrawn.
     static func needsNormalizing(_ image: CGImage) -> Bool {
-        let alpha = image.alphaInfo
-        let displayable: Set<CGImageAlphaInfo> = [
-            .premultipliedFirst, .premultipliedLast, .noneSkipFirst, .noneSkipLast,
-        ]
-        return image.bitsPerComponent != 8 || image.bitsPerPixel != 32 || image.colorSpace?.model != .rgb
-            || !displayable.contains(alpha)
+        guard image.bitsPerComponent == 8, image.bitsPerPixel == 32, image.colorSpace?.model == .rgb else {
+            return true
+        }
+        let order = image.byteOrderInfo
+        switch image.alphaInfo {
+        case .premultipliedFirst, .noneSkipFirst: return ![.order32Little, .orderDefault, .order32Big].contains(order)
+        case .premultipliedLast, .noneSkipLast: return order != .orderDefault && order != .order32Big
+        default: return true
+        }
     }
 
     /// Redraws `image` into an 8-bit premultiplied context, in Display P3 for wide-gamut

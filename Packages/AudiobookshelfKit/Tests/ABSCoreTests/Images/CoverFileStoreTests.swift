@@ -31,12 +31,13 @@ import Testing
                 return Date(timeIntervalSince1970: value)
             }
         }
-        let oldestButLeased = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "webp")
+        let oldestButLeased = try await store.insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: 0)
         for id in ["b", "c"] {
-            _ = try await store.insert(moving: temporaryFile(), for: key(id), pathExtension: "webp")
+            _ = try await store.insert(moving: temporaryFile(), for: key(id), pathExtension: "webp", generation: 0)
         }
         #expect(await store.evictionCount == 0)
-        _ = try await store.insert(moving: temporaryFile(), for: key("d"), pathExtension: "webp")
+        _ = try await store.insert(moving: temporaryFile(), for: key("d"), pathExtension: "webp", generation: 0)
         await store.waitForEviction()
 
         #expect(await store.evictionCount == 1)
@@ -50,7 +51,8 @@ import Testing
 
     @Test func leaseIsReleasedWithItsLastHolder() async throws {
         let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
-        var file: LeasedFile? = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "jpg")
+        var file: LeasedFile? = try await store.insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "jpg", generation: 0)
         let url = try #require(file?.url)
         #expect(url.pathExtension == "jpg")
         #expect(await store.isLeased(url))
@@ -60,11 +62,25 @@ import Testing
 
     @Test func fullPassRescansAndRemovingAServerDeletesItsFolder() async throws {
         let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
-        _ = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "webp")
+        _ = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: 0)
         let reopened = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
         #expect(await reopened.size == 16_384)
         await reopened.removeServer(serverID)
         #expect(await reopened.size == 0)
         #expect(await reopened.lookup(key("a")) == nil)
+    }
+
+    @Test func writesStartedBeforeAServerRemovalAreRefused() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
+        let generation = await store.generation(for: serverID)
+        await store.removeServer(serverID)
+        await #expect(throws: CancellationError.self) {
+            try await store.insert(
+                moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: generation)
+        }
+        #expect(await store.size == 0)
+        let current = await store.generation(for: serverID)
+        _ = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: current)
+        #expect(await store.size == 16_384)
     }
 }

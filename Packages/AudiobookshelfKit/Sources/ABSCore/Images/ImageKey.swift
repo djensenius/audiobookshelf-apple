@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Identifies one version of one server image at one width bucket (ADR 0005).
@@ -13,8 +14,8 @@ public struct ImageKey: Sendable, Hashable {
     public var updatedAt: Int?
     /// The variant requested from the server. Views pick it from their rendered size.
     public var bucket: ImageWidthBucket
-    /// An absolute cover URL (a legacy external `coverPath`, or a local `file:` URL) used
-    /// instead of the server route.
+    /// An absolute `http(s)` cover URL (a legacy external `coverPath`) used instead of the
+    /// server route. Local files come only from ``DownloadedCoverLookup``.
     public var externalURL: URL?
 
     public init(
@@ -47,13 +48,18 @@ public struct ImageKey: Sendable, Hashable {
         return key
     }
 
-    /// `<kind>-<entityID>-<updatedAt>-<bucket>`, the `CoverFileStore` file name without its
-    /// extension. The entity ID is sanitised so it can't escape the server's folder.
+    /// `<kind>-<entityID>-<updatedAt>-<bucket>-<hash>`, the `CoverFileStore` file name without
+    /// its extension. The entity ID is sanitised so it can't escape the server's folder, and
+    /// the hash of the original ID and external URL keeps sanitised names from colliding. A
+    /// missing `updatedAt` is `n`, distinct from `0`.
     var fileStem: String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
         let entity = String(
             String.UnicodeScalarView(entityID.unicodeScalars.map { allowed.contains($0) ? $0 : "_" }))
-        return "\(kind.rawValue)-\(entity.prefix(128))-\(updatedAt.map(String.init) ?? "0")-\(bucket.rawValue)"
+        let identity = Data((entityID + "\n" + (externalURL?.absoluteString ?? "")).utf8)
+        let hash = SHA256.hash(data: identity).prefix(6).map { String(format: "%02x", $0) }.joined()
+        let version = updatedAt.map(String.init) ?? "n"
+        return "\(kind.rawValue)-\(entity.prefix(64))-\(version)-\(bucket.rawValue)-\(hash)"
     }
 }
 
@@ -102,6 +108,7 @@ public struct DownloadedCover: Sendable, Hashable {
 
 /// Finds the cover file of a downloaded item, so offline items show covers with no network.
 /// Implemented in ABSAppModel over ABSData's `LocalItemStore`.
+// TODO(#143): add the ABSAppModel implementation once ABSData's `LocalItemStore` exists.
 public protocol DownloadedCoverLookup: Sendable {
     /// The local cover for `key`'s entity, whatever its version, or `nil`.
     func downloadedCover(for key: ImageKey) async -> DownloadedCover?

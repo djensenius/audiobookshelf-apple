@@ -466,6 +466,11 @@ static, unauthenticated remote images (none are planned).
       download), the decode treats it as a miss and refetches once. A second
       failure shows the placeholder.
   - **Logout:** removing a server deletes its folder.
+    - *Implementation deviation (#43):* `ImagePipeline.removeServer` cancels
+      the server's fetches and decodes, drops its memory entries, and makes
+      `CoverFileStore` refuse writes from fetches started before the
+      removal, but it deletes the folder without waiting for open leases.
+      Waiting for them is tracked in #143.
 - **Rendering:** the pipeline returns `CGImage` plus scale. Each consumer wraps
   it:
   - SwiftUI: `Image(decorative:scale:)`;

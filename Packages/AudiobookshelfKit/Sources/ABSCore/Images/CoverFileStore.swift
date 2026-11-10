@@ -39,7 +39,7 @@ struct LeasedFile: Sendable {
 
 /// The encoded image file cache (ADR 0005, "`CoverFileStore`").
 ///
-/// Files live at `<directory>/<serverID>/<kind>-<entityID>-<updatedAt>-<bucket>.<ext>`. Only
+/// Files live at `<directory>/<serverID>/<ImageKey.fileStem>.<ext>`. Only
 /// the app process writes and evicts. Eviction is least recently used by modification date
 /// (touched on hits at most once a day), skips leased files, and brings the total to 90 % of
 /// the cap.
@@ -51,6 +51,8 @@ public actor CoverFileStore {
     private var totalBytes = 0
     private var isScanned = false
     private var evictionTask: Task<Void, Never>?
+    /// Bumped by ``removeServer(_:)``, so fetches started before it can't write.
+    private var serverGenerations: [UUID: Int] = [:]
     /// The number of background evictions started, for tests.
     private(set) var evictionCount = 0
 
@@ -63,11 +65,17 @@ public actor CoverFileStore {
     }
 
     /// `Library/Caches/Images` in the App Group container, so the widget can read it, or the
-    /// app's own caches directory when the App Group entitlement is missing.
+    /// app's own caches directory when the App Group container is missing or not writable (as
+    /// on an unsigned macOS build).
     public static func defaultDirectory(appGroup: String = AppSettings.appGroupIdentifier) -> URL {
-        let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
-        return (container?.appending(path: "Library/Caches", directoryHint: .isDirectory) ?? URL.cachesDirectory)
-            .appending(path: "Images", directoryHint: .isDirectory)
+        let fallback = URL.cachesDirectory.appending(path: "Images", directoryHint: .isDirectory)
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
+        else { return fallback }
+        let directory = container.appending(path: "Library/Caches/Images", directoryHint: .isDirectory)
+        guard (try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)) != nil,
+            FileManager.default.isWritableFile(atPath: directory.path)
+        else { return fallback }
+        return directory
     }
 
     /// The total size of the cache files, in bytes.
@@ -79,6 +87,7 @@ public actor CoverFileStore {
     /// Rescans the folder, resetting the size from what it finds (which picks up files the OS
     /// purged), and evicts down to 90 % of the cap if it is over. Run at launch and when the app
     /// enters the background.
+    // TODO(#143): call at launch and from a background maintenance task.
     public func fullPass() {
         isScanned = true
         totalBytes = files().reduce(0) { $0 + $1.size }
@@ -100,8 +109,15 @@ public actor CoverFileStore {
         return nil
     }
 
-    /// Moves `file` into the store as `key`'s file and returns it leased.
-    func insert(moving file: URL, for key: ImageKey, pathExtension: String) throws -> LeasedFile {
+    /// The current generation of `serverID`'s folder; pass it to ``insert(moving:for:pathExtension:generation:)``.
+    func generation(for serverID: UUID) -> Int {
+        serverGenerations[serverID, default: 0]
+    }
+
+    /// Moves `file` into the store as `key`'s file and returns it leased. Throws
+    /// `CancellationError` if the server was removed since `generation` was read.
+    func insert(moving file: URL, for key: ImageKey, pathExtension: String, generation: Int) throws -> LeasedFile {
+        guard generation == self.generation(for: key.serverID) else { throw CancellationError() }
         scanIfNeeded()
         let folder = folder(for: key.serverID)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -126,11 +142,21 @@ public actor CoverFileStore {
 
     /// Deletes one server's files, for example when its connection is removed.
     public func removeServer(_ serverID: UUID) {
+        serverGenerations[serverID, default: 0] += 1
         scanIfNeeded()
         let folder = folder(for: serverID)
         let removed = files(in: folder).reduce(0) { $0 + $1.size }
         try? FileManager.default.removeItem(at: folder)
         totalBytes = max(0, totalBytes - removed)
+    }
+
+    /// Deletes a stored file that turned out not to decode.
+    func discard(_ url: URL) {
+        guard
+            url.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path
+                == directory.standardizedFileURL.path
+        else { return }
+        remove(url)
     }
 
     /// Waits for a running background eviction, for tests.
@@ -144,7 +170,10 @@ public actor CoverFileStore {
 
     private func evict(toBytes target: Int) {
         let leased = leases.leasedPaths
-        for file in files().sorted(by: { $0.modified < $1.modified }) where totalBytes > target {
+        let listing = files()
+        // Resync with the folder, which the OS may have purged since the last pass.
+        totalBytes = listing.reduce(0) { $0 + $1.size }
+        for file in listing.sorted(by: { $0.modified < $1.modified }) where totalBytes > target {
             guard !leased.contains(Self.leaseKey(file.url)) else { continue }
             remove(file.url)
         }

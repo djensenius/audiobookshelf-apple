@@ -41,18 +41,36 @@ final class Flight<Value: Sendable>: Sendable {
         }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let immediate: Result<Value, any Error>? = state.withLock { state in
-                    if let result = state.result { return result }
-                    if state.isAbandoned { return .failure(Abandoned()) }
-                    if Task.isCancelled { return .failure(CancellationError()) }
+                let (immediate, orphan) = state.withLock {
+                    state -> (Result<Value, any Error>?, Task<Void, Never>?) in
+                    if let result = state.result { return (result, nil) }
+                    if state.isAbandoned { return (.failure(Abandoned()), nil) }
+                    if Task.isCancelled {
+                        // A caller cancelled before joining may be the flight's only one.
+                        guard state.waiters.isEmpty else { return (.failure(CancellationError()), nil) }
+                        state.isAbandoned = true
+                        return (.failure(CancellationError()), state.task)
+                    }
                     state.waiters[id] = continuation
-                    return nil
+                    return (nil, nil)
                 }
+                orphan?.cancel()
                 if let immediate { continuation.resume(with: immediate) }
             }
         } onCancel: {
             leave(id)
         }
+    }
+
+    /// Abandons the flight and cancels its task; current waiters get the task's result, usually
+    /// a `CancellationError`.
+    func cancel() {
+        let task = state.withLock { state -> Task<Void, Never>? in
+            guard state.result == nil else { return nil }
+            state.isAbandoned = true
+            return state.task
+        }
+        task?.cancel()
     }
 
     private func leave(_ id: UInt64) {

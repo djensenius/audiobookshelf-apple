@@ -91,9 +91,16 @@ final class ImageMemoryLedger: Sendable {
         state.withLock { $0.reserved += cost }
     }
 
+    /// Returns a reservation, waking decodes waiting for room (the reserving decode may have
+    /// failed or been cancelled).
     func unreserve(_ cost: Int) {
+        guard cost > 0 else { return }
         state.withLock { $0.reserved -= cost }
+        signal()
     }
+
+    /// The decodes waiting for room, for tests.
+    var waiterCount: Int { state.withLock { $0.waiters.count } }
 
     /// Returns once an image is released after `generation`, or when the task is cancelled.
     func waitForRelease(after generation: UInt64) async {
@@ -170,6 +177,13 @@ final class ImageMemoryCache {
             if ledger.total + cost <= limit { return true }
         }
         return false
+    }
+
+    /// Removes every entry whose key matches, for example a removed server's.
+    func removeAll(where shouldRemove: (MemoryKey) -> Bool) {
+        for key in entries.keys where shouldRemove(key) {
+            remove(key)
+        }
     }
 
     /// Evicts least recently used entries until the LRU holds at most `fraction` of the cap.
