@@ -8821,6 +8821,251 @@
         }
       }
     },
+    "ButtonOpenSettings" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Open Settings"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Open Settings"
+          }
+        }
+      }
+    },
     "ButtonOverride" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -67866,6 +68111,251 @@
         }
       }
     },
+    "LabelThemeSystem" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "System"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "System"
+          }
+        }
+      }
+    },
     "LabelTimeRemaining" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -72031,6 +72521,251 @@
         }
       }
     },
+    "MessageAllowSeekingOnMediaControlsHelp" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        }
+      }
+    },
     "MessageAndroid10Downloads" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -73011,6 +73746,251 @@
         }
       }
     },
+    "MessageAutoSleepTimerWindowEmpty" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The start and end times are the same, so the auto sleep timer never starts."
+          }
+        }
+      }
+    },
     "MessageBookshelfEmpty" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -73252,6 +74232,496 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "書架是空的"
+          }
+        }
+      }
+    },
+    "MessageCellularSettingsHelp" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "These settings also apply when Low Data Mode is on."
+          }
+        }
+      }
+    },
+    "MessageCellularSettingsHelpMac" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on."
           }
         }
       }
@@ -79377,6 +80847,496 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "項目遺失且必須在伺服器端修正。項目通常會因無法存取檔案路徑而被標記為遺失。"
+          }
+        }
+      }
+    },
+    "MessageLanguageSettingsHelp" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+          }
+        }
+      }
+    },
+    "MessageLanguageSettingsHelpMac" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
           }
         }
       }

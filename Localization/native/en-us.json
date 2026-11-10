@@ -1,4 +1,12 @@
 {
+  "ButtonOpenSettings": "Open Settings",
   "ButtonRetry": "Retry",
-  "LabelAbridged": "Abridged"
+  "LabelAbridged": "Abridged",
+  "LabelThemeSystem": "System",
+  "MessageAllowSeekingOnMediaControlsHelp": "Lets you change the playback position from the Lock Screen, Control Center and other system media controls.",
+  "MessageAutoSleepTimerWindowEmpty": "The start and end times are the same, so the auto sleep timer never starts.",
+  "MessageCellularSettingsHelp": "These settings also apply when Low Data Mode is on.",
+  "MessageCellularSettingsHelpMac": "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on.",
+  "MessageLanguageSettingsHelp": "Audiobookshelf uses the language you choose for it in the Settings app.",
+  "MessageLanguageSettingsHelpMac": "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
 }
