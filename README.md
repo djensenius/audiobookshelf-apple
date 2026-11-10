@@ -26,6 +26,7 @@ Requires Xcode 27.2 and [mise](https://mise.jdx.dev). Open
 mise install
 mise run build:ios     # or build:macos
 mise run test          # package and macOS app tests
+mise run test:ios      # app tests on the iPhone Duo simulator
 mise run lint          # ShellCheck, actionlint, swift format
 ```
 

@@ -34,7 +34,20 @@ run = "swift format format --in-place --recursive --parallel Audiobookshelf Audi
 [tasks."xcproj:check"]
 description = "Verify Audiobookshelf.xcodeproj/project.xcproj is in canonical form"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
-run = "scripts/xcprojformatter.sh Audiobookshelf.xcodeproj | diff -u Audiobookshelf.xcodeproj/project.xcproj -"
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+canonical="$(mktemp)"
+trap 'rm -f "$canonical"' EXIT
+if ! scripts/xcprojformatter.sh Audiobookshelf.xcodeproj > "$canonical"; then
+  printf "\nerror: xcprojformatter failed; see the output above\n" >&2
+  exit 1
+fi
+if ! diff -u Audiobookshelf.xcodeproj/project.xcproj "$canonical"; then
+  echo "error: project.xcproj is not canonical; run 'mise run xcproj:format'" >&2
+  exit 1
+fi
+"""
 
 [tasks."xcproj:format"]
 description = "Rewrite Audiobookshelf.xcodeproj/project.xcproj in canonical form"
@@ -59,7 +72,25 @@ run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .buil
 [tasks."test:app"]
 description = "Run app tests on macOS"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
-run = "xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'platform=macOS' -derivedDataPath .build/DerivedData"
+# The sandboxed macOS host app must be signed; sign ad hoc so no team or identity is needed.
+run = "xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'platform=macOS' -derivedDataPath .build/DerivedData CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="
+
+[tasks."test:ios"]
+description = "Run app tests on the iPhone Duo simulator"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+# Several simulators can share the name "iPhone Duo", which xcodebuild rejects as
+# ambiguous, so resolve one by name (newest runtime is listed last). Override with
+# IOS_SIMULATOR_ID=<udid>.
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+udid="${IOS_SIMULATOR_ID:-$(xcrun simctl list devices available | grep -E '^ +iPhone Duo [(]' | tail -n 1 | grep -oE '[0-9A-F-]{36}' || true)}"
+if [[ -z "$udid" ]]; then
+  echo "error: no available iPhone Duo simulator; create one in Xcode or set IOS_SIMULATOR_ID" >&2
+  exit 1
+fi
+xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination "platform=iOS Simulator,id=$udid" -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO
+"""
 
 [tasks.test]
 description = "Run package and app tests"

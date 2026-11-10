@@ -41,8 +41,10 @@ Bundle IDs: `org.davidjensenius.Audiobookshelf` and
 
 CarPlay: the scene and `CarPlaySceneDelegate` exist, but the
 `com.apple.developer.carplay-audio` entitlement is not added yet — it requires Apple
-approval. Add it to `Audiobookshelf/Audiobookshelf.entitlements` (and make that
-file apply to iOS) once granted.
+approval. Once granted, add it to a separate iOS entitlements file and set
+`CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]` and `CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]`
+to it, so the macOS sandbox keys in `Audiobookshelf/Audiobookshelf.entitlements`
+don't leak into iOS.
 
 ### Legacy reference
 
@@ -72,7 +74,8 @@ Repository tooling lives in `scripts/`, `.github/workflows/`, and `mise.toml`.
 | `mise run lint` | ShellCheck, actionlint, and `swift format lint --strict` (`lint:repo` skips Swift) |
 | `mise run format` | `swift format` Swift sources in place |
 | `mise run build:ios` / `build:macos` | Build the app (unsigned) into `.build/DerivedData` |
-| `mise run test` | Package tests (`test:kit`) and macOS app tests (`test:app`) |
+| `mise run test` | Package tests (`test:kit`) and macOS app tests (`test:app`, signed ad hoc) |
+| `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
 
 Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing.
