@@ -61,6 +61,11 @@ public enum AuthEndpoints {
     /// session, which logging out should end. `/logout` is not behind the access-token check,
     /// so no access token is sent and a 401 never triggers a refresh.
     ///
+    /// Only redirects on the server's origin are followed (``Endpoint/staysOnOrigin``). A hop
+    /// off the origin would be stripped of the refresh token and cookies, so whatever it answered
+    /// says nothing about the session; it fails with ``APIError/redirectRefused(status:)``
+    /// instead of reporting a logout that never revoked anything.
+    ///
     /// For an OpenID session, pass the cookies saved at sign-in: they're added to the jar's in
     /// the `Cookie` header (replacing any jar cookies of the same names), so the server returns
     /// the identity provider's end-session URL in ``LogoutResponse/redirectURL``.
@@ -70,7 +75,8 @@ public enum AuthEndpoints {
         var headers = ["x-refresh-token": refreshToken]
         if let openIDSession { headers["Cookie"] = openIDSession.headerValue }
         return Endpoint(
-            .post, "/logout", headers: headers, requiresAuthentication: false, withheldCookies: ["refresh_token"])
+            .post, "/logout", headers: headers, requiresAuthentication: false, staysOnOrigin: true,
+            withheldCookies: ["refresh_token"])
     }
 }
 

@@ -109,9 +109,10 @@ public actor APIClient {
     public func response<Response>(for endpoint: Endpoint<Response>) async throws -> APIResponse<Response> {
         let request = try makeRequest(for: endpoint)
         let followsRedirects = endpoint.followsRedirects
+        let staysOnOrigin = endpoint.staysOnOrigin
 
         guard endpoint.requiresAuthentication else {
-            let reply = try await perform(request, followsRedirects: followsRedirects)
+            let reply = try await perform(request, followsRedirects: followsRedirects, staysOnOrigin: staysOnOrigin)
             return try handle(reply.data, reply.http, for: endpoint)
         }
 
@@ -133,7 +134,9 @@ public actor APIClient {
             // A refresh that returned the same pair says nothing about the pair's rejection unless it
             // completed after this send.
             let sendGeneration = refreshGeneration
-            let reply = try await perform(authorized(request, tokens.accessToken), followsRedirects: followsRedirects)
+            let reply = try await perform(
+                authorized(request, tokens.accessToken), followsRedirects: followsRedirects,
+                staysOnOrigin: staysOnOrigin)
             // A 401 from a hop that never received the token says nothing about the token.
             guard reply.http.statusCode == 401, !reply.credentialsStripped else {
                 return try handle(reply.data, reply.http, for: endpoint)
