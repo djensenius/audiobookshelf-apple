@@ -234,7 +234,10 @@ Model notes:
     must go before finished). Once a server baseline exists, ebook doesn't depend
     on the others: when the newest unacknowledged send carried audio or finished
     (it failed or its response was lost) and ebook is dirty, ebook goes next, so a
-    PATCH that keeps failing can't block it. Without a baseline, ebook waits for
+    PATCH that keeps failing can't block it; the send after an ebook one goes back
+    to audio or finished, even when the ebook send succeeded (leaving no entry)
+    while a newer ebook edit is pending, so neither side starves. The store tracks
+    that in memory; after a relaunch the entries decide. Without a baseline, ebook waits for
     audio and finished, because an ebook PATCH for media the server has no
     progress for creates it with zero audio and unfinished (#53). The body never
     carries `lastUpdate` (the server would store it as `updatedAt`, a device-clock
@@ -383,9 +386,11 @@ Model notes:
     row holds no evidence of it, so the outcome sets the truncation flag of each of
     its dirty groups: their echoes can't replace the edits, which keep their values
     until their own sends are acknowledged. The flags and the settlement are saved
-    together: if that save fails, the old send stays in flight (its groups still
-    excluded from merges) and the outcome throws, so the sync coordinator retries
-    it. A group edited during the request stays dirty with its newer local values, and the next fetch sees the
+    together: if that save, or the lookup telling the rows apart, fails, the old
+    send stays in flight (its groups still excluded from merges) and the outcome
+    throws, so the sync coordinator retries it. Server progress is merged with
+    one lookup of the connection's rows per batch, not one per entry, since a
+    snapshot may list thousands of items with no local row. A group edited during the request stays dirty with its newer local values, and the next fetch sees the
     server matching the advanced baseline, so the edit is kept and sent rather
     than treated as a conflict.
   - **Merges during an in-flight PATCH.** While a PATCH for a row is in flight,

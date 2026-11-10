@@ -191,6 +191,25 @@ import Testing
         #expect(row.unacknowledgedSends.isEmpty)
     }
 
+    /// An ebook send that bypassed a failing audio send goes back to audio next, even when it
+    /// succeeds (pruning its evidence) while a newer ebook edit is pending.
+    @Test func acknowledgedEbookBypassReturnsToAudio() async throws {
+        let (store, _) = try makeStore()
+        let page = { (location: String) in ProgressEdit(ebook: .init(location: location, progress: 0.5)) }
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        try await store.recordEdit(page("a"), for: key, now: Self.at(2))
+        for attempt in 0..<3 {
+            let audio = try #require(try await store.beginSend(for: key))
+            #expect(audio.values.groups == .audio, "attempt \(attempt)")
+            #expect(try await store.failSend(audio, error: "offline"))
+            let ebook = try #require(try await store.beginSend(for: key))
+            #expect(ebook.values.groups == .ebook, "attempt \(attempt)")
+            try await store.recordEdit(page("b\(attempt)"), for: key, now: Self.at(Double(3 + attempt)))
+            #expect(try await store.completeSend(ebook, serverLastUpdate: Self.at(Double(10 + attempt))))
+        }
+    }
+
     @Test func failedCommitRollsBackSendAndEdit() async throws {
         let (store, _) = try makeStore()
         try await store.recordEdit(
@@ -312,10 +331,11 @@ import Testing
         #expect(try await store.progress(for: key)?.needsServerSync == false)
     }
 
-    /// The shield for a recreated row and the settlement are saved together: when the save fails,
-    /// the old send stays in flight (its echo stays excluded) until a retried outcome saves both.
-    @Test(arguments: [false, true])
-    func failedShieldSaveKeepsTheObsoleteSendInFlight(_ succeeds: Bool) async throws {
+    /// The shield for a recreated row and the settlement are saved together: when the save, or
+    /// the lookup that tells the rows apart, fails, the old send stays in flight (its echo stays
+    /// excluded) until a retried outcome saves both.
+    @Test(arguments: [false, true], [false, true])
+    func failedShieldSaveKeepsTheObsoleteSendInFlight(_ succeeds: Bool, _ lookupFails: Bool) async throws {
         let (store, _) = try makeStore()
         try await store.recordEdit(
             Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
@@ -341,7 +361,11 @@ import Testing
             }
         }
 
-        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        if lookupFails {
+            await store.failNextRowFetch(with: CocoaError(.fileReadUnknown))
+        } else {
+            await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        }
         await #expect(throws: CocoaError.self) { try await settle() }
         #expect(await store.hasUncommittedChanges == false)
         try await echo()
@@ -377,6 +401,33 @@ import Testing
     }
 
     // MARK: - Stale and in-flight server values
+
+    /// A snapshot (`/api/me`, `user_updated`) is merged with one lookup for its connection's rows,
+    /// not one per entry; entries without a row are skipped.
+    @Test func largeSnapshotLooksUpRowsOnce() async throws {
+        let (store, _) = try makeStore()
+        let other = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_2")
+        for edited in [key, other] {
+            try await store.recordEdit(
+                Self.seek(200), for: edited, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        }
+        var snapshot: [MediaKey: ProgressBaseline] = [:]
+        for index in 0..<2000 {
+            let entry = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_x\(index)")
+            snapshot[entry] = Self.server(lastUpdate: Self.at(5))
+        }
+        snapshot[key] = Self.server(currentTime: 700, lastUpdate: Self.at(0.5))  // Older than the edit.
+        snapshot[other] = Self.server(currentTime: 800, lastUpdate: Self.at(5))
+        let capture = await store.captureGeneration()
+        let before = await store.rowFetchCount
+        let merged = try await store.applyServerProgress(snapshot, capturedAt: capture, source: .socket)
+        #expect(await store.rowFetchCount - before == 1)
+        #expect(merged == [key, other])
+        #expect(try await store.progress(for: key)?.currentTime == 200)
+        #expect(try await store.progress(for: key)?.audioDirty == true)
+        #expect(try await store.progress(for: other)?.currentTime == 800)
+        #expect(try await store.progress(for: other)?.audioDirty == false)
+    }
 
     @Test func fetchIssuedBeforeLocalSeekChangesNothing() async throws {
         let (store, _) = try makeStore()

@@ -125,6 +125,9 @@ struct ProgressSyncState: Sendable, Equatable {
     var unacknowledgedSends: [ProgressSend] = []
     /// Groups whose `<group>HistoryTruncated` flag is set.
     var truncated: ProgressGroups = []
+    /// Whether the row's latest send carried ebook (in memory only, set by the store): an
+    /// acknowledged ebook send leaves no entry, so the evidence can't tell.
+    var ebookSentLast = false
 
     /// A row seeded from known server progress: every field and the baseline, nothing dirty.
     init(seed server: ProgressBaseline) {
@@ -189,14 +192,19 @@ struct ProgressSyncState: Sendable, Equatable {
 
     /// The group the next PATCH carries: audio, then finished, then ebook. When the newest
     /// unacknowledged send (a failed or unanswered one) carried audio or finished and ebook is
-    /// dirty, ebook goes next, so the two alternate while one keeps failing. Only once a server
+    /// dirty, ebook goes next, unless ebook was sent last (``ebookSentLast``), so the two
+    /// alternate while one keeps failing. Only once a server
     /// baseline exists: on a row the server has no progress for, an ebook PATCH creates it with
     /// zero audio and unfinished (#53), so audio and finished go first.
     var nextSendGroup: ProgressGroups? {
         let chain = [ProgressGroups.audio, .finished].first { dirty.contains($0) }
         guard dirty.contains(.ebook) else { return chain }
         guard let chain else { return .ebook }
-        if serverBaseline != nil, let last = unacknowledgedSends.last, !last.groups.contains(.ebook) { return .ebook }
+        if !ebookSentLast, serverBaseline != nil, let last = unacknowledgedSends.last,
+            !last.groups.contains(.ebook)
+        {
+            return .ebook
+        }
         return chain
     }
 
