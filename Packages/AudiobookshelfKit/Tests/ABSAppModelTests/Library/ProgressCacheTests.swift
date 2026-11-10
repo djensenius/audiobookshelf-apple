@@ -131,6 +131,32 @@ private func at(_ milliseconds: Int) -> Date {
         #expect(cache.progress(libraryItemID: "a") == nil)
     }
 
+    @Test func removedEntriesArePrunedAndReadersReregister() {
+        let cache = ProgressCache()
+        cache.apply(progress("a", lastUpdate: 1))
+        cache.apply(progress("b", lastUpdate: 1))
+        _ = cache.progress(libraryItemID: "c")  // an empty entry a view may be watching
+        #expect(cache.entryCount == 3)
+
+        cache.seed([progress("b", lastUpdate: 1)], fetchedAt: at(10))
+        #expect(cache.entryCount == 2)
+        cache.remove(libraryItemID: "b")
+        #expect(cache.entryCount == 1)
+        cache.remove(libraryItemID: "missing")
+        #expect(cache.entryCount == 1)
+
+        // A reader of a pruned key reads a new entry and sees later progress.
+        let changed = Locked(false)
+        withObservationTracking {
+            _ = cache.progress(libraryItemID: "a")
+        } onChange: {
+            changed.value = true
+        }
+        cache.apply(progress("a", currentTime: 5, lastUpdate: 20))
+        #expect(changed.value)
+        #expect(cache.progress(libraryItemID: "a")?.currentTime == 5)
+    }
+
     @Test func observationIsPerKey() {
         let cache = ProgressCache()
         cache.apply(progress("b", lastUpdate: 1))

@@ -258,6 +258,38 @@ private func makeModel(_ server: PageServer, query: String = "a", pageSize: Int 
         #expect(model.reachedEnd)
     }
 
+    @Test func cancelledRefreshKeepsTheItems() async throws {
+        let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
+        let model = Model(query: "a", pageSize: 2) { query, page, limit in
+            try await gate.call(PageRequest(query: query, page: page, limit: limit))
+        }
+        var calls = gate.calls.makeAsyncIterator()
+        for page in 0..<2 {
+            let load = try #require(model.loadNextPage())
+            let call = try #require(await calls.next())
+            let results = items((page * 2 + 1)...(page * 2 + 2))
+            call.reply.resume(returning: PagedResults(results: results, total: 6, limit: 2, page: page))
+            await load.value
+        }
+
+        let refresh = try #require(model.refresh())
+        let call = try #require(await calls.next())
+        call.reply.resume(throwing: CancellationError())
+        await refresh.value
+        #expect(model.items == items(1...4))
+        #expect(model.error == nil)
+        #expect(!model.isLoading)
+
+        // A later scroll appends to the kept list instead of replacing it with page 0.
+        model.itemAppeared(at: 3)
+        let next = try #require(model.loadNextPage())
+        let nextCall = try #require(await calls.next())
+        #expect(nextCall.request.page == 0)
+        nextCall.reply.resume(returning: PagedResults(results: items(1...2), total: 6, limit: 2, page: 0))
+        await next.value
+        #expect(model.items == items(1...4))
+    }
+
     @Test func releasingTheModelCancelsThePageInFlight() async throws {
         let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
         var model: Model? = Model(query: "a", pageSize: 2) { query, page, limit in

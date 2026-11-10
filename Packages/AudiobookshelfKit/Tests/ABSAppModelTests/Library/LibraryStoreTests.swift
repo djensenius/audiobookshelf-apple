@@ -224,6 +224,23 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func reconnectingWithoutADefaultKeepsTheAccountsDefault() async throws {
+        try await withLibrarySettings { settings in
+            let libraries = [makeLibrary("one"), makeLibrary("two")]
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service(libraries), connectionKey: serverA, defaultLibraryID: "two")
+
+            await store.connect(client: service(libraries), connectionKey: serverA)
+            #expect(store.defaultLibraryID == "two")
+            #expect(store.initialLibraryID == "two")
+
+            // Another account doesn't inherit it.
+            await store.connect(client: service(libraries), connectionKey: serverB)
+            #expect(store.defaultLibraryID == nil)
+            #expect(store.initialLibraryID == "one")
+        }
+    }
+
     @Test func initialLibraryBeforeTheLibrariesLoad() async throws {
         try await withLibrarySettings { settings in
             var offline = FakeLibraryService()

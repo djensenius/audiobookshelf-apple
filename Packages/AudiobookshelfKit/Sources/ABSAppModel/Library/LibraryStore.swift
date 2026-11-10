@@ -57,7 +57,8 @@ public final class LibraryStore {
 
     /// Starts serving `connectionKey`'s account through `client`, then refreshes the libraries.
     /// A different account than the current one clears the store first; the same account
-    /// keeps its data while it refreshes.
+    /// keeps its data while it refreshes, and keeps its ``defaultLibraryID`` when
+    /// `defaultLibraryID` is `nil`.
     public func connect(
         client: any LibraryService, connectionKey: LibraryConnectionKey, defaultLibraryID: String? = nil
     ) async {
@@ -66,7 +67,9 @@ public final class LibraryStore {
             self.connectionKey = connectionKey
         }
         self.client = client
-        self.defaultLibraryID = defaultLibraryID
+        // Reconnecting the same account (for example with a new client) without a default keeps
+        // the one from login; a new account was cleared above.
+        if let defaultLibraryID { self.defaultLibraryID = defaultLibraryID }
         await refresh()
     }
 
@@ -188,7 +191,9 @@ public final class LibraryStore {
     /// The library a new scene or CarPlay starts in, in the legacy order (`layouts/default.vue`):
     /// the last-used library, then the user's default library, each only if it still exists,
     /// then the first library. Until a refresh succeeds (for example offline) the libraries
-    /// aren't known, so the last-used library, or else the default one, is returned unchecked.
+    /// aren't known, so the last-used library, or else the default one, is returned unchecked:
+    /// callers (the app shell, P3-06) must check `Router.libraryID` against ``libraries`` again
+    /// once ``hasLoaded`` becomes `true`.
     public var initialLibraryID: String? {
         guard hasLoaded else { return lastLibraryID ?? defaultLibraryID }
         for candidate in [lastLibraryID, defaultLibraryID] {

@@ -13,6 +13,12 @@ import Observation
 ///
 /// Observation is per key: ``progress(libraryItemID:episodeID:)`` only tracks its own entry, so
 /// an update to one item doesn't invalidate views showing other items.
+///
+/// Entries are created on first read, so reading items without progress (for example scrolling
+/// a grid) grows the cache by one empty entry per item read. Those can't be pruned safely,
+/// because a view may be watching one for its first progress; ``clear()`` (logout or account
+/// switch) drops them. Entries whose progress is removed are dropped right away: their readers
+/// are notified by the removal and create a new entry when they read again.
 @MainActor
 public final class ProgressCache {
     /// One observable entry per key, created on first read or write.
@@ -36,6 +42,12 @@ public final class ProgressCache {
     /// - A cached entry missing from the list is removed, unless its `lastUpdate` is later than
     ///   `fetchedAt`: it was then applied (for example by local playback starting a new item)
     ///   after the server built the list, so the list can't know about it.
+    ///
+    /// `fetchedAt` must be on the same clock as the `lastUpdate` of progress passed to
+    /// ``apply(_:)``: record it on the device just before sending the request, and stamp local
+    /// progress with the device clock. Progress the server stamped (socket updates) uses the
+    /// server's clock, so with clock skew an entry missing from the list may be kept or removed
+    /// wrongly; the next seed or update corrects it.
     public func seed(_ progress: [MediaProgress], fetchedAt: Date) {
         let fetchedAtMilliseconds = Int((fetchedAt.timeIntervalSince1970 * 1000).rounded(.down))
         var seeded: [String: MediaProgress] = [:]
@@ -53,6 +65,7 @@ public final class ProgressCache {
         }
         for (key, entry) in entries where seeded[key] == nil && entry.value != nil {
             entry.value = nil
+            entries[key] = nil
         }
         for (key, value) in seeded {
             let entry = entry(for: key)
@@ -72,7 +85,10 @@ public final class ProgressCache {
 
     /// Removes the entry for a media item, for example after the server deleted its progress.
     public func remove(libraryItemID: String, episodeID: String? = nil) {
-        entries[MediaProgress.key(libraryItemID: libraryItemID, episodeID: episodeID)]?.value = nil
+        let key = MediaProgress.key(libraryItemID: libraryItemID, episodeID: episodeID)
+        guard let entry = entries[key], entry.value != nil else { return }
+        entry.value = nil
+        entries[key] = nil
     }
 
     public func clear() {
@@ -87,6 +103,9 @@ public final class ProgressCache {
     var storedKeys: Set<String> {
         Set(entries.compactMap { $0.value.value == nil ? nil : $0.key })
     }
+
+    /// The number of entries, including empty ones created by reads; for tests.
+    var entryCount: Int { entries.count }
 
     private func entry(for key: String) -> Entry {
         if let entry = entries[key] { return entry }

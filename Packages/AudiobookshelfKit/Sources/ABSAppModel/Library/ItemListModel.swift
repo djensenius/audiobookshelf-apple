@@ -176,8 +176,12 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
                 } else {
                     page.results.count < pageSize
                 }
+        case .failure(let error) where error is CancellationError:
+            // A cancelled refresh keeps the current items; later pages are appended to them (and
+            // deduplicated) rather than replacing the list from a scroll.
+            replacesItems = false
         case .failure(let error):
-            if !(error is CancellationError) { self.error = error }
+            self.error = error
         }
     }
 }
