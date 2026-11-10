@@ -225,6 +225,42 @@ private func query(_ request: URLRequest?) -> [String: String] {
         #expect(!text.contains("<") && !text.contains("/") && !text.contains("\n"))
     }
 
+    @Test(arguments: [
+        ("access_denied", "access_denied"), ("invalid.scope-2", "invalid.scope-2"), ("dénied<b>", "dniedb"),
+        ("\u{3164}é", "error"), (String(repeating: "a", count: 100), String(repeating: "a", count: 64)),
+    ])
+    func identityProviderErrorCode(raw: String, shown: String) throws {
+        let callback = callbackURL(["error": raw, "state": "s"])
+        #expect(throws: OIDCLoginError.identityProvider(error: shown, description: nil)) {
+            try OIDCLoginService.authorizationCode(from: callback, expectedState: "s")
+        }
+    }
+
+    @Test func displayTextCapsCombiningMarks() throws {
+        let stacked = "e" + String(repeating: "\u{0301}", count: 50) + "x"
+        let text = try #require(OIDCLoginService.displayText(stacked, limit: 200))
+        #expect(text.unicodeScalars.count == 4)
+        #expect(text == "e\u{0301}\u{0301}x")
+        // A mark with no base character is dropped.
+        #expect(OIDCLoginService.displayText("\u{0301}\u{0301}", limit: 200) == nil)
+
+        // Within the character limit, but over `limit × 2` scalars.
+        let long = String(repeating: "a\u{0301}\u{0300}", count: 150)
+        let limited = try #require(OIDCLoginService.displayText(long, limit: 200))
+        #expect(limited.unicodeScalars.count <= 400)
+        #expect(limited.hasSuffix("…"))
+    }
+
+    @Test func displayTextDropsInvisibleCharacters() {
+        let hidden = "a\u{3164}b\u{115F}\u{1160}c\u{FFA0}d\u{FE0F}e\u{034F}f\u{FE00}"
+        #expect(OIDCLoginService.displayText(hidden, limit: 200) == "abcdef")
+        #expect(OIDCLoginService.displayText("\u{3164}\u{3164} \u{FFA0}", limit: 200) == nil)
+        // Right-to-left letters stay.
+        #expect(OIDCLoginService.displayText("مرحبا שלום", limit: 200) == "مرحبا שלום")
+        #expect(OIDCLoginService.displayText("abc", limit: 3) == "abc")
+        #expect(OIDCLoginService.displayText("abcd", limit: 3) == "ab…")
+    }
+
     @Test func errorCallbackWithWrongStateIsStateMismatch() async throws {
         let server = stubServer()
         let callback = callbackURL(["error": "access_denied", "error_description": "Call +1 555", "state": "attacker"])
@@ -322,13 +358,37 @@ private func query(_ request: URLRequest?) -> [String: String] {
         ),
         (StubResponse(status: 302, headers: ["Location": "/login?autoLaunch=0"]), .serverRefused(message: nil)),
         (StubResponse(status: 302), .serverRefused(message: nil)),
+        // Only the server's own sign-in page may supply the message.
+        (
+            StubResponse(status: 302, headers: ["Location": "https://evil.example/login?error=Call"]),
+            .serverRefused(message: nil)
+        ),
+        (StubResponse(status: 302, headers: ["Location": "/abs/other?error=Call"]), .serverRefused(message: nil)),
     ])
     func callbackFailures(response: StubResponse, expected: OIDCLoginError) async throws {
         let server = stubServer(callback: response)
         await #expect(throws: expected) {
             try await login(server, authenticator: FakeAuthenticator())
         }
-        #expect(server.requests(path: "/abs/login").isEmpty)
+        // Nothing follows the callback: not the redirect, and not a logout.
+        #expect(server.requests.last?.url?.path() == "/abs/auth/openid/callback")
+        #expect(server.requests(path: "/login").isEmpty)
+    }
+
+    @Test(arguments: [
+        ("/login?error=Unauthorized", "Unauthorized"), ("/abs/login?error=Unauthorized", "Unauthorized"),
+        ("https://abs.example:443/login?error=Unauthorized", "Unauthorized"),
+        ("http://abs.example/login?error=Unauthorized", nil),
+        ("https://abs.example:8443/login?error=Unauthorized", nil),
+        ("https://evil.example/login?error=Unauthorized", nil), ("/login/other?error=Unauthorized", nil),
+    ])
+    func refusalMessageNeedsServerLoginPage(location: String, message: String?) throws {
+        let callback = try #require(URL(string: "https://abs.example/abs/auth/openid/callback?state=s"))
+        let response = try #require(
+            HTTPURLResponse(
+                url: callback, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": location]))
+        let server = try #require(URL(string: "https://abs.example/abs"))
+        #expect(OIDCLoginService.refusal(from: response, server: server) == .serverRefused(message: message))
     }
 
     @Test func tooManyAttemptsFromCallback() async throws {

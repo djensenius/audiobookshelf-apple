@@ -94,16 +94,17 @@ On an iPhone (or simulator) and on a Mac:
 
 ## Notes
 
-- Sign-out loses the IdP end-session URL. The flow's cookie jar holds
-  `auth_method=openid-mobile`, which `POST /logout` reads (`req.cookies.auth_method`, Auth.js
-  v2.37.2:508) to return the IdP's end-session `redirect_url`. The jar is discarded after
-  sign-in, and `/logout` has no body field or header for the auth method (only
-  `x-refresh-token`), so a later sign-out gets `redirect_url: null`. The `id_token_hint`
-  would also be missing: `openid_id_token` is a `Secure` cookie set on the callback.
+- Sign-out loses the IdP end-session URL. The server's `auth_method=openid-mobile` and
+  `openid_id_token` cookies live only in the flow's cookie jar, which is discarded after
+  sign-in, so the main client never receives them. `POST /logout` reads the auth method and
+  ID token only from those cookies (`req.cookies.auth_method`, Auth.js v2.37.2:508, 515) and
+  has no body field or header for them (only `x-refresh-token`), so a later sign-out gets
+  `redirect_url: null`.
 - Servers 2.26.0–2.37.2 redirect every callback refusal to `/login?error=…` instead of
   answering 401/500, because `passportCallback` checks `session.mobile === true` while
   `mobile` holds the redirect URI (Auth.js v2.37.2:424). The app reads `error` from that
-  redirect, filters it to letters, digits and basic punctuation, and shortens it.
+  redirect only when it points at the server's own `…/login` page, filters it to visible
+  letters, digits and basic punctuation, and shortens it.
 
 - `WebAuthenticationSession` intercepts the `audiobookshelf` callback itself; the app does
   not declare the scheme in `CFBundleURLTypes`. The legacy app (`com.audiobookshelf.app`)

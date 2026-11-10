@@ -28,10 +28,11 @@ public protocol WebAuthenticator: Sendable {
 /// The server keeps the OpenID state in its session cookie, so steps 1 and 4 go through one
 /// ``APIClient`` and its cookie jar. The code, verifier, state and tokens are never logged.
 ///
-/// That jar is discarded after sign-in, together with the server's `auth_method=openid-mobile`
-/// cookie. `POST /logout` reads only that cookie (and `openid_id_token`, which is `Secure`) to
-/// build the identity provider's end-session `redirect_url`, so a later sign-out from another
-/// client gets `redirect_url: null`.
+/// The server's `auth_method=openid-mobile` and `openid_id_token` cookies live only in that
+/// jar, which is discarded after sign-in, so the main client never receives them.
+/// `POST /logout` reads the auth method and ID token only from those cookies to build the
+/// identity provider's end-session `redirect_url`, so a later sign-out gets
+/// `redirect_url: null`.
 ///
 /// Methods throw ``OIDCLoginError`` for problems specific to OpenID,
 /// ``ServerValidationError`` for the failures password sign-in shares (connection, version
@@ -97,7 +98,7 @@ public struct OIDCLoginService: Sendable {
             throw Self.callbackError(error)
         }
         if (300..<400).contains(reply.httpResponse.statusCode) {
-            throw Self.refusal(from: reply.httpResponse)
+            throw Self.refusal(from: reply.httpResponse, server: server.configuration.baseURL)
         }
         return try await ServerValidator.loginResult(from: reply, client: client)
     }
@@ -182,7 +183,7 @@ public struct OIDCLoginService: Sendable {
         guard try value("state") == expectedState else { throw .stateMismatch }
         if let error = try value("error") {
             throw .identityProvider(
-                error: displayText(error, limit: 64) ?? "error",
+                error: errorCode(error) ?? "error",
                 description: displayText(try value("error_description"), limit: 200))
         }
         // The server's mobile redirect forwards only `code` and `state`, and writes a missing code
@@ -197,24 +198,75 @@ public struct OIDCLoginService: Sendable {
     /// identity provider refuses, a user that isn't allowed or doesn't exist) with
     /// `302 /login?error=<message>&autoLaunch=0`: `passportCallback` treats the request as
     /// mobile only if `req.session[…].mobile === true`, but `mobile` holds the redirect URI.
-    static func refusal(from response: HTTPURLResponse) -> OIDCLoginError {
-        let location = response.value(forHTTPHeaderField: "Location")
-            .flatMap { URL(string: $0, relativeTo: response.url)?.absoluteURL }
-        return .serverRefused(message: location.flatMap { displayText(queryValue("error", in: $0), limit: 200) })
+    /// The message is read only from a redirect to the server's own `…/login` page.
+    static func refusal(from response: HTTPURLResponse, server: URL) -> OIDCLoginError {
+        guard
+            let location = response.value(forHTTPHeaderField: "Location")
+                .flatMap({ URL(string: $0, relativeTo: response.url)?.absoluteURL }),
+            sameOrigin(location, server), location.path(percentEncoded: true).hasSuffix("/login")
+        else { return .serverRefused(message: nil) }
+        return .serverRefused(message: displayText(queryValue("error", in: location), limit: 200))
     }
 
+    private static func sameOrigin(_ url: URL, _ other: URL) -> Bool {
+        func origin(_ url: URL) -> (String?, String?, Int?) {
+            let scheme = url.scheme?.lowercased()
+            let port = url.port ?? (scheme == "https" ? 443 : scheme == "http" ? 80 : nil)
+            return (scheme, url.host()?.lowercased(), port)
+        }
+        return origin(url) == origin(other)
+    }
+
+    /// An OAuth `error` code (RFC 6749 §5.2) for display: ASCII letters, digits, `_`, `.` and
+    /// `-` only, at most 64 characters.
+    static func errorCode(_ text: String) -> String? {
+        let code = String(text.unicodeScalars.filter { $0.isASCII && errorCodeCharacters.contains($0) }.prefix(64))
+        return code.isEmpty ? nil : code
+    }
+
+    private static let errorCodeCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+    private static let displayCharacters = CharacterSet.letters.union(.decimalDigits)
+        .union(CharacterSet(charactersIn: " .,:;'()-_!?"))
+        .subtracting(invisibleCharacters)
+    /// Letters and marks that render as nothing: Hangul fillers, the combining grapheme joiner
+    /// and variation selectors.
+    private static let invisibleCharacters = CharacterSet(charactersIn: "\u{115F}\u{1160}\u{3164}\u{FFA0}\u{034F}")
+        .union(CharacterSet(charactersIn: "\u{FE00}"..."\u{FE0F}"))
+    /// Combining marks kept after each base character.
+    private static let maxMarksPerBase = 2
+
     /// Text from a URL that may be shown to the user: letters, digits, spaces and basic
-    /// punctuation only, whitespace collapsed, and at most `limit` characters.
+    /// punctuation only, without invisible letters, at most two combining marks per base
+    /// character, whitespace collapsed, and at most `limit` characters and `limit × 2` scalars.
     static func displayText(_ text: String?, limit: Int) -> String? {
         guard let text else { return nil }
-        let allowed = CharacterSet.letters.union(.decimalDigits).union(CharacterSet(charactersIn: " .,:;'()-_!?"))
-        let filtered = String(
-            String.UnicodeScalarView(
-                text.unicodeScalars.map { CharacterSet.whitespacesAndNewlines.contains($0) ? " " : $0 }
-                    .filter(allowed.contains)))
-        let words = filtered.split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
-        let limited = words.count > limit ? String(words.prefix(limit - 1)) + "…" : words
-        return limited.isEmpty ? nil : limited
+        var scalars = String.UnicodeScalarView()
+        var marks = 0
+        for scalar in text.unicodeScalars {
+            let scalar = CharacterSet.whitespacesAndNewlines.contains(scalar) ? " " : scalar
+            guard displayCharacters.contains(scalar) else { continue }
+            if CharacterSet.nonBaseCharacters.contains(scalar) {
+                // Drop marks with no base and marks beyond the cap.
+                guard let last = scalars.last, last != " ", marks < maxMarksPerBase else { continue }
+                marks += 1
+            } else {
+                marks = 0
+            }
+            scalars.append(scalar)
+        }
+        let words = String(scalars).split(separator: " ", omittingEmptySubsequences: true).joined(separator: " ")
+        guard !words.isEmpty else { return nil }
+        guard words.count > limit || words.unicodeScalars.count > limit * 2 else { return words }
+        // Leave room for the ellipsis.
+        var limited = ""
+        var scalarCount = 0
+        for character in words {
+            scalarCount += character.unicodeScalars.count
+            guard limited.count < limit - 1, scalarCount < limit * 2 else { break }
+            limited.append(character)
+        }
+        return limited + "…"
     }
 
     private static func queryValue(_ name: String, in url: URL) -> String? {
