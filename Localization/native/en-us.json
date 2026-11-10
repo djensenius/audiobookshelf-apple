@@ -54,7 +54,7 @@
   "MessageConnectInsecureRedirect": "The server redirected from HTTPS to an unencrypted HTTP address, so the app stopped.",
   "MessageConnectInvalidAddress": "Enter a server address, such as https://abs.example.com or 192.168.1.20:13378.",
   "MessageConnectInvalidCredentials": "Invalid username or password.",
-  "MessageConnectKeychainUnavailable": "Your saved login can't be read while the device is locked. Unlock it, then try again.",
+  "MessageConnectKeychainUnavailable": "Keychain access is unavailable. If your device is locked, unlock it and try again.",
   "MessageConnectLocalNetworkDenied": "Audiobookshelf isn't allowed to reach servers on your local network. Turn on Local Network for Audiobookshelf in Settings, then try again.",
   "MessageConnectLocalNetworkDeniedMac": "Audiobookshelf isn't allowed to reach servers on your local network. Turn on Audiobookshelf in System Settings > Privacy & Security > Local Network, then try again.",
   "MessageConnectLoginRedirected": "The login request was redirected. Check the address, including any path after the host name, and your proxy's settings.",
