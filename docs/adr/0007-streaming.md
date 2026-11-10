@@ -215,23 +215,90 @@ Cons:
      - It is needed because the path has no extension and X-Accel deployments may send a generic type.
 3. **HLS fallback.**
    - **Planned fallback:** if the session comes back with `playMethod == 2`, play `<server> + audioTracks[0].contentUrl` with a plain `AVURLAsset`. That single item covers the whole book.
-   - **Recovery on any item failure, stall, or HTTP error.** `GET /api/session/{id}` is **authoritative**: `openSessionMiddleware` returns 404 only when the session is no longer open (`SessionController.js:338-349`).
-     1. **Session gone (404).** Session loss. Re-open the session in the same mode and resume at the last known position.
-     2. **Session exists, HLS segment 404.** The segment is not ready yet. That happens while ffmpeg is still producing it, or after an unbuffered seek makes the server reset the transcode: `HlsRouter` returns 404 for a missing `.ts` and may restart ffmpeg at the requested segment, emitting socket `stream_reset {startTime, streamId}` (`server/routers/HlsRouter.js:74-94`).
-        - Retry segment readiness with exponential backoff: 0.5 s, 1 s, 2 s, 4 s, 8 s. That is at most 5 retries and about 15.5 s in total, then the attempt is abandoned. The playlist URL and server session stay unchanged on every retry. Each retry depends on the item's state:
-          - **Item not failed** (stalled, `AVPlayerItem.status != .failed`): re-seek the current item to the saved position.
-          - **Item failed** (`AVPlayerItem.status == .failed`, which a seek cannot recover): create a new `AVURLAsset` and `AVPlayerItem` for the same playlist URL, replace the current item, and seek to the saved position.
-          - **Player failed** (`AVPlayer.status == .failed`): also create a new player before inserting the item. Re-attach observers and the rate.
-          - Re-seeks and item or player recreations all draw on the same retry budget.
-        - If a `stream_reset` for this session arrives, move the saved position to its `startTime`, apply it with the same item-state rule, and restart the backoff once.
-        - After the bounds are exhausted, re-check the session. If it still exists, close it and re-open it in the same mode at the last known position. Do this at most once, then surface an error.
-     3. **Session exists, direct-play decode or format error.** Examples: `AVError.fileFormatNotRecognized`, `.decodeFailed`. Close the session and re-open it once with `forceTranscode: true`, resuming at the current position. This matches legacy behaviour.
-     4. **Session exists, other network errors** on direct play: retry with the same bounded backoff and the same item-state rule (re-seek, or recreate a failed item or player), then surface an error. Never transcode because of a network error.
-   - **Detecting the failure on a plain `AVURLAsset`.** AVFoundation does not hand the app the HTTP response:
-     - Observe `AVPlayerItem.status == .failed` and `AVPlayerItemFailedToPlayToEndTime` (`AVPlayerItemFailedToPlayToEndTimeErrorKey`).
-     - On a failure or a stall (`AVPlayerItemPlaybackStalled`), read the `AVPlayerItem.errorLog()` events (`AVPlayerItemNewErrorLogEntry`). For HTTP failures, `errorStatusCode` and `errorComment` usually carry the HTTP status, for example `404` with "HTTP 404: File Not Found" in `CoreMediaErrorDomain`. This is typical for HLS. Whether progressive items fill the error log is unverified.
-     - The HTTP status is only a hint for choosing the branch above. The session lookup always decides between session loss and the other cases.
-     - The resource-loader path sees the `HTTPURLResponse` directly and maps 404 the same way.
+   - **Detecting failures on a plain `AVURLAsset`.** AVFoundation does not hand the app the HTTP response, so the engine watches:
+     - `AVPlayerItem.status == .failed` (`item.error`);
+     - `AVPlayer.status == .failed`;
+     - `AVPlayerItemFailedToPlayToEndTime` (`AVPlayerItemFailedToPlayToEndTimeErrorKey`);
+     - `AVPlayerItemPlaybackStalled`;
+     - the `AVPlayerItem.errorLog()` events delivered by `AVPlayerItemNewErrorLogEntry`.
+     For HTTP failures, `errorStatusCode` and `errorComment` usually carry the HTTP status, for example `404` with "HTTP 404: File Not Found" in `CoreMediaErrorDomain`. This is typical for HLS. Whether progressive items fill the error log is unverified. Network failures surface as an `NSURLErrorDomain` underlying error.
+     The HTTP status is only a hint. `GET /api/session/{id}` decides between "session alive" and "session gone". `openSessionMiddleware` returns 404 only when the session is no longer open (`SessionController.js:338-349`). The resource-loader path sees the `HTTPURLResponse` directly and classifies it the same way.
+   - **Failure classification.** Every failure falls into exactly one class.
+     - **Recoverable, session alive:**
+       - an HLS segment or playlist 404 while `GET /api/session/{id}` returns 200 (segment not ready yet, or a transcode reset);
+       - HTTP 5xx, 408 or 429;
+       - a stall with no error.
+       → **segment-readiness retries** (below).
+     - **Recoverable, session gone:**
+       - `GET /api/session/{id}` returns 404. This happens when the transcode session was closed, after a 36-hour idle period, after a same-device takeover, or when the server restarted (sessions are in-memory, so `/hls/{id}/…` and `/public/session/{id}/…` then return 404 as well).
+       → **session rebuild**.
+     - **Network loss:**
+       - `NSURLErrorNotConnectedToInternet`, `.networkConnectionLost`, `.timedOut`, `.cannotConnectToHost`, `.cannotFindHost` or `.dnsLookupFailed` (as `item.error`, as an underlying error, or in the error log);
+       - the session lookup itself failing with one of these.
+       → **network wait**, then a session check.
+     - **Auth (HTTP 401)** on the playlist, a segment, a track or the session lookup → **401 path**.
+     - **Decode or format:**
+       - On direct play (`AVError.fileFormatNotRecognized`, `.decodeFailed`, similar codes) → the **direct-play to HLS fallback**: one session rebuild with `forceTranscode: true`. This matches legacy behaviour.
+       - On an HLS session, the same error is **not** recoverable.
+     - **Not recoverable, error shown immediately:**
+       - HTTP 403;
+       - TLS or certificate errors (`NSURLErrorServerCertificate*`, `.secureConnectionFailed`);
+       - a decode error on HLS;
+       - a second 401 within one recovery;
+       - user cancellation.
+   - **Segment-readiness retries (session alive).** The playlist URL and server session stay unchanged on every retry.
+     - **Why a segment can be missing.** While ffmpeg is still producing a segment, or after an unbuffered seek makes the server reset the transcode, `HlsRouter` returns 404 for the missing `.ts`. It may restart ffmpeg at the requested segment and emit the socket event `stream_reset {startTime, streamId}` (`server/routers/HlsRouter.js:74-94`).
+     - **Budget:** exponential backoff of 0.5 s, 1 s, 2 s, 4 s, 8 s. That is at most 5 retries and about 15.5 s in total.
+     - **Each retry depends on the item's state:**
+       - **Item not failed** (stalled, `AVPlayerItem.status != .failed`): re-seek the current item to the saved position.
+       - **Item failed** (`AVPlayerItem.status == .failed`, which a seek cannot recover): create a new `AVURLAsset` and `AVPlayerItem` for the same playlist URL, replace the current item, and seek to the saved position.
+       - **Player failed** (`AVPlayer.status == .failed`): also create a new player before inserting the item. Re-attach observers and the rate.
+       - Re-seeks and item or player recreations all draw on the same budget.
+     - **On `stream_reset`:** if one arrives for this session, apply it with the same item-state rule, seeking to the saved position (see "Playback position across rebuilds"; the server's `startTime` is only used to know the reset happened), and restart the backoff once.
+     - **When the budget is exhausted:** re-check the session. If it is gone, run a session rebuild. If it is still alive, escalate to a session rebuild too; the old session is closed in step 1 of the rebuild.
+     - Direct play uses the same budget and item-state rule for 5xx, 408, 429 and stalls.
+   - **Session rebuild** (session gone, readiness budget exhausted, or the direct-play to HLS fallback). The old `sessionId` is never reused.
+     1. **Final sync and close of the old session.** Send the old session's unsynced listening time and the saved position (see "Playback position across rebuilds").
+     2. **Open a new session.** Call `POST /api/items/:id/play[/:episodeId]` with the same body as the original. Keep `forceTranscode: true` if the old session was a forced transcode, and set it for the direct-play to HLS fallback.
+     3. **Build the new item, or `AVQueuePlayer` items, from the new session's URLs.**
+     4. **Restore the position and rate.**
+     - **Budget:** at most **3** rebuild attempts per failure episode, with **1 s / 2 s / 4 s** backoff before attempts 1–3.
+     - **What counts as an attempt:** an attempt fails if the `/play` call fails, or if the new item fails before its first confirmed time-observer tick.
+     - **Episode reset:** the episode, and with it both budgets, resets after 30 s of confirmed playback.
+     - **Giving up:** after the third failed attempt, stop. Keep the saved position, pause, and show "Can't continue streaming. Check your connection or server." with a Retry action. Retry starts a fresh episode.
+   - **Network wait (network loss).**
+     - **No budget spent offline:** do not retry while `NWPathMonitor` reports the path as unsatisfied. Pause in a "Waiting for network" state.
+     - **Connectivity returns:** retry **immediately**, without backoff. First check the session. If it is alive, use the readiness rule; if it is gone, start a rebuild. That immediate retry counts as rebuild attempt 1 if a rebuild is needed.
+     - **Satisfied path, still failing:** if the path is satisfied but requests still fail with network errors, treat each failure as a rebuild attempt, using the 3-attempt budget above.
+     - **Giving up:** if the path stays unsatisfied for 5 minutes, stop with the same error and Retry action.
+   - **401 path. Never loops.**
+     - **Where a 401 can come from.** On supported servers (≥ 2.26.0) `/hls` and `/public/session` carry no user token, so Audiobookshelf itself never returns 401 there (`server/Server.js:346-347`). A 401 on media therefore comes from a fronting proxy, or arrives on the authenticated `GET /api/session/{id}`, `/play` or `/sync` calls.
+     - **First 401 in a failure episode:** run the API client's single-flight refresh (`POST /auth/refresh`). If it succeeds, do one session rebuild; that rebuild counts against the 3-attempt budget.
+     - **Second 401, or a failed refresh:** stop. A failed refresh leads to sign-in. A 401 on media after a successful refresh shows "The server or a proxy in front of it rejected the stream." Never refresh twice in one episode.
+   - **Playback position across rebuilds.** This applies to every rebuild of the item or session: recovery, a quality change, the direct-play to HLS fallback, and an audio route change that recreates the player.
+     - **Source of truth.** The position is the last value confirmed by the player's periodic time observer (`addPeriodicTimeObserver`, every 0.5 s). It is stored as global book time (track `startOffset` plus item time) and kept locally in the engine, persisted on pause and backgrounding.
+       - It is updated only while the item is `.readyToPlay` and time advances.
+       - Seeks set it when they complete.
+       - It is **never** taken from the new session's `currentTime`. The server derives that from `mediaProgress`, which can be older than local playback.
+       - The cold-start "newer progress wins" rule in point 7 applies only when a session starts fresh, not to a rebuild.
+     - **Final sync before close.** Before step 2 of a rebuild, the old session gets one `POST /api/session/{old}/close` with `{currentTime: savedPosition, timeListened: unsyncedDelta, duration}`.
+       - The server applies that body through `syncSession` before removing the session (`PlaybackSessionManager.js:421-426`).
+       - Doing this first also moves the user's progress forward. A new HLS `Stream` starts transcoding at the user's progress (`PlaybackSessionManager.js:345`, `Stream.js:241-263`), so this avoids a needless transcode reset.
+       - If the old session is already gone (404), or the device is offline, the delta is **not** dropped. It goes into the persisted sync queue, tagged with the old session id.
+       - When that queue entry is replayed and its session is gone, the delta is carried into the **new** session's first `/sync`.
+     - **Restoring the position.** The new item seeks to the saved position **before** playing.
+       - Use `seek(to:toleranceBefore:toleranceAfter:)` with a small tolerance: 0 for direct play, ≤ 0.5 s for HLS.
+       - Set `AVPlayer.defaultRate` to the saved rate before `play()`.
+       - Play only after the seek completes, and only if playback was playing before the failure.
+       - Re-apply the rate after `play()`, because AVPlayer can reset it.
+       - The new session's first `/sync` reports the saved position.
+     - **`timeListening` without double-counting.** The server adds each `timeListened` as a delta (`PlaybackSession.addListeningTime`, `server/objects/PlaybackSession.js:238`).
+       - The engine accumulates listened seconds only from time-observer deltas while the rate is above 0 and time is advancing, capped at wall-clock time. Stalls and rebuild gaps add nothing.
+       - Each delta belongs to exactly one session id, and leaves the queue only after a 200 from exactly one destination: the old session's `/close` or `/sync`, or the new session's first `/sync`. The accumulator for the new session starts at 0.
+       - The final report uses `/close` with a body, not `/sync`. If the response is lost and the call is retried, the retry gets 404, because the session is already closed. The delta is therefore never applied twice.
+     - **Now Playing and CarPlay.** During a rebuild, the Now Playing session (`ABSPlayback/NowPlaying/`, which also feeds CarPlay) keeps publishing the saved position as elapsed time, with a buffering or paused state.
+       - The new item's time is not published until its seek has completed.
+       - Elapsed time never jumps back to the server's `currentTime`, or to 0.
 4. **`supportedMimeTypes` are computed at runtime, not hard-coded.**
    - Take the server's audio MIME set: `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/flac`, `audio/x-caf`, `audio/x-aiff`, `audio/ogg`, `audio/webm`, `audio/x-matroska`, `audio/x-ms-wma`, `audio/amr-wb`.
    - Keep each type for which `AVURLAsset.isPlayableExtendedMIMEType(_:)` returns true.
@@ -291,7 +358,7 @@ Cons:
   - **What they see:** a blocking "This server runs Audiobookshelf X. Version 2.26.0 or newer is required." message at sign-in, with upgrade guidance.
   - **What they must do:** upgrade the server (2.26.0 shipped 2025-07-12; the current release is v2.37.2).
   - **Not yet settled:** the floor is provisional until the owner signs off (#48).
-- **New failure mode.** Expired access tokens can no longer cause mid-playback 401s, because streaming URLs carry no user token. Losing the session (restart, 36-hour idle, same-device takeover) is now the main failure mode, and the engine must handle it.
+- **New failure mode.** Expired access tokens can no longer cause mid-playback 401s from Audiobookshelf, because streaming URLs carry no user token. Losing the session (restart, 36-hour idle, same-device takeover) is now the main failure mode. The engine handles it with the bounded recovery in Decision 3, so the engine carries more state: the saved position, the per-session listening deltas, and a persisted sync queue.
 - **Session ids are capabilities.** Never log full track URLs at info level.
 - **Header-gated proxies.** Users get direct play through a resource loader that we must maintain and test, but no transcode. This is a documented limitation, and still better than the legacy app, whose streaming ignored custom headers entirely.
 - **Ogg books transcode.** Vorbis and Opus books will transcode until the matrix proves direct play works. This costs server CPU but plays reliably.
@@ -326,6 +393,20 @@ Cons:
 - `curl -r 1000-1999` on the public track URL returns `206` with `Content-Range`, both with and without X-Accel (nginx).
 - After a server restart, the track URL returns 404, and the app re-opens the session.
 - Uploading the same local session (same UUID) twice does not create a duplicate.
+
+**Recovery and position tests.** These are engine unit tests with a stubbed player and API client. Where marked, #49 also runs them on a device.
+- **Playlist 404 mid-play:** a 404 on the HLS playlist with the session gone (`GET /api/session/{id}` → 404) recovers through one rebuild. A new `/play` session is opened and the old id is never reused. Playback resumes within ≤ 0.5 s of the saved position at the same rate. On a device (#49), restart the server mid-play.
+- **Segment 404 with the session alive:** re-seeks without opening a new session. A failed item is recreated with the same playlist URL.
+- **401 on media or on `GET /api/session/{id}`:** the token is refreshed exactly once and recovery happens once. A second 401 in the same episode stops with an error and makes no further refresh or rebuild calls.
+- **Three failed rebuild attempts:** surface the error with a Retry action after 1, 2 and 4 s backoff. There is no fourth `/play` call.
+- **Network loss:** no attempts are spent while the path is unsatisfied. A retry happens immediately when the path becomes satisfied. The error appears after 5 minutes offline.
+- **No double-counted listening time:**
+  - Across a rebuild, the sum of `timeListened` sent to the old session's `/close` and the new session's `/sync` calls equals the played time, and stall or rebuild gaps add 0.
+  - A retried `/close` after a lost response adds nothing.
+  - When the old session is gone, its queued delta is sent once, through the new session's first `/sync`.
+- **Position source:** the new session's server `currentTime` (deliberately older) is ignored, and the saved local position is used.
+- **Now Playing:** elapsed time never decreases during a rebuild.
+- **Direct play to HLS fallback:** the fallback keeps the position and rate, and sends the old session's final `/close` before the transcode `/play`.
 
 **Verified from source and SDK:**
 - Every server behaviour cited in Context, with file paths at the commits listed.
