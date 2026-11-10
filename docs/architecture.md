@@ -96,6 +96,8 @@ Audiobookshelf/
 ├── AudiobookshelfApp.swift      # @main, scenes, environment injection
 ├── AppEnvironment.swift         # composition root (see below)
 ├── CarPlay/                     # CarPlaySceneDelegate and template builders
+├── Navigation/                  # RouteDestination: the one navigationDestination(for: Route.self)
+├── Shell/                       # a window scene's shell: RootView, SceneRouterHost, MainTabView, PlayerSlot
 └── Features/
     ├── Home/
     ├── Library/
