@@ -5,6 +5,7 @@
     @testable import ABSPlayback
 
     /// A motion manager that claims an accelerometer, which the simulator lacks, and counts the stops it is given.
+    /// `@unchecked Sendable` is safe here: only the main-actor tests below touch `stops`.
     private final class StubMotionManager: CMMotionManager, @unchecked Sendable {
         private(set) var stops = 0
 
