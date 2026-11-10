@@ -14,6 +14,7 @@ public actor ImagePipeline {
     private let downloadedCovers: (any DownloadedCoverLookup)?
     private let isOnline: @Sendable () -> Bool
     private let session: URLSession
+    private let sessionDelegate = ImageSessionDelegate()
     private let ledger = ImageMemoryLedger()
     private let memory: ImageMemoryCache
     private let decodeSlots: AsyncSemaphore
@@ -52,7 +53,12 @@ public actor ImagePipeline {
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
-        session = URLSession(configuration: configuration)
+        session = URLSession(configuration: configuration, delegate: sessionDelegate, delegateQueue: nil)
+    }
+
+    deinit {
+        // The session retains its delegate until invalidated.
+        session.invalidateAndCancel()
     }
 
     /// Sets the request builder (`MediaURLBuilder`) for one server connection, or removes it.
@@ -308,7 +314,7 @@ public actor ImagePipeline {
         }
         let generation = await fileStore.generation(for: key.serverID)
         networkFetchCount += 1
-        let (temporary, response) = try await Self.receive(request, session: session)
+        let (temporary, response) = try await sessionDelegate.download(request, session: session)
         var keepsTemporary = false
         defer {
             if !keepsTemporary { try? FileManager.default.removeItem(at: temporary) }
@@ -328,53 +334,6 @@ public actor ImagePipeline {
             keepsTemporary = true
             let lease = FileLease { try? FileManager.default.removeItem(at: temporary) }
             return FetchedFile(url: temporary, updatedAt: key.updatedAt, lease: lease)
-        }
-    }
-
-    /// Streams the response body to a temporary file, rejecting it as soon as it passes the
-    /// 4 MiB input cap (by `Content-Length`, or while counting).
-    @concurrent private static func receive(_ request: URLRequest, session: URLSession) async throws -> (
-        URL, URLResponse
-    ) {
-        let (bytes, response) = try await session.bytes(for: request, delegate: ImageTaskDelegate(original: request))
-        let limit = ImageCacheLimits.maxInputBytes
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 200
-        guard (200..<300).contains(status) else {
-            bytes.task.cancel()
-            throw ImagePipelineError.httpStatus(status)
-        }
-        guard response.expectedContentLength <= Int64(limit) else {
-            bytes.task.cancel()
-            throw ImagePipelineError.tooLarge
-        }
-        let url = FileManager.default.temporaryDirectory.appending(path: "image-\(UUID().uuidString).download")
-        guard FileManager.default.createFile(atPath: url.path, contents: nil) else {
-            bytes.task.cancel()
-            throw CocoaError(.fileWriteUnknown)
-        }
-        do {
-            let handle = try FileHandle(forWritingTo: url)
-            defer { try? handle.close() }
-            let chunkSize = 64 << 10
-            var buffer = Data(capacity: chunkSize)
-            var total = 0
-            for try await byte in bytes {
-                buffer.append(byte)
-                guard buffer.count == chunkSize else { continue }
-                total += chunkSize
-                guard total <= limit else {
-                    bytes.task.cancel()
-                    throw ImagePipelineError.tooLarge
-                }
-                try handle.write(contentsOf: buffer)
-                buffer.removeAll(keepingCapacity: true)
-            }
-            guard total + buffer.count <= limit else { throw ImagePipelineError.tooLarge }
-            try handle.write(contentsOf: buffer)
-            return (url, response)
-        } catch {
-            try? FileManager.default.removeItem(at: url)
-            throw error
         }
     }
 

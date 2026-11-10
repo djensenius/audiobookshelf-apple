@@ -43,6 +43,8 @@ final class ImageStubProtocol: URLProtocol {
         /// Sends the body in chunks of this size, `chunkDelay` apart, stopping if cancelled.
         var chunkSize: Int?
         var chunkDelay = Duration.milliseconds(20)
+        /// The last chunk waits for this gate.
+        var finalChunkGate: Gate?
         /// The `Content-Length` header: the body size by default, `nil` to omit it.
         var contentLength: Int?? = .none
         var requests: [URLRequest] = []
@@ -152,6 +154,7 @@ final class ImageStubProtocol: URLProtocol {
         var offset = 0
         while offset < route.body.count {
             if offset > 0 { try? await Task.sleep(for: route.chunkDelay) }
+            if offset + chunkSize >= route.body.count { await route.finalChunkGate?.wait() }
             guard !isDone.withLock({ $0 }) else { return }
             let end = min(offset + chunkSize, route.body.count)
             client?.urlProtocol(self, didLoad: route.body.subdata(in: offset..<end))

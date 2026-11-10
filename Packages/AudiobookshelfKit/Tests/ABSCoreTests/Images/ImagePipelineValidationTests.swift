@@ -18,29 +18,35 @@ import UniformTypeIdentifiers
     private var directory: URL { harness.directory.url }
 
     @Test func streamedBodyIsCancelledPastFourMebibytes() async throws {
+        // The last chunk waits until the load is stopped, so it can only be stopped early.
         let chunks = 8
+        let finalChunk = Gate()
         let host = ImageStubProtocol.register(
             .init(
-                body: Data(count: chunks << 20), chunkSize: 1 << 20, chunkDelay: .milliseconds(250),
+                body: Data(count: chunks << 20), chunkSize: 1 << 20, chunkDelay: .zero, finalChunkGate: finalChunk,
                 contentLength: .some(nil)))
         let (pipeline, store) = await harness.make(host: host)
         await #expect(throws: ImagePipelineError.tooLarge) {
             try await pipeline.image(for: harness.key(), pixelBox: gridBox)
         }
         await ImageStubProtocol.wait(for: host) { $0.stopped == 1 }
+        finalChunk.open()
         #expect((ImageStubProtocol.route(host)?.chunksSent ?? chunks) < chunks)
         #expect(await store.size == 0)
     }
 
     @Test func contentLengthOverFourMebibytesIsRejectedBeforeTheBody() async throws {
-        // The body would take minutes; only the header can end the load in time.
+        // URLSession delivers the response with the first bytes. The fifth chunk, which would
+        // take the count past the cap, waits for the gate, so only the header can end the load.
+        let finalChunk = Gate()
         let host = ImageStubProtocol.register(
-            .init(body: Data(count: 5 << 20), chunkSize: 1 << 20, chunkDelay: .seconds(120)))
+            .init(body: Data(count: 5 << 20), chunkSize: 1 << 20, chunkDelay: .zero, finalChunkGate: finalChunk))
         let (pipeline, store) = await harness.make(host: host)
         await #expect(throws: ImagePipelineError.tooLarge) {
             try await pipeline.image(for: harness.key(), pixelBox: gridBox)
         }
-        #expect((ImageStubProtocol.route(host)?.chunksSent ?? 0) <= 1)
+        #expect((ImageStubProtocol.route(host)?.chunksSent ?? 5) < 5)
+        finalChunk.open()
         #expect(await store.size == 0)
     }
 

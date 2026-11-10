@@ -59,7 +59,7 @@ import Testing
     }
 }
 
-@Suite struct ImageTaskDelegateTests {
+@Suite struct ImageDownloadRedirectTests {
     private let original: URLRequest
 
     init() throws {
@@ -70,45 +70,43 @@ import Testing
     }
 
     private func hop(
-        _ delegate: ImageTaskDelegate, from: String, to: String
-    ) async throws -> URLRequest? {
+        _ download: ImageDownload, from: String, to: String
+    ) throws -> URLRequest? {
         let from = try #require(URL(string: from))
         let response = try #require(HTTPURLResponse(url: from, statusCode: 302, httpVersion: nil, headerFields: nil))
         var proposed = URLRequest(url: try #require(URL(string: to)))
         proposed.setValue("secret", forHTTPHeaderField: "CF-Access-Client-Secret")
-        return await delegate.urlSession(
-            .shared, task: URLSession.shared.dataTask(with: from), willPerformHTTPRedirection: response,
-            newRequest: proposed)
+        return download.redirect(following: response, to: proposed)
     }
 
-    @Test func sameOriginAndUpgradeKeepHeaders() async throws {
-        let delegate = ImageTaskDelegate(original: original)
-        let same = try await hop(delegate, from: "http://abs.example/a", to: "http://abs.example/b")
+    @Test func sameOriginAndUpgradeKeepHeaders() throws {
+        let download = ImageDownload(original: original)
+        let same = try hop(download, from: "http://abs.example/a", to: "http://abs.example/b")
         #expect(same?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
-        let upgrade = try await hop(delegate, from: "http://abs.example/b", to: "https://abs.example/c")
+        let upgrade = try hop(download, from: "http://abs.example/b", to: "https://abs.example/c")
         #expect(upgrade?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
         #expect(upgrade?.httpShouldHandleCookies == false)
     }
 
-    @Test func crossOriginStripsAndStaysStrippedBackOnTheOrigin() async throws {
-        let delegate = ImageTaskDelegate(original: original)
-        let cross = try await hop(delegate, from: "http://abs.example/a", to: "http://cdn.example/b")
+    @Test func crossOriginStripsAndStaysStrippedBackOnTheOrigin() throws {
+        let download = ImageDownload(original: original)
+        let cross = try hop(download, from: "http://abs.example/a", to: "http://cdn.example/b")
         #expect(cross?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == nil)
         #expect(cross?.value(forHTTPHeaderField: "Accept") == "image/webp")
         #expect(cross?.httpShouldHandleCookies == false)
-        let back = try await hop(delegate, from: "http://cdn.example/b", to: "http://abs.example/c")
+        let back = try hop(download, from: "http://cdn.example/b", to: "http://abs.example/c")
         #expect(back?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == nil)
         #expect(back?.httpShouldHandleCookies == false)
     }
 
-    @Test func portChangeIsCrossOrigin() async throws {
-        let delegate = ImageTaskDelegate(original: original)
-        let next = try await hop(delegate, from: "http://abs.example/a", to: "http://abs.example:8080/b")
+    @Test func portChangeIsCrossOrigin() throws {
+        let download = ImageDownload(original: original)
+        let next = try hop(download, from: "http://abs.example/a", to: "http://abs.example:8080/b")
         #expect(next?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == nil)
     }
 
-    @Test func downgradeIsRefused() async throws {
-        let delegate = ImageTaskDelegate(original: original)
-        #expect(try await hop(delegate, from: "https://abs.example/a", to: "http://abs.example/b") == nil)
+    @Test func downgradeIsRefused() throws {
+        let download = ImageDownload(original: original)
+        #expect(try hop(download, from: "https://abs.example/a", to: "http://abs.example/b") == nil)
     }
 }
