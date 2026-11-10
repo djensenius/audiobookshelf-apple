@@ -69,12 +69,12 @@ final class FakeFeedback: SleepTimerFeedback {
     func playResetFeedback() { resets += 1 }
 }
 
-/// Yields until `condition` holds; the timer's tasks need a few turns of the executors to run. Never sleeps.
+/// Yields until `condition` holds; the timer's tasks need a few turns of the executors to run. Never sleeps. Bounded
+/// by wall-clock time, not yields: a loaded machine can starve the pool threads that resume ``ManualClock`` sleepers.
 @MainActor
 func until(_ condition: () -> Bool, sourceLocation: SourceLocation = #_sourceLocation) async {
-    for _ in 0..<100_000 where !condition() {
-        await Task.yield()
-    }
+    let deadline = ContinuousClock.now + .seconds(10)
+    while !condition(), ContinuousClock.now < deadline { await Task.yield() }
     if !condition() { Issue.record("Condition never held", sourceLocation: sourceLocation) }
 }
 
