@@ -66,7 +66,7 @@ public final class NowPlayingController {
     /// right away.
     public var settings: NowPlayingSettings {
         didSet {
-            if settings != oldValue { publish() }
+            if settings != oldValue { publish(freshSample: false) }
         }
     }
 
@@ -91,10 +91,20 @@ public final class NowPlayingController {
     private var artworkGeneration = 0
     /// The last load for ``artworkRequest`` returned no data; retried on the next play-state change.
     private var artworkLoadFailed = false
-    /// `isPlaying` when ``artworkRequest`` was last (re)tried.
+    /// `isPlaying` when ``artworkRequest`` was last (re)tried, or when its load failed.
     private var artworkRequestIsPlaying = false
     private(set) var artworkTask: Task<Void, Never>?
+    /// The latest application-primary request for ``session``.
     private(set) var activationTask: Task<Void, Never>?
+    private var activation = Activation.none
+    /// Bumped on every request and on ``clear()``, so a stale request's result is ignored.
+    private var activationGeneration = 0
+    /// When ``state`` was received: its `elapsed` is the position at this time.
+    private var sampleTimestamp = Date.distantPast
+
+    private enum Activation {
+        case none, requesting, succeeded, failed
+    }
 
     struct Timing: Equatable {
         var elapsed: Double
@@ -149,18 +159,40 @@ public final class NowPlayingController {
             clear()
             return
         }
+        let wasPlaying = self.state?.isPlaying ?? false
         self.state = state
+        sampleTimestamp = now()
         loadArtworkIfNeeded(for: state)
         if session == nil { session = makeSession() }
-        publish()
-        if let session, activationTask == nil, state.isPlaying {
-            activationTask = Task {
-                do {
-                    try await session.becomeApplicationPrimary()
-                } catch {
-                    Log.playback.error("Now Playing: couldn't become application primary: \(error, privacy: .public)")
-                }
+        publish(freshSample: true)
+        guard let session, state.isPlaying else { return }
+        // Once per session; a failed request is retried on the next playback start, not every tick.
+        switch activation {
+        case .none: break
+        case .failed where !wasPlaying: break
+        case .requesting, .succeeded, .failed: return
+        }
+        requestApplicationPrimary(session)
+    }
+
+    private func requestApplicationPrimary(_ session: any NowPlayingSessionPublishing) {
+        activation = .requesting
+        activationGeneration += 1
+        let generation = activationGeneration
+        activationTask = Task { [weak self] in
+            // Cleared (or superseded) before the task ran: never make an ended session primary.
+            guard !Task.isCancelled, let self, self.activationGeneration == generation, self.session === session
+            else { return }
+            let succeeded: Bool
+            do {
+                try await session.becomeApplicationPrimary()
+                succeeded = true
+            } catch {
+                Log.playback.error("Now Playing: couldn't become application primary: \(error, privacy: .public)")
+                succeeded = false
             }
+            guard self.activationGeneration == generation else { return }
+            self.activation = succeeded ? .succeeded : .failed
         }
     }
 
@@ -174,6 +206,8 @@ public final class NowPlayingController {
         loadedArtwork = nil
         activationTask?.cancel()
         activationTask = nil
+        activation = .none
+        activationGeneration += 1
         if let session {
             session.setCommands([])
             session.setPlaybackSnapshot(nil)
@@ -190,12 +224,12 @@ public final class NowPlayingController {
     /// Asks to become the system's Now Playing app (Lock Screen, Control Center). iOS only, and only
     /// effective while the app is in the foreground, so call it when the user starts playback in the
     /// app, after the playing state was passed to ``update(_:)``. Waits for the application-primary
-    /// request; does nothing before it was made, on macOS, or without a session. Failures are logged,
-    /// never thrown, so they never block playback.
+    /// request; does nothing unless it succeeded, on macOS, or without a session. Failures are
+    /// logged, never thrown, so they never block playback.
     public func requestSystemPrimary() async {
         guard let activationTask else { return }
         await activationTask.value
-        guard let session, self.activationTask == activationTask else { return }
+        guard let session, self.activationTask == activationTask, activation == .succeeded else { return }
         do {
             try await session.becomeSystemPrimary()
         } catch {
@@ -245,7 +279,10 @@ public final class NowPlayingController {
 
     // MARK: Publishing
 
-    private func publish() {
+    /// Publishes ``state``. `freshSample` is `true` for a new ``update(_:)``; metadata-only
+    /// republishes (artwork, settings) keep the published snapshot unless the time base changed, and
+    /// then reuse the sample's own timestamp so the system extrapolates from it.
+    private func publish(freshSample: Bool) {
         guard let session, let state else { return }
 
         let content = contentDescriptor(for: state)
@@ -268,8 +305,9 @@ public final class NowPlayingController {
             previousContent?.id != content.id || previousContent?.chapter != content.chapter
             || previousContent?.duration != content.duration
         let elapsed = publishedElapsed(for: state)
-        if timeBaseChanged || needsTimingUpdate(elapsed: elapsed, state: state) {
-            let timing = Timing(elapsed: elapsed, rate: state.rate, isPlaying: state.isPlaying, timestamp: now())
+        if timeBaseChanged || (freshSample && needsTimingUpdate(elapsed: elapsed, state: state)) {
+            let timing = Timing(
+                elapsed: elapsed, rate: state.rate, isPlaying: state.isPlaying, timestamp: sampleTimestamp)
             session.setPlaybackSnapshot(
                 MediaPlaybackSnapshot(
                     state: timing.isPlaying ? .playing(rate: Float(timing.rate)) : .paused,
@@ -282,7 +320,8 @@ public final class NowPlayingController {
         guard let last = publishedTiming else { return true }
         if last.isPlaying != state.isPlaying || last.rate != state.rate { return true }
         let expected =
-            last.isPlaying ? last.elapsed + now().timeIntervalSince(last.timestamp) * last.rate : last.elapsed
+            last.isPlaying
+            ? last.elapsed + sampleTimestamp.timeIntervalSince(last.timestamp) * last.rate : last.elapsed
         return abs(elapsed - expected) > Self.elapsedTolerance
     }
 
@@ -344,10 +383,12 @@ public final class NowPlayingController {
         // A newer item or artwork key was requested (or the session cleared) while this one loaded.
         guard generation == artworkGeneration else { return }
         guard let data else {
+            // Retry when the play state next differs from now (it may have changed while loading).
             artworkLoadFailed = true
+            artworkRequestIsPlaying = state?.isPlaying ?? false
             return
         }
         loadedArtwork = .init(key: key, generation: generation, data: data)
-        publish()
+        publish(freshSample: false)
     }
 }

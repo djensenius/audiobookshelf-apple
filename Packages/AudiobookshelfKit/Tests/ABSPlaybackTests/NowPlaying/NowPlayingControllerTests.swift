@@ -121,6 +121,43 @@ import _NowPlaying_AppIntents
         #expect(try h.session.primaryRequests == ["application", "system"])
     }
 
+    @Test func clearingBeforeActivationRunsNeverMakesTheSessionPrimary() async throws {
+        let h = NowPlayingHarness()
+        h.controller.update(F.book(isPlaying: true))
+        let pending = h.controller.activationTask
+        h.controller.clear()
+        await pending?.value
+        #expect(try h.session.primaryRequests.isEmpty)
+    }
+
+    @Test func failedActivationIsRetriedOnTheNextPlaybackStart() async throws {
+        let h = NowPlayingHarness()
+        h.controller.update(F.book(isPlaying: false))
+        let session = try h.session
+        session.applicationPrimaryFailures = 1
+        h.controller.update(F.book(isPlaying: true))
+        await h.controller.activationTask?.value
+        #expect(session.primaryRequests == ["application"])
+        // No system primary without application primary.
+        await h.controller.requestSystemPrimary()
+        #expect(session.primaryRequests == ["application"])
+
+        // Ticks while still playing don't retry.
+        h.controller.update(F.book(isPlaying: true))
+        await h.controller.activationTask?.value
+        #expect(session.primaryRequests == ["application"])
+
+        // The next playback start does; after success, no more requests.
+        h.controller.update(F.book(isPlaying: false))
+        h.controller.update(F.book(isPlaying: true))
+        await h.controller.activationTask?.value
+        #expect(session.primaryRequests == ["application", "application"])
+        h.controller.update(F.book(isPlaying: false))
+        h.controller.update(F.book(isPlaying: true))
+        await h.controller.requestSystemPrimary()
+        #expect(session.primaryRequests == ["application", "application", "system"])
+    }
+
     // MARK: Commands
 
     @Test func routesCommandsToTheHandler() async throws {
@@ -348,15 +385,38 @@ import _NowPlaying_AppIntents
     @Test func chapterTrackSettingChangeRepublishesMetadata() throws {
         let h = NowPlayingHarness()
         h.controller.update(F.book(elapsed: 700))
+        let sampled = h.clock.now
         let session = try h.session
         #expect(session.book?.title == "The Book")
 
+        // A new time base: the sample (700 s, chapter-relative 100 s) keeps its own timestamp, so the
+        // system extrapolates the 2 s since rather than rewinding.
+        h.clock.advance(by: 2)
         h.controller.settings.chapterTrack = true
         #expect(session.book?.title == "Chapter Three")
         #expect(
             session.snapshot
-                == MediaPlaybackSnapshot(state: .playing(rate: 1.5), elapsedTime: 100, timestamp: h.clock.now))
+                == MediaPlaybackSnapshot(state: .playing(rate: 1.5), elapsedTime: 100, timestamp: sampled))
         #expect(session.commandUpdates.count == 1)
+
+        // A setting that doesn't change the time base keeps the snapshot.
+        h.controller.settings.jumpForwardTime = 45
+        #expect(session.snapshots.count == 2)
+        #expect(session.commandUpdates.count == 2)
+    }
+
+    @Test func artworkArrivingLaterDoesNotRewindElapsedTime() async throws {
+        let gate = ArtworkGate()
+        let h = NowPlayingHarness(artwork: { await gate.load($0) })
+        h.controller.update(F.book(elapsed: 700, rate: 1.5, isPlaying: true, artworkKey: "cover-1"))
+        let session = try h.session
+        // The system shows 703 s by now; republishing 700 s with a new timestamp would rewind it.
+        h.clock.advance(by: 2)
+        await gate.resolve("cover-1", with: Data([1]))
+        await h.controller.artworkTask?.value
+        #expect(session.book?.artwork?.id == "cover-1")
+        #expect(session.contents.count == 2)
+        #expect(session.snapshots.count == 1)
     }
 
     // MARK: Artwork
@@ -405,6 +465,30 @@ import _NowPlaying_AppIntents
         #expect(session.book?.id == F.otherBookKey.rawValue)
         #expect(session.book?.artwork?.id == "cover-2")
         #expect(h.entityCalls.keys == [F.bookKey, F.otherBookKey])
+    }
+
+    @Test func artworkFailingAfterAPauseIsRetriedOnResume() async throws {
+        let calls = ArtworkCalls()
+        let gate = ArtworkGate()
+        let h = NowPlayingHarness(artwork: { key in
+            calls.record(key)
+            return await gate.load(key)
+        })
+        h.controller.update(F.book(isPlaying: true, artworkKey: "cover-1"))
+        let loading = h.controller.artworkTask
+        h.controller.update(F.book(isPlaying: false, artworkKey: "cover-1"))
+        await gate.resolve("cover-1", with: nil)
+        await loading?.value
+        #expect(calls.all == ["cover-1"])
+
+        // Failed while paused: paused ticks don't start a new load, resuming does.
+        h.controller.update(F.book(isPlaying: false, artworkKey: "cover-1"))
+        #expect(h.controller.artworkTask == loading)
+        await gate.resolve("cover-1", with: Data([1]))
+        h.controller.update(F.book(isPlaying: true, artworkKey: "cover-1"))
+        await h.controller.artworkTask?.value
+        #expect(calls.all == ["cover-1", "cover-1"])
+        #expect(try h.session.book?.artwork?.id == "cover-1")
     }
 
     @Test func missingArtworkIsRetriedOnlyOnThePlayStateChange() async throws {

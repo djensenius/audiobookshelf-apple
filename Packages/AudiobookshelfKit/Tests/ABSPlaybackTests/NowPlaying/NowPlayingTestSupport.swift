@@ -25,7 +25,16 @@ final class FakeNowPlayingSession: NowPlayingSessionPublishing {
     func setContent(_ content: (any MediaContentRepresentable)?) { contents.append(content) }
     func setPlaybackSnapshot(_ snapshot: MediaPlaybackSnapshot?) { snapshots.append(snapshot) }
     func setCommands(_ commands: [MediaCommand]) { commandUpdates.append(commands) }
-    func becomeApplicationPrimary() async throws { primaryRequests.append("application") }
+    /// The next this-many application-primary requests throw.
+    var applicationPrimaryFailures = 0
+
+    func becomeApplicationPrimary() async throws {
+        primaryRequests.append("application")
+        if applicationPrimaryFailures > 0 {
+            applicationPrimaryFailures -= 1
+            throw CancellationError()
+        }
+    }
     func becomeSystemPrimary() async throws { primaryRequests.append("system") }
 }
 
