@@ -249,7 +249,10 @@ private func makeClient(
 }
 
 @Suite struct CustomHeaderValidationTests {
-    @Test(arguments: ["Authorization", "authorization", "COOKIE", "Cookie"])
+    @Test(arguments: [
+        "Authorization", "authorization", "COOKIE", "Cookie", "X-Refresh-Token", "Proxy-Authorization", "Host",
+        "Connection", "Transfer-Encoding", "content-length", "TE", "Upgrade",
+    ])
     func rejectsReservedHeaders(name: String) throws {
         let url = try #require(URL(string: "https://example.com"))
         #expect(throws: CustomHeaderError.reserved(name: name)) {
@@ -275,5 +278,7 @@ private func makeClient(
         let description = CustomHeaderError.reserved(name: "Cookie").errorDescription ?? ""
         #expect(description.contains("Cookie"))
         #expect(description.contains("service token"))
+        #expect(
+            CustomHeaderError.reserved(name: "Host").errorDescription?.contains("managed by the connection") == true)
     }
 }

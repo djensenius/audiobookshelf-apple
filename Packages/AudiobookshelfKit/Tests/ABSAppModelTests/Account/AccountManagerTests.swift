@@ -55,6 +55,11 @@ private final class FakeServer: Sendable {
         requests("/logout").map { $0.value(forHTTPHeaderField: "x-refresh-token") }
     }
 
+    /// Held requests for `path` that the client cancelled before the gate opened.
+    func abandoned(_ path: String) -> [URLRequest] {
+        StubURLProtocol.abandonedRequests(host: host).filter { $0.url?.path() == "/abs\(path)" }
+    }
+
     /// Holds the next request for `path` until the gate opens.
     func hold(_ path: String) -> StubGate {
         StubURLProtocol.hold(host: host, path: "/abs\(path)")
@@ -165,7 +170,8 @@ private struct Harness {
         store = ServerConnectionStore(modelContainer: try DataStack(location: .inMemory).container)
     }
 
-    func makeManager() -> AccountManager {
+    /// - Parameter willReadClock: Runs before each reading of the clock, in the caller's task.
+    func makeManager(willReadClock: @escaping @Sendable () -> Void = {}) -> AccountManager {
         let openID = OIDCLoginService { configuration, cookieStorage in
             let client = APIClient(
                 configuration: configuration, tokenProvider: SignedOutTokenProvider(),
@@ -179,7 +185,10 @@ private struct Harness {
             store: store, keychain: keychain,
             validator: ServerValidator(sessionConfiguration: { StubURLProtocol.sessionConfiguration() }),
             openID: openID, sessionConfiguration: { StubURLProtocol.sessionConfiguration() },
-            now: { [clock] in clock.now() })
+            now: { [clock] in
+                willReadClock()
+                return clock.now()
+            })
     }
 
     func session(_ id: UUID?) throws -> StoredSession? {
@@ -711,6 +720,43 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(try await harness.store.connection(id: firstID)?.lastUsedAt == lastUsed)
     }
 
+    @Test func cancellingASignInDoesNotStopTheLogoutOfTheSessionItReplaced() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        _ = try await signIn(manager, to: server)
+        let validated = try await validate(server)
+        let logout = server.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        signingIn.cancel()
+        logout.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        // Answered, not dropped with the sign-in's task.
+        #expect(server.loggedOutRefreshTokens == ["refresh-1"] && server.abandoned("/logout").isEmpty)
+    }
+
+    @Test func signInCancelledAfterMarkingUsedKeepsTheActiveConnection() async throws {
+        let harness = try Harness()
+        let readings = TickingClock()
+        // Readings 1 and 2 are the first sign-in's; 4 marks the second one's connection used,
+        // after its first cancellation check.
+        let manager = harness.makeManager {
+            if readings.now() == Date(timeIntervalSinceReferenceDate: 4) { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        let firstID = try await signIn(manager, to: FakeServer())
+        let validated = try await validate(FakeServer(userId: "usr-2"))
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(manager.state.user?.connectionID == firstID)
+        let secondID = try #require(manager.connections.first { $0.id != firstID }?.id)
+        #expect(try harness.session(secondID)?.refreshToken == "refresh-1")
+        // Too late to leave it unused: it's the one restored at the next launch.
+        #expect(try await harness.store.connectionToRestore()?.id == secondID)
+    }
+
     @Test func logoutSignsOutOfASignInThatIsSaving() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()
@@ -886,5 +932,50 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         authorize.open()
         await reconnect.value
         #expect(manager.state == offline && manager.activeConnection?.id == id && manager.client != nil)
+    }
+
+    @Test func failedSignInDuringReconnectStaysOffline() async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        server.update { $0.isOffline = true }
+        let manager = harness.makeManager()
+        await manager.restoreSession()
+        let offline = manager.state
+        let validated = try await validate(FakeServer(userId: "usr-2"))
+
+        server.update { $0.isOffline = false }
+        let authorize = server.hold("/api/authorize")
+        let reconnect = Task { await manager.restoreSession() }
+        await authorize.arrived()
+        // Supersedes the reconnect, then can't save its session.
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        await #expect(throws: KeychainError.self) {
+            try await manager.connect(local: validated, username: "david", password: "pw")
+        }
+        #expect(manager.state == offline)
+        authorize.open()
+        await reconnect.value
+        #expect(manager.state == offline && manager.activeConnection?.id == id && manager.client != nil)
+    }
+
+    @Test func failedSignInDuringRestoreSignsOut() async throws {
+        let harness = try Harness()
+        _ = try await signIn(harness.makeManager(), to: FakeServer())
+        let manager = harness.makeManager()
+        let choosing = StubGate()
+        manager.restoreWillChooseConnection = { await choosing.pass() }
+        let restore = Task { await manager.restoreSession() }
+        await choosing.arrived()
+        let validated = try await validate(FakeServer(userId: "usr-2"))
+
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        await #expect(throws: KeychainError.self) {
+            try await manager.connect(local: validated, username: "david", password: "pw")
+        }
+        #expect(manager.state == .signedOut && manager.activeConnection == nil)
+        choosing.open()
+        await restore.value
+        #expect(manager.state == .signedOut)
     }
 }

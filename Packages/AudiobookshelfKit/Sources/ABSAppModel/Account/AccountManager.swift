@@ -144,11 +144,15 @@ public final class AccountManager {
 
     /// Signs in to `server` with a username and password and makes it the active connection.
     ///
-    /// If the sign-in fails, the state is unchanged. It throws `CancellationError` if a newer call
-    /// superseded it, including a ``logout()`` while it runs, even of another connection, which
-    /// also signs out of the session it saved, or if its task was cancelled, which keeps the
-    /// session as a superseded sign-in does. A new connection whose session couldn't be saved
-    /// stays in ``connections`` without one; switching to it throws ``AccountError/notSignedIn``.
+    /// If the sign-in fails, the state is unchanged, unless it superseded a restore or switch:
+    /// then it's offline with the active connection, or signed out if none is active. It throws
+    /// `CancellationError` if a newer call superseded it, including a ``logout()`` while it runs,
+    /// even of another connection, which also signs out of the session it saved, or if its task
+    /// was cancelled, which keeps the session as a superseded sign-in does. The active connection
+    /// doesn't change, but a sign-in superseded or cancelled after it marked its connection used
+    /// leaves that connection the one restored at the next launch. A new connection whose session
+    /// couldn't be saved stays in ``connections`` without one; switching to it throws
+    /// ``AccountError/notSignedIn``.
     public func connect(local server: ValidatedServer, username: String, password: String) async throws {
         let logouts = self.logouts
         let result = try await validator.login(to: server, username: username, password: password)
@@ -201,6 +205,8 @@ public final class AccountManager {
             setActive(connection, client: makeClient(server, credentials: credentials))
             didAuthorize(result.response, features: result.features, connection: connection)
         } catch {
+            // A restore or switch this superseded won't finish.
+            endSupersededRestore(operation)
             let logoutClient = makeClient(server, credentials: nil)
             if let saved {
                 if await isRemoved(saved.id) {
@@ -277,13 +283,7 @@ public final class AccountManager {
         } catch {
             // A superseded restore or switch won't finish. Keep a connection it was activating or
             // reconnecting, unverified, as offline does.
-            if isCurrent(operation), state == .restoring {
-                if let active = activeConnection {
-                    goOffline(active, client: self.client, error: nil)
-                } else {
-                    signOutLocally(error: nil)
-                }
-            }
+            endSupersededRestore(operation)
             throw error
         }
         lastError = nil
@@ -379,6 +379,17 @@ public final class AccountManager {
 
     private func ensureCurrent(_ operation: Int) throws {
         guard isCurrent(operation) else { throw CancellationError() }
+    }
+
+    /// After a failed call that superseded a restore or switch, which then won't finish: keeps
+    /// the active connection, unverified, as offline does, or signs out if none is active.
+    private func endSupersededRestore(_ operation: Int) {
+        guard isCurrent(operation), state == .restoring else { return }
+        if let active = activeConnection {
+            goOffline(active, client: client, error: nil)
+        } else {
+            signOutLocally(error: nil)
+        }
     }
 
     /// Signs out locally if `id` is active or being activated, and supersedes the running calls
@@ -563,19 +574,22 @@ public final class AccountManager {
         return makeClient(connection, customHeaders: customHeaders, credentials: nil)
     }
 
-    /// `POST /logout`, best effort. Returns the end-session URL if it's `http` or `https`.
+    /// `POST /logout`, best effort, in its own task so that cancelling the caller, such as a
+    /// sign-in, doesn't stop the revoke. Returns the end-session URL if it's `http` or `https`.
     private func serverLogout(_ session: StoredSession, client: APIClient) async -> URL? {
-        do {
-            let response = try await client.send(
-                AuthEndpoints.logout(refreshToken: session.refreshToken, openIDSession: session.openIDSession))
-            guard let string = response.redirectURL, let url = URL(string: string),
-                ["https", "http"].contains(url.scheme?.lowercased())
-            else { return nil }
-            return url
-        } catch {
-            Log.auth.notice("Server sign-out failed: \(String(describing: type(of: error)), privacy: .public)")
-            return nil
-        }
+        await Task {
+            do {
+                let response = try await client.send(
+                    AuthEndpoints.logout(refreshToken: session.refreshToken, openIDSession: session.openIDSession))
+                guard let string = response.redirectURL, let url = URL(string: string),
+                    ["https", "http"].contains(url.scheme?.lowercased())
+                else { return nil }
+                return url
+            } catch {
+                Log.auth.notice("Server sign-out failed: \(String(describing: type(of: error)), privacy: .public)")
+                return nil
+            }
+        }.value
     }
 }
 
