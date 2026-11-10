@@ -308,7 +308,12 @@ private struct HTMLParser {
                 index = start + 1
                 let name = readName()
                 guard readAttributes() != nil else { break }
-                if name == "template" { depth += 1 }
+                if name == "template" {
+                    depth += 1
+                } else if Self.rawTextElements.contains(name) {
+                    // Raw-text bodies aren't markup: `"</template>"` in a script is just text.
+                    skipRawText(name)
+                }
             } else {
                 index = start + 1
             }

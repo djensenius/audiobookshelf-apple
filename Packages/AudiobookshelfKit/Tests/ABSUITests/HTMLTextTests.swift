@@ -205,6 +205,12 @@ import Testing
         #expect(plain("before<template><!-- </template> -->hidden</template>after") == "beforeafter")
         #expect(plain("a<TEMPLATE id=t><Template>x</template>still hidden") == "a")
         #expect(plain("a<template>x<!-- never closed") == "a")
+        #expect(
+            plain(#"before<template><script>const s = "</template>";</script>hidden</template>after"#) == "beforeafter")
+        #expect(
+            plain("before<template><style>p::after { content: '</template>' }</style>hidden</template>after")
+                == "beforeafter")
+        #expect(plain("before<template><script>never closed</template>after") == "before")
         #expect(plain(#"<template><div title="<template>">hidden</div></template>after"#) == "after")
         #expect(plain("<template><div title='<template>'>hidden</div></template>after") == "after")
         #expect(plain(#"<template><div title="a > </template> b">hidden</div></template>after"#) == "after")

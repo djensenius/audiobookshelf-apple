@@ -59,6 +59,13 @@ import SwiftUI
     ErrorStateView(title: L10n.string("MessageNoNetworkConnection"), retry: {})
 }
 
+#Preview("ExpandableText under ancestor lineLimit") {
+    // Read more must still appear: the measurement ignores the ancestor's line limit.
+    ExpandableText(html: PreviewData.description, collapsedLineLimit: 4)
+        .lineLimit(1)
+        .padding()
+}
+
 #Preview("AX5") {
     VStack(alignment: .leading, spacing: ABSSpacing.large) {
         AdaptiveStack(spacing: ABSSpacing.small) {
