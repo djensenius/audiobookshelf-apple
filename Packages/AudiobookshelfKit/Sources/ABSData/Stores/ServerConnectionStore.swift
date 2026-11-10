@@ -22,9 +22,9 @@ import SwiftData
 
     /// Saves a successful login: updates the connection for `address` and `userId` in place
     /// (clearing `isDisconnected`) or creates one, and marks it as the latest used.
-    /// - Parameter markUsed: Pass `false` to leave `lastUsedAt` as it was (`nil` for a new
-    ///   connection, so it isn't restored) until ``markUsed(id:at:)``, for example until the
-    ///   credentials are saved.
+    /// - Parameter markUsed: Pass `false` to leave it unrestorable until ``markUsed(id:at:)``, for
+    ///   example until the credentials are saved: `lastUsedAt` is `nil` for a new connection or
+    ///   one ``remove(id:now:)`` disconnected, and stays as it was for any other.
     @discardableResult
     public func upsertLogin(
         address: ServerAddress,
@@ -53,7 +53,11 @@ import SwiftData
                 )
                 modelContext.insert(record)
             }
-            if markUsed { record.lastUsedAt = now }
+            if markUsed {
+                record.lastUsedAt = now
+            } else if record.isDisconnected {
+                record.lastUsedAt = nil
+            }
             record.isDisconnected = false
             record.disconnectedAt = nil
             return ServerConnectionDTO(record)
@@ -102,6 +106,17 @@ import SwiftData
         try commit {
             guard let record = try fetchRecord(id: id) else { return false }
             record.serverVersion = version
+            return true
+        }
+    }
+
+    /// Records a sign-out at `date`, before its session is deleted from the Keychain, or `nil`
+    /// once a sign-in has saved a new session. Returns `false` when the connection doesn't exist.
+    @discardableResult
+    public func setSignedOut(id: UUID, at date: Date?) throws -> Bool {
+        try commit {
+            guard let record = try fetchRecord(id: id) else { return false }
+            record.signedOutAt = date
             return true
         }
     }

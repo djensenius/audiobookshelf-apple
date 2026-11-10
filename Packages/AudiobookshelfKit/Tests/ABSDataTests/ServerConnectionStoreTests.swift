@@ -100,6 +100,33 @@ import Testing
         #expect(try await store.connectionToRestore()?.id == created.id)
     }
 
+    @Test func stagingADisconnectedLoginLeavesItUnrestorable() async throws {
+        let (store, container) = try makeStore()
+        let other = try await login(store, userId: "usr_2", at: now)
+        let disconnected = try await login(store, at: now.addingTimeInterval(10))
+        let context = ModelContext(container)
+        RetainedRecord.download.insert(connectionID: disconnected.id, into: context)
+        try context.save()
+        #expect(try await store.remove(id: disconnected.id) == .disconnected)
+
+        let staged = try await store.upsertLogin(
+            address: address, userId: "usr_1", username: "reader", authMethod: .local, serverVersion: nil,
+            markUsed: false, now: now.addingTimeInterval(20))
+        #expect(staged.id == disconnected.id && !staged.isDisconnected && staged.lastUsedAt == nil)
+        #expect(try await store.connectionToRestore()?.id == other.id)
+    }
+
+    @Test func recordsAndClearsASignOut() async throws {
+        let (store, _) = try makeStore()
+        let created = try await login(store)
+        #expect(created.signedOutAt == nil)
+        #expect(try await store.setSignedOut(id: created.id, at: now))
+        #expect(try await store.connection(id: created.id)?.signedOutAt == now)
+        #expect(try await store.setSignedOut(id: created.id, at: nil))
+        #expect(try await store.connection(id: created.id)?.signedOutAt == nil)
+        #expect(try await store.setSignedOut(id: UUID(), at: now) == false)
+    }
+
     @Test func updatesServerVersion() async throws {
         let (store, _) = try makeStore()
         let created = try await login(store)
