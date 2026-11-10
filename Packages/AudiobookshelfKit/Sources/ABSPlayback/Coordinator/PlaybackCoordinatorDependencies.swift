@@ -11,10 +11,11 @@ public protocol PlaybackSessionService: Sendable {
     /// `POST /api/items/:id/play[/:episodeId]`.
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession
     /// The user's server progress for the media, or `nil` when there is none. The coordinator uses
-    /// its `lastUpdate` and `isFinished` (a new session's own `updatedAt` is just its creation
-    /// time). When this fails, the session's position is used only if there is no local progress
-    /// or record. Server timestamps are compared with device ones, so clock skew between them can
-    /// pick the older position.
+    /// its `currentTime`, `lastUpdate` and `isFinished` together, since the session's own position
+    /// comes from a separate request and can differ (its `updatedAt` is just its creation time).
+    /// When there is none, or this fails, the session's position is used only if there is no local
+    /// progress or record. Server timestamps are compared with device ones, so clock skew between
+    /// them can pick the older position.
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress?
     /// The URLs to load for `session`. Throws ``StreamResolutionError`` when they can't be built, and
     /// `CancellationError` when the caller is cancelled: the coordinator drops that start without

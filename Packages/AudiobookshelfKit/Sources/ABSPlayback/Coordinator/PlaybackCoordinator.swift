@@ -290,11 +290,14 @@ public final class PlaybackCoordinator {
         let server = started.serverProgress
         guard current == generation else { return }
         var candidates: [ProgressCandidate] = []
-        if let local {
-            // Ebook edits bump `lastUpdate`; only the audio position's own date counts here.
-            let date = local.audioEditedAt ?? local.serverBaseline?.lastUpdate ?? local.lastUpdate
+        // Dated by the audio and completion groups alone, never `lastUpdate`, which ebook edits bump.
+        // A row with no saved audio state offers nothing.
+        if let local, let audioSavedAt = local.audioSavedAt {
+            let finishedSavedAt = local.isFinished || local.finishedDirty ? local.finishedSavedAt : nil
             candidates.append(
-                ProgressCandidate(currentTime: local.currentTime, updatedAt: date, isFinished: local.isFinished))
+                ProgressCandidate(
+                    currentTime: local.currentTime, updatedAt: max(audioSavedAt, finishedSavedAt ?? audioSavedAt),
+                    isFinished: local.isFinished))
         }
         let record = lastPlayedStore.load().flatMap { $0.key == key ? $0 : nil }
         if let record {
@@ -303,11 +306,15 @@ public final class PlaybackCoordinator {
                     currentTime: record.position, updatedAt: record.timestamp, isFinished: record.isFinished))
         }
         switch server {
-        case .success(let progress):
+        case .success(let progress?):
+            // The position, date and flag all come from the fetched progress: `/play` may have
+            // captured an older position than the fetch returned.
             candidates.append(
                 ProgressCandidate(
-                    currentTime: session.currentTime, updatedAt: progress?.lastUpdate.map(Self.date(ms:)),
-                    isFinished: progress?.isFinished ?? false))
+                    currentTime: progress.currentTime, updatedAt: progress.lastUpdate.map(Self.date(ms:)),
+                    isFinished: progress.isFinished))
+        case .success(nil):
+            candidates.append(ProgressCandidate(currentTime: session.currentTime, updatedAt: nil))
         case .failure(let error):
             // Undated: the session position is used only when there is nothing else.
             logger.info("Server progress unavailable (\(Self.caseName(error), privacy: .public))")
