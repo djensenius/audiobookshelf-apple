@@ -506,6 +506,9 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(manager.state == .signedOut && manager.lastError == .server(.sessionExpired))
         #expect(manager.connections.map(\.id) == [id] && manager.client == nil)
         #expect(try harness.session(id) == nil)
+        // The delete succeeded, so there's no sign-out to save.
+        #expect(manager.connections.first?.signedOutAt == nil)
+        #expect(try await harness.store.connection(id: id)?.signedOutAt == nil)
     }
 
     @Test func unsupportedServerOnRestoreSignsOutKeepingTokens() async throws {
@@ -1596,5 +1599,134 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         let relaunched = harness.makeManager()
         await relaunched.restoreSession()
         #expect(relaunched.state.user?.connectionID == id && relaunched.lastError == nil)
+    }
+
+    @Test func signInStoppedByAnExpiryKeepsTheSignOutTheExpirySaved() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let oldClient = try #require(manager.client)
+        let validated = try await validate(server)
+        // Signing in again holds while ending the replaced session.
+        let logout = server.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        // The active client uses the new session, which the server rejects. The Keychain can't
+        // delete it, so the expiry saves the sign-out.
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed) { data in
+            // The delete keeps the custom headers, so it writes the item without the session.
+            data.map { !String(decoding: $0, as: UTF8.self).contains("accessToken") } ?? true
+        }
+        server.revokeSession()
+        await #expect(throws: APIError.sessionExpired) { try await oldClient.send(AuthEndpoints.authorize()) }
+        #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+        logout.open()
+        await #expect(throws: AccountError.server(.sessionExpired)) { try await signingIn.value }
+        // The sign-in mustn't clear it as the sign-out of a session it keeps for switching to.
+        #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+        #expect(manager.state == .signedOut && manager.connections.first?.signedOutAt != nil)
+
+        // The rejected tokens are still stored, and aren't restored offline.
+        #expect(try harness.session(id) != nil)
+        server.update { $0.isOffline = true }
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        #expect(relaunched.state == .signedOut && relaunched.connections.first?.signedOutAt != nil)
+    }
+
+    @Test(arguments: [false, true])
+    func failedRemovalDoesNotReviveAnotherConnectionThatEndedMeanwhile(removed: Bool) async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let other = FakeServer()
+        let active = FakeServer(userId: "usr-2")
+        let otherID = try await signIn(manager, to: other)
+        let activeID = try await signIn(manager, to: active)
+        let activeClient = try #require(manager.client)
+        var isHeld = false
+        let deleting = StubGate()
+        manager.willDeleteRemovedSession = {
+            // Only the first removal waits.
+            guard !isHeld else { return }
+            isHeld = true
+            await deleting.pass()
+        }
+        let removingOther = Task { try await manager.remove(otherID) }
+        await deleting.arrived()
+
+        if removed {
+            try await manager.remove(activeID)
+        } else {
+            active.revokeSession()
+            await #expect(throws: APIError.sessionExpired) { try await activeClient.send(AuthEndpoints.authorize()) }
+        }
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        deleting.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await removingOther.value }
+        // The active connection was signed out or removed when the delete failed, and stays so.
+        #expect(manager.state == .signedOut && manager.activeConnection == nil && manager.client == nil)
+        #expect(manager.lastError == (removed ? nil : .server(.sessionExpired)))
+        #expect(Set(manager.connections.map(\.id)) == Set(removed ? [otherID] : [otherID, activeID]))
+        #expect(try harness.session(otherID) != nil)
+    }
+
+    @Test func failedRemovalDoesNotReviveTheConnectionWhoseSessionExpiredMeanwhile() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let client = try #require(manager.client)
+        let deleting = StubGate()
+        manager.willDeleteRemovedSession = { await deleting.pass() }
+        let removing = Task { try await manager.remove(id) }
+        await deleting.arrived()
+
+        // Removing it signed out already, so the expiry publishes nothing.
+        server.revokeSession()
+        await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        deleting.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await removing.value }
+        // Not signed in again with the session that expired.
+        #expect(manager.state == .signedOut && manager.activeConnection == nil && manager.client == nil)
+        #expect(try harness.session(id) == nil && manager.connections.map(\.id) == [id])
+    }
+
+    @Test(arguments: [false, true])
+    func removingTheConnectionASwitchIsReadingEndsTheRestoreItSuperseded(hasActive: Bool) async throws {
+        let harness = try Harness()
+        let setUp = harness.makeManager()
+        let firstID = try await signIn(setUp, to: FakeServer())
+        // Signed out, so a switch to it pauses before reading its session.
+        await setUp.logout()
+        let second = FakeServer(userId: "usr-2")
+        let secondID = try await signIn(setUp, to: second)
+        // Offline, so a restore keeps the connection without verifying it.
+        second.update { $0.isOffline = true }
+        let manager = harness.makeManager()
+        if hasActive { await manager.restoreSession() }
+        let expected = manager.state
+        let expectedID = hasActive ? secondID : nil
+        #expect(manager.activeConnection?.id == expectedID)
+        let choosing = StubGate()
+        manager.restoreWillChooseConnection = { await choosing.pass() }
+        let restoring = Task { await manager.restoreSession() }
+        await choosing.arrived()
+        let reading = StubGate()
+        manager.willReadSignedOutSession = { await reading.pass() }
+        let switching = Task { try await manager.switch(to: firstID) }
+        await reading.arrived()
+        #expect(manager.state == .restoring)
+
+        // Both calls are superseded, so neither would end the restore.
+        try await manager.remove(firstID)
+        #expect(manager.state == expected && manager.activeConnection?.id == expectedID)
+        reading.open()
+        await #expect(throws: CancellationError.self) { try await switching.value }
+        choosing.open()
+        await restoring.value
+        #expect(manager.state == expected && manager.activeConnection?.id == expectedID)
     }
 }

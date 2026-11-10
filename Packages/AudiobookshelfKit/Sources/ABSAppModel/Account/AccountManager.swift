@@ -135,6 +135,9 @@ public final class AccountManager {
     /// A test seam: restoring or switching to a signed-out connection awaits it before reading the
     /// session whose delete it retries, so a test can save a session in that window.
     @ObservationIgnored var willReadSignedOutSession: (@MainActor () async -> Void)?
+    /// A test seam: ``remove(_:)`` awaits it after signing out locally and finding the connection,
+    /// and before deleting its session, so a test can change the state in that window.
+    @ObservationIgnored var willDeleteRemovedSession: (@MainActor () async -> Void)?
 
     /// - Parameters:
     ///   - keychain: The app passes `KeychainStore()`; tests pass a fake.
@@ -434,6 +437,7 @@ public final class AccountManager {
         do {
             guard let found = try await store.connection(id: id) else { throw AccountError.connectionNotFound }
             connection = found
+            await willDeleteRemovedSession?()
             removed = try await credentials(for: id).removeAll()
         } catch {
             // Not over a newer call's state.
