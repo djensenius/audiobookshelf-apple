@@ -92,6 +92,12 @@ struct BridgeHarness {
     func snapshot(_ state: MediaPlaybackSnapshot.PlaybackState, at elapsed: Double) -> MediaPlaybackSnapshot {
         MediaPlaybackSnapshot(state: state, elapsedTime: elapsed, timestamp: h.clock.now)
     }
+
+    /// Whether `session` published playing or buffering at 0 or 30 s (the clock not having moved).
+    func wasShownPlaying(_ session: FakeNowPlayingSession) -> Bool {
+        let shownPlaying = [0.0, 30].flatMap { [snapshot(.playing(rate: 1), at: $0), snapshot(.buffering, at: $0)] }
+        return session.snapshots.contains { $0.map(shownPlaying.contains) ?? false }
+    }
 }
 
 @MainActor
@@ -432,6 +438,57 @@ struct BridgeHarness {
         // A real play activates.
         try await b.controller.perform(.play)
         #expect(b.coordinator.isPlaying)
+        await b.controller.activationTask?.value
+        #expect(session.applicationPrimaryRequests == 1)
+    }
+
+    @Test func playingAgainDuringTheCatchUpSeekActivatesOnlyOnceItPlays() async throws {
+        let b = try BridgeHarness()
+        let (play, gate) = await b.playHeld("a")
+        try await b.controller.perform(.skipForward(30))
+        let seekGate = Gate()
+        b.h.engine.seekGates = [seekGate]
+        gate.open()
+        await yieldUntil { b.h.engine.seeks == [30] }
+        let session = try b.session
+
+        await b.coordinator.play(itemID: "a")
+        #expect(!b.h.engine.isPlaybackRequested)
+        #expect(!b.wasShownPlaying(session))
+        #expect(session.applicationPrimaryRequests == 0)
+
+        seekGate.open()
+        await play.value
+        #expect(b.coordinator.isPlaying)
+        #expect(session.snapshot == b.snapshot(.playing(rate: 1), at: 30))
+        await b.controller.activationTask?.value
+        #expect(session.applicationPrimaryRequests == 1)
+    }
+
+    /// The engine defers playing (and activating its audio session) while a seek is in flight.
+    @Test func playDuringASeekIsShownOnlyOnceTheEnginePlays() async throws {
+        let b = try BridgeHarness()
+        let (play, gate) = await b.playHeld("a")
+        try await b.controller.perform(.togglePlayPause)
+        gate.open()
+        await play.value
+        let session = try b.session
+        #expect(session.snapshot == b.snapshot(.paused, at: 0))
+
+        let seekGate = Gate()
+        b.h.engine.seekGates = [seekGate]
+        let controller = b.controller
+        let skip = Task { try await controller.perform(.skipForward(30)) }
+        await yieldUntil { b.h.engine.seeks == [30] }
+        try await b.controller.perform(.play)
+        #expect(b.h.engine.isPlaybackRequested)
+        #expect(b.h.engine.state == .buffering)
+        #expect(!b.wasShownPlaying(session))
+        #expect(session.applicationPrimaryRequests == 0)
+
+        seekGate.open()
+        try await skip.value
+        await yieldUntil { session.snapshot == b.snapshot(.playing(rate: 1), at: 30) }
         await b.controller.activationTask?.value
         #expect(session.applicationPrimaryRequests == 1)
     }

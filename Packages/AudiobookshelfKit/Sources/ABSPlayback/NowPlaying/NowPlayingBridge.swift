@@ -60,6 +60,9 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
     private var observerToken: PlaybackObserverToken?
     /// The last display metadata seen, for one item.
     private var metadata: (key: MediaKey, value: Metadata)?
+    /// The session the engine was last seen playing, so its audio session is active (the engine
+    /// activates it just before it plays, and defers that while a load or seek is in flight).
+    private var playedSessionID: String?
     private(set) var isInvalidated = false
 
     /// - Parameters:
@@ -131,8 +134,12 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
         if let key, let fresh = Self.metadata(of: coordinator, key: key) {
             metadata = (key, fresh)
         }
+        if coordinator.isPlaying { playedSessionID = coordinator.session?.id }
+        let hasPlayed = playedSessionID != nil && playedSessionID == coordinator.session?.id
         let current = key.flatMap { metadata?.key == $0 ? metadata?.value : nil }
-        let state = key.map { Self.state(of: coordinator, key: $0, metadata: current ?? Metadata()) }
+        let state = key.map {
+            Self.state(of: coordinator, key: $0, metadata: current ?? Metadata(), hasPlayed: hasPlayed)
+        }
         covers.set(state?.artworkKey, cover: current?.cover)
         controller.update(state)
     }
@@ -202,10 +209,12 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
 
     /// Published play state: playing while the coordinator plays, and also while loaded media stalls
     /// with play requested (published as buffering, elapsed time held), so the system offers pause
-    /// for a stalled stream. Never before the engine has started for this session (while starting,
-    /// or loaded with a catch-up seek in flight): the first playing state activates the Now Playing
+    /// for a stalled stream. Never before the engine has played in this session (`hasPlayed`; while
+    /// starting, or loaded with a seek in flight): the first playing state activates the Now Playing
     /// session, and the engine's audio session must be active first (ADR 0006).
-    static func state(of coordinator: PlaybackCoordinator, key: MediaKey, metadata: Metadata) -> NowPlayingState {
+    static func state(
+        of coordinator: PlaybackCoordinator, key: MediaKey, metadata: Metadata, hasPlayed: Bool
+    ) -> NowPlayingState {
         var chapter: NowPlayingState.Chapter?
         if let timeline = coordinator.timeline, let index = coordinator.chapterIndex {
             let current = timeline.chapters[index]
@@ -214,7 +223,7 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
                 range: TimelineRange(start: current.start, end: current.end))
         }
         let stalled =
-            !coordinator.isPlaying && coordinator.phase == .loaded && coordinator.hasStartedEngine
+            !coordinator.isPlaying && coordinator.phase == .loaded && hasPlayed
             && coordinator.isBuffering && coordinator.isPlaybackRequested
         return NowPlayingState(
             key: key, title: metadata.title, author: metadata.author, narrator: metadata.narrator,

@@ -88,7 +88,107 @@ struct PlaybackCoordinatorJumpTests {
         #expect(coordinator.isPlaying)
     }
 
+    @Test func jumpsWhileANewItemStartsShowOnlyOnceLoaded() async throws {
+        h.setServerProgress("a", time: 500, updated: h.clock.ago(10))
+        let (play, gate) = await playHeld("a")
+
+        await coordinator.jump(by: 30)
+        // The resume position isn't known yet: no 0:30 that snaps to 8:50.
+        #expect(coordinator.currentTime == 0)
+        gate.open()
+        await play.value
+
+        #expect(engine.loads.last?.time == 500)
+        #expect(engine.seeks == [530])
+        #expect(coordinator.currentTime == 530)
+    }
+
+    @Test func jumpsWhileRestartingStayWithinTheItem() async throws {
+        h.lastPlayed.record = h.record("a", position: 3590, age: 3600)
+        coordinator.restoreLastPlayed()
+        let (play, gate) = await playHeld("a")
+
+        await coordinator.jump(by: 30)
+        #expect(coordinator.currentTime == 3600)
+        await coordinator.jump(by: -30)
+        #expect(coordinator.currentTime == 3570)
+        gate.open()
+        await play.value
+
+        #expect(engine.loads.last?.time == 3590)
+        #expect(engine.seeks == [3570])
+        #expect(coordinator.currentTime == 3570)
+    }
+
     // MARK: - Play intent
+
+    /// Loads "a" with play requested and the catch-up seek (for a jump while starting) held.
+    private func playHeldInCatchUpSeek() async -> (task: Task<Void, Never>, seekGate: Gate) {
+        let (play, gate) = await playHeld("a")
+        await coordinator.jump(by: 30)
+        let seekGate = Gate()
+        engine.seekGates = [seekGate]
+        gate.open()
+        await yieldUntil { engine.seeks == [30] }
+        return (play, seekGate)
+    }
+
+    @Test func playingTheSameItemDuringTheCatchUpSeekWaitsForIt() async throws {
+        let (play, seekGate) = await playHeldInCatchUpSeek()
+
+        await coordinator.play(itemID: "a")
+        #expect(coordinator.isPlaybackRequested)
+        #expect(!engine.isPlaybackRequested)
+        #expect(startCount == 0)
+        seekGate.open()
+        await play.value
+
+        #expect(coordinator.isPlaying)
+        #expect(engine.seeks == [30])
+        #expect(startCount == 1)
+    }
+
+    @Test func stopDuringTheCatchUpSeekEndsTheLoad() async throws {
+        let (play, seekGate) = await playHeldInCatchUpSeek()
+
+        coordinator.stop()
+        #expect(coordinator.phase == .idle)
+        #expect(!coordinator.isPlaybackRequested)
+        seekGate.open()
+        await play.value
+        #expect(!engine.isPlaybackRequested)
+        #expect(startCount == 0)
+
+        // Nothing from the stopped load lingers: a later play of the item plays normally.
+        await coordinator.play(itemID: "a")
+        #expect(coordinator.isPlaying)
+        #expect(startCount == 1)
+        coordinator.pause()
+        #expect(!coordinator.isPlaybackRequested)
+    }
+
+    /// A switch requests play for the new item (it starts playing), so `isPlaybackRequested` follows
+    /// it; what must not leak is the old item's pending start.
+    @Test func switchingItemsDuringTheCatchUpSeekDropsTheOldStart() async throws {
+        let (playA, seekGate) = await playHeldInCatchUpSeek()
+        let (playB, gateB) = await playHeld("b")
+
+        #expect(coordinator.mediaKey == h.key("b"))
+        coordinator.pause()
+        #expect(!coordinator.isPlaybackRequested)
+        seekGate.open()
+        await playA.value
+        #expect(!coordinator.isPlaybackRequested)
+        #expect(!engine.isPlaybackRequested)
+        #expect(startCount == 0)
+
+        gateB.open()
+        await playB.value
+        #expect(coordinator.phase == .loaded)
+        #expect(!coordinator.isPlaybackRequested)
+        #expect(!engine.isPlaybackRequested)
+        #expect(startCount == 0)
+    }
 
     @Test func pauseBeforeTheEngineStartsCancelsThePlay() async throws {
         let (play, gate) = await playHeld("a")
@@ -101,7 +201,7 @@ struct PlaybackCoordinatorJumpTests {
         // Loaded, with the catch-up seek in flight: play is requested, but the engine hasn't started.
         #expect(coordinator.phase == .loaded)
         #expect(coordinator.isPlaybackRequested)
-        #expect(!coordinator.hasStartedEngine)
+        #expect(!engine.isPlaybackRequested)
         coordinator.pause()
         #expect(!coordinator.isPlaybackRequested)
         seekGate.open()
@@ -109,12 +209,10 @@ struct PlaybackCoordinatorJumpTests {
 
         #expect(!coordinator.isPlaying)
         #expect(!engine.isPlaybackRequested)
-        #expect(!coordinator.hasStartedEngine)
         #expect(startCount == 0)
 
         await coordinator.resume()
         #expect(coordinator.isPlaying)
-        #expect(coordinator.hasStartedEngine)
         #expect(startCount == 1)
     }
 

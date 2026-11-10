@@ -80,9 +80,10 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         state = isPlaybackRequested ? .playing : .paused
     }
 
+    /// As the real engine does, defers playing (shown as buffering) while a seek is in flight.
     func play() {
         isPlaybackRequested = true
-        state = .playing
+        state = pendingSeekTarget == nil ? .playing : .buffering
     }
 
     func pause() {
@@ -106,6 +107,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         if pendingSeekTarget == time { pendingSeekTarget = nil }
         currentTime = time
         if state == .ended { state = isPlaybackRequested ? .playing : .paused }
+        if state == .buffering, isPlaybackRequested, pendingSeekTarget == nil { state = .playing }
         return .completed
     }
 

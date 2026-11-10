@@ -69,9 +69,6 @@ public final class PlaybackCoordinator {
         case .idle, .unloaded: false
         }
     }
-    /// The engine was asked to play since this session loaded, so the audio session has been
-    /// activated (the engine activates it before playing). Reset when the session closes.
-    public private(set) var hasStartedEngine = false
     public var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
     public var chapter: Chapter? { timeline?.currentChapter(at: currentTime) }
     /// The current chapter's span, for chapter-relative times (`elapsed(at:)`, `remaining(at:)`).
@@ -115,6 +112,9 @@ public final class PlaybackCoordinator {
     /// resume position is resolved, so they never replace it. The single source of the jumps: the
     /// position shown is `unloadedPosition` plus this (clamped while unloaded, see `jump(by:)`).
     private var pendingJumpOffset: Double = 0
+    /// A new item is starting and its resume position isn't resolved yet, so jumps (which apply
+    /// after it) aren't shown: the position stays 0 rather than jump ahead and snap back.
+    private var isResolvingStart = false
     @ObservationIgnored private var policyCheck = 0
     /// When playback was last seen playing; drives auto-rewind on resume.
     @ObservationIgnored private var lastPlayedAt: Date?
@@ -210,6 +210,12 @@ public final class PlaybackCoordinator {
         pendingPlayKey = nil
         if key == mediaKey {
             switch phase {
+            case .loaded where isFinishingLoad:
+                // `play()` for this item starts the engine after its catch-up seek; a start time
+                // retargets that seek (a later seek replaces it).
+                playWhenLoaded = true
+                if let startTime { await seek(to: startTime) }
+                return
             case .loaded:
                 return await resumeLoaded(rewindingBy: nil, startingAt: startTime)
             case .starting:
@@ -259,6 +265,7 @@ public final class PlaybackCoordinator {
             restoredRecord = nil
             unloadedPosition = 0
             unloadedDuration = 0
+            isResolvingStart = true
             emit(.itemChanged(key))
         }
         guard current == generation else { return }
@@ -333,6 +340,7 @@ public final class PlaybackCoordinator {
 
         engine.setRate(Float(rate))
         unloadedPosition = target
+        isResolvingStart = false
         do {
             try await engine.load(source, at: target)
         } catch .superseded {
@@ -494,12 +502,12 @@ public final class PlaybackCoordinator {
         case .loaded:
             return await seek(to: (engine.pendingSeekTarget ?? engine.currentTime) + offset)
         case .starting:
-            pendingJumpOffset += offset
+            // Clamped like an unloaded jump once the item's duration is known.
+            if isResolvingStart || unloadedDuration == 0 { pendingJumpOffset += offset } else { addClampedJump(offset) }
             return nil
         case .unloaded:
             if let pendingStartTime { return await seek(to: pendingStartTime + offset) }
-            // Kept so the position shown stays within the item: it and the resume agree.
-            pendingJumpOffset = Self.clamp(unloadedPositionAfterJumps + offset, to: unloadedDuration) - unloadedPosition
+            addClampedJump(offset)
             return unloadedPositionAfterJumps
         case .idle:
             return nil
@@ -536,6 +544,7 @@ public final class PlaybackCoordinator {
         restoredRecord = nil
         pendingStartTime = nil
         pendingJumpOffset = 0
+        isResolvingStart = false
         reachedEnd = false
         unloadedPosition = 0
         unloadedDuration = 0
@@ -613,7 +622,6 @@ public final class PlaybackCoordinator {
 
     private func startEngine() {
         isFinishingLoad = false
-        hasStartedEngine = true
         engine.setRate(Float(rate))
         engine.play()
         emit(.playbackStarted)
@@ -643,7 +651,6 @@ public final class PlaybackCoordinator {
         resumeIntent += 1
         resumingIntent = nil
         isFinishingLoad = false
-        hasStartedEngine = false
         if phase == .loaded || phase == .starting { engine.stop() }
         if phase != .idle { phase = .unloaded }
         if let session, let key = mediaKey {
@@ -749,9 +756,16 @@ public final class PlaybackCoordinator {
             && abs(candidate.currentTime - record.position) > otherProgressPositionTolerance
     }
 
-    /// The unloaded position moved by jumps not yet applied, within the item.
+    /// The unloaded position moved by jumps not yet applied, within the item. While a new item
+    /// starts, its resume position (and duration) isn't known yet, so its jumps show once loaded.
     private var unloadedPositionAfterJumps: Double {
-        Self.clamp(unloadedPosition + pendingJumpOffset, to: unloadedDuration)
+        if phase == .starting, isResolvingStart { return unloadedPosition }
+        return Self.clamp(unloadedPosition + pendingJumpOffset, to: unloadedDuration)
+    }
+
+    /// Adds a jump so the position shown stays within the item, and it and the resume agree.
+    private func addClampedJump(_ offset: Double) {
+        pendingJumpOffset = Self.clamp(unloadedPositionAfterJumps + offset, to: unloadedDuration) - unloadedPosition
     }
 
     /// `time` within `0...duration`, or only at 0 when the duration is unknown (0).
