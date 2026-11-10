@@ -34,6 +34,12 @@ public struct ServerAddress: Sendable, Hashable, CustomStringConvertible {
             let host = components.encodedHost, !host.isEmpty,
             components.user == nil, components.password == nil
         else { return nil }
+        // `port` is nil for a port that overflows `Int`; only an empty port (`host:`) may be nil.
+        if components.port == nil, let string = components.string, let range = components.rangeOfPort,
+            !string[range].isEmpty
+        {
+            return nil
+        }
         if let port = components.port {
             guard (1...65_535).contains(port) else { return nil }
             if (scheme == "https" && port == 443) || (scheme == "http" && port == 80) {

@@ -35,7 +35,8 @@ import Testing
     @Test(arguments: [
         "", "   ", "ftp://example.com", "https://", "https://:80", "https://user:pw@example.com",
         "https://example.com:0", "https://example.com:70000", "file:///tmp", "https:/host", "HTTP:host",
-        "https:host:13378",
+        "https:host:13378", "https://example.com:65536", "https://example.com:999999999999999999999999999999999999",
+        "example.com:999999999999999999999999999999999999",
     ])
     func rejects(input: String) {
         #expect(ServerAddress(input) == nil)
