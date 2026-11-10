@@ -128,17 +128,47 @@ struct PlaybackCoordinatorSessionStartTests {
         service.state.withLock { $0.startError = nil }
         let playB = Task { await coordinator.play(itemID: "B") }
         await yieldUntil { coordinator.queuedSessionStarts == 1 }
+        #expect(service.starts == ["A"])
 
         gate.open()
         await playA.value
         await playB.value
 
-        // A's failure is stale news: B is current and plays.
-        #expect(service.starts == ["A", "B"])
+        // B's request went out only once A's had failed. A's failure is stale news: B is current and plays.
+        #expect(service.log == ["start A", "start A failed", "start B"])
         #expect(coordinator.error == nil)
         #expect(coordinator.session?.id == "B-2")
         #expect(coordinator.isPlaying)
         #expect(coordinator.queuedSessionStarts == 0)
+    }
+
+    @Test func cancelledQueuedPlayEndsQuietlyAndPassesItsTurnOn() async {
+        let gate = Gate()
+        service.state.withLock { $0.startGates["A"] = gate }
+        let playA = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { service.starts == ["A"] }
+        let playB = Task { await coordinator.play(itemID: "B") }
+        await yieldUntil { coordinator.queuedSessionStarts == 1 }
+
+        playB.cancel()
+        gate.open()
+        await playA.value
+        await playB.value
+        await coordinator.waitForPendingCloses()
+
+        // B's turn came with its caller cancelled: its start throws `CancellationError`, which is no failure.
+        #expect(service.starts == ["A"])
+        #expect(coordinator.error == nil)
+        #expect(h.events.events == [.itemChanged(h.key("A")), .itemChanged(h.key("B"))])
+        #expect(coordinator.phase == .unloaded)
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(coordinator.queuedSessionStarts == 0)
+
+        await coordinator.play(itemID: "C")
+
+        #expect(service.starts == ["A", "C"])
+        #expect(service.openSessions == ["C-2"])
+        #expect(coordinator.isPlaying)
     }
 
     @Test func playAfterAFailedStartIsNotBlocked() async {

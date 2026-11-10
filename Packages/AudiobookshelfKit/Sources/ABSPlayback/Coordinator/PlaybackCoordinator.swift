@@ -277,6 +277,10 @@ public final class PlaybackCoordinator {
                     itemID: itemID, episodeID: episodeID, generation: current)
             else { return }
             started = result
+        } catch is CancellationError {
+            // A cancelled caller abandons the start; that isn't a failure. No session was opened.
+            if current == generation, phase == .starting { phase = .unloaded }
+            return
         } catch {
             return fail(Self.sessionError(error), generation: current)
         }

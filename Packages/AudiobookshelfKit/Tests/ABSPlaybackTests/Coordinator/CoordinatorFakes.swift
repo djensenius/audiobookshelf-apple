@@ -199,6 +199,8 @@ final class StubSessionService: PlaybackSessionService {
     var takenOver: [String] { state.withLock { $0.takenOver } }
 
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+        // As the API client's request does, a start for a cancelled caller sends nothing and throws.
+        try Task.checkCancellation()
         let (gate, error, time, id, updatedAt) = state.withLock { state in
             state.starts.append(itemID)
             state.log.append("start \(itemID)")
@@ -210,7 +212,10 @@ final class StubSessionService: PlaybackSessionService {
         }
         // The gate holds the request before it reaches the server.
         await gate?.wait()
-        if let error { throw error }
+        if let error {
+            state.withLock { $0.log.append("start \(itemID) failed") }
+            throw error
+        }
         state.withLock { state in
             state.takenOver += state.openSessions
             state.openSessions = [id]
