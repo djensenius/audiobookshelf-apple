@@ -3,8 +3,8 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
-/// Shake to reset, fade-out, reset feedback and the almost-done chime. Shaking and
-/// vibration need an iPhone or iPad, so those rows are iOS only.
+/// Shake to reset, fade-out, reset feedback and the almost-done chime. Shaking needs an
+/// iPhone or iPad and the reset vibration a Taptic Engine, so those rows show only there.
 struct SleepTimerSettingsSection: View {
     @Bindable var settings: AppSettings
 
@@ -24,9 +24,11 @@ struct SleepTimerSettingsSection: View {
                 "LabelDisableAudioFadeOut", help: "LabelDisableAudioFadeOutHelp",
                 isOn: $settings.disableSleepTimerFadeOut)
             #if os(iOS)
-                SettingToggle(
-                    "LabelDisableVibrateOnReset", help: "LabelDisableVibrateOnResetHelp",
-                    isOn: $settings.disableSleepTimerResetFeedback)
+                if HapticsSupport.isAvailable {
+                    SettingToggle(
+                        "LabelDisableVibrateOnReset", help: "LabelDisableVibrateOnResetHelp",
+                        isOn: $settings.disableSleepTimerResetFeedback)
+                }
             #endif
             SettingToggle(
                 "LabelSleepTimerAlmostDoneChime", help: "LabelSleepTimerAlmostDoneChimeHelp",

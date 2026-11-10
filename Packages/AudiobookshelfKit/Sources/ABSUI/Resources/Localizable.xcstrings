@@ -25481,6 +25481,251 @@
         }
       }
     },
+    "LabelAllowSeekingOnMediaControlsHelp" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
+          }
+        }
+      }
+    },
     "LabelAlways" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -72521,251 +72766,6 @@
         }
       }
     },
-    "MessageAllowSeekingOnMediaControlsHelp" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "be" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "bg" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "ca" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "cs" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "da" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "el" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "et" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "fa" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "fi" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "gu" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "hr" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "hu" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "is" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "lt" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "nb" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "ro" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "sk" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "sl" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "sv" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "ta" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "uk" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "vi" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Lets you change the playback position from the Lock Screen, Control Center and other system media controls."
-          }
-        }
-      }
-    },
     "MessageAndroid10Downloads" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -80857,241 +80857,241 @@
         "ar" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "be" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "bg" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "et" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "gu" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "is" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "lt" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "sl" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "ta" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "Audiobookshelf uses the language you choose for it in the Settings app."
+            "value" : "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region."
           }
         }
       }

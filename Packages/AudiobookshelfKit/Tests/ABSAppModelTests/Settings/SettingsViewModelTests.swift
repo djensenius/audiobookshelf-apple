@@ -145,6 +145,27 @@ private var utcCalendar: Calendar {
         }
     }
 
+    @Test func endOfChapterWinsOverAnEarlierCustomChoice() throws {
+        try withSettings { settings, _ in
+            let model = SettingsViewModel(settings: settings)
+            model.sleepTimerLengthChoice = .custom
+            // Another scene switches to end of chapter.
+            settings.sleepTimerLength = 0
+            #expect(model.sleepTimerLengthChoice == .endOfChapter)
+        }
+    }
+
+    @Test func customRewindFromZeroStartsAtOneMinute() throws {
+        try withSettings { settings, _ in
+            let model = SettingsViewModel(settings: settings)
+            settings.autoSleepTimerAutoRewindTime = 0
+            model.autoRewindLengthChoice = .custom
+            #expect(settings.autoSleepTimerAutoRewindTime == 60_000)
+            #expect(model.autoRewindLengthChoice == .custom)
+            #expect(model.autoRewindCustomMinutes == 1)
+        }
+    }
+
     @Test func customMinutesAreClamped() throws {
         try withSettings { settings, _ in
             let model = SettingsViewModel(settings: settings)
@@ -193,6 +214,28 @@ private var utcCalendar: Calendar {
         }
     }
 
+    @Test(
+        arguments: ["00:00", "06:00", "22:30", "23:59"],
+        [
+            // UTC+14, UTC-11, UTC+5:45, UTC+10:30 with a 30-minute DST shift, UTC-3:30.
+            "Pacific/Kiritimati", "Pacific/Pago_Pago", "Asia/Kathmandu", "Australia/Lord_Howe",
+            "America/St_Johns",
+        ])
+    func timeOfDayRoundTripsThroughDates(_ timeOfDay: String, _ timeZone: String) throws {
+        try withSettings { settings, _ in
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = try #require(TimeZone(identifier: timeZone))
+            let model = SettingsViewModel(settings: settings, calendar: calendar)
+
+            let date = model.date(forTimeOfDay: timeOfDay)
+            #expect(model.timeOfDay(from: date) == timeOfDay)
+
+            settings.autoSleepTimerStartTime = timeOfDay
+            model.autoSleepTimerEnd = model.autoSleepTimerStart
+            #expect(settings.autoSleepTimerEndTime == timeOfDay)
+        }
+    }
+
     @Test func windowWrapsPastMidnight() {
         #expect(SettingsViewModel.windowMinutes(start: "22:00", end: "06:00") == 480)
         #expect(SettingsViewModel.windowMinutes(start: "06:00", end: "22:00") == 960)
@@ -210,12 +253,9 @@ private var utcCalendar: Calendar {
         }
     }
 
-    @Test func invalidTimesAreRejected() {
-        for value in ["24:00", "12:60", "7:00", "07:5", "+1:00", "07:00:00", "ab:cd", "", "٠٧:٠٠"] {
-            #expect(SettingsViewModel.minutesSinceMidnight(value) == nil, "\(value)")
-        }
-        #expect(SettingsViewModel.minutesSinceMidnight("00:00") == 0)
-        #expect(SettingsViewModel.minutesSinceMidnight("23:59") == 1439)
+    @Test func invalidTimesMakeAnEmptyWindow() {
+        // Parsing itself is tested with `AppSettings.minutesSinceMidnight`.
         #expect(SettingsViewModel.windowMinutes(start: "bad", end: "06:00") == 0)
+        #expect(SettingsViewModel.windowMinutes(start: "22:00", end: "24:00") == 0)
     }
 }

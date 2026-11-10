@@ -25,6 +25,8 @@ struct SettingsView: View {
                 DataSettingsSection(settings: settings)
                 LanguageSettingsSection()
             }
+            // The themed surfaces are iOS only: on a Mac the Settings window keeps the native
+            // grouped form, so Black looks like Dark there (docs/settings.md).
             #if os(iOS)
                 .listRowBackground(Rectangle().fill(ABSColor.secondarySurface))
             #endif

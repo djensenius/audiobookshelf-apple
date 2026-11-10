@@ -3,6 +3,16 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
+#if os(iOS)
+    import CoreHaptics
+
+    /// Whether this device can play haptics. iPads (and Macs) have no Taptic Engine, so the
+    /// haptic settings would do nothing there.
+    enum HapticsSupport {
+        static let isAvailable = CHHapticEngine.capabilitiesForHardware().supportsHaptics
+    }
+#endif
+
 /// A toggle with a title and, optionally, the legacy info-dialog text under it. VoiceOver
 /// reads the help as the hint.
 struct SettingToggle: View {
@@ -101,6 +111,7 @@ struct DurationChoicePicker: View {
         } label: {
             Text(verbatim: L10n.string(titleKey))
         }
+        .accessibilityValue(Text(verbatim: text(selection, spoken: true)))
         if selection == .custom {
             Stepper(value: $customMinutes, in: SettingsViewModel.customMinutesRange) {
                 AdaptiveStack(spacing: ABSSpacing.small) {

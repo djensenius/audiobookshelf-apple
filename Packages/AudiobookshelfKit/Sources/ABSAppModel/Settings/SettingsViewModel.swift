@@ -63,11 +63,12 @@ public final class SettingsViewModel {
 
     // MARK: Sleep timer lengths
 
-    /// ``AppSettings/sleepTimerLength`` as a picker choice; `0` is end of chapter.
+    /// ``AppSettings/sleepTimerLength`` as a picker choice; `0` is end of chapter, even
+    /// after the user picked "Custom time" (another scene may have changed it since).
     public var sleepTimerLengthChoice: DurationChoice {
         get {
-            if isSleepTimerLengthCustom { return .custom }
             if settings.sleepTimerLength == 0 { return .endOfChapter }
+            if isSleepTimerLengthCustom { return .custom }
             return Self.presetChoice(milliseconds: settings.sleepTimerLength)
         }
         set {
@@ -100,8 +101,17 @@ public final class SettingsViewModel {
         }
         set {
             isAutoRewindLengthCustom = newValue == .custom
-            if case .minutes(let minutes) = newValue {
+            switch newValue {
+            case .minutes(let minutes):
                 settings.autoSleepTimerAutoRewindTime = Self.milliseconds(minutes: minutes)
+            case .custom:
+                // A stored 0 is below the stepper's range; start where the legacy stepper did.
+                if settings.autoSleepTimerAutoRewindTime == 0 {
+                    settings.autoSleepTimerAutoRewindTime = Self.milliseconds(
+                        minutes: Self.customMinutesRange.lowerBound)
+                }
+            case .endOfChapter:
+                break  // Not offered for the rewind length.
             }
         }
     }
@@ -140,19 +150,9 @@ public final class SettingsViewModel {
     /// past midnight, as in legacy `checkAutoSleepTimer`: 22:00–06:00 is 480. `0` when the
     /// times are equal or either is invalid.
     public nonisolated static func windowMinutes(start: String, end: String) -> Int {
-        guard let start = minutesSinceMidnight(start), let end = minutesSinceMidnight(end) else { return 0 }
+        guard let start = AppSettings.minutesSinceMidnight(start), let end = AppSettings.minutesSinceMidnight(end)
+        else { return 0 }
         return (end - start + minutesPerDay) % minutesPerDay
-    }
-
-    /// The minutes since midnight of a 24-hour `HH:mm` time, or `nil` if it isn't valid.
-    public nonisolated static func minutesSinceMidnight(_ timeOfDay: String) -> Int? {
-        let parts = timeOfDay.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count == 2,
-            parts.allSatisfy({ $0.count == 2 && $0.allSatisfy { $0.isASCII && $0.isNumber } }),
-            let hours = Int(parts[0]), let minutes = Int(parts[1]),
-            (0..<24).contains(hours), (0..<60).contains(minutes)
-        else { return nil }
-        return hours * 60 + minutes
     }
 
     /// `date`'s time of day in this model's calendar, as 24-hour `HH:mm`.
@@ -164,7 +164,7 @@ public final class SettingsViewModel {
     /// A date at `timeOfDay` (`HH:mm`) on a fixed day without a daylight-saving change, so
     /// every time of day exists. Time pickers show only the time.
     func date(forTimeOfDay timeOfDay: String) -> Date {
-        let minutes = Self.minutesSinceMidnight(timeOfDay) ?? 0
+        let minutes = AppSettings.minutesSinceMidnight(timeOfDay) ?? 0
         let day = calendar.startOfDay(for: Self.referenceDay)
         return calendar.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: day) ?? day
     }

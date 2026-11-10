@@ -7,7 +7,7 @@ import SwiftUI
     import UIKit
 #endif
 
-/// Bookshelf view, theme and (on iPhone and iPad) haptics.
+/// Bookshelf view, theme and, on devices that can play them, haptics.
 struct DisplaySettingsSection: View {
     @Bindable var settings: AppSettings
     @Bindable var viewModel: SettingsViewModel
@@ -18,10 +18,11 @@ struct DisplaySettingsSection: View {
             SettingPicker(
                 titleKey: "LabelTheme", options: AppTheme.allCases, label: \.settingsLabel, selection: $settings.theme)
             #if os(iOS)
-                // Macs have no impact haptics, so the setting would do nothing there.
-                SettingPicker(
-                    titleKey: "LabelHapticFeedback", options: HapticFeedback.allCases, label: \.settingsLabel,
-                    selection: $settings.hapticFeedback)
+                if HapticsSupport.isAvailable {
+                    SettingPicker(
+                        titleKey: "LabelHapticFeedback", options: HapticFeedback.allCases, label: \.settingsLabel,
+                        selection: $settings.hapticFeedback)
+                }
             #endif
         } header: {
             Text(verbatim: L10n.string("HeaderUserInterfaceSettings"))
@@ -47,7 +48,7 @@ struct PlaybackSettingsSection: View {
                 "LabelEnableMp3IndexSeeking", help: "LabelEnableMp3IndexSeekingHelp",
                 isOn: $settings.enableMp3IndexSeeking)
             SettingToggle(
-                "LabelAllowSeekingOnMediaControls", help: "MessageAllowSeekingOnMediaControlsHelp",
+                "LabelAllowSeekingOnMediaControls", help: "LabelAllowSeekingOnMediaControlsHelp",
                 isOn: $settings.allowSeekingOnMediaControls)
         } header: {
             Text(verbatim: L10n.string("HeaderPlaybackSettings"))
@@ -116,6 +117,6 @@ struct LanguageSettingsSection: View {
     /// The localization the app is running in, named in the current locale.
     private var currentLanguage: String {
         let identifier = Bundle.main.preferredLocalizations.first ?? "en"
-        return locale.localizedString(forIdentifier: identifier) ?? identifier
+        return (locale.localizedString(forIdentifier: identifier) ?? identifier).capitalized(with: locale)
     }
 }
