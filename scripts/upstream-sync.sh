@@ -184,7 +184,8 @@ git -c log.showSignature=false log --no-color --no-use-mailmap --encoding=UTF-8 
   --reverse --date=short --format="%H${US}%s${US}%an${US}%ad" "${base}..${head}" >"$tmp/log.raw"
 
 # Sanitize text that ends up in the issue:
-# - escape & first so entities like &#64; / &#35; cannot smuggle in @ or #,
+# - double backslashes first so a source "\#123" cannot escape a generated link;
+# - escape & next so entities like &#64; / &#35; cannot smuggle in @ or #,
 #   then neutralize HTML and escape table pipes;
 # - send github.com links through redirect.github.com (scheme and host matched
 #   case-insensitively; bracket classes because BSD sed has no I flag);
@@ -192,6 +193,7 @@ git -c log.showSignature=false log --no-color --no-use-mailmap --encoding=UTF-8 
 #   #123 / GH-123 into upstream links whose text is not auto-referenced;
 # - break @mentions with a zero-width space so upstream users are not pinged.
 sed -E \
+  -e 's/\\/\\\\/g' \
   -e 's/&/\&amp;/g' \
   -e 's/</\&lt;/g' \
   -e 's/>/\&gt;/g' \
