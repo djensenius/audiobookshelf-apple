@@ -9,7 +9,7 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
 @Suite struct UserModelTests {
     @Test func decodesLoginResponseWithAccessAndRefreshTokens() throws {
         let response = try decode(AuthResponse.self, UserFixtures.loginResponse)
-        #expect(response.tokens == AuthTokens(accessToken: "access-abc", refreshToken: "refresh-abc"))
+        #expect(response.tokens == LoginTokens(accessToken: "access-abc", refreshToken: "refresh-abc"))
         #expect(response.userDefaultLibraryId == "lib-books")
         #expect(response.serverSettings?.version == "2.26.0")
         #expect(response.serverSettings?.sortingIgnorePrefix == true)
@@ -44,7 +44,7 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(try decode(AuthResponse.self, legacyOnly).tokens == nil)
         let json = #"{"user":{"id":"u","username":"x","token":"old","accessToken":"new","refreshToken":null}}"#
         let response = try decode(AuthResponse.self, json)
-        #expect(response.tokens == AuthTokens(accessToken: "new", refreshToken: nil))
+        #expect(response.tokens == LoginTokens(accessToken: "new", refreshToken: nil))
     }
 
     @Test func skipsMalformedProgressAndBookmarks() throws {
@@ -111,8 +111,8 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
             }
         }
         #expect(
-            String(describing: AuthTokens(accessToken: "a"))
-                == "AuthTokens(accessToken: <redacted>, refreshToken: nil)")
+            String(describing: LoginTokens(accessToken: "a"))
+                == "LoginTokens(accessToken: <redacted>, refreshToken: nil)")
     }
 
     @Test func decodesEReaderDevices() throws {

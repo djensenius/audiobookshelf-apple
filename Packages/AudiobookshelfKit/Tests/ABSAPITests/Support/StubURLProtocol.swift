@@ -46,6 +46,7 @@ final class StubURLProtocol: URLProtocol {
     private struct Route {
         var handler: Handler
         var requests: [URLRequest] = []
+        var cookieStorage: HTTPCookieStorage?
     }
 
     private static let routes = Mutex<[String: Route]>([:])
@@ -53,6 +54,14 @@ final class StubURLProtocol: URLProtocol {
 
     static func register(host: String, handler: @escaping Handler) {
         routes.withLock { $0[host] = Route(handler: handler) }
+    }
+
+    /// URLSession's own HTTP loader handles cookies, but not for custom protocols. With a storage
+    /// set, this protocol does it instead for `host`: requests that handle cookies get a `Cookie`
+    /// header from `storage` (recorded with the request), and `Set-Cookie` response headers are
+    /// stored in it. Pass the session's jar, for example ``APIClient/cookieStorage``.
+    static func useCookieStorage(_ storage: HTTPCookieStorage, host: String) {
+        routes.withLock { $0[host]?.cookieStorage = storage }
     }
 
     static func requests(host: String) -> [URLRequest] {
@@ -73,16 +82,29 @@ final class StubURLProtocol: URLProtocol {
         if request.httpBody == nil, let stream = request.httpBodyStream {
             request.httpBody = Self.read(stream)
         }
-        let handler = Self.routes.withLock { routes -> Handler? in
-            guard let host = request.url?.host() else { return nil }
+        let route = Self.routes.withLock { routes -> (Handler, HTTPCookieStorage?)? in
+            guard let host = request.url?.host(), let route = routes[host] else { return nil }
+            if request.httpShouldHandleCookies, let url = request.url,
+                let cookies = route.cookieStorage?.cookies(for: url), !cookies.isEmpty
+            {
+                for (name, value) in HTTPCookie.requestHeaderFields(with: cookies) {
+                    request.setValue(value, forHTTPHeaderField: name)
+                }
+            }
             routes[host]?.requests.append(request)
-            return routes[host]?.handler
+            return (route.handler, request.httpShouldHandleCookies ? route.cookieStorage : nil)
         }
-        guard let handler else {
+        guard let route else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
+        let (handler, cookieStorage) = route
         let stub = handler(request)
+        if let cookieStorage, let url = request.url {
+            for cookie in HTTPCookie.cookies(withResponseHeaderFields: stub.headers, for: url) {
+                cookieStorage.setCookie(cookie)
+            }
+        }
         if let gate = stub.gate {
             let box = UncheckedProtocol(value: self)
             let recorded = request
@@ -114,7 +136,10 @@ final class StubURLProtocol: URLProtocol {
             var next = request
             next.url = location
             next.setValue(nil, forHTTPHeaderField: "Authorization")
-            if stub.status == 303 {
+            // Like URLSession: a 303 turns any method but HEAD into GET, and a 301 or 302 turns
+            // a POST into GET; 307 and 308 keep the method and body.
+            let method = request.httpMethod ?? "GET"
+            if (stub.status == 303 && method != "HEAD") || ([301, 302].contains(stub.status) && method == "POST") {
                 next.httpMethod = "GET"
                 next.httpBody = nil
             }
@@ -205,6 +230,11 @@ struct StubServer: Sendable {
 
     func requests(path: String) -> [URLRequest] {
         requests.filter { $0.url?.path() == path }
+    }
+
+    /// Emulates `storage` as this host's cookie jar; see ``StubURLProtocol/useCookieStorage(_:host:)``.
+    func useCookieStorage(_ storage: HTTPCookieStorage) {
+        StubURLProtocol.useCookieStorage(storage, host: host)
     }
 
     func sessionConfiguration() -> URLSessionConfiguration {

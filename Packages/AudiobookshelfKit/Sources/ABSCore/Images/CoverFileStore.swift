@@ -135,7 +135,8 @@ public actor CoverFileStore {
         for ext in Self.extensions {
             let url = folder.appending(path: "\(key.fileStem).\(ext)")
             guard !leases.isPendingDeletion(Self.leaseKey(url)),
-                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
+                values.isRegularFile == true
             else { continue }
             if let modified = values.contentModificationDate, now().timeIntervalSince(modified) > 86_400 {
                 try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: url.path)
@@ -151,7 +152,8 @@ public actor CoverFileStore {
     }
 
     /// Moves `file` into the store as `key`'s file and returns it leased. Throws
-    /// `CancellationError` if the server was removed since `generation` was read.
+    /// `CancellationError` if the server was removed since `generation` was read. On any error
+    /// `file` is left where it was, so the caller can still use it.
     ///
     /// The new file replaces the old one atomically, and only once it is complete; copies under
     /// other extensions are deleted afterwards, each once its last lease is released.
@@ -176,7 +178,7 @@ public actor CoverFileStore {
         let addedBytes = Self.allocatedSize(staging)
         guard rename(staging.path, destination.path) == 0 else {
             let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-            try? FileManager.default.removeItem(at: staging)
+            if rename(staging.path, file.path) != 0 { try? FileManager.default.removeItem(at: staging) }
             if wasRetired { leases.deleteWhenUnleased(Self.leaseKey(destination)) }
             throw error
         }

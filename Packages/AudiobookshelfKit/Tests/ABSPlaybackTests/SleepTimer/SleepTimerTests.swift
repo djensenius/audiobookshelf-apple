@@ -49,6 +49,17 @@ private final class Harness {
         clock.advance(by: .seconds(SleepTimer.gracePeriod))
         await until { !timer.canRestart }
     }
+
+    /// Applies `move` to playback of item "a".
+    func apply(_ move: Move) {
+        switch move {
+        case .none: timer.itemDidChange("a")
+        case .seek, .unreportedSeek: control.currentTime = 5000
+        case .pendingSeek: control.userSeekIsPending = true
+        case .anotherItem: timer.itemDidChange("b")
+        }
+        if move == .seek { timer.didSeek(to: 5000) }
+    }
 }
 
 private let chapters = TimelineFixture.crossingChapters.timeline
@@ -65,9 +76,9 @@ private func gappedTimeline(_ ranges: [ClosedRange<Double>], chapterEnd: Double)
 }
 
 /// How a grace period ends.
-enum GraceEnd: CaseIterable, Sendable { case graceTask, clockOnly, cancel, anotherItem }
-/// What happens between an automatic timer's expiry and the next play.
-enum Move: CaseIterable, Sendable { case none, seek, unreportedSeek, anotherItem }
+enum GraceEnd: CaseIterable, Sendable { case graceTask, clockOnly, cancel, anotherItem, pause }
+/// What happens after a timer expires: nothing, a seek that landed (reported or not) or is in flight, or another item.
+enum Move: CaseIterable, Sendable { case none, seek, unreportedSeek, pendingSeek, anotherItem }
 /// What happens during the seek back to where an expired timer's fade began.
 enum ExpirySeek: CaseIterable, Sendable { case play, manualStart, failure, userSeek }
 /// What happens before a grace-period reset's rewind seek, or during it.
@@ -242,16 +253,18 @@ struct SleepTimerTests {
         #expect(harness.timer.isRunning, "Restarted within the grace period")
     }
 
-    /// Another item, or a seek that landed, before the expiry's seek task runs wins: no rewind to the fade.
-    @Test(arguments: [false, true])
-    func aChangeBeforeTheExpirySeekWins(userSeeks: Bool) async {
+    /// Another item, or a seek that landed or is in flight, before the expiry's seek task runs wins: no rewind to
+    /// the fade.
+    @Test(arguments: Move.allCases)
+    func aChangeBeforeTheExpirySeekWins(_ move: Move) async {
         let harness = Harness(at: 100)
+        harness.timer.itemDidChange("a")
         harness.timer.start(.duration(30))
         await harness.play(from: 100, to: 130)
         #expect(harness.control.pauseCount == 1)
-        if userSeeks { harness.control.currentTime = 5000 } else { harness.timer.itemDidChange("other") }
+        harness.apply(move)
         await Task { @MainActor in }.value  // Queued after the expiry's seek task, so that has run.
-        #expect(harness.control.seeks.isEmpty)
+        #expect(harness.control.seeks == (move == .none ? [100] : []))
     }
 
     @Test func aSeekDuringTheFadeRewindsOnlyToTheSeek() async {
@@ -748,6 +761,7 @@ struct SleepTimerTests {
         case .clockOnly: harness.clock.advance(by: .seconds(SleepTimer.gracePeriod))
         case .cancel: harness.timer.cancel()
         case .anotherItem: harness.timer.itemDidChange("b")
+        case .pause: harness.timer.playbackDidPause()
         }
         #expect(harness.timer.canRestart == (end == .clockOnly), "Published when the grace task runs")
         #expect(harness.shake.sensitivity == (end == .clockOnly ? .medium : nil))
@@ -896,12 +910,7 @@ struct SleepTimerTests {
         _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
         await harness.expire()
         await harness.endGrace()
-        switch move {
-        case .none: harness.timer.itemDidChange("a")
-        case .seek, .unreportedSeek: harness.control.currentTime = 5000
-        case .anotherItem: harness.timer.itemDidChange("b")
-        }
-        if move == .seek { harness.timer.didSeek(to: 5000) }
+        harness.apply(move)
 
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == (move == .none ? 300 : 0))
         #expect(harness.timer.isRunning == false, "Outside the window")
@@ -967,6 +976,70 @@ struct SleepTimerTests {
         #expect(harness.control.plays == 0)
         #expect(harness.feedback.resets == 0)
         #expect(harness.timer.isRunning == (race != .cancelBefore && race != .cancelDuring))
+    }
+
+    /// A seek of the user's that landed, reported or not, or is in flight before a reset's rewind wins, as when it
+    /// supersedes the rewind: no seek, no play, and the grace period comes back.
+    @Test(arguments: [Move.seek, .unreportedSeek, .pendingSeek])
+    func aSeekBeforeAResetsRewindWins(_ move: Move) async throws {
+        let harness = Harness(timeline: chapters, at: 1000, options: try autoOptions())
+        harness.timer.itemDidChange("a")
+        _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        await harness.expire()
+        #expect(harness.timer.reset())
+        harness.apply(move)
+        await Task { @MainActor in }.value  // Queued after the reset's task, so that has run.
+        #expect(harness.control.seeks.isEmpty)
+        #expect(harness.control.plays == 0)
+        #expect(harness.timer.isRunning == false)
+        #expect(harness.timer.canRestart)
+    }
+
+    /// A pause, or a play (whose own resume seek supersedes the rewind), during a reset's rewind wins: the timer
+    /// neither plays nor stops.
+    @Test(arguments: [false, true])
+    func aPlayOrPauseDuringAResetsRewindWins(pauses: Bool) async throws {
+        let harness = Harness(timeline: chapters, at: 1000, options: try autoOptions())
+        _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        await harness.expire()
+        harness.control.holdsSeeks = true
+        harness.control.seeksLand = pauses
+        #expect(harness.timer.reset())
+        await until { harness.control.seeks == [700] }
+        if pauses {
+            harness.control.pause()
+            harness.timer.playbackDidPause()
+        } else {
+            #expect(harness.timer.playbackWillStart() == 0)
+            harness.control.play()
+        }
+        await harness.control.finishSeek()
+        #expect(harness.control.plays == (pauses ? 0 : 1), "Only the user's")
+        #expect(harness.control.isPlaying == !pauses)
+        #expect(harness.feedback.resets == 0)
+        #expect(harness.timer.isRunning)
+        #expect(harness.timer.canRestart == false)
+    }
+
+    /// The timer plays only to resume a grace-period reset: changing or cancelling a fade the user paused restores
+    /// the volume, but playback stays paused.
+    @Test func changingAFadeTheUserPausedNeverPlays() async {
+        let harness = Harness(at: 100)
+        harness.timer.start(.duration(30))
+        await harness.play(from: 100, to: 110)
+        #expect(harness.control.volume < 1)
+        harness.control.pause()
+        harness.timer.playbackDidPause()
+        harness.timer.add(60)
+        #expect(harness.control.volume == 1)
+        harness.timer.subtract(70)
+        #expect(harness.timer.reset() == false, "Only while playing")
+        await harness.advance(20)
+        #expect(harness.timer.isRunning, "Paused, it doesn't count down")
+        harness.timer.cancel()
+        #expect(harness.control.volume == 1)
+        #expect(harness.control.plays == 0)
+        #expect(harness.control.pauseCount == 1, "Only the user's")
     }
 
     @Test func aResetAtTheEndOfTheMediaWaitsForItsRewindThenPlays() async throws {
