@@ -1,7 +1,8 @@
 import Foundation
 
-/// Credentials returned at sign-in. Printing, dumping, or mirroring redacts the token values.
-public struct AuthTokens: Sendable, Hashable {
+/// Credentials as a login response carries them (ABSAPI's `AuthTokens` is the pair a connection
+/// stores). Printing, dumping, or mirroring redacts the token values.
+public struct LoginTokens: Sendable, Hashable {
     public var accessToken: String
     /// `nil` when the request didn't send `x-return-tokens: true` (the server then sets a
     /// cookie instead).
@@ -13,9 +14,9 @@ public struct AuthTokens: Sendable, Hashable {
     }
 }
 
-extension AuthTokens: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+extension LoginTokens: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public var description: String {
-        "AuthTokens(accessToken: <redacted>, refreshToken: \(refreshToken == nil ? "nil" : "<redacted>"))"
+        "LoginTokens(accessToken: <redacted>, refreshToken: \(refreshToken == nil ? "nil" : "<redacted>"))"
     }
 
     public var debugDescription: String { description }
@@ -144,7 +145,7 @@ public struct AuthResponse: Sendable, Hashable, Decodable {
 
     public init(
         user: User, userDefaultLibraryId: String? = nil, serverSettings: ServerSettings? = nil,
-        ereaderDevices: [EReaderDevice]? = nil, tokens: AuthTokens? = nil
+        ereaderDevices: [EReaderDevice]? = nil, tokens: LoginTokens? = nil
     ) {
         self.user = user
         self.userDefaultLibraryId = userDefaultLibraryId
@@ -157,10 +158,10 @@ public struct AuthResponse: Sendable, Hashable, Decodable {
     /// `accessToken`/`refreshToken`, or `nil` if the server sent no access token (as on
     /// `/api/authorize`). The legacy `user.token` is intentionally ignored: the minimum supported
     /// server is 2.26.0 (ADR 0007), which always sends `accessToken` on login and refresh.
-    public var tokens: AuthTokens? {
+    public var tokens: LoginTokens? {
         guard let accessToken, !accessToken.isEmpty else { return nil }
         let refreshToken = refreshToken.flatMap { $0.isEmpty ? nil : $0 }
-        return AuthTokens(accessToken: accessToken, refreshToken: refreshToken)
+        return LoginTokens(accessToken: accessToken, refreshToken: refreshToken)
     }
 
     enum CodingKeys: String, CodingKey {
