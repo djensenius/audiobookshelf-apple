@@ -55,8 +55,15 @@ public final class AudioEngine: AudioEngineProtocol {
     @ObservationIgnored var errorLogFetcher: @MainActor (AVPlayerItem) async -> [PlaybackFailure.ErrorLogEntry] = {
         await PlaybackFailure.errorLogEntries(of: $0)
     }
-    /// An item failure waiting for its error log. The player is paused meanwhile.
-    @ObservationIgnored private var pendingItemFailure: Task<Void, Never>?
+    /// An item failure waiting for its error log, for the queue of `generation`. While it is set the
+    /// player stays paused, nothing starts playback and no time is published; a seek rebuilds the
+    /// queue (invalidating it) and clearing the queue drops it.
+    private struct PendingItemFailure {
+        let trackIndex: Int
+        let generation: Int
+        let report: Task<Void, Never>
+    }
+    @ObservationIgnored private var pendingItemFailure: PendingItemFailure?
     /// Incremented whenever the queue is cleared, so a delayed failure for an old item is dropped.
     @ObservationIgnored private var queueGeneration = 0
     @ObservationIgnored private var readyWaiters: [ObjectIdentifier: [CheckedContinuation<Void, Never>]] = [:]
@@ -182,7 +189,9 @@ public final class AudioEngine: AudioEngineProtocol {
         let generation = seekGeneration
         pendingSeekTarget = target
         isSeeking = true
-        if failure != nil {
+        // After a failure, or while one is being reported, rebuild: the queue may have dropped the
+        // failed item, and the report must not outlive a newer seek.
+        if failure != nil || pendingItemFailure != nil {
             failure = nil
             clearQueue()
             replacePlayerIfFailed()
@@ -351,6 +360,11 @@ public final class AudioEngine: AudioEngineProtocol {
     // MARK: - Playback
 
     private func startPlayer() {
+        // A failure being reported holds playback; the request stays and a later seek starts it.
+        guard pendingItemFailure == nil else {
+            refreshState()
+            return
+        }
         do {
             try audioSession?.activate()
         } catch {
@@ -384,7 +398,9 @@ public final class AudioEngine: AudioEngineProtocol {
             case .waitingToPlayAtSpecifiedRate: newState = .buffering
             // A seek in flight, or one that was interrupted and awaits recovery, holds playback.
             case .paused:
-                newState = isPlaybackRequested && (isSeeking || pendingSeekTarget != nil) ? .buffering : .paused
+                newState =
+                    isPlaybackRequested && (isSeeking || pendingSeekTarget != nil || pendingItemFailure != nil)
+                    ? .buffering : .paused
             @unknown default: newState = .paused
             }
         }
@@ -405,22 +421,26 @@ public final class AudioEngine: AudioEngineProtocol {
     private func reportItemFailure(
         trackIndex: Int, item: AVPlayerItem, error: (any Error)? = nil
     ) -> Task<Void, Never>? {
-        if let pendingItemFailure { return pendingItemFailure }
+        if let pendingItemFailure { return pendingItemFailure.report }
         guard failure == nil else { return nil }
         let generation = queueGeneration
         let id = ObjectIdentifier(item)
         player.pause()
+        // A failed asset stays failed; evict it now so a rebuild during the fetch makes a new one.
+        assets[trackIndex] = nil
         let report = Task { [weak self] in
             guard let self else { return }
             let log = await errorLogFetcher(item)
-            guard generation == queueGeneration else { return }
+            guard pendingItemFailure?.generation == generation, generation == queueGeneration else { return }
             pendingItemFailure = nil
-            guard queued[id]?.item === item, failure == nil else { return }
-            // A failed asset stays failed; the retry seek must create a new one.
-            assets[trackIndex] = nil
+            guard queued[id]?.item === item, failure == nil else {
+                refreshState()
+                return
+            }
             fail(.itemFailed(trackIndex: trackIndex, PlaybackFailure(error: error ?? item.error, errorLog: log)))
         }
-        pendingItemFailure = report
+        pendingItemFailure = PendingItemFailure(trackIndex: trackIndex, generation: generation, report: report)
+        refreshState()
         return report
     }
 
@@ -523,7 +543,8 @@ public final class AudioEngine: AudioEngineProtocol {
         if entry.trackIndex != currentTrackIndex {
             // The queue advanced before the `currentItem` KVO hop ran.
             currentItemChanged()
-            guard failure == nil else { return }
+            // A skipped failed track keeps the last confirmed position.
+            guard failure == nil, pendingItemFailure == nil else { return }
         }
         let offset = item.currentTime().seconds
         guard offset.isFinite, let time = timeline.time(trackIndex: entry.trackIndex, offset: offset) else { return }
