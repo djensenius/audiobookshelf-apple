@@ -1,0 +1,60 @@
+import Foundation
+
+public enum EbookFormat: Sendable, Hashable, Codable, RawRepresentable {
+    case epub
+    case pdf
+    case mobi
+    case azw3
+    case cbr
+    case cbz
+    /// A format this client doesn't know; the server's value is kept.
+    case unknown(String)
+
+    public init(rawValue: String) {
+        switch rawValue.lowercased() {
+        case "epub": self = .epub
+        case "pdf": self = .pdf
+        case "mobi": self = .mobi
+        case "azw3": self = .azw3
+        case "cbr": self = .cbr
+        case "cbz": self = .cbz
+        default: self = .unknown(rawValue)
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .epub: "epub"
+        case .pdf: "pdf"
+        case .mobi: "mobi"
+        case .azw3: "azw3"
+        case .cbr: "cbr"
+        case .cbz: "cbz"
+        case .unknown(let value): value
+        }
+    }
+
+    public var mimeType: String? {
+        switch self {
+        case .epub: "application/epub+zip"
+        case .pdf: "application/pdf"
+        case .mobi: "application/x-mobipocket-ebook"
+        case .azw3: "application/vnd.amazon.mobi8-ebook"
+        case .cbr: "application/vnd.comicbook-rar"
+        case .cbz: "application/vnd.comicbook+zip"
+        case .unknown: nil
+        }
+    }
+}
+
+public struct EbookFile: Sendable, Hashable, Codable, Identifiable {
+    public let ino: String
+    public let metadata: FileMetadata?
+    public let ebookFormat: EbookFormat?
+    /// Epoch milliseconds.
+    public let addedAt: Int?
+    /// Epoch milliseconds.
+    public let updatedAt: Int?
+
+    public var id: String { ino }
+}
