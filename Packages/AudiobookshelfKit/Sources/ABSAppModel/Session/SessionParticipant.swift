@@ -47,10 +47,12 @@ public enum SessionStage: Sendable, Hashable {
 ///   promptly; they hold up the gate and every other transition. Start network work in a task the
 ///   participant owns and cancels on end. For example, the library adapter (S7a) must not await
 ///   `LibraryStore.refresh()` inside `sessionDidStart`: it sets the connection, then refreshes in
-///   its own task. ``sessionWillEnd(_:)`` is given at most the lifecycle's flush timeout.
-/// - A participant must not call ``SessionLifecycle`` transitions (`signOut()`,
-///   `switchAccount(to:)` and the rest) from these methods or ``flush()``. Such a call doesn't
-///   wait: the lifecycle runs it after the current transition finishes.
+///   its own task. The whole teardown is given at most the lifecycle's flush timeout.
+/// - A participant must not await ``SessionLifecycle`` transitions (`signOut()`,
+///   `switchAccount(to:)` and the rest) from these methods, ``flush()`` or the tasks they start
+///   while the transition runs: that would deadlock, so such a call asserts and does nothing.
+///   To sign out from there (say, on a rejected request), call
+///   ``SessionLifecycle/requestSignOut()``, which queues it without waiting.
 @MainActor
 public protocol SessionParticipant: AnyObject, Sendable {
     func sessionDidStart(_ context: SessionContext) async
@@ -60,12 +62,20 @@ public protocol SessionParticipant: AnyObject, Sendable {
     func sessionDidReconnect(_ context: SessionContext) async
     /// Stops the participant's work for the session. With ``SessionEndReason/expired`` this must
     /// not use the network.
+    ///
+    /// The synchronous part, before the first `await`, must stop every progress write and detach
+    /// from the library. The teardown shares one time budget: once it's spent, the lifecycle
+    /// cancels the rest of this call and moves on while it may still be running, and the next
+    /// account's session can begin. The library's progress cache has no generation check, so a
+    /// write after that point would land in the next account.
     func sessionWillEnd(_ reason: SessionEndReason) async
     /// Sends pending work to the server, on background and before a sign-out, switch or removal.
     /// Every participant flushes concurrently, and the lifecycle waits at most its flush
     /// timeout, then cancels the flushes. A flush must honour cancellation, and must tolerate
-    /// ``sessionWillEnd(_:)`` arriving while a cancelled flush is still running. The default does
-    /// nothing.
+    /// ``sessionWillEnd(_:)`` arriving while a cancelled flush is still running.
+    ///
+    /// Flushes may overlap (a background flush during a sign-out's), and a flush may arrive
+    /// after ``sessionWillEnd(_:)``; it must then do nothing. The default does nothing.
     func flush() async
 }
 

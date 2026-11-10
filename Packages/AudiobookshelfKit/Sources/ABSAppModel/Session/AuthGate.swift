@@ -11,6 +11,8 @@ public enum AuthGate: Sendable, Equatable {
     case ready(SessionIdentity, isOffline: Bool)
     /// The session of `from` has ended and another account is being made active.
     case switching(from: SessionIdentity)
+    /// The session of `from` is flushing and ending before a sign-out or removal.
+    case signingOut(from: SessionIdentity)
     /// The local store couldn't be opened, so nothing can be restored or saved.
     case storeUnavailable(SessionStoreError)
 

@@ -143,8 +143,13 @@ final class FakeParticipant: SessionParticipant {
     private let log: CallLog
     /// When set, ``flush()`` waits for it to open, or for cancellation.
     var flushGate: Gate?
+    /// When set, ``sessionWillEnd(_:)`` waits for it to open after stopping, or for
+    /// cancellation.
+    var endGate: Gate?
     /// Runs once inside the next ``sessionDidStart(_:)``.
     var onStart: (@MainActor () async -> Void)?
+    /// Between start and end; a flush outside a session does nothing.
+    private var isRunning = false
 
     init(_ name: String, log: CallLog) {
         self.name = name
@@ -152,6 +157,7 @@ final class FakeParticipant: SessionParticipant {
     }
 
     func sessionDidStart(_ context: SessionContext) async {
+        isRunning = true
         log.record("\(name).start(\(context.identity.userID))")
         if let onStart {
             self.onStart = nil
@@ -164,10 +170,20 @@ final class FakeParticipant: SessionParticipant {
     }
 
     func sessionWillEnd(_ reason: SessionEndReason) async {
+        isRunning = false
         log.record("\(name).end(\(reason))")
+        if let endGate {
+            await withTaskCancellationHandler {
+                await endGate.wait()
+            } onCancel: {
+                Task { @MainActor in endGate.open() }
+            }
+            log.record(Task.isCancelled ? "\(name).endCancelled" : "\(name).ended")
+        }
     }
 
     func flush() async {
+        guard isRunning else { return }
         log.record("\(name).flush")
         if let flushGate {
             await withTaskCancellationHandler {
@@ -190,6 +206,7 @@ final class FakeLibrary: SessionSeeding {
     /// When set, ``seed(_:)`` waits for it after fetching.
     var seedGate: Gate?
     private var generation = 0
+    private var isRunning = false
 
     init(log: CallLog) {
         self.log = log
@@ -197,6 +214,7 @@ final class FakeLibrary: SessionSeeding {
 
     func sessionDidStart(_ context: SessionContext) async {
         generation += 1
+        isRunning = true
         log.record("library.connect(\(context.identity.userID))")
         await connectGate?.wait()
     }
@@ -207,10 +225,12 @@ final class FakeLibrary: SessionSeeding {
 
     func sessionWillEnd(_ reason: SessionEndReason) async {
         generation += 1
+        isRunning = false
         log.record("library.clear(\(reason))")
     }
 
     func flush() async {
+        guard isRunning else { return }
         log.record("library.flush")
         log.record("library.flushed")
     }
