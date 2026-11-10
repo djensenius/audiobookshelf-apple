@@ -272,9 +272,14 @@ static, unauthenticated remote images (none are planned).
     refresh either: both image routes are unauthenticated on every supported
     server (2.26.0+).
   - **User-configured custom headers** for the server (from the Keychain) are
-    always sent to the server's origin, whatever their name. That includes a
-    proxy credential such as `Authorization: Basic …`. The builder only
-    guarantees that it never adds the Audiobookshelf bearer itself.
+    always sent to the server's origin. They can never be named
+    `Authorization` or `Cookie`: the API client rejects those names when the
+    server is configured, because API requests need `Authorization` for the
+    bearer token and a proxy header there would be overwritten. A proxy that
+    needs credentials must use a non-`Authorization` header or a service token,
+    for example Cloudflare Access's `CF-Access-Client-Id` and
+    `CF-Access-Client-Secret`. The image request builder never adds the
+    Audiobookshelf bearer itself.
   - A 401 or 403 means a proxy rejected the request (wrong custom headers). The
     pipeline shows the placeholder and does not retry in a loop.
 - **Custom headers:** they are applied per request, not through
@@ -284,9 +289,14 @@ static, unauthenticated remote images (none are planned).
 - **Redirects:** the image session's delegate implements
   `urlSession(_:task:willPerformHTTPRedirection:newRequest:)`, because
   `URLSession` would otherwise carry the custom headers to the new location.
-  - A redirect to the same origin (same host and port, or the same host
-    upgraded from `http` to `https` on default ports) is followed with the
-    headers unchanged.
+  - **Origin** means scheme + host + effective port (the explicit port, or 80
+    for `http` and 443 for `https`).
+  - A redirect to the same origin is followed with the headers unchanged.
+  - The only other case that keeps the headers is an upgrade from `http` to
+    `https` on the same host, where both URLs use the default port (80 → 443).
+  - A downgrade (`https` → `http`, on any host or port, for example
+    `https://books.example:8443` → `http://books.example:8443`) is refused:
+    the delegate returns `nil` and the placeholder is shown.
   - A redirect to any other origin is followed only after the new request is
     rebuilt from the URL alone: every custom header (and any `Authorization`
     or `Cookie` header) is stripped, and `Accept` is set again. If it can't be
@@ -394,12 +404,19 @@ static, unauthenticated remote images (none are planned).
     can return early from the memory LRU or the downloaded cover without ever
     writing `CoverFileStore`.
   - `ensureCoverFile` skips the memory LRU and guarantees a file for that exact
-    key:
+    key, holding the cover the key names:
     1. if `CoverFileStore` already has the file, it returns it;
-    2. if `DownloadedCoverLookup` has a usable downloaded cover, it downsamples
-       it to the bucket and writes it to `CoverFileStore` as JPEG with
-       `CGImageDestinationCreateWithURL`;
-    3. otherwise it fetches the bucket from the network and writes it.
+    2. if `DownloadedCoverLookup` has a downloaded cover whose
+       `LocalLibraryItem.coverUpdatedAt` is the same as or newer than the key's
+       `updatedAt`, it downsamples it to the bucket and writes it to
+       `CoverFileStore` as JPEG with `CGImageDestinationCreateWithURL`. This is
+       stricter than the display load order: the offline "whatever its age"
+       rule never applies here, so an older cover is never stored under a
+       newer key (snapshot files are exempt from eviction and would keep it);
+    3. otherwise it fetches the bucket from the network and writes it;
+    4. if it is offline (or the fetch fails), it throws and writes nothing. The
+       widget shows the placeholder for that item until a later snapshot
+       succeeds.
   - Readers find the file by key whatever its extension (`.webp` or `.jpg`);
     ImageIO detects the format from the bytes.
   - The widget reads covers through the pipeline's App Group cover cache by
@@ -488,8 +505,10 @@ That fits under 256 MiB without eviction churn.
     neither `ABSDownloads` nor `ABSData`.
 - **Auth:** image requests never carry the Audiobookshelf token, so none end up
   in URLs, logs, the database, or cached files. User-configured custom headers
-  (including proxy `Authorization: Basic …`) go to the server origin only and
-  are stripped on cross-origin redirects. Proxies that require custom headers
+  (never `Authorization` or `Cookie`; proxies use headers such as
+  `CF-Access-Client-Id`/`CF-Access-Client-Secret` or a service token) go to
+  the server origin only, are stripped on cross-origin redirects, and are never
+  sent over an `https` → `http` downgrade. Proxies that require custom headers
   work for images too, which fixes a legacy gap.
 - **Server disk:** the server keeps at most three cover renditions per item for
   this app, plus the 1200 px JPEG for downloaded items.
@@ -510,16 +529,27 @@ That fits under 256 MiB without eviction churn.
 ## Validation
 
 - **Unit tests** (Swift Testing, `ABSCoreTests` and `ABSAPITests`; in #43):
-  - request building: user-configured custom headers present (including a
-    user-configured `Authorization: Basic …`), the Audiobookshelf bearer token
-    never present, no `token` query item, and no headers for absolute external
-    URLs;
-  - redirects (through a `URLProtocol` stub): a same-origin redirect keeps the
-    custom headers; a cross-origin redirect arrives with no custom,
-    `Authorization`, or `Cookie` headers, and this holds for a later hop back
-    to the server origin as well;
-  - `ensureCoverFile(for:)`: after a memory hit and after a downloaded-cover
-    hit, the file for that exact `ImageKey` exists in `CoverFileStore`;
+  - request building: user-configured custom headers present (for example
+    `CF-Access-Client-Id` and `CF-Access-Client-Secret`), no `Authorization`
+    header (the Audiobookshelf bearer is never added, and custom headers can't
+    use that name), no `token` query item, and no headers for absolute
+    external URLs;
+  - redirects (through a `URLProtocol` stub):
+    - a same-origin redirect keeps the custom headers;
+    - an `http` → `https` upgrade on the same host with default ports keeps
+      them;
+    - a same-host change of port, or of scheme on a non-default port, is
+      treated as cross-origin;
+    - an `https` → `http` downgrade (for example
+      `https://books.example:8443` → `http://books.example:8443`) is refused;
+    - a cross-origin redirect arrives with no custom, `Authorization`, or
+      `Cookie` headers, and this holds for a later hop back to the server
+      origin as well;
+  - `ensureCoverFile(for:)`:
+    - after a memory hit and after a downloaded-cover hit, the file for that
+      exact `ImageKey` exists in `CoverFileStore`;
+    - with a downloaded cover older than the key's `updatedAt`, it fetches from
+      the network instead, and offline it throws and writes no file;
   - bucket selection;
   - key and file-path construction;
   - deduplication: two concurrent loads produce one `URLProtocol` hit;
