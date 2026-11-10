@@ -54,6 +54,23 @@ import Testing
         #expect(unresolved.isEmpty)
     }
 
+    @Test func stringDropsMarkup() {
+        let value = L10n.string("MessageAudiobookshelfServerRequired", locale: Locale(identifier: "zh-Hans"))
+        #expect(!value.contains("*") && !value.contains("^[") && !value.contains("]()"))
+        #expect(value.hasPrefix("重要提示！此应用"))
+        #expect(L10n.string("HeaderWelcome", "Ada", locale: Locale(identifier: "en")) == "Welcome, Ada")
+    }
+
+    @Test func stringKeepsPlainValuesAndLiteralArguments() {
+        #expect(L10n.string("ButtonCancel", locale: Locale(identifier: "en")) == "Cancel")
+        // The value has markup, but arguments are never parsed: their asterisks and
+        // brackets stay literal.
+        let value = L10n.string("HeaderWelcome", "*Ada* [x](y)", locale: Locale(identifier: "en"))
+        #expect(value == "Welcome, *Ada* [x](y)")
+        let plain = L10n.string("MessageConfirmDeleteServerEpisode", "*Ep*", locale: Locale(identifier: "en"))
+        #expect(plain.hasPrefix("Are you sure you want to delete episode \"*Ep*\" from the server?\n"))
+    }
+
     /// Bold ending in punctuation and followed by a letter, which plain `**x**` can't close.
     @Test(arguments: [("zh-Hans", "重要提示！", "此应用"), ("zh-Hant", "重要！", "此應用程式")])
     func attributedBoldsBeforeCJKText(locale: String, bold: String, following: String) {

@@ -49,8 +49,9 @@ asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
 
 ## Using strings in Swift
 
-- `L10n.string` returns plain text. `L10n.attributed` renders the localized value's inline
-  Markdown (bold, line breaks kept) and inserts the arguments as plain text.
+- `L10n.string` returns plain text, with any markup (bold) removed. `L10n.attributed`
+  renders the localized value's inline Markdown (bold, line breaks kept). Both insert the
+  arguments as plain text.
 - Never run Markdown over formatted output (`AttributedString(markdown: L10n.string(…))`
   or `Text(LocalizedStringKey(…))`): arguments are often server data such as user names or
   titles, and would be parsed as links or formatting.
