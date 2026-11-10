@@ -453,13 +453,27 @@ private final class TestClock: Sendable {
         #expect(tokens.updates.count == 2)
     }
 
-    @Test func refreshedTokenWithoutIssuedAtThatLooksExpiringIsNotRefreshedAgain() async throws {
+    /// A refreshed token without `iat` that arrives 30 s from its `exp` isn't refreshed early,
+    /// but is refreshed once that `exp` passes rather than returned expired forever.
+    @Test func refreshedTokenWithoutIssuedAtThatLooksExpiringIsRefreshedAfterExp() async throws {
+        let refreshed = makeJWT(expiringAt: now.addingTimeInterval(30))
         let (client, server, _) = try await makeExpiryClient(
-            accessToken: expiringToken, refresh: .json(refreshJSON(makeJWT(expiringAt: now.addingTimeInterval(30)))))
+            accessToken: expiringToken, refresh: .json(refreshJSON(refreshed)))
+        let clock = TestClock()
+        await client.setNow { clock.read() }
+        let refreshes = { server.requests(path: refreshPath).count }
 
+        #expect(try await client.accessToken(replacing: nil) == refreshed)
+        #expect(try await client.accessToken(replacing: nil) == refreshed)
+        clock.advance(by: 29)
+        #expect(try await client.accessToken(replacing: nil) == refreshed)
+        #expect(refreshes() == 1)
+        clock.advance(by: 2)
         _ = try await client.accessToken(replacing: nil)
+        #expect(refreshes() == 2)
+        // The server returned the same token, already expired on arrival: not chased again.
         _ = try await client.accessToken(replacing: nil)
-        #expect(server.requests(path: refreshPath).count == 1)
+        #expect(refreshes() == 2)
     }
 
     @Test func tokenExpiringAtOrBeforeIssueIsNotRefreshedEarly() async throws {
@@ -635,6 +649,116 @@ private final class SignOutAfterSwapProvider: TokenProvider {
         #expect(server.requests(path: refreshPath).count == 1)
         clock.advance(by: 2)
         _ = try await client.accessToken(replacing: nil)
+        #expect(server.requests(path: refreshPath).count == 2)
+    }
+}
+
+/// Wraps an ``InMemoryTokenProvider`` and holds the first successful swap after committing it
+/// until ``release()``. ``held()`` returns once it's holding.
+private final class HeldFirstSwapProvider: TokenProvider {
+    let inner: InMemoryTokenProvider
+    private let swaps = Mutex(0)
+    private let holding = Checkpoint()
+    private let released = Checkpoint()
+
+    init(_ tokens: AuthTokens) {
+        inner = InMemoryTokenProvider(tokens)
+    }
+
+    func held() async { await holding.reached() }
+    func release() { released.pass() }
+
+    func tokens() async -> AuthTokens? {
+        await inner.tokens()
+    }
+
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) async -> Bool {
+        guard await inner.replaceTokens(expected: expected, with: new) else { return false }
+        let swap = swaps.withLock {
+            $0 += 1
+            return $0
+        }
+        if swap == 1 {
+            holding.pass()
+            await released.reached()
+        }
+        return true
+    }
+
+    func expireSession(ifCurrent rejected: AuthTokens) async -> Bool {
+        await inner.expireSession(ifCurrent: rejected)
+    }
+}
+
+@Suite struct APIClientTokenReviewTests {
+    @Test func cancelledCallersOfSharedRefreshThrowWhileOthersGetToken() async throws {
+        let gate = StubGate()
+        let (client, server, _) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .json(refreshJSON(freshToken), gate: gate))
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
+
+        let first = Task { try await client.accessToken(replacing: nil) }
+        await gate.arrived()
+        let cancelledEarly = Task { try await client.accessToken(replacing: nil) }
+        let cancelledReactive = Task { try await client.accessToken(replacing: expiringToken) }
+        let other = Task { try await client.accessToken(replacing: nil) }
+        await joins.reached(3)
+        first.cancel()
+        cancelledEarly.cancel()
+        cancelledReactive.cancel()
+        gate.open()
+
+        await #expect(throws: CancellationError.self) { try await first.value }
+        await #expect(throws: CancellationError.self) { try await cancelledEarly.value }
+        await #expect(throws: CancellationError.self) { try await cancelledReactive.value }
+        #expect(try await other.value == freshToken)
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
+    @Test func cancelledCallerDoesNotGetTransientFallbackToken() async throws {
+        let gate = StubGate()
+        let (client, _, _) = try await makeExpiryClient(
+            accessToken: expiringToken, refresh: .text("Bad gateway", status: 502, gate: gate))
+        let joins = Checkpoint()
+        await client.observeRefreshJoins { joins.pass() }
+
+        let cancelled = Task { try await client.accessToken(replacing: nil) }
+        await gate.arrived()
+        let other = Task { try await client.accessToken(replacing: nil) }
+        await joins.reached()
+        cancelled.cancel()
+        gate.open()
+
+        await #expect(throws: CancellationError.self) { try await cancelled.value }
+        #expect(try await other.value == expiringToken)
+    }
+
+    /// A→B commits but returns late, after B→C has completed. C's receipt must survive, or C
+    /// (issued by a server whose clock is an hour behind) looks expired and is refreshed again.
+    @Test func lateRefreshDoesNotReplaceNewerReceipt() async throws {
+        let t = Int(now.timeIntervalSince1970)
+        let tokenB = makeJWT(claims: #"{"n":"B","iat":\#(t - 3600),"exp":\#(t)}"#)
+        let tokenC = makeJWT(claims: #"{"n":"C","iat":\#(t - 3600),"exp":\#(t)}"#)
+        let server = StubServer { request in
+            switch request.value(forHTTPHeaderField: "x-refresh-token") {
+            case "refresh-1": .json(#"{"user":{"accessToken":"\#(tokenB)","refreshToken":"refresh-2"}}"#)
+            case "refresh-2": .json(#"{"user":{"accessToken":"\#(tokenC)","refreshToken":"refresh-3"}}"#)
+            default: .text("Unexpected", status: 500)
+            }
+        }
+        let tokens = HeldFirstSwapProvider(AuthTokens(accessToken: expiringToken, refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+        await client.setNow { now }
+
+        let first = Task { try await client.accessToken(replacing: nil) }
+        await tokens.held()
+        // B is stored but its refresh hasn't returned; a 401 for B refreshes it to C.
+        #expect(try await client.accessToken(replacing: tokenB) == tokenC)
+        tokens.release()
+        #expect(try await first.value == tokenC)
+
+        #expect(try await client.accessToken(replacing: nil) == tokenC)
         #expect(server.requests(path: refreshPath).count == 2)
     }
 }

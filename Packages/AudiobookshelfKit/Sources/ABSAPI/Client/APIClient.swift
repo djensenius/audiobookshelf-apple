@@ -38,8 +38,10 @@ public actor APIClient {
     private var refreshJoinObserver: (@Sendable () -> Void)?
     /// The clock for access token expiry; tests replace it with ``setNow(_:)``.
     private var now: @Sendable () -> Date = { Date() }
-    /// The access token the latest successful refresh returned, and when it arrived.
-    private var refreshReceipt: (accessToken: String, receivedAt: Date)?
+    /// When each access token returned by a refresh arrived, keyed by that token, so a refresh
+    /// that returns late (after a newer one) can't replace the newer token's receipt. Entries
+    /// for tokens that are no longer stored are pruned by ``accessToken(replacing:)``.
+    private var refreshReceipts: [String: Date] = [:]
     /// The pair whose latest early refresh failed transiently, and when, so a server outage doesn't
     /// make every ``accessToken(replacing:)`` call wait for another failing refresh.
     private var earlyRefreshFailure: (tokens: AuthTokens, at: Date)?
@@ -212,11 +214,13 @@ public actor APIClient {
             guard rejected == tokens.accessToken else { return tokens.accessToken }
             // The caller's rejection is treated as if the pair was sent when it was read here.
             let outcome = try await refreshedTokens(replacing: tokens, readAt: readGeneration, sentAt: readGeneration)
+            // The shared refresh isn't cancelled with this caller, but its result isn't returned.
+            try Task.checkCancellation()
             return outcome.tokens.accessToken
         }
-        // A receipt older than this read belongs to a pair that is no longer stored.
-        if refreshGeneration == readGeneration, refreshReceipt?.accessToken != tokens.accessToken {
-            refreshReceipt = nil
+        // Receipts older than this read belong to pairs that are no longer stored.
+        if refreshGeneration == readGeneration {
+            refreshReceipts = refreshReceipts.filter { $0.key == tokens.accessToken }
         }
         guard let expiry = earlyRefreshExpiry(of: tokens.accessToken),
             expiry.expiresAt.timeIntervalSince(now()) <= expiry.leeway
@@ -228,11 +232,14 @@ public actor APIClient {
         }
         do {
             let outcome = try await refreshedTokens(replacing: tokens, readAt: readGeneration, sentAt: readGeneration)
+            // The shared refresh isn't cancelled with this caller, but its result isn't returned.
+            try Task.checkCancellation()
             return outcome.tokens.accessToken
         } catch let error as APIError where error.isTransient {
             earlyRefreshFailure = (tokens, now())
             // The session may have ended or changed while the refresh was failing.
             guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
+            try Task.checkCancellation()
             guard current == tokens else { return current.accessToken }
             guard now() < expiry.validUntil else { throw error }
             return current.accessToken
@@ -240,11 +247,13 @@ public actor APIClient {
             // The server didn't reject this pair's refresh token, so the session was ended or
             // replaced locally while the refresh ran.
             guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
+            try Task.checkCancellation()
             return current.accessToken
         } catch is CancellationError where !Task.isCancelled {
             // A sign-out or new sign-in replaced the session during the refresh.
             guard let current = await tokenProvider.tokens() else { throw APIError.notAuthenticated }
             guard current != tokens else { throw CancellationError() }
+            try Task.checkCancellation()
             return current.accessToken
         }
     }
@@ -263,7 +272,8 @@ public actor APIClient {
     /// A token this client received from a refresh is timed from when it arrived: its lifetime
     /// (`exp` − `iat`) after the receipt, so a server clock that differs from this device's doesn't
     /// make it look expired. Without `iat`, such a token that already looked near expiry when it
-    /// arrived is never refreshed early. Any other token (loaded from storage) uses `exp` against
+    /// arrived isn't refreshed early: if it was still valid then, it's refreshed once its `exp`
+    /// passes by this device's clock; if not, never. Any other token (loaded from storage) uses `exp` against
     /// this device's clock. The leeway is at most half the lifetime, and a token whose `exp` isn't
     /// after its `iat` is never refreshed early, so a fresh token never immediately looks near
     /// expiry and each pair is replaced by an early refresh at most once (a refresh that fails
@@ -277,11 +287,12 @@ public actor APIClient {
         of accessToken: String
     ) -> (expiresAt: Date, validUntil: Date, leeway: TimeInterval)? {
         guard let claims = AccessTokenExpiry(token: accessToken) else { return nil }
-        let receivedAt = refreshReceipt?.accessToken == accessToken ? refreshReceipt?.receivedAt : nil
+        let receivedAt = refreshReceipts[accessToken]
         let rawExpiry = Date(timeIntervalSince1970: claims.expiresAt)
         guard let issuedAt = claims.issuedAt else {
             if let receivedAt, rawExpiry.timeIntervalSince(receivedAt) <= Self.accessTokenExpiryLeeway {
-                return nil
+                // Already expired on arrival means the clocks disagree; don't chase it.
+                return rawExpiry > receivedAt ? (rawExpiry, rawExpiry, 0) : nil
             }
             return (rawExpiry, rawExpiry, Self.accessTokenExpiryLeeway)
         }
@@ -435,7 +446,8 @@ public actor APIClient {
             }
             // Recorded before the flight's task finishes, so no request can miss both the
             // flight and its result.
-            refreshReceipt = (refreshed.accessToken, receivedAt)
+            refreshReceipts[tokens.accessToken] = nil
+            refreshReceipts[refreshed.accessToken] = receivedAt
             refreshGeneration += 1
             completedRefreshes.append(CompletedRefresh(from: tokens, to: refreshed, generation: refreshGeneration))
             pruneCompletedRefreshes()
