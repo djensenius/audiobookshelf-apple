@@ -29,19 +29,77 @@ import Testing
             Attachment.record(png, named: "\(name).png")
             // Read only the rendered fixture, not the shared screen. This avoids requiring a
             // system accessibility client to activate SwiftUI's virtual accessibility nodes.
-            let text = try await Task.detached {
-                let request = try Self.textRecognitionRequest()
-                try VNImageRequestHandler(data: png).perform([request])
-                return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
-                    .joined(separator: " ").replacingOccurrences(of: "’", with: "'")
-            }.value
+            let text: String
+            do {
+                text = try await Task.detached {
+                    let request = try Self.textRecognitionRequest()
+                    try VNImageRequestHandler(data: png).perform([request])
+                    return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+                        .joined(separator: " ").replacingOccurrences(of: "’", with: "'")
+                }.value
+            } catch {
+                let reports = await Task.detached { Self.ocrDiagnostics(png) }.value
+                // Attach in the test's task, not the detached task without its test context.
+                for report in reports {
+                    Attachment.record(Data(report.text.utf8), named: "\(name)-ocr-\(report.name).txt")
+                }
+                throw error
+            }
             return RenderedForm(view: host, text: text)
+        }
+
+        private enum OCRDiagnosticError: Error { case noCPUDevice }
+
+        /// Temporary failure-context probes, not fallback recognition. Remove after the VM investigation.
+        private nonisolated static func ocrDiagnostics(_ png: Data) -> [(name: String, text: String)] {
+            var reports: [(name: String, text: String)] = []
+            for fast in [false, true] {
+                // Fresh request and handler per probe; Vision's process-level caches are still shared.
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = fast ? .fast : .accurate
+                request.recognitionLanguages = ["en-US"]
+                let name = fast ? "fast-cpu-stages" : "accurate-cpu-only"
+                var report = """
+                    Failure-context probe: \(name)
+                    revision=\(request.revision) (default), language=en-US
+                    recognitionLevel=\(fast ? "fast" : "accurate")
+                    CPU configuration=\(fast ? "explicit CPU stages" : "usesCPUOnly=true")
+                    """
+                do {
+                    if fast {
+                        let stages = try request.supportedComputeStageDevices
+                        guard !stages.isEmpty else { throw OCRDiagnosticError.noCPUDevice }
+                        for (stage, devices) in stages {
+                            guard
+                                let cpu = devices.first(where: {
+                                    if case .cpu = $0 { return true }
+                                    return false
+                                })
+                            else { throw OCRDiagnosticError.noCPUDevice }
+                            request.setComputeDevice(cpu, for: stage)
+                            report += "\nstage=\(stage.rawValue): CPU"
+                        }
+                    } else {
+                        request.usesCPUOnly = true
+                    }
+                    try VNImageRequestHandler(data: png).perform([request])
+                    let observations = request.results ?? []
+                    report += "\nsuccess: \(observations.count) observations\nrecognized fixture text:\n"
+                    report += observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+                } catch {
+                    // No userInfo, paths, device descriptions or environment data in the diagnostic.
+                    let failure = error as NSError
+                    report += "\nerror: \(String(reflecting: type(of: error)))"
+                    report += " domain=\(failure.domain) code=\(failure.code)"
+                }
+                reports.append((name, report))
+            }
+            return reports
         }
 
         private nonisolated static func textRecognitionRequest() throws -> VNRecognizeTextRequest {
             let request = VNRecognizeTextRequest()
-            // Revision 3's TextRecognition models request ANE on CI even with CPU stages.
-            // Pin the older, still-supported accurate engine for these English fixtures.
+            // Keep the failing VM configuration unchanged as the diagnostic control.
             request.revision = VNRecognizeTextRequestRevision2
             request.recognitionLevel = .accurate
             request.recognitionLanguages = ["en-US"]
