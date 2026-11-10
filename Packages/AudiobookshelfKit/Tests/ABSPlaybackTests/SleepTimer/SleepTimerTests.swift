@@ -464,6 +464,24 @@ struct SleepTimerTests {
         #expect(harness.timer.isTicking == false)
     }
 
+    /// Where a seek in flight lands decides whether a chapter timer reached its goal, not the position it leaves: the
+    /// chapter end while playing, or the end of the media.
+    @Test(arguments: [450.0, 1800])
+    func aChapterTimerWaitsForASeekInFlight(end: Double) async {
+        let harness = Harness(timeline: chapters, at: end - 20)
+        harness.timer.start(.endOfChapter)
+        await harness.play(from: end - 20, to: end - 1)
+        harness.control.userSeekIsPending = true
+        harness.control.isPlaying = end < 1800
+        harness.control.currentTime = end
+        await harness.advance(1)
+        #expect(harness.control.pauseCount == 0)
+        harness.control.userSeekIsPending = false
+        harness.control.currentTime = end - 30
+        harness.timer.didSeek(to: end - 30)
+        #expect(harness.timer.remaining == 30)
+    }
+
     /// An unusable rate counts at 1× (legacy iOS); a chapter timer still expires at the chapter's end.
     @Test(arguments: [0, -1, .nan, .infinity])
     func anUnusableRateCountsAtNormalSpeed(rate: Double) async {
@@ -978,13 +996,17 @@ struct SleepTimerTests {
         #expect(harness.timer.isRunning == (race != .cancelBefore && race != .cancelDuring))
     }
 
-    /// A seek of the user's that landed, reported or not, or is in flight before a reset's rewind wins, as when it
-    /// supersedes the rewind: no seek, no play, and the grace period comes back.
-    @Test(arguments: [Move.seek, .unreportedSeek, .pendingSeek])
-    func aSeekBeforeAResetsRewindWins(_ move: Move) async throws {
+    /// A seek of the user's that landed, reported or not, or is in flight before a reset resumes wins, with a rewind
+    /// (as when it supersedes the rewind) or without: no seek, no play, and the grace period comes back.
+    @Test(arguments: [Move.seek, .unreportedSeek, .pendingSeek], [false, true])
+    func aSeekBeforeAResetResumesWins(_ move: Move, rewinds: Bool) async throws {
         let harness = Harness(timeline: chapters, at: 1000, options: try autoOptions())
         harness.timer.itemDidChange("a")
-        _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        if rewinds {
+            _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
+        } else {
+            harness.timer.start(.duration(10))
+        }
         await harness.expire()
         #expect(harness.timer.reset())
         harness.apply(move)

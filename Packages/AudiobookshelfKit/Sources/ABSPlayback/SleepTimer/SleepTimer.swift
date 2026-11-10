@@ -65,6 +65,8 @@ public final class SleepTimer {
         case length(TimeInterval)
         /// The end of the chapter (or gap, or track), moved by added and subtracted listening time.
         case chapterEnd(segmentEnd: Double, offset: Double)
+
+        var isChapterEnd: Bool { if case .chapterEnd = self { true } else { false } }
     }
 
     private enum Chime {
@@ -382,8 +384,11 @@ public final class SleepTimer {
         // Capped, so a tick that ran late after a suspension doesn't count the time the app didn't play.
         if isPlaying { run.elapsed += min(interval, 2 * Self.seconds(tickInterval)) }
         let left = remaining(of: run, at: time)
-        // While paused only the end of the media expires a timer: a seek may not have landed yet.
-        if left <= 0, isPlaying || time >= (control.timeline?.duration ?? 0) {
+        // While paused only the end of the media expires a timer: a seek may not have landed yet. A chapter timer
+        // waits for a seek in flight, whose landing decides if it reached its goal; a duration's time is up anyway.
+        if left <= 0, isPlaying || time >= (control.timeline?.duration ?? 0),
+            !(run.goal.isChapterEnd && control.hasPendingSeek)
+        {
             self.run = run
             expire()
             return
@@ -444,14 +449,15 @@ public final class SleepTimer {
     }
 
     /// Plays after a grace-period reset, rewinding from `position` to `time` first, unless the run or the item
-    /// changed, or playback played or paused, before or during the seek. When a seek moved playback or is moving it,
-    /// or the rewind doesn't land, `undo` reopens the grace period and the run stops.
+    /// changed, or playback played or paused, before or during the seek. When a seek moved playback from `position`
+    /// or is moving it (with or without a rewind), or the rewind doesn't land, `undo` reopens the grace period and the
+    /// run stops.
     private func resume(
         rewindingTo time: Double?, from position: Double, runID id: Int, item: String?, undo: (SleepTimer) -> Void
     ) async {
         guard isCurrent(item, runID: id) else { return }
-        var landed: Double? = control.currentTime
-        if let time { landed = Self.isStill(control, at: position) ? await control.seek(to: time) : nil }
+        var landed = Self.isStill(control, at: position) ? control.currentTime : nil
+        if let time, landed != nil { landed = await control.seek(to: time) }
         guard isCurrent(item, runID: id) else { return }
         guard let landed else {
             undo(self)
