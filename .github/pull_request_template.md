@@ -10,32 +10,49 @@ If you are a new contributor, the workflows will need to be manually approved be
 
 ## Brief summary
 
-<!-- Please provide a brief summary of what your PR attempts to achieve. -->
+<!-- In one or two sentences, what does this PR change and why? -->
 
 ## Which issue is fixed?
 
-<!-- Which issue number does this PR fix? Ex: "Fixes #1234" -->
+<!--
+One issue per PR. Ex: "Fixes #1234".
+If this ports upstream work, also link the upstream-port issue and the upstream
+commit or PR, e.g. "Ports advplyr/audiobookshelf-app#2002" (see docs/upstream-sync.md).
+-->
 
 ## Pull Request Type
 
 <!--
-Does this affect only Android, only iOS, or both?
-Does this change the frontend or the backend of the apps?
+Which platforms or areas does this affect? List the ones that apply:
+- iOS / iPadOS
+- iPhone Duo (foldable)
+- macOS
+- CarPlay
+- Shared core package
+- Repo / CI / tooling
+Is it a bug fix, feature, refactor, or docs change? Does it add an SPM dependency (justify it)?
 -->
 
 ## In-depth Description
 
 <!--
-Describe your solution in more depth.
-How does it work? Why is this the best solution?
-Does it solve a problem that affects multiple users or is this an edge case for your setup?
+Describe the approach and why it is the right one.
+Note concurrency, persistence (SwiftData) or API changes, and any trade-offs or follow-ups.
+Keep PRs to at most 20 files / 2000 hand-written lines.
 -->
 
 ## How have you tested this?
 
-<!-- Please describe in detail with reproducible steps how you tested your changes. -->
+<!--
+List the exact commands you ran and their results (e.g. `mise run lint`,
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test …`),
+plus any manual steps with the device or simulator and the server version used.
+-->
 
 ## Screenshots
 
-<!-- If your PR includes any changes to the front-end, please include screenshots or a
-short video from before and after your changes. -->
+<!--
+For UI changes, include before/after screenshots or a short video for each affected
+platform and pose (iPhone, iPad, iPhone Duo folded/unfolded, Mac, CarPlay).
+-->
+
