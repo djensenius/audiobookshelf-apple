@@ -581,6 +581,85 @@ struct AudioEngineTests {
         #expect(engine.currentTime == 3.5)
     }
 
+    /// Loads track 0 with track 1's file moved to `missing`, and waits until AVQueuePlayer has
+    /// prefetched track 1 and failed it (it stays queued and unreported).
+    private func makeEngineWithPrefetchFailure(
+        _ fixture: AudioFixture, missing: URL, events: Box<[AudioEngineEvent]>
+    ) async throws -> AudioEngine {
+        try FileManager.default.moveItem(at: fixture.urls[1], to: missing)
+        let engine = makeEngine()
+        engine.errorLogFetcher = { _ in [] }
+        engine.onEvent = { events.value.append($0) }
+        try await engine.load(fixture.source, at: 0)
+        try await waitUntil { engine.player.items().count == 3 && engine.player.items()[1].status == .failed }
+        return engine
+    }
+
+    private static func hasFailure(_ events: [AudioEngineEvent]) -> Bool {
+        events.contains { if case .failed = $0 { true } else { false } }
+    }
+
+    @Test(.tags(.realtimeAudio)) func prefetchFailureKeepsPlayingAndIsReportedOnAdvance() async throws {
+        let fixture = try AudioFixture()
+        let missing = fixture.directory.appending(path: "missing.wav")
+        let events = Box<[AudioEngineEvent]>([])
+        let engine = try await makeEngineWithPrefetchFailure(fixture, missing: missing, events: events)
+
+        // The next item's failure does not affect the current one.
+        #expect(!Self.hasFailure(events.value))
+        #expect(engine.state == .paused)
+        engine.setRate(2)
+        engine.play()
+        #expect(await eventually { engine.state == .playing && engine.currentTime > 0.1 })
+        #expect(engine.currentTrackIndex == 0)
+
+        // A seek within the current track keeps the queued failure; reaching it reports it.
+        #expect(await engine.seek(to: 2.8) == .completed)
+        #expect(
+            await eventually { if case .failed(.itemFailed(trackIndex: 1, _)) = engine.state { true } else { false } })
+        #expect(engine.currentTime <= 3)
+        #expect(!events.value.contains(.endOfMedia))
+
+        // Once the file is back (a recovered network), a seek retries with a fresh asset.
+        try FileManager.default.moveItem(at: missing, to: fixture.urls[1])
+        #expect(await engine.seek(to: 3.5) == .completed)
+        #expect(engine.currentTrackIndex == 1)
+        if case .failed = engine.state { Issue.record("still failed: \(engine.state)") }
+    }
+
+    @Test(.tags(.realtimeAudio)) func crossTrackSeekAfterPrefetchFailureUsesAFreshAsset() async throws {
+        let fixture = try AudioFixture()
+        let missing = fixture.directory.appending(path: "missing.wav")
+        let events = Box<[AudioEngineEvent]>([])
+        let engine = try await makeEngineWithPrefetchFailure(fixture, missing: missing, events: events)
+
+        // The prefetched asset failed; the file is back before the seek.
+        try FileManager.default.moveItem(at: missing, to: fixture.urls[1])
+        #expect(await engine.seek(to: 3.5) == .completed)
+
+        #expect(!Self.hasFailure(events.value))
+        #expect(engine.currentTrackIndex == 1)
+        #expect(engine.currentTime == 3.5)
+    }
+
+    @Test(.tags(.realtimeAudio)) func crossTrackSeekIntoAPrefetchFailureReportsIt() async throws {
+        let fixture = try AudioFixture()
+        let missing = fixture.directory.appending(path: "missing.wav")
+        let events = Box<[AudioEngineEvent]>([])
+        let engine = try await makeEngineWithPrefetchFailure(fixture, missing: missing, events: events)
+
+        #expect(await engine.seek(to: 3.5) == .failed)
+        guard case .failed(.itemFailed(trackIndex: 1, _)) = engine.state else {
+            Issue.record("expected itemFailed(1), got \(engine.state)")
+            return
+        }
+
+        // A seek elsewhere clears the failure.
+        #expect(await engine.seek(to: 1) == .completed)
+        #expect(engine.state == .paused)
+        #expect(engine.currentTrackIndex == 0)
+    }
+
     @Test(.tags(.realtimeAudio)) func pendingFailureKeepsTheLastConfirmedPosition() async throws {
         let fixture = try AudioFixture()
         try FileManager.default.removeItem(at: fixture.urls[1])
