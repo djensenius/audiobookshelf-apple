@@ -47,7 +47,12 @@ public final class SceneNavigation {
 
 /// What a window scene's root view shows for the session gate, and whether it keeps a link.
 public enum SceneContent: Equatable, Sendable {
+    /// Starting up. The root shows a splash and keeps a link that launched the app.
     case loading
+    /// The session is ending. The root shows the same splash, but keeps no link: a sign-out can
+    /// end at another account without the gate passing through ``connect`` long enough for a
+    /// view to see it, so a link kept here could open for that account.
+    case signingOut
     /// Signed out: the connect flow.
     case connect
     case storeUnavailable
@@ -59,7 +64,8 @@ public enum SceneContent: Equatable, Sendable {
 
     public init(_ gate: AuthGate) {
         switch gate {
-        case .launching, .signingOut: self = .loading
+        case .launching: self = .loading
+        case .signingOut: self = .signingOut
         case .connect: self = .connect
         case .ready(let identity, _): self = .shell(identity, opensLinks: true)
         case .switching(from: let identity): self = .shell(identity, opensLinks: false)
@@ -68,12 +74,12 @@ public enum SceneContent: Equatable, Sendable {
     }
 
     /// Whether a link that arrives now may wait for a scene to open it. It may not when signed
-    /// out, or without a store: a link kept through a sign-in would open later, for whichever
-    /// account signed in.
+    /// out, signing out, or without a store: a link kept through a sign-in would open later, for
+    /// whichever account signed in.
     public var holdsLinks: Bool {
         switch self {
         case .loading, .shell: true
-        case .connect, .storeUnavailable: false
+        case .signingOut, .connect, .storeUnavailable: false
         }
     }
 }

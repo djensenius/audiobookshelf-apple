@@ -270,12 +270,12 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 **Handling URLs**
 
 - `audiobookshelf://oauth` is reserved for the OIDC callback. `ASWebAuthenticationSession` consumes it, and `DeepLink` returns `nil` for it.
-- A link may carry `server={connectionID}`. If it differs from the active connection, the app asks before switching.
+- A link may carry `server={connectionID}`. If it differs from the active connection, the app asks before switching. The ID is the connection's local UUID, which each device makes for itself, so it is meaningful only for a link made and used on the same device; it is never put in a Handoff payload (see "Handoff").
 - There are no universal links, because servers are self-hosted and we control no associated domain.
 - `DeepLink.init?(url:)` is a pure parser.
 - In the scene that receives the URL, `RootView.onOpenURL` hands the link to the scene's host, which calls `router.open(_:)` once the scene has restored its saved navigation, so the restore can't wipe the link.
   - Only a ready session's shell takes the link. During an account switch the outgoing shell doesn't, so the incoming account's shell opens it.
-  - A link is never kept while signed out or without a store. One that arrives then, or is still waiting when the gate becomes signed out, is dropped, because it would otherwise open later for whichever account signed in.
+  - A link is never kept while signed out, while signing out or without a store. One that arrives then, or is still waiting when the gate becomes one of these, is dropped, because it would otherwise open later for whichever account signed in. A sign-out can end at another account without the root ever seeing the signed-out gate, so a link that arrives while one runs is dropped on arrival instead of waiting for that gate.
 - `RootView` applies `.handlesExternalEvents(preferring: ["*"], allowing: ["*"])`, so URLs and continued activities go to an existing window instead of creating a new one. On macOS, repeated `open audiobookshelf://downloads` keeps one window with the modifier, and opens another window each time without it.
 
 **URL format** (`ABSAppModel/Navigation/DeepLink.swift`)
@@ -298,7 +298,7 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 
 **Handoff**
 
-- Item, episode and player screens publish `.userActivity("org.davidjensenius.Audiobookshelf.item")`, with the payload below.
+- Item, episode and player screens will publish `.userActivity("org.davidjensenius.Audiobookshelf.item")`, with the payload below. No screen does yet; the first publisher comes with the item and player screens.
 - `.onContinueUserActivity` turns the activity into the same `DeepLink` (`DeepLink.init?(handoff:)`).
 - The activity type is listed in `NSUserActivityTypes` in `Audiobookshelf/Info.plist`, which the system requires before it delivers the activity. `AppEnvironmentTests` checks it.
 - The intents and entities side of Handoff is in P5-10 #87.

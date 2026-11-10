@@ -8,8 +8,8 @@ import SwiftUI
 /// a signed-in host can open it, so a cold launch from a link, or a link that arrives while the
 /// session restores, isn't lost. Only a ready session's shell gets the binding: during an account
 /// switch the outgoing shell has none, so the incoming account's shell takes the link. Nothing
-/// waits while signed out or without a store (``SceneContent/holdsLinks``), so a link is never kept
-/// through a sign-in to open later, for whichever account signed in.
+/// waits while signed out, signing out or without a store (``SceneContent/holdsLinks``), so a link
+/// is never kept through a sign-in to open later, for whichever account signed in.
 struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
@@ -43,7 +43,7 @@ struct RootView: View {
 
     @ViewBuilder private var content: some View {
         switch SceneContent(lifecycle.gate) {
-        case .loading:
+        case .loading, .signingOut:
             LoadingView()
         case .connect:
             SignedOutPlaceholder()

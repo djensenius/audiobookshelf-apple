@@ -50,7 +50,7 @@ import Testing
     @Test func gateBecomesWhatTheRootShows() {
         let failure = SessionStoreError(CocoaError(.fileWriteOutOfSpace))
         #expect(SceneContent(.launching) == .loading)
-        #expect(SceneContent(.signingOut(from: identity)) == .loading)
+        #expect(SceneContent(.signingOut(from: identity)) == .signingOut)
         #expect(SceneContent(.connect) == .connect)
         #expect(SceneContent(.storeUnavailable(failure)) == .storeUnavailable)
         #expect(SceneContent(.ready(identity, isOffline: false)) == .shell(identity, opensLinks: true))
@@ -65,13 +65,13 @@ import Testing
 
     @Test func linksWaitOnlyWhereASignedInSceneCanTakeThem() {
         let failure = SessionStoreError(CocoaError(.fileWriteOutOfSpace))
-        let held: [AuthGate] = [
-            .launching, .signingOut(from: identity), .ready(identity, isOffline: false),
-            .switching(from: identity),
-        ]
+        let held: [AuthGate] = [.launching, .ready(identity, isOffline: false), .switching(from: identity)]
         for gate in held {
             #expect(SceneContent(gate).holdsLinks, "\(gate)")
         }
+        // A sign-out can end at another account without a `.connect` a view would see, so a link
+        // that arrives while one runs is dropped at once.
+        #expect(!SceneContent(.signingOut(from: identity)).holdsLinks)
         #expect(!SceneContent(.connect).holdsLinks)
         #expect(!SceneContent(.storeUnavailable(failure)).holdsLinks)
     }
