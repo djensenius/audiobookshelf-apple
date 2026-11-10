@@ -28,8 +28,13 @@ public struct APIClientConfiguration: Sendable {
         customHeaders = headers
     }
 
-    /// Header names the client manages itself and that users may not set.
-    public static let reservedHeaderNames: Set<String> = ["authorization", "cookie"]
+    /// Header names, lowercased, that users may not set: the sign-in headers the client manages,
+    /// and connection and framing headers that `URLSession` manages or a proxy would misread.
+    public static let reservedHeaderNames: Set<String> = [
+        "authorization", "cookie", "x-refresh-token", "proxy-authorization", "proxy-authenticate",
+        "www-authenticate", "host", "connection", "keep-alive", "upgrade", "te", "transfer-encoding",
+        "content-length",
+    ]
 
     /// Checks custom headers before they are saved, so the connect screen can explain the
     /// problem.
@@ -42,13 +47,15 @@ public struct APIClientConfiguration: Sendable {
 
 /// A custom header the user can't configure.
 public enum CustomHeaderError: Error, Sendable, Equatable, LocalizedError {
-    /// `Authorization` and `Cookie` carry the Audiobookshelf session.
+    /// One of ``APIClientConfiguration/reservedHeaderNames``.
     case reserved(name: String)
 
     public var errorDescription: String? {
         switch self {
-        case .reserved(let name):
+        case .reserved(let name) where ["authorization", "cookie", "x-refresh-token"].contains(name.lowercased()):
             "The \(name) header is used for your Audiobookshelf sign-in. Use a different header or a service token."
+        case .reserved(let name):
+            "The \(name) header is managed by the connection and can't be set."
         }
     }
 }

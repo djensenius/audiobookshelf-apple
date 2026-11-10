@@ -671,9 +671,12 @@ struct PlaybackCoordinatorTests {
         let first = Task { await coordinator.play(itemID: "A") }
         await yieldUntil { service.starts == ["A"] }
 
-        await coordinator.play(itemID: "B")
+        // B's start takes its turn after A's returns, so it can't finish before the gate opens.
+        let second = Task { await coordinator.play(itemID: "B") }
+        await yieldUntil { coordinator.mediaKey == h.key("B") }
         gate.open()
         await first.value
+        await second.value
         await coordinator.waitForPendingCloses()
 
         #expect(coordinator.mediaKey == h.key("B"))
@@ -778,6 +781,37 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.error == .sessionStartFailed(.forbidden(message: nil)))
         #expect(coordinator.phase == .unloaded)
         #expect(coordinator.mediaKey == h.key("A"))
+    }
+
+    @Test func streamResolutionFailureIsSurfacedAndClosesTheSession() async {
+        service.state.withLock { $0.resolveError = StreamResolutionError.missingAccessToken }
+        await coordinator.play(itemID: "A")
+        await coordinator.waitForPendingCloses()
+
+        #expect(coordinator.error == .streamUnavailable(.missingAccessToken))
+        #expect(coordinator.phase == .unloaded)
+        #expect(service.closes == ["A-1"])
+        #expect(h.events.events.last == .failed(.streamUnavailable(.missingAccessToken)))
+    }
+
+    @Test func cancelledStreamResolutionIsNotAFailure() async {
+        service.state.withLock { $0.resolveError = CancellationError() }
+        await coordinator.play(itemID: "A")
+        await coordinator.waitForPendingCloses()
+
+        #expect(coordinator.error == nil)
+        #expect(coordinator.phase == .unloaded)
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(service.closes == ["A-1"])
+        #expect(engine.loads.isEmpty)
+        #expect(h.events.events == [.itemChanged(h.key("A"))])
+
+        // The abandoned start doesn't leave the item stuck: playing again starts a new session.
+        service.state.withLock { $0.resolveError = nil }
+        await coordinator.play(itemID: "A")
+        #expect(coordinator.phase == .loaded)
+        #expect(coordinator.error == nil)
+        #expect(service.starts == ["A", "A"])
     }
 
     @Test func engineLoadFailureClosesSessionAndSurfacesPlaybackFailure() async {

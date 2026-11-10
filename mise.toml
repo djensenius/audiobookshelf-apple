@@ -84,12 +84,22 @@ description = "Run slow AudiobookshelfKit tests (OSLogStore integration)"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}", ABS_SLOW_TESTS = "1" }
 run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter OSLogStoreIntegrationTests"
 
+[tasks."test:server"]
+description = "Run the opt-in contract tests against a real Audiobookshelf server (Docker; ABS_SERVER_VERSION picks the release)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "scripts/test-server.sh test"
+
+[tasks."server:run"]
+description = "Start a seeded Audiobookshelf server for manual use and print its URL and login"
+run = "scripts/test-server.sh serve"
+
 [tasks."test:app"]
 description = "Run app tests on macOS"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 # The sandboxed macOS host app must be signed; sign ad hoc so no team or identity is needed.
 # App Group and keychain-group entitlements need a provisioning profile, which an ad hoc
-# signature lacks, so the host is signed with sandbox and network-client entitlements only.
+# signature lacks, so the host is signed with sandbox, network-client and user-selected-file
+# entitlements only.
 # Override ABS_MACOS_ENTITLEMENTS (read only by the app target), not CODE_SIGN_ENTITLEMENTS,
 # which would also apply to SwiftPM resource-bundle targets and fail to resolve there.
 run = "xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'platform=macOS' -derivedDataPath .build/DerivedData CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ABS_MACOS_ENTITLEMENTS=Audiobookshelf/Audiobookshelf-AdHoc.entitlements"

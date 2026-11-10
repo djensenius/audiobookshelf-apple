@@ -14,6 +14,8 @@ final class FakeAudioEngine: AudioEngineProtocol {
     var isPlaybackRequested = false
     var pendingSeekTarget: Double?
     var timeline: PlaybackTimeline?
+    var volume: Float = 1
+    var seekResult = SeekResult.completed
     var onEvent: (@MainActor (AudioEngineEvent) -> Void)?
     private(set) var calls: [String] = []
 
@@ -29,9 +31,11 @@ final class FakeAudioEngine: AudioEngineProtocol {
     func stop() { calls.append("stop") }
     func seek(to time: Double) async -> SeekResult {
         calls.append("seek")
-        return .completed
+        if seekResult == .completed { currentTime = time }
+        return seekResult
     }
     func setRate(_ rate: Float) { calls.append("setRate") }
+    func setVolume(_ volume: Float) { self.volume = volume }
 }
 
 @MainActor

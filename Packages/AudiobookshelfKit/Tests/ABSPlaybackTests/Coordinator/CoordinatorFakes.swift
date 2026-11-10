@@ -50,6 +50,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     var duration: Double { timeline?.duration ?? 0 }
     var currentTrackIndex: Int?
     var defaultRate: Float = 1
+    var volume: Float = 1
     var isPlaybackRequested = false
     var pendingSeekTarget: Double?
     var timeline: PlaybackTimeline?
@@ -62,6 +63,16 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     var loadGates: [Gate] = []
     var seekGates: [Gate] = []
     var loadError: AudioEngineError?
+    /// How many of the next loads end like the real engine's after two interrupted initial seeks:
+    /// they return normally, paused at 0, with the start still `pendingSeekTarget`.
+    var interruptedLoads = 0
+    /// The results of the next seeks, in order; without one a seek completes. Any other result
+    /// leaves the position and `pendingSeekTarget`, as the real engine does.
+    var seekResults: [SeekResult] = []
+    /// How many of the next plays fail synchronously, as an audio session activation failure does.
+    var failingPlays = 0
+    /// How many plays are silently refused while a prior engine failure remains sticky.
+    var silentlyRefusingPlays = 0
     private var generation = 0
 
     func load(_ source: AudioEngineSource, at time: Double) async throws(AudioEngineError) {
@@ -69,6 +80,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         let current = generation
         loads.append((source, time))
         state = .loading
+        pendingSeekTarget = nil
         if !loadGates.isEmpty { await loadGates.removeFirst().wait() }
         guard current == generation else { throw .superseded }
         if let loadError {
@@ -76,12 +88,32 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
             throw loadError
         }
         timeline = source.timeline
+        if interruptedLoads > 0 {
+            interruptedLoads -= 1
+            currentTime = 0
+            pendingSeekTarget = source.timeline.clamp(time)
+            state = .paused
+            return
+        }
         currentTime = source.timeline.clamp(time)
         state = isPlaybackRequested ? .playing : .paused
     }
 
     /// As the real engine does, defers playing (shown as buffering) while a seek is in flight.
     func play() {
+        if silentlyRefusingPlays > 0 {
+            silentlyRefusingPlays -= 1
+            isPlaybackRequested = false
+            state = .paused
+            return
+        }
+        if failingPlays > 0 {
+            failingPlays -= 1
+            isPlaybackRequested = false
+            state = .paused
+            onEvent?(.failed(.audioSessionActivationFailed(description: "Session activation failed")))
+            return
+        }
         isPlaybackRequested = true
         state = pendingSeekTarget == nil ? .playing : .buffering
     }
@@ -97,6 +129,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         isPlaybackRequested = false
         timeline = nil
         currentTime = 0
+        pendingSeekTarget = nil
         state = .idle
     }
 
@@ -104,11 +137,26 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         seeks.append(time)
         pendingSeekTarget = time
         if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
-        if pendingSeekTarget == time { pendingSeekTarget = nil }
-        currentTime = time
-        if state == .ended { state = isPlaybackRequested ? .playing : .paused }
-        if state == .buffering, isPlaybackRequested, pendingSeekTarget == nil { state = .playing }
-        return .completed
+        let result = seekResults.isEmpty ? SeekResult.completed : seekResults.removeFirst()
+        if result == .completed {
+            if pendingSeekTarget == time { pendingSeekTarget = nil }
+            currentTime = time
+            if state == .ended { state = isPlaybackRequested ? .playing : .paused }
+            if state == .buffering, isPlaybackRequested, pendingSeekTarget == nil { state = .playing }
+        } else {
+            state = isPlaybackRequested ? .buffering : .paused
+        }
+        return result
+    }
+
+    /// Lands the pending seek, as the real engine's retry does once the player can: the position
+    /// becomes the target, the player starts if play was requested, and the next tick fires.
+    func landPendingSeek() {
+        guard let target = pendingSeekTarget else { return }
+        pendingSeekTarget = nil
+        currentTime = target
+        state = isPlaybackRequested ? .playing : .paused
+        onEvent?(.tick(target))
     }
 
     /// Plays to the end, as the real engine does: play is no longer requested.
@@ -120,10 +168,12 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func setRate(_ rate: Float) { defaultRate = rate }
+    func setVolume(_ volume: Float) { self.volume = volume }
 }
 
 /// Sessions per item (ids `<item>-<n>`, unique per start), with optional gates on starts and
-/// closes and a log of both in order.
+/// closes and a log of both in order. It models the server's one open session per device: a
+/// start that reaches it takes over every other open session, and a close removes its own.
 final class StubSessionService: PlaybackSessionService {
     struct State {
         var progress: [String: MediaProgress] = [:]
@@ -135,11 +185,14 @@ final class StubSessionService: PlaybackSessionService {
         var metadata: [String: (MediaMetadata, LibraryItem?)] = [:]
         var closeGates: [String: Gate] = [:]
         var startError: APIError?
+        var resolveError: (any Error)?
         var closeError: APIError?
         var starts: [String] = []
         var closes: [String] = []
         var log: [String] = []
         var count = 0
+        var openSessions: [String] = []
+        var takenOver: [String] = []
     }
 
     let serverConnectionID: UUID
@@ -152,8 +205,14 @@ final class StubSessionService: PlaybackSessionService {
     var starts: [String] { state.withLock { $0.starts } }
     var closes: [String] { state.withLock { $0.closes } }
     var log: [String] { state.withLock { $0.log } }
+    /// The sessions open on the server now.
+    var openSessions: [String] { state.withLock { $0.openSessions } }
+    /// The sessions the server closed because another start took over.
+    var takenOver: [String] { state.withLock { $0.takenOver } }
 
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+        // As the API client's request does, a start for a cancelled caller sends nothing and throws.
+        try Task.checkCancellation()
         let (gate, error, time, id, updatedAt, metadata) = state.withLock { state in
             state.starts.append(itemID)
             state.log.append("start \(itemID)")
@@ -163,8 +222,16 @@ final class StubSessionService: PlaybackSessionService {
                 "\(itemID)-\(state.count)", state.sessionUpdatedAt, state.metadata[itemID]
             )
         }
+        // The gate holds the request before it reaches the server.
         await gate?.wait()
-        if let error { throw error }
+        if let error {
+            state.withLock { $0.log.append("start \(itemID) failed") }
+            throw error
+        }
+        state.withLock { state in
+            state.takenOver += state.openSessions
+            state.openSessions = [id]
+        }
         return PlaybackSession(
             id: id, libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
             mediaMetadata: metadata?.0,
@@ -186,6 +253,7 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
+        if let error = state.withLock({ $0.resolveError }) { throw error }
         let tracks = session.audioTracks.map { track in
             PlayableTrack(
                 url: URL(filePath: "/\(session.id)/\(track.index ?? 0)"), mimeType: track.mimeType,
@@ -202,7 +270,10 @@ final class StubSessionService: PlaybackSessionService {
             return (state.closeGates.removeValue(forKey: id), state.closeError)
         }
         await gate?.wait()
-        state.withLock { $0.log.append("close \(id) done") }
+        state.withLock { state in
+            state.openSessions.removeAll { $0 == id }
+            state.log.append("close \(id) done")
+        }
         if let error { throw error }
     }
 }

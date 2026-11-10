@@ -34,4 +34,30 @@ public protocol TokenProvider: Sendable {
     /// they still equal `rejected` (the server rejected its refresh token), returning `true`.
     /// Returns `false` without changing anything if the stored pair is different.
     func expireSession(ifCurrent rejected: AuthTokens) async -> Bool
+
+    /// Runs `refresh`, a client's `POST /auth/refresh` of `tokens`. A provider that several
+    /// clients share should run one refresh of a pair at a time, and have the others wait for it
+    /// and share its outcome: the server rotates the refresh token, so it would reject a second
+    /// refresh of the pair, which would end the session the first one renewed. The default runs
+    /// `refresh`.
+    func refreshTokens(_ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void) async throws
+
+    /// ``expireSession(ifCurrent:)`` for a 401 to a request that used `rejected` after a refresh
+    /// produced it (not for the refresh endpoint itself rejecting its refresh token, which runs
+    /// inside a refresh and mustn't wait for it). A provider that shares refreshes between clients
+    /// should first wait for any in progress of `rejected`, which another client may be about to
+    /// replace with a newer pair, and compare only then. The default doesn't wait.
+    func expireSessionAfterRefreshes(ifCurrent rejected: AuthTokens) async -> Bool
+}
+
+extension TokenProvider {
+    public func expireSessionAfterRefreshes(ifCurrent rejected: AuthTokens) async -> Bool {
+        await expireSession(ifCurrent: rejected)
+    }
+
+    public func refreshTokens(
+        _ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        try await refresh()
+    }
 }

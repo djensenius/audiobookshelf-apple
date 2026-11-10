@@ -64,6 +64,9 @@ public final class AppSettings {
         /// A `[String: String]` dictionary from ``AppSettings/accountKey(serverID:userID:)``
         /// to library ID.
         case lastLibraryIDs = "settings_lastLibraryIDs"
+        /// A `[String: String]` dictionary from ``AppSettings/libraryViewPreferencesKey(serverID:userID:libraryID:)``
+        /// to the library's view preferences as a small JSON string (encoded by `LibraryViewPreferences`).
+        case libraryViewPreferences = "settings_libraryViewPreferences"
     }
 
     /// Default values, for `@AppStorage` declarations that need one.
@@ -191,6 +194,13 @@ public final class AppSettings {
         didSet { persist(.lastLibraryIDs, lastLibraryIDs) }
     }
 
+    /// Sort, filter and view mode per account and library, as JSON strings; see
+    /// ``libraryViewPreferencesJSON(serverID:userID:libraryID:)``. The settings store the strings
+    /// without interpreting them.
+    public private(set) var libraryViewPreferences: [String: String] = [:] {
+        didSet { persist(.libraryViewPreferences, libraryViewPreferences) }
+    }
+
     @ObservationIgnored private var isReloading = false
     @ObservationIgnored private var observer: DefaultsObserver?
 
@@ -242,6 +252,27 @@ public final class AppSettings {
         var stored = Reader(defaults: defaults).stringDictionary(.lastLibraryIDs)
         stored[Self.accountKey(serverID: serverID, userID: userID)] = libraryID
         lastLibraryIDs = stored
+    }
+
+    // MARK: Library view preferences
+
+    /// The key of a library's view preferences: the account key and the library ID.
+    public nonisolated static func libraryViewPreferencesKey(serverID: String, userID: String, libraryID: String)
+        -> String
+    {
+        "\(accountKey(serverID: serverID, userID: userID))|\(libraryID)"
+    }
+
+    public func libraryViewPreferencesJSON(serverID: String, userID: String, libraryID: String) -> String? {
+        libraryViewPreferences[Self.libraryViewPreferencesKey(serverID: serverID, userID: userID, libraryID: libraryID)]
+    }
+
+    /// Saves a library's view preferences; `nil` removes them. Like ``setLastLibraryID(_:serverID:userID:)``
+    /// it changes the dictionary currently in the store, so another library's entry isn't overwritten.
+    public func setLibraryViewPreferencesJSON(_ json: String?, serverID: String, userID: String, libraryID: String) {
+        var stored = Reader(defaults: defaults).stringDictionary(.libraryViewPreferences)
+        stored[Self.libraryViewPreferencesKey(serverID: serverID, userID: userID, libraryID: libraryID)] = json
+        libraryViewPreferences = stored
     }
 
     // MARK: Store selection
@@ -357,6 +388,7 @@ public final class AppSettings {
         update(\.playbackRate, snapshot.playbackRate)
         update(\.chapterTrack, snapshot.chapterTrack)
         update(\.lastLibraryIDs, snapshot.lastLibraryIDs)
+        update(\.libraryViewPreferences, snapshot.libraryViewPreferences)
     }
 
     private func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppSettings, Value>, _ value: Value) {
@@ -397,6 +429,7 @@ extension AppSettings {
         public let playbackRate: Double
         public let chapterTrack: Bool
         public let lastLibraryIDs: [String: String]
+        public let libraryViewPreferences: [String: String]
 
         init(defaults: UserDefaults) {
             let store = Reader(defaults: defaults)
@@ -431,6 +464,7 @@ extension AppSettings {
             playbackRate = store.double(.playbackRate, Default.playbackRate, where: isPlaybackRate)
             chapterTrack = store.bool(.chapterTrack, Default.chapterTrack)
             lastLibraryIDs = store.stringDictionary(.lastLibraryIDs)
+            libraryViewPreferences = store.stringDictionary(.libraryViewPreferences)
         }
 
         public func lastLibraryID(serverID: String, userID: String) -> String? {

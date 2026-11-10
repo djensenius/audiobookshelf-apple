@@ -37,6 +37,11 @@ public struct LibraryFilter: Sendable, Hashable {
     }
 
     /// `encodeURIComponent(Buffer.from(value).toString('base64'))`.
+    ///
+    /// The wire carries the value percent-encoded twice, on purpose: `URLComponents` encodes the
+    /// `%` of this `encodeURIComponent` output again (`%252B`), and the server decodes twice
+    /// (Express, then `decodeURIComponent` in `libraryFilters.decode`), as the legacy client
+    /// does. Don't "fix" it.
     static func encode(_ value: String) -> String {
         Data(value.utf8).base64EncodedString()
             .replacingOccurrences(of: "+", with: "%2B")
