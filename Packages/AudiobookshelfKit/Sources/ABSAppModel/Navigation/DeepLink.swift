@@ -116,10 +116,12 @@ public struct DeepLink: Hashable, Sendable {
         }
     }
 
-    /// The decoded path segments after the host, or `nil` if one is empty (`item//li_1`) or
-    /// doesn't decode. One trailing `/` is ignored.
+    /// The decoded path segments after the host, or `nil` if one is empty (`item//li_1`,
+    /// `search//`) or doesn't decode. One trailing `/` is ignored.
     private static func pathSegments(_ components: URLComponents) -> [String]? {
         var path = Substring(components.percentEncodedPath)
+        // Checked before stripping, which would turn `//` into an empty path.
+        guard !path.contains("//") else { return nil }
         if path.hasPrefix("/") { path = path.dropFirst() }
         if path.hasSuffix("/") { path = path.dropLast() }
         guard !path.isEmpty else { return [] }
@@ -131,19 +133,23 @@ public struct DeepLink: Hashable, Sendable {
         return segments
     }
 
-    /// The decoded first value of each query parameter, keyed by lower-cased name; `nil` if a
-    /// value doesn't decode. A parameter without a value (`?server`) is empty.
+    /// The decoded first value of each query parameter, keyed by decoded, lower-cased name
+    /// (so `%73erver` is `server`); `nil` if a name or value doesn't decode. A parameter
+    /// without a value (`?server`) is empty.
     private static func queryValues(_ components: URLComponents) -> [String: String]? {
         var values: [String: String] = [:]
         for item in components.percentEncodedQueryItems ?? [] {
-            let name = item.name.lowercased()
-            guard values[name] == nil else { continue }
-            guard let value = (item.value ?? "").replacing("+", with: " ").removingPercentEncoding else {
-                return nil
-            }
-            values[name] = value
+            guard let name = decodeQueryComponent(item.name)?.lowercased(),
+                let value = decodeQueryComponent(item.value ?? "")
+            else { return nil }
+            if values[name] == nil { values[name] = value }
         }
         return values
+    }
+
+    /// Percent-decodes a query name or value, reading `+` as a space.
+    private static func decodeQueryComponent(_ text: String) -> String? {
+        text.replacing("+", with: " ").removingPercentEncoding
     }
 
     /// The largest start time a link may carry, about 115 days, so converting it (for

@@ -63,6 +63,11 @@ private func link(_ string: String) -> DeepLink? {
         Case("audiobookshelf://item//", nil),
         Case("audiobookshelf://item//li_1", nil),
         Case("audiobookshelf://item/li_1//", nil),
+        Case("audiobookshelf://search//", nil),
+        Case("audiobookshelf://search//?q=dune", nil),
+        Case("audiobookshelf://downloads//", nil),
+        Case("audiobookshelf://downloads///", nil),
+        Case("audiobookshelf://item/li_1?%FF=x", nil),
         Case("audiobookshelf://item/.", nil),
         Case("audiobookshelf://item/..", nil),
         Case("audiobookshelf://item/%2E%2E", nil),
@@ -112,6 +117,18 @@ private func link(_ string: String) -> DeepLink? {
         Case(
             "audiobookshelf://play/li_1?server=conn-1&t=5&episode=ep_1",
             DeepLink(.play(PlayLink(itemID: "li_1", episodeID: "ep_1", startTime: 5)), serverID: "conn-1")),
+        // Encoded parameter names are decoded, so they can't hide `server=`.
+        Case(
+            "audiobookshelf://item/li_1?%73erver=other",
+            DeepLink(.item(id: "li_1", episodeID: nil), serverID: "other")),
+        Case(
+            "audiobookshelf://play/li_1?%65pisode=ep_1&%74=90&server=conn-1",
+            DeepLink(.play(PlayLink(itemID: "li_1", episodeID: "ep_1", startTime: 90)), serverID: "conn-1")),
+        Case("audiobookshelf://search?%71=dune&server=conn-1", DeepLink(.search(query: "dune"), serverID: "conn-1")),
+        Case(
+            "audiobookshelf://series/se_1?%73erver=a&server=b", DeepLink(.series(id: "se_1"), serverID: "a")),
+        Case(
+            "audiobookshelf://series/se_1?server=a&%53ERVER=b", DeepLink(.series(id: "se_1"), serverID: "a")),
         // The first value of a repeated parameter wins.
         Case("audiobookshelf://series/se_1?server=a&server=b", DeepLink(.series(id: "se_1"), serverID: "a")),
     ]
