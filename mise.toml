@@ -78,7 +78,11 @@ run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .buil
 description = "Run app tests on macOS"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 # The sandboxed macOS host app must be signed; sign ad hoc so no team or identity is needed.
-run = "xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'platform=macOS' -derivedDataPath .build/DerivedData CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="
+# App Group and keychain-group entitlements need a provisioning profile, which an ad hoc
+# signature lacks, so the host is signed with sandbox and network-client entitlements only.
+# Override ABS_MACOS_ENTITLEMENTS (read only by the app target), not CODE_SIGN_ENTITLEMENTS,
+# which would also apply to SwiftPM resource-bundle targets and fail to resolve there.
+run = "xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'platform=macOS' -derivedDataPath .build/DerivedData CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ABS_MACOS_ENTITLEMENTS=Audiobookshelf/Audiobookshelf-AdHoc.entitlements"
 
 [tasks."test:ios"]
 description = "Run app tests on the iPhone Duo simulator"
