@@ -28,8 +28,9 @@ See [docs/architecture.md](../../docs/architecture.md) for the full rules.
 
 ## Resources
 
-- `ABSUI` processes `Sources/ABSUI/Resources/` (the string catalog arrives with the localization issue). The package's
-  default localization is `en`.
+- `ABSUI` processes `Sources/ABSUI/Resources/`, which holds the generated
+  `Localizable.xcstrings` (see [docs/localization.md](../../docs/localization.md)). The
+  package's default localization is `en`.
 - `ABSCoreTests`, `ABSAPITests`, and `ABSPlaybackTests` copy their `Fixtures/`
   folder; load files with
   `Bundle.module.url(forResource:withExtension:subdirectory: "Fixtures")`.
