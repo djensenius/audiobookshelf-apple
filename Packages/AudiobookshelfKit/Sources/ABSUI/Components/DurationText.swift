@@ -29,15 +29,13 @@ public enum DurationStyle: Hashable, Sendable {
             // Truncated like the visible timestamp.
             let whole = seconds.isFinite ? max(seconds, 0).rounded(.towardZero) : 0
             return Self.format(
-                min(whole, Self.maxSeconds), units: [.hours, .minutes, .seconds], width: .wide, locale: locale
+                min(whole, TimeFormatting.maxSeconds), units: [.hours, .minutes, .seconds], width: .wide,
+                locale: locale
             )
         case .elapsed(let showSeconds, let useDays):
             return Self.elapsed(seconds, showSeconds: showSeconds, useDays: useDays, width: .wide, locale: locale)
         }
     }
-
-    /// Guards the integer conversion; about 31 million years.
-    private static let maxSeconds: Double = 1e15
 
     /// Port of `$elapsedPrettyExtended`: rounds to whole seconds first, and without seconds
     /// rounds the minutes up from 30 seconds when the minute-of-hour is non-zero.
@@ -49,7 +47,7 @@ public enum DurationStyle: Hashable, Sendable {
         locale: Locale
     ) -> String {
         guard seconds.isFinite, seconds > 0 else { return "" }
-        var total = Int64(min(seconds.rounded(), maxSeconds))
+        var total = Int64(min(seconds.rounded(), TimeFormatting.maxSeconds))
         if !showSeconds {
             let remainder = total % 60
             let minuteOfHour = total / 60 % 60
