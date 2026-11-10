@@ -17,8 +17,9 @@ enum DownloadTaskResult: Sendable, Equatable {
     /// The body was an error page or message (HTML from a proxy or captive portal, text, JSON
     /// or XML), not the file.
     case unexpectedContent(String)
-    /// The body isn't the whole file. `expected` is the planned size, or else the declared
-    /// length, or `0` when neither is known.
+    /// The body isn't the whole file. `expected` is the size it was checked against: after a
+    /// 206, the `Content-Range` total; otherwise the planned size, or else the declared length.
+    /// It is `0` when that isn't known.
     case sizeMismatch(expected: Int64, actual: Int64)
     /// The body couldn't be moved to the destination.
     case moveFailed(String, isOutOfSpace: Bool)
@@ -160,10 +161,11 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
         guard size > 0 else { return .failed(DownloadTransferFailure(URLError(.zeroByteResource))) }
         let declared = Self.declaredLength(of: task.response)
         let planned = target.expectedBytes > 0 ? target.expectedBytes : nil
-        let isWhole =
-            (task.response as? HTTPURLResponse)?.statusCode == 206
-            ? size == declared : size == declared || size == planned || (declared == nil && planned == nil)
-        guard isWhole else { return .sizeMismatch(expected: planned ?? declared ?? 0, actual: size) }
+        if (task.response as? HTTPURLResponse)?.statusCode == 206 {
+            guard size == declared else { return .sizeMismatch(expected: declared ?? 0, actual: size) }
+        } else if size != declared, size != planned, declared != nil || planned != nil {
+            return .sizeMismatch(expected: planned ?? declared ?? 0, actual: size)
+        }
         do {
             try DownloadLocations.moveFile(at: location, to: target.destination)
         } catch {
