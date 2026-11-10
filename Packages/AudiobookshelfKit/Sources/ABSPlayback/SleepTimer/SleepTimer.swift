@@ -89,7 +89,7 @@ public final class SleepTimer {
     }
 
     @ObservationIgnored private let control: any SleepTimerPlaybackControl
-    @ObservationIgnored private let feedback: any SleepTimerFeedback
+    @ObservationIgnored private let feedback: (any SleepTimerFeedback)?
     @ObservationIgnored private let shakeDetector: (any ShakeDetecting)?
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let calendar: Calendar
@@ -119,11 +119,12 @@ public final class SleepTimer {
     var isTicking: Bool { tickTask != nil }
 
     /// - Parameters:
+    ///   - feedback: Plays the chime and the reset feedback; `nil` plays nothing.
     ///   - shakeDetector: Pass ``ShakeDetector`` on iOS; `nil` disables shake to reset.
     ///   - tickInterval: How often the countdown, fade and chime update.
     public init(
         control: any SleepTimerPlaybackControl,
-        feedback: any SleepTimerFeedback = SystemSleepTimerFeedback(),
+        feedback: (any SleepTimerFeedback)? = nil,
         shakeDetector: (any ShakeDetecting)? = nil,
         options: SleepTimerOptions = SleepTimerOptions(),
         clock: any Clock<Duration> = ContinuousClock(),
@@ -199,7 +200,7 @@ public final class SleepTimer {
     /// Resets the timer, for a gesture such as shake to reset. A running timer restarts while audio plays (a
     /// duration only after ``resetGuard`` seconds); during the grace period the expired timer restarts and playback
     /// resumes after the pending rewind, with the reset feedback once it plays. If that rewind fails, the grace
-    /// period and the rewind come back. Returns whether it reset.
+    /// period and the rewind come back, unless another item loaded meanwhile. Returns whether it reset.
     @discardableResult
     public func reset() -> Bool {
         if let run {
@@ -207,7 +208,7 @@ public final class SleepTimer {
             guard control.isPlaying, begin(run.mode, isAutomatic: run.isAutomatic, at: control.currentTime) else {
                 return false
             }
-            if options.playsResetFeedback { feedback.playResetFeedback() }
+            if options.playsResetFeedback { feedback?.playResetFeedback() }
             return true
         }
         guard let expiredRun = restartableRun, let graceEnd else { return false }
@@ -218,9 +219,10 @@ public final class SleepTimer {
             return false
         }
         let target = time < control.currentTime ? time : nil
-        let id = runID
+        let id = runID, item = itemID
         Task { [weak self] in
             await self?.resume(rewindingTo: target, runID: id) {
+                guard $0.itemID == item else { return }
                 $0.startGrace(for: expiredRun, until: graceEnd)
                 $0.pendingRewind = rewind
             }
@@ -237,7 +239,7 @@ public final class SleepTimer {
         let time = time(rewoundBy: rewind)
         if let expiredRun = restartableRun {
             if begin(expiredRun.mode, isAutomatic: expiredRun.isAutomatic, at: time), options.playsResetFeedback {
-                feedback.playResetFeedback()
+                feedback?.playResetFeedback()
             }
         } else if shouldStartAutomatically(at: date) {
             begin(options.autoSleep.mode, isAutomatic: true, at: time)
@@ -351,7 +353,7 @@ public final class SleepTimer {
                 run.chime = .played
             } else if isPlaying {
                 run.chime = .played
-                if options.playsAlmostDoneChime { feedback.playChime() }
+                if options.playsAlmostDoneChime { feedback?.playChime() }
             }
         }
         trackFade(of: &run, left: left, at: time)
@@ -372,8 +374,8 @@ public final class SleepTimer {
         if run.fadeStart == nil { run.fadeStart = time }
     }
 
-    /// Pauses, then seeks back to where a duration run's fade began, and keeps the automatic rewind for that
-    /// position.
+    /// Pauses, then seeks back to where a duration run's fade began, and keeps the automatic rewind for where
+    /// playback ends up.
     private func expire() {
         guard let run else { return }
         control.pause()
@@ -384,13 +386,14 @@ public final class SleepTimer {
             pendingRewind = rewind.map { ($0, control.currentTime) }
             return
         }
-        pendingRewind = nil
-        let id = runID, item = itemID
+        // A play or reset during the seek finds playback elsewhere and drops the rewind; a manual start keeps it.
+        pendingRewind = rewind.map { ($0, fadeStart) }
+        let item = itemID
         Task { [weak self, control] in
-            guard let landed = await control.seek(to: fadeStart), let self, itemID == item else { return }
-            didSeek(to: landed)
-            // A run restarted during the seek takes no automatic rewind.
-            if runID == id { pendingRewind = rewind.map { ($0, landed) } }
+            let landed = await control.seek(to: fadeStart)
+            guard let self, itemID == item else { return }
+            pendingRewind?.at = landed ?? control.currentTime
+            if let landed { didSeek(to: landed) }
         }
     }
 
@@ -407,7 +410,7 @@ public final class SleepTimer {
         }
         if time != nil { didSeek(to: landed) }
         control.play()
-        if options.playsResetFeedback { feedback.playResetFeedback() }
+        if options.playsResetFeedback { feedback?.playResetFeedback() }
     }
 
     /// The pending rewind, consumed; nothing once playback moved away from where it was set.

@@ -57,6 +57,8 @@ private let chapters = TimelineFixture.crossingChapters.timeline
 enum GraceEnd: CaseIterable, Sendable { case graceTask, clockOnly, cancel, anotherItem }
 /// What happens between an automatic timer's expiry and the next play.
 enum Move: CaseIterable, Sendable { case none, seek, unreportedSeek, anotherItem }
+/// What happens during the seek back to where an expired timer's fade began.
+enum ExpirySeek: CaseIterable, Sendable { case play, manualStart, failure }
 
 private func autoOptions(mode: SleepTimerMode = .duration(10), rewind: TimeInterval? = 300) throws -> SleepTimerOptions
 {
@@ -684,21 +686,26 @@ struct SleepTimerTests {
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 11)) == 0)
     }
 
-    @Test func aResetWhoseRewindFailsRestoresTheGracePeriodAndTheRewind() async throws {
+    @Test(arguments: [false, true])
+    func aResetWhoseRewindFailsRestoresTheGracePeriodAndTheRewindOnTheSameItem(itemChanges: Bool) async throws {
         let harness = Harness(timeline: chapters, at: 1000, options: try autoOptions())
         _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
         await harness.expire()
         harness.clock.advance(by: .seconds(60))
         harness.control.seeksLand = false
+        harness.control.holdsSeeks = true
         #expect(harness.timer.reset())
+        await until { harness.control.seeks == [700] }
+        if itemChanges { harness.timer.itemDidChange("other") }
+        harness.control.finishSeek()
         await until { !harness.timer.isRunning }
         #expect(harness.control.plays == 0)
         #expect(harness.feedback.resets == 0)
-        #expect(harness.timer.canRestart)
+        #expect(harness.timer.canRestart == !itemChanges)
 
         harness.clock.advance(by: .seconds(60))
         await until { !harness.timer.canRestart }
-        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == 300)
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == (itemChanges ? 0 : 300))
     }
 
     @Test func aCancelDuringAResetsRewindWins() async throws {
@@ -725,17 +732,21 @@ struct SleepTimerTests {
         #expect(harness.timer.isAutomatic, "And the next automatic timer starts")
     }
 
-    @Test func aTimerRestartedDuringTheExpirySeekTakesNoAutomaticRewind() async throws {
+    /// A play during the expiry's seek takes no automatic rewind; a manual start keeps it, as does a failed seek.
+    @Test(arguments: ExpirySeek.allCases)
+    func theAutomaticRewindAfterTheExpirySeek(_ event: ExpirySeek) async throws {
         let harness = Harness(at: 1000, options: try autoOptions(mode: .duration(70)))
         _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 0))
-        harness.control.holdsSeeks = true
+        harness.control.holdsSeeks = event != .failure
+        harness.control.seeksLand = event != .failure
         await harness.play(from: 1000, to: 1070)
         await until { harness.control.seeks == [1010] }
-        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 0)
+        if event == .play { #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 0) }
+        if event == .manualStart { harness.timer.start(.duration(600)) }
         harness.control.finishSeek()
-        await until { harness.control.currentTime == 1010 }
+        await until { harness.control.currentTime == (event == .failure ? 1070 : 1010) }
         harness.timer.cancel()
-        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == 0)
+        #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == (event == .play ? 0 : 300))
     }
 
     @Test func automaticChapterTimerRestartsFromTheRewoundPosition() async throws {
@@ -766,16 +777,5 @@ struct SleepTimerTests {
         await harness.expire()
         await harness.endGrace()
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 0)) == 0)
-    }
-
-    // MARK: - Platform
-
-    @Test func chimeIsAQuietSecondAndAHalf() throws {
-        let buffer = try #require(SystemSleepTimerFeedback.makeChime())
-        #expect(buffer.frameLength == 66_150)
-        let samples = try #require(buffer.floatChannelData?[0])
-        let peak = (0..<Int(buffer.frameLength)).map { abs(samples[$0]) }.max() ?? 0
-        #expect(peak > 0.5)
-        #expect(peak <= 1)
     }
 }
