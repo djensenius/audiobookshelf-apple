@@ -18,6 +18,7 @@ replacing the Nuxt/Capacitor app this repository was forked from. Track work on 
 | `Audiobookshelf.xcodeproj/project.xcproj` | Xcode 27.2 JSON project: app target `Audiobookshelf` (iOS, iPadOS, native macOS; no Catalyst) and test target `AudiobookshelfTests` |
 | `Audiobookshelf/` | App sources (synchronized folder), `Info.plist` fragment (ATS, background audio, CarPlay scene), entitlements (`Audiobookshelf.entitlements` macOS, `Audiobookshelf-iOS.entitlements` iOS, `Audiobookshelf-AdHoc.entitlements` for ad hoc `test:app`) |
 | `AudiobookshelfTests/` | App tests (Swift Testing), hosted in the app |
+| `Localization/native/` | Native-only string keys merged into the String Catalog ([docs/localization.md](docs/localization.md)) |
 | `Packages/AudiobookshelfKit/` | Local Swift package with all feature code; one `AudiobookshelfKit` library product exposes every module |
 
 `AudiobookshelfKit` modules (all are declared in `Package.swift` already; add source
@@ -70,8 +71,8 @@ not built:
 | `android/` | Android app — ignore |
 | `strings/` | Translations for 42 locales — the source for localization |
 
-Repository tooling lives in `scripts/`, `ci_scripts/` (Xcode Cloud),
-`.github/workflows/`, and `mise.toml`.
+Repository tooling lives in `scripts/`, `ci_scripts/` (Xcode Cloud), `Tools/` (Swift tool
+packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 
 ## Toolchain
 
@@ -86,7 +87,9 @@ Repository tooling lives in `scripts/`, `ci_scripts/` (Xcode Cloud),
 | `mise run lint` | ShellCheck, actionlint, and `swift format lint --strict` (`lint:repo` skips Swift) |
 | `mise run format` | `swift format` Swift sources in place |
 | `mise run build:ios` / `build:macos` | Build the app (unsigned) into `.build/DerivedData` |
-| `mise run test` | Package tests (`test:kit`) and macOS app tests (`test:app`, signed ad hoc) |
+| `mise run test` | Package tests (`test:kit`), tool tests (`test:tools`), and macOS app tests (`test:app`, signed ad hoc) |
+| `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer) |
+| `mise run strings` / `strings:check` | Generate or verify ABSUI's `Localizable.xcstrings` from `strings/*.json` and `Localization/native/`; see [docs/localization.md](docs/localization.md) |
 | `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
 
