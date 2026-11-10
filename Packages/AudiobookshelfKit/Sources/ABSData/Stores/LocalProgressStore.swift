@@ -61,7 +61,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// The generation after each row last merged server values: a fetch captured since was read
     /// after the server held them.
     private var mergedAt: [String: UInt64] = [:]
-    private var inFlight: [String: (token: UUID, groups: ProgressGroups)] = [:]
+    /// The send in flight per row, with the row it was taken from: a row deleted meanwhile and
+    /// recreated for the same key isn't the one the response settles.
+    private var inFlight: [String: (token: UUID, groups: ProgressGroups, row: PersistentIdentifier)] = [:]
     /// Rows acknowledged without a server time that wait for a fetch issued after the
     /// acknowledgement, with the latest socket value received meanwhile and its capture.
     private var awaitingFetch: [String: (key: MediaKey, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] =
@@ -194,37 +196,39 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// the next group.
     public func beginSend(for key: MediaKey, now: Date = .now) throws -> ProgressPatch? {
         guard inFlight[key.rawValue] == nil else { return nil }
-        let send: ProgressSend? = try commit {
+        let taken: (ProgressSend, PersistentIdentifier)? = try commit {
             guard let row = try fetchRow(key) else { return nil }
             var state = ProgressSyncState(row)
             guard let send = state.beginSend() else { return nil }
             state.write(to: row)
             row.lastSyncAttemptAt = now
-            return send
+            return (send, row.persistentModelID)
         }
-        guard let send else { return nil }
+        guard let (send, rowID) = taken else { return nil }
         let patch = ProgressPatch(key: key, values: send, token: UUID())
-        inFlight[key.rawValue] = (patch.token, send.groups)
+        inFlight[key.rawValue] = (patch.token, send.groups, rowID)
         return patch
     }
 
     /// The PATCH succeeded. `serverLastUpdate` is the response's `lastUpdate`, when it has one.
     /// Returns `false`, changing nothing, when `patch` is not the row's send in flight (a late or
-    /// repeated response for a send already settled).
+    /// repeated response for a send already settled). A row deleted and recreated for the same
+    /// key since ``beginSend(for:now:)`` is left unchanged; the send is still settled.
     @discardableResult
     public func completeSend(_ patch: ProgressPatch, serverLastUpdate: Date?) throws -> Bool {
-        guard inFlight[patch.key.rawValue]?.token == patch.token else { return false }
+        guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
         // Settled even when the save fails: the send stays recorded, so a later fetch still
         // recognises its echo.
         defer { settle(patch.key) }
-        try commit {
-            guard let row = try fetchRow(patch.key) else { return }
+        let acknowledged = try commit {
+            guard let row = try fetchRow(patch.key), row.persistentModelID == flight.row else { return false }
             var state = ProgressSyncState(row)
             state.acknowledge(patch.values, serverLastUpdate: serverLastUpdate)
             state.write(to: row)
             row.lastSyncError = nil
+            return true
         }
-        if serverLastUpdate == nil { awaitingFetch[patch.key.rawValue] = (patch.key, nil) }
+        if acknowledged, serverLastUpdate == nil { awaitingFetch[patch.key.rawValue] = (patch.key, nil) }
         return true
     }
 
@@ -238,10 +242,10 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// must not start the next send while the previous task may still be delivered.
     @discardableResult
     public func failSend(_ patch: ProgressPatch, error: String?) throws -> Bool {
-        guard inFlight[patch.key.rawValue]?.token == patch.token else { return false }
+        guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
         defer { settle(patch.key) }
         try commit {
-            guard let row = try fetchRow(patch.key) else { return }
+            guard let row = try fetchRow(patch.key), row.persistentModelID == flight.row else { return }
             row.lastSyncError = error
         }
         return true

@@ -368,7 +368,10 @@ Model notes:
     their evidence and flags. It then clears the group's dirty flag only if its
     `<group>EditedAt` still equals the snapshot's. Each send carries a token, and
     an outcome whose token isn't the row's send in flight (a late or duplicate
-    one) is ignored, so acknowledging twice changes nothing. A group edited during the request stays dirty with its newer local values, and the next fetch sees the
+    one) is ignored, so acknowledging twice changes nothing. The send also records
+    the row's `persistentModelID`: if the row was deleted (sign-out, reset) and
+    recreated for the same key while the request ran, the outcome settles the send
+    but leaves the new row untouched (still dirty, no baseline change, no hold). A group edited during the request stays dirty with its newer local values, and the next fetch sees the
     server matching the advanced baseline, so the edit is kept and sent rather
     than treated as a conflict.
   - **Merges during an in-flight PATCH.** While a PATCH for a row is in flight,

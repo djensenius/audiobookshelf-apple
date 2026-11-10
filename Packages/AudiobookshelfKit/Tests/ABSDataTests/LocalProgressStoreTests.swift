@@ -267,6 +267,57 @@ import Testing
         #expect(!row.audioDirty)
     }
 
+    /// A row deleted while its PATCH is in flight and recreated before the response: the
+    /// response settles the send but doesn't touch the new row, whether its edit has the sent
+    /// edit's time (would be cleared) or a later one (would get the old baseline and a hold).
+    @Test(arguments: [false, true], [1.0, 5.0])
+    func responseForADeletedRowLeavesItsReplacementAlone(_ succeeds: Bool, _ recreatedAt: TimeInterval)
+        async throws
+    {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        #expect(try await store.deleteProgress(for: key))
+        try await store.recordEdit(
+            Self.seek(300), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(recreatedAt))
+        #expect(try await store.beginSend(for: key) == nil)  // Still one PATCH in flight per row.
+        let recreated = try await store.progress(for: key)
+
+        if succeeds {
+            #expect(try await store.completeSend(patch, serverLastUpdate: nil))
+        } else {
+            #expect(try await store.failSend(patch, error: "offline"))
+        }
+        #expect(try await store.progress(for: key) == recreated)
+        #expect(await store.needsConfirmationFetch.isEmpty)
+        #expect(try await store.beginSend(for: key)?.values.audio?.currentTime == 300)
+    }
+
+    /// Server values merged while a PATCH is in flight update the row in place; the response
+    /// still acknowledges the sent group and keeps the merged one.
+    @Test func serverValueMergedDuringPatchIsKeptByTheAcknowledgement() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        let capture = await store.captureGeneration()
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 900, ebookLocation: "B", lastUpdate: Self.at(2))], capturedAt: capture,
+            source: .socket)
+        let merged = try #require(try await store.progress(for: key))
+        #expect(merged.currentTime == 200)
+        #expect(merged.audioDirty)
+        #expect(merged.ebookLocation == "B")
+
+        #expect(try await store.completeSend(patch, serverLastUpdate: Self.at(3)))
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 200)
+        #expect(row.ebookLocation == "B")
+        #expect(row.dirtyGroups.isEmpty)
+        #expect(row.serverBaseline?.currentTime == 200)
+    }
+
     // MARK: - Stale and in-flight server values
 
     @Test func fetchIssuedBeforeLocalSeekChangesNothing() async throws {
