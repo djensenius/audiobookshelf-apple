@@ -432,10 +432,17 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
         #expect(AppSettings.isTimeOfDay(value))
     }
 
+    @Test(arguments: [("00:00", 0), ("06:00", 360), ("22:30", 1350), ("23:59", 1439)])
+    func parsesMinutesSinceMidnight(_ value: String, _ minutes: Int) {
+        #expect(AppSettings.minutesSinceMidnight(value) == minutes)
+    }
+
     @Test(arguments: [
         "24:00", "12:60", "6:00", "12:5", "ab:cd", "1200", "12:00:00", "", "+1:00", "-0:30", "00:+1", "１２:００",
+        "٠٧:٠٠",
     ])
     func rejectsInvalidTimesOfDay(_ value: String) {
         #expect(!AppSettings.isTimeOfDay(value))
+        #expect(AppSettings.minutesSinceMidnight(value) == nil)
     }
 }
