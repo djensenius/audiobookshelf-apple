@@ -114,7 +114,7 @@ import Testing
     @Test func discardedLeasedFileIsSkippedThenReplacedInPlace() async throws {
         let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
         let bad = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "png", generation: 0)
-        await store.discard(bad.url)
+        await store.discard(bad.url, version: bad.version)
         #expect(await store.lookup(key("a")) == nil)
         #expect(await store.size == 0)
         let good = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "png", generation: 0)
@@ -129,7 +129,7 @@ import Testing
         var retired: LeasedFile? = try await store.insert(
             moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: 0)
         let retiredURL = try #require(retired?.url)
-        await store.discard(retiredURL)
+        await store.discard(retiredURL, version: try #require(retired?.version))
         for id in ["b", "c"] {
             _ = try await store.insert(moving: temporaryFile(), for: key(id), pathExtension: "webp", generation: 0)
         }
@@ -149,10 +149,49 @@ import Testing
         let larger = try await store.insert(
             moving: temporaryFile(bytes: 65_536), for: key("a"), pathExtension: "jpg", generation: 0)
         #expect(await store.size == 65_536)
-        _ = try await store.insert(
+        let smaller = try await store.insert(
             moving: temporaryFile(bytes: 4_096), for: key("a"), pathExtension: "jpg", generation: 0)
         #expect(await store.size == 4_096)
-        await store.discard(larger.url)
+        await store.discard(smaller.url, version: smaller.version)
+        #expect(await store.size == 0)
+        withExtendedLifetime(larger) {}
+    }
+
+    @Test func staleReadersDecodeFailureKeepsTheReplacement() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
+        _ = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "jpg", generation: 0)
+        let first = try #require(await store.lookup(key("a")))
+        let second = try await store.insert(
+            moving: temporaryFile(bytes: 4_096), for: key("a"), pathExtension: "jpg", generation: 0)
+        #expect(first.url == second.url)
+        await store.discard(first.url, version: first.version)
+        let current = try #require(await store.lookup(key("a")))
+        #expect(current.version == second.version)
+        #expect(try Data(contentsOf: current.url).count == 4_096)
+        #expect(await store.size == 4_096)
+    }
+
+    @Test func decodeFailureWithoutAReplacementRemovesTheFile() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
+        _ = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "jpg", generation: 0)
+        var read = await store.lookup(key("a"))
+        let url = try #require(read?.url)
+        await store.discard(url, version: try #require(read?.version))
+        #expect(await store.lookup(key("a")) == nil)
+        #expect(await store.size == 0)
+        read = nil
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test func fileFromAnEarlierLaunchIsDiscardedAtVersionZero() async throws {
+        let images = directory.url.appending(path: "Images")
+        _ = try await CoverFileStore(directory: images, limit: 1 << 20).insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "jpg", generation: 0)
+        let store = CoverFileStore(directory: images, limit: 1 << 20)
+        let read = try #require(await store.lookup(key("a")))
+        #expect(read.version == 0)
+        await store.discard(read.url, version: read.version)
+        #expect(await store.lookup(key("a")) == nil)
         #expect(await store.size == 0)
     }
 
