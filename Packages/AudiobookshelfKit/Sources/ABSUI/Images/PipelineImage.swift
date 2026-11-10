@@ -45,8 +45,54 @@ enum ImageReveal {
     }
 }
 
+/// What a ``PipelineImage`` shows, and how each load step changes it. Generic over the image
+/// so it can be tested without decoding.
+struct ImageLoadState<Image> {
+    private(set) var image: Image?
+    /// The entity `image` shows; a different entity clears it rather than showing a stale cover.
+    private(set) var entity: String?
+    private(set) var failed = false
+
+    /// Starts a load and returns whether to run it. With no request or no pipeline it clears
+    /// everything, so the no-image fallback shows instead of an old bitmap.
+    mutating func begin(_ request: ImageLoadRequest?, hasPipeline: Bool) -> Bool {
+        guard let request, hasPipeline else {
+            self = Self()
+            return false
+        }
+        if entity != request.key.entityID {
+            image = nil
+            failed = false
+        }
+        return true
+    }
+
+    /// Publishes a load's result, unless its task was cancelled (the key changed or the view
+    /// went away) in which case it is dropped, even if the load succeeded.
+    mutating func finish(_ request: ImageLoadRequest, result: Result<Image, any Error>, isCancelled: Bool) {
+        guard !isCancelled else { return }
+        switch result {
+        case .success(let loaded):
+            image = loaded
+            entity = request.key.entityID
+            failed = false
+        case .failure:
+            image = nil
+            failed = true
+        }
+    }
+
+    /// Releases the image when the view goes off screen, so lazy cells don't hold bitmaps the
+    /// pipeline counts against its memory cap. The entity is kept, so the reload when the view
+    /// returns doesn't reset a failure, and its memory-cache hit appears without a fade.
+    mutating func disappear() {
+        image = nil
+    }
+}
+
 /// Loads `key` from the environment's pipeline at the rendered size and shows it, filling its
-/// frame. Loading starts in `.task(id:)`, so it is cancelled when the view scrolls away.
+/// frame. Loading starts in `.task(id:)`, so it is cancelled when the view scrolls away, and
+/// the image is released then too.
 ///
 /// When the image's aspect ratio differs from the frame's by more than 0.15, it is shown
 /// aspect-fit over a blurred fill of itself, like the legacy covers.
@@ -58,20 +104,17 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
     @Environment(\.imagePipeline) private var pipeline
     @Environment(\.displayScale) private var displayScale
     @State private var size = CGSize.zero
-    @State private var image: CoverImage?
-    /// The entity `image` shows; a different entity clears it rather than showing a stale cover.
-    @State private var imageEntity: String?
-    @State private var failed = false
+    @State private var state = ImageLoadState<CoverImage>()
 
     var body: some View {
         let request = ImageLoadRequest(key: key, size: size, scale: displayScale)
         Color.clear
             .overlay {
-                if let image {
+                if let image = state.image {
                     content(image)
                         .transition(.opacity)
                 } else if let fallback = ImageFallback.resolve(
-                    hasKey: key != nil, hasPipeline: pipeline != nil, failed: failed)
+                    hasKey: key != nil, hasPipeline: pipeline != nil, failed: state.failed)
                 {
                     failure(fallback)
                 } else {
@@ -86,6 +129,7 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
             }
             // Keyed on the pipeline's presence too, so one injected later starts the load.
             .task(id: pipeline == nil ? nil : request) { await load(request) }
+            .onDisappear { state.disappear() }
     }
 
     @ViewBuilder private func content(_ image: CoverImage) -> some View {
@@ -103,27 +147,19 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
     }
 
     private func load(_ request: ImageLoadRequest?) async {
-        guard let request else {
-            image = nil
-            return
-        }
-        guard let pipeline else { return }
-        if imageEntity != request.key.entityID {
-            image = nil
-            failed = false
-        }
+        guard state.begin(request, hasPipeline: pipeline != nil), let request, let pipeline else { return }
         let start = ContinuousClock.now
+        let result: Result<CoverImage, any Error>
         do {
-            let loaded = try await pipeline.image(for: request.key, pixelBox: request.box)
-            withAnimation(ImageReveal.animation(after: ContinuousClock.now - start)) {
-                image = loaded
-                imageEntity = request.key.entityID
-                failed = false
-            }
+            result = .success(try await pipeline.image(for: request.key, pixelBox: request.box))
         } catch {
-            guard !Task.isCancelled else { return }
-            image = nil
-            failed = true
+            result = .failure(error)
+        }
+        // Checked after the await: a memory hit doesn't check cancellation, and the task can be
+        // cancelled between a successful load and resuming here.
+        let isCancelled = Task.isCancelled
+        withAnimation(ImageReveal.animation(after: ContinuousClock.now - start)) {
+            state.finish(request, result: result, isCancelled: isCancelled)
         }
     }
 }

@@ -59,7 +59,7 @@ public struct CoverView: View {
     }
 
     /// The VoiceOver value: "Finished", or "Progress, 42%", or empty without a progress bar.
-    static func accessibilityValue(progress: Double?, isFinished: Bool, locale: Locale) -> String {
+    nonisolated static func accessibilityValue(progress: Double?, isFinished: Bool, locale: Locale) -> String {
         if isFinished { return L10n.string("LabelFinished") }
         guard let progress else { return "" }
         return [L10n.string("LabelProgress"), progressAccessibilityValue(progress, locale: locale)]

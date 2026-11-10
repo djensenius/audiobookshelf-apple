@@ -63,4 +63,71 @@ import Testing
                 == L10n.string("LabelFinished"))
     }
 
+    private struct LoadFailed: Error {}
+
+    private func request(_ id: String) throws -> ImageLoadRequest {
+        try #require(
+            ImageLoadRequest(
+                key: ImageKey(serverID: UUID(), kind: .itemCover, entityID: id, updatedAt: 1),
+                size: CGSize(width: 100, height: 160), scale: 2))
+    }
+
+    @Test func losingThePipelineOrRequestClearsTheLoadedImage() throws {
+        let cover = try request("li_1")
+        var state = ImageLoadState<String>()
+        let loads = state.begin(cover, hasPipeline: true)
+        #expect(loads)
+        state.finish(cover, result: .success("cover"), isCancelled: false)
+        #expect(state.image == "cover")
+        let loadsWithoutPipeline = state.begin(cover, hasPipeline: false)
+        #expect(!loadsWithoutPipeline)
+        #expect(state.image == nil && state.entity == nil && !state.failed)
+
+        state.finish(cover, result: .failure(LoadFailed()), isCancelled: false)
+        #expect(state.failed)
+        let loadsWithoutRequest = state.begin(nil, hasPipeline: true)
+        #expect(!loadsWithoutRequest)
+        #expect(state.image == nil && !state.failed)
+    }
+
+    @Test func cancelledLoadsPublishNothing() throws {
+        let (first, second) = (try request("li_1"), try request("li_2"))
+        var state = ImageLoadState<String>()
+        _ = state.begin(first, hasPipeline: true)
+        state.finish(first, result: .success("first"), isCancelled: false)
+        let loadsNewKey = state.begin(second, hasPipeline: true)
+        #expect(loadsNewKey)
+        #expect(state.image == nil)
+        // The old task's memory hit resumes after the key changed.
+        state.finish(first, result: .success("first"), isCancelled: true)
+        state.finish(first, result: .failure(LoadFailed()), isCancelled: true)
+        #expect(state.image == nil && !state.failed)
+        state.finish(second, result: .success("second"), isCancelled: false)
+        #expect(state.image == "second" && state.entity == "li_2")
+    }
+
+    @Test func disappearingReleasesTheImageAndReturningReloadsIt() throws {
+        let cover = try request("li_1")
+        var state = ImageLoadState<String>()
+        _ = state.begin(cover, hasPipeline: true)
+        state.finish(cover, result: .success("cover"), isCancelled: false)
+        state.disappear()
+        #expect(state.image == nil)
+        let reloads = state.begin(cover, hasPipeline: true)
+        #expect(reloads)
+        state.finish(cover, result: .success("cover"), isCancelled: false)
+        #expect(state.image == "cover")
+    }
+
+    @Test func sameEntityRefetchKeepsTheImageUntilTheNewOneArrives() throws {
+        var state = ImageLoadState<String>()
+        let small = try request("li_1")
+        _ = state.begin(small, hasPipeline: true)
+        state.finish(small, result: .success("small"), isCancelled: false)
+        let larger = try #require(
+            ImageLoadRequest(key: small.key, size: CGSize(width: 300, height: 480), scale: 2))
+        let loadsLarger = state.begin(larger, hasPipeline: true)
+        #expect(loadsLarger)
+        #expect(state.image == "small")
+    }
 }
