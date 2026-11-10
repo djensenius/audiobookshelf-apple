@@ -1,0 +1,73 @@
+import Accessibility
+import Foundation
+import Testing
+
+@testable import ABSUI
+
+@MainActor
+@Suite struct DailyListeningChartDescriptorTests {
+    private static let locale = Locale(identifier: "en_US")
+    private static let minutesStyle = Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: .wide).locale(locale)
+
+    private static func minutes(_ value: Int) -> String {
+        Duration.seconds(value * 60).formatted(minutesStyle)
+    }
+
+    private static let days: [DailyListeningChartDescriptor.Day] = [
+        .init(label: "Sunday, February 25", minutes: 0),
+        .init(label: "Monday, February 26", minutes: 12),
+        .init(label: "Tuesday, February 27", minutes: 0),
+        .init(label: "Wednesday, February 28", minutes: 45),
+        .init(label: "Thursday, February 29", minutes: 0),
+        .init(label: "Friday, March 1", minutes: 60),
+        .init(label: "Saturday, March 2", minutes: 30),
+    ]
+
+    @Test func describesTheWeek() throws {
+        let chart = DailyListeningChartDescriptor(days: Self.days, locale: Self.locale).makeChartDescriptor()
+        let title = L10n.string("HeaderStatsMinutesListeningChart", locale: Self.locale)
+        #expect(chart.title == title)
+        // 147 minutes in total; 147 / 7 = 21 a day.
+        #expect(
+            chart.summary
+                == L10n.string(
+                    "MessageStatsChartSummary", Self.minutes(147), Self.minutes(21), locale: Self.locale))
+
+        let xAxis = try #require(chart.xAxis as? AXCategoricalDataAxisDescriptor)
+        #expect(xAxis.title == L10n.string("LabelStatsDays", locale: Self.locale))
+        #expect(xAxis.categoryOrder == Self.days.map(\.label))
+
+        let yAxis = try #require(chart.yAxis)
+        #expect(yAxis.title == L10n.string("LabelStatsMinutesListening", locale: Self.locale))
+        #expect(yAxis.range == 0...60)
+        #expect(yAxis.valueDescriptionProvider(45) == Self.minutes(45))
+        #expect(yAxis.valueDescriptionProvider(0) == Self.minutes(0))
+
+        #expect(chart.series.count == 1)
+        let series = try #require(chart.series.first)
+        #expect(series.name == title)
+        #expect(!series.isContinuous)
+        // `AXDataPointValue` refines its accessors for Swift with no replacement, so read the
+        // underlying properties.
+        #expect(series.dataPoints.map(\.xValue.__category) == Self.days.map(\.label))
+        #expect(series.dataPoints.map { $0.yValue?.__number } == Self.days.map { Double($0.minutes) })
+    }
+
+    @Test func emptyWeekKeepsAUsableRange() throws {
+        let days = Self.days.map { DailyListeningChartDescriptor.Day(label: $0.label, minutes: 0) }
+        let chart = DailyListeningChartDescriptor(days: days, locale: Self.locale).makeChartDescriptor()
+        #expect(chart.yAxis?.range == 0...1)
+        #expect(
+            chart.summary
+                == L10n.string("MessageStatsChartSummary", Self.minutes(0), Self.minutes(0), locale: Self.locale))
+        #expect(chart.series.first?.dataPoints.map { $0.yValue?.__number } == Array(repeating: 0, count: 7))
+    }
+
+    @Test func minutesTextUsesTheLocale() {
+        let german = Locale(identifier: "de_DE")
+        let expected = Duration.seconds(75 * 60).formatted(
+            Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: .wide).locale(german))
+        #expect(DailyListeningChartDescriptor.minutesText(75, locale: german) == expected)
+        #expect(DailyListeningChartDescriptor.minutesText(75, locale: german) != Self.minutes(75))
+    }
+}

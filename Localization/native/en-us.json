@@ -8,5 +8,7 @@
   "MessageCellularSettingsHelp": "These settings also apply when Low Data Mode is on.",
   "MessageCellularSettingsHelpMac": "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on.",
   "MessageLanguageSettingsHelp": "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region.",
-  "MessageLanguageSettingsHelpMac": "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications."
+  "MessageLanguageSettingsHelpMac": "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications.",
+  "MessageStatsChartSummary": "Listened {0} in the last 7 days, a daily average of {1}.",
+  "MessageStatsLoadFailed": "Couldn't load your stats."
 }
