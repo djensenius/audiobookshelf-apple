@@ -364,6 +364,47 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func detailsRequestedBeforeARefreshAreNotStored() async throws {
+        try await withLibrarySettings { settings in
+            let response = Locked([makeLibrary("books", name: "Books"), makeLibrary("gone", name: "Gone")])
+            let gate = GatedCalls<String, LibraryWithFilterData>()
+            var fake = service([])
+            fake.librariesHandler = { response.value }
+            fake.libraryHandler = { id in try await gate.call(id) }
+            var calls = gate.calls.makeAsyncIterator()
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: fake, connectionKey: serverA)
+
+            let loadBooks = Task { try await store.loadDetails(libraryID: "books") }
+            let booksCall = try #require(await calls.next())
+            let loadGone = Task { try await store.loadDetails(libraryID: "gone") }
+            let goneCall = try #require(await calls.next())
+
+            response.value = [makeLibrary("books", name: "Audiobooks")]
+            await store.refresh()
+
+            booksCall.reply.resume(
+                returning: LibraryWithFilterData(
+                    library: makeLibrary("books", name: "Books"), filterData: LibraryFilterData()))
+            goneCall.reply.resume(
+                returning: LibraryWithFilterData(
+                    library: makeLibrary("gone", name: "Gone"), filterData: LibraryFilterData()))
+            // The callers still get the responses, but the store keeps the refreshed state.
+            #expect(try await loadBooks.value.library.name == "Books")
+            #expect(try await loadGone.value.library.id == "gone")
+            #expect(store.libraries.map(\.name) == ["Audiobooks"])
+            #expect(store.details.isEmpty)
+
+            // A load started after the refresh is stored.
+            let reload = Task { try await store.loadDetails(libraryID: "books") }
+            try #require(await calls.next()).reply.resume(
+                returning: LibraryWithFilterData(
+                    library: makeLibrary("books", name: "Audiobooks"), filterData: LibraryFilterData(tags: ["t"])))
+            _ = try await reload.value
+            #expect(store.filterData(libraryID: "books")?.tags == ["t"])
+        }
+    }
+
     @Test func refreshKeepsLibrariesOnFailureAndDropsRemovedOnes() async throws {
         try await withLibrarySettings { settings in
             let response = Locked<Result<[Library], TestError>>(.success([makeLibrary("one"), makeLibrary("two")]))

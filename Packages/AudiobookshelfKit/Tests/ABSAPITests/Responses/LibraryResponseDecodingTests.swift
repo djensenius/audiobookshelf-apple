@@ -59,15 +59,26 @@ private let episodeMatch =
             PagedResults<LibraryItem>.self,
             #"{"results":[\#(book),{"id":"bad"}],"total":40,"limit":"20","page":"1","sortBy":"addedAt"}"#)
         #expect(page.results.map(\.id) == ["li1"])
+        #expect(page.rawCount == 2)
         #expect(page.total == 40)
         #expect(page.limit == 20)
         #expect(page.page == 1)
+    }
+
+    @Test func pagedResultsCountRowsThatFailToDecode() throws {
+        let malformed = try decode(
+            PagedResults<LibraryItem>.self, #"{"results":[{"id":"bad"},7,null],"total":40,"limit":3,"page":0}"#)
+        #expect(malformed.results.isEmpty)
+        #expect(malformed.rawCount == 3)
+        let missing = try decode(PagedResults<LibraryItem>.self, #"{"total":0,"limit":3,"page":0}"#)
+        #expect(missing.rawCount == 0)
     }
 
     @Test func pagedResultsWithoutTotalOrPaging() throws {
         let page = try decode(
             PagedResults<Series>.self, #"{"results":[{"id":"ser1","name":"Saga"}],"limit":0,"page":0}"#)
         #expect(page.results.map(\.name) == ["Saga"])
+        #expect(page.rawCount == 1)
         #expect(page.total == nil)
         #expect(page.limit == 0)
     }

@@ -10,6 +10,12 @@ import Observation
 /// within ``prefetchThreshold`` of the end appears. Items whose ID was already loaded are
 /// skipped, because offset paging repeats items when the list changes on the server.
 ///
+/// Paging counts the rows the server sent (`PagedResults.rawCount`), so rows that fail to
+/// decode don't end the list early. A page that adds no item (all its rows malformed or
+/// duplicates) can't be scrolled to, so the next page loads right away, until
+/// ``maxEmptyPagesInARow`` such pages arrived in a row; then the next page waits for
+/// ``loadNextPage()`` or an appearing item, so a server sending only malformed rows can't loop.
+///
 /// Changing the query with ``setQuery(_:)`` (or calling ``reset()``) cancels the page in flight,
 /// clears the list and loads the first page again. ``refresh()`` reloads too, but keeps the list
 /// until the first new page replaces it. Each reset or refresh starts a new generation, and a
@@ -39,11 +45,16 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     public let prefetchThreshold: Int
     /// The account the model loads for, when created by `LibraryStore`.
     public let connectionKey: LibraryConnectionKey?
+    /// How many pages that add no item load automatically in a row.
+    public let maxEmptyPagesInARow = 3
 
     @ObservationIgnored private let fetchPage: PageFetcher
     @ObservationIgnored private var nextPage = 0
-    /// Results received, including duplicates, compared with `total` to detect the end.
+    /// Rows received, including duplicates and rows that failed to decode, compared with
+    /// `total` to detect the end.
     @ObservationIgnored private var fetchedCount = 0
+    /// Consecutive pages that added no item.
+    @ObservationIgnored private var emptyPagesInARow = 0
     @ObservationIgnored private var indexByID: [Item.ID: Int] = [:]
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var loadTask: Task<Void, Never>?
@@ -107,6 +118,7 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
         reachedEnd = false
         nextPage = 0
         fetchedCount = 0
+        emptyPagesInARow = 0
     }
 
     /// Loads the next page unless one is in flight or the end was reached. Returns the page's
@@ -155,27 +167,33 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
         switch result {
         case .success(let page):
             nextPage += 1
-            fetchedCount += page.results.count
+            fetchedCount += page.rawCount
             var appended = items
             if replacesItems {
                 replacesItems = false
                 appended = []
                 indexByID = [:]
             }
+            var added = 0
             for item in page.results where indexByID[item.id] == nil {
                 indexByID[item.id] = appended.count
                 appended.append(item)
+                added += 1
             }
             items = appended
             total = page.total
             reachedEnd =
-                if page.results.isEmpty || pageSize <= 0 {
+                if page.rawCount == 0 || pageSize <= 0 {
                     true
                 } else if let total = page.total {
                     fetchedCount >= total
                 } else {
-                    page.results.count < pageSize
+                    page.rawCount < pageSize
                 }
+            emptyPagesInARow = added == 0 ? emptyPagesInARow + 1 : 0
+            if !reachedEnd, added == 0, emptyPagesInARow < maxEmptyPagesInARow {
+                loadNextPage()
+            }
         case .failure(let error) where error is CancellationError:
             // A cancelled refresh keeps the current items; later pages are appended to them (and
             // deduplicated) rather than replacing the list from a scroll.

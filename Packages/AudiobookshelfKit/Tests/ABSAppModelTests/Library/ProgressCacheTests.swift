@@ -13,11 +13,6 @@ private func progress(
         lastUpdate: lastUpdate)
 }
 
-/// A request time in epoch milliseconds.
-private func at(_ milliseconds: Int) -> Date {
-    Date(timeIntervalSince1970: Double(milliseconds) / 1000)
-}
-
 @MainActor
 @Suite struct ProgressCacheTests {
     @Test func seedKeysByItemAndEpisode() {
@@ -27,7 +22,7 @@ private func at(_ milliseconds: Int) -> Date {
                 progress("book", currentTime: 1, lastUpdate: 10),
                 progress("podcast", episode: "e1", currentTime: 2, lastUpdate: 10),
                 progress("podcast", episode: "e2", currentTime: 3, lastUpdate: 10),
-            ], fetchedAt: at(10))
+            ], since: cache.revision)
 
         #expect(cache.progress(libraryItemID: "book")?.currentTime == 1)
         #expect(cache.progress(libraryItemID: "podcast", episodeID: "e1")?.currentTime == 2)
@@ -76,7 +71,7 @@ private func at(_ milliseconds: Int) -> Date {
                 // An undated row never replaces a dated entry.
                 progress("dated", currentTime: 0, lastUpdate: nil),
                 progress("new", currentTime: 7, lastUpdate: 100),
-            ], fetchedAt: at(1000))
+            ], since: cache.revision)
 
         #expect(cache.progress(libraryItemID: "played-locally")?.currentTime == 50)
         #expect(cache.progress(libraryItemID: "stale-locally")?.currentTime == 9)
@@ -93,7 +88,7 @@ private func at(_ milliseconds: Int) -> Date {
                 progress("newer-first", currentTime: 1, lastUpdate: 10),
                 progress("older-first", currentTime: 1, lastUpdate: 10),
                 progress("older-first", currentTime: 2, lastUpdate: 20),
-            ], fetchedAt: at(100))
+            ], since: cache.revision)
 
         #expect(cache.progress(libraryItemID: "newer-first")?.currentTime == 2)
         #expect(cache.progress(libraryItemID: "older-first")?.currentTime == 2)
@@ -102,25 +97,68 @@ private func at(_ milliseconds: Int) -> Date {
     @Test func seedKeepsEntriesAppliedAfterTheRequest() {
         let cache = ProgressCache()
         cache.apply(progress("deleted-on-server", lastUpdate: 900))
-        cache.apply(progress("same-millisecond", lastUpdate: 1000))
-        cache.apply(progress("undated", lastUpdate: nil))
-        // `/api/me` was requested at 1000; meanwhile playback started an item with no server
-        // progress, which the response therefore doesn't contain.
+        // A clock far ahead doesn't keep an entry applied before the request.
+        cache.apply(progress("clock-ahead", lastUpdate: 9_999_999))
+        cache.apply(progress("undated-before", lastUpdate: nil))
+        let boundary = cache.revision
+        // While `/api/me` is in flight, playback starts items with no server progress, so the
+        // response doesn't contain them, whatever their timestamps.
         cache.apply(progress("started-meanwhile", currentTime: 3, lastUpdate: 1500))
+        cache.apply(progress("undated-meanwhile", currentTime: 4, lastUpdate: nil))
+        cache.apply(progress("server-clock-behind", currentTime: 5, lastUpdate: 1))
 
-        cache.seed([progress("on-server", lastUpdate: 800)], fetchedAt: at(1000))
+        cache.seed([progress("on-server", lastUpdate: 800)], since: boundary)
 
         #expect(cache.progress(libraryItemID: "started-meanwhile")?.currentTime == 3)
+        #expect(cache.progress(libraryItemID: "undated-meanwhile")?.currentTime == 4)
+        #expect(cache.progress(libraryItemID: "server-clock-behind")?.currentTime == 5)
         #expect(cache.progress(libraryItemID: "on-server") != nil)
         #expect(cache.progress(libraryItemID: "deleted-on-server") == nil)
-        #expect(cache.progress(libraryItemID: "same-millisecond") == nil)
-        #expect(cache.progress(libraryItemID: "undated") == nil)
-        #expect(cache.storedKeys == ["started-meanwhile", "on-server"])
+        #expect(cache.progress(libraryItemID: "clock-ahead") == nil)
+        #expect(cache.progress(libraryItemID: "undated-before") == nil)
+        #expect(
+            cache.storedKeys == ["started-meanwhile", "undated-meanwhile", "server-clock-behind", "on-server"])
+    }
+
+    @Test func seedRowsAgainstEntriesAppliedAfterTheRequest() {
+        let cache = ProgressCache()
+        let boundary = cache.revision
+        cache.apply(progress("undated", currentTime: 1, lastUpdate: nil))
+        cache.apply(progress("older-row", currentTime: 2, lastUpdate: 500))
+        cache.apply(progress("tie", currentTime: 3, lastUpdate: 500))
+        cache.apply(progress("newer-row", currentTime: 4, lastUpdate: 500))
+
+        cache.seed(
+            [
+                // A dated row doesn't replace an undated local update made after the request.
+                progress("undated", currentTime: 10, lastUpdate: 100),
+                progress("older-row", currentTime: 20, lastUpdate: 400),
+                progress("tie", currentTime: 30, lastUpdate: 500),
+                // The server got a later update (for example from another device).
+                progress("newer-row", currentTime: 40, lastUpdate: 600),
+            ], since: boundary)
+
+        #expect(cache.progress(libraryItemID: "undated")?.currentTime == 1)
+        #expect(cache.progress(libraryItemID: "older-row")?.currentTime == 2)
+        #expect(cache.progress(libraryItemID: "tie")?.currentTime == 3)
+        #expect(cache.progress(libraryItemID: "newer-row")?.currentTime == 40)
+    }
+
+    @Test func seedDoesNotChangeTheRevision() {
+        let cache = ProgressCache()
+        #expect(cache.revision == 0)
+        cache.apply(progress("a", lastUpdate: 1))
+        #expect(cache.revision == 1)
+        #expect(!cache.apply(progress("a", lastUpdate: 0)))
+        #expect(cache.revision == 1)
+        cache.seed([progress("b", lastUpdate: 1)], since: cache.revision)
+        cache.clear()
+        #expect(cache.revision == 1)
     }
 
     @Test func removeAndClear() {
         let cache = ProgressCache()
-        cache.seed([progress("a", lastUpdate: 1), progress("p", episode: "e", lastUpdate: 1)], fetchedAt: at(1))
+        cache.seed([progress("a", lastUpdate: 1), progress("p", episode: "e", lastUpdate: 1)], since: cache.revision)
 
         cache.remove(libraryItemID: "p", episodeID: "e")
         #expect(cache.progress(libraryItemID: "p", episodeID: "e") == nil)
@@ -138,7 +176,7 @@ private func at(_ milliseconds: Int) -> Date {
         _ = cache.progress(libraryItemID: "c")  // an empty entry a view may be watching
         #expect(cache.entryCount == 3)
 
-        cache.seed([progress("b", lastUpdate: 1)], fetchedAt: at(10))
+        cache.seed([progress("b", lastUpdate: 1)], since: cache.revision)
         #expect(cache.entryCount == 2)
         cache.remove(libraryItemID: "b")
         #expect(cache.entryCount == 1)
@@ -155,6 +193,26 @@ private func at(_ milliseconds: Int) -> Date {
         cache.apply(progress("a", currentTime: 5, lastUpdate: 20))
         #expect(changed.value)
         #expect(cache.progress(libraryItemID: "a")?.currentTime == 5)
+    }
+
+    @Test func clearKeepsObserversOfMissingProgressAttached() {
+        let cache = ProgressCache()
+        cache.apply(progress("a", lastUpdate: 1))
+        let changed = Locked(false)
+        withObservationTracking {
+            _ = cache.progress(libraryItemID: "missing")
+        } onChange: {
+            changed.value = true
+        }
+        let entries = cache.entryCount
+
+        cache.clear()
+        #expect(cache.entryCount == entries)
+        #expect(!changed.value)
+
+        cache.apply(progress("missing", currentTime: 7, lastUpdate: 2))
+        #expect(changed.value)
+        #expect(cache.progress(libraryItemID: "missing")?.currentTime == 7)
     }
 
     @Test func observationIsPerKey() {
@@ -174,7 +232,7 @@ private func at(_ milliseconds: Int) -> Date {
         let readerOfB = observe("b")
         let readerOfC = observe("c")  // not cached yet
         cache.apply(progress("a", lastUpdate: 2))
-        cache.seed([progress("a", lastUpdate: 2), progress("b", lastUpdate: 1)], fetchedAt: at(2))
+        cache.seed([progress("a", lastUpdate: 2), progress("b", lastUpdate: 1)], since: cache.revision)
         #expect(!readerOfB.value)
         #expect(!readerOfC.value)
 
@@ -187,7 +245,7 @@ private func at(_ milliseconds: Int) -> Date {
 
         // Removal by a seed and clearing notify readers too.
         let rereadB = observe("b")
-        cache.seed([progress("a", lastUpdate: 2)], fetchedAt: at(10))
+        cache.seed([progress("a", lastUpdate: 2)], since: cache.revision)
         #expect(rereadB.value)
         let readerOfA = observe("a")
         cache.clear()

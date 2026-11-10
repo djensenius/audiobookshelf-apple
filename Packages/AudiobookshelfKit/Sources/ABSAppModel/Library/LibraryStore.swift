@@ -47,7 +47,11 @@ public final class LibraryStore {
     /// Bumped by ``clear()``, so responses for an earlier account are dropped.
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var refreshSequence = 0
-    @ObservationIgnored private var detailSequences: [String: Int] = [:]
+    @ObservationIgnored private var detailRequestCount = 0
+    /// The latest detail request per library whose response may still be stored. A successful
+    /// refresh empties it, so a response requested before the refresh can't bring back a removed
+    /// library or an old name.
+    @ObservationIgnored private var latestDetailRequests: [String: Int] = [:]
 
     public init(settings: AppSettings) {
         self.settings = settings
@@ -74,7 +78,8 @@ public final class LibraryStore {
     }
 
     /// Reloads the libraries list. Loaded details take the refreshed libraries (for example a
-    /// new name), and details of libraries that no longer exist are dropped.
+    /// new name), details of libraries that no longer exist are dropped, and detail loads still
+    /// in flight are no longer stored.
     public func refresh() async {
         guard let client else { return }
         let generation = generation
@@ -101,6 +106,7 @@ public final class LibraryStore {
                     numUserPlaylists: loaded.numUserPlaylists)
             }
             self.details = details
+            latestDetailRequests = [:]
             hasLoaded = true
             error = nil
         case .failure(let error):
@@ -119,7 +125,7 @@ public final class LibraryStore {
         isLoading = false
         error = nil
         defaultLibraryID = nil
-        detailSequences = [:]
+        latestDetailRequests = [:]
         progress.clear()
     }
 
@@ -140,16 +146,18 @@ public final class LibraryStore {
     /// Loads a library with its filter data and stores it under its ID.
     ///
     /// Throws `CancellationError` when the store was cleared or connected to another account
-    /// meanwhile. When several loads of the same library overlap, the last one started is kept.
+    /// meanwhile. When several loads of the same library overlap, the last one started is kept;
+    /// a response to a load started before a successful ``refresh()`` is returned but not stored.
     @discardableResult
     public func loadDetails(libraryID: String) async throws -> LibraryWithFilterData {
         guard let client else { throw CancellationError() }
         let generation = generation
-        let sequence = (detailSequences[libraryID] ?? 0) + 1
-        detailSequences[libraryID] = sequence
+        detailRequestCount += 1
+        let request = detailRequestCount
+        latestDetailRequests[libraryID] = request
         let loaded = try await client.library(id: libraryID)
         guard generation == self.generation else { throw CancellationError() }
-        if detailSequences[libraryID] == sequence {
+        if latestDetailRequests[libraryID] == request {
             details[libraryID] = loaded
             if let index = libraries.firstIndex(where: { $0.id == loaded.library.id }) {
                 libraries[index] = loaded.library

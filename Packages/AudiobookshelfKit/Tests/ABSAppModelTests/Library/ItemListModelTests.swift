@@ -41,6 +41,19 @@ private func makeModel(_ server: PageServer, query: String = "a", pageSize: Int 
     }
 }
 
+/// Serves pages whose rows partly failed to decode: `rawCounts[page]` rows were sent and
+/// `pages[page]` survived.
+@MainActor
+private func makeLossyModel(
+    pages: [[TestItem]], rawCounts: [Int], total: Int?, pageSize: Int = 4, requests: Locked<[Int]>
+) -> Model {
+    Model(query: "a", pageSize: pageSize, prefetchThreshold: 1) { _, page, limit in
+        requests.value.append(page)
+        guard page < pages.count else { return PagedResults(results: [], total: total, limit: limit, page: page) }
+        return PagedResults(results: pages[page], total: total, limit: limit, page: page, rawCount: rawCounts[page])
+    }
+}
+
 @MainActor
 @Suite struct ItemListModelTests {
     @Test func appendsPagesInOrder() async {
@@ -341,5 +354,54 @@ private func makeModel(_ server: PageServer, query: String = "a", pageSize: Int 
         await model.loadNextPage()?.value
         #expect(queries.value == [LibraryQuery(sort: "addedAt", descending: true, page: 0, limit: 50)])
         #expect(model.reachedEnd)
+    }
+    @Test func malformedRowsDoNotEndTheList() async {
+        for total in [12, nil] as [Int?] {
+            let requests = Locked<[Int]>([])
+            // Page 0 is full but one row failed to decode; page 1 is entirely malformed.
+            let model = makeLossyModel(
+                pages: [items(1...3), [], items(9...12)], rawCounts: [4, 4, 4], total: total, requests: requests)
+
+            await model.loadNextPage()?.value
+            #expect(model.items == items(1...3))
+            #expect(!model.reachedEnd)
+
+            await model.loadNextPage()?.value
+            // The empty page started the next load by itself; this awaits it.
+            #expect(model.isLoading)
+            await model.loadNextPage()?.value
+            #expect(requests.value == [0, 1, 2])
+            #expect(model.items == items(1...3) + items(9...12))
+            if total != nil { #expect(model.reachedEnd) }
+        }
+    }
+
+    @Test func pagesWithoutDisplayableItemsAdvanceAutomatically() async {
+        let requests = Locked<[Int]>([])
+        let model = makeLossyModel(
+            pages: [[], [], items(1...2)], rawCounts: [4, 4, 2], total: 10, requests: requests)
+
+        await model.loadNextPage()?.value
+        // Each empty page started the next load, so the in-flight load is the auto-advanced one.
+        while let task = model.loadNextPage() { await task.value }
+        #expect(requests.value == [0, 1, 2])
+        #expect(model.items == items(1...2))
+        #expect(model.reachedEnd)
+    }
+
+    @Test func automaticAdvanceIsBounded() async {
+        let requests = Locked<[Int]>([])
+        let malformed = Array(repeating: [TestItem](), count: 10)
+        let model = makeLossyModel(
+            pages: malformed, rawCounts: Array(repeating: 4, count: 10), total: 40, requests: requests)
+
+        await model.loadNextPage()?.value
+        while model.isLoading, let task = model.loadNextPage() { await task.value }
+        // Three empty pages in a row stop the automatic loads; a scroll or call continues.
+        #expect(requests.value == [0, 1, 2])
+        #expect(!model.reachedEnd)
+        #expect(!model.isLoading)
+        await model.loadNextPage()?.value
+        #expect(requests.value.count == 4)
     }
 }
