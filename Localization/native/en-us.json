@@ -41,5 +41,9 @@
   "MessageNoHistory": "No History",
   "MessageStatsChartSummary": "Listened {0} in the last 7 days, a daily average of {1}.",
   "MessageStatsLoadFailed": "Couldn't load your stats.",
-  "MessageStatsRefreshFailed": "Couldn't refresh your stats. Showing the last ones loaded."
+  "MessageStatsRefreshFailed": "Couldn't refresh your stats. Showing the last ones loaded.",
+  "SharedBookCount": "{0} books",
+  "SharedHideFromContinueListening": "Hide from Continue Listening",
+  "SharedMarkAsNotFinished": "Mark as Not Finished",
+  "SharedOpenDetailsHint": "Opens the details."
 }
