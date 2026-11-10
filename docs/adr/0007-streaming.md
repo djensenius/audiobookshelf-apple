@@ -1,13 +1,13 @@
 # 0007. Streaming strategy and minimum server version
 - Status: Accepted
 - Date: 2026-11-09
-- Issue: #TBD
+- Issue: #48 (P2-02)
 
 ## Context
 
 The native app must stream audiobooks and podcast episodes with `AVPlayer` on iOS, iPadOS, iPhone Duo, macOS and CarPlay (minimum OS 27.0). The audio comes from an Audiobookshelf server. Most of those servers need authentication, and some sit behind reverse proxies.
 
-The legacy Capacitor app authenticates its HLS transcode stream with the string literal `"AVURLAssetHTTPHeaderFieldsKey"` (`ios/App/Shared/player/AudioPlayer.swift:581-587`). That key is not public API. The iOS 27.2 SDK `AVAsset.h` has no `HTTPHeaderFieldsKey` symbol; only the private `_AVURLAssetHTTPHeaderFieldsKey` is exported (see [platform API research §3.4](../research/platform-apis.md)). We will not ship it.
+The legacy Capacitor app authenticates its HLS transcode stream with the string literal `"AVURLAssetHTTPHeaderFieldsKey"` (`ios/App/Shared/player/AudioPlayer.swift:581-587`). That key is not public API. The iOS 27.2 SDK `AVAsset.h` declares no `HTTPHeaderFieldsKey` constant. AVFoundation's `.tbd` does list `_AVURLAssetHTTPHeaderFieldsKey`, but the leading `_` is Mach-O C symbol mangling: the binary exports a constant named `AVURLAssetHTTPHeaderFieldsKey` that is unpublished and undocumented (see [platform API research §3.4](../research/platform-apis.md)). We will not ship it.
 
 Server facts below come from the server source at `advplyr/audiobookshelf` `master` @ `83dce682e88c2b32b0c33a8f83a9457bfc459e0e` (latest tag v2.37.2) and from tags `v2.22.0` (`25c7e95a`) and `v2.26.0` (`264ae928`).
 
@@ -181,12 +181,12 @@ Cons:
    **Gating:**
    - **Before sign-in:** read `GET /status` `serverVersion`. If it is below 2.26.0 or unparseable, block sign-in with a localised "This server runs Audiobookshelf X. Version 2.26.0 or newer is required." message and a link to the server upgrade docs.
    - **After every login or authorize:** re-check `serverSettings.version`. If the server has been downgraded, show a blocking banner and disable playback.
-   - **Finer gates** live in a single `ServerCapabilities` value derived from the version. There is only one today:
+   - **Finer gates** live in `ServerFeatures` (ABSCore, P1-03 #26), derived from the version. There is only one today:
      - **Below 2.26.3:** a podcast episode track whose `index` is `null` cannot be addressed on the public route. For that case only, use Option 2 (`/api/items/{id}/file/{ino}?token=`). Refresh the access token immediately before creating the item, and accept the 1-hour limit, because episodes are usually short.
 2. **Direct play (the default) uses Option 1.**
    - Start the session with this JSON body:
      - `deviceInfo`:
-       - `deviceId`: a per-install UUID stored in the Keychain, because `identifierForVendor` does not exist on macOS
+       - `deviceId`: a stable device UUID stored in the Keychain, because `identifierForVendor` does not exist on macOS. Keychain items survive app deletion and reinstall, so the server keeps seeing the same device
        - `clientName`: "Audiobookshelf Apple"
        - `clientVersion`
        - `manufacturer`: "Apple"
@@ -204,13 +204,18 @@ Cons:
    - **Planned fallback:** if the session comes back with `playMethod == 2`, play `<server> + audioTracks[0].contentUrl` with a plain `AVURLAsset`. That single item covers the whole book.
    - **Reactive fallback:** if a direct-play `AVPlayerItem` fails with a decode or format error (not a network error or HTTP 404), close the session and re-open it once with `forceTranscode: true`, resuming at the current position. This matches legacy behaviour.
    - **Session loss:** HTTP 404 on any track or segment means the session was lost. Re-open the session in the same mode and resume at the last known position.
+   - **Detecting the failure on a plain `AVURLAsset`.** AVFoundation does not hand the app the HTTP response:
+     - Observe `AVPlayerItem.status == .failed` and `AVPlayerItemFailedToPlayToEndTime` (`AVPlayerItemFailedToPlayToEndTimeErrorKey`).
+     - On a failure or a stall (`AVPlayerItemPlaybackStalled`), read the `AVPlayerItem.errorLog()` events (`AVPlayerItemNewErrorLogEntry`). For HTTP failures, `errorStatusCode` and `errorComment` usually carry the HTTP status, for example `404` with "HTTP 404: File Not Found" in `CoreMediaErrorDomain`. This is typical for HLS. Whether progressive items fill the error log is unverified.
+     - Whenever the status is 404, ambiguous or missing, confirm with `GET /api/session/{id}` (also 404 when the session is gone) before choosing between "session lost" and "decode error". Treat `AVError.fileFormatNotRecognized`, `.decodeFailed` and similar codes as decode errors.
+     - The resource-loader path sees the `HTTPURLResponse` directly and maps 404 the same way.
 4. **`supportedMimeTypes` are computed at runtime, not hard-coded.**
    - Take the server's audio MIME set: `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/flac`, `audio/x-caf`, `audio/x-aiff`, `audio/ogg`, `audio/webm`, `audio/x-matroska`, `audio/x-ms-wma`, `audio/amr-wb`.
    - Keep each type for which `AVURLAsset.isPlayableExtendedMIMEType(_:)` returns true.
    - Then apply a **denylist** owned by this ADR. It starts with `audio/ogg` and `audio/amr-wb`:
      - `audio/ogg` covers both Vorbis and Opus, and progressive Ogg seeking over HTTP in `AVPlayer` is unproven.
      - AMR-WB is not in `AVURLAsset.audiovisualMIMETypes()`.
-   - Remove a denylist entry only when the validation matrix shows it passes on both iOS and macOS.
+   - Remove a denylist entry only when the validation matrix in #49 shows it passes on both iOS and macOS.
    - Expected result on OS 27: `audio/mpeg`, `audio/mp4`, `audio/aac`, `audio/flac`, `audio/x-caf`, `audio/x-aiff`. A runtime probe on macOS 27.2 returned `true` for all six, and `false` for webm, matroska and wma.
    - A multi-file book with any denied file is transcoded as a whole, because `Book.checkCanDirectPlay` uses `every`.
 5. **Multi-track books** use one `AVPlayerItem` per track in an `AVQueuePlayer` (`actionAtItemEnd = .advance`).
@@ -220,7 +225,7 @@ Cons:
    - HLS sessions always have exactly one track.
    - Engine details belong to the playback-engine issue.
 6. **Custom-header servers.**
-   - When a server config has custom headers, the app sends them on **all** `URLSession` API and download requests. That is broader than the legacy app, which sends them only on ping and login.
+   - When a server config has custom headers, the app sends them on **all** `URLSession` API and download requests. That is broader than the legacy app, which sends them only on ping and login. Header values are secrets and live in the Keychain.
    - **Direct play** uses Option 4: a custom-scheme resource loader, used only for that server. It adds the custom headers and nothing else, because `/public/session` needs no Bearer token.
    - If the only custom header is `Cookie`, pass it with the public `AVURLAssetHTTPCookiesKey` on a plain asset instead. We assume that key also covers HLS segment requests; validation must confirm it.
    - **HLS with non-cookie custom headers is not supported** (Option 4 cannot cover segments, and Options 3 and 5 are rejected).
@@ -238,6 +243,11 @@ Cons:
    - **After reconnecting:** batch unsent sessions with `POST /api/session/local-all`.
    - Before a session starts, server progress that is newer than local progress wins, as in the legacy flow (`ApiClient.swift:532-591`).
    - A downloaded item never falls back to streaming silently. A missing file is shown as an error with a "Stream instead" action, which starts a normal server session.
+   - **Downloads themselves** (fetching files for offline use) do **not** use `?token=`. That differs from the legacy app (`AbsDownloader.swift:454`):
+     - Request `/api/items/{id}/file/{ino}/download` with an `Authorization: Bearer` header plus any custom headers.
+     - Refresh the access token before creating or resuming each background `URLSession` task, because a task can sit queued longer than the 1-hour token lifetime.
+     - On HTTP 401, refresh the token and recreate the task. Use resume data when available; the new request carries the new header.
+     - Store only token-free server paths and local file paths in SwiftData. Never store signed or tokenised URLs.
 8. **Streaming sessions:**
    - Sync with `POST /api/session/{id}/sync` `{currentTime, timeListened, duration}`.
    - Close with `POST /api/session/{id}/close` when playback stops, the item changes or the user signs out.
@@ -255,28 +265,25 @@ Cons:
 
 ## Validation
 
-**Sign-off:** the owner must sign off the minimum version (2.26.0) before the engine work starts.
+**Acceptance.** This ADR is Accepted with a minimum server version of 2.26.0. The coordinator signed it off in autopilot. The owner may supersede it with a new ADR.
 
-**Spike matrix: pending.**
-- "Expected" comes from reading the server source.
-- Fill in "Observed" on a physical iPhone (iOS 27) and a Mac (macOS 27) against real servers.
-- For each cell, check:
+**Device validation is performed in #49 (P2-03).** It is part of that issue's acceptance criteria. The matrix below is the expected behaviour, derived from the server source. #49 records the observed results on a physical iPhone (iOS 27) and a Mac (macOS 27) against real servers. For each cell, #49 checks:
   - start
   - seek ±1 h
   - seek into an unbuffered range
   - the track boundary (multi-file mp3)
   - resume after more than 1 h paused
 
-| Server | m4b (single file) | Multi-file mp3 | Opus (`.opus` → `audio/ogg`) | FLAC | Observed |
-|---|---|---|---|---|---|
-| < 2.22.0 | Blocked at sign-in | Blocked | Blocked | Blocked | pending |
-| 2.22.0–2.25.x | Blocked (pre-JWT auth) | Blocked | Blocked | Blocked | pending |
-| 2.26.0–2.26.2 | Direct play, public track | Direct play, N items in `AVQueuePlayer` | HLS transcode (denylisted) | Direct play | pending |
-| 2.26.3–2.27.x | as above | as above | as above | as above | pending |
-| ≥ 2.28.0 (test on 2.37.2) | as above | as above | as above | as above | pending |
-| Any ≥ 2.26.0 behind a custom-header proxy | Direct play via resource loader | Direct play via resource loader | Error (needs transcode) | Direct play via resource loader | pending |
+| Server | m4b (single file) | Multi-file mp3 | Opus (`.opus` → `audio/ogg`) | FLAC |
+|---|---|---|---|---|
+| < 2.22.0 | Blocked at sign-in | Blocked | Blocked | Blocked |
+| 2.22.0–2.25.x | Blocked (pre-JWT auth) | Blocked | Blocked | Blocked |
+| 2.26.0–2.26.2 | Direct play, public track | Direct play, N items in `AVQueuePlayer` | HLS transcode (denylisted) | Direct play |
+| 2.26.3–2.27.x | as above | as above | as above | as above |
+| ≥ 2.28.0 (test on 2.37.2) | as above | as above | as above | as above |
+| Any ≥ 2.26.0 behind a custom-header proxy | Direct play via resource loader | Direct play via resource loader | Error (needs transcode) | Direct play via resource loader |
 
-**Additional checks** on one supported server:
+**Additional checks in #49,** on one supported server:
 - `forceTranscode: true` on an m4b returns `playMethod 2`, and `/hls/…/output.m3u8` plays without any `Authorization` header.
 - `forceDirectPlay: true` on a `.wma` returns `playMethod 0`, and `AVPlayer` fails. This confirms the app must never send `forceDirectPlay: true` blindly.
 - `curl -r 1000-1999` on the public track URL returns `206` with `Content-Range`, both with and without X-Accel (nginx).
@@ -286,7 +293,7 @@ Cons:
 
 **Verified from source and SDK:**
 - Every server behaviour cited in Context, with file paths at the commits listed.
-- SDK header facts: no public header-fields key; `AVURLAssetOverrideMIMETypeKey` is available from iOS 17; `AVURLAssetHTTPCookiesKey` and `AVURLAssetHTTPUserAgentKey` are public.
+- SDK header facts: no published header-fields key; `AVURLAssetOverrideMIMETypeKey` is available from iOS 17; `AVURLAssetHTTPCookiesKey` and `AVURLAssetHTTPUserAgentKey` are public.
 - The resource-loader API shape typechecks under Swift 6 for iOS and macOS 27.
 - The MIME probe ran on macOS 27.2 only.
 
@@ -295,6 +302,7 @@ Cons:
 - iOS results from `isPlayableExtendedMIMEType`.
 - Resource-loader limits for HLS segments.
 - Cookie propagation to HLS segments.
+- HTTP status reporting through `AVPlayerItem.errorLog()` for progressive (non-HLS) items.
 - Express `sendFile` range support (the documented default of the `send` module, not re-read).
 
 ## References
