@@ -357,6 +357,8 @@ Cons:
    - **Online:** report with `POST /api/session/local` while playing.
    - **After reconnecting:** batch unsent sessions with `POST /api/session/local-all`.
    - Before a session starts, server progress that is newer than local progress wins, as in the legacy flow (`ApiClient.swift:532-591`).
+     - Newer means saved later. An unsent edit is dated by its edit time, a synced group by the later of its edit time and the server's `lastUpdate`. That date covers the whole row, so for a synced group it is only an upper bound on when the group last changed. Equal dates go to the server, as in the sync merge (ADR 0003).
+     - An unsent audio edit is kept when the server's audio still equals what the row last saw, however new its `lastUpdate`: another device changed something else, such as the ebook position or the finished flag.
    - A downloaded item never falls back to streaming silently. A missing file is shown as an error with a "Stream instead" action, which starts a normal server session.
    - **Downloads themselves** (fetching files for offline use) do **not** use `?token=`. That differs from the legacy app (`AbsDownloader.swift:454`):
      - Request `/api/items/{id}/file/{ino}/download` with an `Authorization: Bearer` header plus any custom headers.
