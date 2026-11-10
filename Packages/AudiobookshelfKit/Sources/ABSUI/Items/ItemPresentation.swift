@@ -129,12 +129,14 @@ extension View {
 struct MissingIndicator: View {
     var body: some View {
         Label {
+            // Text uses the secondary label colour for contrast; the icon carries the red.
             Text(verbatim: L10n.string("LabelMissing"))
+                .foregroundStyle(.secondary)
         } icon: {
             Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(ABSColor.error)
         }
         .font(.caption.weight(.semibold))
-        .foregroundStyle(ABSColor.error)
         // The cell speaks the state in its accessibility value.
         .accessibilityHidden(true)
     }

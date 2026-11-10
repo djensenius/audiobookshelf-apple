@@ -107,7 +107,8 @@ public struct ItemSummary: Sendable, Hashable, Identifiable {
             self.init(
                 id: "series-\(collapsed.id)", itemID: item.id, seriesID: collapsed.id, kind: .series,
                 title: collapsed.name, bookCount: collapsed.numBooks ?? collapsed.libraryItemIds?.count, cover: cover,
-                isMissing: unplayable, hasAudio: false)
+                // The entry stands for the series, never missing itself even if its first book is.
+                isMissing: false, hasAudio: false)
             return
         }
         switch item.media {

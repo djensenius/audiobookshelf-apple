@@ -138,6 +138,13 @@ import Testing
         #expect(ItemSummary(item: book(collapsed: counted)).bookCount == 2)
     }
 
+    @Test func aCollapsedSeriesIsNeverMissingEvenWhenItsFirstBookIs() {
+        let collapsed = CollapsedSeries(id: "ser_1", name: "Barsoom", numBooks: 3)
+        #expect(ItemSummary(item: book(collapsed: collapsed, isMissing: true)).isMissing == false)
+        #expect(ItemSummary(item: book(collapsed: collapsed, isInvalid: true)).isMissing == false)
+        #expect(ItemSummary(item: book(isMissing: true)).isMissing)
+    }
+
     @Test func seriesSummaryKeepsTheFirstFourCovers() {
         let books = (1...6).map { book(id: "li_\($0)") }
         let summary = SeriesSummary(series: Series(id: "s", name: "Long", books: books, totalDuration: 7_200))
