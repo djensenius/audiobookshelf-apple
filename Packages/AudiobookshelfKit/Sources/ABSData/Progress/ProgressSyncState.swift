@@ -91,7 +91,9 @@ extension ProgressSend {
 /// edits, sends, acknowledgements and merges) are pure functions tested without a store.
 ///
 /// Each PATCH carries one group, audio first, then finished, then ebook (#53: the server
-/// mishandles audio and finished in one body).
+/// mishandles audio and finished in one body, and audio must go before finished). Ebook is
+/// independent: after an unanswered audio or finished send it goes next, so a PATCH that keeps
+/// failing can't block it.
 ///
 /// Conflicts compare the device clock (`<group>EditedAt`) with the server clock (`lastUpdate`), so
 /// a device whose clock runs ahead of the server's wins conflicts it should lose, and one running
@@ -101,8 +103,9 @@ extension ProgressSend {
 /// come from our own sends, so the dirty local value wins". They are set when a send entry is
 /// dropped from the full list, and when the server may have changed the group as a side effect
 /// of our PATCH of the other one (#53: an audio PATCH can un-finish or auto-finish, a finished one
-/// can reset `currentTime`). A group's flag clears when its own send is acknowledged or it stops
-/// being dirty.
+/// can reset `currentTime`): when that PATCH is acknowledged, when an echo matches it after its
+/// response was lost, and when server progress is merged while it is in flight. A group's flag
+/// clears when its own send is acknowledged or it stops being dirty.
 struct ProgressSyncState: Sendable, Equatable {
     var currentTime: Double = 0
     var progress: Double = 0
@@ -182,8 +185,16 @@ struct ProgressSyncState: Sendable, Equatable {
 
     // MARK: - Sending
 
-    /// The group the next PATCH carries: the first dirty one of audio, finished and ebook.
-    var nextSendGroup: ProgressGroups? { ProgressGroups.each.first { dirty.contains($0) } }
+    /// The group the next PATCH carries: audio, then finished, then ebook. When the newest
+    /// unacknowledged send (a failed or unanswered one) carried audio or finished and ebook is
+    /// dirty, ebook goes next, so the two alternate while one keeps failing.
+    var nextSendGroup: ProgressGroups? {
+        let chain = [ProgressGroups.audio, .finished].first { dirty.contains($0) }
+        guard dirty.contains(.ebook) else { return chain }
+        guard let chain else { return .ebook }
+        if let last = unacknowledgedSends.last, !last.groups.contains(.ebook) { return .ebook }
+        return chain
+    }
 
     /// Snapshots the next dirty group (``nextSendGroup``) for a PATCH and records it in
     /// `unacknowledgedSends` before it is sent; `nil` when nothing is dirty. An identical earlier
@@ -242,6 +253,8 @@ struct ProgressSyncState: Sendable, Equatable {
     @discardableResult
     mutating func merge(_ server: ProgressBaseline, excluding excluded: ProgressGroups = []) -> Bool {
         if let baseline = serverBaseline, server.lastUpdate < baseline.lastUpdate { return false }
+        // A PATCH in flight may already have changed the other group as a side effect (#53).
+        shieldSideEffects(of: excluded)
         // An echo of our audio or finished PATCH may carry the server's side effect on the other
         // group, so shield that group before resolving it.
         for group in ProgressGroups.each where !excluded.contains(group) && dirty.contains(group) {

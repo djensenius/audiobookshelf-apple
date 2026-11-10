@@ -236,15 +236,16 @@ import Testing
 
     @Test func overflowSetsTruncationOnlyForDroppedGroups() throws {
         var state = Self.seeded()
-        state.apply(Self.page("first", 0.2), now: Self.at(1))
-        try Self.send(&state)  // Carries only ebook; the response is lost.
+        // Finished, not ebook: a dirty ebook group would alternate with the failing audio sends.
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(1))
+        try Self.send(&state)  // Carries only finished; the response is lost.
         for index in 0..<ProgressSend.historyLimit {
             state.apply(Self.seek(Double(200 + index * 10)), now: Self.at(Double(10 + index)))
             try Self.send(&state)
         }
         #expect(state.unacknowledgedSends.count == ProgressSend.historyLimit)
-        // The dropped first entry carried only the ebook group.
-        #expect(state.truncated == .ebook)
+        // The dropped first entry carried only the finished group.
+        #expect(state.truncated == .finished)
         #expect(state.unacknowledgedSends.allSatisfy { $0.audio != nil })
     }
 
@@ -269,18 +270,20 @@ import Testing
 
     @Test func untruncatedGroupStillResolvesConflictsByTime() throws {
         var state = Self.seeded()
-        state.apply(Self.page("first", 0.2), now: Self.at(1))
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(1))
         try Self.send(&state)
         for index in 0..<ProgressSend.historyLimit {
             state.apply(Self.seek(Double(200 + index)), now: Self.at(Double(10 + index)))
             try Self.send(&state)
         }
-        #expect(state.truncated == .ebook)
+        #expect(state.truncated == .finished)
         // Audio isn't truncated: an unmatched, newer server value is a real conflict the server wins.
-        let server = Self.server(currentTime: 900, ebookLocation: "first", ebookProgress: 0.2, lastUpdate: Self.at(500))
-        state.merge(server)
+        state.merge(Self.server(currentTime: 900, lastUpdate: Self.at(500)))
         #expect(state.currentTime == 900)
         #expect(state.dirty.contains(.audio) == false)
+        // Finished is truncated: its local value wins.
+        #expect(state.isFinished)
+        #expect(state.dirty.contains(.finished))
     }
 
     /// The case from the ADR 0003 review (#37 comment): ebook edit → PATCH A (response lost) →
@@ -495,77 +498,232 @@ import Testing
         #expect(unfinish.finished?.isFinished == false)
     }
 
+    /// The #53 race while the audio PATCH is in flight: its socket echo, carrying the server's
+    /// auto-finish, arrives before the HTTP response and is merged with audio excluded.
+    @Test func userUnfinishSurvivesAutoFinishEchoWhileAudioIsInFlight() throws {
+        var state = ProgressSyncState(
+            seed: Self.server(currentTime: 1000, isFinished: true, finishedAt: Self.t0, lastUpdate: Self.t0))
+        state.apply(ProgressEdit(isFinished: false), now: Self.at(10))
+        state.apply(Self.seek(995), now: Self.at(10))
+        let audio = try Self.send(&state)
+        #expect(audio.groups == .audio)
+
+        state.merge(
+            Self.server(currentTime: 995, isFinished: true, finishedAt: Self.at(15), lastUpdate: Self.at(15)),
+            excluding: .audio)
+        #expect(state.isFinished == false)
+        #expect(state.dirty == [.audio, .finished])
+        state.acknowledge(audio, serverLastUpdate: Self.at(15))
+        let unfinish = try Self.send(&state)
+        #expect(unfinish.finished?.isFinished == false)
+    }
+
+    /// The mirror: a seek made while a finished PATCH is in flight survives the echo of the
+    /// server's `currentTime` reset.
+    @Test func seekSurvivesCurrentTimeResetEchoWhileFinishedIsInFlight() throws {
+        var state = ProgressSyncState(
+            seed: Self.server(currentTime: 1000, isFinished: true, finishedAt: Self.t0, lastUpdate: Self.t0))
+        state.apply(ProgressEdit(isFinished: false), now: Self.at(10))
+        let finished = try Self.send(&state)
+        #expect(finished.groups == .finished)
+        state.apply(Self.seek(400), now: Self.at(12))
+
+        state.merge(Self.server(currentTime: 0, lastUpdate: Self.at(15)), excluding: .finished)
+        #expect(state.currentTime == 400)
+        #expect(state.dirty == [.audio, .finished])
+        state.acknowledge(finished, serverLastUpdate: Self.at(15))
+        let seek = try Self.send(&state)
+        #expect(seek.audio?.currentTime == 400)
+    }
+
+    @Test func failingAudioDoesNotBlockEbook() throws {
+        var state = Self.seeded()
+        state.apply(Self.seek(200), now: Self.at(1))
+        state.apply(Self.page("A", 0.3), now: Self.at(1))
+        #expect(try Self.send(&state).groups == .audio)  // Fails.
+        #expect(try Self.send(&state).groups == .ebook)  // Fails too.
+        #expect(try Self.send(&state).groups == .audio)
+        let ebook = try Self.send(&state)
+        #expect(ebook.groups == .ebook)
+        state.acknowledge(ebook, serverLastUpdate: Self.at(2))
+        #expect(state.dirty == .audio)
+        #expect(state.nextSendGroup == .audio)
+        // Finished still waits for audio.
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(3))
+        #expect(state.nextSendGroup == .audio)
+    }
+
     // MARK: - Interleavings
 
-    /// Random interleavings of edits, sends, outcomes and fetches against a simulated server
-    /// that changes only through our PATCHes.
-    @Test func randomInterleavingsKeepTheInvariants() throws {
-        var random = SeededGenerator(seed: 37)
-        var state = ProgressSyncState(seed: Self.server(lastUpdate: Self.t0))
-        var server = Self.server(lastUpdate: Self.t0)
-        var expected = state
-        var inFlight: ProgressSend?
-        var clock = 1.0
+    /// Random interleavings against a simulated server. A PATCH reaches the server at a random
+    /// point between `beginSend()` and its outcome, with the #53 side effects; another device
+    /// writes now and then; fetches may be stale.
+    @Test(arguments: [1, 7, 37, 2026, 53] as [UInt64])
+    func randomInterleavingsKeepTheInvariants(seed: UInt64) throws {
+        var sim = Simulation(seed: seed, server: Self.server(lastUpdate: Self.t0))
         for step in 0..<500 {
-            clock += 1
-            let now = Self.at(clock)
-            switch Int.random(in: 0..<6, using: &random) {
-            case 0, 1:
-                let edit = Self.randomEdit(step: step, using: &random)
-                state.apply(edit, now: now)
-                expected.apply(edit, now: now)
-            case 2:
-                if inFlight == nil { inFlight = state.beginSend() }
-            case 3:
-                guard let send = inFlight else { break }
-                inFlight = nil
-                let outcome = Int.random(in: 0..<3, using: &random)
-                if outcome < 2 { Self.applyPatch(send, to: &server, at: now) }
-                if outcome == 0 {
-                    state.acknowledge(send, serverLastUpdate: now)
-                    let once = state
-                    state.acknowledge(send, serverLastUpdate: now)
-                    #expect(state == once, "double ack at step \(step)")
-                }
-            default:
-                state.merge(server, excluding: inFlight?.groups ?? [])
-            }
-            for group in ProgressGroups.each {
-                #expect(Self.values(group, of: state) == Self.values(group, of: expected), "reverted at \(step)")
-                if Self.values(group, of: state) != Self.values(group, of: server) {
-                    #expect(state.dirty.contains(group), "unsynced but clean at step \(step)")
-                }
-            }
-            #expect(state.unacknowledgedSends.count <= ProgressSend.historyLimit)
+            try sim.step(step, now: Self.at(Double(step + 1)))
         }
     }
+}
 
-    private static func randomEdit(step: Int, using random: inout SeededGenerator) -> ProgressEdit {
-        switch Int.random(in: 0..<3, using: &random) {
-        case 0: seek(Double(2 * step % 999))
-        case 1: ProgressEdit(isFinished: Bool.random(using: &random))
-        default: page("loc\(step)", Double(step % 100) / 100)
-        }
+/// Where the server's value of a group came from.
+private enum Origin: Equatable {
+    case ours
+    case sideEffect(Date)
+    case other
+}
+
+/// The interleaving simulation for ``ProgressSyncStateTests``.
+private struct Simulation {
+    var random: SeededGenerator
+    var state: ProgressSyncState
+    var server: ProgressBaseline
+    var origins: [Int: Origin] = [:]
+    var lastOtherWrite = Date.distantPast
+    var inFlight: ProgressSend?
+    var delivered: Date?
+    /// A fetch captured earlier, valid while `epoch` (bumped by edits and settlements) is unchanged.
+    var captured: (server: ProgressBaseline, origins: [Int: Origin], epoch: Int)?
+    var epoch = 0
+
+    init(seed: UInt64, server: ProgressBaseline) {
+        random = SeededGenerator(seed: seed)
+        state = ProgressSyncState(seed: server)
+        self.server = server
     }
 
-    private static func applyPatch(_ send: ProgressSend, to server: inout ProgressBaseline, at now: Date) {
+    mutating func roll(_ count: Int) -> Int { Int.random(in: 0..<count, using: &random) }
+
+    mutating func step(_ step: Int, now: Date) throws {
+        switch roll(10) {
+        case 0, 1, 2:
+            edit(step, now: now)
+        case 3:
+            if inFlight == nil { inFlight = state.beginSend() }
+        case 4:
+            deliver(now: now)
+        case 5:
+            try settle(step, now: now)
+        case 6:
+            otherDevice(now: now)
+        case 7:
+            captured = (server, origins, epoch)
+        default:
+            if roll(3) == 0, let captured, captured.epoch == epoch {
+                merge(captured.server, origins: captured.origins, fresh: false, step: step)
+            } else {
+                merge(server, origins: origins, fresh: true, step: step)
+            }
+        }
+        #expect(state.unacknowledgedSends.count <= ProgressSend.historyLimit, "step \(step)")
+    }
+
+    mutating func edit(_ step: Int, now: Date) {
+        switch roll(3) {
+        case 0:
+            let time = roll(2) == 0 ? Double(985 + roll(15)) : Double(roll(985))
+            state.apply(
+                ProgressEdit(audio: .init(currentTime: time, duration: 1000, progress: time / 1000)), now: now)
+        case 1:
+            state.apply(ProgressEdit(isFinished: roll(2) == 0), now: now)
+        default:
+            state.apply(ProgressEdit(ebook: .init(location: "loc\(step)", progress: 0.5)), now: now)
+        }
+        epoch += 1
+    }
+
+    /// The PATCH reaches the server, which applies it with the #53 side effects.
+    mutating func deliver(now: Date) {
+        guard let send = inFlight, delivered == nil else { return }
+        delivered = now
         if let audio = send.audio {
             server.currentTime = audio.currentTime
             server.progress = audio.progress
             server.duration = audio.duration
+            origins[0] = .ours
+            let nearEnd = audio.currentTime >= audio.duration - 10
+            if nearEnd != server.isFinished {
+                server.isFinished = nearEnd
+                server.finishedAt = nearEnd ? ProgressSyncState.wholeMilliseconds(now) : nil
+                origins[1] = .sideEffect(now)
+            }
         }
         if let finished = send.finished {
             server.isFinished = finished.isFinished
             server.finishedAt = finished.finishedAt
+            origins[1] = .ours
+            if !finished.isFinished {
+                server.currentTime = 0
+                server.progress = 0
+                origins[0] = .sideEffect(now)
+            }
         }
         if let ebook = send.ebook {
             server.ebookLocation = ebook.ebookLocation
             server.ebookProgress = ebook.ebookProgress
+            origins[2] = .ours
         }
         server.lastUpdate = now
     }
 
-    private static func values(_ group: ProgressGroups, of state: ProgressSyncState) -> [String] {
+    /// The PATCH's outcome: delivered or not, the response arrives or is lost.
+    mutating func settle(_ step: Int, now: Date) throws {
+        guard let send = inFlight else { return }
+        if delivered == nil, roll(2) == 0 { deliver(now: now) }
+        if let delivered, roll(3) != 0 {
+            state.acknowledge(send, serverLastUpdate: delivered)
+            let once = state
+            state.acknowledge(send, serverLastUpdate: delivered)
+            #expect(state == once, "double ack at step \(step)")
+        }
+        inFlight = nil
+        delivered = nil
+        epoch += 1
+    }
+
+    mutating func otherDevice(now: Date) {
+        let group = roll(3)
+        switch group {
+        case 0:
+            server.currentTime = Double(roll(1000))
+            server.progress = server.currentTime / 1000
+        case 1:
+            server.isFinished.toggle()
+            server.finishedAt = server.isFinished ? ProgressSyncState.wholeMilliseconds(now) : nil
+        default:
+            server.ebookLocation = "other\(roll(1000))"
+        }
+        origins[group] = .other
+        server.lastUpdate = now
+        lastOtherWrite = now
+    }
+
+    mutating func merge(_ fetched: ProgressBaseline, origins: [Int: Origin], fresh: Bool, step: Int) {
+        let before = state
+        let excluded = inFlight?.groups ?? []
+        state.merge(fetched, excluding: excluded)
+        for (index, group) in ProgressGroups.each.enumerated() {
+            let changed = Self.values(group, of: state) != Self.values(group, of: before)
+            if before.dirty.contains(group), changed {
+                let editedAt = before.editedAt(group) ?? .distantPast
+                let allowed: Bool
+                switch origins[index] {
+                case .ours: allowed = false
+                case .sideEffect(let at): allowed = lastOtherWrite > max(at, editedAt)
+                case .other, nil: allowed = fetched.lastUpdate > editedAt
+                }
+                #expect(allowed, "dirty \(group.rawValue) lost to \(String(describing: origins[index])) at \(step)")
+            }
+            if fresh, !excluded.contains(group), !state.dirty.contains(group) {
+                #expect(
+                    Self.values(group, of: state) == Self.values(group, of: fetched),
+                    "unsynced \(group.rawValue) is clean at step \(step)")
+            }
+        }
+    }
+
+    static func values(_ group: ProgressGroups, of state: ProgressSyncState) -> [String] {
         switch group {
         case .audio: ["\(state.currentTime)", "\(state.progress)", "\(state.duration)"]
         case .finished: ["\(state.isFinished)", "\(String(describing: state.finishedAt))"]
@@ -573,7 +731,7 @@ import Testing
         }
     }
 
-    private static func values(_ group: ProgressGroups, of server: ProgressBaseline) -> [String] {
+    static func values(_ group: ProgressGroups, of server: ProgressBaseline) -> [String] {
         switch group {
         case .audio: ["\(server.currentTime)", "\(server.progress)", "\(server.duration)"]
         case .finished: ["\(server.isFinished)", "\(String(describing: server.finishedAt))"]

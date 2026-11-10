@@ -432,7 +432,23 @@ import Testing
         }
         let row = try #require(try await store.session(id: "s"))
         #expect(row.uploadAttempts == 0)
-        #expect(row.lastUploadError == nil)
+        // The error is still kept for diagnostics.
+        #expect(row.lastUploadError == "x")
+    }
+
+    @Test func uncountedFailureStillRecordsTheLatestError() async throws {
+        let (store, _) = try makeStore()
+        let item = session("s", startedAt: Self.at(1), updatedAt: Self.at(1))
+        try await store.saveSession(item)
+        let sent = ["s": item.updatedAt]
+        try await store.settleSessionUpload(
+            sent: sent, results: ["s": .failure("first")], isFirstSync: false, now: Self.at(10))
+        // Within the hour: not counted, but the message is newer.
+        try await store.settleSessionUpload(
+            sent: sent, results: ["s": .failure("second")], isFirstSync: false, now: Self.at(20))
+        let row = try #require(try await store.session(id: "s"))
+        #expect(row.uploadAttempts == 1)
+        #expect(row.lastUploadError == "second")
     }
 
     @Test func successResetsAttemptsOfKeptActiveSession() async throws {

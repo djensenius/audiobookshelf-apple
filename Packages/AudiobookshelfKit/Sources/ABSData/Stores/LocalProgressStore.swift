@@ -166,6 +166,11 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// The PATCH failed or its response was lost. The send stays recorded as unacknowledged, and
     /// the next attempt sends the then-current values. Returns `false`, changing nothing, when
     /// `patch` is not the row's send in flight.
+    ///
+    /// Call this only once the PATCH's `URLSessionTask` has really completed (ADR 0007, #53). The
+    /// token stops a late outcome from settling a newer send, but it can't stop an old request
+    /// that is still running from reaching the server after a newer one; the sync coordinator
+    /// must not start the next send while the previous task may still be delivered.
     @discardableResult
     public func failSend(_ patch: ProgressPatch, error: String?) throws -> Bool {
         guard inFlight[patch.key.rawValue]?.token == patch.token else { return false }
@@ -287,7 +292,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     ///   consecutive uploads without a result count as one failure, but only when the session
     ///   wasn't changed during the upload (newer data may succeed) and no failure was counted in
     ///   the last ``uploadFailureWindow``. After ``maxUploadFailures`` counted failures the
-    ///   session is discarded and logged.
+    ///   session is discarded and logged. The latest error is stored in `lastUploadError` even
+    ///   when the failure isn't counted.
     ///
     /// - Parameter sent: The `updatedAt` sent for each session, by id.
     /// - Returns: The ids of the deleted sessions.
@@ -324,10 +330,11 @@ public enum SessionUploadResult: Sendable, Equatable {
                     guard session.missingUploadResults >= Self.missingResultsPerFailure else { continue }
                     message = "No upload result"
                 }
+                // Kept for diagnostics even when the failure isn't counted.
+                session.lastUploadError = message
                 guard unchanged, Self.canCountFailure(after: session.lastUploadFailureAt, now: now) else { continue }
                 session.missingUploadResults = 0
                 session.uploadAttempts += 1
-                session.lastUploadError = message
                 session.lastUploadFailureAt = now
                 if session.uploadAttempts >= Self.maxUploadFailures {
                     Self.logger.error(
