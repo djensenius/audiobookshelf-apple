@@ -58,14 +58,6 @@ final class FakeCommandHandler: NowPlayingCommandHandling {
     func setRate(_ rate: Double) async { calls.append(.rate(rate)) }
 }
 
-/// A clock tests advance by hand.
-final class TestClock: Sendable {
-    private let date = Mutex(Date(timeIntervalSince1970: 1_800_000_000))
-
-    var now: Date { date.withLock { $0 } }
-    func advance(by seconds: TimeInterval) { date.withLock { $0 += seconds } }
-}
-
 /// Artwork loads that complete only when the test resolves them, in either order.
 actor ArtworkGate {
     private var waiting: [String: CheckedContinuation<Data?, Never>] = [:]

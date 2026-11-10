@@ -132,6 +132,22 @@ struct ProgressSyncerTests {
         #expect(s.service.reports.map(\.timeListened) == [2.25, 0])
     }
 
+    @Test func slowSeekWithFrozenMediaCreditsNothing() async throws {
+        let s = try SyncHarness()
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 2)
+
+        // The seek takes 1.8 s to land and no tick fires meanwhile.
+        s.h.clock.advance(by: 1.8)
+        await s.coordinator.seek(to: 500)
+        await s.settle()
+        s.coordinator.pause()
+        await s.settle()
+
+        #expect(s.service.reports.map(\.currentTime) == [500, 500])
+        #expect(s.service.reports.map(\.timeListened) == [2, 0])
+    }
+
     @Test func shortStallBetweenTicksIsCreditedInFull() async throws {
         let s = try SyncHarness()
         await s.coordinator.play(itemID: "a")
@@ -370,6 +386,8 @@ struct ProgressSyncerTests {
         (.network(.dnsLookupFailed), true),
         (.network(.cannotConnectToHost), true),
         (.network(.secureConnectionFailed), true),
+        (.network(.internationalRoamingOff), true),
+        (.network(.appTransportSecurityRequiresSecureConnection), true),
         (.notAuthenticated, true),
         (.sessionExpired, true),
         (.unauthorized(message: nil), true),
@@ -380,8 +398,6 @@ struct ProgressSyncerTests {
         (.network(.dataNotAllowed), false),
         (.network(.callIsActive), false),
         (.network(.networkConnectionLost), false),
-        (.network(.internationalRoamingOff), false),
-        (.network(.appTransportSecurityRequiresSecureConnection), false),
         (.network(.cancelled), false),
         (.timedOut, false),
         (.redirectRefused(status: 302), false),

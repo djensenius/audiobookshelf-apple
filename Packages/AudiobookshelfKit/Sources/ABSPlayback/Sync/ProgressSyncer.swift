@@ -15,7 +15,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// - **Listening time** is wall-clock time while playing, independent of rate (ADR 0007). A tick
 ///   credits the monotonic time since the previous tick only while playing and only if media time
 ///   advanced; a gap longer than ``maxTickGap`` (a suspension) credits one interval. A seek
-///   credits the time played up to it and adds nothing for the jump.
+///   credits the time since the last tick only when it's within one tick interval, and adds
+///   nothing for the jump or for the time the seek took.
 /// - **One request at a time.** Every send and store write runs on one serial queue, and a send
 ///   counts as finished only when the service call returns, after its task has completed. So no
 ///   report or PATCH goes out while an earlier one could still reach the server. The
@@ -146,7 +147,7 @@ public final class ProgressSyncer {
             requestSync()
         case .didSeek(let time):
             defer { loadedTime = nil }
-            creditPlayedTime()
+            creditTimeBeforeSeek(now: now)
             chapterIndex = source?.chapterIndex
             lastTick = isPlaying ? (now, time) : nil
             if loadedTime != time { requestSync() }
@@ -200,6 +201,16 @@ public final class ProgressSyncer {
         guard isPlaying, let last = lastTick else { return }
         current?.listened += credit(for: now - last.uptime)
         lastTick = (now, source?.currentTime ?? last.mediaTime)
+    }
+
+    /// Credits the time played between the last tick and a seek. The event comes after the seek
+    /// lands and carries no pre-seek media time, so the time is credited only when no tick was
+    /// due yet (at most one interval, while the source plays); otherwise the media may have been
+    /// frozen while the seek loaded, and nothing is credited.
+    private func creditTimeBeforeSeek(now: TimeInterval) {
+        guard isPlaying, source?.isPlaying == true, let last = lastTick else { return }
+        let gap = now - last.uptime
+        if gap.isFinite, gap > 0, gap <= tickInterval { current?.listened += gap }
     }
 
     /// The longest gap between ticks still counted as play; a longer one (the app was suspended)
@@ -347,13 +358,17 @@ public final class ProgressSyncer {
 
     /// The request certainly didn't reach Audiobookshelf, or was rejected before the session was
     /// touched, so its listening time can be sent again: no host, no connection or no TLS
-    /// handshake, a 401 or 403, or a request that was never built or sent. Everything else is
+    /// handshake, a request refused before sending (roaming off, App Transport Security), a 401
+    /// or 403, or a request that was never built or sent. Everything else is
     /// ambiguous, including `notConnectedToInternet`, `dataNotAllowed` and `callIsActive`, which
     /// can also end a request already sent.
     static func neverReachedServer(_ error: any Error) -> Bool {
         switch error as? APIError {
         case .network(let code):
-            [.cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .secureConnectionFailed].contains(code)
+            [
+                .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .secureConnectionFailed,
+                .internationalRoamingOff, .appTransportSecurityRequiresSecureConnection,
+            ].contains(code)
         case .notAuthenticated, .sessionExpired, .unauthorized, .forbidden, .invalidURL, .encoding: true
         default: false
         }
