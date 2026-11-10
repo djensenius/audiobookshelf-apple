@@ -217,7 +217,33 @@ dependency.
      fold. Folded or single-panel layouts use a single page.
    - PDF uses `PDFView.displayMode = .twoUp` with `displaysAsBook` under the same
      width rule.
-   - Comics stay single-page in v1, as in the legacy app.
+   - **Comics** show a two-page spread on wide layouts and a single page otherwise.
+     This is new compared with the legacy app, which was single-page only. It is in
+     the P6-13 #105 scope.
+     - **When to show a spread:** the reader uses the shared `spread` setting
+       (`auto`/`none`) in reader settings. With `auto`, show two pages when the
+       horizontal size class is regular and the reader area is wider than it is
+       tall. That covers iPad landscape, wide Mac windows, and iPhone Duo spanned
+       across the hinge, where one page sits on each side of the hinge reserved
+       region. iPhone, iPad portrait, narrow Mac windows, a folded Duo, and `none`
+       show a single page.
+     - **Pairing:** page 1 (the cover) is shown alone, then pages pair as (2, 3),
+       (4, 5), and so on. These pages are also shown alone:
+       - pages marked `DoublePage="True"` or `Type="FrontCover"` in
+         `ComicInfo.xml`;
+       - landscape images (wider than tall), which are usually pre-joined
+         spreads;
+       - a final odd page.
+
+       After a page shown alone, pairing restarts from the next page.
+     - **Reading direction:** a right-to-left toggle in reader settings, saved per
+       item. RTL puts the lower-numbered page on the right and reverses swipe and
+       arrow-key direction. The default is RTL when `ComicInfo.xml` has
+       `<Manga>YesAndRightToLeft</Manga>`, and LTR otherwise.
+     - **Location:** `ebookLocation` is the lower page number of the visible spread,
+       so the web client's single-page reader reopens on the first page of that
+       spread. `ebookProgress` uses the web formula `(page - 1) / numPages`.
+     - **Vertical scroll mode** is always single-column.
 8. **Code placement.** This follows [`docs/architecture.md`](../architecture.md) and
    ADR 0001. No new module is added.
    - **Views** live in the app target under `Audiobookshelf/Features/Reader/`. That
@@ -301,6 +327,7 @@ run in the spike. They are acceptance criteria of the issues below:
 | EPUB two-page spread on iPad, Mac, and Duo spanned with a hinge-width gap (`minSpreadWidth`, reserved regions) | **performed in #104** (P6-12) |
 | PDFKit two-up (`.twoUp`, `displaysAsBook`) on wide layouts, and the 1-based page `ebookLocation` round trip with the web client | **performed in #102** (P6-11b) |
 | CBZ page ordering identical to the web client (last number in the basename, unnumbered images last), with fixture tests | **performed in #105** (P6-13) |
+| Comic spread pairing tests: cover, double-page and landscape pages shown alone; RTL order; `ebookLocation` = lower page. Also a manual check on iPad landscape, Mac and spanned Duo | **performed in #105** (P6-13) |
 
 **Assumed, not verified:**
 
