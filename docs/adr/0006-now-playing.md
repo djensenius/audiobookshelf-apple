@@ -328,17 +328,18 @@ for d in Audiobookshelf AudiobookshelfTests AudiobookshelfUITests Audiobookshelf
   if [[ -d "$d" ]]; then dirs+=("$d"); fi
 done
 if ((${#dirs[@]} == 0)); then exit 0; fi
+scan=(-rnE --include='*.swift' --exclude-dir=.build --exclude-dir=DerivedData)
 allowed='^Packages/AudiobookshelfKit/(Sources/ABSPlayback|Tests/ABSPlaybackTests)/NowPlaying/'
-imp='^[[:space:]]*(@[_A-Za-z]+[[:space:]]+)*((public|package|internal|fileprivate|private)[[:space:]]+)?import[[:space:]]+((typealias|struct|class|enum|protocol|let|var|func)[[:space:]]+)?'
+imp='^[[:space:]]*(@[_A-Za-z][_A-Za-z0-9]*(\([^)]*\))?[[:space:]]*)*((public|package|internal|fileprivate|private)[[:space:]]+)?import[[:space:]]+((typealias|struct|class|enum|protocol|let|var|func)[[:space:]]+)?'
+end='([.;/[:space:]]|$)'
 mp_symbols='\bMP(NowPlaying|RemoteCommand|MediaItemArtwork|MediaItemProperty|AppEntityIdentifier|SkipInterval|ChangePlayback|ChangeRepeatMode|ChangeShuffleMode|FeedbackCommand|RatingCommand)[A-Za-z]*'
 status=0
-if grep -rnE --include='*.swift' \
-    -e "${imp}(MediaPlayer|_MediaPlayer_AppIntents)([.[:space:]]|$)" -e "${mp_symbols}" "${dirs[@]}" \
+if grep "${scan[@]}" -e "${imp}(MediaPlayer|_MediaPlayer_AppIntents)${end}" -e "${mp_symbols}" "${dirs[@]}" \
     | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//'; then
   echo "error: MediaPlayer Now Playing APIs are banned; use the NowPlaying framework (ADR 0006)" >&2
   status=1
 fi
-if grep -rnE --include='*.swift' -e "${imp}(NowPlaying|_NowPlaying_AppIntents)([.[:space:]]|$)" "${dirs[@]}" \
+if grep "${scan[@]}" -e "${imp}(NowPlaying|_NowPlaying_AppIntents)${end}" "${dirs[@]}" \
     | grep -vE "${allowed}"; then
   echo "error: import NowPlaying only under ABSPlayback/NowPlaying/ or ABSPlaybackTests/NowPlaying/ (ADR 0006)" >&2
   status=1
@@ -354,13 +355,25 @@ What the rule covers:
   Activity extension (`AudiobookshelfWidgets`, added by P5-11a #88) and `Packages`.
   Folders that don't exist yet are skipped, so the task works before the extension
   lands. Legacy `ios/` is excluded on purpose, because it still imports MediaPlayer.
+  Both scans skip `.build` and `DerivedData` folders (`--exclude-dir`). Without
+  that, SwiftPM dependency checkouts or generated code could fail the lint even
+  when every first-party source follows this ADR.
+- **Portability.** The script runs on macOS `/bin/bash` 3.2 and BSD grep (`grep -E`
+  only, no PCRE), which is what the macOS CI runner has.
 - **Allow-list.** `import NowPlaying` / `_NowPlaying_AppIntents` is allowed only
   under `Packages/AudiobookshelfKit/Sources/ABSPlayback/NowPlaying/` and its tests,
   `Packages/AudiobookshelfKit/Tests/ABSPlaybackTests/NowPlaying/`. Widgets can't use
   `MediaSession` anyway (it is unavailable in app extensions).
-- **Import forms.** It catches attribute-prefixed imports
-  (`@preconcurrency import MediaPlayer`), access-level imports, scoped imports
-  (`import class MediaPlayer.…`) and submodule imports.
+- **Import forms.** Both import checks catch:
+  - attribute prefixes, including attributes with arguments and several in a row
+    (`@preconcurrency`, `@_spi(Testing)`, `@_implementationOnly`);
+  - access-level imports (`public import …`);
+  - kind-scoped imports (`import struct MediaPlayer.X`, `import class NowPlaying.…`);
+  - submodule imports.
+
+  The module name may be followed by whitespace, `.`, `;`, a `//` or `/*` comment,
+  or the end of the line. An attribute written on its own line before `import` is
+  still caught, because the `import` line matches by itself.
 - **Re-exporting overlays.** It also bans `_MediaPlayer_AppIntents` and limits
   `_NowPlaying_AppIntents`, because each one `@_exported`-imports its base module.
 - **No false positives on similar names.** `MediaPlayerX`, `NowPlayingKit` and a
@@ -455,7 +468,8 @@ Other spike results:
   symbols are visible without importing that API's module (results listed under
   Lint rule).
 - **Lint dry run.** We ran the command above against a scratch tree with macOS BSD
-  grep 2.6.0 and GNU bash 5.3, and the script passes `shellcheck`.
+  grep 2.6.0, using both `/bin/bash` 3.2.57 and GNU bash 5.3. The script passes
+  `shellcheck`.
   - Empty tree, with none of the scanned folders present: exit 0.
   - Clean tree: exit 0. `AudiobookshelfTests` and `AudiobookshelfUITests` were
     missing, which shows that missing folders are skipped. NowPlaying imports
@@ -469,6 +483,27 @@ Other spike results:
     - `import _MediaPlayer_AppIntents` in `ABSUI`;
     - `import NowPlaying` in the app target;
     - `import NowPlaying` in `ABSPlaybackTests` outside `NowPlaying/`.
+  - After the PR review, a second seeded run (exit 1) flagged all 11 import forms
+    tested in the app target:
+    - `@_spi(Testing) import NowPlaying`;
+    - `import NowPlaying;`, `import NowPlaying// c` and `import NowPlaying /* c */`;
+    - `@preconcurrency @_spi(X) public import MediaPlayer`;
+    - `import MediaPlayer;` and `import MediaPlayer // c`;
+    - `import struct MediaPlayer.MPMediaItem` and
+      `import class NowPlaying.MediaSession`;
+    - an indented `@_implementationOnly import _MediaPlayer_AppIntents`;
+    - `import NowPlaying.Sub`.
+
+    In the same run:
+    - allowed `@_spi(Testing) import NowPlaying`,
+      `import _NowPlaying_AppIntents;` and `import NowPlaying // ok` lines
+      under the two `NowPlaying/` folders passed;
+    - a string literal `"import NowPlaying"` and a `// import MediaPlayer` comment
+      were not flagged;
+    - MediaPlayer and NowPlaying imports under
+      `Packages/AudiobookshelfKit/.build/checkouts/` and a `DerivedData/` folder
+      were ignored. They were flagged in a control run with the `--exclude-dir`
+      options removed.
   - The first commit of this ADR used a fixed folder list. That version ran
     `grep -r` on missing folders, which exits 2, and under `pipefail` that could
     hide real violations. The folder filter fixes this.
