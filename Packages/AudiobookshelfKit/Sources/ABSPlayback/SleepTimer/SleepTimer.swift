@@ -73,6 +73,8 @@ public final class SleepTimer {
     private struct Run {
         var goal: Goal
         var isAutomatic: Bool
+        /// The item a chapter goal belongs to; once another loads, a seek retargets without keeping the goal.
+        var item: String?
         /// Seconds of playback since the run started.
         var elapsed: TimeInterval = 0
         var chime = Chime.waiting
@@ -110,6 +112,8 @@ public final class SleepTimer {
     /// The position and ``now`` at the last tick, seek or start, to spot seeks nobody reported.
     @ObservationIgnored private var lastPosition: Double?
     @ObservationIgnored private var lastTick: TimeInterval = 0
+    /// Where playback was when a run began at a rewound position; ticks ignore it until the rewind's seek lands.
+    @ObservationIgnored private var stalePosition: Double?
     @ObservationIgnored private var autoSleepSuppressedUntil: Date?
     @ObservationIgnored private var appliedVolume: Float = 1
     @ObservationIgnored private var tickTask: Task<Void, Never>?
@@ -251,8 +255,9 @@ public final class SleepTimer {
     }
 
     /// Call when another item loads (`nil` when none): an expired timer restarts, and its rewind applies, only on
-    /// the item it paused (Android `handleMediaPlayEvent` compares sessions). A running timer keeps running. For a
-    /// podcast, pass an ID combining the item and the episode.
+    /// the item it paused (Android `handleMediaPlayEvent` compares sessions). A running timer keeps running; an
+    /// end-of-chapter one retargets at the ``didSeek(to:)`` for the new item's load. For a podcast, pass an ID
+    /// combining the item and the episode.
     public func itemDidChange(_ itemID: String?) {
         guard itemID != self.itemID else { return }
         self.itemID = itemID
@@ -265,11 +270,12 @@ public final class SleepTimer {
     /// Call once a seek, chapter skip, rewind or item load lands at `time`. An end-of-chapter timer moves to the
     /// end of the chapter now playing (dropping added or subtracted time), or of the media; without media it
     /// stops. A seek within the chapter or its added time, or just before it (``maximumResumeRewind``), keeps the
-    /// goal, unless it passed what a subtraction left. Short-lived retargets are expected while a timer restarted
-    /// at a rewound position waits for the seek, or during a load.
+    /// goal, unless it passed what a subtraction left, or it's another item's. Short-lived retargets are expected
+    /// while a timer restarted at a rewound position waits for the seek, or during a load.
     public func didSeek(to time: Double) {
         guard var run else { return }
         lastPosition = time
+        stalePosition = nil
         guard case .chapterEnd(let segmentEnd, let offset) = run.goal else {
             if run.fadeStart != nil { run.fadeStart = time }
             self.run = run
@@ -279,10 +285,15 @@ public final class SleepTimer {
             stopRun()
             return
         }
-        let end = chapterEnd(at: time, keeping: segmentEnd, offset: offset) ?? timeline.duration
-        if end != segmentEnd || segmentEnd + offset <= time {
+        let isSameItem = run.item == itemID
+        let end =
+            (isSameItem
+                ? chapterEnd(at: time, keeping: segmentEnd, offset: offset)
+                : chapterEnd(at: time, skippingShortRemainder: false)) ?? timeline.duration
+        if !isSameItem || end != segmentEnd || segmentEnd + offset <= time {
             run.goal = .chapterEnd(segmentEnd: end, offset: 0)
             run.wasCutShort = false
+            run.item = itemID
         }
         update(run, at: time)
     }
@@ -303,9 +314,10 @@ public final class SleepTimer {
         endGrace()
         runID += 1
         lastPosition = time
+        stalePosition = time == control.currentTime ? nil : control.currentTime
         lastTick = now()
         startTicking()
-        update(Run(goal: goal, isAutomatic: isAutomatic), at: time)
+        update(Run(goal: goal, isAutomatic: isAutomatic, item: itemID), at: time)
         updateShakeDetection()
         return true
     }
@@ -327,7 +339,9 @@ public final class SleepTimer {
         tickCount += 1
         guard var run else { return }
         let isPlaying = control.isPlaying
-        let time = control.currentTime
+        var time = control.currentTime
+        // Until a rewound start's seek lands (at the end of the media, say), count from the rewound position.
+        if time != stalePosition { stalePosition = nil } else if let lastPosition { time = lastPosition }
         let tickTime = now()
         let interval = max(tickTime - lastTick, 0)
         lastTick = tickTime
@@ -389,14 +403,15 @@ public final class SleepTimer {
             pendingRewind = rewind.map { ($0, control.currentTime) }
             return
         }
-        // A play or reset during the seek finds playback elsewhere and drops the rewind; a manual start keeps it.
+        // A play or reset during the seek finds playback elsewhere and drops the rewind; a manual start keeps it. A
+        // failed seek leaves it where playback paused, so a seek that superseded it drops it too.
         pendingRewind = rewind.map { ($0, fadeStart) }
-        let item = itemID
+        let item = itemID, pausedAt = control.currentTime
         Task { [weak self, control] in
             guard self?.isCurrent(item) == true else { return }
             let landed = await control.seek(to: fadeStart)
             guard let self, isCurrent(item) else { return }
-            pendingRewind?.at = landed ?? control.currentTime
+            pendingRewind?.at = landed ?? pausedAt
             if let landed { didSeek(to: landed) }
         }
     }
