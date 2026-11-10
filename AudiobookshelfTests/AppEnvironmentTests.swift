@@ -67,6 +67,23 @@ import Testing
         #expect(types.contains(DeepLink.handoffActivityType))
     }
 
+    @Test func registersTheLegacyURLScheme() throws {
+        let identifier = try #require(Bundle.main.bundleIdentifier)
+        let urlTypes = try #require(Bundle.main.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]])
+
+        // ADR 0004: the legacy scheme, once, and no second one.
+        #expect(urlTypes.count == 1)
+        let urlType = try #require(urlTypes.first)
+        #expect(urlType["CFBundleURLName"] as? String == identifier)
+        #expect(urlType["CFBundleTypeRole"] as? String == "Editor")
+        let schemes = try #require(urlType["CFBundleURLSchemes"] as? [String])
+        #expect(schemes == ["audiobookshelf"])
+
+        // What the app registers is what `DeepLink` accepts.
+        let url = try #require(URL(string: "\(schemes[0])://item/li_1"))
+        #expect(DeepLink(url: url)?.target == .item(id: "li_1", episodeID: nil))
+    }
+
     @Test(arguments: AppTab.allCases)
     func everyTabHasATitleAndASymbol(tab: AppTab) {
         #expect(L10n.string(tab.titleKey) != tab.titleKey, "\(tab) has no string for \(tab.titleKey)")
