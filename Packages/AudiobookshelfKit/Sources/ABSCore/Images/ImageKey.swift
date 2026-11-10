@@ -49,17 +49,20 @@ public struct ImageKey: Sendable, Hashable {
     }
 
     /// `<kind>-<entityID>-<updatedAt>-<bucket>-<hash>`, the `CoverFileStore` file name without
-    /// its extension. The entity ID is sanitised so it can't escape the server's folder, and
-    /// the hash of the original ID and external URL keeps sanitised names from colliding. A
-    /// missing `updatedAt` is `n`, distinct from `0`.
+    /// its extension. The entity ID keeps its first 64 Unicode scalars, each mapped to an ASCII
+    /// letter, digit or `_`, so the stem is pure ASCII, at most 64 bytes of ID, and can't escape
+    /// the server's folder or exceed the 255-byte file-name limit. The hash of the original ID
+    /// and external URL keeps sanitised names from colliding. A missing `updatedAt` is `n`,
+    /// distinct from `0`.
     var fileStem: String {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
         let entity = String(
-            String.UnicodeScalarView(entityID.unicodeScalars.map { allowed.contains($0) ? $0 : "_" }))
+            String.UnicodeScalarView(
+                entityID.unicodeScalars.prefix(64).map { $0.isASCII && allowed.contains($0) ? $0 : "_" }))
         let identity = Data((entityID + "\n" + (externalURL?.absoluteString ?? "")).utf8)
         let hash = SHA256.hash(data: identity).prefix(6).map { String(format: "%02x", $0) }.joined()
         let version = updatedAt.map(String.init) ?? "n"
-        return "\(kind.rawValue)-\(entity.prefix(64))-\(version)-\(bucket.rawValue)-\(hash)"
+        return "\(kind.rawValue)-\(entity)-\(version)-\(bucket.rawValue)-\(hash)"
     }
 }
 

@@ -32,4 +32,20 @@ import Testing
         #expect(stem("a", 1, url: URL(string: "https://x.example/1.jpg")) != stem("a", 1))
         #expect(stem("a", 1) == stem("a", 1))
     }
+
+    @Test(arguments: [
+        String(repeating: "a" + String(repeating: "\u{0301}", count: 500), count: 4),
+        String(repeating: "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}", count: 200),
+        String(repeating: "\u{8C37}\u{6B4C}\u{6F22}\u{5B57}", count: 300),
+    ])
+    func unicodeIDsGiveShortASCIIStems(_ entityID: String) {
+        let stem = ImageKey(
+            serverID: UUID(), kind: .itemCover, entityID: entityID, updatedAt: nil, bucket: .large
+        ).fileStem
+        #expect(stem.utf8.count <= 128)
+        let isASCII = stem.unicodeScalars.allSatisfy(\.isASCII)
+        #expect(isASCII)
+        let idSegment = stem.split(separator: "-").dropFirst().first ?? ""
+        #expect(idSegment.utf8.count == 64)
+    }
 }
