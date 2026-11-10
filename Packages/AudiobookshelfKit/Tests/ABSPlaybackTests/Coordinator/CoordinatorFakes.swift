@@ -188,6 +188,9 @@ final class StubSessionService: PlaybackSessionService {
         var startGates: [String: Gate] = [:]
         /// Metadata and expanded library item for an item's sessions (none by default).
         var metadata: [String: (MediaMetadata, LibraryItem?)] = [:]
+        /// Native-engine fixtures; tests without overrides retain the default session and stream.
+        var sessionOverride: PlaybackSession?
+        var streamOverride: ResolvedStream?
         var closeGates: [String: Gate] = [:]
         var startError: APIError?
         var resolveError: (any Error)?
@@ -238,6 +241,7 @@ final class StubSessionService: PlaybackSessionService {
             state.takenOver += state.openSessions
             state.openSessions = [id]
         }
+        if let session = state.withLock({ $0.sessionOverride }) { return session }
         return PlaybackSession(
             id: id, libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
             mediaMetadata: metadata?.0,
@@ -260,6 +264,7 @@ final class StubSessionService: PlaybackSessionService {
 
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
         if let error = state.withLock({ $0.resolveError }) { throw error }
+        if let stream = state.withLock({ $0.streamOverride }) { return stream }
         let tracks = session.audioTracks.map { track in
             PlayableTrack(
                 url: URL(filePath: "/\(session.id)/\(track.index ?? 0)"), mimeType: track.mimeType,

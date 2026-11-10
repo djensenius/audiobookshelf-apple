@@ -435,8 +435,8 @@ public final class PlaybackCoordinator {
             // A seek while loading: normalize before adding jumps, just as the initial load does.
             seekTarget = Self.clamp(pending, to: unloadedDuration)
         }
-        // Jumps while loading are relative to the resolved resume position (or the seek above).
-        if jumpOffset != 0 { seekTarget = (seekTarget ?? position) + jumpOffset }
+        // Use the requested resume anchor (or newer seek), not the engine's gap-snapped landing.
+        if jumpOffset != 0 { seekTarget = (seekTarget ?? target) + jumpOffset }
         if let seekTarget {
             await engine.seek(to: engine.timeline?.clamp(seekTarget) ?? seekTarget)
             guard current == generation, phase == .loaded else { return }
