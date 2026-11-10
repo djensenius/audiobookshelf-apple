@@ -179,6 +179,9 @@ public actor DownloadEngine {
     /// The last ``pause(recordID:)`` or ``resume(recordID:)`` of each record; each waits for
     /// the one before it.
     private var recordOperations: [UUID: Task<Void, Never>] = [:]
+    /// Resumes that haven't reached the part-start section yet. Failures during this interval
+    /// must leave the record startable by the resume.
+    private var resumingRecords: Set<UUID> = []
     /// Records whose `failed` state couldn't be saved after a part failed for good. Their parts
     /// can't launch until ``reconcile()`` saves it.
     private var pendingRecordFailures: Set<UUID> = []
@@ -310,6 +313,10 @@ public actor DownloadEngine {
     /// of `paused` and `failed` records, and a `failed` state the engine couldn't save is
     /// dropped. A part being failed for good starts once that is settled.
     public func start(partIDs: [UUID]) async {
+        await start(partIDs: partIDs, resumingRecordID: nil)
+    }
+
+    private func start(partIDs: [UUID], resumingRecordID: UUID?) async {
         guard await ensureSession() else { return }
         let records: [DownloadRecordDTO]
         do {
@@ -328,6 +335,7 @@ public actor DownloadEngine {
             if settling.contains(partID) { settlingParts.insert(partID) }
         }
         startsAfterSettling.formUnion(settlingParts)
+        if let resumingRecordID { resumingRecords.remove(resumingRecordID) }
         let retried = Set(records.flatMap(\.parts).filter { $0.retryCount > 0 }.map(\.id))
         for partID in partIDs where tasks[partID] == nil && !settlingParts.contains(partID) {
             retries.removeValue(forKey: partID)?.cancel()
@@ -421,10 +429,12 @@ public actor DownloadEngine {
     }
 
     private func performResume(_ recordID: UUID) async throws -> Bool {
+        resumingRecords.insert(recordID)
+        defer { resumingRecords.remove(recordID) }
         guard try await store.setState(.queued, forRecord: recordID),
             let record = try await readRecord(store, recordID)
         else { return false }
-        await start(partIDs: record.parts.filter { $0.state != .completed }.map(\.id))
+        await start(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), resumingRecordID: recordID)
         return true
     }
 
@@ -1179,6 +1189,10 @@ public actor DownloadEngine {
     /// Saves a record's `failed` state; when it can't, the record's parts can't launch until a
     /// later ``reconcile()`` saves it.
     private func saveRecordFailure(_ recordID: UUID) async {
+        guard !resumingRecords.contains(recordID) else {
+            pendingRecordFailures.remove(recordID)
+            return
+        }
         do {
             _ = try await store.setState(.failed, forRecord: recordID, expecting: [.queued, .downloading])
             pendingRecordFailures.remove(recordID)
@@ -1260,10 +1274,9 @@ public actor DownloadEngine {
     }
 
     /// Fails the part and its record for good, and stops the record's other parts, keeping
-    /// their resume data, so a retry of the record continues them. The record fails first, so
-    /// a concurrent launch of another part is refused; until that is saved, the engine
-    /// launches none of them. A ``start(partIDs:)`` of the part meanwhile (a resume of the
-    /// record while the siblings stop) starts it once this is done.
+    /// their resume data, so a retry of the record continues them. The record fails first
+    /// unless a resume already owns it; a concurrent launch of another part is refused until
+    /// failure is saved. A ``start(partIDs:)`` of the part meanwhile starts it once this is done.
     private func failPermanently(
         _ partID: UUID, code: DownloadFailureCode, message: String, retryCount: Int? = nil
     ) async {

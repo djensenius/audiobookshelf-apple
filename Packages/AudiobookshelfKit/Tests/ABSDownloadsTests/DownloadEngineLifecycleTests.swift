@@ -578,6 +578,68 @@ import Testing
         #expect(harness.session?.resumedData == [Data("resume-b".utf8)])
     }
 
+    @Test func resumeAfterPermanentFailureSettlesBeforeStartRestartsThePart() async throws {
+        let first = StubGate()
+        let resumed = StubGate()
+        let requests = Mutex(0)
+        let harness = try await DownloadHarness { _ in
+            let count = requests.withLock {
+                $0 += 1; return $0
+            }
+            return count == 1 ? .status(404, body: Data(), gate: first) : .status(200, gate: resumed)
+        }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let (resumeReads, resumeReadStarted) = AsyncStream.makeStream(of: DownloadState?.self)
+        let releaseResumeRead = StubGate()
+        let engine = harness.makeEngine(readRecord: { store, id in
+            let record = try await store.record(id: id)
+            resumeReadStarted.yield(record?.state)
+            await withCheckedContinuation { continuation in
+                releaseResumeRead.run { continuation.resume() }
+            }
+            return record
+        })
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+
+        let resuming = Task { try await engine.resume(recordID: record.id) }
+        #expect(await resumeReads.first { _ in true } == .queued)
+
+        first.open()
+        #expect(await engine.nextPermanentFailure() != nil)
+        let settledState = try await harness.store.record(id: record.id)?.state
+        #expect(settledState == .queued)
+        guard settledState == .queued else { return }
+        #expect(try await harness.store.part(id: partID)?.state == .failed)
+
+        releaseResumeRead.open()
+        #expect(try await resuming.value)
+        await harness.waitForRequests(2)
+        #expect(try await harness.store.record(id: record.id)?.state == .downloading)
+        let task = try #require(
+            await harness.session?.session.allTasks.first { $0.taskDescription == partID.uuidString })
+        #expect(task.state == .running)
+
+        resumed.open()
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(try await harness.store.record(id: record.id) == nil)
+    }
+
+    @Test func permanentFailureFromResumeLaunchIsNotReplayed() async throws {
+        let harness = try await DownloadHarness { _ in .status(404) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .failed, partState: .failed)
+        let engine = harness.makeEngine()
+
+        #expect(try await engine.resume(recordID: record.id))
+        #expect(await engine.nextPermanentFailure() != nil)
+
+        #expect(harness.requests.count == 1)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        #expect(try await harness.store.part(id: partID)?.state == .failed)
+    }
+
     /// A resume can queue a record before its start reaches a part that is settling.
     @Test func resumeBeforePermanentFailureSettlesRestartsTheFailingPart() async throws {
         let first = StubGate()
@@ -633,7 +695,7 @@ import Testing
         // The resume has saved `.queued` and read it, but can't start until released.
         first.open()
         _ = await cancelling.first { _ in true }
-        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        #expect(try await harness.store.record(id: record.id)?.state == .queued)
         releaseResumeRead.open()
         _ = await reads.first { $0 >= 3 }
         while await engine.startsAfterSettlingCount == 0 { await Task.yield() }
