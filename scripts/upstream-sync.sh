@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Report new upstream (advplyr/audiobookshelf-app) commits as a GitHub issue.
 #
-# State lives in issue markers, not a mirror branch: the most recently created
-# issue labelled $SYNC_LABEL whose body contains
-# `<!-- upstream-sync:head=<sha> -->` records the last upstream commit that was
-# reported. See docs/upstream-sync.md.
+# State lives in issue markers, not a mirror branch: the newest issue labelled
+# $SYNC_LABEL whose body contains `<!-- upstream-sync:head=<sha> -->` records the
+# last upstream commit that was reported. See docs/upstream-sync.md.
 set -euo pipefail
+
+# Byte-wise, locale-independent text handling (sed, awk, sort, and bash patterns
+# such as [[:cntrl:]], which would otherwise match U+200B in some UTF-8 locales).
+export LC_ALL=C
 
 UPSTREAM_REPO="${UPSTREAM_REPO:-advplyr/audiobookshelf-app}"
 UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-master}"
@@ -70,24 +73,41 @@ trap cleanup EXIT
 
 # --- Determine the range ----------------------------------------------------
 
-last_synced="$(
-  gh issue list --repo "$GH_REPO" --label "$SYNC_LABEL" --state all --limit 100 \
-    --json number,body,createdAt \
-    --jq '[.[] | select((.body // "") | test("<!-- upstream-sync:head=[0-9a-f]{40} -->"))]
-      | sort_by(.createdAt) | last
-      | if . == null then empty else
-          "\(.number) \([.body | match("<!-- upstream-sync:head=([0-9a-f]{40}) -->"; "g")] | last | .captures[0].string)"
-        end'
-)"
+# List issues whose body mentions "upstream-sync:head=" as TSV lines:
+#   createdAt, number, labelled with $SYNC_LABEL (1/0), last valid head marker or "-".
+marker_jq() {
+  printf '%s' '.[] | select((.body // "") | contains("upstream-sync:head="))
+    | [.createdAt, (.number | tostring), '"$1"',
+       (([(.body // "") | match("<!-- upstream-sync:head=([0-9a-f]{40}) -->"; "g")] | last | .captures[0].string) // "-")]
+    | @tsv'
+}
 
-if [[ -n "$last_synced" ]]; then
-  base="${last_synced#* }"
-  log "Last synced upstream head: $base (from $GH_REPO#${last_synced%% *})"
-else
+# Recent labelled issues (not subject to search-index lag) ...
+gh issue list --repo "$GH_REPO" --label "$SYNC_LABEL" --state all --limit 100 \
+  --json number,body,createdAt --jq "$(marker_jq '"1"')" >"$tmp/markers.raw"
+# ... plus any issue with a marker, labelled or not.
+SYNC_LABEL="$SYNC_LABEL" gh issue list --repo "$GH_REPO" --state all --limit 100 \
+  --search '"upstream-sync:head=" in:body sort:created-desc' --json number,body,createdAt,labels \
+  --jq "$(marker_jq '(if any(.labels[]?; .name == env.SYNC_LABEL) then "1" else "0" end)')" >>"$tmp/markers.raw"
+
+# Newest first, one line per issue. The newest labelled issue mentioning a marker,
+# or the newest issue with a valid marker if that is newer, decides the base.
+sort -r "$tmp/markers.raw" | awk -F '\t' '!seen[$2]++' >"$tmp/markers"
+latest_marker="$(awk -F '\t' '$3 == "1" || $4 != "-" { print; exit }' "$tmp/markers")"
+
+if [[ -z "$latest_marker" ]]; then
   base="$UPSTREAM_BASELINE"
-  log "No $SYNC_LABEL issue with a sync marker found; using baseline $base"
+  log "No issue with an upstream-sync marker found; using baseline $base"
+else
+  IFS=$'\t' read -r _ marker_issue marker_labelled base <<<"$latest_marker"
+  if [[ "$marker_labelled" != 1 ]]; then
+    die "Issue $GH_REPO#$marker_issue has the newest upstream-sync marker but is not labelled $SYNC_LABEL; re-apply the label or set SYNC_LABEL (see $DOCS_PATH)"
+  fi
+  if ! [[ "$base" =~ $SHA_RE ]]; then
+    die "Issue $GH_REPO#$marker_issue mentions upstream-sync:head= but has no valid <!-- upstream-sync:head=<40-hex sha> --> marker; fix it (see $DOCS_PATH)"
+  fi
+  log "Last synced upstream head: $base (from $GH_REPO#$marker_issue)"
 fi
-[[ "$base" =~ $SHA_RE ]] || die "Could not parse the last synced head from the issue marker"
 
 log "Fetching ${UPSTREAM_REPO} ${UPSTREAM_BRANCH}"
 git fetch --quiet --no-tags "https://github.com/${UPSTREAM_REPO}.git" \
@@ -116,18 +136,29 @@ title="Upstream: port changes ${base:0:7}..${head:0:7} (${commit_count} commits)
 
 US=$'\x1f'
 ZWSP=$'\xe2\x80\x8b'
+# Links via redirect.github.com (like Dependabot) do not create cross-reference
+# backlinks on upstream issues and pull requests.
+REF_URL="https://redirect.github.com/${UPSTREAM_REPO}/issues"
 
-git log --reverse --date=short --format="%H${US}%s${US}%an${US}%ad" "${base}..${head}" >"$tmp/log.raw"
+git -c log.showSignature=false log --no-color --no-use-mailmap --encoding=UTF-8 \
+  --reverse --date=short --format="%H${US}%s${US}%an${US}%ad" "${base}..${head}" >"$tmp/log.raw"
 
-# Sanitize text that ends up in the issue: neutralize HTML, escape table pipes,
-# point bare #123 / GH-123 references at the upstream repo, and break
-# @mentions with a zero-width space so upstream users are not pinged.
-LC_ALL=C sed -E \
+# Sanitize text that ends up in the issue:
+# - escape & first so entities like &#64; / &#35; cannot smuggle in @ or #,
+#   then neutralize HTML and escape table pipes;
+# - send github.com links through redirect.github.com;
+# - break owner/repo#123 references with a zero-width space, and turn bare
+#   #123 / GH-123 into upstream links whose text is not auto-referenced;
+# - break @mentions with a zero-width space so upstream users are not pinged.
+sed -E \
+  -e 's/&/\&amp;/g' \
   -e 's/</\&lt;/g' \
   -e 's/>/\&gt;/g' \
   -e 's/[|]/\\|/g' \
-  -e "s~(^|[^[:alnum:]_/&])#([0-9]+)~\\1${UPSTREAM_REPO}#\\2~g" \
-  -e "s~(^|[^[:alnum:]_])GH-([0-9]+)~\\1${UPSTREAM_REPO}#\\2~g" \
+  -e 's~https?://(www\.)?github\.com/~https://redirect.github.com/~g' \
+  -e "s~([[:alnum:]_/])#([0-9])~\\1#${ZWSP}\\2~g" \
+  -e "s~(^|[^[:alnum:]_/])#([0-9]+)~\\1[${UPSTREAM_REPO}#\\2](${REF_URL}/\\2)~g" \
+  -e "s~(^|[^[:alnum:]_])GH-([0-9]+)~\\1[${UPSTREAM_REPO}#\\2](${REF_URL}/\\2)~g" \
   -e "s/@/@${ZWSP}/g" \
   "$tmp/log.raw" >"$tmp/log"
 
@@ -136,6 +167,8 @@ LC_ALL=C sed -E \
   echo "| --- | --- | --- | --- |"
   shown=0
   while IFS="$US" read -r sha subject author date; do
+    subject="${subject//[[:cntrl:]]/ }"
+    author="${author//[[:cntrl:]]/ }"
     if ((shown >= MAX_COMMITS)); then
       echo
       echo "_Showing the first ${MAX_COMMITS} of ${commit_count} commits; see the [full comparison](${compare_url})._"
@@ -146,7 +179,7 @@ LC_ALL=C sed -E \
   done <"$tmp/log"
 } >"$tmp/commits.md"
 
-# --- Referenced upstream pull requests --------------------------------------
+# --- Referenced upstream issues and pull requests ---------------------------
 
 cut -d "$US" -f 2 "$tmp/log.raw" |
   { grep -oE 'Merge pull request #[0-9]+|\(#[0-9]+\)' || true; } |
@@ -155,10 +188,10 @@ cut -d "$US" -f 2 "$tmp/log.raw" |
 
 if [[ -s "$tmp/prs" ]]; then
   while IFS= read -r pr; do
-    echo "- [ ] ${UPSTREAM_REPO}#${pr}"
+    echo "- [ ] [${UPSTREAM_REPO}#${pr}](${REF_URL}/${pr})"
   done <"$tmp/prs" >"$tmp/prs.md"
 else
-  echo "_No pull requests referenced in commit subjects._" >"$tmp/prs.md"
+  echo "_No issues or pull requests referenced in commit subjects._" >"$tmp/prs.md"
 fi
 
 # --- Changed files, grouped by area -----------------------------------------
@@ -187,14 +220,16 @@ classify() {
   esac
 }
 
-# Wrap a path or status in a Markdown code span (backticks become quotes).
+# Wrap a path or status in a Markdown code span (backticks become quotes and
+# control characters such as newlines become "?", so paths cannot inject Markdown).
 code() {
-  local bt='`' q="'"
-  printf '%s%s%s' "$bt" "${1//"$bt"/"$q"}" "$bt"
+  local bt='`' q="'" s="${1//[[:cntrl:]]/?}"
+  printf '%s%s%s' "$bt" "${s//"$bt"/"$q"}" "$bt"
 }
 
 file_count=0
-git diff --name-status -z "$base" "$head" >"$tmp/diff"
+git diff --no-color --no-ext-diff --no-relative --find-renames -O/dev/null --name-status -z \
+  "$base" "$head" >"$tmp/diff"
 while IFS= read -r -d '' status; do
   IFS= read -r -d '' path
   case "$status" in
@@ -306,7 +341,7 @@ append_section() {
 
 append_file "$tmp/header.md"
 append_section "Commits" "$tmp/commits.md"
-append_section "Referenced upstream pull requests" "$tmp/prs.md"
+append_section "Referenced upstream issues and pull requests" "$tmp/prs.md"
 append_section "Changed files" "$tmp/files.md"
 append "<!-- upstream-sync:base=${base} -->"
 append "<!-- upstream-sync:head=${head} -->"

@@ -21,17 +21,28 @@ which:
    `Upstream: port changes <base>..<head> (<N> commits)` containing:
    - a compare link and a triage checklist,
    - a table of changed areas,
-   - the commits (linked to upstream, subjects sanitized so `#123` points at the
-     upstream repo and `@mentions` do not ping anyone),
-   - the upstream pull requests referenced by commit subjects,
+   - the commits (linked to upstream, with sanitized subjects; see below),
+   - the upstream issues and pull requests referenced by commit subjects,
    - the changed files grouped by area, with porting guidance.
 5. Optionally adds the issue to the [roadmap project](https://github.com/users/djensenius/projects/15).
 
 Long lists are truncated (`MAX_COMMITS`, `MAX_FILES`, and a 60,000-character
 body cap); the compare link always has the full picture.
 
+Upstream text is sanitized so the issue stays readable and does not disturb
+upstream: `&`, `<`, `>` are escaped first (so entities such as `&#64;` cannot
+smuggle in mentions), `|` is escaped for tables, `#123` / `GH-123` become
+`advplyr/audiobookshelf-app#123` links via `redirect.github.com` (like
+Dependabot, so no "mentioned this" backlinks appear on upstream threads), other
+`owner/repo#123` references and `@mentions` are broken with a zero-width space,
+and control characters in subjects and file paths are replaced.
+
 There is deliberately no mirror branch: the workflow's `GITHUB_TOKEN` cannot push
 upstream commits that modify workflow files, so all state lives in issues.
+
+GitHub disables scheduled workflows in public repositories after 60 days without
+repository activity. If `upstream-port` issues stop appearing, check the
+*Actions* tab and re-enable **Upstream sync**.
 
 ### State markers
 
@@ -42,9 +53,21 @@ Each issue body ends with two hidden HTML comments:
 <!-- upstream-sync:head=<40-hex sha> -->
 ```
 
-The next run reads the `head` marker from the most recently created
-`upstream-port` issue (open **or** closed) and reports everything after it.
-Consequences:
+The next run looks for issues (open **or** closed) whose body contains
+`upstream-sync:head=`, using two queries: the 100 newest `upstream-port` issues,
+and a search for that text across all issues (labelled or not). The newest issue
+that is either labelled `upstream-port` and mentions the marker, or carries a
+valid marker, decides the base:
+
+- labelled with a valid marker: its last `head` marker is the base, and
+  everything after it is reported;
+- carries a valid marker but is **not** labelled: the job fails (re-apply the
+  label, or fix `SYNC_LABEL`), rather than silently re-reporting from the baseline;
+- labelled but the marker is malformed: the job fails until it is fixed;
+- no such issue: `UPSTREAM_BASELINE` is used.
+
+Unlabelled issues that only mention the marker text in prose (without a valid
+marker) are ignored. Consequences:
 
 - Do not edit or delete the markers, and do not delete these issues. Closing
   them is fine.
@@ -104,6 +127,10 @@ so set it explicitly if needed:
 ```sh
 GH_REPO=djensenius/audiobookshelf-apple mise run upstream:check
 ```
+
+The local check is read-only on GitHub, but it fetches upstream objects into
+your clone and creates or updates the local ref `refs/upstream-sync/head`
+(remove it with `git update-ref -d refs/upstream-sync/head`).
 
 ### Configuration
 
