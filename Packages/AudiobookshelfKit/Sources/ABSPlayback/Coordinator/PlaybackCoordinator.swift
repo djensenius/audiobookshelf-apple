@@ -86,6 +86,9 @@ public final class PlaybackCoordinator {
     /// seconds to rewind (the sleep timer's `playbackWillStart`, P2-08). The extra rewind is
     /// ignored for an explicit start time and for a restart from the end.
     @ObservationIgnored public var willResume: (@MainActor () -> TimeInterval)?
+    /// Picks what plays after an item ends (P2-13, ``PlaybackQueueAdvancer``); without one, or
+    /// when it returns `nil`, the item stays loaded at its end.
+    @ObservationIgnored public var nextItemProvider: (any NextItemProvider)?
 
     // MARK: Dependencies
 
@@ -527,6 +530,7 @@ public final class PlaybackCoordinator {
             lastPlayedAt = now()
             saveLastPlayed()
             emit(.ended)
+            playNextItem()
         case .failed(let failure):
             // Recovery (ADR 0007 retries, rebuilds) hooks in here; for now the failure is surfaced.
             let error = PlaybackCoordinatorError(engineError: failure)
@@ -536,6 +540,20 @@ public final class PlaybackCoordinator {
     }
 
     // MARK: Helpers
+
+    /// After the end, plays what ``nextItemProvider`` picks, unless a play, resume, pause, seek or
+    /// stop happened while it was deciding.
+    private func playNextItem() {
+        guard let provider = nextItemProvider, let key = mediaKey, phase == .loaded, reachedEnd else { return }
+        let state = (generation, policyCheck, resumeIntent)
+        Task { [weak self] in
+            guard let next = await provider.nextItem(after: key), let self,
+                next.serverConnectionID == sessions.serverConnectionID, reachedEnd, mediaKey == key,
+                state == (generation, policyCheck, resumeIntent)
+            else { return }
+            await play(itemID: next.libraryItemId, episodeID: next.episodeId)
+        }
+    }
 
     private func startEngine() {
         engine.setRate(Float(rate))
