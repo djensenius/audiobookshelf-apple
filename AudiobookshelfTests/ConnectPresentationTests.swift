@@ -30,14 +30,40 @@ import Testing
             // Read only the rendered fixture, not the shared screen. This avoids requiring a
             // system accessibility client to activate SwiftUI's virtual accessibility nodes.
             let text = try await Task.detached {
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate
-                request.recognitionLanguages = ["en-US"]
+                let request = try Self.textRecognitionRequest()
                 try VNImageRequestHandler(data: png).perform([request])
                 return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
                     .joined(separator: " ").replacingOccurrences(of: "’", with: "'")
             }.value
             return RenderedForm(view: host, text: text)
+        }
+
+        private nonisolated static func textRecognitionRequest() throws -> VNRecognizeTextRequest {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["en-US"]
+            // CI's virtual Mac has no Neural Engine. Automatic selection fails in the
+            // OCR detector before any form assertion runs, so use CPU for every stage.
+            for (stage, devices) in try request.supportedComputeStageDevices {
+                let cpu = try #require(
+                    devices.first {
+                        if case .cpu = $0 { return true }
+                        return false
+                    }, "CPU OCR is required for \(stage.rawValue)")
+                request.setComputeDevice(cpu, for: stage)
+            }
+            return request
+        }
+
+        @Test func textRecognitionUsesOnlyCPU() throws {
+            let request = try Self.textRecognitionRequest()
+            let stages = try request.supportedComputeStageDevices
+            #expect(!stages.isEmpty)
+            #expect(
+                stages.keys.allSatisfy {
+                    if case .cpu? = request.computeDevice(for: $0) { return true }
+                    return false
+                })
         }
 
         private func secureFields(in view: NSView) -> [NSSecureTextField] {
