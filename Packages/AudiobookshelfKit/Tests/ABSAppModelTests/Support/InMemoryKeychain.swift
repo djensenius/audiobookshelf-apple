@@ -3,10 +3,11 @@ import Foundation
 import Security
 import Synchronization
 
-/// A `KeychainStoring` fake that can be made to fail writes.
+/// A `KeychainStoring` fake that can be made to fail reads or writes.
 final class InMemoryKeychain: KeychainStoring {
     private struct State {
         var items: [KeychainItem: (data: Data, accessibility: KeychainAccessibility)] = [:]
+        var readFailure: OSStatus?
         var writeFailure: OSStatus?
     }
 
@@ -17,6 +18,11 @@ final class InMemoryKeychain: KeychainStoring {
         state.withLock { $0.writeFailure = status }
     }
 
+    /// Makes every read fail with `status`; `nil` restores them.
+    func failReads(with status: OSStatus?) {
+        state.withLock { $0.readFailure = status }
+    }
+
     func accessibility(of item: KeychainItem) -> KeychainAccessibility? {
         state.withLock { $0.items[item]?.accessibility }
     }
@@ -24,7 +30,10 @@ final class InMemoryKeychain: KeychainStoring {
     var isEmpty: Bool { state.withLock { $0.items.isEmpty } }
 
     func data(for item: KeychainItem) throws(KeychainError) -> Data? {
-        state.withLock { $0.items[item]?.data }
+        try state.withLock { state throws(KeychainError) in
+            if let status = state.readFailure { throw KeychainError(status: status) }
+            return state.items[item]?.data
+        }
     }
 
     func add(_ data: Data, for item: KeychainItem, accessibility: KeychainAccessibility) throws(KeychainError) -> Bool {

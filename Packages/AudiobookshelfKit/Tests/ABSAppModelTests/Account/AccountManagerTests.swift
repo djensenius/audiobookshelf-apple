@@ -8,15 +8,23 @@ import Testing
 @testable import ABSAPI
 @testable import ABSAppModel
 
-/// An Audiobookshelf server on a unique stub host. It accepts one token pair at a time and
-/// rotates it on `POST /auth/refresh`, like the real server.
+/// An Audiobookshelf server on a unique stub host. It accepts only the latest token pair, issues
+/// a new one on each sign-in, and rotates it on `POST /auth/refresh`, like the real server.
 private final class FakeServer: Sendable {
     struct State {
         var isOffline = false
-        var accessToken = "access-1"
-        var refreshToken = "refresh-1"
-        var refreshes = 0
+        var accessToken = ""
+        var refreshToken = ""
+        var issued = 0
+        /// Answers `/api/authorize` with this status, as a proxy might.
+        var authorizeStatus: Int?
         var logoutRedirect: String?
+
+        mutating func issueTokens() {
+            issued += 1
+            accessToken = "access-\(issued)"
+            refreshToken = "refresh-\(issued)"
+        }
     }
 
     let host = "\(UUID().uuidString.lowercased()).stub.test"
@@ -36,6 +44,16 @@ private final class FakeServer: Sendable {
 
     func requests(_ path: String) -> [URLRequest] {
         StubURLProtocol.requests(host: host).filter { $0.url?.path() == "/abs\(path)" }
+    }
+
+    /// The `x-refresh-token` of each `POST /logout`.
+    var loggedOutRefreshTokens: [String?] {
+        requests("/logout").map { $0.value(forHTTPHeaderField: "x-refresh-token") }
+    }
+
+    /// Holds the next request for `path` until the gate opens.
+    func hold(_ path: String) -> StubGate {
+        StubURLProtocol.hold(host: host, path: "/abs\(path)")
     }
 
     /// The server forgets the access token, so the next request refreshes.
@@ -60,6 +78,7 @@ private final class FakeServer: Sendable {
                     #"{"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"authMethods":["local","openid"]}"#
                 )
             case "/abs/login":
+                state.issueTokens()
                 return .json(Self.authJSON(userId: userId, tokens: state))
             case "/abs/auth/openid":
                 return StubResponse(
@@ -69,10 +88,12 @@ private final class FakeServer: Sendable {
                         "Set-Cookie": "auth_method=openid-mobile; Path=/; HttpOnly",
                     ])
             case "/abs/auth/openid/callback":
+                state.issueTokens()
                 return .json(
                     Self.authJSON(userId: userId, tokens: state),
                     headers: ["Set-Cookie": "openid_id_token=id.token.sig; Path=/; HttpOnly"])
             case "/abs/api/authorize":
+                if let status = state.authorizeStatus { return .json("{}", status: status) }
                 guard request.value(forHTTPHeaderField: "Authorization") == "Bearer \(state.accessToken)" else {
                     return .json("{}", status: 401)
                 }
@@ -81,9 +102,7 @@ private final class FakeServer: Sendable {
                 guard request.value(forHTTPHeaderField: "x-refresh-token") == state.refreshToken else {
                     return .json("{}", status: 401)
                 }
-                state.refreshes += 1
-                state.accessToken = "access-\(state.refreshes + 1)"
-                state.refreshToken = "refresh-\(state.refreshes + 1)"
+                state.issueTokens()
                 return .json(Self.authJSON(userId: userId, tokens: state))
             case "/abs/logout":
                 return .json(#"{"redirect_url":\#(state.logoutRedirect.map { "\"\($0)\"" } ?? "null")}"#)
@@ -220,18 +239,25 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(session.openIDSession == OpenIDSessionCookies(authMethod: "openid-mobile", idToken: "id.token.sig"))
     }
 
-    @Test func failedKeychainWriteKeepsStateAndEndsServerSession() async throws {
+    @Test func failedSignInIsNotRestoredAndEndsServerSession() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()
-        let server = FakeServer()
+        let firstID = try await signIn(manager, to: FakeServer())
+        let server = FakeServer(userId: "usr-2")
         let validated = try await validate(server)
         harness.keychain.failWrites(with: errSecInteractionNotAllowed)
 
         await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) {
             try await manager.connect(local: validated, username: "david", password: "pw")
         }
-        #expect(manager.state == .signedOut && manager.client == nil)
-        #expect(server.requests("/logout").first?.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+        #expect(manager.state.user?.connectionID == firstID && manager.activeConnection?.id == firstID)
+        #expect(server.loggedOutRefreshTokens == ["refresh-1"])
+
+        // The connection was saved, but isn't the one to restore.
+        harness.keychain.failWrites(with: nil)
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        #expect(relaunched.state.user?.connectionID == firstID)
     }
 
     @Test func restoreSignsInWithSavedTokens() async throws {
@@ -259,8 +285,10 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         let user = try #require(relaunched.state.user)
         #expect(relaunched.state == .offline(user))
         #expect(user.connectionID == id && user.username == "david")
-        #expect(relaunched.lastError == .cannotConnect(.notConnectedToInternet))
+        #expect(relaunched.lastError == .server(.cannotConnect(.notConnectedToInternet)))
         #expect(relaunched.client != nil && relaunched.authorization == nil)
+        // The features of the version saved with the connection.
+        #expect(relaunched.features?.version == ServerVersion(2, 26, 0))
         #expect(try harness.session(id) != nil)
 
         server.update { $0.isOffline = false }
@@ -385,7 +413,7 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
 
         let relaunched = harness.makeManager()
         await relaunched.restoreSession()
-        #expect(relaunched.state == .signedOut && relaunched.lastError == .sessionExpired)
+        #expect(relaunched.state == .signedOut && relaunched.lastError == .server(.sessionExpired))
         #expect(relaunched.connections.map(\.id) == [id])
         #expect(try harness.session(id) == nil)
         #expect(try harness.customHeaders(id) == ["X-Proxy": "proxy-secret"])
@@ -401,7 +429,7 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         let client = try #require(manager.client)
         await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
         // Already signed out when the error arrives.
-        #expect(manager.state == .signedOut && manager.lastError == .sessionExpired)
+        #expect(manager.state == .signedOut && manager.lastError == .server(.sessionExpired))
         #expect(manager.connections.map(\.id) == [id] && manager.client == nil)
         #expect(try harness.session(id) == nil)
     }
@@ -419,8 +447,262 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
 
         let relaunched = harness.makeManager()
         await relaunched.restoreSession()
-        #expect(relaunched.state == .signedOut && relaunched.lastError == .unsupportedVersion("2.25.0"))
+        #expect(relaunched.state == .signedOut && relaunched.lastError == .server(.unsupportedVersion("2.25.0")))
         #expect(try harness.session(id) != nil)
+    }
+
+    @Test func proxyRefusingRestoreIsOffline() async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        server.update { $0.authorizeStatus = 403 }
+
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        let user = try #require(relaunched.state.user)
+        #expect(relaunched.state == .offline(user) && relaunched.lastError == .server(.accessDenied(status: 403)))
+        #expect(relaunched.features?.version == ServerVersion(2, 26, 0))
+        #expect(try harness.session(id) != nil)
+    }
+
+    @Test func lockedKeychainOnRestoreIsOffline() async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        harness.keychain.failReads(with: errSecInteractionNotAllowed)
+
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        let user = try #require(relaunched.state.user)
+        #expect(relaunched.state == .offline(user) && user.connectionID == id && relaunched.client == nil)
+        #expect(relaunched.lastError == .keychain(KeychainError(status: errSecInteractionNotAllowed)))
+        #expect(server.requests("/api/authorize").isEmpty)
+
+        harness.keychain.failReads(with: nil)
+        await relaunched.restoreSession()
+        #expect(relaunched.state == .signedIn(user) && relaunched.lastError == nil)
+
+        // Any other read failure signs out, with the reason.
+        harness.keychain.failReads(with: errSecDecode)
+        let other = harness.makeManager()
+        await other.restoreSession()
+        #expect(other.state == .signedOut && other.lastError == .keychain(KeychainError(status: errSecDecode)))
+    }
+
+    @Test func failedSessionDeleteIsRetried() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let id = try await signIn(manager, to: FakeServer())
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+
+        await manager.logout()
+        #expect(try harness.session(id) != nil && manager.state == .signedOut)
+
+        harness.keychain.failWrites(with: nil)
+        await manager.restoreSession()
+        #expect(manager.state == .signedOut && manager.lastError == nil)
+        #expect(try harness.session(id) == nil)
+    }
+
+    @Test func removingActiveOpenIDConnectionReplaysCookies() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server, oidc: true)
+        server.update { $0.logoutRedirect = "https://idp.example/end-session" }
+
+        let url = try await manager.remove(id)
+        #expect(url?.absoluteString == "https://idp.example/end-session")
+        let logout = try #require(server.requests("/logout").first)
+        #expect(logout.value(forHTTPHeaderField: "Cookie") == "auth_method=openid-mobile; openid_id_token=id.token.sig")
+        #expect(logout.value(forHTTPHeaderField: "x-refresh-token") == "refresh-1")
+        #expect(manager.state == .signedOut && manager.lastError == nil && manager.connections.isEmpty)
+        #expect(harness.keychain.isEmpty)
+    }
+
+    @Test func expiryOfAnotherConnectionKeepsTheActiveOne() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let first = FakeServer()
+        let firstID = try await signIn(manager, to: first)
+        let firstClient = try #require(manager.client)
+        let secondID = try await signIn(manager, to: FakeServer(userId: "usr-2"))
+        first.revokeSession()
+
+        await #expect(throws: APIError.sessionExpired) { try await firstClient.send(AuthEndpoints.authorize()) }
+        #expect(manager.state.user?.connectionID == secondID && manager.lastError == nil)
+        #expect(try harness.session(firstID) == nil && harness.session(secondID) != nil)
+    }
+
+    @Test func refreshFromBeforeSigningInAgainIsDropped() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let oldClient = try #require(manager.client)
+        server.expireAccessToken()
+        let refresh = server.hold("/auth/refresh")
+        let request = Task { try await oldClient.send(AuthEndpoints.authorize()) }
+        await refresh.arrived()
+
+        // Signing in again ends the replaced session on the server.
+        _ = try await signIn(manager, to: server)
+        #expect(server.loggedOutRefreshTokens == ["refresh-1"])
+        refresh.open()
+        // The rejected refresh token was no longer current, so the request retried with the new one.
+        _ = try await request.value
+        #expect(manager.state.user?.connectionID == id && manager.lastError == nil)
+        #expect(try harness.session(id)?.tokens == AuthTokens(accessToken: "access-2", refreshToken: "refresh-2"))
+
+        // A later expiry of the new session still signs out.
+        server.revokeSession()
+        let client = try #require(manager.client)
+        await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
+        #expect(manager.state == .signedOut && manager.lastError == .server(.sessionExpired))
+    }
+}
+
+/// Calls that overlap: the newer call wins, and signing out also ends the session of a call that
+/// is still running.
+@MainActor @Suite struct AccountManagerOverlapTests {
+    @Test func logoutDuringRefreshEndsTheSession() async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        server.expireAccessToken()
+        let refresh = server.hold("/auth/refresh")
+        let manager = harness.makeManager()
+        let restore = Task { await manager.restoreSession() }
+        await refresh.arrived()
+
+        await manager.logout()
+        refresh.open()
+        await restore.value
+        #expect(manager.state == .signedOut && manager.lastError == nil && manager.client == nil)
+        // The refreshed pair arrived after the sign-out and wasn't stored.
+        #expect(try harness.session(id) == nil && server.requests("/auth/refresh").count == 1)
+        #expect(server.loggedOutRefreshTokens == ["refresh-1"])
+    }
+
+    @Test(arguments: [false, true])
+    func signingOutDuringRestoreWins(removing: Bool) async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        // Without a session, the held authorize would fail as an expiry.
+        server.revokeSession()
+        let authorize = server.hold("/api/authorize")
+        let manager = harness.makeManager()
+        let restore = Task { await manager.restoreSession() }
+        await authorize.arrived()
+
+        if removing { try await manager.remove(id) } else { await manager.logout() }
+        authorize.open()
+        await restore.value
+        #expect(manager.state == .signedOut && manager.lastError == nil)
+        #expect(try harness.session(id) == nil && server.loggedOutRefreshTokens == ["refresh-1"])
+        #expect(manager.connections.map(\.id) == (removing ? [] : [id]))
+    }
+
+    @Test func laterSwitchSupersedesSwitch() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let first = FakeServer()
+        let firstID = try await signIn(manager, to: first)
+        let secondID = try await signIn(manager, to: FakeServer(userId: "usr-2"))
+        let lastUsed = try await harness.store.connection(id: firstID)?.lastUsedAt
+        let authorize = first.hold("/api/authorize")
+        let switching = Task { try await manager.switch(to: firstID) }
+        await authorize.arrived()
+        #expect(manager.state == .restoring)
+
+        try await manager.switch(to: secondID)
+        authorize.open()
+        await #expect(throws: CancellationError.self) { try await switching.value }
+        #expect(manager.state.user?.connectionID == secondID && manager.activeConnection?.id == secondID)
+        #expect(try await harness.store.connection(id: firstID)?.lastUsedAt == lastUsed)
+    }
+
+    @Test func signInSupersededBySwitchKeepsItsSession() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let first = FakeServer()
+        let firstID = try await signIn(manager, to: first)
+        let secondID = try await signIn(manager, to: FakeServer(userId: "usr-2"))
+        let lastUsed = try await harness.store.connection(id: firstID)?.lastUsedAt
+        let validated = try await validate(first)
+        // Signing in again to the first server holds while ending the replaced session.
+        let logout = first.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        try await manager.switch(to: secondID)
+        logout.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(manager.state.user?.connectionID == secondID)
+        #expect(try harness.session(firstID)?.refreshToken == "refresh-2")
+        #expect(try await harness.store.connection(id: firstID)?.lastUsedAt == lastUsed)
+
+        try await manager.switch(to: firstID)
+        #expect(manager.state.user?.connectionID == firstID)
+    }
+
+    @Test func logoutSignsOutOfASignInThatIsSaving() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let first = FakeServer()
+        let second = FakeServer(userId: "usr-2")
+        let firstID = try await signIn(manager, to: first)
+        let secondID = try await signIn(manager, to: second)
+        let validated = try await validate(first)
+        let logout = first.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        // Signs out of the active second server, then of the first once its sign-in resumes.
+        await manager.logout()
+        logout.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(manager.state == .signedOut && manager.activeConnection == nil)
+        #expect(try harness.session(firstID) == nil && harness.session(secondID) == nil)
+        #expect(first.loggedOutRefreshTokens == ["refresh-1", "refresh-2"])
+        #expect(second.loggedOutRefreshTokens == ["refresh-1"])
+    }
+
+    @Test func logoutSignsOutOfASignInWithNothingActive() async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        let manager = harness.makeManager()
+        let validated = try await validate(server)
+        let logout = server.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        await manager.logout()
+        logout.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(try harness.session(id) == nil && manager.state == .signedOut)
+        let requests = server.requests("/logout")
+        #expect(server.loggedOutRefreshTokens == ["refresh-1", "refresh-2"])
+        #expect(requests.last?.value(forHTTPHeaderField: "X-Proxy") == "proxy-secret")
+    }
+
+    @Test func logoutDuringLoginRequestDiscardsTheSignIn() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let activeID = try await signIn(manager, to: FakeServer())
+        let server = FakeServer(userId: "usr-2")
+        let validated = try await validate(server)
+        let login = server.hold("/login")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await login.arrived()
+
+        await manager.logout()
+        login.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(manager.state == .signedOut && manager.connections.map(\.id) == [activeID])
+        #expect(server.loggedOutRefreshTokens == ["refresh-1"])
     }
 }
 
@@ -453,13 +735,13 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
             recorder.record(generation)
         }
         let session = StoredSession(tokens: first, openIDSession: nil)
-        let signedIn = try await credentials.signIn(session, customHeaders: [:])
+        let signedIn = try await credentials.signIn(session, customHeaders: [:]).generation
 
         #expect(await !credentials.expireSession(ifCurrent: second))
         #expect(await credentials.expireSession(ifCurrent: first))
         #expect(await credentials.tokens() == nil)
         #expect(recorder.recorded == [signedIn + 1])
-        #expect(try await credentials.signIn(session, customHeaders: [:]) > signedIn + 1)
+        #expect(try await credentials.signIn(session, customHeaders: [:]).generation > signedIn + 1)
     }
 
     @Test func corruptItemsReadAsMissing() throws {

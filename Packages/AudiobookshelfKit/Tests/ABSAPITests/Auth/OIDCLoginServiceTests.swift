@@ -170,8 +170,11 @@ private func query(_ request: URLRequest?) -> [String: String] {
         #expect(result.openIDSession?.authMethod == "openid-mobile")
         #expect(result.openIDSession?.idToken == "eyJhbGciOi.payload.sig")
 
-        // Without the ID token the auth method alone still gets an end-session URL.
-        let withoutIDToken = try await login(stubServer(), authenticator: FakeAuthenticator())
+        // Without the ID token the auth method alone still gets an end-session URL. A cookie that
+        // `POST /logout` wouldn't receive isn't kept.
+        var otherPath = StubResponse.json(authResponseJSON())
+        otherPath.headers["Set-Cookie"] = "openid_id_token=other; Path=/elsewhere; HttpOnly"
+        let withoutIDToken = try await login(stubServer(callback: otherPath), authenticator: FakeAuthenticator())
         #expect(withoutIDToken.openIDSession == OpenIDSessionCookies(authMethod: "openid-mobile", idToken: nil))
     }
 

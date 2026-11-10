@@ -74,14 +74,10 @@ extension KeychainStoring {
 /// Generic passwords in the data-protection Keychain (also on macOS), never synchronised through
 /// iCloud (ADR 0002).
 public struct KeychainStore: KeychainStoring {
-    /// The shared group `$(AppIdentifierPrefix)org.davidjensenius.Audiobookshelf` from ADR 0002,
-    /// with the prefix of team `9JALHNGRBQ`. Only a build signed with the keychain-access-groups
-    /// entitlement may use it; unsigned builds, the ad hoc test host and `swift test` use `nil`.
-    public static let sharedAccessGroup = "9JALHNGRBQ.org.davidjensenius.Audiobookshelf"
-
     /// `nil` adds to the first `keychain-access-groups` entitlement,
     /// `$(AppIdentifierPrefix)org.davidjensenius.Audiobookshelf` (ADR 0002), and reads from every
-    /// group the process can access.
+    /// group the process can access. Pass a group only from a build signed with that entitlement;
+    /// unsigned builds, the ad hoc test host and `swift test` use `nil`.
     public let accessGroup: String?
     /// `false` uses the macOS file-based login keychain instead, for tests only: an unsigned
     /// `swift test` binary gets `errSecMissingEntitlement` from the data-protection Keychain.

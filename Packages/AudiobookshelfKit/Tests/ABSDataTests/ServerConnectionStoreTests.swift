@@ -83,6 +83,23 @@ import Testing
         #expect(try await store.connectionToRestore()?.id == newer.id)
     }
 
+    @Test func loginCanWaitToBeMarkedUsed() async throws {
+        let (store, _) = try makeStore()
+        let saved = try await login(store, userId: "usr_1", at: now)
+        let later = now.addingTimeInterval(60)
+        let updated = try await store.upsertLogin(
+            address: address, userId: "usr_1", username: "reader", authMethod: .local, serverVersion: nil,
+            markUsed: false, now: later)
+        let created = try await store.upsertLogin(
+            address: address, userId: "usr_2", username: "other", authMethod: .local, serverVersion: nil,
+            markUsed: false, now: later)
+        #expect(updated.lastUsedAt == now && created.lastUsedAt == nil && created.createdAt == later)
+        #expect(try await store.connectionToRestore()?.id == saved.id)
+
+        try await store.markUsed(id: created.id, at: later)
+        #expect(try await store.connectionToRestore()?.id == created.id)
+    }
+
     @Test func updatesServerVersion() async throws {
         let (store, _) = try makeStore()
         let created = try await login(store)

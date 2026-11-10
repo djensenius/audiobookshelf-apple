@@ -219,7 +219,9 @@ public struct ServerValidator: Sendable {
 
     private static func authorizeError(_ error: APIError) -> ServerValidationError {
         switch error {
-        case .sessionExpired, .notAuthenticated, .unauthorized, .forbidden: .sessionExpired
+        case .sessionExpired, .notAuthenticated, .unauthorized: .sessionExpired
+        // The server answers 401 for a rejected session; a 403 comes from a proxy or firewall.
+        case .forbidden: .accessDenied(status: 403)
         default: genericError(error)
         }
     }
@@ -280,7 +282,8 @@ public enum ServerValidationError: Error, Sendable, Equatable, LocalizedError {
     case httpsUnavailable(ServerAddress)
     /// `/status` returned 404 or something that isn't an Audiobookshelf status.
     case notAudiobookshelf
-    /// `/status` returned 401 or 403, usually from a proxy that needs custom headers.
+    /// `/status` or `/api/authorize` returned 401 or 403, usually from a proxy that needs custom
+    /// headers.
     case accessDenied(status: Int)
     /// `/status` returned another error status.
     case statusFailed(status: Int)

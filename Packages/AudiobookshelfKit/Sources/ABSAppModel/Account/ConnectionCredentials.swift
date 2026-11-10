@@ -84,8 +84,13 @@ struct CredentialVault: Sendable {
 ///
 /// ``AccountManager`` keeps one instance per connection for the life of the process, so the
 /// compare-and-swap also covers refreshes still in flight from a client it has replaced. Memory
-/// is the source of truth once loaded: a refreshed pair that couldn't be written is kept and the
-/// write is retried before the tokens are next read.
+/// is the source of truth once loaded: a refreshed pair or a sign-out that couldn't be written is
+/// kept, and the write is retried whenever the session is next loaded or read.
+///
+/// A sign-out while a refresh is in flight ends the session it holds, so `POST /logout` sends
+/// the refresh token from before the refresh. The refreshed pair is then rejected by
+/// ``replaceTokens(expected:with:)`` and never stored; if the server had already rotated the
+/// token, its session for the new token stays until it expires there.
 actor ConnectionCredentials: TokenProvider {
     nonisolated let connectionID: UUID
     private let vault: CredentialVault
@@ -107,7 +112,8 @@ actor ConnectionCredentials: TokenProvider {
         self.onExpire = onExpire
     }
 
-    /// The stored session and custom headers, read from the Keychain the first time.
+    /// The stored session and custom headers, read from the Keychain the first time. Retries a
+    /// pending write.
     func load() throws(KeychainError) -> (session: StoredSession?, customHeaders: [String: String]) {
         if !isLoaded {
             let headers = try vault.customHeaders(for: connectionID)
@@ -116,12 +122,16 @@ actor ConnectionCredentials: TokenProvider {
             customHeaders = headers
             isLoaded = true
         }
+        writeIfNeeded()
         return (session, customHeaders)
     }
 
-    /// Stores a new sign-in and returns its generation. Throws, keeping the previous session, if
-    /// the Keychain can't be written.
-    func signIn(_ new: StoredSession, customHeaders headers: [String: String]) throws(KeychainError) -> Int {
+    /// Stores a new sign-in. Returns its generation and the session it replaced, for the server
+    /// sign-out. Throws, keeping the previous session, if the Keychain can't be written.
+    func signIn(
+        _ new: StoredSession, customHeaders headers: [String: String]
+    ) throws(KeychainError) -> (generation: Int, replaced: StoredSession?) {
+        let replaced = try? load().session
         try vault.setCustomHeaders(headers, for: connectionID)
         customHeaders = headers
         try vault.setSession(new, for: connectionID)
@@ -129,15 +139,17 @@ actor ConnectionCredentials: TokenProvider {
         isLoaded = true
         needsWrite = false
         generation += 1
-        return generation
+        return (generation, replaced)
     }
 
-    /// Ends the session, keeping the custom headers, and returns the session that ended for the
-    /// server sign-out.
-    func signOut() -> StoredSession? {
+    /// Ends the session, keeping the custom headers. Returns the session that ended, for the
+    /// server sign-out, and the error if the Keychain item couldn't be deleted yet.
+    /// - Parameter expected: Only sign out if the session is still the one this generation
+    ///   stored.
+    func signOut(ifGeneration expected: Int? = nil) -> (ended: StoredSession?, deleteError: KeychainError?) {
+        guard expected == nil || expected == generation else { return (nil, nil) }
         let ended = try? load().session
-        clearSession()
-        return ended
+        return (ended, clearSession())
     }
 
     /// Deletes both Keychain items. Returns what they held, for the server sign-out. Throws,
@@ -162,7 +174,6 @@ actor ConnectionCredentials: TokenProvider {
             Log.auth.error("Couldn't read a connection's session: \(error.description, privacy: .public)")
             return nil
         }
-        writeIfNeeded()
         return session?.tokens
     }
 
@@ -183,20 +194,24 @@ actor ConnectionCredentials: TokenProvider {
 
     // MARK: - Private
 
-    private func clearSession() {
+    @discardableResult
+    private func clearSession() -> KeychainError? {
         session = nil
         generation += 1
         needsWrite = true
-        writeIfNeeded()
+        return writeIfNeeded()
     }
 
-    private func writeIfNeeded() {
-        guard needsWrite else { return }
+    @discardableResult
+    private func writeIfNeeded() -> KeychainError? {
+        guard needsWrite else { return nil }
         do {
             try vault.setSession(session, for: connectionID)
             needsWrite = false
+            return nil
         } catch {
             Log.auth.error("Couldn't save a connection's session: \(error.description, privacy: .public)")
+            return error
         }
     }
 }

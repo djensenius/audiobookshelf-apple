@@ -9,10 +9,10 @@ private let item = KeychainItem(service: "org.davidjensenius.Audiobookshelf.test
 
 @Suite struct KeychainStoreTests {
     @Test func queryUsesDataProtectionKeychainWithoutSync() {
-        let query = KeychainStore.query(for: item, accessGroup: KeychainStore.sharedAccessGroup)
+        let query = KeychainStore.query(for: item, accessGroup: "TEAMID.org.davidjensenius.Audiobookshelf")
         #expect(query[kSecUseDataProtectionKeychain as String] as? Bool == true)
         #expect(query[kSecAttrSynchronizable as String] as? Bool == false)
-        #expect(query[kSecAttrAccessGroup as String] as? String == "9JALHNGRBQ.org.davidjensenius.Audiobookshelf")
+        #expect(query[kSecAttrAccessGroup as String] as? String == "TEAMID.org.davidjensenius.Audiobookshelf")
         #expect(query[kSecAttrService as String] as? String == item.service)
         #expect(query[kSecAttrAccount as String] as? String == item.account)
     }

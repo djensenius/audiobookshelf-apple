@@ -101,7 +101,10 @@ public struct OIDCLoginService: Sendable {
             throw Self.refusal(from: reply.httpResponse, server: server.configuration.baseURL)
         }
         var result = try await ServerValidator.loginResult(from: reply, client: client)
-        result.openIDSession = OpenIDSessionCookies(cookies: client.cookieStorage?.cookies ?? [])
+        // Only the cookies the server would get on `POST /logout`.
+        let logoutURL = try? APIClient.url(base: server.configuration.baseURL, path: "/logout", query: [])
+        result.openIDSession = OpenIDSessionCookies(
+            cookies: logoutURL.flatMap { client.cookieStorage?.cookies(for: $0) } ?? [])
         return result
     }
 

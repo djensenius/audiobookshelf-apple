@@ -22,6 +22,9 @@ import SwiftData
 
     /// Saves a successful login: updates the connection for `address` and `userId` in place
     /// (clearing `isDisconnected`) or creates one, and marks it as the latest used.
+    /// - Parameter markUsed: Pass `false` to leave `lastUsedAt` as it was (`nil` for a new
+    ///   connection, so it isn't restored) until ``markUsed(id:at:)``, for example until the
+    ///   credentials are saved.
     @discardableResult
     public func upsertLogin(
         address: ServerAddress,
@@ -29,6 +32,7 @@ import SwiftData
         username: String,
         authMethod: ServerAuthMethod,
         serverVersion: String?,
+        markUsed: Bool = true,
         now: Date = .now
     ) throws -> ServerConnectionDTO {
         try commit {
@@ -49,7 +53,7 @@ import SwiftData
                 )
                 modelContext.insert(record)
             }
-            record.lastUsedAt = now
+            if markUsed { record.lastUsedAt = now }
             record.isDisconnected = false
             record.disconnectedAt = nil
             return ServerConnectionDTO(record)

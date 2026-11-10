@@ -394,13 +394,17 @@ private func stubServer(status statusJSON: String = statusLocal, login loginResp
         }
     }
 
-    @Test(arguments: [401, 403])
-    func authorizeRejectedTokensNeedSignIn(status: Int) async throws {
+    @Test(arguments: [
+        (401, ServerValidationError.sessionExpired),
+        // A proxy refused the request; the session may still be valid.
+        (403, ServerValidationError.accessDenied(status: 403)),
+    ])
+    func authorizeRejected(status: Int, expected: ServerValidationError) async throws {
         let server = StubServer { _ in .text("Unauthorized", status: status) }
         let client = APIClient(
             configuration: try APIClientConfiguration(baseURL: server.baseURL),
             tokenProvider: InMemoryTokenProvider(), sessionConfiguration: server.sessionConfiguration())
-        await #expect(throws: ServerValidationError.sessionExpired) {
+        await #expect(throws: expected) {
             try await validator(server).authorize(with: client)
         }
     }

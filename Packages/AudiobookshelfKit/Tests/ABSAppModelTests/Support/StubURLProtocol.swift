@@ -22,8 +22,9 @@ struct StubResponse: Sendable {
 
 /// A `URLProtocol` that answers requests for registered hosts with canned responses and records
 /// them. Responses are delivered at once and a 3xx is delivered as is, never followed, so nothing
-/// waits on real time. URLSession doesn't handle cookies for custom protocols, so `Set-Cookie`
-/// headers are stored in the jar registered for the host, if any.
+/// waits on real time; a request can instead be held by a ``StubGate`` until the test opens it.
+/// URLSession doesn't handle cookies for custom protocols, so `Set-Cookie` headers are stored in
+/// the jar registered for the host, if any.
 final class StubURLProtocol: URLProtocol {
     typealias Handler = @Sendable (URLRequest) -> StubResponse
 
@@ -31,6 +32,8 @@ final class StubURLProtocol: URLProtocol {
         var handler: Handler
         var requests: [URLRequest] = []
         var cookieStorage: HTTPCookieStorage?
+        /// One-shot gates by path.
+        var gates: [String: StubGate] = [:]
     }
 
     private static let routes = Mutex<[String: Route]>([:])
@@ -41,6 +44,14 @@ final class StubURLProtocol: URLProtocol {
 
     static func useCookieStorage(_ storage: HTTPCookieStorage, host: String) {
         routes.withLock { $0[host]?.cookieStorage = storage }
+    }
+
+    /// Holds the next request for `path` on `host` until the gate opens; the handler then answers
+    /// it.
+    static func hold(host: String, path: String) -> StubGate {
+        let gate = StubGate()
+        routes.withLock { $0[host]?.gates[path] = gate }
+        return gate
     }
 
     static func requests(host: String) -> [URLRequest] {
@@ -58,12 +69,27 @@ final class StubURLProtocol: URLProtocol {
 
     override func startLoading() {
         let request = request
-        let route = Self.routes.withLock { routes -> (Handler, HTTPCookieStorage?)? in
+        let route = Self.routes.withLock { routes -> (Handler, HTTPCookieStorage?, StubGate?)? in
             guard let host = request.url?.host(), let route = routes[host] else { return nil }
             routes[host]?.requests.append(request)
-            return (route.handler, route.cookieStorage)
+            let gate = request.url.flatMap { routes[host]?.gates.removeValue(forKey: $0.path()) }
+            return (route.handler, route.cookieStorage, gate)
         }
-        guard let (handler, cookieStorage) = route, let url = request.url else {
+        guard let (handler, cookieStorage, gate) = route else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+            return
+        }
+        guard let gate else { return respond(to: request, handler: handler, cookieStorage: cookieStorage) }
+        let box = UncheckedProtocol(value: self)
+        gate.hold {
+            DispatchQueue.global().async {
+                box.value.respond(to: request, handler: handler, cookieStorage: cookieStorage)
+            }
+        }
+    }
+
+    private func respond(to request: URLRequest, handler: Handler, cookieStorage: HTTPCookieStorage?) {
+        guard let url = request.url else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
@@ -95,4 +121,54 @@ final class StubURLProtocol: URLProtocol {
         configuration.protocolClasses = [StubURLProtocol.self]
         return configuration
     }
+}
+
+/// Holds one request until the test opens it.
+final class StubGate: Sendable {
+    private struct State {
+        var hasArrived = false
+        var isOpen = false
+        var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
+        var held: (@Sendable () -> Void)?
+    }
+
+    private let state = Mutex(State())
+
+    /// Returns once the request has arrived and is being held.
+    func arrived() async {
+        await withCheckedContinuation { continuation in
+            let hasArrived = state.withLock { state in
+                if !state.hasArrived { state.arrivalWaiters.append(continuation) }
+                return state.hasArrived
+            }
+            if hasArrived { continuation.resume() }
+        }
+    }
+
+    /// Lets the request through, now or when it arrives.
+    func open() {
+        let held = state.withLock { state in
+            state.isOpen = true
+            defer { state.held = nil }
+            return state.held
+        }
+        held?()
+    }
+
+    fileprivate func hold(_ respond: @escaping @Sendable () -> Void) {
+        let (waiters, isOpen) = state.withLock { state in
+            state.hasArrived = true
+            if !state.isOpen { state.held = respond }
+            defer { state.arrivalWaiters = [] }
+            return (state.arrivalWaiters, state.isOpen)
+        }
+        waiters.forEach { $0.resume() }
+        if isOpen { respond() }
+    }
+}
+
+// URLProtocol is not Sendable, but the URL loading system lets a protocol call its client from
+// any thread, and a held request is the only use after `startLoading` returns.
+private struct UncheckedProtocol: @unchecked Sendable {
+    let value: StubURLProtocol
 }
