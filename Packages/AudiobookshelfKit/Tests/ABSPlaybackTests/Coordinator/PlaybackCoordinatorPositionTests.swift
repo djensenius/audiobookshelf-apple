@@ -50,6 +50,7 @@ struct PlaybackCoordinatorPositionTests {
         coordinator.finalCloseReport = {
             closing.append($0)
             return PlaybackSyncReport(currentTime: $0.currentTime, timeListened: 0, duration: $0.duration)
+                .map { PlaybackCloseHandoff(report: $0, position: PlaybackCloseResult()) }
         }
         engine.interruptedLoads = 1
         await coordinator.play(itemID: "A", startTime: 1500)

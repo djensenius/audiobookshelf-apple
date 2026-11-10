@@ -56,6 +56,8 @@ public final class PlaybackCoordinator {
     // MARK: Observable state
 
     public private(set) var phase: Phase = .idle
+    /// Account end permanently retires the coordinator. A later account needs a new instance.
+    public private(set) var isRetired = false
     /// The current media (book or podcast episode); stable across sessions of the same media.
     public private(set) var mediaKey: MediaKey?
     /// The current server session: display metadata, chapters and the expanded library item.
@@ -90,6 +92,9 @@ public final class PlaybackCoordinator {
         return engine.currentTime
     }
     @ObservationIgnored private var closingPlaybackTime: Double?
+    /// Read by progress sync during `loaded` to persist explicit intent without reporting play.
+    public var loadedPositionIsExplicit: Bool { phase == .loaded && explicitLoadedPosition }
+    @ObservationIgnored private var explicitLoadedPosition = false
     public var duration: Double { phase == .loaded ? engine.duration : unloadedDuration }
     public var isPlaying: Bool { phase == .loaded && engine.state == .playing }
     public var isBuffering: Bool {
@@ -109,10 +114,12 @@ public final class PlaybackCoordinator {
     public var chapterElapsed: Double? { chapterRange?.elapsed(at: currentTime) }
     public var chapterRemaining: Double? { chapterRange?.remaining(at: currentTime) }
 
-    /// The P2-06b seam: the body of the final `/close` for a session that loaded (position and
-    /// unsynced listening time). Not called for sessions that never loaded; `nil` closes without
-    /// a body.
-    @ObservationIgnored public var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackSyncReport?)?
+    /// Synchronously captures the final report and queues its durable audio-position receipt,
+    /// before `sessionWillClose`. Not called for sessions that never loaded. A missing handoff
+    /// is an explicit failure of `waitForClose`, even if the bodyless transport succeeds.
+    @ObservationIgnored public var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)?
+    /// Installed by ProgressSyncer; account end invokes it synchronously before suspension.
+    @ObservationIgnored public var quiesceProgressTransport: (@MainActor () -> Void)?
     /// Called once before playback starts or resumes, before the resume seek; returns extra
     /// seconds to rewind (the sleep timer's `playbackWillStart`, P2-08). The extra rewind is
     /// ignored for an explicit start time and for a restart from the end.
@@ -158,6 +165,11 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var resumingIntent: Int?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var closeOperations: [PlaybackCloseOperation] = []
+    @ObservationIgnored private var startTask: Task<StartedSession, any Error>?
+    @ObservationIgnored private var resolvingTasks: [UUID: Task<ResolvedStream, any Error>] = [:]
+    @ObservationIgnored private var pendingOpenings: [UUID: PlaybackCloseResult<Void>] = [:]
+    @ObservationIgnored private var permitsCloseTransport = true
     @ObservationIgnored private let startGate = StartGate()
     @ObservationIgnored private var observers: [PlaybackObserverToken: @MainActor (PlaybackCoordinatorEvent) -> Void] =
         [:]
@@ -237,6 +249,7 @@ public final class PlaybackCoordinator {
     public func play(
         itemID: String, episodeID: String? = nil, startTime: Double? = nil, allowingMeteredNetwork: Bool = false
     ) async {
+        guard !isRetired else { return }
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
         policyCheck += 1
@@ -280,6 +293,10 @@ public final class PlaybackCoordinator {
 
         generation += 1
         let current = generation
+        // Retain pending old closes, but not a lifetime history of completed user sessions.
+        closeOperations.removeAll {
+            $0.transport.result != nil && ($0.handoff == nil || $0.handoff?.position.result != nil)
+        }
         let restarting = key == mediaKey
         // A seek while unloaded (restored, or a failed start's start time) is an explicit start,
         // unless progress from elsewhere turns out newer than the last-played record.
@@ -304,6 +321,13 @@ public final class PlaybackCoordinator {
         }
         guard current == generation else { return }
 
+        let openingID = UUID()
+        let opening = PlaybackCloseResult<Void>()
+        pendingOpenings[openingID] = opening
+        defer {
+            opening.resolve(.success(()))
+            pendingOpenings[openingID] = nil
+        }
         let started: StartedSession
         do {
             guard
@@ -323,7 +347,7 @@ public final class PlaybackCoordinator {
 
         let source: AudioEngineSource
         do {
-            let stream = try await sessions.resolveStream(for: session)
+            let stream = try await resolveStream(for: session)
             source = try makeSource(session: session, stream: stream)
         } catch {
             closeInBackground(sessionID: session.id, report: nil)
@@ -337,6 +361,9 @@ public final class PlaybackCoordinator {
         guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
         // From here the coordinator owns the session: whoever replaces it closes it.
         self.session = session
+        // From here teardown can capture this known session without waiting for the engine load.
+        opening.resolve(.success(()))
+        pendingOpenings[openingID] = nil
         unloadedDuration = source.timeline.duration
         emit(.sessionStarted(sessionID: session.id, key: key))
 
@@ -395,6 +422,7 @@ public final class PlaybackCoordinator {
             explicitStart = nil
         }
         let extra = playWhenLoaded ? Self.nonNegative(willResume?() ?? 0) : 0
+        guard current == generation else { return }
         let resumeTime = ResumePosition.startTime(
             explicit: explicitStart, candidates: candidates, duration: source.timeline.duration, now: now(),
             autoRewind: !settings.disableAutoRewind)
@@ -443,6 +471,7 @@ public final class PlaybackCoordinator {
         }
         // An interrupted initial seek stays pending with the engine paused at 0: `.loaded` carries
         // its target, and `.didSeek` waits for the landing (see `handle(_:)`).
+        explicitLoadedPosition = explicitStart != nil || seekTarget != nil
         emit(.loaded(time: position))
         guard current == generation, phase == .loaded else { return }
         // Even a newer seek or tick during catch-up must report its landing after `loaded`.
@@ -459,7 +488,7 @@ public final class PlaybackCoordinator {
     /// Plays the current item: resumes a loaded one (rewinding by `seconds`, or by ``AutoRewind``
     /// for the time since it last played), or starts a session for a restored or failed one.
     public func resume(rewindingBy seconds: Double? = nil) async {
-        guard let key = mediaKey else { return }
+        guard !isRetired, let key = mediaKey else { return }
         switch phase {
         case .idle: return
         case .starting: playWhenLoaded = true
@@ -495,6 +524,7 @@ public final class PlaybackCoordinator {
         defer { if resumingIntent == intent { resumingIntent = nil } }
 
         let extra = Self.nonNegative(willResume?() ?? 0)
+        guard current == generation else { return }
         let target: Double?
         if let startTime {
             target = startTime
@@ -630,9 +660,27 @@ public final class PlaybackCoordinator {
         engine.setRate(Float(self.rate))
     }
 
-    /// Stops playback, closes the session and forgets the item, so it isn't restored at launch.
-    public func stop() {
+    /// Ordinary user stop remains reusable and clears LastPlayed. Account end permanently
+    /// retires this coordinator; switch/expiry retain a valid matching record, sign-out/removal
+    /// clear only this connection's record. Capture and transport quiescence are synchronous.
+    public func stop(reason: PlaybackStopReason = .user) {
+        guard !isRetired else { return }
+        if reason != .user {
+            isRetired = true
+            startTask?.cancel()
+            for task in resolvingTasks.values { task.cancel() }
+            quiesceProgressTransport?()
+            if !reason.permitsTransport {
+                permitsCloseTransport = false
+                for operation in closeOperations {
+                    operation.task?.cancel()
+                    operation.transport.resolve(.success(false))
+                }
+            }
+            if reason == .accountSwitch || reason == .expired { preserveLastPlayedAtAccountEnd() }
+        }
         generation += 1
+        policyCheck += 1
         pendingPlayKey = nil
         let hadItem = mediaKey != nil
         tearDown(reason: .stopped)
@@ -646,7 +694,12 @@ public final class PlaybackCoordinator {
         unloadedPosition = 0
         unloadedDuration = 0
         phase = .idle
-        lastPlayedStore.clear()
+        if reason == .user
+            || ((reason == .signOut || reason == .accountRemoved)
+                && lastPlayedStore.load()?.serverConnectionID == sessions.serverConnectionID)
+        {
+            lastPlayedStore.clear()
+        }
         if hadItem { emit(.itemChanged(nil)) }
     }
 
@@ -655,7 +708,7 @@ public final class PlaybackCoordinator {
     /// engine. Returns whether an item was restored.
     @discardableResult
     public func restoreLastPlayed() -> Bool {
-        guard phase == .idle, let record = lastPlayedStore.load(),
+        guard !isRetired, phase == .idle, let record = lastPlayedStore.load(),
             record.serverConnectionID == sessions.serverConnectionID
         else { return false }
         generation += 1
@@ -667,6 +720,39 @@ public final class PlaybackCoordinator {
         phase = .unloaded
         emit(.itemChanged(record.key))
         return true
+    }
+
+    private func preserveLastPlayedAtAccountEnd() {
+        let saved = lastPlayedStore.load()
+        guard saved == nil || saved?.serverConnectionID == sessions.serverConnectionID,
+            let key = mediaKey
+        else { return }
+        if phase == .loaded {
+            guard currentTime.isFinite, currentTime >= 0 else { return }
+            saveLastPlayed()
+            return
+        }
+        // An unresolved new start has no position. A relative jump alone is not an anchor.
+        guard pendingStartTime != nil || (!isResolvingStart && (restoredRecord != nil || session != nil)) else {
+            return
+        }
+        let base = pendingStartTime ?? unloadedPosition
+        guard base.isFinite else { return }
+        let time = Self.clamp(Self.clamp(base, to: unloadedDuration) + pendingJumpOffset, to: unloadedDuration)
+        var record =
+            restoredRecord ?? saved.flatMap { $0.key == key ? $0 : nil }
+            ?? LastPlayedRecord(
+                serverConnectionID: key.serverConnectionID, libraryItemID: key.libraryItemId,
+                episodeID: key.episodeId, position: time, duration: unloadedDuration > 0 ? unloadedDuration : nil,
+                timestamp: now(), title: session?.displayTitle, author: session?.displayAuthor,
+                coverPath: session?.coverPath)
+        // Preserve the timestamp/finished flag of untouched restored metadata.
+        if pendingStartTime != nil || pendingJumpOffset != 0 || phase == .starting {
+            record.position = time
+            record.timestamp = now()
+            record.isFinished = false
+        }
+        lastPlayedStore.save(record)
     }
 
     /// Saves the loaded item's position as the last-played record. Call when the app moves to
@@ -768,27 +854,102 @@ public final class PlaybackCoordinator {
             let closing = ClosingSession(
                 sessionID: session.id, key: key, currentTime: unloadedPosition, duration: unloadedDuration,
                 wasLoaded: wasLoaded, reason: reason)
-            let report = wasLoaded ? finalCloseReport?(closing) : nil
-            closeInBackground(sessionID: session.id, report: report)
+            let handoff = wasLoaded ? finalCloseReport?(closing) : nil
+            closeInBackground(sessionID: session.id, handoff: handoff, wasLoaded: wasLoaded)
             emit(.sessionWillClose(closing))
         }
     }
 
-    private func closeInBackground(sessionID: String, report: PlaybackSyncReport?) {
+    private func closeInBackground(
+        sessionID: String, report: PlaybackSyncReport? = nil,
+        handoff: PlaybackCloseHandoff? = nil, wasLoaded: Bool = false
+    ) {
         guard closingSessionIDs.insert(sessionID).inserted else { return }
+        let operation = PlaybackCloseOperation(sessionID: sessionID, wasLoaded: wasLoaded, handoff: handoff)
+        closeOperations.append(operation)
+        guard permitsCloseTransport else {
+            operation.transport.resolve(.success(false))
+            return
+        }
         let id = UUID()
         let sessions = self.sessions
-        closeTasks[id] = Task { [weak self] in
+        let task = Task { [weak self] in
+            defer {
+                self?.closeTasks[id] = nil
+                self?.closingSessionIDs.remove(sessionID)
+                operation.task = nil
+            }
+            // Account end cancels this owned task synchronously. Do not require the coordinator
+            // to stay alive: ordinary stop has always allowed its captured close to outlive it.
+            guard !Task.isCancelled else {
+                operation.transport.resolve(.success(false))
+                return
+            }
             do {
-                try await sessions.closeSession(id: sessionID, report: report)
+                try await sessions.closeSession(id: sessionID, report: handoff?.report ?? report)
+                operation.transport.resolve(.success(true))
             } catch {
+                operation.transport.resolve(.failure(error))
                 logger.info(
                     "Closing a playback session failed: \(Self.caseName(error), privacy: .public) \(String(describing: error), privacy: .private)"
                 )
             }
-            self?.closeTasks[id] = nil
-            self?.closingSessionIDs.remove(sessionID)
         }
+        closeTasks[id] = task
+        operation.task = task
+    }
+
+    /// Joins closes captured so far, without another callback or request. The deadline bounds
+    /// this waiter, not the owned local write. A committed AUDIO POSITION permits fallback for
+    /// failed/slow transport, never for a missing reporter or failed/pending position commit.
+    /// Cancellation ends only this wait. Call synchronously `stop(reason:)` before awaiting.
+    public func waitForClose(timeout: Duration = PlaybackCoordinator.closeWaitTimeout) async throws
+        -> PlaybackCloseOutcome
+    {
+        let captured = closeOperations
+        // Switch must also join cleanup of an issued /play or stream resolution. No-network
+        // end deliberately suppresses that late cleanup instead of waiting for issued bytes.
+        let openings = isRetired && permitsCloseTransport ? Array(pendingOpenings.values) : []
+        func operations() -> [PlaybackCloseOperation] { openings.isEmpty ? captured : closeOperations }
+        func outcome() throws -> PlaybackCloseOutcome {
+            guard openings.allSatisfy({ $0.result != nil }) else { throw PlaybackCloseError.timedOut }
+            return try PlaybackCloseOutcome(sessions: operations().map { try $0.outcome() })
+        }
+        let result = PlaybackCloseResult<PlaybackCloseOutcome>()
+        let completion = Task {
+            do {
+                for opening in openings { try await opening.wait() }
+                for operation in operations() {
+                    if operation.wasLoaded {
+                        guard let handoff = operation.handoff else {
+                            throw PlaybackCloseError.missingReporter(sessionID: operation.sessionID)
+                        }
+                        do { try await handoff.waitForAudioPosition() } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {
+                            throw PlaybackCloseError.positionCommitFailed(
+                                sessionID: operation.sessionID, description: String(describing: error))
+                        }
+                    }
+                    _ = try? await operation.transport.wait()
+                    try Task.checkCancellation()
+                }
+                result.resolve(Result { try outcome() })
+            } catch {
+                result.resolve(.failure(error))
+            }
+        }
+        let sleep = self.sleep
+        let timer = Task {
+            await sleep(timeout)
+            guard !Task.isCancelled else { return }
+            result.resolve(Result { try outcome() })
+        }
+        defer {
+            completion.cancel()
+            timer.cancel()
+        }
+        return try await result.wait()
     }
 
     /// Waits up to ``closeWaitTimeout`` for the closes in flight, so the server normally sees
@@ -824,10 +985,38 @@ public final class PlaybackCoordinator {
         await waitForCloses()
         guard self.generation == generation else { return nil }
         let sessions = self.sessions
-        // Read only, but after the closes: a restart must see the previous session's final report.
-        async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
-        let session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
-        return StartedSession(session: session, serverProgress: await serverProgress)
+        let task = Task { @MainActor in
+            try Task.checkCancellation()
+            // Read only, but after the closes: a restart must see the previous final report.
+            async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
+            let session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
+            return StartedSession(session: session, serverProgress: await serverProgress)
+        }
+        startTask = task
+        defer { startTask = nil }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    /// Resolution can refresh an access token. Own its cancellation independently of the caller,
+    /// just like /play, while generation checks still discard uncooperative late completions.
+    private func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
+        let id = UUID()
+        let sessions = self.sessions
+        let task = Task {
+            try Task.checkCancellation()
+            return try await sessions.resolveStream(for: session)
+        }
+        resolvingTasks[id] = task
+        defer { resolvingTasks[id] = nil }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     /// Waits for the background closes started so far (tests).

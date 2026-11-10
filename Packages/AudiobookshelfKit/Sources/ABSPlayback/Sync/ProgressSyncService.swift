@@ -61,10 +61,14 @@ public protocol PlaybackProgressSource: AnyObject {
     /// Confirmed engine sample, never a seek target; nil while waiting/seeking. Includes the
     /// final pre-stop sample during `finalCloseReport`, even though the engine is already stopped.
     var confirmedPlaybackTime: Double? { get }
+    /// The `loaded` event carries a newly chosen start/seek/jump, not automatic resume progress.
+    var loadedPositionIsExplicit: Bool { get }
     var duration: Double { get }
     var isPlaying: Bool { get }
     var chapterIndex: Int? { get }
-    var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackSyncReport?)? { get set }
+    var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)? { get set }
+    /// Synchronously suppresses sync/PATCH transport before account teardown can suspend.
+    var quiesceProgressTransport: (@MainActor () -> Void)? { get set }
     func addObserver(_ handler: @escaping @MainActor (PlaybackCoordinatorEvent) -> Void) -> PlaybackObserverToken
     func removeObserver(_ token: PlaybackObserverToken)
 }

@@ -25,7 +25,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   before sending. Local writes have their own serial queue, so a held request doesn't block
 ///   saving a newer seek or pause. Failed writes stay in memory for the next trigger or drain;
 ///   no report is sent while a position still needs saving.
-///   Close-position refreshes enter that queue at event arrival too, never after transport.
+///   Final positions enter that queue synchronously in the close callback, even for clean or
+///   missing rows. Their throwing receipts acknowledge only committed audio, not listening time.
 /// - **Failures.** The position stays in the durable retry queue. Listening time is carried into the next
 ///   report only when the request clearly never reached the server (DNS, connect, TLS, auth);
 ///   after an ambiguous failure it is dropped, so it is never counted twice.
@@ -43,11 +44,11 @@ public final class ProgressSyncer {
     static let maxSendsPerRow = 6
 
     private struct Position: Equatable {
+        let revision: UInt64
+        let token: PlaybackPositionToken
         let time: Double
         let duration: Double
         let editedAt: Date
-        /// A close must qualify as dirty work once; failed saves retain that qualification.
-        var onlyIfPending: Bool
     }
 
     private struct CurrentSession {
@@ -80,14 +81,18 @@ public final class ProgressSyncer {
     /// Test seam: hold local persistence independently of transport.
     var beforePositionPersistence: (@MainActor () async -> Void)?
     private var pendingPositions: [MediaKey: Position] = [:]
-    /// Covers snapshot acquisition, transport and settlement, before any of them can suspend.
-    private var sendingKey: MediaKey?
+    private var positionRevision: UInt64 = 0
+    private var positionReceipts: [MediaKey: [(revision: UInt64, receipt: PlaybackCloseResult<Void>)]] = [:]
+    private var transportTasks: [UUID: Task<Void, Never>] = [:]
+    private var isTransportQuiesced = false
     /// `nil` error means success; neither outcome may be forgotten if the store throws.
     private var pendingSettlements: [MediaKey: (patch: ProgressPatch, error: String?)] = [:]
-    /// Set by ``detach()``: queued requests are skipped; one already in flight finishes.
+    /// Set by ``detach()``: queued requests are skipped; issued calls are canceled best-effort.
     private var isDetached = false
 
     /// Starts following `source`: observes its events and supplies its `finalCloseReport`.
+    /// - Parameter store: Reuse the same writer across account-scope lifetimes. Independent
+    ///   writers over the same database do not share in-process playback-position ordering.
     /// - Parameter tickInterval: The engine's time-update interval (`AudioEngine`'s
     ///   `timeObserverInterval`).
     public init(
@@ -101,16 +106,26 @@ public final class ProgressSyncer {
         self.tickInterval = tickInterval
         observer = source.addObserver { [weak self] event in self?.handle(event) }
         source.finalCloseReport = { [weak self] closing in self?.closeReport(for: closing) }
+        source.quiesceProgressTransport = { [weak self] in self?.quiesceTransport() }
     }
 
-    /// Stops following the source. Already queued position saves are allowed to finish.
+    /// Stops following the source and quiesces transport. Owned position writes still finish.
     public func detach() {
+        quiesceTransport()
         isDetached = true
         if let observer { source?.removeObserver(observer) }
         observer = nil
         source?.finalCloseReport = nil
+        source?.quiesceProgressTransport = nil
         source = nil
         current = nil
+    }
+
+    /// Permanently prevents queued/new sync and PATCH calls and cancels issued calls best-effort.
+    /// Does not detach the final-position reporter or cancel any local write; never calls `flush`.
+    public func quiesceTransport() {
+        isTransportQuiesced = true
+        for task in transportTasks.values { task.cancel() }
     }
 
     // MARK: Commands
@@ -171,6 +186,11 @@ public final class ProgressSyncer {
             loadedTime = time
             lastSyncAt = now
             chapterIndex = source?.chapterIndex
+            if source?.loadedPositionIsExplicit == true, let session = current {
+                // A chapter/start-time or pending seek/jump is new intent, not listening credit
+                // or a network trigger. It must supersede a held final close even with no tick.
+                queuePosition(session.key, time: time, duration: source?.duration ?? 0)
+            }
         case .playbackStarted:
             isPlaying = true
             lastSyncAt = now
@@ -191,9 +211,6 @@ public final class ProgressSyncer {
             if current?.sessionID == closing.sessionID { current = nil }
             isPlaying = false
             lastTick = nil
-            if closing.wasLoaded {
-                queuePosition(closing.key, time: closing.currentTime, duration: closing.duration, onlyIfPending: true)
-            }
         case .itemChanged, .failed:
             break
         }
@@ -217,14 +234,21 @@ public final class ProgressSyncer {
 
     /// The body of the coordinator's final `/close`: the closing position and the listening time
     /// no report carried yet.
-    private func closeReport(for closing: ClosingSession) -> PlaybackSyncReport? {
+    private func closeReport(for closing: ClosingSession) -> PlaybackCloseHandoff? {
         var listened: TimeInterval = 0
         if current?.sessionID == closing.sessionID {
             creditPlayedTime()
             listened = current?.listened ?? 0
             current = nil
         }
-        return PlaybackSyncReport(currentTime: closing.currentTime, timeListened: listened, duration: closing.duration)
+        guard
+            let report = PlaybackSyncReport(
+                currentTime: closing.currentTime, timeListened: listened, duration: closing.duration),
+            let position = queuePosition(closing.key, time: closing.currentTime, duration: closing.duration)
+        else { return nil }
+        let receipt = PlaybackCloseResult<Void>()
+        positionReceipts[closing.key, default: []].append((position.revision, receipt))
+        return PlaybackCloseHandoff(report: report, position: receipt)
     }
 
     /// A final sample may advance after the last tick. Targets and stalls earn nothing, and
@@ -250,14 +274,18 @@ public final class ProgressSyncer {
 
     private func enqueue(_ operation: @escaping @MainActor () async -> Void) {
         let previous = tail
-        tail = Task {
+        let id = UUID()
+        let task = Task {
             await previous?.value
             await operation()
+            transportTasks[id] = nil
         }
+        tail = task
+        transportTasks[id] = task
     }
 
     private func requestSync() {
-        guard let session = current, let source,
+        guard !isDetached, !isTransportQuiesced, let session = current, let source,
             let position = queuePosition(session.key, time: source.currentTime, duration: source.duration)
         else { return }
         current?.position = position
@@ -272,7 +300,8 @@ public final class ProgressSyncer {
     private func sendSync(sessionID: String) async {
         await waitForPendingWrites()
         if queuedSyncSessionID == sessionID { queuedSyncSessionID = nil }
-        guard !isDetached, pendingPositions.isEmpty, let session = current, session.sessionID == sessionID,
+        guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty,
+            let session = current, session.sessionID == sessionID,
             let position = session.position
         else { return }
         let listened = session.listened
@@ -307,16 +336,14 @@ public final class ProgressSyncer {
 
     @discardableResult
     private func queuePosition(
-        _ key: MediaKey, time: Double, duration: Double, onlyIfPending: Bool = false
+        _ key: MediaKey, time: Double, duration: Double
     ) -> Position? {
         guard time.isFinite, time >= 0 else { return nil }
         let duration = duration.isFinite && duration > 0 ? duration : 0
-        // Capture the obligation at arrival: a send may clean the row before the lookup runs.
-        // Unsaved positions and unsettled outcomes also remain pending work.
+        positionRevision += 1
         let position = Position(
-            time: time, duration: duration, editedAt: clock.now(),
-            onlyIfPending: onlyIfPending && (pendingPositions[key]?.onlyIfPending ?? true)
-                && sendingKey != key && pendingSettlements[key] == nil)
+            revision: positionRevision, token: store.reservePlaybackPosition(for: key),
+            time: time, duration: duration, editedAt: clock.now())
         pendingPositions[key] = position
         queuePersistence()
         return position
@@ -324,48 +351,46 @@ public final class ProgressSyncer {
 
     private func queuePersistence() {
         let previous = persistenceTail
+        // Strong ownership is intentional: detach, release and waiter cancellation cannot drop
+        // captured writes. Coalesced receipts are resolved only by a committed newer revision.
         persistenceTail = Task {
             await previous?.value
             await beforePositionPersistence?()
             let positions = pendingPositions
             for (key, queuedPosition) in positions {
-                var position = queuedPosition
+                let position = queuedPosition
                 guard pendingPositions[key] == position else { continue }
                 let progress = position.duration > 0 ? min(position.time / position.duration, 1) : 0
                 do {
-                    if position.onlyIfPending {
-                        let isPending = try await store.progress(for: key)?.needsServerSync == true
-                        // The lookup may suspend while a newer event replaces this close.
-                        guard pendingPositions[key] == position else { continue }
-                        if !isPending {
-                            pendingPositions[key] = nil
-                            continue
-                        }
-                        // Keep the obligation before awaiting the save: an older PATCH may
-                        // clean the row while this newer position is still waiting for a retry.
-                        position.onlyIfPending = false
-                        pendingPositions[key] = position
-                    }
-                    try await store.recordEdit(
-                        ProgressEdit(
-                            audio: .init(currentTime: position.time, duration: position.duration, progress: progress)),
-                        for: key, now: position.editedAt)
+                    // Store-scoped ordering is checked at the actual commit boundary, including
+                    // when a newer scope committed while this scope's write was held.
+                    _ = try await store.recordPlaybackPosition(
+                        .init(currentTime: position.time, duration: position.duration, progress: progress),
+                        for: key, token: position.token, now: position.editedAt)
                     // A newer event may have arrived while the save ran.
                     if pendingPositions[key] == position { pendingPositions[key] = nil }
+                    finishReceipts(for: key, through: position.revision, result: .success(()))
                 } catch {
+                    finishReceipts(for: key, through: position.revision, result: .failure(error))
                     logger.error("Saving pending progress failed: \(String(describing: error), privacy: .public)")
                 }
             }
         }
     }
 
+    private func finishReceipts(for key: MediaKey, through revision: UInt64, result: Result<Void, any Error>) {
+        let receipts = positionReceipts[key, default: []].filter { $0.revision <= revision }
+        positionReceipts[key]?.removeAll { $0.revision <= revision }
+        for entry in receipts { entry.receipt.resolve(result) }
+    }
+
     // MARK: Durable queue
 
     private func drain() async {
-        guard !isDetached else { return }
+        guard !isDetached, !isTransportQuiesced else { return }
         queuePersistence()
         await waitForPendingWrites()
-        guard !isDetached, pendingPositions.isEmpty else { return }
+        guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
         for outcome in Array(pendingSettlements.values) {
             guard await settle(outcome.patch, error: outcome.error) else { return }
         }
@@ -379,9 +404,7 @@ public final class ProgressSyncer {
         for row in rows {
             for _ in 0..<Self.maxSendsPerRow {
                 await waitForPendingWrites()
-                guard !isDetached, pendingPositions.isEmpty else { return }
-                sendingKey = row.key
-                defer { sendingKey = nil }
+                guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
                 let patch: ProgressPatch?
                 do {
                     patch = try await store.beginSend(for: row.key, now: clock.now())
@@ -390,6 +413,10 @@ public final class ProgressSyncer {
                     break
                 }
                 guard let patch else { break }
+                guard !isDetached, !isTransportQuiesced else {
+                    _ = await settle(patch, error: "accountEnded")
+                    return
+                }
                 guard let update = Self.update(for: patch.values) else {
                     logger.fault("beginSend returned a send with no group")
                     _ = await settle(patch, error: "emptySend")

@@ -24,6 +24,7 @@ final class StubProgressSyncService: ProgressSyncService {
         var patchGates: [Gate] = []
         var patchStarted: Gate?
         var log: [String] = []
+        var canceledCalls: [String] = []
         var syncWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
     }
 
@@ -63,6 +64,7 @@ final class StubProgressSyncService: ProgressSyncService {
         }
         for continuation in reached { continuation.resume() }
         await gate?.wait()
+        if Task.isCancelled { state.withLock { $0.canceledCalls.append("sync") } }
         state.withLock { $0.log.append("sync \(number) done") }
         if let error { throw error }
     }
@@ -78,6 +80,7 @@ final class StubProgressSyncService: ProgressSyncService {
         }
         started?.open()
         await gate?.wait()
+        if Task.isCancelled { state.withLock { $0.canceledCalls.append("patch") } }
         if let error { throw error }
     }
 }
