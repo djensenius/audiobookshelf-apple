@@ -35,7 +35,16 @@ struct EngineIOHandshake: Sendable, Equatable, Codable {
         pingInterval = try container.decode(Int.self, forKey: .pingInterval)
         pingTimeout = try container.decode(Int.self, forKey: .pingTimeout)
         maxPayload = try container.decodeIfPresent(Int.self, forKey: .maxPayload)
+        // Bounded so `livenessTimeout` can't overflow; the defaults are 25 s and 20 s.
+        guard Self.allowedMilliseconds.contains(pingInterval), Self.allowedMilliseconds.contains(pingTimeout) else {
+            throw DecodingError.dataCorrupted(
+                .init(codingPath: decoder.codingPath, debugDescription: "pingInterval or pingTimeout out of range")
+            )
+        }
     }
+
+    /// 0 to 1 hour.
+    static let allowedMilliseconds = 0...3_600_000
 
     /// No ping within `pingInterval + pingTimeout` of the open packet or the last ping means the
     /// connection is dead. Other packets don't reset this timer (as in engine.io-client).
@@ -138,8 +147,11 @@ enum SocketIOPacket: Sendable, Equatable {
         let data = payload.isEmpty ? nil : Data(payload.utf8)
         switch type {
         case 0:
+            // Absent, or a JSON object such as `{"sid":…}`.
+            if let data, !Self.isJSONObject(data) { throw .invalidPayload }
             self = .connect(namespace: namespace, payload: data)
         case 1:
+            guard data == nil, ackID == nil else { throw .invalidPayload }
             self = .disconnect(namespace: namespace)
         case 2:
             guard let data, let head = try? JSONDecoder().decode(EventHead.self, from: data) else {
@@ -150,9 +162,20 @@ enum SocketIOPacket: Sendable, Equatable {
             guard let ackID, let data else { throw .invalidPayload }
             self = .ack(namespace: namespace, ackID: ackID, arguments: data)
         default:
-            let message = data.flatMap { try? JSONDecoder().decode(ConnectErrorPayload.self, from: $0) }?.message
+            // Absent, or an object like `{"message":"Not authorized"}`.
+            var message: String?
+            if let data {
+                guard Self.isJSONObject(data),
+                    let payload = try? JSONDecoder().decode(ConnectErrorPayload.self, from: data)
+                else { throw .invalidPayload }
+                message = payload.message
+            }
             self = .connectError(namespace: namespace, message: message)
         }
+    }
+
+    private static func isJSONObject(_ data: Data) -> Bool {
+        (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
     }
 
     var encoded: String {

@@ -24,6 +24,29 @@ import Testing
     }
 
     @Test(arguments: [
+        #"0{"sid":"a","pingInterval":5000000000000000000,"pingTimeout":5000000000000000000}"#,
+        #"0{"sid":"a","pingInterval":-1,"pingTimeout":20000}"#,
+        #"0{"sid":"a","pingInterval":25000,"pingTimeout":3600001}"#,
+    ])
+    func rejectsOutOfRangePingSettings(wire: String) {
+        #expect(throws: RealtimeCodecError.invalidPayload) { try EngineIOPacket(decoding: wire) }
+    }
+
+    @Test func acceptsPingSettingsUpToAnHour() throws {
+        let packet = try EngineIOPacket(decoding: #"0{"sid":"a","pingInterval":3600000,"pingTimeout":3600000}"#)
+        guard case .open(let handshake) = packet else {
+            Issue.record("Expected open")
+            return
+        }
+        #expect(handshake.livenessTimeout == .seconds(7200))
+    }
+
+    @Test(arguments: ["0{", "0[1]", #"0"sid""#, #"1{"x":1}"#, "112", #"4"oops""#, "4{", "4[1]"])
+    func rejectsMalformedControlPackets(wire: String) {
+        #expect(throws: RealtimeCodecError.invalidPayload) { try SocketIOPacket(decoding: wire) }
+    }
+
+    @Test(arguments: [
         ("1", EngineIOPacket.close),
         ("2", .ping("")),
         ("3", .pong("")),

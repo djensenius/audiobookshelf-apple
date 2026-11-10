@@ -161,14 +161,22 @@ final class FakeTransport: WebSocketTransport {
 
 /// A connection the test drives: ``push(_:)`` plays the server, ``sent`` records the client.
 final class FakeConnection: WebSocketConnection {
+    private struct State {
+        var isClosed = false
+        var closeWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
+        var nextWaiterID = 0
+        /// While set, `send` records the frame and then suspends until `releaseSends()` or `close()`.
+        var holdsSends = false
+        var heldSends: [CheckedContinuation<Void, any Error>] = []
+        var failingSendPrefix: String?
+    }
+
     let messages: AsyncThrowingStream<WebSocketMessage, any Error>
     private let messageContinuation: AsyncThrowingStream<WebSocketMessage, any Error>.Continuation
     let sent: AsyncStream<String>
     private let sentContinuation: AsyncStream<String>.Continuation
-    private let closed = Mutex(false)
+    private let state = Mutex(State())
     private let deliversAfterClose: Bool
-    /// While `isHeld`, `send` records the frame and then suspends until `releaseSends()`.
-    private let sendGate = Mutex<(isHeld: Bool, waiters: [CheckedContinuation<Void, Never>])>((false, []))
 
     init(deliversAfterClose: Bool = false) {
         self.deliversAfterClose = deliversAfterClose
@@ -176,7 +184,27 @@ final class FakeConnection: WebSocketConnection {
         (sent, sentContinuation) = AsyncStream.makeStream()
     }
 
-    var isClosed: Bool { closed.withLock { $0 } }
+    var isClosed: Bool { state.withLock { $0.isClosed } }
+
+    /// Returns once `close()` has been called, or the task is cancelled.
+    func waitUntilClosed() async {
+        let id = state.withLock { state in
+            state.nextWaiterID += 1
+            return state.nextWaiterID
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let ready = state.withLock { state in
+                    if state.isClosed || Task.isCancelled { return true }
+                    state.closeWaiters[id] = continuation
+                    return false
+                }
+                if ready { continuation.resume() }
+            }
+        } onCancel: {
+            state.withLock { $0.closeWaiters.removeValue(forKey: id) }?.resume()
+        }
+    }
 
     func push(_ text: String) {
         messageContinuation.yield(.text(text))
@@ -190,34 +218,53 @@ final class FakeConnection: WebSocketConnection {
         messageContinuation.finish(throwing: FakeTransportError())
     }
 
+    /// Sends of frames starting with `prefix` throw, while receiving carries on.
+    func failSends(startingWith prefix: String) {
+        state.withLock { $0.failingSendPrefix = prefix }
+    }
+
     func holdSends() {
-        sendGate.withLock { $0.isHeld = true }
+        state.withLock { $0.holdsSends = true }
     }
 
     func releaseSends() {
-        let waiters = sendGate.withLock { gate in
-            gate.isHeld = false
-            defer { gate.waiters = [] }
-            return gate.waiters
+        let held = state.withLock { state in
+            state.holdsSends = false
+            defer { state.heldSends = [] }
+            return state.heldSends
         }
-        waiters.forEach { $0.resume() }
+        held.forEach { $0.resume() }
     }
 
     func send(_ text: String) async throws {
         sentContinuation.yield(text)
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let proceed = sendGate.withLock { gate in
-                guard gate.isHeld else { return true }
-                gate.waiters.append(continuation)
-                return false
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            let result: Result<Void, any Error>? = state.withLock { state in
+                if state.isClosed { return .failure(FakeTransportError()) }
+                if let prefix = state.failingSendPrefix, text.hasPrefix(prefix) {
+                    return .failure(FakeTransportError())
+                }
+                guard state.holdsSends else { return .success(()) }
+                state.heldSends.append(continuation)
+                return nil
             }
-            if proceed { continuation.resume() }
+            if let result { continuation.resume(with: result) }
         }
     }
 
+    /// Also fails any held sends, as closing a real socket does.
     func close() {
-        closed.withLock { $0 = true }
+        let (held, waiters) = state.withLock { state in
+            state.isClosed = true
+            defer {
+                state.heldSends = []
+                state.closeWaiters = [:]
+            }
+            return (state.heldSends, Array(state.closeWaiters.values))
+        }
         sentContinuation.finish()
         if !deliversAfterClose { messageContinuation.finish() }
+        held.forEach { $0.resume(throwing: FakeTransportError()) }
+        waiters.forEach { $0.resume() }
     }
 }

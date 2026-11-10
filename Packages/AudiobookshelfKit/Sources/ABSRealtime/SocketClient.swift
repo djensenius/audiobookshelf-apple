@@ -30,6 +30,8 @@ public actor SocketClient {
     /// The namespace connection (`40`) must be accepted within this time of opening the socket,
     /// as socket.io-client's default `timeout`; server pings alone don't keep it alive.
     static let connectTimeout: Duration = .seconds(20)
+    /// How long the best-effort `41` may take before the old socket is closed anyway.
+    static let farewellTimeout: Duration = .seconds(1)
 
     private enum Mode {
         case idle
@@ -119,9 +121,17 @@ public actor SocketClient {
         tearDown(reason: .clientRequested)
         if let farewell {
             let packet = Self.wrap(.disconnect())
+            let clock = clock
             Task.detached {
-                try? await farewell.send(packet)
-                farewell.close()
+                // Closes after the send finishes or the timeout passes, whichever is first; closing
+                // also ends a stalled send.
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { try? await farewell.send(packet) }
+                    group.addTask { try? await clock.sleep(for: SocketClient.farewellTimeout) }
+                    await group.next()
+                    farewell.close()
+                    group.cancelAll()
+                }
             }
         }
     }
@@ -367,8 +377,12 @@ public actor SocketClient {
         do {
             try await connection.send(text)
         } catch {
-            // The receive loop sees the same failure and reconnects.
+            // Receiving may carry on after a failed send, so don't wait for it to fail. The
+            // generation check keeps a late failure from closing a replacement connection.
+            guard generation == self.generation else { return }
             Self.logger.info("Socket send failed: \(error.localizedDescription, privacy: .public)")
+            tearDown(reason: .transportClosed)
+            scheduleReconnect()
         }
     }
 

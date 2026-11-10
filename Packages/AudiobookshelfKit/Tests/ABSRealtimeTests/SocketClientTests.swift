@@ -295,6 +295,7 @@ struct SocketClientTests {
         await client.connect()
         first.releaseSends()
         await disconnecting.value
+        await first.waitUntilClosed()
 
         #expect(await harness.nextEvent() == .disconnected(.clientRequested))
         let second = try await harness.nextConnection()
@@ -439,10 +440,70 @@ struct SocketClientTests {
         await harness.client.disconnect()
         #expect(await sent.next() == "41")
         #expect(await harness.nextEvent() == .disconnected(.clientRequested))
-        #expect(connection.isClosed)
+        await connection.waitUntilClosed()
 
         await harness.client.networkChanged()
-        #expect(clock.pendingDelays.isEmpty)
+        await clock.waitUntilPending([])
         #expect(harness.transport.requests.count == 1)
+    }
+
+    @Test func aStalledFarewellStillClosesTheSocket() async throws {
+        var harness = try Harness()
+        let clock = harness.clock
+        await harness.client.connect()
+        let connection = try await harness.nextConnection()
+        var sent = await harness.handshake(connection)
+
+        connection.holdSends()
+        await harness.client.disconnect()
+        #expect(await sent.next() == "41")
+        await clock.waitUntilPending([.seconds(1)])
+        #expect(!connection.isClosed)
+        clock.advance(by: .seconds(1))
+        await connection.waitUntilClosed()
+        await clock.waitUntilPending([])
+    }
+
+    @Test func aFailedAuthSendReconnects() async throws {
+        var harness = try Harness()
+        let clock = harness.clock
+        await harness.client.connect()
+        let connection = try await harness.nextConnection()
+        connection.failSends(startingWith: "42")
+        var sent = connection.sent.makeAsyncIterator()
+        connection.push(openPacket)
+        #expect(await sent.next() == "40")
+        connection.push(#"40{"sid":"sio-1"}"#)
+        #expect(await harness.nextEvent() == .connected)
+        #expect(await sent.next() == #"42["auth","tok"]"#)
+
+        #expect(await harness.nextEvent() == .disconnected(.transportClosed))
+        #expect(connection.isClosed)
+        await clock.waitUntilPending([.seconds(1)])
+        clock.advance(by: .seconds(1))
+        _ = await harness.handshake(try await harness.nextConnection())
+    }
+
+    @Test func ignoresMalformedControlPackets() async throws {
+        var harness = try Harness()
+        let clock = harness.clock
+        await harness.client.connect()
+        let connection = try await harness.nextConnection()
+        var sent = connection.sent.makeAsyncIterator()
+        connection.push(#"0{"sid":"eio-1","pingInterval":5000000000000000000,"pingTimeout":5000000000000000000}"#)
+        connection.push(#"0{"sid":"eio-1","pingInterval":-1,"pingTimeout":20000}"#)
+        connection.push(openPacket)
+        #expect(await sent.next() == "40")
+
+        connection.push("40{")
+        connection.push("40[1]")
+        connection.push(#"41{"x":1}"#)
+        connection.push(#"44"oops""#)
+        connection.push(#"44{"#)
+        connection.push(#"40{"sid":"sio-1"}"#)
+        #expect(await harness.nextEvent() == .connected)
+        #expect(await sent.next() == #"42["auth","tok"]"#)
+        #expect(!connection.isClosed)
+        await clock.waitUntilPending([.seconds(45)])
     }
 }
