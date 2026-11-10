@@ -317,6 +317,7 @@ public final class PlaybackCoordinator {
             // An unsent audio edit stays the newest audio while the server's is as the row last saw
             // it: the server's date is row-wide, so another device's ebook or finished change moves it.
             if let local, local.audioDirty, local.serverAudioUnchanged(in: progress) { break }
+            // Playing again intentionally unfinishes a book, so the next audio PATCH keeps the local flag.
             // Otherwise the position, date and flag all come from the fetched progress: `/play` may
             // have captured an older position than the fetch returned.
             candidates.append(
