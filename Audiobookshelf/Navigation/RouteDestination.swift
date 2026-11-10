@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import SwiftUI
 
 /// The screen for a ``Route``, for each tab stack's single `.navigationDestination(for:)`
@@ -6,11 +7,18 @@ import SwiftUI
 /// nothing.
 struct RouteDestination: View {
     let route: Route
+    @Environment(AppSettings.self) private var settings: AppSettings?
 
     var body: some View {
         switch route {
         case .stats:
             StatsView()
+        case .logs:
+            LogsView()
+        case .settings:
+            if let settings {
+                SettingsView(settings: settings)
+            }
         default:
             EmptyView()
         }

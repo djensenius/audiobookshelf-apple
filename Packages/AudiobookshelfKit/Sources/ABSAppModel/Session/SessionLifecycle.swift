@@ -50,9 +50,27 @@ public enum SessionScenePhase: Sendable, Hashable {
 /// Transitions run one at a time on the main actor, in call order. Participants must not await
 /// a transition from inside one; they call ``requestSignOut(of:)``, which queues a sign-out
 /// without waiting.
+///
+/// **Links.** ``linkEpoch`` advances whenever the account a waiting deep link was meant for goes
+/// away, so a view that never saw the gate in between can still drop the link.
 @MainActor @Observable
 public final class SessionLifecycle {
-    public private(set) var gate: AuthGate = .launching
+    public private(set) var gate: AuthGate = .launching {
+        didSet {
+            if gate != oldValue, endsAccountOfWaitingLinks(gate) { linkEpoch += 1 }
+        }
+    }
+
+    /// Advances each time the gate becomes one where the account a waiting link was meant for has
+    /// gone: signing out, switching, connect or store unavailable. It never moves for
+    /// `.launching` or `.ready`, so an `isOffline` change isn't a boundary. A ``PendingLink``
+    /// carries the epoch it arrived in, which lets a view that missed a short-lived gate still
+    /// tell that its link is stale. A `.ready` gate only follows one of these, or `.launching`,
+    /// because the session ends (and the gate leaves `.ready`) before another identity starts.
+    /// The epoch doesn't compare accounts, so a link that was waiting through a round trip back
+    /// to the same account (a switch that lands where it began, or a sign-out that is reversed)
+    /// is dropped as well; a mounted host normally takes a link at once, so this is rare.
+    public private(set) var linkEpoch: UInt64 = 0
 
     @ObservationIgnored private let source: any AccountSessionSource
     @ObservationIgnored private let clock: any Clock<Duration>
@@ -542,6 +560,11 @@ public final class SessionLifecycle {
         if flushWorkers[sessionID]?.isEmpty == true {
             flushWorkers[sessionID] = nil
         }
+    }
+
+    private func endsAccountOfWaitingLinks(_ gate: AuthGate) -> Bool {
+        if case .switching = gate { return true }
+        return !SceneContent(gate).holdsLinks
     }
 
     private func showConnect() {

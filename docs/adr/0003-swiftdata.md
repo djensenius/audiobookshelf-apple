@@ -161,7 +161,7 @@ General rules:
 
 | Model | Key | Other fields | Uniqueness and indexes |
 | --- | --- | --- | --- |
-| `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?`, `isDisconnected: Bool`, `disconnectedAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
+| `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?`, `isDisconnected: Bool`, `disconnectedAt: Date?`, `signedOutAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
 | `LocalLibraryItem` | `id: UUID` | `serverConnectionID: UUID`, `serverAddress`, `serverUserId`, `libraryItemId`, `mediaType` (`book`/`podcast`), `title`, `authorName: String?`, `relativeDirectory`, `coverRelativePath: String?`, `coverUpdatedAt: Date?`, `addedAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) files: [LocalFile]` | `#Unique([\.id], [\.serverConnectionID, \.libraryItemId])`; `#Index([\.libraryItemId], [\.serverConnectionID])` |
 | `LocalFile` | `id: UUID` | `item: LocalLibraryItem?` (inverse), `kind` (`audio`/`ebook`), `relativePath`, `filename`, `mimeType`, `size: Int64`, `serverIno: String?`, `trackIndex: Int?` (book track order), `episodeId: String?` (podcast) | `#Unique([\.id])` |
 | `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date` (latest change, for display and ordering only), `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `audioEditedAt: Date?`, `finishedEditedAt: Date?`, `ebookEditedAt: Date?`, `@Attribute(.codable) serverBaseline: ProgressBaseline?`, `@Attribute(.codable) unacknowledgedSends: [ProgressSend]` (oldest first, at most 8), `audioHistoryTruncated: Bool`, `finishedHistoryTruncated: Bool`, `ebookHistoryTruncated: Bool` (all default `false`), `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
@@ -540,6 +540,19 @@ Model notes:
     it exists, reuses it and clears `isDisconnected`/`disconnectedAt`. Dependent
     records and derived media keys therefore stay associated, so
     `pendingSync(for:)` finds the retained dirty progress.
+  - Signing out sets `signedOutAt` before deleting the Keychain session. An expiry
+    (the server rejecting the refresh token) deletes first and sets it only if that
+    delete failed, so a crash between the failed delete and the save leaves the
+    rejected tokens, which restore offline until the next request is rejected. A save
+    that a newer sign-in overtook is undone by date: `clearSignedOut(id:savedAt:)`
+    clears only the sign-out saved at that date, never a later one or a sign-in's. A sign-in
+    clears it once its new session is saved, when it marks the connection used
+    (`markUsed` clears it in the same save, so a connection is never active while
+    signed out) or, if the sign-in is superseded, when it keeps the session for
+    switching to later; that clear is by the date it read, and is skipped if its
+    session expired meanwhile. A record with `signedOutAt` set is never restored or
+    switched to, so a session whose delete failed stays signed out after a
+    relaunch.
 
 ### What is not persisted in SwiftData
 
