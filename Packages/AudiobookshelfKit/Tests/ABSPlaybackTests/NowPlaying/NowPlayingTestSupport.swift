@@ -58,6 +58,8 @@ final class FakeCommandHandler: NowPlayingCommandHandling {
     func setRate(_ rate: Double) async { calls.append(.rate(rate)) }
 }
 
+// `TestClock` (a clock tests advance by hand) is shared with the coordinator tests.
+
 /// Artwork loads that complete only when the test resolves them, in either order.
 actor ArtworkGate {
     private var waiting: [String: CheckedContinuation<Data?, Never>] = [:]
