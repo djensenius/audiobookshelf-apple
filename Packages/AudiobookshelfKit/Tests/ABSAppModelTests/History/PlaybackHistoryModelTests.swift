@@ -273,12 +273,29 @@ private final class MutableClock: Sendable {
         #expect(pause.name == .pause)
         #expect(pause.position == 3723.6)
         #expect(pause.positionText == "01:02:04")
+        #expect(pause.shownPosition == 3724)
         #expect(pause.timeText == timeText(now, utc))
         let stop = try #require(model.sections.last?.rows.first)
         #expect(stop.position == nil)
         #expect(stop.positionText == nil)
+        #expect(stop.shownPosition == nil)
         #expect(stop.timeText == timeText(stop.timestamp, utc))
         #expect(model.sections.map(\.dateText) == [dateText(now, utc), dateText(stop.timestamp, utc)])
+    }
+
+    @Test(arguments: [
+        (3723.4, 3723.0, "01:02:03"), (3723.5, 3724, "01:02:04"), (59.6, 60, "00:01:00"), (-2, 0, "00:00:00"),
+    ])
+    func spokenPositionMatchesTheShownTimestamp(position: Double, shown: Double, text: String) throws {
+        let utc = try calendar("UTC")
+        let now = try date(utc, 2026, 11, 10, 15, 45)
+        let model = makeModel(calendar: utc, now: now)
+        model.apply([event(.pause, at: now, position: position)])
+
+        let row = try #require(model.sections.first?.rows.first)
+        #expect(row.positionText == text)
+        #expect(row.shownPosition == shown)
+        #expect(row.shownPosition.map(TimeFormatting.fullTimestamp) == row.positionText)
     }
 
     // MARK: Live updates

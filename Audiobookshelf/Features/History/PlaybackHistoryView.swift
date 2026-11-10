@@ -126,7 +126,7 @@ private struct PlaybackHistoryRow: View {
     }
 
     private var accessibilityLabel: String {
-        guard let position = row.position else {
+        guard let position = row.shownPosition else {
             return L10n.string("LabelHistoryEventNoPositionAccessibility", row.name.label, row.timeText)
         }
         let spoken = DurationStyle.timestamp.accessibilityString(position, locale: locale)

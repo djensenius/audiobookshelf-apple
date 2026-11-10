@@ -49,6 +49,9 @@ public final class PlaybackHistoryModel {
         public let position: TimeInterval?
         /// The position as `hh:mm:ss` (legacy `$secondsToTimestampFull`).
         public let positionText: String?
+        /// The position rounded to the whole second ``positionText`` shows; speak this one so
+        /// VoiceOver and the screen agree (3723.6 is "01:02:04" and 1 h 2 min 4 s).
+        public let shownPosition: TimeInterval?
         public let timestamp: Date
         /// The localized time of day the event happened.
         public let timeText: String
@@ -213,6 +216,8 @@ public final class PlaybackHistoryModel {
             name: event.name,
             position: event.currentTime,
             positionText: event.currentTime.map(TimeFormatting.fullTimestamp),
+            // Rounded like `TimeFormatting.fullTimestamp`.
+            shownPosition: event.currentTime.map { $0.isFinite ? max($0, 0).rounded() : 0 },
             timestamp: event.timestamp,
             timeText: event.timestamp.formatted(timeStyle),
             sync: syncStatus(event)
