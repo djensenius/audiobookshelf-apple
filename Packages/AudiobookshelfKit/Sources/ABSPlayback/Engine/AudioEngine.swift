@@ -380,10 +380,12 @@ public final class AudioEngine: AudioEngineProtocol {
         do {
             try audioSession?.activate()
         } catch {
-            // Without an active session iOS would not play; report it and stay paused. The media is
-            // still usable, so this is not a sticky failure.
+            // Without an active session iOS would not play; report it and stay paused (the player
+            // may already be playing, for example on a repeated play()). The media is still usable,
+            // so this is not a sticky failure: the next play() activates again.
             logger.error("Audio session activation failed: \(error.localizedDescription, privacy: .public)")
             isPlaybackRequested = false
+            player.pause()
             refreshState()
             onEvent?(.failed(.audioSessionActivationFailed(description: error.localizedDescription)))
             return
