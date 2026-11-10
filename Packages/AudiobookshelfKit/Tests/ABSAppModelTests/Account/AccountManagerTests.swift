@@ -119,17 +119,6 @@ private final class FakeServer: Sendable {
     }
 }
 
-/// Records the generations that `onExpire` reports.
-private final class ExpiryRecorder: Sendable {
-    private let generations = Mutex<[Int]>([])
-
-    func record(_ generation: Int) {
-        generations.withLock { $0.append(generation) }
-    }
-
-    var recorded: [Int] { generations.withLock { $0 } }
-}
-
 /// Returns the callback for the state in the identity provider URL.
 private struct FakeAuthenticator: WebAuthenticator {
     func authenticate(_ url: URL, callbackScheme: String) async throws -> URL {
@@ -704,53 +693,120 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(manager.state == .signedOut && manager.connections.map(\.id) == [activeID])
         #expect(server.loggedOutRefreshTokens == ["refresh-1"])
     }
-}
 
-@Suite struct ConnectionCredentialsTests {
-    private let first = AuthTokens(accessToken: "access-1", refreshToken: "refresh-1")
-    private let second = AuthTokens(accessToken: "access-2", refreshToken: "refresh-2")
+    @Test(arguments: [false, true])
+    func signingOutWhileRestoreReadsTheKeychainWins(removing: Bool) async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        let manager = harness.makeManager()
+        let read = harness.keychain.holdNextRead()
+        let restore = Task { await manager.restoreSession() }
+        await read.arrived()
 
-    @Test func refreshedTokensStayInMemoryUntilTheKeychainTakesThem() async throws {
-        let keychain = InMemoryKeychain()
-        let vault = CredentialVault(keychain: keychain)
-        let id = UUID()
-        let credentials = ConnectionCredentials(connectionID: id, vault: vault) { _, _ in }
-        _ = try await credentials.signIn(StoredSession(tokens: first, openIDSession: nil), customHeaders: [:])
-
-        keychain.failWrites(with: errSecInteractionNotAllowed)
-        #expect(await credentials.replaceTokens(expected: first, with: second))
-        #expect(await !credentials.replaceTokens(expected: first, with: first))
-        #expect(await credentials.tokens() == second)
-        #expect(try vault.session(for: id)?.tokens == first)
-
-        keychain.failWrites(with: nil)
-        #expect(await credentials.tokens() == second)
-        #expect(try vault.session(for: id)?.tokens == second)
-    }
-
-    @Test func expiryComparesAndReportsItsGeneration() async throws {
-        let recorder = ExpiryRecorder()
-        let vault = CredentialVault(keychain: InMemoryKeychain())
-        let credentials = ConnectionCredentials(connectionID: UUID(), vault: vault) { _, generation in
-            recorder.record(generation)
+        // Starts before the restore resumes from reading the session.
+        let signingOut = Task {
+            if removing { _ = try await manager.remove(id) } else { _ = await manager.logout() }
         }
-        let session = StoredSession(tokens: first, openIDSession: nil)
-        let signedIn = try await credentials.signIn(session, customHeaders: [:]).generation
-
-        #expect(await !credentials.expireSession(ifCurrent: second))
-        #expect(await credentials.expireSession(ifCurrent: first))
-        #expect(await credentials.tokens() == nil)
-        #expect(recorder.recorded == [signedIn + 1])
-        #expect(try await credentials.signIn(session, customHeaders: [:]).generation > signedIn + 1)
+        read.open()
+        try await signingOut.value
+        await restore.value
+        #expect(manager.state == .signedOut && manager.lastError == nil && manager.activeConnection == nil)
+        #expect(try harness.session(id) == nil && server.loggedOutRefreshTokens == ["refresh-1"])
+        // The restore stopped before authorizing.
+        #expect(server.requests("/api/authorize").isEmpty)
+        #expect(manager.connections.map(\.id) == (removing ? [] : [id]))
     }
 
-    @Test func corruptItemsReadAsMissing() throws {
-        let keychain = InMemoryKeychain()
-        let id = UUID()
-        let item = CredentialVault.item(CredentialVault.sessionService, id)
-        _ = try keychain.add(Data("not json".utf8), for: item, accessibility: .afterFirstUnlock)
-        #expect(try CredentialVault(keychain: keychain).session(for: id) == nil)
-        let description = String(describing: StoredSession(tokens: first, openIDSession: nil))
-        #expect(!description.contains("access-1") && !description.contains("refresh-1"))
+    @Test func logoutBeforeRestoreChoosesEndsItsSession() async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        let manager = harness.makeManager()
+        // The logout runs while the restore waits for the store, before it chooses the connection.
+        let restore = Task { await manager.restoreSession() }
+        let logout = Task { _ = await manager.logout() }
+        await logout.value
+        await restore.value
+        #expect(manager.state == .signedOut && manager.activeConnection == nil)
+        #expect(try harness.session(id) == nil && server.loggedOutRefreshTokens == ["refresh-1"])
+        #expect(server.requests("/api/authorize").isEmpty && manager.connections.map(\.id) == [id])
+    }
+
+    @Test func removingDuringSignInToItEndsBothSessions() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let validated = try await validate(server)
+        // Signing in again holds while ending the replaced session.
+        let logout = server.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        try await manager.remove(id)
+        logout.open()
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        #expect(manager.state == .signedOut && manager.connections.isEmpty && harness.keychain.isEmpty)
+        #expect(server.loggedOutRefreshTokens == ["refresh-1", "refresh-2"])
+    }
+
+    @Test func signInToAConnectionDeletedMeanwhileIsDiscarded() async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        let manager = harness.makeManager()
+        let validated = try await validate(server)
+        let logout = server.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        // Deleted after the sign-in saved its session, as by a removal that checked the connection
+        // before the sign-in saved it.
+        _ = try await harness.store.remove(id: id)
+        logout.open()
+        await #expect(throws: AccountError.connectionNotFound) { try await signingIn.value }
+        #expect(manager.state == .signedOut && manager.activeConnection == nil && manager.connections.isEmpty)
+        #expect(harness.keychain.isEmpty && server.loggedOutRefreshTokens == ["refresh-1", "refresh-2"])
+    }
+
+    @Test func removingTheActiveConnectionLetsASignInToAnotherFinish() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let first = FakeServer()
+        let second = FakeServer(userId: "usr-2")
+        let firstID = try await signIn(manager, to: first)
+        let secondID = try await signIn(manager, to: second)
+        let validated = try await validate(first)
+        let logout = first.hold("/logout")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await logout.arrived()
+
+        try await manager.remove(secondID)
+        #expect(manager.state == .signedOut)
+        logout.open()
+        try await signingIn.value
+        #expect(manager.state.user?.connectionID == firstID && manager.connections.map(\.id) == [firstID])
+        #expect(first.loggedOutRefreshTokens == ["refresh-1"] && second.loggedOutRefreshTokens == ["refresh-1"])
+    }
+
+    @Test func failedSwitchDuringReconnectStaysOffline() async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        server.update { $0.isOffline = true }
+        let manager = harness.makeManager()
+        await manager.restoreSession()
+        let offline = manager.state
+        #expect(offline == .offline(try #require(offline.user)))
+
+        server.update { $0.isOffline = false }
+        let authorize = server.hold("/api/authorize")
+        let reconnect = Task { await manager.restoreSession() }
+        await authorize.arrived()
+        await #expect(throws: AccountError.connectionNotFound) { try await manager.switch(to: UUID()) }
+        authorize.open()
+        await reconnect.value
+        #expect(manager.state == offline && manager.activeConnection?.id == id && manager.client != nil)
     }
 }

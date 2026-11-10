@@ -45,6 +45,6 @@ Use one of these before releasing changes to `KeychainStore` or its attributes:
   `keychain-access-groups` entitlement.
 
 The test passes when the item round-trips through `KeychainStore()` (nil access group) and is
-stored with `kSecAttrAccessibleAfterFirstUnlock` and not synchronisable. Its items (and the
-probe's) use services starting with `org.davidjensenius.Audiobookshelf.tests` and random
-accounts, and are deleted.
+stored with `kSecAttrAccessibleAfterFirstUnlock`, not synchronisable, in the app's default access
+group (`<prefix>.org.davidjensenius.Audiobookshelf`). Its items (and the probe's) use services
+starting with `org.davidjensenius.Audiobookshelf.tests` and random accounts, and are deleted.

@@ -138,7 +138,11 @@ public final class AccountManager {
     // MARK: - Sign-in
 
     /// Signs in to `server` with a username and password and makes it the active connection.
-    /// On failure the state is unchanged.
+    ///
+    /// If the sign-in fails, the state is unchanged. It throws `CancellationError` if a newer call
+    /// superseded it, including a ``logout()`` while it runs, even of another connection, which
+    /// also signs out of the session it saved. A new connection whose session couldn't be saved
+    /// stays in ``connections`` without one; switching to it throws ``AccountError/notSignedIn``.
     public func connect(local server: ValidatedServer, username: String, password: String) async throws {
         let logouts = self.logouts
         let result = try await validator.login(to: server, username: username, password: password)
@@ -146,7 +150,7 @@ public final class AccountManager {
     }
 
     /// Signs in to `server` through its OpenID provider and makes it the active connection.
-    /// On failure the state is unchanged.
+    /// Fails and is cancelled as ``connect(local:username:password:)`` is.
     public func connect(oidc server: ValidatedServer, authenticator: any WebAuthenticator) async throws {
         let logouts = self.logouts
         let result = try await openID.login(to: server, using: authenticator)
@@ -155,13 +159,13 @@ public final class AccountManager {
 
     /// Saves the session, then marks the connection used and activates it. A sign-in superseded
     /// by another call keeps its saved session for switching to later, unless the newer call was
-    /// ``logout()``, which this sign-in then also signs out of.
+    /// ``logout()``, which this sign-in then also signs out of, or the connection was removed.
     private func finishSignIn(
         _ result: LoginResult, to server: ValidatedServer, method: ServerAuthMethod, logoutsBefore: Int
     ) async throws {
         let operation = begin()
         let session = StoredSession(tokens: result.tokens, openIDSession: result.openIDSession)
-        var saved: (credentials: ConnectionCredentials, generation: Int)?
+        var saved: (id: UUID, credentials: ConnectionCredentials, generation: Int)?
         do {
             guard logouts == logoutsBefore else { throw CancellationError() }
             // Not marked used before the session is saved, so a failed sign-in isn't restored.
@@ -174,13 +178,14 @@ public final class AccountManager {
             let credentials = self.credentials(for: connection.id)
             let stored = try await credentials.signIn(session, customHeaders: server.configuration.customHeaders)
             signInGenerations[connection.id] = stored.generation
-            saved = (credentials, stored.generation)
+            saved = (connection.id, credentials, stored.generation)
             if let replaced = stored.replaced, replaced.refreshToken != session.refreshToken {
                 // Signed in again: end the session this one replaced, best effort.
                 _ = await serverLogout(replaced, client: makeClient(server.configuration, credentials: nil))
             }
             try ensureCurrent(operation)
-            try await store.markUsed(id: connection.id, at: now())
+            // Removed since it was saved; the catch deletes the session.
+            guard try await store.markUsed(id: connection.id, at: now()) else { throw AccountError.connectionNotFound }
             await reloadConnections()
             try ensureCurrent(operation)
             Log.auth.info("Signed in with \(method.rawValue, privacy: .public)")
@@ -189,8 +194,13 @@ public final class AccountManager {
         } catch {
             let logoutClient = makeClient(server.configuration, credentials: nil)
             if let saved {
-                // Signed out while saving: end the session saved here, unless it's been replaced.
-                if logouts != logoutsBefore,
+                if await isRemoved(saved.id) {
+                    // Nothing else would delete what this sign-in saved for the removed connection.
+                    if let ended = try? await saved.credentials.removeAll().session {
+                        _ = await serverLogout(ended, client: logoutClient)
+                    }
+                } else if logouts != logoutsBefore,
+                    // Signed out while saving: end the session saved here, unless it's been replaced.
                     let ended = await saved.credentials.signOut(ifGeneration: saved.generation).ended
                 {
                     _ = await serverLogout(ended, client: logoutClient)
@@ -236,7 +246,8 @@ public final class AccountManager {
     /// unless the server rejected it.
     /// - Throws: ``AccountError`` if the connection isn't saved or has no session, or the
     ///   ``KeychainError`` if the session can't be read. The state is then unchanged, unless this
-    ///   superseded a restore or switch, when it's signed out.
+    ///   superseded a restore or switch: then it's offline with the active connection, or signed
+    ///   out if none is active.
     public func `switch`(to id: UUID) async throws {
         let operation = begin()
         pendingConnectionID = id
@@ -253,8 +264,13 @@ public final class AccountManager {
         } catch {
             if isCurrent(operation) {
                 pendingConnectionID = nil
-                // A superseded restore or switch won't finish.
-                if state == .restoring { signOutLocally(error: nil) }
+                // A superseded restore or switch won't finish. Keep a connection it was activating
+                // or reconnecting, unverified, as offline does.
+                if state == .restoring, let active = activeConnection {
+                    goOffline(active, client: self.client, error: nil)
+                } else if state == .restoring {
+                    signOutLocally(error: nil)
+                }
             }
             throw error
         }
@@ -272,9 +288,11 @@ public final class AccountManager {
         await reloadConnections()
     }
 
-    /// Signs out of the active connection, or of the one being restored, switched to or signed
-    /// in to: deletes its tokens, keeping the connection and its custom headers, then ends the
-    /// server session, best effort.
+    /// Signs out of the active connection, or if none is active, of the one being restored,
+    /// switched to or signed in to: deletes its tokens, keeping the connection and its custom
+    /// headers, then ends the server session, best effort. With one connection active while a
+    /// restore or switch to another runs, it signs out of the active one and cancels the other.
+    /// A sign-in that's running is cancelled and signed out too.
     /// - Returns: The OpenID provider's end-session URL to open for an OpenID session, if the
     ///   server returned one.
     @discardableResult
@@ -305,8 +323,9 @@ public final class AccountManager {
     }
 
     /// Forgets a saved connection: deletes its Keychain items and removes it from the store, then
-    /// ends its server session, best effort. Removing the active connection, or the one being
-    /// restored or switched to, signs out.
+    /// ends its server session, best effort. Removing the active connection signs out; a sign-in,
+    /// restore or switch to another connection carries on. Removing the one being signed in to,
+    /// restored or switched to cancels that call.
     /// - Returns: The OpenID provider's end-session URL, as for ``logout()``.
     @discardableResult
     public func remove(_ id: UUID) async throws -> URL? {
@@ -343,11 +362,25 @@ public final class AccountManager {
         guard isCurrent(operation) else { throw CancellationError() }
     }
 
-    /// Supersedes the running calls and signs out locally if `id` is active or being activated.
+    /// Signs out locally if `id` is active or being activated, and supersedes the running calls
+    /// only if they're activating `id`.
     private func abandon(_ id: UUID) {
-        guard activeConnection?.id == id || pendingConnectionID == id else { return }
-        _ = begin()
+        if pendingConnectionID == id {
+            _ = begin()
+        } else if activeConnection?.id != id {
+            return
+        }
         signOutLocally(error: nil)
+    }
+
+    /// Whether `id` is being removed or is no longer saved and connected.
+    private func isRemoved(_ id: UUID) async -> Bool {
+        guard !removing.contains(id) else { return true }
+        do {
+            return try await store.connection(id: id)?.isDisconnected ?? true
+        } catch {
+            return false
+        }
     }
 
     private func credentials(for id: UUID) -> ConnectionCredentials {

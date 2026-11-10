@@ -51,6 +51,9 @@ private let dataProtectionKeychainStatus: OSStatus = {
         #expect(items.count == 1)
         #expect(attributes[kSecAttrAccessible as String] as? String == kSecAttrAccessibleAfterFirstUnlock as String)
         #expect(attributes[kSecAttrSynchronizable as String] as? Bool != true)
+        // The app's default group, the first in its keychain-access-groups (ADR 0002).
+        let group = try #require(attributes[kSecAttrAccessGroup as String] as? String)
+        #expect(group.hasSuffix(".org.davidjensenius.Audiobookshelf"), "Stored in \(group)")
 
         try store.delete(item)
         #expect(try store.data(for: item) == nil)
