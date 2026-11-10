@@ -7,14 +7,19 @@ import Foundation
 /// string, so they may arrive as strings.
 public struct PagedResults<Element: Decodable & Sendable>: Decodable, Sendable {
     public let results: [Element]
+    /// The number of rows the server sent, including those skipped in ``results``. Use it to
+    /// page: a page of malformed rows is still a full page.
+    public let rawCount: Int
     /// Missing when the server lists a series' sub-series with `collapseseries=1`.
     public let total: Int?
     /// `0` means unlimited.
     public let limit: Int
     public let page: Int
 
-    public init(results: [Element], total: Int?, limit: Int, page: Int) {
+    /// `rawCount` defaults to the number of `results`.
+    public init(results: [Element], total: Int?, limit: Int, page: Int, rawCount: Int? = nil) {
         self.results = results
+        self.rawCount = rawCount ?? results.count
         self.total = total
         self.limit = limit
         self.page = page
@@ -27,6 +32,7 @@ public struct PagedResults<Element: Decodable & Sendable>: Decodable, Sendable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         results = try container.decodeLossyArrayIfPresent(Element.self, forKey: .results) ?? []
+        rawCount = (try? container.nestedUnkeyedContainer(forKey: .results))?.count ?? results.count
         total = try container.decodeLenientIntIfPresent(forKey: .total)
         limit = try container.decodeLenientIntIfPresent(forKey: .limit) ?? 0
         page = try container.decodeLenientIntIfPresent(forKey: .page) ?? 0

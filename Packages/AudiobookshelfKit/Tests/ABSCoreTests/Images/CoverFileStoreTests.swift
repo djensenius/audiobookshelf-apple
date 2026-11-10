@@ -111,6 +111,22 @@ import Testing
         #expect(await store.size == 16_384)
     }
 
+    @Test func failedFinalRenameLeavesTheInputInPlace() async throws {
+        let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
+        // A non-empty folder where the file belongs makes the final rename fail.
+        let folder = store.directory.appending(path: serverID.uuidString)
+        let blocker = folder.appending(path: "\(key("a").fileStem).jpg")
+        try FileManager.default.createDirectory(at: blocker.appending(path: "x"), withIntermediateDirectories: true)
+        let input = try temporaryFile()
+        await #expect(throws: POSIXError.self) {
+            try await store.insert(moving: input, for: key("a"), pathExtension: "jpg", generation: 0)
+        }
+        #expect(try Data(contentsOf: input).count == 16_384)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path) == [blocker.lastPathComponent])
+        #expect(await store.lookup(key("a")) == nil)
+        #expect(await store.size == 0)
+    }
+
     @Test func discardedLeasedFileIsSkippedThenReplacedInPlace() async throws {
         let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
         let bad = try await store.insert(moving: temporaryFile(), for: key("a"), pathExtension: "png", generation: 0)

@@ -15,7 +15,8 @@ public struct LibrariesResponse: Decodable, Sendable, Hashable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        libraries = try container.decodeLossyArrayIfPresent(Library.self, forKey: .libraries) ?? []
+        // Required: a body without the list must not read as "no libraries" and empty the store.
+        libraries = try container.decode(LossyArray<Library>.self, forKey: .libraries).elements
     }
 }
 
