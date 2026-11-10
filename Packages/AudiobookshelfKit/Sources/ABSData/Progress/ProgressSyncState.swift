@@ -236,13 +236,24 @@ struct ProgressSyncState: Sendable, Equatable {
             baseline.finishedAt = finished.finishedAt
         }
         if let ebook = send.ebook {
+            // Keep the 0 the server created for a missing `ebookProgress` when acknowledged again.
+            let created = baseline.ebookLocation == ebook.ebookLocation && baseline.ebookProgress == 0
             baseline.ebookLocation = ebook.ebookLocation
-            baseline.ebookProgress = ebook.ebookProgress
+            baseline.ebookProgress = ebook.ebookProgress ?? (created ? 0 : nil)
         }
+        // Creating progress stores a missing `ebookProgress` as 0.
+        if unseeded, baseline.ebookProgress == nil { baseline.ebookProgress = 0 }
         if let serverLastUpdate { baseline.lastUpdate = max(baseline.lastUpdate, serverLastUpdate) }
         serverBaseline = baseline
         let sent = send.groups
         dropEvidence(sent)
+        // The server may have auto-finished our un-finish: while a newer finished edit is
+        // pending, keep this send as evidence so the finished echo still matches it.
+        if let finished = send.finished, !finished.isFinished, dirty.contains(.finished),
+            editedAt(.finished) != finished.editedAt
+        {
+            unacknowledgedSends.append(send.only(.finished))
+        }
         truncated.subtract(sent)
         for group in ProgressGroups.each where sent.contains(group) && editedAt(group) == send.editedAt(group) {
             dirty.remove(group)
@@ -264,7 +275,8 @@ struct ProgressSyncState: Sendable, Equatable {
         // An echo of our audio or finished PATCH may carry the server's side effect on the other
         // group, so shield that group before resolving it.
         for group in ProgressGroups.each where !excluded.contains(group) && dirty.contains(group) {
-            if unacknowledgedSends.contains(where: { Self.matches(server, $0, group) }) {
+            if unacknowledgedSends.contains(where: { Self.matches(server, $0, group, created: serverBaseline == nil) })
+            {
                 shieldSideEffects(of: group)
             }
         }
@@ -292,7 +304,9 @@ struct ProgressSyncState: Sendable, Equatable {
         if let baseline = serverBaseline, Self.matches(server, baseline, group) { return }
         // The echo of one of our PATCHes whose response was lost. Only this group's evidence is
         // settled and pruned (from that entry and every older one); other groups keep theirs.
-        if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }) {
+        if let index = unacknowledgedSends.lastIndex(where: {
+            Self.matches(server, $0, group, created: serverBaseline == nil)
+        }) {
             let sentEditedAt = unacknowledgedSends[index].editedAt(group)
             for older in 0...index {
                 unacknowledgedSends[older].remove(group)
@@ -398,17 +412,31 @@ struct ProgressSyncState: Sendable, Equatable {
         }
     }
 
-    static func matches(_ server: ProgressBaseline, _ send: ProgressSend, _ group: ProgressGroups) -> Bool {
+    /// Whether `server` holds `send`'s value of `group` as the server stores it: an un-finish
+    /// fewer than 10 s from the end is auto-finished (`finishedAt` no earlier than the edit),
+    /// and, when the send `created` the progress (no baseline yet), a missing `ebookProgress` is
+    /// stored as 0.
+    static func matches(
+        _ server: ProgressBaseline, _ send: ProgressSend, _ group: ProgressGroups, created: Bool = false
+    ) -> Bool {
         switch group {
         case .audio:
             guard let audio = send.audio else { return false }
             return audioMatches(server, audio.currentTime, audio.duration)
         case .finished:
             guard let finished = send.finished else { return false }
+            // Auto-finished after the edit: by this PATCH, not an earlier one.
+            if !finished.isFinished, server.isFinished, server.duration > 0,
+                server.duration - server.currentTime < 10, let finishedAt = server.finishedAt,
+                finishedAt >= wholeMilliseconds(finished.editedAt)
+            {
+                return true
+            }
             return server.isFinished == finished.isFinished && datesMatch(server.finishedAt, finished.finishedAt)
         default:
             guard let ebook = send.ebook else { return false }
             return ebookMatches(server, ebook.ebookLocation, ebook.ebookProgress)
+                || (created && ebook.ebookProgress == nil && ebookMatches(server, ebook.ebookLocation, 0))
         }
     }
 

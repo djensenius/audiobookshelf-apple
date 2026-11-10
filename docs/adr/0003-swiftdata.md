@@ -227,7 +227,11 @@ Model notes:
     (it failed or its response was lost) and ebook is dirty, ebook goes next, so a
     PATCH that keeps failing can't block it. Without a baseline, ebook waits for
     audio and finished, because an ebook PATCH for media the server has no
-    progress for creates it with zero audio and unfinished (#53).
+    progress for creates it with zero audio and unfinished (#53). The body never
+    carries `lastUpdate` (the server would store it as `updatedAt`, a device-clock
+    time that can be older than the baseline, so the echo would be dropped as
+    stale), and an ebook PATCH always sends `ebookProgress`, `null` when unknown
+    (an omitted key leaves the old value on existing progress).
   - **Stale server values are dropped before any merge.** `LocalProgressStore`
     keeps an in-memory generation counter and, per row, the generation of its last
     local edit or PATCH settlement. Every fetch (`/api/me`, an expanded item,
@@ -272,7 +276,22 @@ Model notes:
     auto-finishing stores 1, un-finishing stores 0, and a sent value equal to its
     old `currentTime / duration` is ignored. `finishedAt` is stored and compared
     in whole milliseconds, as the server keeps it, so the echo of a local "mark
-    finished" compares equal.
+    finished" compares equal. Two more server forms of our values also match a
+    send (`ProgressSyncState.matches`):
+    - a "not finished" sent fewer than 10 s from the end is auto-finished, so a
+      finished server value matches it when its `finishedAt` isn't earlier than
+      the send's edit (an earlier finish isn't this send's echo). The ack keeps
+      such an un-finish send as evidence while a newer finished edit is pending,
+      so that edit survives the finished echo; an unchanged edit takes it;
+    - creating progress stores a missing `ebookProgress` as 0
+      (`User.createUpdateMediaProgressFromPayload`), so while the row has no
+      baseline a sent `nil` also matches 0 at the same location, and the ack of
+      a send that created the progress records 0 in the baseline.
+
+    Other normalizations need nothing: the server clamps `progress` (not
+    compared); creation defaults `currentTime` and `duration` to 0, which only
+    affects unsent groups, shielded below; `hideFromContinueListening` isn't
+    synced.
 
     Conflicts compare the device clock (`<group>EditedAt`) with the server clock
     (`lastUpdate`). A device whose clock runs ahead wins conflicts it should lose,
@@ -352,7 +371,9 @@ Model notes:
       device's value can lose to ours until the first acknowledgement or echo.
     - The server auto-finishes unfinished progress within 10 s of the end on any
       PATCH, including one that un-finishes, so a "not finished" sent there
-      doesn't stick; the server's finished value is taken.
+      doesn't stick; the server's finished value is taken. The match uses the
+      default 10 s threshold and compares the server's `finishedAt` with the
+      device's edit time, so clock skew can misjudge it.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
@@ -670,7 +691,10 @@ Ongoing checks:
   the dirty groups its PATCH could have changed, and
   an unmatched server value for such a group then keeps the local value dirty; a server echo of an in-flight PATCH (newer `lastUpdate`, older
   values) arriving after a newer local seek is deferred and leaves the seek dirty
-  and unchanged, on both PATCH success and failure; deleting a connection with dirty progress and then logging in
+  and unchanged, on both PATCH success and failure; a newer edit survives the
+  server's normalized echo (an un-finish auto-finished near the end, a created
+  `ebookProgress` of 0 for a sent `nil`) after an ack or a lost response, and an
+  unchanged edit takes it; deleting a connection with dirty progress and then logging in
   again to the same address and user returns the same connection `id`, and
   `pendingSync(for:)` returns the retained progress.
 - #72 (P4-01): a sealed resume-data file on disk contains no plaintext bearer
