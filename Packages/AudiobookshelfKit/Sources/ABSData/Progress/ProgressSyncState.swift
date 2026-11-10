@@ -1,0 +1,356 @@
+import Foundation
+
+/// The field groups of a progress row. Each local change marks only the groups it touched, and a
+/// PATCH sends only the dirty groups (ADR 0003):
+/// - `audio`: `currentTime`, `progress`, `duration`;
+/// - `finished`: `isFinished`, `finishedAt`;
+/// - `ebook`: `ebookLocation`, `ebookProgress`.
+public struct ProgressGroups: OptionSet, Sendable, Hashable {
+    public let rawValue: Int
+
+    public init(rawValue: Int) { self.rawValue = rawValue }
+
+    public static let audio = ProgressGroups(rawValue: 1 << 0)
+    public static let finished = ProgressGroups(rawValue: 1 << 1)
+    public static let ebook = ProgressGroups(rawValue: 1 << 2)
+    public static let all: ProgressGroups = [.audio, .finished, .ebook]
+
+    /// The single groups, in a fixed order.
+    static let each: [ProgressGroups] = [.audio, .finished, .ebook]
+}
+
+/// A local progress change. Only the non-`nil` groups are changed and become dirty.
+public struct ProgressEdit: Sendable, Equatable {
+    public var audio: Audio?
+    /// Whether the media is finished; `finishedAt` becomes the edit time when `true`, else `nil`.
+    public var isFinished: Bool?
+    public var ebook: Ebook?
+
+    public init(audio: Audio? = nil, isFinished: Bool? = nil, ebook: Ebook? = nil) {
+        self.audio = audio
+        self.isFinished = isFinished
+        self.ebook = ebook
+    }
+
+    public struct Audio: Sendable, Equatable {
+        public var currentTime: Double
+        public var duration: Double
+        public var progress: Double
+
+        public init(currentTime: Double, duration: Double, progress: Double) {
+            self.currentTime = currentTime
+            self.duration = duration
+            self.progress = progress
+        }
+    }
+
+    public struct Ebook: Sendable, Equatable {
+        public var location: String?
+        public var progress: Double?
+
+        public init(location: String?, progress: Double?) {
+            self.location = location
+            self.progress = progress
+        }
+    }
+}
+
+extension ProgressSend {
+    /// The groups this send carries.
+    public var groups: ProgressGroups {
+        var groups: ProgressGroups = []
+        if audio != nil { groups.insert(.audio) }
+        if finished != nil { groups.insert(.finished) }
+        if ebook != nil { groups.insert(.ebook) }
+        return groups
+    }
+
+    func editedAt(_ group: ProgressGroups) -> Date? {
+        switch group {
+        case .audio: audio?.editedAt
+        case .finished: finished?.editedAt
+        default: ebook?.editedAt
+        }
+    }
+
+    mutating func remove(_ group: ProgressGroups) {
+        if group.contains(.audio) { audio = nil }
+        if group.contains(.finished) { finished = nil }
+        if group.contains(.ebook) { ebook = nil }
+    }
+}
+
+/// The sync bookkeeping of one `LocalMediaProgress` row as a value, so the ADR 0003 rules (local
+/// edits, sends, acknowledgements and merges) are pure functions tested without a store.
+struct ProgressSyncState: Sendable, Equatable {
+    var currentTime: Double = 0
+    var progress: Double = 0
+    var duration: Double = 0
+    var isFinished = false
+    var finishedAt: Date?
+    var ebookLocation: String?
+    var ebookProgress: Double?
+    var lastUpdate: Date
+    var dirty: ProgressGroups = []
+    var audioEditedAt: Date?
+    var finishedEditedAt: Date?
+    var ebookEditedAt: Date?
+    var serverBaseline: ProgressBaseline?
+    /// Oldest first, at most `ProgressSend.historyLimit`.
+    var unacknowledgedSends: [ProgressSend] = []
+    /// Groups whose `<group>HistoryTruncated` flag is set.
+    var truncated: ProgressGroups = []
+
+    /// A row seeded from known server progress: every field and the baseline, nothing dirty.
+    init(seed server: ProgressBaseline) {
+        lastUpdate = server.lastUpdate
+        take(.all, from: server)
+        serverBaseline = server
+    }
+
+    /// A row with default values and no baseline.
+    init(lastUpdate: Date) {
+        self.lastUpdate = lastUpdate
+    }
+
+    // MARK: - Local edits
+
+    /// Applies a local change: marks each changed group dirty and sets its edit time to `now`.
+    mutating func apply(_ edit: ProgressEdit, now: Date) {
+        if let audio = edit.audio {
+            currentTime = audio.currentTime
+            duration = audio.duration
+            progress = audio.progress
+            dirty.insert(.audio)
+            audioEditedAt = now
+        }
+        if let finished = edit.isFinished {
+            isFinished = finished
+            finishedAt = finished ? now : nil
+            dirty.insert(.finished)
+            finishedEditedAt = now
+        }
+        if let ebook = edit.ebook {
+            ebookLocation = ebook.location
+            ebookProgress = ebook.progress
+            dirty.insert(.ebook)
+            ebookEditedAt = now
+        }
+        lastUpdate = max(lastUpdate, now)
+    }
+
+    /// The current values and edit times of the dirty groups; the other groups are `nil`.
+    var dirtyValues: ProgressSend {
+        var send = ProgressSend()
+        if dirty.contains(.audio) {
+            send.audio = .init(
+                currentTime: currentTime, progress: progress, duration: duration,
+                editedAt: audioEditedAt ?? lastUpdate)
+        }
+        if dirty.contains(.finished) {
+            send.finished = .init(
+                isFinished: isFinished, finishedAt: finishedAt, editedAt: finishedEditedAt ?? lastUpdate)
+        }
+        if dirty.contains(.ebook) {
+            send.ebook = .init(
+                ebookLocation: ebookLocation, ebookProgress: ebookProgress, editedAt: ebookEditedAt ?? lastUpdate)
+        }
+        return send
+    }
+
+    // MARK: - Sending
+
+    /// Snapshots the dirty groups for a PATCH and records it in `unacknowledgedSends` before it is
+    /// sent; `nil` when nothing is dirty. When the list is full, the oldest entry is dropped and
+    /// the truncation flag of each group it carried is set.
+    mutating func beginSend() -> ProgressSend? {
+        guard !dirty.isEmpty else { return nil }
+        let send = dirtyValues
+        while unacknowledgedSends.count >= ProgressSend.historyLimit {
+            truncated.formUnion(unacknowledgedSends.removeFirst().groups)
+        }
+        unacknowledgedSends.append(send)
+        return send
+    }
+
+    /// The PATCH carrying `send` succeeded: the server now holds the sent values, so they become
+    /// the baseline, the send history and truncation flags are cleared, and each sent group stops
+    /// being dirty unless it was edited again while the request was in flight.
+    mutating func acknowledge(_ send: ProgressSend, serverLastUpdate: Date?) {
+        // Without a baseline the groups that weren't sent take the row's values (the seeded or
+        // merged server values, or defaults when the server had none).
+        var baseline = serverBaseline ?? currentValues(lastUpdate: .distantPast)
+        if let audio = send.audio {
+            baseline.currentTime = audio.currentTime
+            baseline.progress = audio.progress
+            baseline.duration = audio.duration
+        }
+        if let finished = send.finished {
+            baseline.isFinished = finished.isFinished
+            baseline.finishedAt = finished.finishedAt
+        }
+        if let ebook = send.ebook {
+            baseline.ebookLocation = ebook.ebookLocation
+            baseline.ebookProgress = ebook.ebookProgress
+        }
+        if let serverLastUpdate { baseline.lastUpdate = serverLastUpdate }
+        serverBaseline = baseline
+        unacknowledgedSends = []
+        truncated = []
+        for group in ProgressGroups.each where send.groups.contains(group) && editedAt(group) == send.editedAt(group) {
+            dirty.remove(group)
+        }
+    }
+
+    // MARK: - Merging server progress
+
+    /// Merges server progress, group by group, except the `excluded` groups (those carried by a
+    /// PATCH in flight). Returns `false` when the values are older than the baseline and were
+    /// dropped. The caller has already dropped values captured before the row's last local edit or
+    /// settlement.
+    @discardableResult
+    mutating func merge(_ server: ProgressBaseline, excluding excluded: ProgressGroups = []) -> Bool {
+        if let baseline = serverBaseline, server.lastUpdate < baseline.lastUpdate { return false }
+        for group in ProgressGroups.each where !excluded.contains(group) {
+            resolve(group, server: server)
+        }
+        var baseline = server
+        if let old = serverBaseline {
+            // Groups not merged keep their old baseline values.
+            for group in ProgressGroups.each where excluded.contains(group) {
+                baseline.copy(group, from: old)
+            }
+        }
+        serverBaseline = baseline
+        lastUpdate = max(lastUpdate, server.lastUpdate)
+        return true
+    }
+
+    private mutating func resolve(_ group: ProgressGroups, server: ProgressBaseline) {
+        guard dirty.contains(group) else {
+            take(group, from: server)
+            return
+        }
+        // The server hasn't changed the group since we last saw it: keep the local edit.
+        if let baseline = serverBaseline, Self.matches(server, baseline, group) { return }
+        // The echo of one of our PATCHes whose response was lost. Only this group's evidence is
+        // settled and pruned (from that entry and every older one); other groups keep theirs.
+        if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }) {
+            let sentEditedAt = unacknowledgedSends[index].editedAt(group)
+            for older in 0...index {
+                unacknowledgedSends[older].remove(group)
+            }
+            unacknowledgedSends.removeAll { $0.groups.isEmpty }
+            if editedAt(group) == sentEditedAt { dirty.remove(group) }
+            return
+        }
+        // The server value may be one of our dropped sends.
+        if truncated.contains(group) { return }
+        // A real conflict. `server.lastUpdate` is row-wide, an upper bound on when the group
+        // changed, so ties and unknown edit times favour the server.
+        if let edited = editedAt(group), edited > server.lastUpdate { return }
+        take(group, from: server)
+        dirty.remove(group)
+    }
+
+    // MARK: - Helpers
+
+    func editedAt(_ group: ProgressGroups) -> Date? {
+        switch group {
+        case .audio: audioEditedAt
+        case .finished: finishedEditedAt
+        default: ebookEditedAt
+        }
+    }
+
+    private mutating func take(_ groups: ProgressGroups, from server: ProgressBaseline) {
+        if groups.contains(.audio) {
+            currentTime = server.currentTime
+            progress = server.progress
+            duration = server.duration
+        }
+        if groups.contains(.finished) {
+            isFinished = server.isFinished
+            finishedAt = server.finishedAt
+        }
+        if groups.contains(.ebook) {
+            ebookLocation = server.ebookLocation
+            ebookProgress = server.ebookProgress
+        }
+    }
+
+    private func currentValues(lastUpdate: Date) -> ProgressBaseline {
+        ProgressBaseline(
+            currentTime: currentTime, progress: progress, duration: duration, isFinished: isFinished,
+            finishedAt: finishedAt, ebookLocation: ebookLocation, ebookProgress: ebookProgress, lastUpdate: lastUpdate)
+    }
+
+    // Comparisons allow 1 s for `currentTime` and `duration` and 0.001 for `progress` and
+    // `ebookProgress`. Dates allow 1 ms, because the server stores milliseconds.
+
+    static func matches(_ server: ProgressBaseline, _ other: ProgressBaseline, _ group: ProgressGroups) -> Bool {
+        switch group {
+        case .audio:
+            audioMatches(server, other.currentTime, other.progress, other.duration)
+        case .finished:
+            server.isFinished == other.isFinished && datesMatch(server.finishedAt, other.finishedAt)
+        default:
+            ebookMatches(server, other.ebookLocation, other.ebookProgress)
+        }
+    }
+
+    static func matches(_ server: ProgressBaseline, _ send: ProgressSend, _ group: ProgressGroups) -> Bool {
+        switch group {
+        case .audio:
+            guard let audio = send.audio else { return false }
+            return audioMatches(server, audio.currentTime, audio.progress, audio.duration)
+        case .finished:
+            guard let finished = send.finished else { return false }
+            return server.isFinished == finished.isFinished && datesMatch(server.finishedAt, finished.finishedAt)
+        default:
+            guard let ebook = send.ebook else { return false }
+            return ebookMatches(server, ebook.ebookLocation, ebook.ebookProgress)
+        }
+    }
+
+    private static func audioMatches(
+        _ server: ProgressBaseline, _ currentTime: Double, _ progress: Double, _ duration: Double
+    ) -> Bool {
+        abs(server.currentTime - currentTime) <= 1 && abs(server.duration - duration) <= 1
+            && abs(server.progress - progress) <= 0.001
+    }
+
+    private static func ebookMatches(_ server: ProgressBaseline, _ location: String?, _ progress: Double?) -> Bool {
+        guard server.ebookLocation == location else { return false }
+        switch (server.ebookProgress, progress) {
+        case (nil, nil): return true
+        case (let lhs?, let rhs?): return abs(lhs - rhs) <= 0.001
+        default: return false
+        }
+    }
+
+    private static func datesMatch(_ lhs: Date?, _ rhs: Date?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): true
+        case (let lhs?, let rhs?): abs(lhs.timeIntervalSince(rhs)) < 0.001
+        default: false
+        }
+    }
+}
+
+extension ProgressBaseline {
+    fileprivate mutating func copy(_ group: ProgressGroups, from other: ProgressBaseline) {
+        switch group {
+        case .audio:
+            currentTime = other.currentTime
+            progress = other.progress
+            duration = other.duration
+        case .finished:
+            isFinished = other.isFinished
+            finishedAt = other.finishedAt
+        default:
+            ebookLocation = other.ebookLocation
+            ebookProgress = other.ebookProgress
+        }
+    }
+}
