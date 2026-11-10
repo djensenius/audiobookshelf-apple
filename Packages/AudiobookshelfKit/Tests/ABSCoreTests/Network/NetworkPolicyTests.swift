@@ -137,6 +137,28 @@ struct NetworkPolicyTests {
         #expect(await waiting.value == .askUser(.cellular))
         #expect(await policy.canDownload(waitingUpTo: .zero) == .askUser(.cellular))
     }
+
+    /// Wi-Fi, stop, move to cellular, restart: the waiting check must not decide on the
+    /// stale Wi-Fi path.
+    @Test func restartWaitsForTheNewPathUnderAsk() async throws {
+        let (settings, cleanUp) = try makeSettings(stream: .ask, download: .ask)
+        defer { cleanUp() }
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        let policy = NetworkPolicy(monitor: monitor, settings: settings, treatsExpensiveAsCellular: false)
+        monitor.start()
+        var updates = monitor.paths().makeAsyncIterator()
+        source.send(.wifi)
+        _ = await updates.next()
+        #expect(policy.canStream() == .allowed)
+
+        monitor.stop()
+        monitor.start()
+        let waiting = Task { await policy.canStream(waitingUpTo: .seconds(3600)) }
+        source.send(.cellular)
+        #expect(await waiting.value == .askUser(.cellular))
+        #expect(policy.canDownload() == .askUser(.cellular))
+    }
 }
 
 @Suite struct NetworkAccessTests {

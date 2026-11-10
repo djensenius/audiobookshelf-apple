@@ -273,6 +273,26 @@ struct NetworkMonitorTests {
         #expect(await waiter.value == .cellular)
     }
 
+    @Test func restartForgetsTheStalePathSoCurrentPathWaits() async {
+        let source = FakeNetworkPathSource()
+        let monitor = NetworkMonitor(source: source)
+        monitor.start()
+        var updates = monitor.paths().makeAsyncIterator()
+        source.send(.wifi)
+        #expect(await updates.next() == .wifi)
+
+        monitor.stop()
+        #expect(monitor.path == .wifi)
+        monitor.start()
+        #expect(monitor.path == nil)
+        #expect(await monitor.currentPath(timeout: .zero) == nil)
+
+        let waiter = Task { await monitor.currentPath(timeout: .seconds(3600)) }
+        source.send(.cellular)
+        #expect(await waiter.value == .cellular)
+        #expect(await updates.next() == .cellular)
+    }
+
     @Test func currentPathTimesOutWithoutAPath() async {
         let source = FakeNetworkPathSource()
         let monitor = NetworkMonitor(source: source)

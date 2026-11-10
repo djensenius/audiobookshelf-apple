@@ -6,7 +6,8 @@ import Synchronization
 /// `AsyncStream`s. Replaces the legacy Capacitor Network listener
 /// (`store/index.js` `setupNetworkListener`).
 ///
-/// ``path`` is `nil` until the source reports a path, and again after the source ends.
+/// ``path`` is `nil` until the source reports a path, and again after the source ends
+/// or the monitor restarts. ``stop()`` keeps the last path.
 /// Each ``paths()`` stream yields the current path (when known) and then every change;
 /// equal consecutive paths are dropped and a stream keeps only the newest unread path.
 /// Streams outlive ``stop()`` and ``start()``: a subscriber keeps receiving across
@@ -50,10 +51,13 @@ public final class NetworkMonitor {
     /// Whether the device is online, for display. `true` while the path is unknown.
     public var isOnline: Bool { path?.isOnline ?? true }
 
-    /// Starts reading from the source. Does nothing if already running.
+    /// Starts reading from the source. Does nothing if already running. Clears ``path``,
+    /// which may be stale after ``stop()``, so ``currentPath(timeout:)`` waits for this
+    /// run's first report.
     public func start() {
         guard task == nil else { return }
         isRunning = true
+        path = nil
         let stream = source.paths()
         task = Task { [weak self] in
             for await path in stream {
