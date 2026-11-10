@@ -27,21 +27,29 @@ public typealias NowPlayingCoverProvider = @Sendable (NowPlayingCover) async -> 
 /// - **State.** Every ``PlaybackCoordinatorEvent`` (item, session, load, play, pause, seek, tick,
 ///   end, failure, close) rebuilds a ``NowPlayingState`` from the coordinator's properties and
 ///   passes it to ``NowPlayingController/update(_:)``, which publishes only what changed. The rate
-///   (which changes without an event) and the Now Playing settings are observed with Observation,
-///   so a change in the app's settings applies at runtime. No item clears the session.
+///   and play state (which change without an event) and the Now Playing settings are observed with
+///   Observation, so a change in the app's settings applies at runtime. No item clears the session.
+///   Title, author, narrator, release date and cover are cached per item, so a closing session, a
+///   restart or a failed load keeps them; a new item shows blank until its session starts.
 /// - **Commands.** Remote commands arrive through the controller, which refuses them without an
 ///   item (``NowPlayingCommandError/noPlayer``) and refuses seeks while seeking from media controls
-///   is off. Skips and next/previous track jump by the interval from the user's settings.
+///   is off. Skips and next/previous track jump by the interval from the user's settings, through
+///   ``PlaybackCoordinator/jump(by:)``. Toggle follows the coordinator's play intent
+///   (``PlaybackCoordinator/isPlaybackRequested``), so it pauses while starting or stalled. Once the
+///   coordinator is gone, a command ends the session and throws ``NowPlayingCommandError/noPlayer``.
 /// - **Ownership.** The composition root owns the bridge. The bridge holds the coordinator weakly,
 ///   and the coordinator holds only a weak observer, so neither keeps the other alive. The bridge
 ///   owns the controller, whose command handler (this bridge) is weak.
 /// - **Threading.** Main actor only. Artwork loads run off the main actor.
 ///
-/// The app's composition root (`AppEnvironment`, P3-04 #44) creates one with
-/// ``init(coordinator:settings:coverProvider:entityIdentifiers:)`` once the coordinator exists and
-/// keeps it for the coordinator's lifetime; calling ``invalidate()`` (or releasing it) ends the
-/// session. When the user starts playback in the app in the foreground, it calls
-/// ``requestSystemPrimary()``.
+/// **What the composition root must do** (`AppEnvironment`, P3-04 #44, which also owns the device
+/// gate: Lock Screen, Control Center, AirPods, Mac media keys, CarPlay):
+/// 1. Construct one with ``init(coordinator:settings:coverProvider:entityIdentifiers:)`` right after
+///    the coordinator, passing the app's `AppSettings`, a cover provider (download, else the
+///    server's cover endpoint) and the App Intents entity mapping.
+/// 2. Hold it strongly for the coordinator's lifetime (nothing else retains it). Calling
+///    ``invalidate()``, or releasing it, ends the Now Playing session.
+/// 3. Call ``requestSystemPrimary()`` after each user-initiated play in the foreground (iOS).
 @available(iOSApplicationExtension, unavailable)
 @MainActor
 public final class NowPlayingBridge: NowPlayingCommandHandling {
@@ -50,6 +58,8 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
     private let readSettings: @MainActor () -> NowPlayingSettings
     private let covers: CoverRegistry
     private var observerToken: PlaybackObserverToken?
+    /// The last display metadata seen, for one item.
+    private var metadata: (key: MediaKey, value: Metadata)?
     private(set) var isInvalidated = false
 
     /// - Parameters:
@@ -117,16 +127,24 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
             invalidate()
             return
         }
-        let state = Self.state(of: coordinator)
-        covers.set(state?.artworkKey, cover: state.flatMap { Self.cover(of: coordinator, key: $0.key) })
+        let key = coordinator.mediaKey
+        if let key, let fresh = Self.metadata(of: coordinator, key: key) {
+            metadata = (key, fresh)
+        }
+        let current = key.flatMap { metadata?.key == $0 ? metadata?.value : nil }
+        let state = key.map { Self.state(of: coordinator, key: $0, metadata: current ?? Metadata()) }
+        covers.set(state?.artworkKey, cover: current?.cover)
         controller.update(state)
     }
 
-    /// Reads the settings and the coordinator's rate under observation; either changing republishes.
+    /// Reads the settings and the coordinator's rate and play state under observation; any of them
+    /// changing republishes. (A stall or a rate change emits no coordinator event.)
     private func trackSettingsAndRate() {
         guard !isInvalidated else { return }
         let settings = withObservationTracking {
             _ = coordinator?.rate
+            _ = coordinator?.isPlaying
+            _ = coordinator?.isBuffering
             return readSettings()
         } onChange: { [weak self] in
             Task { @MainActor [weak self] in self?.settingsOrRateChanged() }
@@ -139,12 +157,54 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
         refresh()
     }
 
-    static func state(of coordinator: PlaybackCoordinator) -> NowPlayingState? {
-        guard let key = coordinator.mediaKey else { return nil }
-        let session = coordinator.session
-        let record = coordinator.restoredRecord
+    /// The display metadata for `key`, cached by ``refresh()`` so a closing session, a restart or a
+    /// failed load (which drop the session) never blank the item out.
+    struct Metadata: Equatable {
+        var title = ""
+        var author = ""
         var narrator: String?
-        if case .book(let metadata) = session?.mediaMetadata { narrator = metadata.narratorName }
+        var releaseDate: Date?
+        var cover: NowPlayingCover?
+    }
+
+    /// Metadata from the coordinator's session or restored record for `key`; `nil` when it has
+    /// neither (for example between items, or while a new item's session starts: the coordinator
+    /// keeps no metadata from the play request, so a new item shows blank until its session starts).
+    static func metadata(of coordinator: PlaybackCoordinator, key: MediaKey) -> Metadata? {
+        if let session = coordinator.session, session.libraryItemId == key.libraryItemId,
+            session.episodeId == key.episodeId
+        {
+            var metadata = Metadata(
+                title: session.displayTitle ?? "", author: session.displayAuthor ?? "",
+                cover: cover(key: key, path: session.coverPath))
+            switch session.mediaMetadata {
+            case .book(let book):
+                metadata.narrator = book.narratorName
+            case .podcast(let podcast):
+                // The show, as the legacy app did; podcasts have no narrator.
+                metadata.author = podcast.title
+                if case .podcast(let show) = session.libraryItem?.media,
+                    let published = show.episodes?.first(where: { $0.id == key.episodeId })?.publishedAt
+                {
+                    metadata.releaseDate = Date(timeIntervalSince1970: Double(published) / 1000)
+                }
+            case nil:
+                break
+            }
+            return metadata
+        }
+        if let record = coordinator.restoredRecord, record.key == key {
+            return Metadata(
+                title: record.title ?? "", author: record.author ?? "", cover: cover(key: key, path: record.coverPath))
+        }
+        return nil
+    }
+
+    /// Published play state: playing while the coordinator plays, and also while loaded media stalls
+    /// with play requested (published as buffering, elapsed time held), so the system offers pause
+    /// for a stalled stream. Never while starting: the first playing state activates the Now Playing
+    /// session, and the engine's audio session must be active first.
+    static func state(of coordinator: PlaybackCoordinator, key: MediaKey, metadata: Metadata) -> NowPlayingState {
         var chapter: NowPlayingState.Chapter?
         if let timeline = coordinator.timeline, let index = coordinator.chapterIndex {
             let current = timeline.chapters[index]
@@ -152,16 +212,18 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
                 title: current.title, index: index, count: timeline.chapters.count,
                 range: TimelineRange(start: current.start, end: current.end))
         }
+        let stalled =
+            !coordinator.isPlaying && coordinator.phase == .loaded && coordinator.isBuffering
+            && coordinator.isPlaybackRequested
         return NowPlayingState(
-            key: key, title: session?.displayTitle ?? record?.title ?? "",
-            author: session?.displayAuthor ?? record?.author ?? "", narrator: narrator, chapter: chapter,
-            duration: coordinator.duration, elapsed: coordinator.currentTime, rate: coordinator.rate,
-            isPlaying: coordinator.isPlaying, artworkKey: cover(of: coordinator, key: key).map(artworkKey(for:)))
+            key: key, title: metadata.title, author: metadata.author, narrator: metadata.narrator,
+            releaseDate: metadata.releaseDate, chapter: chapter, duration: coordinator.duration,
+            elapsed: coordinator.currentTime, rate: coordinator.rate, isPlaying: coordinator.isPlaying || stalled,
+            artworkKey: metadata.cover.map(artworkKey(for:)), isBuffering: stalled)
     }
 
-    private static func cover(of coordinator: PlaybackCoordinator, key: MediaKey) -> NowPlayingCover? {
-        guard let path = coordinator.session?.coverPath ?? coordinator.restoredRecord?.coverPath, !path.isEmpty
-        else { return nil }
+    private static func cover(key: MediaKey, path: String?) -> NowPlayingCover? {
+        guard let path, !path.isEmpty else { return nil }
         return NowPlayingCover(key: key, coverPath: path)
     }
 
@@ -172,52 +234,58 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
 
     // MARK: NowPlayingCommandHandling
 
-    public func play() async {
-        await coordinator?.resume()
+    /// The coordinator, or (once it's gone) ends the session and refuses the command.
+    private func liveCoordinator() throws(NowPlayingCommandError) -> PlaybackCoordinator {
+        guard let coordinator else {
+            invalidate()
+            throw .noPlayer
+        }
+        return coordinator
     }
 
-    public func pause() async {
-        coordinator?.pause()
+    public func play() async throws {
+        try await liveCoordinator().resume()
     }
 
-    public func togglePlayPause() async {
-        guard let coordinator else { return }
-        if coordinator.isPlaying {
+    public func pause() async throws {
+        try liveCoordinator().pause()
+        refresh()
+    }
+
+    /// Pauses while playback is requested (also while starting or stalled), else resumes.
+    public func togglePlayPause() async throws {
+        let coordinator = try liveCoordinator()
+        if coordinator.isPlaybackRequested {
             coordinator.pause()
+            // A pause while starting emits no event.
+            refresh()
         } else {
             await coordinator.resume()
         }
     }
 
-    public func skipForward(by seconds: Double) async {
-        await jump(by: Self.nonNegative(seconds))
-    }
-
-    public func skipBackward(by seconds: Double) async {
-        await jump(by: -Self.nonNegative(seconds))
-    }
-
-    public func seek(to time: Double) async {
-        await coordinator?.seek(to: time)
-    }
-
-    public func setRate(_ rate: Double) async {
-        coordinator?.setRate(rate)
-        // `setRate` emits no event; publish the new rate now rather than after the observation hop.
+    /// Skips (and next track) go through ``PlaybackCoordinator/jump(by:)``, which adds up rapid
+    /// skips and applies skips while starting after the resume position is resolved. Jumps and
+    /// seeks while unloaded emit no event, so each command republishes.
+    public func skipForward(by seconds: Double) async throws {
+        try await liveCoordinator().jump(by: Self.nonNegative(seconds))
         refresh()
     }
 
-    private func jump(by offset: Double) async {
-        guard let coordinator else { return }
-        let time = coordinator.currentTime
-        let target =
-            if let timeline = coordinator.timeline {
-                offset >= 0
-                    ? timeline.jumpForward(from: time, by: offset) : timeline.jumpBackward(from: time, by: -offset)
-            } else {
-                max(time + offset, 0)
-            }
-        await coordinator.seek(to: target)
+    public func skipBackward(by seconds: Double) async throws {
+        try await liveCoordinator().jump(by: -Self.nonNegative(seconds))
+        refresh()
+    }
+
+    public func seek(to time: Double) async throws {
+        try await liveCoordinator().seek(to: time)
+        refresh()
+    }
+
+    public func setRate(_ rate: Double) async throws {
+        try liveCoordinator().setRate(rate)
+        // `setRate` emits no event; publish the new rate now rather than after the observation hop.
+        refresh()
     }
 
     private static func nonNegative(_ value: Double) -> Double {

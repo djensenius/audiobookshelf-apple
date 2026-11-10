@@ -34,8 +34,7 @@ struct BridgeHarness {
     nonisolated static let coverData = Data("cover".utf8)
 
     let h: CoordinatorHarness
-    let settings = ObservableNowPlayingSettings(
-        NowPlayingSettings(jumpForwardTime: 30, jumpBackwardsTime: 15, chapterTrack: false))
+    let settings: ObservableNowPlayingSettings
     let sessions = NowPlayingHarness.SessionLog()
     let covers = CoverCalls()
     let bridge: NowPlayingBridge
@@ -46,21 +45,29 @@ struct BridgeHarness {
         get throws { try #require(sessions.made.last) }
     }
 
-    init(_ h: CoordinatorHarness? = nil) throws {
+    /// - Parameter artwork: Holds each cover load until the test resolves its path.
+    init(
+        _ h: CoordinatorHarness? = nil,
+        settings: NowPlayingSettings = NowPlayingSettings(
+            jumpForwardTime: 30, jumpBackwardsTime: 15, chapterTrack: false),
+        artwork: ArtworkGate? = nil
+    ) throws {
         let h = try h ?? CoordinatorHarness()
         self.h = h
-        bridge = Self.makeBridge(h, settings: settings, sessions: sessions, covers: covers)
+        self.settings = ObservableNowPlayingSettings(settings)
+        bridge = Self.makeBridge(h, settings: self.settings, sessions: sessions, covers: covers, artwork: artwork)
     }
 
     static func makeBridge(
         _ h: CoordinatorHarness, settings: ObservableNowPlayingSettings, sessions: NowPlayingHarness.SessionLog,
-        covers: CoverCalls
+        covers: CoverCalls, artwork: ArtworkGate? = nil
     ) -> NowPlayingBridge {
         let clock = h.clock
         return NowPlayingBridge(
             coordinator: h.coordinator, settings: { settings.value },
             coverProvider: { cover in
                 covers.record(cover)
+                if let artwork { return await artwork.load(cover.coverPath) }
                 return coverData
             },
             entityIdentifiers: { [EntityIdentifier(for: TestBookEntity.self, identifier: $0.libraryItemId)] },
@@ -70,6 +77,16 @@ struct BridgeHarness {
                 sessions.made.append(session)
                 return session
             })
+    }
+
+    /// Starts playing `itemID` with its session start held, returning once the coordinator waits on it.
+    func playHeld(_ itemID: String) async -> (task: Task<Void, Never>, gate: Gate) {
+        let gate = Gate()
+        h.service.state.withLock { $0.startGates[itemID] = gate }
+        let coordinator = coordinator
+        let task = Task { await coordinator.play(itemID: itemID) }
+        await yieldUntil { h.service.starts.last == itemID && coordinator.phase == .starting }
+        return (task, gate)
     }
 
     func snapshot(_ state: MediaPlaybackSnapshot.PlaybackState, at elapsed: Double) -> MediaPlaybackSnapshot {
@@ -276,6 +293,212 @@ struct BridgeHarness {
         #expect(b.sessions.made.isEmpty)
     }
 
+    @Test func skipsWhileStartingApplyAfterTheResumePosition() async throws {
+        let b = try BridgeHarness()
+        b.h.settings.disableAutoRewind = true
+        b.h.setServerProgress("a", time: 500, updated: b.h.clock.ago(10))
+        let (play, gate) = await b.playHeld("a")
+
+        // The coordinator has no position yet; jumps wait for the resume position.
+        try await b.controller.perform(.skipForward(30))
+        try await b.controller.perform(.nextTrack)
+        try await b.controller.perform(.previousTrack)
+        gate.open()
+        await play.value
+
+        #expect(b.h.engine.loads.last?.time == 500)
+        #expect(b.h.engine.seeks == [545])
+        #expect(b.coordinator.currentTime == 545)
+        #expect(b.coordinator.isPlaying)
+        #expect(try b.session.snapshot == b.snapshot(.playing(rate: 1), at: 545))
+    }
+
+    @Test(arguments: [false, true])
+    func skipsOnARestoredItemKeepProgressFromElsewhere(elsewhere: Bool) async throws {
+        let b = try BridgeHarness()
+        b.h.settings.disableAutoRewind = true
+        b.h.lastPlayed.record = b.h.record("a", position: 120, age: 3600)
+        if elsewhere { b.h.setServerProgress("a", time: 500, updated: b.h.clock.now) }
+        b.coordinator.restoreLastPlayed()
+
+        try await b.controller.perform(.skipForward(30))
+        #expect(b.coordinator.currentTime == 150)
+        #expect(try b.session.snapshot == b.snapshot(.paused, at: 150))
+
+        // Played: the skip applies to the resolved position, which newer progress from elsewhere wins.
+        await b.coordinator.resume()
+        let resume: Double = elsewhere ? 500 : 120
+        #expect(b.h.engine.loads.last?.time == resume)
+        #expect(b.h.engine.seeks == [resume + 30])
+    }
+
+    @Test func skipsWhileStartingAreDroppedWithTheStart() async throws {
+        let b = try BridgeHarness()
+        b.h.settings.disableAutoRewind = true
+        b.h.setServerProgress("a", time: 500, updated: b.h.clock.ago(10))
+        b.h.service.state.withLock { $0.startError = .forbidden(message: nil) }
+        let (play, gate) = await b.playHeld("a")
+        try await b.controller.perform(.skipForward(30))
+        gate.open()
+        await play.value
+        #expect(b.coordinator.error != nil)
+
+        // A retry starts at the resume position, without the failed start's skip.
+        b.h.service.state.withLock { $0.startError = nil }
+        await b.coordinator.resume()
+        #expect(b.h.engine.loads.last?.time == 500)
+        #expect(b.h.engine.seeks.isEmpty)
+    }
+
+    @Test func rapidSkipsAddUp() async throws {
+        let b = try BridgeHarness()
+        await b.coordinator.play(itemID: "a")
+        b.h.engine.currentTime = 100
+        let gate = Gate()
+        b.h.engine.seekGates = [gate]
+
+        let first = Task { try await b.controller.perform(.skipForward(30)) }
+        await yieldUntil { b.h.engine.seeks == [130] }
+        // The first seek is still in flight: the second jumps from its target.
+        try await b.controller.perform(.skipForward(30))
+        gate.open()
+        try await first.value
+        #expect(b.h.engine.seeks == [130, 160])
+    }
+
+    @Test func toggleWhileStartingLoadsPaused() async throws {
+        let b = try BridgeHarness()
+        let (play, gate) = await b.playHeld("a")
+
+        try await b.controller.perform(.togglePlayPause)
+        #expect(!b.coordinator.isPlaybackRequested)
+        gate.open()
+        await play.value
+
+        #expect(b.coordinator.phase == .loaded)
+        #expect(!b.coordinator.isPlaying)
+        #expect(!b.h.engine.isPlaybackRequested)
+        #expect(try b.session.snapshot == b.snapshot(.paused, at: 0))
+        // Toggling again plays.
+        try await b.controller.perform(.togglePlayPause)
+        #expect(b.coordinator.isPlaying)
+    }
+
+    @Test func aStallShowsPauseAndToggleStopsIt() async throws {
+        let b = try BridgeHarness()
+        await b.coordinator.play(itemID: "a")
+        let session = try b.session
+        b.h.engine.currentTime = 200
+
+        // Stalled with play requested: shown as buffering (elapsed held), so the system offers pause.
+        b.h.engine.state = .buffering
+        #expect(!b.coordinator.isPlaying)
+        #expect(b.coordinator.isPlaybackRequested)
+        await yieldUntil { session.snapshot == b.snapshot(.buffering, at: 200) }
+
+        try await b.controller.perform(.togglePlayPause)
+        #expect(!b.h.engine.isPlaybackRequested)
+        #expect(!b.coordinator.isPlaybackRequested)
+        #expect(session.snapshot == b.snapshot(.paused, at: 200))
+    }
+
+    @Test func aFailedLoadAndARestartKeepTheMetadata() async throws {
+        let b = try BridgeHarness()
+        b.h.engine.loadError = .emptyTimeline
+        await b.coordinator.play(itemID: "a")
+        let session = try b.session
+        let failedAt = session.contents.count
+        #expect(b.coordinator.error != nil)
+        #expect(b.coordinator.session == nil)
+        await b.controller.artworkTask?.value
+        #expect(session.book?.title == "Title a")
+        #expect(session.book?.authorName == "Author")
+        let artwork = try #require(session.book?.artwork?.id)
+
+        // Retrying restarts the same item: no blank content, and the artwork isn't reloaded.
+        b.h.engine.loadError = nil
+        await b.coordinator.resume()
+        #expect(b.coordinator.isPlaying)
+        #expect(session.book?.artwork?.id == artwork)
+        let books = session.contents.dropFirst(failedAt - 1).compactMap { $0 as? BookContent }
+        #expect(books.count == session.contents.count - failedAt + 1)
+        #expect(books.allSatisfy { $0.title == "Title a" })
+        #expect(b.covers.all.count == 1)
+    }
+
+    @Test func anItemSwitchNeverBlanksTheOldItem() async throws {
+        let b = try BridgeHarness()
+        await b.coordinator.play(itemID: "a")
+        let session = try b.session
+        await b.controller.artworkTask?.value
+        let before = session.contents.count
+
+        await b.coordinator.play(itemID: "b")
+        let books = session.contents.dropFirst(before).compactMap { $0 as? BookContent }
+        let oldItem = books.filter { $0.id == b.h.key("a").rawValue }
+        #expect(oldItem.allSatisfy { $0.title == "Title a" && $0.artwork != nil })
+        #expect(session.book?.title == "Title b")
+    }
+
+    @Test func aStaleCoverLoadDoesNotReplaceTheNewItemsCover() async throws {
+        let artwork = ArtworkGate()
+        let b = try BridgeHarness(artwork: artwork)
+        await b.coordinator.play(itemID: "a")
+        let session = try b.session
+        await yieldUntil { b.covers.all.count == 1 }
+
+        await b.coordinator.play(itemID: "b")
+        await yieldUntil { b.covers.all.count == 2 }
+        // A's load finishes after the switch, then B's.
+        await artwork.resolve("/covers/a.jpg", with: Data("a".utf8))
+        await artwork.resolve("/covers/b.jpg", with: Data("b".utf8))
+        await b.controller.artworkTask?.value
+
+        #expect(session.book?.id == b.h.key("b").rawValue)
+        #expect(session.book?.artwork?.id == "\(b.h.key("b").rawValue)|/covers/b.jpg")
+    }
+
+    @Test func chapterTrackModeShowsTheChapterAndSeeksWithinIt() async throws {
+        let b = try BridgeHarness(
+            settings: NowPlayingSettings(
+                jumpForwardTime: 30, jumpBackwardsTime: 15, allowSeekingOnMediaControls: true, chapterTrack: true))
+        await b.coordinator.play(itemID: "a")
+        let session = try b.session
+        #expect(session.book?.title == "One")
+        #expect(session.book?.duration?.finiteValue == 1000)
+
+        b.h.engine.currentTime = 1500
+        b.h.engine.onEvent?(.tick(1500))
+        #expect(session.book?.chapter?.current == 2)
+        #expect(session.snapshot == b.snapshot(.playing(rate: 1), at: 500))
+
+        // The scrubber is chapter-relative: 100 into chapter two is 1100 globally.
+        try await b.controller.perform(.seek(100))
+        #expect(b.h.engine.seeks.last == 1100)
+        #expect(session.snapshot == b.snapshot(.playing(rate: 1), at: 100))
+    }
+
+    @Test func podcastEpisodesShowTheShowAndReleaseDate() async throws {
+        let b = try BridgeHarness()
+        let show = PodcastMetadata(title: "The Show", author: "Host")
+        let published = 1_700_000_000_000
+        let item = LibraryItem(
+            id: "p", libraryId: "lib", mediaType: .podcast,
+            media: .podcast(
+                Podcast(
+                    id: "pod", metadata: show,
+                    episodes: [PodcastEpisode(id: "e0"), PodcastEpisode(id: "e1", publishedAt: published)])))
+        b.h.service.state.withLock { $0.metadata["p"] = (.podcast(show), item) }
+
+        await b.coordinator.play(itemID: "p", episodeID: "e1")
+        let podcast = try #require(try b.session.podcast)
+        #expect(podcast.episodeTitle == "Title p")
+        #expect(podcast.showName == "The Show")
+        #expect(podcast.releaseDate == Date(timeIntervalSince1970: 1_700_000_000))
+        let state = try #require(b.controller.state)
+        #expect(state.narrator == nil)
+    }
+
     // MARK: Lifetime
 
     @Test func invalidateEndsTheSessionAndStopsFollowing() async throws {
@@ -336,8 +559,8 @@ struct BridgeHarness {
         #expect(weakCoordinator == nil)
         #expect(bridge.controller.isActive)
 
-        // The next refresh notices and ends the session.
-        bridge.refresh()
+        // A command (or the next refresh) notices, ends the session and fails.
+        await #expect(throws: NowPlayingCommandError.noPlayer) { try await bridge.controller.perform(.skipForward(30)) }
         #expect(bridge.isInvalidated)
         #expect(!bridge.controller.isActive)
         #expect(sessions.made.last?.content == nil)

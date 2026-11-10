@@ -44,7 +44,10 @@ public enum NowPlayingCommandError: Error, Equatable {
 /// | `sessionWillClose` | `.stopped` is followed by `itemChanged(nil)`, which clears. After `.loadFailed` the item stays, paused and unloaded, so play retries it. With `.itemChanged` the next item's state replaces it. |
 ///
 /// Rate changes made through `setRate` don't emit an event; the bridge also updates on the
-/// coordinator's observed `rate`, and assigns ``settings`` when the user's settings change.
+/// coordinator's observed `rate` and play state, and assigns ``settings`` when the user's settings
+/// change. A stall with playback requested (loading or buffering after playing) is published as
+/// `.buffering` (``NowPlayingState/isBuffering``), with the elapsed time held. Titles and covers
+/// are cached per item, so `sessionWillClose`, a restart or `failed` keep them.
 ///
 /// The session is created on the first ``update(_:)``, but `requestToBecomeApplicationPrimary()` is
 /// deferred to the first state with `isPlaying == true`: ADR 0006 requires the `.playback` audio
@@ -110,7 +113,11 @@ public final class NowPlayingController {
         var elapsed: Double
         var rate: Double
         var isPlaying: Bool
+        var isBuffering: Bool
         var timestamp: Date
+
+        /// Whether the published elapsed time advances with the clock.
+        var isAdvancing: Bool { isPlaying && !isBuffering }
     }
 
     private struct ArtworkRequest: Equatable {
@@ -242,18 +249,18 @@ public final class NowPlayingController {
     func perform(_ command: NowPlayingCommand) async throws {
         guard let handler = commandHandler, let state else { throw NowPlayingCommandError.noPlayer }
         switch command {
-        case .play: await handler.play()
-        case .pause: await handler.pause()
-        case .togglePlayPause: await handler.togglePlayPause()
-        case .skipForward(let seconds): await handler.skipForward(by: seconds)
-        case .skipBackward(let seconds): await handler.skipBackward(by: seconds)
+        case .play: try await handler.play()
+        case .pause: try await handler.pause()
+        case .togglePlayPause: try await handler.togglePlayPause()
+        case .skipForward(let seconds): try await handler.skipForward(by: seconds)
+        case .skipBackward(let seconds): try await handler.skipBackward(by: seconds)
         // Next and previous track jump, as in the legacy app (AirPods double and triple press).
-        case .nextTrack: await handler.skipForward(by: settings.jumpForwardTime)
-        case .previousTrack: await handler.skipBackward(by: settings.jumpBackwardsTime)
+        case .nextTrack: try await handler.skipForward(by: settings.jumpForwardTime)
+        case .previousTrack: try await handler.skipBackward(by: settings.jumpBackwardsTime)
         case .seek(let position):
             guard settings.allowSeekingOnMediaControls else { throw NowPlayingCommandError.seekingDisabled }
-            await handler.seek(to: globalTime(forPublished: position, in: state))
-        case .changeRate(let rate): await handler.setRate(rate)
+            try await handler.seek(to: globalTime(forPublished: position, in: state))
+        case .changeRate(let rate): try await handler.setRate(rate)
         }
     }
 
@@ -307,10 +314,19 @@ public final class NowPlayingController {
         let elapsed = publishedElapsed(for: state)
         if timeBaseChanged || (freshSample && needsTimingUpdate(elapsed: elapsed, state: state)) {
             let timing = Timing(
-                elapsed: elapsed, rate: state.rate, isPlaying: state.isPlaying, timestamp: sampleTimestamp)
+                elapsed: elapsed, rate: state.rate, isPlaying: state.isPlaying,
+                isBuffering: state.isPlaying && state.isBuffering, timestamp: sampleTimestamp)
+            let playbackState: MediaPlaybackSnapshot.PlaybackState =
+                if !timing.isPlaying {
+                    .paused
+                } else if timing.isBuffering {
+                    .buffering
+                } else {
+                    .playing(rate: Float(timing.rate))
+                }
             session.setPlaybackSnapshot(
                 MediaPlaybackSnapshot(
-                    state: timing.isPlaying ? .playing(rate: Float(timing.rate)) : .paused,
+                    state: playbackState,
                     elapsedTime: timing.elapsed, timestamp: timing.timestamp))
             publishedTiming = timing
         }
@@ -319,8 +335,9 @@ public final class NowPlayingController {
     private func needsTimingUpdate(elapsed: Double, state: NowPlayingState) -> Bool {
         guard let last = publishedTiming else { return true }
         if last.isPlaying != state.isPlaying || last.rate != state.rate { return true }
+        if last.isBuffering != (state.isPlaying && state.isBuffering) { return true }
         let expected =
-            last.isPlaying
+            last.isAdvancing
             ? last.elapsed + sampleTimestamp.timeIntervalSince(last.timestamp) * last.rate : last.elapsed
         return abs(elapsed - expected) > Self.elapsedTolerance
     }

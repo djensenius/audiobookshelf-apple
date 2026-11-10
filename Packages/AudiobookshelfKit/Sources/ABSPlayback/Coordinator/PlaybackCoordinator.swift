@@ -104,6 +104,9 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var playWhenLoaded = true
     /// A position chosen while starting or unloaded (a seek, or a play with a start time).
     @ObservationIgnored private var pendingStartTime: Double?
+    /// Jumps made while starting, or while unloaded without a chosen position; applied after the
+    /// resume position is resolved, so they never replace it.
+    @ObservationIgnored private var pendingJumpOffset: Double = 0
     @ObservationIgnored private var policyCheck = 0
     /// When playback was last seen playing; drives auto-rewind on resume.
     @ObservationIgnored private var lastPlayedAt: Date?
@@ -203,7 +206,10 @@ public final class PlaybackCoordinator {
                 return await resumeLoaded(rewindingBy: nil, startingAt: startTime)
             case .starting:
                 playWhenLoaded = true
-                if let startTime { pendingStartTime = startTime }
+                if let startTime {
+                    pendingStartTime = startTime
+                    pendingJumpOffset = 0
+                }
                 return
             case .idle, .unloaded:
                 break
@@ -234,6 +240,8 @@ public final class PlaybackCoordinator {
         guard current == generation else { return }
         error = nil
         pendingStartTime = startTime ?? unloadedSeek
+        // Jumps while the same item was unloaded carry over; a new item or an explicit start drops them.
+        if !restarting || startTime != nil { pendingJumpOffset = 0 }
         reachedEnd = false
         playWhenLoaded = true
         phase = .starting
@@ -333,9 +341,14 @@ public final class PlaybackCoordinator {
         let intent = resumeIntent
         let pending = pendingStartTime
         pendingStartTime = nil
-        if let pending, pending != plannedStart {
-            // A seek while loading.
-            await engine.seek(to: engine.timeline?.clamp(pending) ?? pending)
+        let jumpOffset = pendingJumpOffset
+        pendingJumpOffset = 0
+        var seekTarget: Double?
+        if let pending, pending != plannedStart { seekTarget = pending }  // A seek while loading.
+        // Jumps while loading are relative to the resolved resume position (or the seek above).
+        if jumpOffset != 0 { seekTarget = (seekTarget ?? engine.currentTime) + jumpOffset }
+        if let seekTarget {
+            await engine.seek(to: engine.timeline?.clamp(seekTarget) ?? seekTarget)
             guard current == generation, phase == .loaded else { return }
         }
         emit(.loaded(time: engine.currentTime))
@@ -440,12 +453,50 @@ public final class PlaybackCoordinator {
             let finite = time.isFinite ? max(time, 0) : 0
             unloadedPosition = unloadedDuration > 0 ? min(finite, unloadedDuration) : finite
             pendingStartTime = unloadedPosition
+            pendingJumpOffset = 0
             return unloadedPosition
         case .starting:
             pendingStartTime = time
+            pendingJumpOffset = 0
             return nil
         case .idle:
             return nil
+        }
+    }
+
+    /// Jumps by `offset` seconds (negative jumps back), clamped to the item, and returns where
+    /// playback landed (`nil` as for ``seek(to:)``). Loaded, the jump is relative to the latest
+    /// seek's target while one is in flight, so rapid jumps add up. While starting, jumps add up and
+    /// apply after the resume position is resolved, so they never replace it. Unloaded, a jump
+    /// moves a chosen position (after a ``seek(to:)``), or else moves the position shown and
+    /// applies after the resume position is resolved, keeping the progress-from-elsewhere rule.
+    @discardableResult
+    public func jump(by offset: Double) async -> Double? {
+        guard offset.isFinite, offset != 0 else { return nil }
+        switch phase {
+        case .loaded:
+            return await seek(to: (engine.pendingSeekTarget ?? engine.currentTime) + offset)
+        case .starting:
+            pendingJumpOffset += offset
+            return nil
+        case .unloaded:
+            if let pendingStartTime { return await seek(to: pendingStartTime + offset) }
+            pendingJumpOffset += offset
+            let moved = max(unloadedPosition + offset, 0)
+            unloadedPosition = unloadedDuration > 0 ? min(moved, unloadedDuration) : moved
+            return unloadedPosition
+        case .idle:
+            return nil
+        }
+    }
+
+    /// Whether the user wants playback: true while starting to play, and while loaded and
+    /// playing, buffering, seeking or resuming, unlike ``isPlaying``. Drives play/pause toggles.
+    public var isPlaybackRequested: Bool {
+        switch phase {
+        case .starting: playWhenLoaded
+        case .loaded: engine.isPlaybackRequested || resumingIntent != nil
+        case .idle, .unloaded: false
         }
     }
 
@@ -465,6 +516,7 @@ public final class PlaybackCoordinator {
         error = nil
         restoredRecord = nil
         pendingStartTime = nil
+        pendingJumpOffset = 0
         reachedEnd = false
         unloadedPosition = 0
         unloadedDuration = 0
@@ -546,6 +598,7 @@ public final class PlaybackCoordinator {
     private func fail(_ error: PlaybackCoordinatorError, generation failed: Int) {
         guard failed == generation else { return }
         self.error = error
+        pendingJumpOffset = 0
         if phase == .starting { phase = .unloaded }
         emit(.failed(error))
     }

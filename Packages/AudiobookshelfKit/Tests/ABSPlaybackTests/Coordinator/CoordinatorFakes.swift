@@ -101,7 +101,9 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
 
     func seek(to time: Double) async -> SeekResult {
         seeks.append(time)
+        pendingSeekTarget = time
         if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
+        if pendingSeekTarget == time { pendingSeekTarget = nil }
         currentTime = time
         if state == .ended { state = isPlaybackRequested ? .playing : .paused }
         return .completed
@@ -127,6 +129,8 @@ final class StubSessionService: PlaybackSessionService {
         var serverTime: [String: Double] = [:]
         var sessionUpdatedAt: Date?
         var startGates: [String: Gate] = [:]
+        /// Metadata and expanded library item for an item's sessions (none by default).
+        var metadata: [String: (MediaMetadata, LibraryItem?)] = [:]
         var closeGates: [String: Gate] = [:]
         var startError: APIError?
         var closeError: APIError?
@@ -148,19 +152,20 @@ final class StubSessionService: PlaybackSessionService {
     var log: [String] { state.withLock { $0.log } }
 
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
-        let (gate, error, time, id, updatedAt) = state.withLock { state in
+        let (gate, error, time, id, updatedAt, metadata) = state.withLock { state in
             state.starts.append(itemID)
             state.log.append("start \(itemID)")
             state.count += 1
             return (
                 state.startGates.removeValue(forKey: itemID), state.startError, state.serverTime[itemID] ?? 0,
-                "\(itemID)-\(state.count)", state.sessionUpdatedAt
+                "\(itemID)-\(state.count)", state.sessionUpdatedAt, state.metadata[itemID]
             )
         }
         await gate?.wait()
         if let error { throw error }
         return PlaybackSession(
             id: id, libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
+            mediaMetadata: metadata?.0,
             chapters: [Chapter(id: 0, start: 0, end: 1000, title: "One"), Chapter(id: 1, start: 1000, end: 3600)],
             displayTitle: "Title \(itemID)", displayAuthor: "Author", coverPath: "/covers/\(itemID).jpg",
             duration: 3600, currentTime: time,
@@ -168,7 +173,7 @@ final class StubSessionService: PlaybackSessionService {
             audioTracks: [
                 AudioTrack(index: 1, startOffset: 0, duration: 1800, mimeType: "audio/mpeg"),
                 AudioTrack(index: 2, startOffset: 1800, duration: 1800, mimeType: "audio/mpeg"),
-            ])
+            ], libraryItem: metadata?.1)
     }
 
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
