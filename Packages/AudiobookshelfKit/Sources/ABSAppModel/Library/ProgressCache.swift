@@ -11,8 +11,9 @@ import Observation
 /// `lastUpdate` counts as older than any that has one. ``LibraryStore`` owns the cache and clears
 /// it on logout and account switches.
 ///
-/// Seeding uses a local ``revision`` rather than timestamps to tell which entries changed while
-/// the list was being fetched; see ``seed(_:since:)``.
+/// Seeding uses a ``SeedToken`` taken before the request: it rejects superseded or
+/// previous-account responses, and holds a local ``revision`` (rather than timestamps) to tell
+/// which entries changed while the list was being fetched; see ``seed(_:token:)``.
 ///
 /// Observation is per key: ``progress(libraryItemID:episodeID:)`` only tracks its own entry, so
 /// an update to one item doesn't invalidate views showing other items.
@@ -34,10 +35,22 @@ public final class ProgressCache {
         @ObservationIgnored var revision = 0
     }
 
-    private var entries: [String: Entry] = [:]
+    /// Identifies one request for the full list; see ``beginSeed()``.
+    public struct SeedToken: Sendable, Equatable {
+        let generation: Int
+        let request: Int
+        /// ``ProgressCache/revision`` when the request started.
+        let boundary: Int
+    }
 
-    /// Increases with every ``apply(_:)`` that stores progress. Capture it just before requesting
-    /// the list passed to ``seed(_:since:)``.
+    private var entries: [String: Entry] = [:]
+    /// Bumped by ``clear()``, so tokens issued before it are stale.
+    private var generation = 0
+    private var seedRequests = 0
+    /// The request of the last seed applied in this generation.
+    private var appliedSeedRequest = 0
+
+    /// Increases with every ``apply(_:)`` that stores progress.
     public private(set) var revision = 0
 
     public init() {}
@@ -46,16 +59,28 @@ public final class ProgressCache {
         entry(for: MediaProgress.key(libraryItemID: libraryItemID, episodeID: episodeID)).value
     }
 
-    /// Replaces the cache with the server's full list.
-    ///
-    /// `boundary` is ``revision`` read just before the list was requested:
+    /// Starts a request for the full list: call it just before sending the request, and pass the
+    /// token with the response to ``seed(_:token:)``.
     ///
     /// ```swift
-    /// let boundary = cache.revision
+    /// let token = cache.beginSeed()
     /// let me = try await client.me()
-    /// cache.seed(me.mediaProgress, since: boundary)
+    /// cache.seed(me.mediaProgress, token: token)
     /// ```
+    public func beginSeed() -> SeedToken {
+        seedRequests += 1
+        return SeedToken(generation: generation, request: seedRequests, boundary: revision)
+    }
+
+    /// Replaces the cache with the server's full list, requested with `token`. Returns whether it
+    /// was applied.
     ///
+    /// The response is dropped when ``clear()`` ran since ``beginSeed()`` (logout or another
+    /// account), or when a response to a later request was already applied: an older snapshot
+    /// never overwrites a newer one. A response that arrives first is applied even if a later
+    /// request is still in flight, because the later one may never complete.
+    ///
+    /// Against the entries, with `boundary` the ``revision`` when the request started:
     /// - An entry applied after `boundary` may be missing from or older in the list, so it is
     ///   kept unless the list has a row for it with a later `lastUpdate` (both dated).
     /// - Any other entry missing from the list is removed.
@@ -64,7 +89,11 @@ public final class ProgressCache {
     ///
     /// Timestamps aren't compared with the request time, so undated progress and clock skew
     /// between the device and the server don't matter.
-    public func seed(_ progress: [MediaProgress], since boundary: Int) {
+    @discardableResult
+    public func seed(_ progress: [MediaProgress], token: SeedToken) -> Bool {
+        guard token.generation == generation, token.request > appliedSeedRequest else { return false }
+        appliedSeedRequest = token.request
+        let boundary = token.boundary
         var seeded: [String: MediaProgress] = [:]
         for item in progress {
             if let existing = seeded[item.progressKey], !Self.isNewer(item, than: existing) { continue }
@@ -88,6 +117,7 @@ public final class ProgressCache {
             let entry = entry(for: key)
             if entry.value != value { entry.value = value }
         }
+        return true
     }
 
     /// Stores `progress` unless the cached entry for the same media is newer. Returns whether it
@@ -111,8 +141,11 @@ public final class ProgressCache {
     }
 
     /// Empties every entry. The entry objects are kept, so views watching a key (even one that
-    /// had no progress) see the next ``apply(_:)`` or ``seed(_:since:)`` for it.
+    /// had no progress) see the next ``apply(_:)`` or ``seed(_:token:)`` for it. Seed requests
+    /// started before it are dropped when they respond.
     public func clear() {
+        generation += 1
+        appliedSeedRequest = 0
         for entry in entries.values {
             entry.revision = 0
             // Setting nil over nil isn't guaranteed to stay silent, so only change real values.

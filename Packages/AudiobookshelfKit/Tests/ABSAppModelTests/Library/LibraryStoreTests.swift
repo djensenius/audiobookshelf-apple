@@ -364,6 +364,22 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func progressRequestedForThePreviousAccountIsDropped() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([]), connectionKey: serverA)
+            let sameAccount = store.progress.beginSeed()
+            await store.connect(client: service([]), connectionKey: serverA)
+            #expect(store.progress.seed([MediaProgress(id: "p1", libraryItemId: "a1")], token: sameAccount))
+
+            let previousAccount = store.progress.beginSeed()
+            await store.connect(client: service([]), connectionKey: serverB)
+            #expect(!store.progress.seed([MediaProgress(id: "p2", libraryItemId: "a2")], token: previousAccount))
+            #expect(store.progress.progress(libraryItemID: "a1") == nil)
+            #expect(store.progress.progress(libraryItemID: "a2") == nil)
+        }
+    }
+
     @Test func detailsRequestedBeforeARefreshAreNotStored() async throws {
         try await withLibrarySettings { settings in
             let response = Locked([makeLibrary("books", name: "Books"), makeLibrary("gone", name: "Gone")])
