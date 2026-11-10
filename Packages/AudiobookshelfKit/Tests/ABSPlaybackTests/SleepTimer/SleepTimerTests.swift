@@ -657,8 +657,7 @@ struct SleepTimerTests {
         #expect(harness.timer.reset())
         await until { harness.control.seeks == [700] }
         if itemChanges { harness.timer.itemDidChange("other") }
-        harness.control.finishSeek()
-        await Task { @MainActor in }.value  // Queued after the seek's end.
+        await harness.control.finishSeek()
         #expect(harness.timer.isRunning == itemChanges, "Another item keeps the restarted timer")
         #expect(harness.control.plays == 0)
         #expect(harness.feedback.resets == 0)
@@ -684,8 +683,8 @@ struct SleepTimerTests {
         case .startBefore: harness.timer.start(.duration(600))
         case .itemBefore, .itemDuring: harness.timer.itemDidChange("other")
         }
-        harness.control.finishSeek()
-        await Task { @MainActor in }.value  // Queued after the reset's task and the seek's end.
+        await harness.control.finishSeek()
+        await Task { @MainActor in }.value  // Queued after the reset's task, so that has run.
         #expect(harness.control.seeks == (isDuring ? [700] : []))
         #expect(harness.control.currentTime == (isDuring ? 700 : 1000))
         #expect(harness.control.plays == 0)
@@ -714,7 +713,7 @@ struct SleepTimerTests {
         await until { harness.control.seeks == [1010] }
         if event == .play { #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 15, 23, 2)) == 0) }
         if event == .manualStart { harness.timer.start(.duration(600)) }
-        harness.control.finishSeek()
+        await harness.control.finishSeek()
         await until { harness.control.currentTime == (event == .failure ? 1070 : 1010) }
         harness.timer.cancel()
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 30)) == (event == .play ? 0 : 300))

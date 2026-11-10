@@ -45,14 +45,17 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
     func seek(to time: Double) async -> Double? {
         seeks.append(time)
         if holdsSeeks { await withCheckedContinuation { heldSeek = $0 } }
+        heldSeek = nil
         guard seeksLand else { return nil }
         currentTime = time
         return time
     }
 
-    func finishSeek() {
+    /// Lets a held seek return, and waits until its caller has carried on: a resumed continuation can reach the main
+    /// actor after jobs queued later, so a barrier task wouldn't do.
+    func finishSeek() async {
         heldSeek?.resume()
-        heldSeek = nil
+        await until { heldSeek == nil }
     }
 
     func setVolume(_ volume: Float) {
