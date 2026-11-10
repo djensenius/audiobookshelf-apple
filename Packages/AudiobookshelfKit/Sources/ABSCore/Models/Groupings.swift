@@ -32,6 +32,24 @@ public struct LibraryCollection: Sendable, Hashable, Codable, Identifiable {
         self.lastUpdate = lastUpdate
         self.createdAt = createdAt
     }
+
+    enum CodingKeys: String, CodingKey {
+        case id, libraryId, userId, name, description, cover, coverFullPath, books, lastUpdate, createdAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        libraryId = try container.decode(String.self, forKey: .libraryId)
+        userId = try container.decodeIfPresent(String.self, forKey: .userId)
+        name = try container.decode(String.self, forKey: .name)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        cover = try container.decodeIfPresent(String.self, forKey: .cover)
+        coverFullPath = try container.decodeIfPresent(String.self, forKey: .coverFullPath)
+        books = try container.decodeLossyArrayIfPresent(LibraryItem.self, forKey: .books)
+        lastUpdate = try container.decodeIfPresent(Int.self, forKey: .lastUpdate)
+        createdAt = try container.decodeIfPresent(Int.self, forKey: .createdAt)
+    }
 }
 
 /// A user's playlist of books and podcast episodes.
