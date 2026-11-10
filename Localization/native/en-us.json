@@ -4,6 +4,7 @@
   "ButtonOpenSettings": "Open Settings",
   "ButtonRetry": "Retry",
   "ButtonShare": "Share",
+  "HeaderBrowse": "Browse",
   "LabelAbridged": "Abridged",
   "LabelAllowSeekingOnMediaControlsHelp": "Lets you change the playback position from the Lock Screen, Control Center and other system media controls.",
   "LabelHistoryEventAccessibility": "{0} at {1}, {2}",
@@ -38,5 +39,7 @@
   "MessageLogsCopied": "Copied the logs",
   "MessageLogsCurrentLaunchOnly": "These logs cover only the current launch of the app. Tokens are always removed.",
   "MessageLogsLoadFailed": "Couldn't load the logs.",
-  "MessageNoHistory": "No History"
+  "MessageNoHistory": "No History",
+  "MessageStoreUnavailable": "Couldn't open the app's data.",
+  "MessageStoreUnavailableHelp": "Quit and reopen Audiobookshelf. If this keeps happening, make sure your device has free storage space."
 }
