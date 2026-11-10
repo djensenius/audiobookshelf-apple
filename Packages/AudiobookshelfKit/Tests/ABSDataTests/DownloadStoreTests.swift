@@ -254,6 +254,20 @@ import Testing
         #expect(await store.hasUncommittedChanges == false)
     }
 
+    @Test func beginRunningFailedSaveChangesNothing() async throws {
+        let (store, _) = try makeStore()
+        let part = Self.part()
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [part]), now: now).record
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) {
+            try await store.beginRunning(partID: part.id, expecting: [.queued], now: now.addingTimeInterval(5))
+        }
+        #expect(await store.hasUncommittedChanges == false)
+        #expect(try await store.record(id: created.id) == created)
+        let reread = DownloadStore(modelContainer: store.modelContainer)
+        #expect(try await reread.record(id: created.id) == created)
+    }
+
     /// The task finishes before its last throttled progress write lands, with an unknown length:
     /// the final size comes with the completion, and a late progress write can't change it.
     @Test func completionBeforeFinalProgressRecordsFinalSize() async throws {
