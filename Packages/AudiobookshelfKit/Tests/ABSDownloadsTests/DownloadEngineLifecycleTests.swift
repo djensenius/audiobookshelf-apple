@@ -530,6 +530,117 @@ import Testing
         #expect(harness.credentials.calls.isEmpty)
     }
 
+    @Test func survivorIsStoppedWhenItsAdoptionCantBeSaved() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness {
+            $0.authorization == "Bearer previous" ? .status(200, gate: never) : .status(200)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let base = harness.base
+        let engine = harness.makeEngine(prepare: { stub in
+            var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+            request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+            stub.leaveTask(request, description: partID.uuidString)
+        })
+        // The adoption's `beginRunning` fails.
+        await harness.store.failNextCommit(with: TestError())
+
+        #expect(await engine.ensureSession())
+
+        #expect(harness.session?.leftovers.withLock { $0.first?.state } != .running)
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
+        #expect(part.taskIdentifier == nil)
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.credentials.calls == [nil])
+    }
+
+    @Test(arguments: [false, true])
+    func survivorFailingBeforeAdoptionDoesNotFailStoppedRecords(withResumeData: Bool) async throws {
+        let harness = try await DownloadHarness {
+            guard $0.stubCount == 1 else { return .status(200) }
+            return withResumeData ? .failure(resumeData: Data("resume".utf8)) : .status(404, body: Data())
+        }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .paused, partState: .running)
+        let base = harness.base
+        // The leftover fails before the engine lists its tasks. Its request is the one a launch
+        // would make, so its resume data stays valid.
+        let engine = harness.makeEngine(
+            listing: { await harness.waitForCompletions(1) },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer token-1", forHTTPHeaderField: "Authorization")
+                let task = stub.downloadTask(with: request)
+                task.taskDescription = partID.uuidString
+                task.resume()
+            })
+
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
+        #expect(part.hasResumeData == withResumeData)
+        #expect(part.retryCount == 0)
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        #expect(harness.credentials.calls.isEmpty)
+        #expect(try await engine.resume(recordID: record.id))
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.session?.resumedData == (withResumeData ? [Data("resume".utf8)] : []))
+    }
+
+    @Test func unsavedRecordFailureBlocksRestartsUntilSaved() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { _ in .status(404, body: Data(), gate: gate) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        // Saving the record's `failed` state fails, then fails again on the next activation.
+        await harness.store.failNextCommit(with: TestError())
+        gate.open()
+        #expect(await engine.nextPermanentFailure() != nil)
+        #expect(try await harness.store.record(id: record.id)?.state != .failed)
+
+        await harness.store.failNextCommit(with: TestError())
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        #expect(try await harness.store.part(id: partID)?.state == .failed)
+
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        #expect(try await harness.store.part(id: partID)?.state == .failed)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// What a background wake whose completion couldn't be saved leaves: the moved file, and
+    /// the part running. Only a file of the expected size written since the record was created
+    /// completes it.
+    @Test(arguments: [("audio-bytes", false, true), ("audio", false, false), ("audio-bytes", true, false)])
+    func fileAlreadyInPlaceCompletesThePart(contents: String, predatesRecord: Bool, isKept: Bool) async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let file = harness.fileURL("li_1/1.mp3")
+        try FileManager.default.createDirectory(at: harness.fileURL("li_1"), withIntermediateDirectories: true)
+        try Data(contents.utf8).write(to: file)
+        if predatesRecord {
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date.distantPast], ofItemAtPath: file.path(percentEncoded: false))
+        }
+        let engine = harness.makeEngine()
+
+        #expect(await engine.activate())
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == (isKept ? 0 : 1))
+    }
+
     @Test func pauseStopsAndResumeContinues() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(200, gate: gate) : .status(200) }

@@ -95,9 +95,13 @@ public actor DownloadEngine {
     /// Session recreations after it was lost, each after a ``RetryPolicy`` delay, before the
     /// engine waits for the next ``activate()``.
     static let maxSessionRecreations = 3
+    /// Attempts, a second apart, to save failed writes before a background wake is released.
+    static let maxWakeSaveAttempts = 3
 
     private struct PartContext {
         var recordID: UUID
+        /// When the record was created: only a file moved since then can complete the part.
+        var recordCreatedAt: Date
         var connectionID: UUID
         var serverPath: String
         var destination: URL?
@@ -158,10 +162,13 @@ public actor DownloadEngine {
     private var strandedRunning: Set<UUID> = []
     /// Stops under way: until one has queued its part, the store still has it `running`.
     private var stopping: [UUID: Task<Void, Never>] = [:]
-    /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the sizes of
-    /// the files they finished meanwhile: those complete only once the transfer is adopted.
+    /// Records whose `failed` state couldn't be saved after a part failed for good. Their parts
+    /// can't launch until ``reconcile()`` saves it.
+    private var pendingRecordFailures: Set<UUID> = []
+    /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the results
+    /// they finished with meanwhile: those are handled only once the transfer is adopted.
     private var adopting: Set<Int> = []
-    private var heldCompletions: [Int: Int64] = [:]
+    private var heldResults: [Int: DownloadTaskResult] = [:]
     /// Records being finalised, so a completion and ``activate()`` don't finalise one twice.
     private var finalising: Set<UUID> = []
     private var retries: [UUID: Task<Void, Never>] = [:]
@@ -271,7 +278,7 @@ public actor DownloadEngine {
     /// Starts (or restarts) the given parts; parts that are already transferring are left
     /// alone. Retry counts start over. Set their records to `queued` (or `downloading`)
     /// first: ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses parts of `paused`
-    /// and `failed` records.
+    /// and `failed` records, and a `failed` state the engine couldn't save is dropped.
     public func start(partIDs: [UUID]) async {
         guard await ensureSession() else { return }
         do {
@@ -279,6 +286,9 @@ public actor DownloadEngine {
         } catch {
             logError("Couldn't read downloads", error)
             return
+        }
+        for partID in partIDs {
+            if let recordID = contexts[partID]?.recordID { pendingRecordFailures.remove(recordID) }
         }
         // A settling part is being completed or failed; its retry may be saving its completion.
         for partID in partIDs where tasks[partID] == nil && !settling.contains(partID) {
@@ -346,6 +356,7 @@ public actor DownloadEngine {
         guard try await store.setState(.paused, forRecord: recordID),
             let record = try await store.record(id: recordID)
         else { return false }
+        pendingRecordFailures.remove(recordID)
         await stop(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), keepingResumeData: true)
         return true
     }
@@ -474,28 +485,38 @@ public actor DownloadEngine {
 
     /// Adopts a transfer that survived a relaunch once
     /// ``DownloadStore/beginRunning(partID:expecting:now:)`` allows it. If the record was
-    /// stopped or failed for good, the transfer is cancelled keeping its resume data, as
-    /// ``stop(partIDs:keepingResumeData:)`` does; if the part completed or was deleted, it is
-    /// cancelled. When the store can't be written, the transfer is adopted. A file it finished
-    /// meanwhile completes the part only once the transfer is adopted; otherwise it stays where
-    /// it was moved, for the part's next transfer to replace.
+    /// stopped or failed for good, or the store can't be written, the transfer is cancelled
+    /// keeping its resume data and its part queued, as ``stop(partIDs:keepingResumeData:)``
+    /// does; if the part completed or was deleted, it is cancelled. A result it finished with
+    /// meanwhile is handled only once the transfer is adopted: otherwise only its resume data
+    /// is kept, and a file it moved stays where it is, for the part's next launch to complete
+    /// or replace.
     private func reattach(_ task: URLSessionDownloadTask, partID: UUID) async {
         adopting.insert(task.taskIdentifier)
         await decideAdoption(of: task, partID: partID)
         adopting.remove(task.taskIdentifier)
-        if let bytes = heldCompletions.removeValue(forKey: task.taskIdentifier) {
-            await handleCompletion(task, .moved(bytes: bytes))
+        if let result = heldResults.removeValue(forKey: task.taskIdentifier) {
+            await handleCompletion(task, result)
         }
+    }
+
+    /// Keeps a surviving transfer's result until its adoption is decided. Its resume data is
+    /// sealed now, so a stopped part continues from it.
+    private func hold(_ result: DownloadTaskResult, of task: URLSessionTask, partID: UUID) {
+        if case .failed(let failure) = result, let data = failure.resumeData {
+            contexts[partID]?.hasResumeData = seal(data, partID: partID, task: task)
+        }
+        heldResults[task.taskIdentifier] = result
     }
 
     private func decideAdoption(of task: URLSessionDownloadTask, partID: UUID) async {
         // Adopted before the write, so its events are handled while the write is under way.
         tasks[partID] = task
-        var adopts = true
+        var adopts = false
         do {
             adopts = try await store.beginRunning(partID: partID, expecting: [.queued, .running, .failed], now: now())
         } catch {
-            logError("Couldn't record a surviving download", error)
+            logError("Couldn't record a surviving download; stopping it", error)
         }
         guard tasks[partID] === task else { return }
         guard adopts else {
@@ -511,6 +532,7 @@ public actor DownloadEngine {
                 tasks[partID] = nil
                 ignoredTasks.insert(task.taskIdentifier)
                 task.cancel()
+                vault.delete(partID: partID)
                 forget(partID)
             } else {
                 await stop(partIDs: [partID], keepingResumeData: true)
@@ -579,7 +601,8 @@ public actor DownloadEngine {
             for part in record.parts where part.state != .completed && contexts[part.id] == nil {
                 let destination = try? locations.fileURL(forRelativePath: part.destinationRelativePath)
                 contexts[part.id] = PartContext(
-                    recordID: record.id, connectionID: record.key.serverConnectionID, serverPath: part.serverPath,
+                    recordID: record.id, recordCreatedAt: record.createdAt,
+                    connectionID: record.key.serverConnectionID, serverPath: part.serverPath,
                     destination: destination, expectedBytes: part.expectedBytes, hasResumeData: part.hasResumeData)
                 delegate.setTarget(
                     destination.map { .init(destination: $0, expectedBytes: part.expectedBytes) }, for: part.id)
@@ -611,13 +634,14 @@ public actor DownloadEngine {
 
     /// Starts `partID` once ``DownloadStore/beginRunning(partID:expecting:now:)`` allows it, then
     /// creates and resumes its task: from its resume data while it matches the fresh request's
-    /// credentials and network access, otherwise from the fresh request.
+    /// credentials and network access, otherwise from the fresh request. A file already at its
+    /// destination completes it instead (see ``movedFileSize(_:)``).
     ///
     /// - Parameter rejectedAccessToken: after a 401, the token that was rejected.
     private func launch(_ partID: UUID, rejectedAccessToken: String? = nil) async {
         if let stop = stopping[partID] { await stop.value }
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
-            !settling.contains(partID)
+            !settling.contains(partID), !pendingRecordFailures.contains(context.recordID)
         else { return }
         guard session != nil, !isInvalidatingSession else {
             deferredLaunches.insert(partID)
@@ -645,6 +669,11 @@ public actor DownloadEngine {
             if launching[partID] == token {
                 await retry(partID, code: .store, message: "Couldn't save the download's state.")
             }
+            return
+        }
+        if launching[partID] == token, let bytes = movedFileSize(context) {
+            Log.downloads.info("A download's file is already in place; completing it without a request")
+            await complete(partID, bytes: bytes)
             return
         }
         let request: URLRequest
@@ -734,6 +763,12 @@ public actor DownloadEngine {
         case .completed(let task, let result):
             await handleCompletion(task, result)
         case .backgroundEventsFinished:
+            // iOS may end the process once the wake is released, losing writes kept only in
+            // memory: those that failed are tried again first, a few times.
+            for attempt in 0..<Self.maxWakeSaveAttempts where hasPendingWrites {
+                if attempt > 0 { try? await clock.sleep(for: .seconds(1)) }
+                await savePendingWrites()
+            }
             if !backgroundWaiters.isEmpty {
                 backgroundWaiters.removeFirst().resume()
             } else if !registry.consumeAbandonedWake() {
@@ -792,17 +827,18 @@ public actor DownloadEngine {
         if ignoredTasks.remove(task.taskIdentifier) != nil { return }
         guard let partID = task.partID, contexts[partID] != nil else { return }
         let current = tasks[partID]
+        // A surviving transfer's result waits for its adoption, so it can't complete or fail a
+        // stopped record's part. One that finished before it was adopted is adopted first.
+        if adopting.contains(task.taskIdentifier) {
+            hold(result, of: task, partID: partID)
+            return
+        }
+        if current == nil, !settling.contains(partID), let download = task as? URLSessionDownloadTask {
+            hold(result, of: task, partID: partID)
+            await reattach(download, partID: partID)
+            return
+        }
         if case .moved(let bytes) = result {
-            if adopting.contains(task.taskIdentifier) {
-                heldCompletions[task.taskIdentifier] = bytes
-                return
-            }
-            // A surviving transfer that finished before it was adopted is adopted first.
-            if current == nil, !settling.contains(partID), let download = task as? URLSessionDownloadTask {
-                heldCompletions[task.taskIdentifier] = bytes
-                await reattach(download, partID: partID)
-                return
-            }
             // A finished file wins even from a stale task; drop any newer transfer.
             if let current, current.taskIdentifier != task.taskIdentifier {
                 ignoredTasks.insert(current.taskIdentifier)
@@ -977,14 +1013,36 @@ public actor DownloadEngine {
         await saveCompletion(partID)
     }
 
-    /// Saves the completions that failed and finalises the complete records that weren't.
+    /// Saves the completions and record failures that failed and finalises the complete
+    /// records that weren't.
     private func reconcile() async {
+        await savePendingWrites()
+        await finaliseCompletedRecords()
+    }
+
+    private var hasPendingWrites: Bool { !unsavedCompletions.isEmpty || !pendingRecordFailures.isEmpty }
+
+    private func savePendingWrites() async {
         for partID in unsavedCompletions.keys {
             retries.removeValue(forKey: partID)?.cancel()
             failures[partID] = nil
             await saveCompletion(partID)
         }
-        await finaliseCompletedRecords()
+        for recordID in pendingRecordFailures where pendingRecordFailures.contains(recordID) {
+            await saveRecordFailure(recordID)
+        }
+    }
+
+    /// Saves a record's `failed` state; when it can't, the record's parts can't launch until a
+    /// later ``reconcile()`` saves it.
+    private func saveRecordFailure(_ recordID: UUID) async {
+        do {
+            try await store.setState(.failed, forRecord: recordID)
+            pendingRecordFailures.remove(recordID)
+        } catch {
+            logError("Couldn't record a failed download", error)
+            pendingRecordFailures.insert(recordID)
+        }
     }
 
     /// Makes a complete record a local item, then deletes it. A failure is logged; the next
@@ -1045,12 +1103,13 @@ public actor DownloadEngine {
 
     /// Fails the part and its record for good, and stops the record's other parts, keeping
     /// their resume data, so a retry of the record continues them. The record fails first, so
-    /// a concurrent launch of another part is refused.
+    /// a concurrent launch of another part is refused; until that is saved, the engine
+    /// launches none of them.
     private func failPermanently(_ partID: UUID, code: DownloadFailureCode, message: String) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
         tasks[partID] = nil
         retries.removeValue(forKey: partID)?.cancel()
-        await persist { try await $0.setState(.failed, forRecord: context.recordID) }
+        await saveRecordFailure(context.recordID)
         await persistIdle(partID) {
             try await $0.setPartState(
                 .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData)
@@ -1076,6 +1135,21 @@ public actor DownloadEngine {
         deferredLaunches.remove(partID)
         throttle.reset(partID)
         delegate.setTarget(nil, for: partID)
+    }
+
+    /// The size of the file at the part's destination when a transfer of this download moved it
+    /// there: it has the expected size and was written after the record was created. The
+    /// delegate moves a file there only once it has checked it, but iOS can end the process
+    /// before its completion is saved.
+    private func movedFileSize(_ context: PartContext) -> Int64? {
+        guard context.expectedBytes > 0, let destination = context.destination else { return nil }
+        // A fresh URL, so no cached values are read.
+        let values = try? URL(filePath: destination.path(percentEncoded: false))
+            .resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        guard let size = values?.fileSize.map(Int64.init), size == context.expectedBytes,
+            let modified = values?.contentModificationDate, modified >= context.recordCreatedAt
+        else { return nil }
+        return size
     }
 
     /// Seals `data` under the task's request; returns whether it was kept.

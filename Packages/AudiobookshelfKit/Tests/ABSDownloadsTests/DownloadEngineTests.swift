@@ -162,6 +162,29 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    @Test func backgroundWakeSavesCompletionsBeforeItEnds() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        // Without retries, nothing else saves the completion before the next activation.
+        let engine = harness.makeEngine(retryPolicy: RetryPolicy(baseDelay: .zero, maxDelay: .zero, maxRetries: 0))
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        await harness.store.failNextCommit(with: TestError())
+        try await postMovedFile(partID, harness: harness, engine: engine)
+        await engine.processPendingEvents()
+        #expect(try await harness.store.part(id: partID)?.state == .running)
+
+        let wake = Task { await engine.handleBackgroundEvents() }
+        harness.session?.finishBackgroundEvents()
+        await wake.value
+
+        #expect(try await harness.store.record(id: record.id) == nil)
+        #expect(harness.clock.sleeps.isEmpty)
+        #expect(harness.requests.count == 1)
+    }
+
     @Test func htmlBodyIsRetried() async throws {
         let harness = try await DownloadHarness {
             $0.stubCount == 1 ? .status(200, body: Data("<html>".utf8), contentType: "text/html") : .status(200)

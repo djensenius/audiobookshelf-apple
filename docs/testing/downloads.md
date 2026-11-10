@@ -168,12 +168,28 @@ iOS.
   `Downloads/` and the engine tries to record it again after the retry delays above, then
   on each `activate()`. A download whose parts are all recorded but that couldn't be
   added to the library is added again on each `activate()`.
+- At the end of a background wake, the engine tries the writes that failed (finished files
+  and failed downloads) up to three times, a second apart, before it lets the wake end:
+  iOS may end the process afterwards. If they still fail, the next launch of the part
+  finds its file already in `Downloads/` and records it as finished without a request.
+  It only accepts a file of the expected size written after the download was created, so
+  an older file or a file whose size changed on the server is downloaded again. To check,
+  set a breakpoint in `DownloadStore.completePart`, start a small download, go to the Home
+  Screen, and when the wake stops at the breakpoint, stop the app from Xcode. Open the app
+  again: the download completes without a new request in the server log.
 - If a part's state can't be saved after a failure, the part stays "downloading" in the
   store without a task; the engine still retries it (or restarts it on the next
   `activate()`).
+- If a download's failed state can't be saved after a part fails for good, the engine
+  starts none of its parts and saves the state again on each `activate()` and at the end
+  of a background wake. Pausing or starting the download again (`pause(recordID:)`,
+  `resume(recordID:)` or `start(partIDs:)`) replaces that state.
 - A transfer that survived a relaunch is adopted only if its download is still meant to
-  run. If its download was paused or failed, a file it finished meanwhile doesn't
-  complete the part: the part is queued, and its next transfer replaces the file.
+  run, and its result (a finished file or a failure) counts only once it is adopted. If
+  its download was paused or failed, or its state can't be saved, the transfer is
+  cancelled and its part queued, keeping its resume data: a file it finished stays in
+  `Downloads/` for the part's next launch, and a failure doesn't change the download's
+  state.
 - Resuming a download waits for a pause that is still cancelling its transfers, so the
   download continues.
 
