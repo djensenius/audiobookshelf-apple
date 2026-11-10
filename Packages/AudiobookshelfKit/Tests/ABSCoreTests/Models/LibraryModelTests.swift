@@ -235,6 +235,29 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(try decode(PlaybackSession.self, reencoded).deviceInfo?.sdkVersion == "34")
     }
 
+    @Test func decodesFractionalFileTimestamps() throws {
+        let item = try decode(LibraryItem.self, Fixtures.fractionalTimestampsItem)
+        #expect(item.mtimeMs == 1_650_621_074_299.0059)
+        #expect(item.ctimeMs == 1_650_621_074_299.5)
+        #expect(item.birthtimeMs == 1_650_621_070_000.25)
+        let book = try #require(item.book)
+        #expect(book.audioFiles?.first?.metadata?.mtimeMs == 1_650_621_074_299.0059)
+        #expect(book.audioFiles?.first?.metadata?.birthtimeMs == 1_650_621_070_000.123)
+        #expect(book.tracks?.first?.metadata?.mtimeMs == 1_650_621_074_299.0059)
+        #expect(item.libraryFiles?.first?.metadata?.ctimeMs == 1_650_621_074_299.0059)
+        #expect(try decode(LibraryItem.self, Fixtures.singleFileBook).mtimeMs == 1_700_000_001_000)
+
+        let shelfJSON = """
+            [{"id":"recently-added","label":"Recently Added","type":"book","entities":\
+            [\(Fixtures.fractionalTimestampsItem)]}]
+            """
+        guard case .libraryItems(let items) = try decode([Shelf].self, shelfJSON).first?.entities else {
+            Issue.record("Expected library items")
+            return
+        }
+        #expect(items.map(\.id) == ["li-book-6"])
+    }
+
     @Test func preservesUnknownPlayMethod() throws {
         let json = #"{"id":"ps-2","libraryItemId":"li-1","mediaType":"book","playMethod":9}"#
         let session = try decode(PlaybackSession.self, json)
