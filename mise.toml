@@ -84,6 +84,15 @@ description = "Run slow AudiobookshelfKit tests (OSLogStore integration)"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}", ABS_SLOW_TESTS = "1" }
 run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter OSLogStoreIntegrationTests"
 
+[tasks."test:server"]
+description = "Run the opt-in contract tests against a real Audiobookshelf server (Docker; ABS_SERVER_VERSION picks the release)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "scripts/test-server.sh test"
+
+[tasks."server:run"]
+description = "Start a seeded Audiobookshelf server for manual use and print its URL and login"
+run = "scripts/test-server.sh serve"
+
 [tasks."test:app"]
 description = "Run app tests on macOS"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
