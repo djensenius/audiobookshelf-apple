@@ -240,13 +240,13 @@ enum Route: Hashable, Codable, Sendable {
 
 **Where the code lives**
 
-- `AppTab`, `Route`, `Router` and `DeepLink` live in **ABSAppModel**, in `ABSAppModel/Navigation/` (for example `Router.swift`, per P3-04 #44). They are tested with `swift test` in its test target.
+- `AppTab`, `Route`, `Router`, `DeepLink`, and the scene rules `SceneNavigation` and `SceneContent` (when a scene may open a link or save, and what its root shows for the session gate) live in **ABSAppModel**, in `ABSAppModel/Navigation/` (for example `Router.swift`, per P3-04 #44). They are tested with `swift test` in its test target.
 - `DuoArrangement` and the other navigation-related views and modifiers stay in **ABSUI**.
 - `RootView`, the scenes, `Commands` and CarPlay live in the app target.
 
 ### Deep links and Handoff
 
-The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.plist`). We keep it.
+The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plist`). We keep it, and the new app registers it in `Audiobookshelf/Info.plist` as one `CFBundleURLTypes` entry (`CFBundleURLName` is the bundle ID, role `Editor`, scheme `audiobookshelf`). The same plist feeds the iOS and macOS builds, and `AppEnvironmentTests` checks the entry.
 
 **Scheme collision.** The legacy Capacitor app registers the same scheme. If both apps are installed on one device, iOS does not define which app receives `audiobookshelf://` URLs, and that includes the OIDC callback.
 
@@ -273,8 +273,10 @@ The `audiobookshelf` URL scheme is already registered (legacy `ios/App/App/Info.
 - A link may carry `server={connectionID}`. If it differs from the active connection, the app asks before switching.
 - There are no universal links, because servers are self-hosted and we control no associated domain.
 - `DeepLink.init?(url:)` is a pure parser.
-- In the scene that receives the URL, `RootView.onOpenURL` calls `router.open(_:)`.
-- `.handlesExternalEvents(preferring:allowing:)` sends links to an existing window instead of creating a new one.
+- In the scene that receives the URL, `RootView.onOpenURL` hands the link to the scene's host, which calls `router.open(_:)` once the scene has restored its saved navigation, so the restore can't wipe the link.
+  - Only a ready session's shell takes the link. During an account switch the outgoing shell doesn't, so the incoming account's shell opens it.
+  - A link is never kept while signed out or without a store. One that arrives then, or is still waiting when the gate becomes signed out, is dropped, because it would otherwise open later for whichever account signed in.
+- `RootView` applies `.handlesExternalEvents(preferring: ["*"], allowing: ["*"])`, so URLs and continued activities go to an existing window instead of creating a new one. On macOS, repeated `open audiobookshelf://downloads` keeps one window with the modifier, and opens another window each time without it.
 
 **URL format** (`ABSAppModel/Navigation/DeepLink.swift`)
 
@@ -337,7 +339,7 @@ IDs follow the URL rules. A present but invalid `item` or `episode` rejects the 
 
 - The key and the stored `serverID`/`userID` must both match the active session. On a mismatch (for example after the server re-issues a user ID) the snapshot is discarded and the scene starts from the defaults.
 - `librarySection` is restored **before** the paths. It is validated against the restored library's type (book or podcast), using the same rule as library switching: an unsupported or unknown section falls back to the default grid (`nil`).
-- Paths are written when `scenePhase` becomes `.background`, not on every push.
+- The snapshot is written to scene storage as the navigation changes, and also, as a backup, whenever the scene leaves `.active` (`.inactive` as well as `.background`, because macOS can quit a scene without `.background`). It is never written before the restore has finished, which would replace the saved snapshot with the defaults. A link that the restore opens is written too.
 - A route whose target no longer exists shows `ContentUnavailableView` and is pruned from the path.
 
 **App-wide state**

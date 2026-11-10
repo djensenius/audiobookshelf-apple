@@ -2,63 +2,65 @@ import ABSAppModel
 import ABSUI
 import SwiftUI
 
-/// Hosts one window scene's ``Router`` for one signed-in identity (ADR 0004). `RootView` gives it
+/// Hosts one window scene's navigation for one signed-in identity (ADR 0004). `RootView` gives it
 /// `.id(identity)`, so a server or user switch builds a new host, a new router and a new
 /// scene-storage entry; the key is the identity's ``SessionIdentity/snapshotKey``.
 ///
 /// The scene's saved navigation is restored once, when the host appears: first the snapshot,
 /// then the size class, then the link that launched the scene. The tabs show only after that, so
-/// they never flash their defaults.
+/// they never flash their defaults. The rules for when the scene may open a link or save are in
+/// ``SceneNavigation``, which this view only wires to SwiftUI.
 struct SceneRouterHost: View {
     let player: any PlayerSlotState
     /// A link waiting for a scene that can open it. The host takes it, opens it and clears it.
     @Binding var pendingLink: DeepLink?
 
-    @State private var router: Router
+    @State private var navigation: SceneNavigation
     @SceneStorage private var snapshot: Data?
-    @State private var isRestored = false
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
 
     init(identity: SessionIdentity, player: any PlayerSlotState, pendingLink: Binding<DeepLink?>) {
         self.player = player
         _pendingLink = pendingLink
-        _router = State(initialValue: Router(identity: identity))
+        _navigation = State(initialValue: SceneNavigation(identity: identity))
         _snapshot = SceneStorage(identity.snapshotKey)
     }
 
     var body: some View {
         Group {
-            if isRestored {
-                MainTabView(router: router, player: player)
+            if navigation.isRestored {
+                MainTabView(router: navigation.router, player: player)
             } else {
                 LoadingView()
             }
         }
-        .focusedSceneValue(router)
+        .focusedSceneValue(navigation.router)
         .onAppear(perform: restoreOnce)
         .onChange(of: pendingLink) { openPendingLink() }
+        // Written through as the navigation changes, so a quit or a crash loses at most the last
+        // move. This runs after the restore has finished, so a link opened by it is saved too.
+        .onChange(of: navigation.router.snapshot) { save() }
+        // Also when the scene leaves the foreground, as a backup: `.inactive` counts, because
+        // macOS may quit a scene without passing through `.background`.
         .onChange(of: scenePhase) { _, phase in
-            // Written when the scene leaves the foreground, not on every push. `.inactive` counts
-            // too, because macOS may quit a scene without passing through `.background`. Never
-            // before the restore, which would replace the saved snapshot with the defaults.
-            if phase != .active, isRestored {
-                snapshot = router.snapshotData
-            }
+            if phase != .active { save() }
         }
     }
 
     private func restoreOnce() {
-        guard !isRestored else { return }
-        router.restoreScene(from: snapshot, isCompact: horizontalSizeClass == .compact, opening: pendingLink)
-        pendingLink = nil
-        isRestored = true
+        let isCompact = horizontalSizeClass == .compact
+        if navigation.restoreOnce(from: snapshot, isCompact: isCompact, opening: pendingLink) {
+            pendingLink = nil
+        }
     }
 
     private func openPendingLink() {
-        guard isRestored, let link = pendingLink else { return }
-        router.open(link)
-        pendingLink = nil
+        if let link = pendingLink, navigation.open(link) { pendingLink = nil }
+    }
+
+    private func save() {
+        if let data = navigation.snapshotToSave { snapshot = data }
     }
 }
 
