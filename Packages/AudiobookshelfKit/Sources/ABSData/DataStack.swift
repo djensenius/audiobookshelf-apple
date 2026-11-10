@@ -189,20 +189,17 @@ public struct DataStack: Sendable {
     /// Core Data incompatibility codes: 134100 incompatible version hash, 134110 migration
     /// failed, 134130 missing source model, 134140 missing mapping model.
     private static let incompatibilityCodes: Set<Int> = [134_100, 134_110, 134_130, 134_140]
-    /// `NSFileReadNoPermissionError`, `NSFileWriteNoPermissionError`, `NSFileWriteOutOfSpaceError`.
-    private static let transientCocoaCodes: Set<Int> = [257, 513, 640]
-    /// `SQLITE_PERM`, `BUSY`, `LOCKED`, `NOMEM`, `READONLY`, `IOERR`, `FULL`, `CANTOPEN`; corrupt
-    /// is `CORRUPT`, `NOTADB`.
-    private static let transientSQLiteCodes: Set<Int> = [3, 5, 6, 7, 8, 10, 13, 14]
+    /// `SQLITE_CORRUPT`, `SQLITE_NOTADB`.
     private static let corruptSQLiteCodes: Set<Int> = [11, 26]
 
     /// Errors inspected in a load error chain; a longer chain is never confirmed.
     static let maxInspectedErrors = 32
 
-    /// Whether a load error confirms the store can't be used: a Core Data incompatibility or
-    /// SQLite corruption somewhere in the chain (`NSUnderlyingErrorKey`, `NSDetailedErrors`), and
-    /// no transient failure (disk full, I/O, busy, locked, can't open, no permission, or any POSIX
-    /// error) anywhere in it.
+    /// Whether a load error confirms the store can't be used. An allow-list: every error in the
+    /// chain (`NSUnderlyingErrorKey`, `NSDetailedErrors`, `NSMultipleUnderlyingErrorsKey`) must be
+    /// either one carrying SQLite `CORRUPT`/`NOTADB` or, carrying no SQLite code, a Core Data
+    /// incompatibility code (or a top-level 259 wrapping one). Anything else (timeouts, busy, locked, I/O, full, permission, POSIX,
+    /// unknown codes) means the store may be intact, so it isn't confirmed.
     static func isConfirmedIncompatibility(_ error: NSError?) -> Bool {
         var chain: [NSError] = []
         var pending = error.map { [$0] } ?? []
@@ -218,16 +215,15 @@ public struct DataStack: Sendable {
             let code = error.domain == NSSQLiteErrorDomain ? error.code : error.userInfo[NSSQLiteErrorDomain] as? Int
             return code.map { $0 & 0xFF }  // Primary code of an extended result code.
         }
-        let isTransient = chain.contains { error in
-            error.domain == NSPOSIXErrorDomain
-                || (error.domain == NSCocoaErrorDomain && transientCocoaCodes.contains(error.code))
-                || sqliteCode(error).map(transientSQLiteCodes.contains) == true
+        func isConfirming(_ error: NSError) -> Bool {
+            if let code = sqliteCode(error) { return corruptSQLiteCodes.contains(code) }
+            return error.domain == NSCocoaErrorDomain && incompatibilityCodes.contains(error.code)
         }
-        return !isTransient
-            && chain.contains { error in
-                (error.domain == NSCocoaErrorDomain && incompatibilityCodes.contains(error.code))
-                    || sqliteCode(error).map(corruptSQLiteCodes.contains) == true
-            }
+        // A top-level `NSFileReadCorruptFileError` (259) may wrap a confirming error; it never
+        // confirms alone, and nested anywhere else it isn't trusted.
+        let root = chain.first.map { $0.domain == NSCocoaErrorDomain && $0.code == NSFileReadCorruptFileError }
+        let rest = root == true && sqliteCode(chain[0]) == nil ? chain.dropFirst() : chain[...]
+        return !rest.isEmpty && rest.allSatisfy(isConfirming)
     }
 
     static let incompleteMarker = "INCOMPLETE"

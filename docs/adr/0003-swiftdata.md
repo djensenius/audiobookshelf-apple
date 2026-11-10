@@ -389,11 +389,11 @@ Model notes:
   `SwiftDataError.loadIssueModelContainer`, not `.backwardMigration`.
 - **Recovery.** Only a writing process recovers, and only on confirmed damage. When
   the load fails, `DataStack` resets the store only if its first 16 bytes are
-  readable and aren't the SQLite header, or if the Core Data error chain
-  (`NSUnderlyingErrorKey`, `NSDetailedErrors`) holds SQLite error 11 or 26 or an
-  incompatibility code (134100, 134110, 134130, 134140) and no transient error (disk
-  full, I/O, busy, locked, out of memory, read-only, can't open, no permission,
-  any POSIX error). Anything
+  readable and aren't the SQLite header, or if every error in the Core Data chain
+  (`NSUnderlyingErrorKey`, `NSDetailedErrors`) is on an allow-list: SQLite error 11
+  or 26, or an incompatibility code (134100, 134110, 134130, 134140), optionally
+  under a top-level 259. Any other error anywhere (timeouts, busy, locked, I/O,
+  full, permission, POSIX, unknown codes) means the store may be intact. Anything
   else, including an unreadable file (protected data while the device is locked),
   is rethrown and the store left alone. A reset logs a fault and moves the store,
   then `-wal` and `-shm`, into `Broken/<epoch>-<uuid>/` (keeping only the newest

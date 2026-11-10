@@ -403,12 +403,30 @@ private enum SupersetSchemaV2: VersionedSchema {
         for code in [7, 8, 264, 520, 776, 1032, 1288, 1544] {  // SQLITE_NOMEM, SQLITE_READONLY_*
             #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSSQLiteErrorDomain: code])))
         }
+        // Timeouts, busy/locked (incl. extended codes), I/O, full, protocol, can't open, auth.
+        for code in [5, 261, 517, 6, 262, 10, 13, 14, 15, 23] {
+            let sqlite = NSError(domain: NSSQLiteErrorDomain, code: code)
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: sqlite])))
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_100, [NSSQLiteErrorDomain: code])))
+        }
+        // NSPersistentStoreTimeoutError, NSPersistentStoreSaveConflictsError, NSFileReadUnknownError.
+        for code in [NSPersistentStoreTimeoutError, NSPersistentStoreSaveConflictsError, NSFileReadUnknownError] {
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(code)))
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(code)])))
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_100, [NSDetailedErrorsKey: [cocoa(code)]])))
+        }
+        for code in [EINTR, EAGAIN, EBUSY] {
+            let posix = NSError(domain: NSPOSIXErrorDomain, code: Int(code))
+            #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: posix])))
+        }
+        #expect(!DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(259)])))
         #expect(!DataStack.isConfirmedIncompatibility(nil))
 
         #expect(DataStack.isConfirmedIncompatibility(cocoa(134_110, [NSUnderlyingErrorKey: cocoa(134_110)])))
         #expect(DataStack.isConfirmedIncompatibility(cocoa(134_100)))
         #expect(
-            DataStack.isConfirmedIncompatibility(cocoa(1, [NSDetailedErrorsKey: [cocoa(134_130), cocoa(134_140)]])))
+            DataStack.isConfirmedIncompatibility(
+                cocoa(134_110, [NSDetailedErrorsKey: [cocoa(134_130), cocoa(134_140)]])))
         #expect(DataStack.isConfirmedIncompatibility(cocoa(259, [NSSQLiteErrorDomain: 26])))
         #expect(
             DataStack.isConfirmedIncompatibility(
