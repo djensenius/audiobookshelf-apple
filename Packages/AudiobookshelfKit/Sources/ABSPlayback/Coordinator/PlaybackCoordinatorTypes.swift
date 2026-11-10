@@ -91,8 +91,9 @@ public enum SessionCloseReason: Sendable, Hashable {
 public struct ClosingSession: Sendable, Hashable {
     public let sessionID: String
     public let key: MediaKey
-    /// The last confirmed global position: the engine's when loaded, else the position the load
-    /// was going to start from.
+    /// The global position: when loaded, the engine's confirmed time or the target of a seek that
+    /// hadn't landed (an interrupted seek leaves the engine's own time behind, at 0 after a load);
+    /// else the position the load was going to start from.
     public let currentTime: Double
     public let duration: Double
     /// Whether the engine loaded the media. A session that never loaded never played, so the
@@ -108,11 +109,13 @@ public enum PlaybackCoordinatorEvent: Sendable, Equatable {
     case itemChanged(MediaKey?)
     /// A server session became the current one.
     case sessionStarted(sessionID: String, key: MediaKey)
-    /// The engine loaded the media at `time`, after the resume seek (including auto-rewind).
+    /// The engine loaded the media at `time`, after the resume seek (including auto-rewind). When
+    /// that seek was interrupted, `time` is its target and ``didSeek(time:)`` follows once it lands.
     case loaded(time: Double)
     case playbackStarted
     case paused(time: Double)
-    /// A seek completed and playback is at `time`.
+    /// A seek completed and playback is at `time`. For a load whose initial seek was interrupted,
+    /// sent once when it lands, never for the position 0 the engine reports meanwhile.
     case didSeek(time: Double)
     /// The engine's periodic time update while media is loaded.
     case tick(time: Double)

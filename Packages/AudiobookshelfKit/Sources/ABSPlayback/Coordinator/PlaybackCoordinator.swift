@@ -28,6 +28,10 @@ private let logger = Log.playback
 ///   `/play` waits up to ``closeWaitTimeout`` for closes in flight, so the server normally sees the
 ///   old session closed first; a slow or failed close never blocks it. Closes are best effort;
 ///   P2-06b's final report is plugged in through ``finalCloseReport``.
+/// - **Interrupted seeks.** The engine keeps the target of a seek it couldn't finish pending and
+///   leaves its own time behind (at 0 after a load). The coordinator treats that target as the
+///   position: ``currentTime``, the last-played record and the paused and closing positions use
+///   it, a resume seeks to it exactly, and a load's `didSeek` is published when the seek lands.
 /// - **Restore is lazy.** ``restoreLastPlayed()`` only publishes the item, position and display
 ///   metadata from the ``LastPlayedRecord``; the session starts and the engine loads on the first
 ///   ``resume(rewindingBy:)`` or play, so opening the app never creates a server session.
@@ -59,12 +63,16 @@ public final class PlaybackCoordinator {
     public private(set) var pendingPlayKey: MediaKey?
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
+    /// Where playback is or is going. An interrupted seek leaves the engine's own time behind
+    /// (at 0 after a load), so a pending target is the position to report and save.
+    private var position: Double { engine.pendingSeekTarget ?? engine.currentTime }
 
     /// The saved playback rate, applied on every load and play.
     public var rate: Double { settings.playbackRate }
     public var timeline: PlaybackTimeline? { phase == .loaded ? engine.timeline : nil }
-    /// Global seconds: the engine's while loaded, else the position play will resume from.
-    public var currentTime: Double { phase == .loaded ? engine.currentTime : unloadedPosition }
+    /// Global seconds: while loaded, the engine's confirmed time, or the target of a seek that
+    /// hasn't landed (an interrupted one stays pending); else the position play will resume from.
+    public var currentTime: Double { phase == .loaded ? position : unloadedPosition }
     public var duration: Double { phase == .loaded ? engine.duration : unloadedDuration }
     public var isPlaying: Bool { phase == .loaded && engine.state == .playing }
     public var isBuffering: Bool {
@@ -116,6 +124,8 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var lastPlayedSavedAt: Date?
     /// The media played to its end; the next play starts again from 0.
     @ObservationIgnored private var reachedEnd = false
+    /// The load's initial seek was interrupted and hasn't landed: its `didSeek` is still owed.
+    @ObservationIgnored private var awaitingInitialLanding = false
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
     @ObservationIgnored private var resumingIntent: Int?
@@ -357,8 +367,12 @@ public final class PlaybackCoordinator {
             await engine.seek(to: engine.timeline?.clamp(pending) ?? pending)
             guard current == generation, phase == .loaded else { return }
         }
-        emit(.loaded(time: engine.currentTime))
-        emit(.didSeek(time: engine.currentTime))
+        // An interrupted initial seek stays pending with the engine paused at 0: `.loaded` carries
+        // its target, and `.didSeek` waits for the landing (see `handle(_:)`).
+        let landed = engine.pendingSeekTarget == nil
+        awaitingInitialLanding = !landed
+        emit(.loaded(time: position))
+        if landed { emit(.didSeek(time: engine.currentTime)) }
         guard current == generation, phase == .loaded else { return }
         saveLastPlayed()
         // A pause or resume during the seek above takes over.
@@ -378,7 +392,8 @@ public final class PlaybackCoordinator {
     }
 
     /// The single place loaded media resumes. In order: ``willResume``; one awaited seek (to
-    /// `startTime`, to 0 after the end, or back by `seconds` or ``AutoRewind``), which emits
+    /// `startTime`, else exactly to the target of an interrupted seek still pending, else to 0
+    /// after the end, else back by `seconds` or ``AutoRewind``), which emits
     /// ``PlaybackCoordinatorEvent/didSeek(time:)`` with where it landed; then play. A pause during
     /// the seek cancels the play, and a resume while one is in flight is ignored (a `startTime`
     /// replaces it). While already playing, a `startTime` is only a seek.
@@ -401,6 +416,10 @@ public final class PlaybackCoordinator {
         let target: Double?
         if let startTime {
             target = startTime
+        } else if let pending = engine.pendingSeekTarget {
+            // The user's interrupted seek is where playback goes: not rewound from the old
+            // position, nor replaced by the restart from the end.
+            target = pending
         } else if atEnd {
             target = 0
         } else {
@@ -431,7 +450,7 @@ public final class PlaybackCoordinator {
             engine.pause()
             lastPlayedAt = now()
             saveLastPlayed()
-            emit(.paused(time: engine.currentTime))
+            emit(.paused(time: position))
         case .idle, .unloaded: return
         }
     }
@@ -451,6 +470,7 @@ public final class PlaybackCoordinator {
                 return nil
             }
             reachedEnd = false
+            awaitingInitialLanding = false
             let landed = engine.currentTime
             emit(.didSeek(time: landed))
             saveLastPlayed()
@@ -531,6 +551,13 @@ public final class PlaybackCoordinator {
         guard phase == .loaded else { return }
         switch event {
         case .tick(let time):
+            if awaitingInitialLanding, engine.pendingSeekTarget == nil {
+                // The interrupted initial seek has landed: the engine retried it as playback started.
+                awaitingInitialLanding = false
+                emit(.didSeek(time: engine.currentTime))
+                guard phase == .loaded else { return }
+                saveLastPlayed()
+            }
             if engine.state == .playing {
                 let date = now()
                 lastPlayedAt = date
@@ -578,8 +605,9 @@ public final class PlaybackCoordinator {
     /// Closes the current session (if any) and unloads the engine.
     private func tearDown(reason: SessionCloseReason) {
         let wasLoaded = phase == .loaded
+        awaitingInitialLanding = false
         if wasLoaded {
-            unloadedPosition = engine.currentTime
+            unloadedPosition = position
             unloadedDuration = engine.duration
         }
         resumeIntent += 1
