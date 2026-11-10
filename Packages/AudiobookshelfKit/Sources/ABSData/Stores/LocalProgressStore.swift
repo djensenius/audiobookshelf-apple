@@ -58,6 +58,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     // In memory only: no fetch or PATCH outlives the process.
     private var generation: UInt64 = 0
     private var rowGenerations: [String: UInt64] = [:]
+    /// The generation after each row last merged server values: a fetch captured since was read
+    /// after the server held them.
+    private var mergedAt: [String: UInt64] = [:]
     private var inFlight: [String: (token: UUID, groups: ProgressGroups)] = [:]
     /// Rows acknowledged without a server time that wait for a fetch issued after the
     /// acknowledgement, with the latest socket value received meanwhile and its capture.
@@ -126,8 +129,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Merges server progress (from `/api/me`, an expanded item, `/api/me/progress/:id` or a
     /// socket event) into existing rows; media without a row is skipped. Values for a row edited
     /// or settled since `capturedAt` are dropped, and groups carried by a PATCH in flight aren't
-    /// merged, nor are socket values whose `lastUpdate` isn't later than the baseline's (another
-    /// write in the same millisecond may predate it). Returns the keys whose rows were merged.
+    /// merged, nor are values whose `lastUpdate` isn't later than the baseline's (another write in
+    /// the same millisecond may predate it), except from a fetch captured after the row's last
+    /// merge. Returns the keys whose rows were merged.
     ///
     /// A PATCH's 200 carries no server time, so after an acknowledgement a socket event may have
     /// been emitted before the PATCH was applied, with any `lastUpdate`. Until a fetch issued
@@ -147,8 +151,9 @@ public enum SessionUploadResult: Sendable, Equatable {
             for (key, server) in updates {
                 let raw = key.rawValue
                 if let edited = rowGenerations[raw], edited > capturedAt.value { continue }
+                let takingTies = source == .fetch && capturedAt.value >= mergedAt[raw] ?? 0
                 guard let awaiting = awaitingFetch[raw] else {
-                    if try merge(server, into: key, source: source) { merged.insert(key) }
+                    if try merge(server, into: key, takingTies: takingTies) { merged.insert(key) }
                     continue
                 }
                 guard source == .fetch else {
@@ -157,12 +162,12 @@ public enum SessionUploadResult: Sendable, Equatable {
                 }
                 // Passing the generation check, the fetch was issued after the acknowledgement.
                 confirmed.insert(raw)
-                if try merge(server, into: key, source: .fetch) { merged.insert(key) }
+                if try merge(server, into: key, takingTies: takingTies) { merged.insert(key) }
                 // Server times are milliseconds, so a pre-PATCH snapshot can tie the fetch; only a
                 // strictly newer one can have been emitted after it.
                 if let latest = awaiting.latest, rowGenerations[raw] ?? 0 <= latest.capturedAt,
                     latest.server.lastUpdate > server.lastUpdate,
-                    try merge(latest.server, into: key, source: .socket)
+                    try merge(latest.server, into: key)
                 {
                     merged.insert(key)
                 }
@@ -174,6 +179,10 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         for raw in confirmed {
             awaitingFetch[raw] = nil
+        }
+        if !merged.isEmpty {
+            generation += 1
+            for key in merged { mergedAt[key.rawValue] = generation }
         }
         return merged
     }
@@ -270,6 +279,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         if deleted {
             rowGenerations[key.rawValue] = nil
+            mergedAt[key.rawValue] = nil
             awaitingFetch[key.rawValue] = nil
         }
         return deleted
@@ -289,6 +299,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         for key in keys {
             awaitingFetch[key] = nil
+            mergedAt[key] = nil
             if inFlight[key] == nil { rowGenerations[key] = nil }
         }
         return keys.count
@@ -422,11 +433,13 @@ public enum SessionUploadResult: Sendable, Equatable {
     }
 
     /// Merges `server` into the row (except groups in flight); `false` when there is no row or the
-    /// values are stale. Server times are milliseconds, so a socket value with the baseline's time
-    /// may be another write emitted before the one the baseline holds; it counts as stale.
-    private func merge(_ server: ProgressBaseline, into key: MediaKey, source: ServerProgressSource) throws -> Bool {
+    /// values are stale. Server times are milliseconds, so a socket event or a fetch response with
+    /// the baseline's time may hold another write made before the one the baseline holds (an
+    /// earlier event, or a fetch read before it); it counts as stale unless `takingTies` (a fetch
+    /// issued after the baseline's values were merged, so read after the server held them).
+    private func merge(_ server: ProgressBaseline, into key: MediaKey, takingTies: Bool = false) throws -> Bool {
         guard let row = try fetchRow(key) else { return false }
-        if source == .socket, let baseline = row.serverBaseline, server.lastUpdate <= baseline.lastUpdate {
+        if !takingTies, let baseline = row.serverBaseline, server.lastUpdate <= baseline.lastUpdate {
             return false
         }
         var state = ProgressSyncState(row)

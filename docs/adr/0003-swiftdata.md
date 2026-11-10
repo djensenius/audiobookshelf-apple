@@ -249,11 +249,15 @@ Model notes:
     applied, a row whose generation has advanced since that capture is skipped; the
     next fetch picks up any real server change. The counter can be in memory
     because no fetch outlives the process. In addition, server values whose
-    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped, and socket
-    values whose `lastUpdate` equals it too: server times are milliseconds, so
-    another write in that millisecond may have been emitted before the one the
-    baseline holds (a fetch applied after it is ordered by the generation check;
-    a later write with the same time arrives by the next fetch). Server
+    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped, and so are
+    values whose `lastUpdate` equals it, unless they come from a fetch issued
+    after the row last merged server values. Server times are milliseconds, so
+    another write in that millisecond may predate the one the baseline holds: a
+    socket event may have been emitted before it, and of two overlapping fetches
+    the one applied second may have been read first. A fetch issued after the
+    merge was read after the server held the baseline's values, so its value at
+    the same time is that write or a later one; the next such fetch brings a
+    later write made in the same millisecond. Server
     progress always carries `lastUpdate` (`MediaProgress.getOldMediaProgress`,
     `updatedAt`); the network layer drops a payload without one rather than
     inventing a time.
@@ -763,9 +767,9 @@ Ongoing checks:
   server's value is newer or is what sending it would store, and converges; a
   seeded random interleaving of `LocalProgressStore` calls (edits, sends acked
   with or without a server time, failures, socket events delivered in order,
-  stale and confirming fetches, writes sharing a millisecond) never loses an
+  stale, overlapping and confirming fetches, writes sharing a millisecond) never loses an
   unconfirmed edit to anything but a later write by another device, never leaves
-  a clean row older than its acknowledged write, never lets a held socket value
+  a clean row older than its acknowledged write or a write it already held, never lets a held socket value
   become the row's value, keeps `needsConfirmationFetch` equal to the hold, and
   converges (25 seeds by default, `ABS_PROGRESS_SEEDS` for more); deleting a connection with dirty progress and then logging in
   again to the same address and user returns the same connection `id`, and

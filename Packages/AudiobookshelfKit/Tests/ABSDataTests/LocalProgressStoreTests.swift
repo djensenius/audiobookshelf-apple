@@ -320,6 +320,36 @@ import Testing
         #expect(row.dirtyGroups.isEmpty)
     }
 
+    /// Overlapping fetches can be read on either side of another write in the same millisecond:
+    /// once the later response is applied, the earlier one with the same `lastUpdate` is ignored.
+    @Test func earlierFetchResponseWithTheSameTimeIsIgnored() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.completeSend(patch, serverLastUpdate: nil)
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 200, lastUpdate: Self.at(2))], capturedAt: await store.captureGeneration(),
+            source: .fetch)
+
+        let first = await store.captureGeneration()
+        let second = await store.captureGeneration()
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 700, lastUpdate: Self.at(5))], capturedAt: second, source: .fetch)
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 300, lastUpdate: Self.at(5))], capturedAt: first, source: .fetch)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 700)
+        #expect(row.dirtyGroups.isEmpty)
+
+        // A fetch issued after that merge was read after the server held 700, so a value with the
+        // same time is a later write.
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 800, lastUpdate: Self.at(5))], capturedAt: await store.captureGeneration(),
+            source: .fetch)
+        #expect(try await store.progress(for: key)?.currentTime == 800)
+    }
+
     /// Two edits with the same clock reading are still told apart: acknowledging the first leaves
     /// the second dirty.
     @Test func editWithTheSameTimeAsTheSentOneStaysDirty() async throws {

@@ -8,7 +8,7 @@ import Testing
 /// against a reference server. The clock advances 0 or 1 ms per step, so server writes and edits
 /// often share a millisecond. After every step: an unconfirmed edit is only replaced by another
 /// device's later write; a clean row holds a server value no older than the last acknowledged
-/// write; a held socket value never becomes the row's value; and `needsConfirmationFetch`
+/// write nor goes back to an older one; a held socket value never becomes the row's value; and `needsConfirmationFetch`
 /// matches the hold. Each run then converges to the server. 25 seeds of 50 steps by default; set
 /// `ABS_PROGRESS_SEEDS` to run more (2,000 take about two minutes), or `ABS_PROGRESS_SEED` to
 /// replay one.
@@ -62,6 +62,7 @@ private struct StoreInterleaving {
     let key: MediaKey
     var rng: SeededGenerator
     var log: [String] = []
+    private let quiet: Bool
     /// Invariants found broken during a step, reported by ``check()``.
     private var violations: [String] = []
     private var milliseconds: Double = 0
@@ -80,11 +81,14 @@ private struct StoreInterleaving {
     private var pending: (value: Double, time: Date)?
     /// The server write of the latest acknowledged PATCH.
     private var floor = 0
+    /// The newest server write a clean row has held.
+    private var newestClean = 0
 
     init(seed: UInt64, store: LocalProgressStore) {
         self.store = store
         key = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_\(seed)")
         rng = SeededGenerator(seed: seed)
+        quiet = !seed.isMultiple(of: 2)
     }
 
     private var now: Date { Self.t0.addingTimeInterval(milliseconds / 1000) }
@@ -139,8 +143,10 @@ private struct StoreInterleaving {
     }
 
     mutating func step() async throws {
-        milliseconds += Double(Int.random(in: 0...1, using: &rng))
-        switch Int.random(in: 0..<100, using: &rng) {
+        // Odd seeds rarely edit or advance the clock, so the row is often clean while server values
+        // sharing a millisecond arrive.
+        milliseconds += Double(Int.random(in: 0..<(quiet ? 4 : 2), using: &rng) == 1 ? 1 : 0)
+        switch Int.random(in: quiet ? 13..<100 : 0..<100, using: &rng) {
         case 0..<16:
             try await edit()
         case 16..<28:
@@ -188,7 +194,9 @@ private struct StoreInterleaving {
                 fetches[index].response = snapshot(writes.count - 1)
             }
         case 91..<97:
-            if let index = fetches.indices.filter({ fetches[$0].response != nil }).randomElement(using: &rng) {
+            // Responses arrive in any order, often the newest first.
+            let served = fetches.indices.filter { fetches[$0].response != nil }
+            if let index = Bool.random(using: &rng) ? served.last : served.randomElement(using: &rng) {
                 try await deliverFetch(index)
             }
         default:
@@ -221,6 +229,13 @@ private struct StoreInterleaving {
             guard index >= floor else {
                 return "clean row holds \(value), older than the acknowledged \(writes[floor].currentTime)"
             }
+            // A clean row never goes back to an older write (the earliest with its value, in case
+            // a send was applied twice).
+            let first = writes.firstIndex { $0.currentTime == value } ?? index
+            guard first >= newestClean else {
+                return "clean row went back to \(value) from \(writes[newestClean].currentTime)"
+            }
+            newestClean = first
             if pending?.value == value { pending = nil }
         }
         if await store.needsConfirmationFetch.contains(key) != holdActive {
@@ -233,7 +248,6 @@ private struct StoreInterleaving {
     /// row must then equal the server.
     mutating func converge() async throws -> String? {
         milliseconds += 1
-        log.append("\(Int(milliseconds)) ms: converge: \(String(describing: try await store.progress(for: key)))")
         for _ in 0..<20 {
             if send == nil, let patch = try await store.beginSend(for: key, now: now) { send = (patch, nil) }
             guard let send else { break }
