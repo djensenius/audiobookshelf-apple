@@ -85,7 +85,8 @@ public enum AccountError: Error, Sendable, Equatable, LocalizedError {
 public final class AccountManager {
     public private(set) var state: AccountState = .signedOut
     /// Saved connections, most recently used first. Removed connections that are kept for their
-    /// local data aren't listed.
+    /// local data aren't listed. A connection's `signedOutAt` is set from ``logout()`` until it's
+    /// signed in to again.
     public private(set) var connections: [ServerConnectionDTO] = []
     /// The active connection, set while signed in, offline or restoring.
     public private(set) var activeConnection: ServerConnectionDTO?
@@ -154,15 +155,17 @@ public final class AccountManager {
     /// switch still running, which leaves the state offline with the active connection, or
     /// signed out if none is active; if the sign-in then fails, the state is otherwise unchanged.
     /// It throws `CancellationError` if a newer call superseded it, including a ``logout()``,
-    /// even of another connection, which also signs out of the session it saved, and a
-    /// ``remove(_:)`` of its connection, which also ends the new session on the server. It also
-    /// throws `CancellationError` if its task was cancelled, which keeps the session as a
-    /// superseded sign-in does. A sign-in superseded before saving its session ends it on the
-    /// server. The active connection doesn't change, but a sign-in superseded or cancelled after
-    /// it marked its connection used leaves that connection the one restored at the next launch.
-    /// It throws `AccountError.server(.sessionExpired)` if the server rejected the new session
-    /// before it became active. A new connection whose session couldn't be saved stays in
-    /// ``connections`` without one; switching to it throws ``AccountError/notSignedIn``.
+    /// even of another connection, which also signs out of the session it saved, as it does of
+    /// the active one, and a ``remove(_:)`` of its connection, which also ends the new session on
+    /// the server. It also throws `CancellationError` if its task was cancelled, which keeps the
+    /// session as a superseded sign-in does. A sign-in superseded before saving its session ends
+    /// it on the server. The active connection doesn't change, but a sign-in superseded or
+    /// cancelled after it marked its connection used leaves that connection the one restored at
+    /// the next launch. It throws `AccountError.server(.sessionExpired)` if the server rejected
+    /// the new session before it became active. A new connection whose session couldn't be saved
+    /// stays in ``connections`` without one; switching to it throws ``AccountError/notSignedIn``.
+    /// If the session was saved but the connection couldn't be marked used, the session is kept
+    /// as a superseded sign-in's is.
     public func connect(local server: ValidatedServer, username: String, password: String) async throws {
         let attempt = beginSignIn()
         let result = try await validator.login(to: server, username: username, password: password)
@@ -177,9 +180,10 @@ public final class AccountManager {
         try await finishSignIn(result, to: server, method: .openid, attempt: attempt)
     }
 
-    /// Saves the session, then marks the connection used and activates it. A sign-in superseded
-    /// by another call keeps its saved session for switching to later, unless the newer call was
-    /// ``logout()``, which this sign-in then also signs out of, or the connection was removed.
+    /// Saves the session, then marks the connection used, which also clears a sign-out saved with
+    /// it, and activates it. A sign-in superseded by another call keeps its saved session for
+    /// switching to later, unless the newer call was ``logout()``, which this sign-in then also
+    /// signs out of, or the connection was removed.
     private func finishSignIn(
         _ result: LoginResult, to server: ValidatedServer, method: ServerAuthMethod, attempt: SignInAttempt
     ) async throws {
@@ -203,16 +207,14 @@ public final class AccountManager {
             let stored = try await credentials.signIn(session, customHeaders: server.configuration.customHeaders)
             signInGenerations[connection.id] = stored.generation
             saved = (connection.id, credentials, stored.generation)
-            if connection.signedOutAt != nil, logouts == attempt.logouts {
-                // The saved session is new, so it may be restored.
-                _ = try? await store.setSignedOut(id: connection.id, at: nil)
-            }
             if let replaced = stored.replaced, replaced.refreshToken != session.refreshToken {
                 // Signed in again: end the session this one replaced, best effort.
                 _ = await serverLogout(replaced, client: makeClient(server, credentials: nil))
             }
             try ensureActivatable(operation, id: connection.id, generation: stored.generation)
-            // Removed since it was saved; the catch deletes the session.
+            // Clears a sign-out saved with the connection in the same save, so it can't be active
+            // while still signed out. False if removed since it was saved; the catch deletes the
+            // session.
             guard try await store.markUsed(id: connection.id, at: now()) else { throw AccountError.connectionNotFound }
             await reloadConnections()
             try ensureActivatable(operation, id: connection.id, generation: stored.generation)
@@ -227,11 +229,18 @@ public final class AccountManager {
                     if let ended = try? await saved.credentials.removeAll().session {
                         _ = await serverLogout(ended, client: logoutClient)
                     }
-                } else if logouts != attempt.logouts,
-                    // Signed out while saving: end the session saved here, unless it's been replaced.
-                    let ended = await saved.credentials.signOut(ifGeneration: saved.generation).ended
-                {
-                    _ = await serverLogout(ended, client: logoutClient)
+                } else if logouts != attempt.logouts {
+                    // Signed out while saving. Save the sign-out first, as logout() does, unless a
+                    // newer sign-in has saved a session since, then end the session saved here,
+                    // unless it's been replaced.
+                    if signInGenerations[saved.id] == saved.generation { await saveSignOut(of: saved.id) }
+                    if let ended = await saved.credentials.signOut(ifGeneration: saved.generation).ended {
+                        _ = await serverLogout(ended, client: logoutClient)
+                    }
+                } else if signInGenerations[saved.id] == saved.generation {
+                    // Kept for switching to later, so clear a sign-out saved with the connection.
+                    // If that fails, the connection stays signed out; nothing is activated here.
+                    _ = try? await store.setSignedOut(id: saved.id, at: nil)
                 }
             } else {
                 // The tokens weren't saved, so nothing could sign out of this server session later.
@@ -263,7 +272,7 @@ public final class AccountManager {
             guard isCurrent(operation) else { return }
             guard let connection = chosen else { throw AccountError.notSignedIn }
             pendingConnectionID = connection.id
-            let client = try await prepare(connection)
+            let client = try await prepare(connection, operation: operation)
             guard isCurrent(operation) else { return }
             await activate(connection, client: client, operation: operation)
         } catch {
@@ -290,7 +299,7 @@ public final class AccountManager {
                 throw AccountError.connectionNotFound
             }
             try ensureCurrent(operation)
-            client = try await prepare(found)
+            client = try await prepare(found, operation: operation)
             try ensureCurrent(operation)
             connection = found
         } catch {
@@ -317,10 +326,10 @@ public final class AccountManager {
     /// Signs out of the active connection, or if none is active, of the one being restored,
     /// switched to or signed in to: deletes its tokens, keeping the connection and its custom
     /// headers, then ends the server session, best effort. The sign-out is saved with the
-    /// connection first, so if the delete fails, the session isn't restored or switched to, even
-    /// after a relaunch, and those retry the delete. With one connection active while a restore
-    /// or switch to another runs, it signs out of the active one and cancels the other. A sign-in
-    /// that's running is cancelled and signed out too.
+    /// connection first, as its `signedOutAt` in ``connections``, so if the delete fails, the
+    /// session isn't restored or switched to, even after a relaunch, and those retry the delete.
+    /// With one connection active while a restore or switch to another runs, it signs out of the
+    /// active one and cancels the other. A sign-in that's running is cancelled and signed out too.
     /// - Returns: The OpenID provider's end-session URL to open for an OpenID session, if the
     ///   server returned one.
     @discardableResult
@@ -336,12 +345,7 @@ public final class AccountManager {
             id = try? await store.connectionToRestore()?.id
         }
         guard let id else { return nil }
-        do {
-            // Saved first, so that if the delete fails, a relaunch doesn't restore the session.
-            try await store.setSignedOut(id: id, at: now())
-        } catch {
-            Log.auth.error("Couldn't save the sign-out: \(String(describing: type(of: error)), privacy: .public)")
-        }
+        await saveSignOut(of: id)
         let credentials = self.credentials(for: id)
         let (ended, deleteError) = await credentials.signOut()
         if let deleteError {
@@ -349,6 +353,9 @@ public final class AccountManager {
             // restoring or switching to the connection, even after a relaunch, retries it too.
             Log.auth.error("Couldn't delete the session, will retry: \(deleteError.status, privacy: .public)")
         }
+        // Publishes the saved sign-out, after the delete: another wait before it would let a
+        // sign-in that starts after this call save its session first.
+        await reloadConnections()
         Log.auth.info("Signed out")
         guard let ended else { return nil }
         var logoutClient = activeClient
@@ -465,11 +472,18 @@ public final class AccountManager {
     }
 
     /// Loads the connection's saved session and builds its client.
-    private func prepare(_ connection: ServerConnectionDTO) async throws -> APIClient {
+    /// - Throws: `CancellationError` if a newer call started while it read a signed-out session.
+    private func prepare(_ connection: ServerConnectionDTO, operation: Int) async throws -> APIClient {
         let credentials = self.credentials(for: connection.id)
         guard connection.signedOutAt == nil else {
             // Signed out, maybe before a relaunch, but the session's delete failed: retry it.
-            if (try? await credentials.load())?.session != nil { _ = await credentials.signOut() }
+            // Not if a newer call started meanwhile, such as a sign-in that has saved a session,
+            // and not if a sign-in saved the session read here: it clears the sign-out.
+            let read = try? await credentials.loadSession()
+            try ensureCurrent(operation)
+            if let read, read.session != nil, signInGenerations[connection.id] != read.generation {
+                _ = await credentials.signOut(ifGeneration: read.generation)
+            }
             throw AccountError.notSignedIn
         }
         let saved = try await credentials.load()
@@ -587,6 +601,16 @@ public final class AccountManager {
             connections = try await store.allConnections().filter { !$0.isDisconnected }
         } catch {
             Log.auth.error("Couldn't load saved connections: \(String(describing: type(of: error)), privacy: .public)")
+        }
+    }
+
+    /// Saves a sign-out with the connection, before its session is deleted, so that if the delete
+    /// fails, the session isn't restored or switched to, even after a relaunch.
+    private func saveSignOut(of id: UUID) async {
+        do {
+            try await store.setSignedOut(id: id, at: now())
+        } catch {
+            Log.auth.error("Couldn't save the sign-out: \(String(describing: type(of: error)), privacy: .public)")
         }
     }
 

@@ -182,6 +182,13 @@ final class StubGate: Sendable {
     func pass() async {
         await withCheckedContinuation { continuation in hold { continuation.resume() } }
     }
+
+    /// Opens the gate and marks it arrived, for a checkpoint in synchronous code, such as a clock
+    /// reading, that mustn't wait.
+    func reach() {
+        open()
+        hold {}
+    }
 }
 
 // URLProtocol is not Sendable, but the URL loading system lets a protocol call its client from

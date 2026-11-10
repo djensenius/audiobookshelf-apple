@@ -103,7 +103,7 @@ actor ConnectionCredentials: TokenProvider {
     /// `session` hasn't been written to the Keychain yet.
     private var needsWrite = false
     /// Bumped by every sign-in, sign-out, expiry and removal, so ``AccountManager`` can ignore an
-    /// expiry that a newer sign-in has already replaced.
+    /// expiry, or skip a delete, that a newer sign-in has already replaced.
     private var generation = 0
 
     init(connectionID: UUID, vault: CredentialVault, onExpire: @escaping @MainActor @Sendable (UUID, Int) -> Void) {
@@ -118,6 +118,12 @@ actor ConnectionCredentials: TokenProvider {
         try readIfNeeded()
         writeIfNeeded()
         return (session, customHeaders)
+    }
+
+    /// The stored session, as ``load()`` returns it, and its ``generation``, for a delete with
+    /// ``signOut(ifGeneration:)`` that mustn't end a session stored after this read.
+    func loadSession() throws(KeychainError) -> (session: StoredSession?, generation: Int) {
+        (try load().session, generation)
     }
 
     /// Stores a new sign-in. Returns its generation and the session it replaced, for the server

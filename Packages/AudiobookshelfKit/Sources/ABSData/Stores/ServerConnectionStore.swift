@@ -90,13 +90,16 @@ import SwiftData
         return try modelContext.fetch(descriptor).first.map(ServerConnectionDTO.init)
     }
 
-    /// Marks the connection as the latest used (switching servers). Returns `false` when it
-    /// doesn't exist or ``remove(id:now:)`` disconnected it, which only a new login undoes.
+    /// Marks the connection as the latest used (switching servers), and clears `signedOutAt` in
+    /// the same save, so a connection is never both the one to restore and signed out. Returns
+    /// `false` when it doesn't exist or ``remove(id:now:)`` disconnected it, which only a new
+    /// login undoes.
     @discardableResult
     public func markUsed(id: UUID, at date: Date = .now) throws -> Bool {
         try commit {
             guard let record = try fetchRecord(id: id), !record.isDisconnected else { return false }
             record.lastUsedAt = date
+            record.signedOutAt = nil
             return true
         }
     }
@@ -111,7 +114,8 @@ import SwiftData
     }
 
     /// Records a sign-out at `date`, before its session is deleted from the Keychain, or `nil`
-    /// once a sign-in has saved a new session. Returns `false` when the connection doesn't exist.
+    /// once a sign-in has saved a new session that isn't marked used yet. Returns `false` when the
+    /// connection doesn't exist.
     @discardableResult
     public func setSignedOut(id: UUID, at date: Date?) throws -> Bool {
         try commit {

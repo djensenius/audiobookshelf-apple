@@ -127,6 +127,16 @@ import Testing
         #expect(try await store.setSignedOut(id: UUID(), at: now) == false)
     }
 
+    @Test func markingUsedClearsASignOut() async throws {
+        let (store, _) = try makeStore()
+        let created = try await login(store)
+        try await store.setSignedOut(id: created.id, at: now)
+
+        #expect(try await store.markUsed(id: created.id, at: now.addingTimeInterval(10)))
+        let used = try await store.connection(id: created.id)
+        #expect(used?.signedOutAt == nil && used?.lastUsedAt == now.addingTimeInterval(10))
+    }
+
     @Test func updatesServerVersion() async throws {
         let (store, _) = try makeStore()
         let created = try await login(store)
