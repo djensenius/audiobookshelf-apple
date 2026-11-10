@@ -353,6 +353,26 @@ import Testing
         #expect(await store.needsConfirmationFetch.isEmpty)
     }
 
+    /// Two server writes can share a millisecond: a held pre-PATCH snapshot with the same
+    /// `lastUpdate` as the confirming fetch is dropped, so the fetch's value stands.
+    @Test func heldSocketValueTyingTheConfirmingFetchIsDropped() async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.completeSend(patch, serverLastUpdate: nil)
+
+        let capture = await store.captureGeneration()
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 100, lastUpdate: Self.at(2))], capturedAt: capture, source: .socket)
+        try await store.applyServerProgress(
+            [key: Self.server(currentTime: 200, lastUpdate: Self.at(2))], capturedAt: capture, source: .fetch)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.currentTime == 200)
+        #expect(row.dirtyGroups.isEmpty)
+        #expect(await store.needsConfirmationFetch.isEmpty)
+    }
+
     /// A held socket value captured before a later local edit is dropped, as it would have been
     /// without the hold.
     @Test func heldSocketValueCapturedBeforeAnEditIsDropped() async throws {

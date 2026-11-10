@@ -266,8 +266,10 @@ Model notes:
     and includes the write, as the server applies the PATCH before its 200) is
     merged normally, including the server's normalizations such as an auto-finish;
     then the kept socket value is merged, unless it was captured before a later
-    local edit or settlement, and the stale check drops it if it is older than the
-    fetch. Callers say which source values came from (`.fetch` or `.socket`).
+    local edit or settlement, and only if its `lastUpdate` is strictly later than
+    the fetch's: server times are milliseconds, so a snapshot emitted before the
+    PATCH can tie the fetch, and on a tie the fetch wins. Callers say which source
+    values came from (`.fetch` or `.socket`).
     `LocalProgressStore.needsConfirmationFetch` lists the waiting rows: after an
     ack without a server time, the progress syncer (P2-06d, #158) must capture the
     generation and issue `GET /api/me/progress/:id` for the row, then apply it with

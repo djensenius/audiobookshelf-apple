@@ -131,8 +131,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// A PATCH's 200 carries no server time, so after an acknowledgement a socket event may have
     /// been emitted before the PATCH was applied, with any `lastUpdate`. Until a fetch issued
     /// after the acknowledgement is applied (``needsConfirmationFetch``), socket values for the
-    /// row aren't merged; the latest is kept and merged after that fetch, where the stale check
-    /// drops it unless it is newer.
+    /// row aren't merged; the latest is kept and merged after that fetch only if its `lastUpdate`
+    /// is strictly later than the fetch's (on a tie the fetch wins).
     @discardableResult
     public func applyServerProgress(
         _ updates: [MediaKey: ProgressBaseline],
@@ -157,7 +157,10 @@ public enum SessionUploadResult: Sendable, Equatable {
                 // Passing the generation check, the fetch was issued after the acknowledgement.
                 confirmed.insert(raw)
                 if try merge(server, into: key) { merged.insert(key) }
+                // Server times are milliseconds, so a pre-PATCH snapshot can tie the fetch; only a
+                // strictly newer one can have been emitted after it.
                 if let latest = awaiting.latest, rowGenerations[raw] ?? 0 <= latest.capturedAt,
+                    latest.server.lastUpdate > server.lastUpdate,
                     try merge(latest.server, into: key)
                 {
                     merged.insert(key)
