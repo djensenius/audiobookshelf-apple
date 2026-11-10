@@ -81,8 +81,8 @@ public struct PlaybackHistoryRecorder: PlaybackHistoryRecording {
         details: String?
     ) async {
         do {
-            if name == .sync, try await !store.hasEvents(for: media.key) { return }
-            try await store.record(event(name, for: media, at: position, sync: sync, details: details))
+            let event = self.event(name, for: media, at: position, sync: sync, details: details)
+            try await store.record(event, onlyIfHistoryExists: name == .sync)
         } catch {
             Log.data.error(
                 "Couldn't record a \(name.rawValue, privacy: .public) history event: \(error.localizedDescription, privacy: .public)"

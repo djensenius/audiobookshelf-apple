@@ -11,6 +11,7 @@ struct PlaybackHistoryView: View {
     @State private var model: PlaybackHistoryModel
     @State private var tapCount = 0
     @Environment(AppSettings.self) private var settings: AppSettings?
+    @Environment(\.scenePhase) private var scenePhase
 
     init(model: PlaybackHistoryModel) {
         _model = State(initialValue: model)
@@ -20,7 +21,19 @@ struct PlaybackHistoryView: View {
         content
             .navigationTitle(Text(verbatim: L10n.string("ButtonHistory")))
             .navigationSubtitle(Text(verbatim: model.title ?? ""))
-            .task { await model.observe() }
+            .task(id: model.loadAttempt) { await model.observe() }
+            // Keep "Today" and "Yesterday" right across midnight and time zone changes.
+            .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged).receive(on: RunLoop.main)) {
+                _ in
+                model.regroup()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange).receive(on: RunLoop.main))
+        { _ in
+            model.regroup()
+        }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { model.regroup() }
+            }
             .absHaptic(settings?.hapticFeedback ?? .off, trigger: tapCount)
     }
 
@@ -28,7 +41,7 @@ struct PlaybackHistoryView: View {
         if !model.isLoaded {
             LoadingView()
         } else if model.error != nil {
-            ErrorStateView(title: L10n.string("MessageHistoryLoadFailed"))
+            ErrorStateView(title: L10n.string("MessageHistoryLoadFailed"), retry: model.retry)
         } else if model.isEmpty {
             ContentUnavailableView {
                 Label {
@@ -74,25 +87,28 @@ private struct PlaybackHistoryRow: View {
 
     var body: some View {
         Button(action: play) {
-            HStack(spacing: 8) {
+            // Time, event and position on one line; one line each at accessibility sizes.
+            AdaptiveStack(spacing: ABSSpacing.small) {
                 Text(verbatim: row.timeText)
                     .font(.subheadline)
                     .monospacedDigit()
                     .foregroundStyle(ABSColor.mutedForeground)
-                Image(systemName: row.name.systemImage)
-                    .foregroundStyle(row.name.tint)
-                Text(verbatim: row.name.label)
-                if let image = row.sync.systemImage {
-                    Image(systemName: image)
-                        .foregroundStyle(row.sync == .succeeded ? ABSColor.success : ABSColor.error)
+                HStack(spacing: ABSSpacing.small) {
+                    Image(systemName: row.name.systemImage)
+                        .foregroundStyle(row.name.tint)
+                    Text(verbatim: row.name.label)
+                    if let image = row.sync.systemImage {
+                        Image(systemName: image)
+                            .foregroundStyle(row.sync == .succeeded ? ABSColor.success : ABSColor.error)
+                    }
+                    if row.collapsedCount > 0 {
+                        Text(verbatim: "+" + row.collapsedCount.formatted(.number.locale(locale)))
+                            .font(.subheadline)
+                            .italic()
+                            .foregroundStyle(ABSColor.mutedForeground)
+                    }
                 }
-                if row.collapsedCount > 0 {
-                    Text(verbatim: "+\(row.collapsedCount)")
-                        .font(.subheadline)
-                        .italic()
-                        .foregroundStyle(ABSColor.mutedForeground)
-                }
-                Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if let positionText = row.positionText {
                     Text(verbatim: positionText)
                         .monospacedDigit()
@@ -102,11 +118,11 @@ private struct PlaybackHistoryRow: View {
         }
         .buttonStyle(.plain)
         .disabled(row.position == nil || isDisabled)
-        .accessibilityElement(children: .ignore)
+        // Set on the button itself so VoiceOver keeps its action; the label replaces the
+        // children's text.
         .accessibilityLabel(Text(verbatim: accessibilityLabel))
         .accessibilityValue(Text(verbatim: accessibilityValue))
         .accessibilityHint(Text(verbatim: row.position == nil ? "" : L10n.string("LabelHistoryPlayFromHint")))
-        .accessibilityAddTraits(.isButton)
     }
 
     private var accessibilityLabel: String {
@@ -132,6 +148,9 @@ private struct PlaybackHistoryRow: View {
 }
 
 extension PlaybackHistoryEventName {
+    /// Event nouns ("Play", "Finished") have their own `LabelHistoryEvent*` keys instead of
+    /// reusing `ButtonPlay` or `LabelFinished`: a language can translate the noun for a logged
+    /// event differently from a button's verb or a status.
     fileprivate var label: String {
         switch self {
         case .play: L10n.string("LabelHistoryEventPlay")

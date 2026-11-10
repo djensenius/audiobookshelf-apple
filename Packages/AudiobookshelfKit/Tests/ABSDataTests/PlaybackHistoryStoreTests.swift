@@ -217,9 +217,10 @@ import Testing
         try await store.record(second)
         #expect(await updates.next() == [second, first])
 
-        // A write to other media sends the same events again.
+        // A write to other media sends nothing: the next snapshot is the sync result's.
+        let sent = await store.snapshotsSent
         try await store.record(event(key: other, at: now))
-        #expect(await updates.next() == [second, first])
+        #expect(await store.snapshotsSent == sent)
 
         try await store.updateSyncResult(id: second.id, success: true, message: nil)
         let synced = try #require(await updates.next())
@@ -227,6 +228,30 @@ import Testing
 
         try await store.deleteEvents(for: key)
         #expect(await updates.next() == [])
+    }
+
+    @Test func bulkDeletesNotifyEveryStream() async throws {
+        let store = try makeStore()
+        let first = event(name: .play, at: now)
+        try await store.record(first)
+        var updates = try await store.updates(for: key).makeAsyncIterator()
+        #expect(await updates.next() == [first])
+
+        try await store.deleteEvents(serverConnectionID: Fixtures.connectionID)
+        #expect(await updates.next() == [])
+    }
+
+    @Test func recordOnlyIfHistoryExistsChecksAndWritesInOneCall() async throws {
+        let store = try makeStore()
+        let sync = event(name: .sync, at: now)
+        #expect(try await store.record(sync, onlyIfHistoryExists: true) == false)
+        #expect(try await store.events(for: key).isEmpty)
+
+        let play = event(name: .play, at: now)
+        #expect(try await store.record(play))
+        let laterSync = event(name: .sync, at: now.addingTimeInterval(10))
+        #expect(try await store.record(laterSync, onlyIfHistoryExists: true))
+        #expect(try await store.events(for: key) == [laterSync, play])
     }
 
     @Test(.timeLimit(.minutes(1))) func updatesStopWhenTheConsumerGoesAway() async throws {

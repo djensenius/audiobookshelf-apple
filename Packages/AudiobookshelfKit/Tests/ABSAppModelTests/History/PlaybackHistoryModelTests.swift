@@ -1,6 +1,7 @@
 import ABSCore
 import ABSData
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSAppModel
@@ -86,6 +87,30 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
         do { try await Task.sleep(for: .milliseconds(10)) } catch { return false }
     }
     return true
+}
+
+/// Counts calls to a test source from any isolation.
+private final class Attempts: Sendable {
+    private let count = Mutex(0)
+
+    func next() -> Int {
+        count.withLock {
+            $0 += 1
+            return $0
+        }
+    }
+}
+
+/// A settable `now` for the model's clock.
+private final class MutableClock: Sendable {
+    private let value: Mutex<Date>
+
+    init(_ date: Date) { value = Mutex(date) }
+
+    var now: Date {
+        get { value.withLock { $0 } }
+        set { value.withLock { $0 = newValue } }
+    }
 }
 
 @MainActor
@@ -330,6 +355,51 @@ private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Boo
         await model.observe()
         #expect(model.error is Failure)
         #expect(model.isLoaded)
+    }
+
+    @Test func retryLoadsAfterAFailure() async throws {
+        struct Failure: Error {}
+        let utc = try calendar("UTC")
+        let now = try date(utc, 2026, 11, 10, 12)
+        let play = event(.play, at: now)
+        let attempts = Attempts()
+        let model = makeModel(
+            calendar: utc, now: now,
+            source: { _ in
+                guard attempts.next() > 1 else { throw Failure() }
+                return AsyncStream {
+                    $0.yield([play])
+                    $0.finish()
+                }
+            })
+        await model.observe()
+        #expect(model.error is Failure)
+
+        let attempt = model.loadAttempt
+        model.retry()
+        #expect(model.loadAttempt != attempt)
+        await model.observe()
+        #expect(model.error == nil)
+        #expect(model.isLoaded)
+        #expect(model.sections.first?.rows.map(\.id) == [play.id])
+    }
+
+    // MARK: Day changes
+
+    @Test func regroupMovesTodayToYesterdayAfterMidnight() throws {
+        let utc = try calendar("UTC")
+        let clock = MutableClock(try date(utc, 2026, 11, 10, 23, 59))
+        let model = PlaybackHistoryModel(
+            mediaKey: mediaKey, source: { _ in AsyncStream { $0.finish() } }, playFromTime: { _, _ in },
+            calendar: utc, locale: usEnglish, now: { clock.now }
+        )
+        model.apply([event(.play, at: try date(utc, 2026, 11, 10, 9)), event(.stop, at: try date(utc, 2026, 11, 9, 9))])
+        #expect(model.sections.map(\.day) == [.today, .yesterday])
+
+        clock.now = try date(utc, 2026, 11, 11, 0, 1)
+        model.regroup()
+        #expect(model.sections.map(\.day) == [.yesterday, .earlier])
+        #expect(model.sections.last?.dateText == dateText(try date(utc, 2026, 11, 9, 0), utc))
     }
 
     // MARK: Play from time

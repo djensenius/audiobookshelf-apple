@@ -69,6 +69,9 @@ public final class PlaybackHistoryModel {
     public private(set) var error: (any Error)?
     /// A ``play(from:)`` call is waiting for playback to start; other taps are ignored meanwhile.
     public private(set) var isStartingPlayback = false
+    /// Changes on every ``retry()``; restart ``observe()`` when it does (for example with
+    /// `.task(id:)`).
+    public private(set) var loadAttempt = 0
 
     public var isEmpty: Bool { sections.isEmpty }
 
@@ -77,6 +80,8 @@ public final class PlaybackHistoryModel {
     @ObservationIgnored private let calendar: Calendar
     @ObservationIgnored private let locale: Locale
     @ObservationIgnored private let now: @Sendable () -> Date
+    /// The newest snapshot, newest first, kept so ``regroup()`` can redo the days.
+    @ObservationIgnored private var events: [PlaybackHistoryEventDTO] = []
 
     /// - Parameters:
     ///   - calendar: Groups events into days, in the calendar's time zone.
@@ -118,7 +123,12 @@ public final class PlaybackHistoryModel {
     }
 
     /// Loads the events and applies each update until the source ends or the task is cancelled.
+    /// After a failure, call ``retry()`` and run this again.
     public func observe() async {
+        if error != nil {
+            error = nil
+            isLoaded = false
+        }
         let stream: AsyncStream<[PlaybackHistoryEventDTO]>
         do {
             stream = try await source(mediaKey)
@@ -132,6 +142,19 @@ public final class PlaybackHistoryModel {
         }
     }
 
+    /// Asks for another ``observe()`` after loading failed, by changing ``loadAttempt``.
+    public func retry() {
+        loadAttempt += 1
+    }
+
+    /// Redoes the days against the current time and calendar, so "Today" and "Yesterday" stay
+    /// right after midnight or a time zone change. Call it on `.NSCalendarDayChanged`,
+    /// `.NSSystemTimeZoneDidChange`, and when the scene becomes active.
+    public func regroup() {
+        guard isLoaded, error == nil else { return }
+        sections = group(events)
+    }
+
     /// Plays the media from the row's position. Ignored for a row without one, or while an
     /// earlier call is starting playback.
     public func play(from row: Row) async {
@@ -143,6 +166,7 @@ public final class PlaybackHistoryModel {
 
     func apply(_ events: [PlaybackHistoryEventDTO]) {
         let sorted = events.sorted { $0.timestamp > $1.timestamp }
+        self.events = sorted
         title = sorted.first?.mediaDisplayTitle
         sections = group(sorted)
         error = nil
