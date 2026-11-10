@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-11-09
-- Issue: #TBD
+- Issue: #35 (P1-12)
 
 ## Context
 
@@ -34,7 +34,7 @@ Constraints:
 - [ADR 0001](0001-architecture.md) already says services are actors, only
   `Sendable` DTOs cross actors and `@Model` objects never do.
 - Widgets (Phase 5) read the store from another process, so it lives in the App
-  Group `group.org.davidjensenius.Audiobookshelf` (P0-03).
+  Group `group.org.davidjensenius.Audiobookshelf` (#18, P0-03).
 - Tests run with `swift test` on macOS, unsigned, without an App Group entitlement.
 - The SwiftData facts used here come from
   [platform-apis.md §4.1](../research/platform-apis.md#41-swiftdata-maturity-on-27-swiftinterface-1483-lines)
@@ -118,8 +118,8 @@ Write JSON files for downloads and progress, and `UserDefaults` for connections.
 
 ## Decision
 
-Use **Option 1**. The rules below are the contract for P1-13a (schema and
-`DataStack`) and P1-13b (stores); deviating from them needs a new ADR.
+Use **Option 1**. The rules below are the contract for #36 (P1-13a) (schema and
+`DataStack`) and #37 (P1-13b) (stores); deviating from them needs a new ADR.
 
 ### Entities (SchemaV1)
 
@@ -162,16 +162,28 @@ General rules:
 | Model | Key | Other fields | Uniqueness and indexes |
 | --- | --- | --- | --- |
 | `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
-| `LocalLibraryItem` | `id: UUID` | `serverConnectionID: UUID`, `serverAddress`, `serverUserId`, `libraryItemId`, `mediaType` (`book`/`podcast`), `title`, `authorName: String?`, `relativeDirectory`, `coverRelativePath: String?`, `addedAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) files: [LocalFile]` | `#Unique([\.id], [\.serverConnectionID, \.libraryItemId])`; `#Index([\.libraryItemId], [\.serverConnectionID])` |
+| `LocalLibraryItem` | `id: UUID` | `serverConnectionID: UUID`, `serverAddress`, `serverUserId`, `libraryItemId`, `mediaType` (`book`/`podcast`), `title`, `authorName: String?`, `relativeDirectory`, `coverRelativePath: String?`, `coverUpdatedAt: Date?`, `addedAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) files: [LocalFile]` | `#Unique([\.id], [\.serverConnectionID, \.libraryItemId])`; `#Index([\.libraryItemId], [\.serverConnectionID])` |
 | `LocalFile` | `id: UUID` | `item: LocalLibraryItem?` (inverse), `kind` (`audio`/`ebook`), `relativePath`, `filename`, `mimeType`, `size: Int64`, `serverIno: String?`, `trackIndex: Int?` (book track order), `episodeId: String?` (podcast) | `#Unique([\.id])` |
-| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date`, `needsServerSync: Bool`, `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
+| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date`, `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
 | `DownloadRecord` | `id: UUID`, `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `mediaType`, `title`, `state` (`queued`/`downloading`/`paused`/`failed`), `relativeDirectory`, `createdAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) parts: [DownloadPart]` | `#Unique([\.id], [\.key])`; `#Index([\.state])` |
 | `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `@Attribute(.externalStorage) resumeData: Data?`, `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
-| `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?` | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
+| `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?` | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
 | `PlaybackHistoryEvent` | `id: UUID` | `serverConnectionID: UUID?`, `mediaKey`, `libraryItemId`, `episodeId: String?`, `mediaDisplayTitle`, `name` (`Play`/`Pause`/`Stop`/`Seek`/`Save`/`Finished`/`Sync`), `type` (`Playback`/`Sync`), `details: String?`, `currentTime: Double?`, `serverSyncAttempted: Bool`, `serverSyncSuccess: Bool?`, `serverSyncMessage: String?`, `timestamp: Date` | `#Unique([\.id])`; `#Index([\.mediaKey, \.timestamp])` |
 
 Model notes:
 
+- **Upserts keep the existing `id`.** Stores fetch by the natural key first
+  (`[address, userId]`, `[serverConnectionID, libraryItemId]`, a media `key`, a
+  download `key`) and update that row in place; they insert only when no row
+  exists. They never rely on `#Unique` to resolve a conflicting insert: SwiftData
+  then replaces the row with the newly inserted values, including a new `id`. That
+  would orphan the Keychain entry keyed by the connection `id` and every scalar
+  reference (`serverConnectionID`, `localLibraryItemID`). `#Unique` remains a
+  safety net, and #37 (P1-13b) tests that a repeated upsert keeps the original
+  `id`.
+- **`coverUpdatedAt`** is the server's cover timestamp at download time (the
+  item's `updatedAt` when no separate cover time exists). ADR 0005 uses it in the
+  `ImageKey` and to decide when to refresh the downloaded cover.
 - **`LocalMediaSnapshot`** is a `Codable, Sendable, Hashable` struct owned by
   `ABSData`, not an `ABSCore` API model, so API changes can't break stored blobs.
   It holds `snapshotVersion: Int` (1), metadata (title, subtitle, authors,
@@ -184,9 +196,32 @@ Model notes:
 - **Progress** rows exist for downloaded media that has been played or synced, and
   for any media (downloaded or streamed, audio or ebook) with a change the server
   hasn't acknowledged: offline playback, a failed `PATCH /api/me/progress`, or a
-  local-first ebook save (P6-11a). `needsServerSync` is the single pending flag for
-  audio and ebook fields, because one PATCH carries both. Merge rule (from
-  `ApiClient.syncLocalSessionsWithServer`): the newer `lastUpdate` wins.
+  local-first ebook save (#101, P6-11a).
+- **Progress dirty fields.** Each local change marks only the field group it
+  touched:
+  - `audioDirty`: `currentTime`, `progress`, `duration`;
+  - `finishedDirty`: `isFinished`, `finishedAt`;
+  - `ebookDirty`: `ebookLocation`, `ebookProgress`.
+
+  `needsServerSync` is kept equal to "any dirty flag is set" by the store and is
+  the indexed pending-sync query. Sync rules:
+  - **Seeding.** When a row is created and server progress for that media is known
+    (`ProgressCache`, `/api/me`, or a progress response), every field is seeded
+    from it with all dirty flags `false`; the local change is then applied on top.
+    Without server progress, the row starts from defaults, and only the changed
+    group is dirty.
+  - **PATCH.** `PATCH /api/me/progress/:id` sends only the fields of dirty groups.
+    An ebook-only save never sends `currentTime`, `progress`, `duration` or
+    `isFinished`, so it can't wipe audio progress made on another device, and
+    vice versa.
+  - **Merge** (extends `ApiClient.syncLocalSessionsWithServer`): groups that are
+    not dirty are always overwritten with server values. For a dirty group, the
+    newer of local `lastUpdate` and server `lastUpdate` wins; when the server wins,
+    its values replace the group and the flag clears without a PATCH.
+  - **Clearing.** After a successful PATCH the store clears the flags of the groups
+    that were sent, only if the row's `lastUpdate` still equals the value that was
+    sent; a change made during the request stays dirty.
+
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
 - **Downloads:** a finished download becomes a `LocalLibraryItem` with its
@@ -194,10 +229,18 @@ Model notes:
   then its `DownloadRecord` is deleted. A crash between the two steps is repaired at
   launch by finalising records whose parts are all `completed`. Each
   `URLSessionTask.taskDescription` is the part's `id`; `taskIdentifier` is only a
-  lookup cache. The token is added to the request when it is sent.
-- **Pending sessions** follow the legacy rule: after a successful `local-all`
-  upload, delete the sessions that are not `isActive` (all of them on the first
-  sync after login).
+  lookup cache. Requests authenticate with an `Authorization` header added when the
+  task is created or resumed (never `?token=`), so only token-free paths are
+  stored.
+- **Downloaded files live in the app container, not the App Group.** Widgets never
+  read downloaded media files; they get covers through the image cache
+  ([ADR 0005](0005-images.md), #89 (P5-11b)).
+- **Pending sessions** store `startTime` (the legacy app didn't send it; the
+  `local-all` DTO in #33 (P1-10) decides whether the upload includes it). The
+  `deviceInfo` object (device id, model, client version) is not stored; it is
+  rebuilt when the upload is sent. After a successful `local-all` upload, the
+  legacy rule applies: delete the sessions that are not `isActive` (all of them on
+  the first sync after login).
 - **History** stays on the device, as in the legacy app. Events older than 90 days
   are deleted at launch.
 - **Connections:** the session to restore is the record with the latest
@@ -208,9 +251,10 @@ Model notes:
 
 | Data | Where it lives |
 | --- | --- |
-| Access and refresh tokens; custom header values (they may be proxy credentials) | Keychain, account = connection `id.uuidString` (P1-14) |
+| Access and refresh tokens; custom header values (they may be proxy credentials) | Keychain, account = connection `id.uuidString` (#38, P1-14) |
 | Device and player settings (`DeviceSettings`, `PlayerSettings`) | App Group `UserDefaults` through `AppSettings` |
-| Logs (`LogEntry`) | OSLog, exported by P1-04 |
+| Last-used library, per server and user (new scenes and CarPlay start from it) | App Group `UserDefaults` through `AppSettings` |
+| Logs (`LogEntry`) | OSLog, exported by #27 (P1-04) |
 | Libraries, items, series, authors, collections, playlists, shelves, filter data, bookmarks, the user, server progress for media without local changes, listening stats | In memory (`LibraryStore`, `ProgressCache`) and HTTP caching; **no browse cache in V1** |
 | Covers and other images | Image cache ([ADR 0005](0005-images.md)) |
 | Live playback position between throttled writes | In memory, in the playback coordinator |
@@ -239,7 +283,7 @@ Model notes:
   `.unknownSchema` or `.unknownDataStoreSchema` (a downgrade or a corrupt store),
   `DataStack` logs a fault, moves the store files aside with a timestamp suffix and
   creates an empty store. Downloaded files that are no longer referenced are removed
-  by the orphan sweep in P4-02. The server still holds synced progress.
+  by the orphan sweep in #73 (P4-02). The server still holds synced progress.
 
 ### Store location and container
 
@@ -262,7 +306,7 @@ Model notes:
 
 ### Concurrency and the DTO boundary
 
-- Stores are `@ModelActor public actor`s in `ABSData`, matching P1-13b:
+- Stores are `@ModelActor public actor`s in `ABSData`, matching #37 (P1-13b):
   - `ServerConnectionStore`;
   - `LocalItemStore` (local items and files);
   - `LocalProgressStore` (progress with `pendingSync(for:)`, covering audio and
@@ -284,8 +328,9 @@ Model notes:
   objects use `modelContext.transaction { }`.
 - `mainContext` is read-only by convention. App-target views use `@Query`;
   `@MainActor` view models in `ABSAppModel` use `ResultsObserver` or
-  `HistoryObserver`. Models fetched there stay on the main actor, and all writes go
-  through stores.
+  `HistoryObserver`, so `ABSAppModel` may `import SwiftData` (it still defines no
+  views). Models fetched there stay on the main actor, and all writes go through
+  stores.
 
 ### Write throttling
 
@@ -297,7 +342,7 @@ Model notes:
 - Download progress (`bytesWritten`) is written at most once every 2 s per part,
   plus on every state change. The UI shows live progress from the engine's
   in-memory stream, not from the store.
-- Ebook location changes are debounced (P6-11a) before they reach the store.
+- Ebook location changes are debounced (#101, P6-11a) before they reach the store.
 
 ### Mapping from the legacy Realm models
 
@@ -313,15 +358,15 @@ Model notes:
 | `DownloadItem` | `DownloadRecord` | Adds `state`; `userMediaProgress` dropped (progress comes from the server or `LocalMediaProgress`) |
 | `DownloadItemPart` | `DownloadPart` | `uri` with a token becomes the token-free `serverPath`; adds `taskIdentifier`, `resumeData` and `retryCount`; `completed`/`moved`/`failed` become `state` |
 | `PlaybackSession` | `PendingLocalSession` | Local-play sessions only, scalars only (no embedded `LibraryItem`) |
-| `LogEntry` | — | OSLog (P1-04) |
+| `LogEntry` | — | OSLog (#27, P1-04) |
 | Android `MediaItemHistory`/`MediaItemEvent` (iOS never implemented `getMediaItemHistory`) | `PlaybackHistoryEvent` | Flattened to one row per event |
 
 ## Consequences
 
-- P1-13a implements `SchemaV1.swift`, `MigrationPlan.swift` and `DataStack` exactly
-  as above; P1-13b implements the stores and DTOs. Downloads (P4-01, P4-02),
-  offline sync (P4-03), history (P2-14), ebook progress (P6-11a) and connections
-  (P1-14) use only store APIs.
+- #36 (P1-13a) implements `SchemaV1.swift`, `MigrationPlan.swift` and `DataStack`
+  exactly as above; #37 (P1-13b) implements the stores and DTOs. Downloads (#72
+  and #73, P4-01 and P4-02), offline sync (#74, P4-03), history (#61, P2-14),
+  ebook progress (#101, P6-11a) and connections (#38, P1-14) use only store APIs.
 - Every schema change after the first TestFlight build needs a new `SchemaVn` and a
   migration test, which deliberately makes small changes slower.
 - DTO mapping is boilerplate, but it keeps SwiftData types inside `ABSData` and
@@ -330,9 +375,9 @@ Model notes:
   separate progress rows, as in the legacy app.
 - A downgrade or corrupt store loses unsynced local state and the downloads index.
   This is accepted because it is rare and the server holds synced progress.
-- With no browse cache, offline mode shows downloaded items only (P4-05). Adding a
+- With no browse cache, offline mode shows downloaded items only (#76, P4-05). Adding a
   cache later needs a new ADR and schema version.
-- The App Group must be registered (P0-03) before the production configuration
+- The App Group must be registered (#18, P0-03) before the production configuration
   loads; tests never use it.
 
 ## Validation
@@ -373,7 +418,8 @@ Verified for this ADR:
   `~/Library/Group Containers/<group>/Library/Application Support/<name>.store` and
   threw `loadIssueModelContainer`, so tests must use `.inMemory` or `.url`.
 
-Assumed, to be confirmed by P1-13a and P1-13b tests or on a device:
+Assumed; the tests and device checks are performed in #36 (P1-13a) and #37
+(P1-13b):
 
 - `@Query` and `ResultsObserver` on the main context pick up saves from store
   actors and from other processes without extra work.
@@ -383,13 +429,15 @@ Assumed, to be confirmed by P1-13a and P1-13b tests or on a device:
 
 Ongoing checks:
 
-- P1-13a: a migration-plan test opens a V1 store on disk and in memory, and every
-  `#Unique` has a test. Each later `SchemaVn` adds a test that migrates a store
+- #36 (P1-13a): a migration-plan test opens a V1 store on disk and in memory, and
+  every `#Unique` has a test. Each later `SchemaVn` adds a test that migrates a store
   populated with the previous version.
-- P1-13b: CRUD, uniqueness and cascade tests for each store.
+- #37 (P1-13b): CRUD, uniqueness and cascade tests for each store; a repeated
+  upsert keeps the original `id`; an ebook-only save leaves `audioDirty` and
+  `finishedDirty` false and its pending-sync DTO carries no audio fields.
 - `mise run test:kit` under Swift 6 strict concurrency, with no Sendable warnings.
-- Review checks: `import SwiftData` only in `ABSData`, app-target views and the
-  widget; no `@Model` type in a public store signature; `cloudKitDatabase: .none`
+- Review checks: `import SwiftData` only in `ABSData`, `ABSAppModel` (view models
+  using `ResultsObserver`/`HistoryObserver`), app-target views and the widget; no `@Model` type in a public store signature; `cloudKitDatabase: .none`
   on every configuration.
 
 ## References
