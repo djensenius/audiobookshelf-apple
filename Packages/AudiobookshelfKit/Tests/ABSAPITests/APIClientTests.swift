@@ -220,6 +220,15 @@ private func makeClient(
         #expect(secondJar.cookies(for: server.baseURL)?.isEmpty ?? true)
     }
 
+    @Test func usesAnInjectedCookieJar() throws {
+        let server = StubServer { _ in .json("{}") }
+        let jar = try #require(URLSessionConfiguration.ephemeral.httpCookieStorage)
+        let client = APIClient(
+            configuration: try APIClientConfiguration(baseURL: server.baseURL), tokenProvider: InMemoryTokenProvider(),
+            sessionConfiguration: server.sessionConfiguration(), cookieStorage: jar)
+        #expect(client.cookieStorage === jar)
+    }
+
     @Test func reusedConfigurationGetsFreshCookieJars() throws {
         let server = StubServer { _ in .json("{}") }
         let configuration = server.sessionConfiguration()

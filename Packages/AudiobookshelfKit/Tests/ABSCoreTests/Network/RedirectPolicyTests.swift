@@ -42,4 +42,24 @@ import Testing
             following: response, to: URLRequest(url: origin), original: original, wasStripped: true)
         #expect(back?.isStripped == true)
     }
+
+    /// A hop whose proposed method differs (a POST turned into a GET by a 301, 302 or 303) is
+    /// refused, on the origin or off it; a 307 or 308 keeps the method and is followed.
+    @Test func refusesHopsThatChangeTheMethod() throws {
+        let origin = try #require(URL(string: "https://a.example/logout"))
+        var original = URLRequest(url: origin)
+        original.httpMethod = "POST"
+        let response = try #require(HTTPURLResponse(url: origin, statusCode: 302, httpVersion: nil, headerFields: nil))
+        for target in ["https://a.example/v2/logout", "https://b.example/logout"] {
+            var asGet = URLRequest(url: try #require(URL(string: target)))
+            asGet.httpMethod = "GET"
+            #expect(RedirectPolicy.hop(following: response, to: asGet, original: original, wasStripped: false) == nil)
+            var asPost = asGet
+            asPost.httpMethod = "POST"
+            #expect(RedirectPolicy.hop(following: response, to: asPost, original: original, wasStripped: false) != nil)
+        }
+        let get = URLRequest(url: origin)
+        let next = URLRequest(url: try #require(URL(string: "https://a.example/b")))
+        #expect(RedirectPolicy.hop(following: response, to: next, original: get, wasStripped: false) != nil)
+    }
 }
