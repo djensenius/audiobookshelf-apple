@@ -38,7 +38,7 @@ run = """
 #!/usr/bin/env bash
 set -euo pipefail
 canonical="$(mktemp)"
-trap 'rm -f "$canonical"' EXIT
+trap 'status=$?; rm -f "$canonical"; exit "$status"' EXIT
 if ! scripts/xcprojformatter.sh Audiobookshelf.xcodeproj > "$canonical"; then
   printf "\nerror: xcprojformatter failed; see the output above\n" >&2
   exit 1

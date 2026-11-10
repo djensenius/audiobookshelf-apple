@@ -13,6 +13,13 @@ src="$root/.build/tools/xcode-project-format"
 bin="$src/.build/release/xcprojformatter"
 lock="$root/.build/tools/xcode-project-format.lock"
 
+# Re-exit with the original status: macOS /bin/bash 3.2 otherwise reports the trap's status.
+release_lock() {
+  local status=$?
+  rmdir "$lock" 2>/dev/null || true
+  exit "$status"
+}
+
 is_built() {
   [[ "$(git -C "$src" rev-parse HEAD 2>/dev/null || true)" == "$PINNED_SHA" && -x "$bin" ]]
 }
@@ -21,13 +28,13 @@ if ! is_built; then
   # Serialize builds so concurrent runs in one worktree don't clobber each other.
   mkdir -p "$(dirname "$lock")"
   if ! mkdir "$lock" 2>/dev/null; then
-    echo "Waiting for another xcprojformatter build (remove $lock if stale)…" >&2
+    echo "Waiting for another xcprojformatter build (remove ${lock} if stale)..." >&2
     until mkdir "$lock" 2>/dev/null; do sleep 2; done
   fi
-  trap 'rmdir "$lock"' EXIT
+  trap release_lock EXIT
 
   if ! is_built; then
-    echo "Building xcprojformatter at $PINNED_SHA…" >&2
+    echo "Building xcprojformatter at ${PINNED_SHA}..." >&2
     rm -rf "$src"
     mkdir -p "$src"
     git -C "$src" init --quiet
