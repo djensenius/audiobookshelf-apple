@@ -997,9 +997,9 @@ public actor DownloadEngine {
     private func handleProgress(_ task: URLSessionTask, bytesWritten: Int64, expectedBytes: Int64) async {
         // An error body (a 401 page, say) also reports progress.
         guard let partID = task.partID, let context = contexts[partID],
-            tasks[partID]?.taskIdentifier == task.taskIdentifier,
-            let status = (task.response as? HTTPURLResponse)?.statusCode, status == 200 || status == 206
+            tasks[partID]?.taskIdentifier == task.taskIdentifier
         else { return }
+        guard DownloadSessionDelegate.classify(response: task.response, task: task) == nil else { return }
         authRetried.remove(partID)
         let expected = expectedBytes > 0 ? expectedBytes : context.expectedBytes
         let decision = throttle.record(

@@ -369,6 +369,25 @@ import Testing
         #expect(try Data(contentsOf: harness.fileURL("li_1/1.mp3")) == Data("audio-bytes".utf8))
     }
 
+    @Test(arguments: ["text/html", "application/json"])
+    func rejectedResponseProgressDoesNotChangeThePlannedSize(contentType: String) async throws {
+        let body = Data(#"{"error":1}"#.utf8)
+        let harness = try await DownloadHarness { _ in
+            .status(200, body: body, contentType: contentType)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine(
+            retryPolicy: RetryPolicy(baseDelay: .zero, maxDelay: .zero, maxRetries: 0))
+
+        await engine.start(partIDs: [partID])
+
+        #expect(await engine.nextPermanentFailure() != nil)
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.expectedBytes == 11)
+        #expect(part.bytesWritten == 0)
+    }
+
     @Test func sizeMismatchIsRetried() async throws {
         // Without a declared length, a short body can't be a changed file.
         let harness = try await DownloadHarness {
