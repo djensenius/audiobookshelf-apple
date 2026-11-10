@@ -20,6 +20,8 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
     var seeksLand = true
     /// Whether seeks wait for ``finishSeek()``.
     var holdsSeeks = false
+    /// Whether a seek of the user's is in flight.
+    var userSeekIsPending = false
     private var heldSeek: CheckedContinuation<Void, Never>?
     /// The volume when playback was last paused.
     private(set) var volumeAtPause: Float?
@@ -30,6 +32,7 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
     }
 
     var volume: Float { volumes.last ?? 1 }
+    var hasPendingSeek: Bool { userSeekIsPending || heldSeek != nil }
 
     func pause() {
         pauseCount += 1

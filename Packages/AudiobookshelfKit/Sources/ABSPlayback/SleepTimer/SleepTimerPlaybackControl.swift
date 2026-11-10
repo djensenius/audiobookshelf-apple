@@ -13,6 +13,8 @@ public protocol SleepTimerPlaybackControl: AnyObject {
     var rate: Double { get }
     /// The loaded timeline; `nil` without media.
     var timeline: PlaybackTimeline? { get }
+    /// Whether a seek or load hasn't landed yet; the timer's rewinds yield to it.
+    var hasPendingSeek: Bool { get }
     func pause()
     /// Resumes playback after a reset during the grace period.
     func play()
@@ -37,6 +39,7 @@ public final class AudioEngineSleepTimerControl: SleepTimerPlaybackControl {
     public var currentTime: Double { engine?.currentTime ?? 0 }
     public var rate: Double { Double(engine?.defaultRate ?? 1) }
     public var timeline: PlaybackTimeline? { engine?.timeline }
+    public var hasPendingSeek: Bool { engine?.pendingSeekTarget != nil }
 
     public func pause() {
         engine?.pause()
