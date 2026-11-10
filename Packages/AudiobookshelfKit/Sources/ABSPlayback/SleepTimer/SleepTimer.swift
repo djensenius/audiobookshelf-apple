@@ -271,6 +271,7 @@ public final class SleepTimer {
         runID += 1
         endGrace()
         publish(remaining: remaining)
+        updateShakeDetection()
     }
 
     /// Call when another item loads (`nil` when none): an expired timer restarts, and its rewind applies, only on
