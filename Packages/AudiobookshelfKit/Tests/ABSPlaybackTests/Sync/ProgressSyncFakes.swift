@@ -22,6 +22,7 @@ final class StubProgressSyncService: ProgressSyncService {
         var patchErrors: [APIError?] = []
         var syncGates: [Gate] = []
         var log: [String] = []
+        var syncWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
     }
 
     let serverConnectionID: UUID
@@ -35,15 +36,30 @@ final class StubProgressSyncService: ProgressSyncService {
     var patches: [Patch] { state.withLock { $0.patches } }
     var log: [String] { state.withLock { $0.log } }
 
+    /// Returns once `count` reports have reached the service (before their gates).
+    func waitForSyncs(_ count: Int) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let reached = state.withLock { state in
+                if state.syncs.count >= count { return true }
+                state.syncWaiters.append((count, continuation))
+                return false
+            }
+            if reached { continuation.resume() }
+        }
+    }
+
     func syncSession(id: String, report: PlaybackSyncReport) async throws {
-        let (gate, error, number) = state.withLock { state in
+        let (gate, error, number, reached) = state.withLock { state in
             state.syncs.append((id, report))
             state.log.append("sync \(state.syncs.count)")
+            let reached = state.syncWaiters.filter { $0.count <= state.syncs.count }.map(\.continuation)
+            state.syncWaiters.removeAll { $0.count <= state.syncs.count }
             return (
                 state.syncGates.isEmpty ? nil : state.syncGates.removeFirst(),
-                state.syncErrors.isEmpty ? nil : state.syncErrors.removeFirst(), state.syncs.count
+                state.syncErrors.isEmpty ? nil : state.syncErrors.removeFirst(), state.syncs.count, reached
             )
         }
+        for continuation in reached { continuation.resume() }
         await gate?.wait()
         state.withLock { $0.log.append("sync \(number) done") }
         if let error { throw error }

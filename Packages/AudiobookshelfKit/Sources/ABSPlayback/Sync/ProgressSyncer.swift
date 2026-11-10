@@ -14,13 +14,16 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   coordinator's `/close` through `finalCloseReport`.
 /// - **Listening time** is wall-clock time while playing, independent of rate (ADR 0007). A tick
 ///   credits the monotonic time since the previous tick only while playing and only if media time
-///   advanced; a gap longer than two tick intervals credits one interval. Seeks add nothing.
+///   advanced; a gap longer than ``maxTickGap`` (a suspension) credits one interval. A seek
+///   credits the time played up to it and adds nothing for the jump.
 /// - **One request at a time.** Every send and store write runs on one serial queue, and a send
 ///   counts as finished only when the service call returns, after its task has completed. So no
-///   report or PATCH goes out while an earlier one could still reach the server.
+///   report or PATCH goes out while an earlier one could still reach the server. The
+///   coordinator's `/close` doesn't go through this queue yet, so it can overlap a report in
+///   flight (#158).
 /// - **Failures.** A failed `/sync` writes the position to `LocalMediaProgress`
 ///   (`needsServerSync`), the durable retry queue. Its listening time is carried into the next
-///   report only when the request clearly never reached the server (offline, DNS, connect, auth);
+///   report only when the request clearly never reached the server (DNS, connect, TLS, auth);
 ///   after an ambiguous failure it is dropped, so it is never counted twice.
 /// - **Durable queue.** ``drainPendingProgress()`` PATCHes the connection's dirty rows, one group
 ///   per request from `LocalProgressStore.beginSend`, in its order (audio, finished, ebook). It
@@ -58,6 +61,8 @@ public final class ProgressSyncer {
     /// The session with a `/sync` queued but not started; later requests join it.
     private var queuedSyncSessionID: String?
     private var tail: Task<Void, Never>?
+    /// Set by ``detach()``: queued requests are skipped; one already in flight finishes.
+    private var isDetached = false
 
     /// Starts following `source`: observes its events and supplies its `finalCloseReport`.
     /// - Parameter tickInterval: The engine's time-update interval (`AudioEngine`'s
@@ -77,6 +82,7 @@ public final class ProgressSyncer {
 
     /// Stops following the source.
     public func detach() {
+        isDetached = true
         if let observer { source?.removeObserver(observer) }
         observer = nil
         source?.finalCloseReport = nil
@@ -140,6 +146,7 @@ public final class ProgressSyncer {
             requestSync()
         case .didSeek(let time):
             defer { loadedTime = nil }
+            creditPlayedTime()
             chapterIndex = source?.chapterIndex
             lastTick = isPlaying ? (now, time) : nil
             if loadedTime != time { requestSync() }
@@ -195,9 +202,13 @@ public final class ProgressSyncer {
         lastTick = (now, source?.currentTime ?? last.mediaTime)
     }
 
+    /// The longest gap between ticks still counted as play; a longer one (the app was suspended)
+    /// credits one tick interval. At least 2 s, so a short stall with fast ticks isn't cut.
+    var maxTickGap: TimeInterval { max(2 * tickInterval, 2) }
+
     private func credit(for gap: TimeInterval) -> TimeInterval {
         guard gap.isFinite, gap > 0 else { return 0 }
-        return gap > 2 * tickInterval ? tickInterval : gap
+        return gap > maxTickGap ? tickInterval : gap
     }
 
     // MARK: Queue
@@ -222,7 +233,7 @@ public final class ProgressSyncer {
     /// and listening time) is taken now, when the previous request has finished.
     private func sendSync(sessionID: String) async {
         if queuedSyncSessionID == sessionID { queuedSyncSessionID = nil }
-        guard let session = current, session.sessionID == sessionID, let source else { return }
+        guard !isDetached, let session = current, session.sessionID == sessionID, let source else { return }
         let time = source.currentTime
         let duration = source.duration
         let listened = session.listened
@@ -234,7 +245,14 @@ public final class ProgressSyncer {
             try await service.syncSession(id: sessionID, report: report)
         } catch {
             if Self.neverReachedServer(error) {
-                if current?.sessionID == sessionID { current?.listened += listened }
+                if current?.sessionID == sessionID {
+                    current?.listened += listened
+                } else if listened > 0 {
+                    // TODO(#158): carry it into the closed session's reconciliation.
+                    logger.info(
+                        "Dropped \(listened, privacy: .public) s of listening time: the session closed before it could be resent"
+                    )
+                }
             } else if listened > 0 {
                 logger.info(
                     "Dropped \(listened, privacy: .public) s of listening time after an ambiguous sync failure (\(Self.caseName(error), privacy: .public))"
@@ -270,6 +288,7 @@ public final class ProgressSyncer {
     // MARK: Durable queue
 
     private func drain() async {
+        guard !isDetached else { return }
         let rows: [LocalMediaProgressDTO]
         do {
             rows = try await store.pendingSync(for: service.serverConnectionID)
@@ -279,6 +298,7 @@ public final class ProgressSyncer {
         }
         for row in rows {
             for _ in 0..<Self.maxSendsPerRow {
+                guard !isDetached else { return }
                 let patch: ProgressPatch?
                 do {
                     patch = try await store.beginSend(for: row.key, now: clock.now())
@@ -287,9 +307,14 @@ public final class ProgressSyncer {
                     break
                 }
                 guard let patch else { break }
+                guard let update = Self.update(for: patch.values) else {
+                    logger.fault("beginSend returned a send with no group")
+                    _ = try? await store.failSend(patch, error: "emptySend")
+                    break
+                }
                 do {
                     try await service.updateProgress(
-                        itemID: row.key.libraryItemId, episodeID: row.key.episodeId, Self.update(for: patch.values))
+                        itemID: row.key.libraryItemId, episodeID: row.key.episodeId, update)
                 } catch {
                     _ = try? await store.failSend(patch, error: Self.caseName(error))
                     if Self.isOffline(error) { return }
@@ -305,31 +330,30 @@ public final class ProgressSyncer {
         }
     }
 
-    /// The PATCH body for one group. `beginSend` returns exactly one group and sends a missing
-    /// `ebookProgress` as 0; `lastUpdate` is never sent.
-    static func update(for send: ProgressSend) -> MediaProgressUpdate {
+    /// The PATCH body for one group, or `nil` for a send with no group. `beginSend` returns
+    /// exactly one group and sends a missing `ebookProgress` as 0; `lastUpdate` is never sent.
+    static func update(for send: ProgressSend) -> MediaProgressUpdate? {
         if let audio = send.audio {
             return .audio(currentTime: audio.currentTime, duration: audio.duration, progress: audio.progress)
         }
         if let finished = send.finished {
             return .finished(finished.isFinished, at: finished.finishedAt)
         }
-        let ebook = send.ebook
-        return .ebook(location: ebook?.ebookLocation, progress: ebook?.ebookProgress ?? 0)
+        guard let ebook = send.ebook else { return nil }
+        return .ebook(location: ebook.ebookLocation, progress: ebook.ebookProgress ?? 0)
     }
 
     // MARK: Errors
 
     /// The request certainly didn't reach Audiobookshelf, or was rejected before the session was
-    /// touched, so its listening time can be sent again.
+    /// touched, so its listening time can be sent again: no host, no connection or no TLS
+    /// handshake, a 401 or 403, or a request that was never built or sent. Everything else is
+    /// ambiguous, including `notConnectedToInternet`, `dataNotAllowed` and `callIsActive`, which
+    /// can also end a request already sent.
     static func neverReachedServer(_ error: any Error) -> Bool {
         switch error as? APIError {
         case .network(let code):
-            [
-                .notConnectedToInternet, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
-                .dataNotAllowed, .internationalRoamingOff, .callIsActive, .secureConnectionFailed,
-                .appTransportSecurityRequiresSecureConnection,
-            ].contains(code)
+            [.cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .secureConnectionFailed].contains(code)
         case .notAuthenticated, .sessionExpired, .unauthorized, .forbidden, .invalidURL, .encoding: true
         default: false
         }

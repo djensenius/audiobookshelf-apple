@@ -34,12 +34,12 @@ import Testing
         #expect(SessionEndpoints.listeningSessions(itemID: "li", episodeID: "").path.hasSuffix("/li"))
     }
 
-    @Test func decodesNewestFirstAndSkipsBrokenSessions() async throws {
+    @Test func decodesNewestFirstWithLenientFields() async throws {
         let json = #"""
             {"total": 3, "numPages": 1, "page": 0, "itemsPerPage": 10, "sessions": [
               {"id": "s-new", "libraryItemId": "li-1", "timeListening": 42.5, "currentTime": 1300, "updatedAt": 1762732842500},
-              {"timeListening": 1},
-              {"id": "s-old", "timeListening": null, "currentTime": 12}
+              {"id": "s-mid", "timeListening": "7", "currentTime": 600, "updatedAt": "soon"},
+              {"id": "s-old", "timeListening": null, "currentTime": 12, "updatedAt": 1762732800000.0}
             ]}
             """#
         let server = StubServer { _ in .json(json) }
@@ -48,10 +48,30 @@ import Testing
             page.sessions == [
                 ListeningSessionRecord(
                     id: "s-new", timeListening: 42.5, currentTime: 1300, updatedAt: 1_762_732_842_500),
-                ListeningSessionRecord(id: "s-old", timeListening: 0, currentTime: 12),
+                ListeningSessionRecord(id: "s-mid", timeListening: 7, currentTime: 600),
+                ListeningSessionRecord(id: "s-old", timeListening: 0, currentTime: 12, updatedAt: 1_762_732_800_000),
             ])
         #expect(page.total == 3)
         #expect(page.numPages == 1)
+    }
+
+    /// A page missing a session would read as "never stored" during reconciliation, so a session
+    /// that can't be decoded fails the page instead.
+    @Test(arguments: [
+        #"{"timeListening": 1, "currentTime": 2}"#,
+        #"{"id": "s", "timeListening": "lots", "currentTime": 2}"#,
+        #"{"id": "s", "timeListening": 1, "currentTime": {"a": 1}}"#,
+    ])
+    func undecodableSessionFailsThePage(session: String) async throws {
+        let json =
+            #"{"total": 2, "numPages": 1, "page": 0, "itemsPerPage": 10, "sessions": ["#
+            + #"{"id": "ok", "timeListening": 5, "currentTime": 5}, "# + session + "]}"
+        let server = StubServer { _ in .json(json) }
+        await #expect {
+            try await makeClient(server).send(SessionEndpoints.listeningSessions(itemID: "li-1"))
+        } throws: { error in
+            if case .decoding = error as? APIError { true } else { false }
+        }
     }
 
     @Test func missingItemIsNotFound() async throws {

@@ -3,6 +3,10 @@ import Foundation
 
 /// A stored listening session, as `GET /api/me/item/listening-sessions/…` returns it. Only the
 /// fields the ADR 0007 `/close` reconciliation reads are decoded.
+///
+/// `timeListening` and `currentTime` are numbers or numeric strings; missing or `null` reads as
+/// 0, and any other value fails the record (and so its page). `updatedAt` is optional
+/// metadata: a value that isn't a number or numeric string reads as `nil`.
 public struct ListeningSessionRecord: Decodable, Sendable, Hashable {
     public let id: String
     /// Seconds; the server stores a session only once this is above 0.
@@ -26,14 +30,38 @@ public struct ListeningSessionRecord: Decodable, Sendable, Hashable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(String.self, forKey: .id)
-        timeListening = try container.decodeIfPresent(Double.self, forKey: .timeListening) ?? 0
-        currentTime = try container.decodeIfPresent(Double.self, forKey: .currentTime) ?? 0
-        updatedAt = try container.decodeIfPresent(Int.self, forKey: .updatedAt)
+        timeListening = try Self.seconds(container, .timeListening)
+        currentTime = try Self.seconds(container, .currentTime)
+        updatedAt = (try? Self.number(container, .updatedAt)).flatMap { $0 }.flatMap { Int(exactly: $0.rounded()) }
+    }
+
+    private static func seconds(_ container: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) throws -> Double {
+        try number(container, key) ?? 0
+    }
+
+    /// A finite number or numeric string; `nil` when missing or `null`. Throws otherwise.
+    private static func number(_ container: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) throws -> Double? {
+        guard container.contains(key), try !container.decodeNil(forKey: key) else { return nil }
+        let value =
+            if let number = try? container.decode(Double.self, forKey: key) {
+                number
+            } else {
+                Double(try container.decode(String.self, forKey: key).trimmingCharacters(in: .whitespaces))
+            }
+        guard let value, value.isFinite else {
+            throw DecodingError.dataCorruptedError(forKey: key, in: container, debugDescription: "Not a number")
+        }
+        return value
     }
 }
 
 /// One page of the user's stored sessions for an item or episode, newest first
-/// (`MeController.getItemListeningSessions`). Sessions that fail to decode are skipped.
+/// (`MeController.getItemListeningSessions`).
+///
+/// A session that fails to decode fails the whole page rather than being skipped: the ADR 0007
+/// reconciliation (#158) reads a missing session as "the server never stored it", so a page
+/// that silently dropped one could make it send the same listening time twice. Callers treat a
+/// decoding failure as "can't tell" and retry later.
 public struct ListeningSessionsPage: Decodable, Sendable, Hashable {
     public let sessions: [ListeningSessionRecord]
     public let total: Int
@@ -47,7 +75,7 @@ public struct ListeningSessionsPage: Decodable, Sendable, Hashable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        sessions = try container.decodeLossyArrayIfPresent(ListeningSessionRecord.self, forKey: .sessions) ?? []
+        sessions = try container.decodeIfPresent([ListeningSessionRecord].self, forKey: .sessions) ?? []
         total = try container.decodeLenientIntIfPresent(forKey: .total) ?? sessions.count
         numPages = try container.decodeLenientIntIfPresent(forKey: .numPages) ?? 1
         page = try container.decodeLenientIntIfPresent(forKey: .page) ?? 0
