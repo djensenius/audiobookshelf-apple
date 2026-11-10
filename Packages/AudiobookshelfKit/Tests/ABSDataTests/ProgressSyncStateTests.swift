@@ -589,6 +589,30 @@ import Testing
         #expect(audio.audio?.currentTime == 200)
     }
 
+    /// Offline playback without server progress, then another device listens further: a plain
+    /// fetch is a real conflict the newer server value wins, not a side effect to shield.
+    @Test func plainFetchWithoutBaselineDoesNotShield() {
+        var state = ProgressSyncState(lastUpdate: Self.t0)
+        state.apply(Self.seek(200), now: Self.at(1))
+        state.merge(Self.server(currentTime: 700, lastUpdate: Self.at(50)))
+        #expect(state.currentTime == 700)
+        #expect(state.dirty.isEmpty)
+        #expect(state.truncated.isEmpty)
+    }
+
+    /// The echo of a lost send that created the server's progress still shields the other
+    /// dirty groups from the created defaults.
+    @Test func echoOfLostCreatingSendStillShields() throws {
+        var state = ProgressSyncState(lastUpdate: Self.t0)
+        state.apply(Self.seek(200), now: Self.at(1))
+        try Self.send(&state)  // Created the progress; the response is lost.
+        state.apply(Self.page("A", 0.3), now: Self.at(2))
+        state.merge(Self.server(currentTime: 200, ebookLocation: nil, ebookProgress: nil, lastUpdate: Self.at(5)))
+        #expect(state.ebookLocation == "A")
+        #expect(state.dirty == .ebook)
+        #expect(state.truncated == .ebook)
+    }
+
     // MARK: - Interleavings
 
     /// Random interleavings against a simulated server. A PATCH reaches the server at a random
@@ -766,13 +790,28 @@ private struct Simulation {
         lastOtherWrite = now
     }
 
-    /// Syncs without other writers until nothing is dirty; local then equals the server.
+    /// Syncs without other writers until nothing is dirty; local then equals the server, and
+    /// another device's values taken by the first fetch survive (unless our sends' side effects
+    /// change them).
     mutating func converge(from start: Date) {
         var now = start
+        if let send = inFlight {
+            deliver(now: now)
+            state.acknowledge(send, serverLastUpdate: delivered ?? now)
+            inFlight = nil
+            delivered = nil
+        }
+        if exists { merge(server, origins: origins, fresh: true, step: 9998) }
+        let taken = ProgressGroups.each.enumerated().filter {
+            origins[$0.offset] == .other && !state.dirty.contains($0.element)
+        }
+        let takenValues = taken.map { Self.values($0.element, of: state) }
+        var sent: ProgressGroups = []
         for _ in 0..<20 {
             now += 10
             if inFlight == nil { inFlight = state.beginSend() }
             guard let send = inFlight else { break }
+            sent.formUnion(send.groups)
             deliver(now: now)
             state.acknowledge(send, serverLastUpdate: now)
             inFlight = nil
@@ -784,6 +823,12 @@ private struct Simulation {
         if exists {
             for group in ProgressGroups.each {
                 #expect(Self.values(group, of: state) == Self.values(group, of: server), "\(group.rawValue)")
+            }
+        }
+        for (taken, value) in zip(taken, takenValues) {
+            let partner: ProgressGroups = taken.element == .audio ? .finished : taken.element == .finished ? .audio : []
+            if !sent.contains(partner) || partner.isEmpty {
+                #expect(Self.values(taken.element, of: state) == value, "other device's \(taken.element.rawValue) lost")
             }
         }
     }
@@ -804,11 +849,31 @@ private struct Simulation {
                 }
                 #expect(allowed, "dirty \(group.rawValue) lost to \(String(describing: origins[index])) at \(step)")
             }
+            // Liveness: a newer write from another device wins unless something justifies keeping ours.
+            let justified =
+                excluded.contains(group) || before.truncated.contains(group)
+                || before.serverBaseline.map { ProgressSyncState.matches(fetched, $0, group) } ?? false
+                || before.unacknowledgedSends.contains { ProgressSyncState.matches(fetched, $0, group) }
+                || (state.truncated.contains(group) && (inFlight != nil || echoed(fetched, in: before)))
+                || (before.serverBaseline == nil && (inFlight != nil || !before.unacknowledgedSends.isEmpty))
+            if fresh, before.dirty.contains(group), origins[index] == .other,
+                fetched.lastUpdate > before.editedAt(group) ?? .distantPast, !justified
+            {
+                #expect(
+                    state.dirty.contains(group) == false, "other device's newer \(group.rawValue) ignored at \(step)")
+            }
             if fresh, !excluded.contains(group), !state.dirty.contains(group) {
                 #expect(
                     Self.values(group, of: state) == Self.values(group, of: fetched),
                     "unsynced \(group.rawValue) is clean at step \(step)")
             }
+        }
+    }
+
+    /// Whether `fetched` matches any group of an unacknowledged send (the echo of a lost send).
+    func echoed(_ fetched: ProgressBaseline, in state: ProgressSyncState) -> Bool {
+        state.unacknowledgedSends.contains { send in
+            ProgressGroups.each.contains { ProgressSyncState.matches(fetched, send, $0) }
         }
     }
 

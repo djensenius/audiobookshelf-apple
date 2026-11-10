@@ -318,6 +318,8 @@ struct ProgressSyncState: Sendable, Equatable {
     /// acknowledged. `unseeded` is whether the row had no server baseline when it was sent
     /// (defaults to now).
     private mutating func shieldSideEffects(of sent: ProgressGroups, unseeded: Bool? = nil) {
+        // Nothing sent, nothing the server could have changed (a plain fetch).
+        guard !sent.isEmpty else { return }
         var affected: ProgressGroups = []
         if sent.contains(.audio) { affected.insert(.finished) }
         if sent.contains(.finished) { affected.insert(.audio) }

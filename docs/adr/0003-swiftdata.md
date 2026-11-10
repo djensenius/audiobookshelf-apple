@@ -316,9 +316,10 @@ Model notes:
     effects: an audio PATCH can un-finish or auto-finish the item, a finished
     PATCH can reset `currentTime`, and any PATCH for media the server has no
     progress for creates it with defaults for the other groups. When one of these
-    groups has been sent while the other is dirty (or any group while the row has
-    no baseline), the flags of the affected dirty groups are set, so the server's
-    side effect can't overwrite the pending local edit, at three points:
+    groups has been sent while the other is dirty (or, only when one of our sends
+    went out while the row had no baseline, any group), the flags of the affected
+    dirty groups are set, so the server's side effect can't overwrite the pending
+    local edit, at three points (a plain fetch with nothing sent shields nothing):
     - when the send is acknowledged;
     - when a fetch matches it as the echo of a lost send;
     - when server progress is merged while it is in flight.
@@ -332,6 +333,8 @@ Model notes:
     - A dirty group can still lose to our own side effect once another device
       writes the row later than both: the server's `lastUpdate` is then later
       than the edit, and the time rule lets the server win.
+    - On a row with no baseline, once one of our sends has gone out, another
+      device's value can lose to ours until the first acknowledgement or echo.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
