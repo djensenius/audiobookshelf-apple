@@ -40,6 +40,8 @@ private struct Harness {
     func started() async throws {
         await lifecycle.start()
         try #require(await eventually { log.entries.contains("library.seed(a)") })
+        // The observation reads the source once more when it begins; let that settle first.
+        try #require(await eventually { lifecycle.reconciledObservations > 0 })
         log.clear()
     }
 }
@@ -597,9 +599,8 @@ private func teardown(_ reason: String) -> [String] {
         await start.value
         #expect(await eventually { harness.lifecycle.gate == .connect })
 
-        #expect(harness.log.entries.suffix(4) == teardown("expired")[...])
-        #expect(harness.log.flushes.isEmpty)
-        #expect(!harness.log.entries.contains { $0.hasPrefix("library.fetchMe") || $0.hasPrefix("library.seed") })
+        // Nothing after the library starts once the source left: only what started ends.
+        #expect(harness.log.entries == ["accounts.restore", "library.connect(a)", "library.clear(expired)"])
     }
 
     @Test func expiryDuringASwitchFlushEndsTheOldSessionOnce() async throws {
@@ -619,7 +620,7 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
-    @Test(arguments: ["signOut", "switch", "remove"])
+    @Test(arguments: ["signOut", "switch", "remove", "removeOther"])
     func transitionAfterAnUnreconciledExpiryEndsAsExpiredWithoutFlushing(operation: String) async throws {
         let harness = Harness()
         try await harness.started()
@@ -634,12 +635,114 @@ private func teardown(_ reason: String) -> [String] {
             try await harness.lifecycle.switchAccount(to: identityB.connectionID)
             #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
             expected = ["accounts.switch(b)"] + pipeline("b")
-        default:
+        case "remove":
             try await harness.lifecycle.removeAccount(identityA.connectionID)
             expected = ["accounts.remove(a)"]
+        default:
+            try await harness.lifecycle.removeAccount(identityB.connectionID)
+            expected = ["accounts.remove(b)"]
         }
 
         #expect(harness.log.entries == teardown("expired") + expected)
+        #expect(harness.lifecycle.gate == (operation == "switch" ? .ready(identityB, isOffline: false) : .connect))
+    }
+
+    @Test(arguments: ["signOut", "accountChange"])
+    func transitionAfterTheSourceShowsAnotherAccountEndsTheOldSessionWithoutFlushing(operation: String) async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        harness.source.publishUnobserved(.active(identityB, isOffline: false))
+        let expected: [String]
+        if operation == "signOut" {
+            await harness.lifecycle.signOut()
+            expected = ["accounts.logout"]
+        } else {
+            await harness.lifecycle.performAccountChange {}
+            #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+            expected = pipeline("b")
+        }
+
+        #expect(harness.log.entries == teardown("switch") + expected)
+    }
+
+    @Test(arguments: [false, true])
+    func selectingTheCachedAccountAfterTheSourceMovedOnSwitchesBack(expired: Bool) async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        if expired {
+            harness.source.expireUnobserved()
+        } else {
+            harness.source.publishUnobserved(.active(identityB, isOffline: false))
+        }
+        try await harness.lifecycle.switchAccount(to: identityA.connectionID)
+        #expect(await eventually { harness.log.entries.contains("library.seed(a)") })
+
+        #expect(
+            harness.log.entries == teardown(expired ? "expired" : "switch") + ["accounts.switch(a)"] + pipeline("a"))
+        #expect(harness.source.phase == .active(identityA, isOffline: false))
+        #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
+    }
+
+    @Test(arguments: [false, true])
+    func backgroundAfterTheSourceLeftTheSessionDoesNotFlush(expired: Bool) async throws {
+        let harness = Harness()
+        try await harness.started()
+
+        if expired {
+            harness.source.expireUnobserved()
+        } else {
+            harness.source.publishUnobserved(.active(identityB, isOffline: false))
+        }
+        await harness.lifecycle.handle(scenePhase: .background)
+        // A transition queued after the background's reconcile, to wait for it.
+        try await harness.lifecycle.removeAccount(UUID())
+        #expect(await eventually { expired || harness.log.entries.contains("library.seed(b)") })
+
+        #expect(harness.log.flushes.isEmpty)
+        #expect(
+            harness.log.entries.filter { $0 != "accounts.remove(?)" }
+                == teardown(expired ? "expired" : "switch") + (expired ? [] : pipeline("b")))
+        #expect(harness.lifecycle.gate == (expired ? .connect : .ready(identityB, isOffline: false)))
+    }
+
+    @Test func sourceThatExpiresDuringASwitchTeardownStartsNothing() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let endGate = Gate()
+        harness.socket.endGate = endGate
+        defer { endGate.open() }
+
+        harness.source.phase = .active(identityB, isOffline: false)
+        #expect(await eventually { harness.log.entries.contains("socket.end(switch)") })
+        harness.source.expire()
+        endGate.open()
+        #expect(await eventually { harness.lifecycle.gate == .connect })
+        // Signed out, so this only waits for the queue.
+        await harness.lifecycle.signOut()
+
+        #expect(harness.log.entries == ["socket.end(switch)", "socket.ended"] + teardown("switch").dropFirst())
+        #expect(harness.lifecycle.gate == .connect)
+    }
+
+    @Test func expiryDuringAReconnectHookReconnectsNothingMore() async throws {
+        let harness = Harness(restoredPhase: .active(identityA, isOffline: true))
+        try await harness.started()
+        let reconnectGate = Gate()
+        harness.images.reconnectGate = reconnectGate
+
+        let reconnect = Task { await harness.source.reconnect(client: try makeClient()) }
+        #expect(await eventually { harness.log.entries.contains("images.reconnect(a)") })
+        harness.source.expire()
+        reconnectGate.open()
+        try await reconnect.value
+        #expect(await eventually { harness.lifecycle.gate == .connect })
+        await harness.lifecycle.signOut()
+
+        #expect(
+            harness.log.entries == ["library.beginSeed(a)", "library.reconnect(a)", "images.reconnect(a)"]
+                + teardown("expired"))
     }
 
     // MARK: Flush

@@ -42,6 +42,11 @@ public enum SessionScenePhase: Sendable, Hashable {
 /// server rejected the session), the same teardown runs with ``SessionEndReason/expired`` and
 /// without a flush.
 ///
+/// **A stale session.** The source can move on (expire, or show another account) before its
+/// observation is reconciled. Every entry point that acts on the running session first checks
+/// the source: a session it has left is ended (as expired, or as a switch) without a flush, and
+/// participants never start, reconnect or flush for a session the source has already left.
+///
 /// Transitions run one at a time on the main actor, in call order. Participants must not await
 /// a transition from inside one; they call ``requestSignOut(of:)``, which queues a sign-out
 /// without waiting.
@@ -72,6 +77,9 @@ public final class SessionLifecycle {
     /// Reports a transition called from inside a running one, where it can't run. Tests record
     /// instead of stopping.
     @ObservationIgnored var reportMisuse: @MainActor (String) -> Void = { assertionFailure($0) }
+    /// How many of the source's changes the observation has reconciled, its first value
+    /// included. Tests wait for it so the observation is idle before they change the source.
+    @ObservationIgnored private(set) var reconciledObservations = 0
 
     private struct RunningSession {
         var context: SessionContext
@@ -180,7 +188,7 @@ public final class SessionLifecycle {
                 return
             }
             guard let running = self.session, running.context.sessionID == context.sessionID,
-                self.source.phase.identity ?? running.context.identity == running.context.identity
+                !self.sourceHasLeft(running.context.identity)
             else {
                 Log.auth.info("Ignored a sign-out request from an ended session")
                 return
@@ -195,6 +203,7 @@ public final class SessionLifecycle {
     public func switchAccount(to connectionID: UUID) async throws {
         if rejectReentrant("switchAccount(to:)") { return }
         let result: Result<Void, any Error> = await serialized {
+            await self.endStaleSession()
             if self.session?.context.identity.connectionID == connectionID { return .success(()) }
             await self.endForAccountChange()
             let result: Result<Void, any Error>
@@ -217,6 +226,7 @@ public final class SessionLifecycle {
     public func removeAccount(_ connectionID: UUID) async throws -> URL? {
         if rejectReentrant("removeAccount(_:)") { return nil }
         let result: Result<URL?, any Error> = await serialized {
+            await self.endStaleSession()
             if let identity = self.session?.context.identity, identity.connectionID == connectionID {
                 self.gate = .signingOut(from: identity)
                 await self.endFlushing(.removed)
@@ -262,13 +272,19 @@ public final class SessionLifecycle {
     /// Flushes the running session when a scene goes to the background, for at most the flush
     /// timeout. It doesn't wait for, or hold up, other transitions. Called from a participant's
     /// task, its flush tasks carry that task's stale transition ID, which is harmless: they
-    /// start no transitions.
+    /// start no transitions. When the source has already left the session (expired, or shows
+    /// another account), it doesn't flush; it queues a reconcile, which ends the session.
     public func handle(scenePhase: SessionScenePhase) async {
-        guard scenePhase == .background, let participants = session?.participants else { return }
-        await flush(participants)
+        guard scenePhase == .background, let running = session else { return }
+        guard !sourceHasLeft(running.context.identity) else {
+            _ = enqueue { await self.reconcile() }
+            return
+        }
+        await flush(running.participants)
     }
 
     private func performSignOut() async -> URL? {
+        await endStaleSession()
         guard source.phase != .signedOut else {
             // Signed out by itself and not reconciled yet: an expiry, not a sign-out.
             await reconcile()
@@ -303,6 +319,7 @@ public final class SessionLifecycle {
             for await _ in changes {
                 guard let self else { return }
                 await self.serialized { await self.reconcile() }
+                self.reconciledObservations += 1
             }
         }
     }
@@ -328,14 +345,18 @@ public final class SessionLifecycle {
                 guard accountChanges == 0 else { break }
                 if let running = session, running.context.identity == identity {
                     await update(running, to: running.context.with(client: client, isOffline: isOffline))
-                } else {
+                } else if session != nil {
                     await end(.switch)
+                    // The source may have moved on during the teardown; look again before starting.
+                    handled = nil
+                    continue
+                } else {
                     lastSessionID += 1
                     await begin(
                         SessionContext(
                             identity: identity, client: client, isOffline: isOffline, sessionID: lastSessionID))
                 }
-                if session?.context.identity == identity {
+                if session?.context.identity == identity, !sourceHasLeft(identity) {
                     gate = .ready(identity, isOffline: isOffline)
                 }
             }
@@ -347,19 +368,27 @@ public final class SessionLifecycle {
         defer { beginning = nil }
         let seeder = self.seeder
         let connect: [any SessionParticipant] = (seeder.map { [$0] } ?? []) + connectParticipants
-        let progressSources = self.progressSources
+        // Once the source leaves the identity, start nothing more: the session keeps only what
+        // started, and the reconcile loop ends it next.
+        var startedConnect: [any SessionParticipant] = []
+        var startedSources: [any SessionParticipant] = []
         for participant in connect {
+            guard !sourceHasLeft(context.identity) else { break }
             await participant.sessionDidStart(context)
+            startedConnect.append(participant)
         }
-        await seeder?.beginSeed(context)
-        for participant in progressSources {
-            await participant.sessionDidStart(context)
+        if startedConnect.count == connect.count, !sourceHasLeft(context.identity) {
+            await seeder?.beginSeed(context)
+            for participant in progressSources {
+                guard !sourceHasLeft(context.identity) else { break }
+                await participant.sessionDidStart(context)
+                startedSources.append(participant)
+            }
         }
-        // Don't seed a session the source already left; the reconcile loop ends it next.
-        let isCurrent = source.phase.identity == context.identity
+        let isComplete = startedSources.count == progressSources.count && !sourceHasLeft(context.identity)
         session = RunningSession(
-            context: context, seeder: seeder, connect: connect, progressSources: progressSources,
-            seed: isCurrent ? startSeed(seeder, context) : nil)
+            context: context, seeder: startedConnect.isEmpty ? nil : seeder, connect: startedConnect,
+            progressSources: startedSources, seed: isComplete ? startSeed(seeder, context) : nil)
     }
 
     /// Runs the online part of the pipeline again when the identity came back online or got a
@@ -373,9 +402,10 @@ public final class SessionLifecycle {
         // The boundary first: progress applied while a hook below is suspended survives the seed.
         await running.seeder?.beginSeed(context)
         for participant in running.participants {
+            guard !sourceHasLeft(context.identity) else { return }
             await participant.sessionDidReconnect(context)
         }
-        guard source.phase.identity == context.identity else { return }
+        guard !sourceHasLeft(context.identity) else { return }
         session?.seed = startSeed(running.seeder, context)
     }
 
@@ -430,7 +460,32 @@ public final class SessionLifecycle {
         await end(reason)
     }
 
+    /// Whether the source no longer shows `identity`: it signed out or shows another account.
+    /// While it restores, it hasn't left yet.
+    private func sourceHasLeft(_ identity: SessionIdentity) -> Bool {
+        switch source.phase {
+        case .signedOut: true
+        case .restoring: false
+        case .active(let current, _): current != identity
+        }
+    }
+
+    /// Ends the running session, without a flush, if the source has left it before its
+    /// observation was reconciled: as expired when the source signed out, as a switch when it
+    /// shows another account. Starts nothing; the caller's reconcile does.
+    private func endStaleSession() async {
+        guard let identity = session?.context.identity, sourceHasLeft(identity) else { return }
+        if source.phase == .signedOut {
+            await end(.expired)
+            showConnect()
+        } else {
+            gate = .switching(from: identity)
+            await end(.switch)
+        }
+    }
+
     private func endForAccountChange() async {
+        await endStaleSession()
         guard let identity = session?.context.identity else { return }
         gate = .switching(from: identity)
         await endFlushing(.switch)

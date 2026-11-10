@@ -133,6 +133,11 @@ final class FakeAccountSource: AccountSessionSource {
         _client = nil
     }
 
+    /// Shows `phase` without notifying observers, like ``expireUnobserved()``.
+    func publishUnobserved(_ phase: AccountSessionPhase) {
+        _phase = phase
+    }
+
     /// Restores again, as from offline, and gets `client` for the same identity.
     func reconnect(client: APIClient) async {
         guard let identity = phase.identity else { return }
