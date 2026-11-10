@@ -53,11 +53,12 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `AuthContractTests` | Status, ping and validation; password login and its JWT pair; `/api/authorize`; a wrong password |
 | `TokenRefreshContractTests` | Refresh and rotation, the old refresh token, concurrent refreshes, refresh before expiry, logout |
 | `LibraryContractTests` | Libraries, minified and expanded books and podcasts, chapters, audio files, tracks, shelves, search, authors, series |
+| `CollectionWriteContractTests` | Five collection writes; ordered two-book lifecycle and empty reads; permissions, atomic invalid create, no-ops/errors, version differences and failure teardown |
 | `PlaybackSessionContractTests` | Start, sync and close; resume; same-device takeover; track URLs and ranges; downloads; local session upload |
 | `ProgressContractTests` | Each progress group, `lastUpdate`, finished and auto-finish, ebook progress, batch update, delete |
 | `LocalProgressContractTests` | `LocalProgressStore` sending to the server and settling on what it holds |
 
-Not covered yet: bookmarks, collections, playlists, listening stats, Socket.IO events
+Not covered yet: bookmarks, playlists, listening stats, Socket.IO events
 (`ABSRealtime`) and OpenID sign-in (see [oidc.md](oidc.md) for the manual check).
 
 ## Differences between versions
@@ -99,6 +100,22 @@ on 2.26.0 and 2.37.2.
 
 ## Cleanup
 
+Collection writes use `CollectionContractFixture`, not the shared `withUser` harness:
+collections are library-wide, have no owner and **survive user deletion**. Each fixture creates
+unique ordinary-type users through the standard admin endpoint, explicitly granting
+`permissions.update/delete = true` for writers. Separate default users verify all five 403s
+on an actual collection. Restricted-library users are also local to this fixture; root permissions,
+shared user provisioning and the two seeded books are never changed.
+
+The fixture registers exact created collection IDs immediately from the successful response,
+before expanded-book decoding, and deletes those IDs **before** its users on both success and
+failure. Cleanup attempts every resource; failures surface without replacing the primary error.
+A test deliberately throws inside the body, then checks every registered collection/user ID is
+404. Never delete by name/prefix, rely on global collection counts, or assume deleting a user
+removes collections. Only run mutations against disposable servers you own. Prefer a worktree-local
+`TMPDIR=$PWD/.build/server-tmp` (create it first); retain captures/helpers only under that worktree's
+`.build` or owned session artifacts.
+
 The script's trap removes the container and `${TMPDIR}/abs-contract.*` on success, failure,
 Ctrl-C and SIGTERM. A SIGKILL cannot be trapped; remove strays with:
 
@@ -106,6 +123,80 @@ Ctrl-C and SIGTERM. A SIGKILL cannot be trapped; remove strays with:
 docker rm -f $(docker ps -aq --filter label=abs-contract-test=1)
 rm -rf "${TMPDIR:-/tmp}"/abs-contract.*
 ```
+
+The broad commands above are only appropriate when **all** matched resources are yours. On a
+shared host, record the exact container name and temporary directory printed/created by your run,
+then remove only those resources. Never clean another contributor's containers, caches or worktrees.
+
+## Collection write contract and capture provenance
+
+| Factory | Request | Success |
+| --- | --- | --- |
+| `CollectionEndpoints.create` | `POST /api/collections`: `name`, `libraryId`, nonempty `books`, optional `description` | 200 flat expanded `LibraryCollection` |
+| `update` | `PATCH /api/collections/:id`: optional `name`, `description`, `books` | 200 expanded collection, including no-op |
+| `delete` | `DELETE /api/collections/:id`, no body | 200 plain `OK` (`EmptyResponse`) |
+| `addBooks` | `POST /api/collections/:id/batch/add`: `{books: [...]}` | 200 expanded collection |
+| `removeBooks` | `POST /api/collections/:id/batch/remove`: `{books: [...]}` | 200 expanded collection |
+
+Every book ID is a **library-item ID**, not a media ID. Create rejects invalid, wrong-library,
+non-book and duplicate IDs atomically with 400. Update nil fields are omitted; `description: ""`
+clears. `bookIDsInOrder` encodes as `books` and is a **full permutation of existing membership**,
+not replacement membership; omitted/empty books are no-ops. Add partially accepts valid IDs,
+ignores existing members, returns 400 for zero valid IDs, and appends in database order rather
+than promising request order. Remove ignores unknown/nonmember IDs but returns 500 for an empty
+array. Empty collections return 200 `books: []`, including detail GET; a nonempty collection
+with all books filtered from a user instead returns 404 (not the owned two-book seed scenario).
+
+2.37.2 strips tags from names, rejects inaccessible-library create with 403 and hides inaccessible
+IDs with 404. 2.26.0 lacks these library-access checks and name sanitization. Tests preserve these
+differences and avoid exotic invalid JSON types. Unknown collection lookup precedes write permission
+checks. All writes except delete need update permission; delete needs delete permission.
+
+Canonical source is `advplyr/audiobookshelf`, with immutable evidence:
+
+- 2.26.0 pin `264ae928a9c1af620487488110eec816b14e23ec`:
+  [routes](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/routers/ApiRouter.js#L144-L154),
+  [writes](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/CollectionController.js#L31-L212),
+  [batch/middleware](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/CollectionController.js#L307-L441),
+  [serialization](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/models/Collection.js#L222-L289),
+  [user deletion](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/UserController.js#L365-L407).
+- 2.37.2 pin `edb1f7efc92ecacdef51aafb4d9d5054ce10604f`:
+  [routes](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/routers/ApiRouter.js#L144-L154),
+  [writes](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/CollectionController.js#L32-L223),
+  [batch/middleware](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/CollectionController.js#L318-L456),
+  [serialization](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/models/Collection.js#L222-L289),
+  [user deletion](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/UserController.js#L363-L406),
+  [permission provisioning](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/UserController.js#L152-L168),
+  [ordinary defaults](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/models/User.js#L169-L184).
+
+The two `ABSAPITests/Fixtures/collection-writes-*.json` fixtures were captured on 2026-11-10
+from one actual create per owned disposable official image, using the existing ordered
+`taleID/singleFileID` seed. No mutation was replayed just to capture JSON. Collection IDs,
+book/media/author IDs, paths and dates are synthetic; filesystem/audio-probe fields are trimmed.
+Both raw responses had exactly two expanded library items in request order. Tests compare raw
+versus decoded counts/IDs, and live writes compare the untrimmed response before trusting lossy
+decoding. Capture collections were explicitly deleted and the servers/temp directories removed.
+
+| Official image | RepoDigest (`ghcr.io/advplyr/audiobookshelf@…`) | `/status.serverVersion` | Revision label |
+| --- | --- | --- | --- |
+| `:2.26.0` | `sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5` | `2.26.0` | `264ae928a9c1af620487488110eec816b14e23ec` |
+| `:2.37.2` | `sha256:b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa` | `2.37.2` | `edb1f7efc92ecacdef51aafb4d9d5054ce10604f` |
+
+`Config.Labels` also reported `org.opencontainers.image.source=https://github.com/advplyr/audiobookshelf`,
+`title=audiobookshelf`, `url=https://github.com/advplyr/audiobookshelf`, `licenses=GPL-3.0`,
+`description=Self-hosted audiobook and podcast server`; `version` matched each release, and `created`
+was respectively `2025-07-12T19:13:12.866Z` / `2026-10-23T19:58:49.792Z`.
+Before any new acceptance run, inspect official image digests, actual server version and **all**
+labels. Require a present revision label matching the exact pin. A mismatch fails the gate;
+an absent label is not proof: pause for a coordinator decision on a separately recorded
+exact-source disposable build fallback. A tag or version string alone is insufficient.
+
+Run the focused `Collection|LibraryEndpointsTests|ItemEndpointsTests|LibraryResponseDecodingTests|LibraryModelTests`
+package filter, then `scripts/test-server.sh test --filter CollectionWriteContractTests` and
+`mise run test:server` with each exact `ABS_SERVER_VERSION=2.26.0` and `2.37.2`. Record actual
+non-skipped live test counts and cleanup, not default-suite skips. Also run `mise run lint`,
+`mise run xcproj:check` and `mise run test`, with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
+and `MISE_TRUSTED_CONFIG_PATHS=$PWD`. These checks do not constitute VM, UI or device acceptance.
 
 ## CI
 
