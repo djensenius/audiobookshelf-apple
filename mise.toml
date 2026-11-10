@@ -24,12 +24,12 @@ run = "actionlint"
 [tasks."lint:swift"]
 description = "Lint Swift sources with swift format"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
-run = "swift format lint --strict --recursive --parallel Audiobookshelf AudiobookshelfTests Packages"
+run = "swift format lint --strict --recursive --parallel Audiobookshelf AudiobookshelfTests Packages Tools"
 
 [tasks.format]
 description = "Format Swift sources in place with swift format"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
-run = "swift format format --in-place --recursive --parallel Audiobookshelf AudiobookshelfTests Packages"
+run = "swift format format --in-place --recursive --parallel Audiobookshelf AudiobookshelfTests Packages Tools"
 
 [tasks."xcproj:check"]
 description = "Verify Audiobookshelf.xcodeproj/project.xcproj is in canonical form"
@@ -69,6 +69,11 @@ description = "Run AudiobookshelfKit package tests"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm"
 
+[tasks."test:kit:slow"]
+description = "Run slow AudiobookshelfKit tests (OSLogStore integration)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}", ABS_SLOW_TESTS = "1" }
+run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter OSLogStoreIntegrationTests"
+
 [tasks."test:app"]
 description = "Run app tests on macOS"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
@@ -96,9 +101,24 @@ fi
 xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination "platform=iOS Simulator,id=$udid" -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO
 """
 
+[tasks."test:tools"]
+description = "Run repository tool tests (Tools/StringsImport)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "swift test --package-path Tools/StringsImport --scratch-path .build/strings-import"
+
 [tasks.test]
-description = "Run package and app tests"
-depends = ["test:kit", "test:app"]
+description = "Run package, tool, and app tests"
+depends = ["test:kit", "test:tools", "test:app"]
+
+[tasks.strings]
+description = "Generate ABSUI's Localizable.xcstrings from strings/ and Localization/native/"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "swift run --package-path Tools/StringsImport --scratch-path .build/strings-import import-strings"
+
+[tasks."strings:check"]
+description = "Verify Localizable.xcstrings and CFBundleLocalizations are up to date"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "swift run --package-path Tools/StringsImport --scratch-path .build/strings-import import-strings --check"
 
 [tasks."upstream:check"]
 description = "Preview the upstream-sync issue without creating it"
