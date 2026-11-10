@@ -32,21 +32,25 @@ public struct PlaybackStartRequest: Encodable, Sendable, Hashable {
 
 /// The body of `/api/session/:id/sync` and of a final `/api/session/:id/close`. The server adds
 /// `timeListened` (wall-clock seconds since the last acknowledged report) to the session's total.
-///
-/// Non-finite or negative values become `0`: `JSONEncoder` can't encode NaN or infinity, and an
-/// HLS item's duration is often indefinite.
 public struct PlaybackSyncReport: Encodable, Sendable, Hashable {
     public let currentTime: Double
     public let timeListened: Double
     public let duration: Double
 
-    public init(currentTime: Double, timeListened: Double, duration: Double) {
-        self.currentTime = Self.sanitized(currentTime)
-        self.timeListened = Self.sanitized(timeListened)
-        self.duration = Self.sanitized(duration)
+    /// Returns `nil` when `currentTime` is NaN, infinite or negative (for example
+    /// `CMTime.invalid.seconds`): the server would rewind the item to 0 on every device, and the
+    /// position never jumps back to 0 (ADR 0007), so the caller skips that report.
+    ///
+    /// A non-finite or negative `timeListened` or `duration` becomes `0`: `JSONEncoder` can't
+    /// encode NaN or infinity, and an HLS item's duration is often indefinite.
+    public init?(currentTime: Double, timeListened: Double, duration: Double) {
+        guard currentTime.isFinite, currentTime >= 0 else { return nil }
+        self.currentTime = currentTime
+        self.timeListened = Self.clamped(timeListened)
+        self.duration = Self.clamped(duration)
     }
 
-    private static func sanitized(_ value: Double) -> Double {
+    private static func clamped(_ value: Double) -> Double {
         value.isFinite && value > 0 ? value : 0
     }
 }
@@ -86,16 +90,14 @@ public struct LocalPlaybackSessionPayload: Encodable, Sendable, Hashable {
     /// Epoch milliseconds; `startedAt` when the session was never updated. The server keeps its
     /// own progress when that is newer.
     public let updatedAt: Int
-    /// Sent with `/session/local`; `/session/local-all` sends one `deviceInfo` for the batch.
-    public let deviceInfo: DeviceInfo?
+    /// Sent with `/session/local`; ``LocalPlaybackSessionBatch`` drops it and sends one
+    /// `deviceInfo` for the batch.
+    public internal(set) var deviceInfo: DeviceInfo?
 
-    /// A payload for `POST /api/session/local`.
+    /// A validated payload for `POST /api/session/local` or, in a ``LocalPlaybackSessionBatch``,
+    /// `POST /api/session/local-all`.
     public init(session: PlaybackSession, deviceInfo: DeviceInfo) throws(LocalSessionPayloadError) {
         try Self.validate(deviceInfo)
-        try self.init(validating: session, deviceInfo: deviceInfo)
-    }
-
-    init(validating session: PlaybackSession, deviceInfo: DeviceInfo?) throws(LocalSessionPayloadError) {
         guard session.playMethod == .local else { throw .notLocal(session.playMethod) }
         guard UUID(uuidString: session.id) != nil else { throw .invalidID(session.id) }
         guard let startedAt = session.startedAt else { throw .missingStartedAt }
@@ -126,14 +128,15 @@ public struct LocalPlaybackSessionBatch: Encodable, Sendable, Hashable {
     public let sessions: [LocalPlaybackSessionPayload]
     public let deviceInfo: DeviceInfo
 
-    /// Validates every session like ``LocalPlaybackSessionPayload/init(session:deviceInfo:)``.
-    public init(sessions: [PlaybackSession], deviceInfo: DeviceInfo) throws(LocalSessionPayloadError) {
+    /// Takes payloads that were each validated by their own init, so one invalid session never
+    /// blocks the others; only `deviceInfo` is checked here.
+    public init(sessions: [LocalPlaybackSessionPayload], deviceInfo: DeviceInfo) throws(LocalSessionPayloadError) {
         try LocalPlaybackSessionPayload.validate(deviceInfo)
-        var payloads: [LocalPlaybackSessionPayload] = []
-        for session in sessions {
-            payloads.append(try LocalPlaybackSessionPayload(validating: session, deviceInfo: nil))
+        self.sessions = sessions.map { payload in
+            var payload = payload
+            payload.deviceInfo = nil
+            return payload
         }
-        self.sessions = payloads
         self.deviceInfo = deviceInfo
     }
 }

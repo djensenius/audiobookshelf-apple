@@ -154,14 +154,20 @@ public enum TrackURLResolver {
 
 // Session ids are capabilities (ADR 0007): descriptions, debug output and mirrors never show them.
 extension PlayableTrack: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
-    /// The URL with the session id in `/public/session/<id>/…` and `/hls/<id>/…` replaced.
+    /// The URL with the session id in `…/public/session/<id>/track/<n>` and `…/hls/<id>/output.m3u8`
+    /// replaced, and without a query.
     public var redactedURL: String {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return "<redacted>" }
         var segments = components.percentEncodedPath.split(separator: "/", omittingEmptySubsequences: false)
             .map(String.init)
-        for index in segments.indices.dropLast() {
-            let isPublicSession = segments[index] == "session" && index > 0 && segments[index - 1] == "public"
-            if isPublicSession || segments[index] == "hls" { segments[index + 1] = "<redacted>" }
+        // Match the route from the end, so a base path containing `hls` or `public` can't shift it.
+        let count = segments.count
+        if count >= 5, segments[count - 5] == "public", segments[count - 4] == "session",
+            segments[count - 2] == "track"
+        {
+            segments[count - 3] = "<redacted>"
+        } else if count >= 3, segments[count - 3] == "hls", segments[count - 1] == "output.m3u8" {
+            segments[count - 2] = "<redacted>"
         }
         components.percentEncodedPath = ""
         components.percentEncodedQuery = nil

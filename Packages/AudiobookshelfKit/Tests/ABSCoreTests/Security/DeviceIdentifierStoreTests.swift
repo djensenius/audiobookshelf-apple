@@ -112,6 +112,21 @@ private func counter(prefix: String) -> @Sendable () -> String {
         #expect(state.items[DeviceIdentifierStore.item] == Data("id-1".utf8))
     }
 
+    @Test func concurrentFirstLoadsReplaceAnEmptyValueOnce() async {
+        let keychain = InMemoryKeychain()
+        keychain.state.withLock { $0.items[DeviceIdentifierStore.item] = Data() }
+        let store = DeviceIdentifierStore(keychain: keychain, makeIdentifier: counter(prefix: "id"))
+        let ids = await withTaskGroup(of: String.self) { group in
+            for _ in 0..<20 { group.addTask { await store.deviceIdentifier() } }
+            return await group.reduce(into: Set<String>()) { $0.insert($1) }
+        }
+        #expect(ids == ["id-1"])
+        let state = keychain.state.withLock { $0 }
+        #expect(state.deletes == 1)
+        #expect(state.adds == 1)
+        #expect(state.items[DeviceIdentifierStore.item] == Data("id-1".utf8))
+    }
+
     @Test func keychainFailureFallsBackWithoutPersistingAndRetriesLater() async {
         let keychain = InMemoryKeychain()
         keychain.state.withLock { $0.failure = KeychainError(status: errSecInteractionNotAllowed) }
@@ -140,9 +155,10 @@ private func counter(prefix: String) -> @Sendable () -> String {
         #expect(query[kSecAttrSynchronizable as String] as? Bool == false)
         #expect(query[kSecUseDataProtectionKeychain as String] as? Bool == true)
         #expect(query[kSecAttrAccessGroup as String] == nil)
+        #expect(KeychainStore().accessGroup == nil)
         #expect(
-            KeychainStore.query(for: item, accessGroup: KeychainStore.sharedAccessGroup)[
-                kSecAttrAccessGroup as String] as? String == "group.org.davidjensenius.Audiobookshelf")
+            KeychainStore.query(for: item, accessGroup: "TEAMID.org.davidjensenius.Audiobookshelf")[
+                kSecAttrAccessGroup as String] as? String == "TEAMID.org.davidjensenius.Audiobookshelf")
     }
 
     @Test(arguments: [
@@ -161,24 +177,28 @@ private func counter(prefix: String) -> @Sendable () -> String {
     }
 }
 
-/// Whether this process can use the data-protection Keychain. Unsigned `swift test` binaries
-/// usually can't (`errSecMissingEntitlement`), so the real-Keychain test is skipped there.
-private let isKeychainAvailable: Bool = {
-    let store = KeychainStore(accessGroup: nil)
+/// The status of a probe add/delete, or `nil` when it succeeded. Unsigned `swift test` binaries
+/// get `errSecMissingEntitlement` from the data-protection Keychain (TODO(#38): signed test host).
+private let keychainProbeStatus: OSStatus? = {
+    let store = KeychainStore()
     let item = KeychainItem(service: "org.davidjensenius.Audiobookshelf.tests", account: UUID().uuidString)
-    do {
+    do throws(KeychainError) {
         _ = try store.add(Data("probe".utf8), for: item, accessibility: .afterFirstUnlockThisDeviceOnly)
         try store.delete(item)
-        return true
+        return nil
     } catch {
-        return false
+        return error.status
     }
 }()
 
+/// Only a missing entitlement or an unavailable Keychain skips; any other probe error fails.
+private let isKeychainUnavailable = [errSecMissingEntitlement, errSecNotAvailable].contains(keychainProbeStatus)
+
 @Suite struct KeychainStoreSystemTests {
-    @Test(.enabled(if: isKeychainAvailable, "Needs a process with Keychain access"))
+    @Test(.disabled(if: isKeychainUnavailable, "Needs a process with Keychain access"))
     func addReadDuplicateDelete() throws {
-        let store = KeychainStore(accessGroup: nil)
+        #expect(keychainProbeStatus == nil)
+        let store = KeychainStore()
         let item = KeychainItem(service: "org.davidjensenius.Audiobookshelf.tests", account: UUID().uuidString)
         defer { try? store.delete(item) }
         #expect(try store.data(for: item) == nil)

@@ -2,7 +2,10 @@ import Foundation
 import Security
 
 // TODO(#38): finish the KeychainStore scope there: update in place, token and custom-header
-// items (AfterFirstUnlock), resolving the shared access group in the app and extensions.
+// items (AfterFirstUnlock), and a real-Keychain test on a signed test host. #38 may pass the
+// resolved `TEAMID.org.davidjensenius.Audiobookshelf` group explicitly; with `nil`, adds already
+// go to that group (the first `keychain-access-groups` entry) and reads search every group, so
+// both find the same items.
 
 /// A Keychain status code returned by a failed generic-password operation.
 public struct KeychainError: Error, Sendable, Hashable {
@@ -54,13 +57,12 @@ public protocol KeychainStoring: Sendable {
 /// Generic passwords in the data-protection Keychain (also on macOS), never synchronised through
 /// iCloud (ADR 0002).
 public struct KeychainStore: KeychainStoring {
-    /// The App Group, also used as the keychain access group shared with extensions (ADR 0002).
-    public static let sharedAccessGroup = AppSettings.appGroupIdentifier
-
-    /// `nil` uses the app's default access group (tests and unsigned hosts).
+    /// `nil` adds to the first `keychain-access-groups` entitlement,
+    /// `$(AppIdentifierPrefix)org.davidjensenius.Audiobookshelf` (ADR 0002), and reads from every
+    /// group the process can access.
     public let accessGroup: String?
 
-    public init(accessGroup: String?) {
+    public init(accessGroup: String? = nil) {
         self.accessGroup = accessGroup
     }
 

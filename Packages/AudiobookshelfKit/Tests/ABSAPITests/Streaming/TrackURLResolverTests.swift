@@ -4,9 +4,10 @@ import Testing
 
 @testable import ABSAPI
 
-private func configuration(customHeaders: [String: String] = [:]) throws -> APIClientConfiguration {
-    try APIClientConfiguration(
-        baseURL: try #require(URL(string: "https://abs.example/abs")), customHeaders: customHeaders)
+private func configuration(
+    base: String = "https://abs.example/abs", customHeaders: [String: String] = [:]
+) throws -> APIClientConfiguration {
+    try APIClientConfiguration(baseURL: try #require(URL(string: base)), customHeaders: customHeaders)
 }
 
 private let current = ServerFeatures(version: ServerVersion(2, 37, 2))
@@ -174,6 +175,16 @@ private func hlsSession(contentUrl: String? = "/hls/sess-hls/output.m3u8") -> Pl
         }
         #expect(direct.tracks[0].redactedURL == "https://abs.example/abs/public/session/<redacted>/track/1")
         #expect(hls.tracks[0].redactedURL == "https://abs.example/abs/hls/<redacted>/output.m3u8")
+    }
+
+    @Test(arguments: ["https://h/hls", "https://h/public", "https://h/hls/public/session"])
+    func redactionIgnoresRouteNamesInTheBasePath(base: String) throws {
+        let direct = try TrackURLResolver.resolve(
+            session: try decodeMultiTrackSession(), features: current, configuration: configuration(base: base))
+        let hls = try TrackURLResolver.resolve(
+            session: hlsSession(), features: current, configuration: configuration(base: base))
+        #expect(direct.tracks[0].redactedURL == "\(base)/public/session/<redacted>/track/1")
+        #expect(hls.tracks[0].redactedURL == "\(base)/hls/<redacted>/output.m3u8")
     }
 
     @Test func customHeadersWithTranscodeFail() throws {

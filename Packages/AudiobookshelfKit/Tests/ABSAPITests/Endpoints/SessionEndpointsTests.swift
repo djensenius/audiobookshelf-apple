@@ -78,9 +78,8 @@ private func localSession(
 
     @Test func syncSendsCurrentTimeTimeListenedAndDuration() async throws {
         let server = StubServer { _ in .text("OK", status: 200) }
-        _ = try await makeClient(server).send(
-            SessionEndpoints.sync(
-                sessionID: "s/1", report: PlaybackSyncReport(currentTime: 120.5, timeListened: 15, duration: 5400)))
+        let report = try #require(PlaybackSyncReport(currentTime: 120.5, timeListened: 15, duration: 5400))
+        _ = try await makeClient(server).send(SessionEndpoints.sync(sessionID: "s/1", report: report))
 
         let sent = try #require(server.requests.first)
         #expect(sent.httpMethod == "POST")
@@ -96,9 +95,8 @@ private func localSession(
         let server = StubServer { _ in .text("OK", status: 200) }
         let client = try makeClient(server)
         _ = try await client.send(SessionEndpoints.close(sessionID: "s1"))
-        _ = try await client.send(
-            SessionEndpoints.close(
-                sessionID: "s1", report: PlaybackSyncReport(currentTime: 10, timeListened: 2.5, duration: 100)))
+        let report = try #require(PlaybackSyncReport(currentTime: 10, timeListened: 2.5, duration: 100))
+        _ = try await client.send(SessionEndpoints.close(sessionID: "s1", report: report))
 
         let requests = server.requests(path: "/abs/api/session/s1/close")
         #expect(requests.count == 2)
@@ -160,14 +158,16 @@ private func localSession(
                 #"{"results":[{"id":"\#(localSessionID)","success":true,"progressSynced":true},"#
                     + #"{"id":"\#(otherLocalSessionID)","success":false,"error":"Media item not found"}]}"#)
         }
-        let sessions = [localSessionID, otherLocalSessionID].map {
-            PlaybackSession(
-                id: $0, libraryItemId: "li-\($0)", mediaType: .book, playMethod: .local, deviceInfo: deviceInfo,
-                startedAt: 1_762_732_800_000)
+        let sessions = try [localSessionID, otherLocalSessionID].map {
+            try LocalPlaybackSessionPayload(
+                session: PlaybackSession(
+                    id: $0, libraryItemId: "li-\($0)", mediaType: .book, playMethod: .local, deviceInfo: deviceInfo,
+                    startedAt: 1_762_732_800_000),
+                deviceInfo: deviceInfo)
         }
 
         let response = try await makeClient(server).send(
-            SessionEndpoints.syncLocalAll(LocalPlaybackSessionBatch(sessions: sessions, deviceInfo: deviceInfo)))
+            SessionEndpoints.syncLocalAll(try LocalPlaybackSessionBatch(sessions: sessions, deviceInfo: deviceInfo)))
 
         #expect(response.results.map(\.id) == [localSessionID, otherLocalSessionID])
         #expect(response.results[0].progressSynced == true)
@@ -223,19 +223,25 @@ private func localSession(
         #expect(plan.tracks.count == 2)
     }
 
-    @Test func syncReportReplacesNonFiniteAndNegativeValues() throws {
-        let report = PlaybackSyncReport(currentTime: .nan, timeListened: -3, duration: .infinity)
-        #expect(report == PlaybackSyncReport(currentTime: 0, timeListened: 0, duration: 0))
+    @Test(arguments: [Double.nan, .infinity, -.infinity, -0.5])
+    func syncReportRejectsAnInvalidCurrentTime(currentTime: Double) {
+        #expect(PlaybackSyncReport(currentTime: currentTime, timeListened: 1, duration: 9) == nil)
+    }
+
+    @Test func syncReportClampsNonFiniteOrNegativeListeningAndDuration() throws {
+        let report = try #require(PlaybackSyncReport(currentTime: 42, timeListened: .nan, duration: .nan))
+        #expect(report == PlaybackSyncReport(currentTime: 42, timeListened: 0, duration: 0))
         let json = try #require(
             try JSONSerialization.jsonObject(with: JSONEncoder().encode(report)) as? [String: Double])
-        #expect(json == ["currentTime": 0, "timeListened": 0, "duration": 0])
-        #expect(PlaybackSyncReport(currentTime: 5, timeListened: 1, duration: 9).currentTime == 5)
+        #expect(json == ["currentTime": 42, "timeListened": 0, "duration": 0])
+        #expect(PlaybackSyncReport(currentTime: 0, timeListened: -3, duration: .infinity)?.duration == 0)
+        #expect(PlaybackSyncReport(currentTime: 0, timeListened: -3, duration: .infinity)?.timeListened == 0)
     }
 
     @Test func syncAndCloseOfAGoneSessionAreNotFound() async throws {
         let server = StubServer { _ in .text("Not Found", status: 404) }
         let client = try makeClient(server)
-        let report = PlaybackSyncReport(currentTime: 1, timeListened: 1, duration: 2)
+        let report = try #require(PlaybackSyncReport(currentTime: 1, timeListened: 1, duration: 2))
         await #expect(throws: APIError.notFound) {
             _ = try await client.send(SessionEndpoints.sync(sessionID: "gone", report: report))
         }
@@ -269,12 +275,34 @@ private func localSession(
         #expect(throws: LocalSessionPayloadError.missingDeviceID) {
             try LocalPlaybackSessionPayload(session: localSession(), deviceInfo: DeviceInfo(deviceId: ""))
         }
-        #expect(throws: LocalSessionPayloadError.missingStartedAt) {
-            try LocalPlaybackSessionBatch(
-                sessions: [localSession(), localSession(startedAt: nil)], deviceInfo: deviceInfo)
-        }
         #expect(throws: LocalSessionPayloadError.missingDeviceID) {
-            try LocalPlaybackSessionBatch(sessions: [localSession()], deviceInfo: DeviceInfo())
+            try LocalPlaybackSessionBatch(sessions: [], deviceInfo: DeviceInfo())
         }
+    }
+
+    @Test func oneInvalidSessionDoesNotBlockTheBatch() async throws {
+        let server = StubServer { _ in .json(#"{"results":[]}"#) }
+        let candidates = [
+            localSession(), localSession(id: "not-a-uuid"), localSession(startedAt: nil),
+            localSession(id: otherLocalSessionID),
+        ]
+        var rejected: [String] = []
+        let valid = candidates.compactMap { session -> LocalPlaybackSessionPayload? in
+            do {
+                return try LocalPlaybackSessionPayload(session: session, deviceInfo: deviceInfo)
+            } catch {
+                rejected.append(session.id)
+                return nil
+            }
+        }
+        #expect(rejected == ["not-a-uuid", localSessionID])
+
+        _ = try await makeClient(server).send(
+            SessionEndpoints.syncLocalAll(try LocalPlaybackSessionBatch(sessions: valid, deviceInfo: deviceInfo)))
+
+        let json = try jsonBody(server.requests.first)
+        let sent = try #require(json["sessions"] as? [[String: Any]])
+        #expect(sent.map { $0["id"] as? String } == [localSessionID, otherLocalSessionID])
+        #expect(sent.allSatisfy { $0["deviceInfo"] == nil })
     }
 }
