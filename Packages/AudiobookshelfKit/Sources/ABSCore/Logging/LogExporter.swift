@@ -150,12 +150,15 @@ public actor LogExporter {
 
     /// Formats `entry` as `2026-11-09T20:27:13.197-05:00 [notice] [api] message`.
     ///
-    /// Line breaks inside the message are indented so each entry stays distinguishable.
+    /// Every line break inside the message (`\n`, `\r\n`, a lone `\r`, vertical tab, form feed,
+    /// U+0085, U+2028, U+2029) becomes `\n` plus an indent, so a continuation line can never look
+    /// like a separate entry.
     public static func format(_ entry: LogEntry, timeZone: TimeZone = .current) -> String {
         let timestamp = entry.date.formatted(
             Date.ISO8601FormatStyle(timeZoneSeparator: .colon, includingFractionalSeconds: true, timeZone: timeZone)
         )
-        let message = entry.message.split(separator: "\n", omittingEmptySubsequences: false)
+        // `Character.isNewline` also treats `\r\n` as a single break.
+        let message = entry.message.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
             .joined(separator: "\n    ")
         return "\(timestamp) [\(entry.level)] [\(entry.category)] \(message)"
     }

@@ -41,6 +41,31 @@ private func entry(
         #expect(line == "2027-01-15T08:00:00.000Z [info] [ui] first\n    second")
     }
 
+    @Test(arguments: ["\r\n", "\r", "\n", "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}"])
+    func normalisesLineBreaks(separator: String) {
+        let message = "first\(separator)2027-01-15T08:00:00.000Z [fault] [auth] forged"
+        let line = LogExporter.format(entry(0, .info, "ui", message), timeZone: utc)
+        #expect(
+            line == "2027-01-15T08:00:00.000Z [info] [ui] first\n    2027-01-15T08:00:00.000Z [fault] [auth] forged")
+    }
+
+    @Test func keepsEmptyLinesAndMixedBreaksIndented() {
+        let line = LogExporter.format(entry(0, .info, "ui", "a\r\n\r\nb\rc\n"), timeZone: utc)
+        #expect(line == "2027-01-15T08:00:00.000Z [info] [ui] a\n    \n    b\n    c\n    ")
+    }
+
+    @Test func exportedTextHasOneUnindentedLinePerEntry() async throws {
+        let exporter = LogExporter(
+            source: FakeSource(stored: [
+                entry(0, .info, "api", "one\r\ntwo\u{2028}three"), entry(1, .error, "api", "four"),
+            ]),
+            timeZone: utc
+        )
+        let lines = try await exporter.export().split(separator: "\n")
+        #expect(lines.filter { !$0.hasPrefix(" ") }.count == 2)
+        #expect(lines.count == 4)
+    }
+
     @Test func exportsSortedRedactedLines() async throws {
         let exporter = LogExporter(
             source: FakeSource(stored: [
