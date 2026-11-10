@@ -164,7 +164,7 @@ General rules:
 | `ServerConnectionRecord` | `id: UUID` | `address` (normalized base URL with subpath, no trailing `/`), `userId`, `username`, `authMethod` (`local`/`openid`), `serverVersion: String?`, `createdAt`, `lastUsedAt: Date?`, `isDisconnected: Bool`, `disconnectedAt: Date?` | `#Unique([\.id], [\.address, \.userId])`; `#Index([\.lastUsedAt])` |
 | `LocalLibraryItem` | `id: UUID` | `serverConnectionID: UUID`, `serverAddress`, `serverUserId`, `libraryItemId`, `mediaType` (`book`/`podcast`), `title`, `authorName: String?`, `relativeDirectory`, `coverRelativePath: String?`, `coverUpdatedAt: Date?`, `addedAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) files: [LocalFile]` | `#Unique([\.id], [\.serverConnectionID, \.libraryItemId])`; `#Index([\.libraryItemId], [\.serverConnectionID])` |
 | `LocalFile` | `id: UUID` | `item: LocalLibraryItem?` (inverse), `kind` (`audio`/`ebook`), `relativePath`, `filename`, `mimeType`, `size: Int64`, `serverIno: String?`, `trackIndex: Int?` (book track order), `episodeId: String?` (podcast) | `#Unique([\.id])` |
-| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date` (latest change, for display and ordering only), `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `audioEditedAt: Date?`, `finishedEditedAt: Date?`, `ebookEditedAt: Date?`, `@Attribute(.codable) serverBaseline: ProgressBaseline?`, `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
+| `LocalMediaProgress` | `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `localLibraryItemID: UUID?`, `duration`, `progress`, `currentTime`, `isFinished`, `ebookLocation: String?`, `ebookProgress: Double?`, `startedAt: Date?`, `finishedAt: Date?`, `lastUpdate: Date` (latest change, for display and ordering only), `audioDirty: Bool`, `finishedDirty: Bool`, `ebookDirty: Bool`, `audioEditedAt: Date?`, `finishedEditedAt: Date?`, `ebookEditedAt: Date?`, `@Attribute(.codable) serverBaseline: ProgressBaseline?`, `@Attribute(.codable) unacknowledgedSend: ProgressSend?`, `needsServerSync: Bool` (true when any dirty flag is set), `lastSyncAttemptAt: Date?`, `lastSyncError: String?` | `#Unique([\.key])`; `#Index([\.needsServerSync], [\.serverConnectionID, \.libraryItemId], [\.localLibraryItemID])` |
 | `DownloadRecord` | `id: UUID`, `key: String` (media key) | `serverConnectionID: UUID`, `libraryItemId`, `episodeId: String?`, `mediaType`, `title`, `state` (`queued`/`downloading`/`paused`/`failed`), `relativeDirectory`, `createdAt`, `updatedAt`, `@Attribute(.codable) media: LocalMediaSnapshot`, `@Relationship(deleteRule: .cascade) parts: [DownloadPart]` | `#Unique([\.id], [\.key])`; `#Index([\.state])` |
 | `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `hasResumeData: Bool` (flag only; the sealed blob lives outside the store), `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
 | `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?` | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
@@ -208,7 +208,9 @@ Model notes:
   the indexed pending-sync query. `serverBaseline` is a `Codable, Sendable` struct
   owned by `ABSData` (`currentTime`, `progress`, `duration`, `isFinished`,
   `finishedAt`, `ebookLocation`, `ebookProgress`, `lastUpdate`) holding the
-  server's values as last seen or acknowledged. Conflicts are detected per group
+  server's values as last seen or acknowledged. `unacknowledgedSend` is a
+  `ProgressSend` struct (the sent groups' values and their `<group>EditedAt`) for
+  a PATCH that hasn't been acknowledged. Conflicts are detected per group
   against this baseline, never with the row-wide `lastUpdate`. Sync rules:
   - **Seeding.** When a row is created and server progress for that media is known
     (`ProgressCache`, `/api/me`, or a progress response), every field and the
@@ -219,6 +221,15 @@ Model notes:
     An ebook-only save never sends `currentTime`, `progress`, `duration` or
     `isFinished`, so it can't wipe audio progress made on another device, and
     vice versa.
+  - **Stale server values are dropped before any merge.** `LocalProgressStore`
+    keeps an in-memory generation counter and, per row, the generation of its last
+    local edit or PATCH settlement. Every fetch (`/api/me`, an expanded item,
+    `/api/me/progress/:id`) captures the counter when it is issued, and every socket
+    `user_item_progress_updated` captures it when received. When the values are
+    applied, a row whose generation has advanced since that capture is skipped; the
+    next fetch picks up any real server change. The counter can be in memory
+    because no fetch outlives the process. In addition, server values whose
+    `lastUpdate` is older than `serverBaseline.lastUpdate` are dropped.
   - **Merge** (replaces the row-wide rule in
     `ApiClient.syncLocalSessionsWithServer`), for each group when server progress
     arrives:
@@ -226,6 +237,11 @@ Model notes:
     - dirty, and the server's values for the group equal the baseline's: the
       server hasn't changed that group since we last saw it, so the local values
       are kept and stay dirty;
+    - dirty, and the server's group equals that group in `unacknowledgedSend`:
+      it is the echo of our own PATCH whose response was lost. The baseline
+      advances to those values, the group leaves `unacknowledgedSend`, and the
+      flag clears only if `<group>EditedAt` still equals the sent one. A newer
+      local edit stays dirty and is never rolled back;
     - dirty, and the server's group differs from the baseline (or there is no
       baseline): a real conflict. The local group wins only if its
       `<group>EditedAt` is later than the server's `lastUpdate`; otherwise the
@@ -237,23 +253,28 @@ Model notes:
     for `currentTime` and `duration`, 0.001 for `progress` and `ebookProgress`,
     and are exact otherwise.
   - **Clearing.** The PATCH is built from a snapshot of the dirty groups' values
-    and their `<group>EditedAt`. After it succeeds, the store always copies the
-    sent snapshot values into `serverBaseline` for every sent group, because the
-    server now holds them. It then clears a group's flag only if its
-    `<group>EditedAt` still equals the snapshot's. A group edited during the
+    and their `<group>EditedAt`, taken when it is sent; a retry always takes a new
+    snapshot of the current values, never the earlier one. Before sending, the
+    store saves the snapshot as `unacknowledgedSend` (values plus the sent
+    `<group>EditedAt`). A failure or lost response leaves it, the flags and the
+    baseline unchanged. After it succeeds, the store always copies the sent
+    snapshot values into `serverBaseline` for every sent group, because the server
+    now holds them, sets `serverBaseline.lastUpdate` from the response when the
+    server returns one, and clears `unacknowledgedSend`. It then clears a group's
+    flag only if its `<group>EditedAt` still equals the snapshot's. A group edited during the
     request stays dirty with its newer local values, and the next fetch sees the
     server matching the advanced baseline, so the edit is kept and sent rather
     than treated as a conflict.
   - **Merges during an in-flight PATCH.** While a PATCH for a row is in flight,
     server progress for that row (a fetch, `/api/me`, or a socket
     `user_item_progress_updated` echo of the PATCH itself) is not merged into any
-    group the PATCH carries. The store keeps only the latest such server values
-    as the row's pending server state and merges them once the PATCH settles:
-    after the clearing step on success, or unchanged on failure. Groups the PATCH
-    doesn't carry merge immediately. So a server update can never overwrite a
-    local edit made during the request or clear its dirty flag before the
-    acknowledgement; on success the deferred merge sees the server matching the
-    advanced baseline and keeps the newer local values dirty.
+    group the PATCH carries. Groups the PATCH doesn't carry merge immediately.
+    Values for the carried groups may be held until the PATCH settles, but they
+    keep their original capture and still go through the stale check. Settlement
+    advances the row's generation, so in practice they are dropped, and the next
+    fetch brings the server state after the PATCH. So a server update can never
+    overwrite a local edit made during the request, clear its dirty flag before
+    the acknowledgement, or roll a group back to its value before the PATCH.
 
   `LocalProgressStore.pruneSynced()` deletes rows with `needsServerSync == false`
   and `localLibraryItemID == nil`.
@@ -523,7 +544,10 @@ Ongoing checks:
   stays dirty) and dirty audio followed by a later local ebook edit while the
   server's audio changed (the server's audio wins); an edit made while its PATCH
   is in flight advances the baseline to the sent values, stays dirty, and survives
-  the next fetch; a server echo of an in-flight PATCH (newer `lastUpdate`, older
+  the next fetch; a fetch issued before a local seek or PATCH and applied after it
+  changes nothing; a PATCH whose response is lost, followed by a newer seek and
+  the server's echo of the first PATCH, keeps the newer seek dirty, and the retry
+  sends the newer seek; a server echo of an in-flight PATCH (newer `lastUpdate`, older
   values) arriving after a newer local seek is deferred and leaves the seek dirty
   and unchanged, on both PATCH success and failure; deleting a connection with dirty progress and then logging in
   again to the same address and user returns the same connection `id`, and
