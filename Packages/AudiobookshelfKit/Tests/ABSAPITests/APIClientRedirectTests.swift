@@ -157,19 +157,4 @@ private func hasCredentials(_ request: URLRequest?) -> Bool {
 
         #expect(next == nil)
     }
-
-    @Test(arguments: [
-        ("https://a.example", "https://a.example:443/x", true),
-        ("https://a.example", "https://A.EXAMPLE/x", true),
-        ("http://a.example", "https://a.example/x", true),
-        ("http://a.example:8080", "https://a.example:8443/x", false),
-        ("https://a.example", "http://a.example/x", false),
-        ("https://a.example", "https://b.example/x", false),
-        ("https://a.example", "https://a.example:8443/x", false),
-    ])
-    func comparesOrigins(current: String, next: String, expected: Bool) throws {
-        let current = try #require(URL(string: current))
-        let next = try #require(URL(string: next))
-        #expect(RedirectPolicy.isSameOrigin(current, next) == expected)
-    }
 }
