@@ -400,7 +400,10 @@ public final class ConnectViewModel {
     private func run(_ work: @escaping @MainActor () async -> Void) async {
         task?.cancel()
         let attempt = self.attempt
-        let task = Task { await work() }
+        let task = Task {
+            guard !Task.isCancelled else { return }
+            await work()
+        }
         self.task = task
         await withTaskCancellationHandler {
             await task.value
