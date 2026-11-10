@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSCore
@@ -93,13 +94,152 @@ import Testing
     @Test func aHeldHitCountsAgainstTheCapUntilReleased() async throws {
         let pipeline = try await makePipeline()
         _ = try await pipeline.image(for: harness.key(), pixelBox: box)
-        var held = pipeline.cachedImage(for: harness.key(), pixelBox: box)
-        let cost = try #require(held?.cost)
-        await pipeline.trimMemory(toFraction: 0)
-        let trimmed = await pipeline.memoryCost
-        #expect(trimmed.lru == 0 && trimmed.combined == cost)
-        held = nil
+        do {
+            let held = try #require(pipeline.cachedImage(for: harness.key(), pixelBox: box))
+            await pipeline.trimMemory(toFraction: 0)
+            let trimmed = await pipeline.memoryCost
+            #expect(trimmed.lru == 0 && trimmed.combined == held.cost)
+            withExtendedLifetime(held) {}
+        }
         try await yieldUntil { await pipeline.memoryCost.combined == 0 }
+    }
+
+    @Test func aDecodeFinishingAfterItsServerIsRemovedIsNotCached() async throws {
+        let pipeline = try await makePipeline()
+        let space = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        let context = try #require(
+            CGContext(
+                data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let bitmap = DecodedBitmap(try #require(context.makeImage()), ledger: nil)
+        let memoryKey = MemoryKey(key: harness.key(), box: box)
+        await pipeline.removeServer(harness.serverID)
+        await #expect(throws: ImagePipelineError.noRequest) { try await pipeline.cache(bitmap, for: memoryKey) }
+        #expect(pipeline.cachedImage(for: harness.key(), pixelBox: box) == nil)
+        // Setting a builder again re-enables the server.
+        await pipeline.setRequestBuilder(TestRequestBuilder(host: "unused.images.test"), for: harness.serverID)
+        try await pipeline.cache(bitmap, for: memoryKey)
+        #expect(pipeline.cachedImage(for: harness.key(), pixelBox: box)?.cgImage === bitmap.cgImage)
+    }
+
+    /// A counter shared by the stress test's tasks.
+    private final class Counter: Sendable {
+        private let value = Mutex(0)
+
+        var current: Int { value.withLock { $0 } }
+
+        func advance() {
+            value.withLock { $0 += 1 }
+        }
+    }
+
+    /// Counts the trims and server removals that start or end, so a reader can tell whether one
+    /// overlapped its lookups.
+    private final class Disruptions: Sendable {
+        private let state = Mutex((running: 0, changes: 0))
+
+        /// The change count if none is running, else `nil`.
+        var quiet: Int? { state.withLock { $0.running == 0 ? $0.changes : nil } }
+        var changes: Int { state.withLock { $0.changes } }
+
+        func during(_ body: () async -> Void) async {
+            state.withLock {
+                $0.running += 1
+                $0.changes += 1
+            }
+            await body()
+            state.withLock {
+                $0.running -= 1
+                $0.changes += 1
+            }
+        }
+    }
+
+    @Test func concurrentLookupsLoadsTrimsAndRemovalsKeepTheCapAndHeldHits() async throws {
+        let limit = 6 << 20
+        let pipeline = try await makePipeline(mebibytes: 6)
+        let removable = UUID()
+        let keys =
+            (0..<12).map { harness.key("item-\($0)") }
+            + (0..<4).map { ImageKey(serverID: removable, kind: .itemCover, entityID: "item-\($0)", updatedAt: 1) }
+        for key in keys.prefix(4) {
+            _ = try await pipeline.image(for: key, pixelBox: box)
+        }
+        // Everything but the loaders runs until they finish.
+        let disruptions = Disruptions()
+        let (loadersDone, hits, checkedHits) = (Counter(), Counter(), Counter())
+        let loaders = 4
+        let box = box
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for loader in 0..<loaders {
+                group.addTask {
+                    defer { loadersDone.advance() }
+                    for step in 0..<30 {
+                        let key = keys[(loader * 7 + step * 5) % keys.count]
+                        do {
+                            let image = try await pipeline.image(for: key, pixelBox: box)
+                            await Task.yield()
+                            withExtendedLifetime(image) {}
+                        } catch  where key.serverID == removable {
+                            // Removed meanwhile.
+                        }
+                    }
+                }
+            }
+            for reader in 0..<8 {
+                group.addTask {
+                    var step = reader * 3
+                    while loadersDone.current < loaders {
+                        step += 1
+                        let key = keys[step % keys.count]
+                        let before = disruptions.quiet
+                        guard let hit = pipeline.cachedImage(for: key, pixelBox: box) else {
+                            await Task.yield()
+                            continue
+                        }
+                        hits.advance()
+                        #expect(hit.pixelWidth == 512)
+                        await Task.yield()
+                        let again = pipeline.cachedImage(for: key, pixelBox: box)
+                        // Only a trim or removal drops a held hit from the LRU, never eviction.
+                        if let before, disruptions.changes == before {
+                            checkedHits.advance()
+                            #expect(again?.cgImage === hit.cgImage)
+                        }
+                    }
+                }
+            }
+            group.addTask {
+                var step = 0
+                while loadersDone.current < loaders {
+                    step += 1
+                    await disruptions.during { await pipeline.trimMemory(toFraction: [0, 0.25, 0.5][step % 3]) }
+                    try await Task.sleep(for: .milliseconds(2))
+                }
+            }
+            group.addTask {
+                while loadersDone.current < loaders {
+                    await disruptions.during {
+                        await pipeline.removeServer(removable)
+                        await pipeline.setRequestBuilder(TestRequestBuilder(host: "unused.images.test"), for: removable)
+                    }
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+            }
+            group.addTask {
+                while loadersDone.current < loaders {
+                    let cost = await pipeline.memoryCost
+                    // Held hits are charged once, like every other live image.
+                    #expect(cost.lru <= cost.combined && cost.combined <= limit)
+                    await Task.yield()
+                }
+            }
+            try await group.waitForAll()
+        }
+        // The race was exercised, not skipped.
+        #expect(hits.current > 0 && checkedHits.current > 0)
+        await pipeline.trimMemory(toFraction: 0)
+        try await yieldUntil { await pipeline.memoryCost == (0, 0) }
     }
 
     @Test func removedServersImagesMiss() async throws {

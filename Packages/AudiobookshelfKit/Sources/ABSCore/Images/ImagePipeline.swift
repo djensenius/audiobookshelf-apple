@@ -99,6 +99,8 @@ public actor ImagePipeline {
                 }
             }
             do {
+                // Wrapped outside the cache's lock, so the LRU may have evicted the entry since the
+                // decode inserted it; the flight's reference kept the bitmap alive and charged.
                 return CoverImage(try await flight.join())
             } catch is Flight<DecodedBitmap>.Abandoned {
                 continue
@@ -109,8 +111,9 @@ public actor ImagePipeline {
     /// The image for `key` at `pixelBox` if the memory LRU holds it, else `nil`, without
     /// waiting for the actor or loading anything, so a view can show a memory hit on its first
     /// frame. It reads the same LRU as ``image(for:pixelBox:)``: a hit counts as recently used
-    /// and is held like any other ``CoverImage``, so keep the wrapper while the image is shown.
-    /// A removed server's images were purged from the LRU, so they miss here too.
+    /// and is wrapped under the LRU's lock, so it is held before anything can evict it; keep the
+    /// wrapper while the image is shown. A removed server's images are purged from the LRU
+    /// before its loads are cancelled, and none are inserted afterwards, so they miss here too.
     public nonisolated func cachedImage(for key: ImageKey, pixelBox: PixelBox) -> CoverImage? {
         memory.coverImage(for: MemoryKey(key: key, box: pixelBox))
     }
@@ -137,6 +140,8 @@ public actor ImagePipeline {
     public func removeServer(_ serverID: UUID) async {
         builders[serverID] = nil
         removedServers.insert(serverID)
+        // First, so the synchronous lookup stops returning the server's covers at once.
+        memory.removeAll { $0.key.serverID == serverID }
         for (key, flight) in fetches where key.key.serverID == serverID {
             flight.cancel()
             fetches[key] = nil
@@ -145,7 +150,6 @@ public actor ImagePipeline {
             flight.cancel()
             decodes[key] = nil
         }
-        memory.removeAll { $0.key.serverID == serverID }
         await fileStore.removeServer(serverID)
     }
 
@@ -176,6 +180,7 @@ public actor ImagePipeline {
         let file = try await fetchedFile(for: FetchKey(key: memoryKey.key, skipsDownloaded: skipsDownloaded))
         // A stale downloaded cover is cached under its own version, never the requested one.
         let storeKey = MemoryKey(key: memoryKey.key.with(updatedAt: file.updatedAt), box: memoryKey.box)
+        // Returned bare, like a decode: the waiters wrap it outside the lock.
         if let hit = memory.image(for: storeKey) { return hit }
 
         try await decodeSlots.acquire()
@@ -219,10 +224,18 @@ public actor ImagePipeline {
         let image = DecodedBitmap(cgImage, ledger: ledger)
         ledger.unreserve(reserved)
         reserved = 0
-        memory.insert(image, for: storeKey)
+        try cache(image, for: storeKey)
         // The file's lease must outlive the decode.
         withExtendedLifetime(file) {}
         return image
+    }
+
+    /// Puts a decoded image in the memory LRU, unless its server was removed while it decoded:
+    /// views read the LRU directly through ``cachedImage(for:pixelBox:)``, so nothing may put a
+    /// removed server's covers back.
+    func cache(_ image: DecodedBitmap, for key: MemoryKey) throws {
+        guard !removedServers.contains(key.key.serverID) else { throw ImagePipelineError.noRequest }
+        memory.insert(image, for: key)
     }
 
     /// Makes room for `cost` bytes under the combined cap, waiting for live images to be

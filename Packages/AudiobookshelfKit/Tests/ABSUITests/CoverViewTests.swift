@@ -52,6 +52,13 @@ import Testing
         #expect(ImageReveal.fade.animation == .easeIn(duration: 0.3))
     }
 
+    @Test func onlyALoadedImageFadesInAndAFailureShowsAtOnce() {
+        let loaded: Result<String, any Error> = .success("cover")
+        let failed: Result<String, any Error> = .failure(LoadFailed())
+        #expect(ImageReveal.animation(for: loaded) == ImageReveal.fade.animation)
+        #expect(ImageReveal.animation(for: failed) == nil)
+    }
+
     @Test func voiceOverValueSpeaksProgressOrFinished() {
         let locale = Locale(identifier: "en_US")
         #expect(CoverView.accessibilityValue(progress: nil, isFinished: false, locale: locale) == "")

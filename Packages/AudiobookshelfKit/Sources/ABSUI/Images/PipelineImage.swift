@@ -34,7 +34,8 @@ enum ImageFallback: Hashable {
     }
 }
 
-/// How a newly shown image appears.
+/// How a newly shown image appears. Only images fade: an image is removed without a transition,
+/// and the placeholder and failure views appear at once.
 enum ImageReveal: Hashable {
     /// A memory-cache hit, read synchronously before the frame renders: at full opacity with no
     /// transition, so cached covers don't flash when a cell scrolls back into view.
@@ -53,8 +54,15 @@ enum ImageReveal: Hashable {
     var transition: AnyTransition {
         switch self {
         case .immediate: .identity
-        case .fade: .opacity
+        case .fade: .asymmetric(insertion: .opacity, removal: .identity)
         }
+    }
+
+    /// The animation that publishes a load's result: a loaded image fades in, and a failure
+    /// replaces the placeholder or image at once.
+    static func animation<Image>(for result: Result<Image, any Error>) -> Animation? {
+        guard case .success = result else { return nil }
+        return fade.animation
     }
 }
 
@@ -178,9 +186,11 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
             } action: {
                 size = $0
             }
-            // SwiftUI runs these in the update, before the frame renders, so a memory hit read
-            // in them shows on that frame: when the view (re)appears, and when its size or key
-            // changes. `.task` starts after the frame and loads only what missed.
+            // On first appearance `size` is zero and `request` nil, so `onAppear` has nothing to
+            // look up; `onGeometryChange` then sets the size during the first layout, and
+            // `onChange` reads the memory cache in that same update, so a hit is on the first
+            // frame (PipelineImageHostingTests checks this on macOS). `onAppear` covers a view
+            // that returns with its size kept. `.task` loads only what missed.
             .onAppear { begin(request) }
             .onChange(of: request) { _, newRequest in begin(newRequest) }
             .task(id: request) { await load(request) }
@@ -223,7 +233,7 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
         // Checked after the await: a memory hit doesn't check cancellation, and the task can be
         // cancelled between a successful load and resuming here.
         let isCancelled = Task.isCancelled
-        withAnimation(ImageReveal.fade.animation) {
+        withAnimation(ImageReveal.animation(for: result)) {
             state.finish(request, result: result, isCancelled: isCancelled)
         }
     }

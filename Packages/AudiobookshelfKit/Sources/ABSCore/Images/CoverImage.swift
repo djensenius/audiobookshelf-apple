@@ -128,8 +128,9 @@ final class ImageMemoryLedger: Sendable {
 /// entries, so every reader sees the same LRU: an entry the actor evicts or trims is gone for
 /// all of them.
 ///
-/// Lock order: this cache's lock, then the ledger's (releasing an evicted bitmap updates the
-/// ledger). The ledger never takes this lock.
+/// Removed bitmaps are released after the lock is dropped, so a lookup never waits while
+/// a trim deallocates them. Lock order: this cache's lock, then the ledger's (``makeRoom(for:)``
+/// reads the ledger's total). The ledger never takes this lock.
 final class ImageMemoryCache: Sendable {
     private struct Entry {
         let image: DecodedBitmap
@@ -149,10 +150,11 @@ final class ImageMemoryCache: Sendable {
             return image
         }
 
-        mutating func remove(_ key: MemoryKey) {
-            if let entry = entries.removeValue(forKey: key) {
-                totalCost -= entry.image.cost
-            }
+        /// Removes `key`'s entry and returns its image, for the caller to release after the lock.
+        mutating func remove(_ key: MemoryKey) -> DecodedBitmap? {
+            guard let entry = entries.removeValue(forKey: key) else { return nil }
+            totalCost -= entry.image.cost
+            return entry.image
         }
     }
 
@@ -166,6 +168,8 @@ final class ImageMemoryCache: Sendable {
     }
 
     var count: Int { state.withLock { $0.entries.count } }
+    /// Whether a thread holds the lock, for tests.
+    var isLocked: Bool { state.withLockIfAvailable { _ in } == nil }
     /// The bytes of the images in the LRU.
     var totalCost: Int { state.withLock { $0.totalCost } }
 
@@ -173,57 +177,71 @@ final class ImageMemoryCache: Sendable {
         state.withLock { $0.use(key) }
     }
 
-    /// The image for `key` in a new ``CoverImage``. The wrapper is created under the lock, so the
-    /// bitmap is held before ``makeRoom(for:)`` can pick it for eviction.
+    /// The image for `key` in a new ``CoverImage``. The wrapper is created under the lock, so a
+    /// hit is held before ``makeRoom(for:)`` can pick it for eviction. That holds for hits read
+    /// here only: a decode's waiters wrap its bitmap outside the lock, after it is inserted, so
+    /// the LRU may evict that entry first (the flight's reference keeps the bitmap alive and
+    /// charged meanwhile).
     func coverImage(for key: MemoryKey) -> CoverImage? {
         state.withLock { $0.use(key).map(CoverImage.init) }
     }
 
     func insert(_ image: DecodedBitmap, for key: MemoryKey) {
-        state.withLock { state in
+        // A replaced image is released here, after the lock.
+        _ = state.withLock { state in
             state.clock += 1
-            if let old = state.entries.updateValue(Entry(image: image, lastUse: state.clock), forKey: key) {
-                state.totalCost -= old.image.cost
-            }
             state.totalCost += image.cost
+            let replaced = state.entries.updateValue(Entry(image: image, lastUse: state.clock), forKey: key)
+            if let replaced { state.totalCost -= replaced.image.cost }
+            return replaced
         }
     }
 
     /// Evicts least recently used entries that nothing else holds until `cost` more bytes fit
     /// under the combined cap. Returns `false` if live images alone leave no room.
     func makeRoom(for cost: Int) -> Bool {
-        state.withLock { state in
-            guard ledger.total + cost > limit else { return true }
-            // Keys only: holding the entries would keep their bitmaps alive and charged.
+        let result = state.withLock { state -> (fits: Bool, evicted: [DecodedBitmap]) in
+            guard ledger.total + cost > limit else { return (true, []) }
             var unheld: [(key: MemoryKey, lastUse: UInt64)] = []
             for (key, entry) in state.entries where !entry.image.isHeld {
                 unheld.append((key, entry.lastUse))
             }
+            // The ledger counts the evicted images until they are released after the lock, so
+            // count what eviction frees: the images nothing else, such as a decode's waiters,
+            // still references.
+            var evicted: [DecodedBitmap] = []
+            var freed = 0
             for candidate in unheld.sorted(by: { $0.lastUse < $1.lastUse }) {
-                state.remove(candidate.key)
-                if ledger.total + cost <= limit { return true }
+                guard var image = state.remove(candidate.key) else { continue }
+                if isKnownUniquelyReferenced(&image) { freed += image.cost }
+                evicted.append(image)
+                if ledger.total - freed + cost <= limit { return (true, evicted) }
             }
-            return false
+            return (false, evicted)
         }
+        // The evicted images are released when `result` is, after the lock.
+        return result.fits
     }
 
     /// Removes every entry whose key matches, for example a removed server's.
     func removeAll(where shouldRemove: (MemoryKey) -> Bool) {
-        state.withLock { state in
-            for key in state.entries.keys.filter(shouldRemove) {
-                state.remove(key)
-            }
+        // Released here, after the lock.
+        _ = state.withLock { state in
+            state.entries.keys.filter(shouldRemove).compactMap { state.remove($0) }
         }
     }
 
     /// Evicts least recently used entries until the LRU holds at most `fraction` of the cap.
     func trim(toFraction fraction: Double) {
         let target = Int(Double(limit) * max(0, fraction))
-        state.withLock { state in
+        // Released here, after the lock.
+        _ = state.withLock { state in
             let ordered = state.entries.sorted { $0.value.lastUse < $1.value.lastUse }.map(\.key)
+            var removed: [DecodedBitmap] = []
             for key in ordered where state.totalCost > target {
-                state.remove(key)
+                if let image = state.remove(key) { removed.append(image) }
             }
+            return removed
         }
     }
 }

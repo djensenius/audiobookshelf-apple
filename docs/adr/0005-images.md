@@ -348,6 +348,9 @@ static, unauthenticated remote images (none are planned).
   again. Nothing is written to `CoverFileStore`. Once the device is back
   online, a load of the requested key misses the LRU, skips the stale file, and
   fetches the new cover.
+  - Accepted exception: the synchronous lookup (see the live-image ledger)
+    only knows the requested key, so a stale cover always misses it and fades
+    in, even when it's in memory.
 - **Deduplication and cancellation** (two levels, so views that need the same
   bucket at different pixel sizes share a fetched file but not a decode):
   - **Fetch:** getting the encoded input for steps 2–4 (downloaded file,
@@ -439,6 +442,16 @@ static, unauthenticated remote images (none are planned).
     The memory spike checks it.
   - The pinned Now Playing artwork stays outside the ledger and is budgeted on
     its own.
+  - **Synchronous lookup:** the LRU is one `Mutex`-protected structure, shared
+    by the actor and the nonisolated `cachedImage(for:pixelBox:)`. Views call
+    that before their first frame, so a memory hit shows without waiting for
+    the actor. There is no second copy that could diverge.
+    - A hit is wrapped in its `CoverImage` under the lock, so it is held before
+      eviction can pick it.
+    - Lock order: the LRU's lock, then the ledger's. The ledger never takes the
+      LRU's lock. Removed bitmaps are released after the lock is dropped.
+    - Removing a server purges its entries before its loads are cancelled, and
+      a decode that finishes afterwards isn't cached.
 - **`CoverFileStore`:**
   - **Location:** the store lives in the App Group container so the widget
     extension can read it (P5-11b, #89). Files are at
@@ -560,6 +573,8 @@ static, unauthenticated remote images (none are planned).
 - **Placeholders and palette:**
   - Port the legacy states: a generated title and author placeholder when there
     is no cover, a logo placeholder on failure, and a 0.3 s fade-in.
+  - Only an image loaded from disk or the network fades in. A memory hit shows
+    at full opacity on the first frame, and failures and removals don't animate.
   - When the aspect ratio differs from the library's (1.6 or 1) by more than
     0.15, show the image aspect-fit over a blurred fill of itself.
   - `CoverPalette` computes the average colour with `CIAreaAverage` on the
