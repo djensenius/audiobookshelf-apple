@@ -185,6 +185,86 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    /// In the background a failed transfer's replacement is created before the wake is
+    /// released: after a 503 it begins once the backoff has passed (`earliestBeginDate`), as
+    /// nothing waits in a process iOS can suspend; after a 401 it begins at once. A relaunch
+    /// adopts it like any other transfer.
+    @Test(arguments: [503, 401])
+    func backgroundRetryIsCreatedBeforeTheWakeEnds(status: Int) async throws {
+        let gate = StubGate()
+        let never = StubGate()
+        let harness = try await DownloadHarness {
+            switch $0.stubCount {
+            case 1: .status(status, gate: gate)
+            case 2: .status(200, gate: never)
+            default: .status(200)
+            }
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        // A retry that waited in the process would never begin.
+        let engine = harness.makeEngine(clock: SignallingClock())
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        // The replacement's credentials take a while.
+        harness.credentials.hook.withLock { $0 = { try? await Task.sleep(for: .milliseconds(100)) } }
+        await engine.deactivate()
+
+        let wake = Task { await engine.handleBackgroundEvents() }
+        let failed = Date.now
+        gate.open()
+        await harness.waitForCompletions(1)
+        harness.session?.finishBackgroundEvents()
+        await wake.value
+
+        let session = try #require(harness.session).session
+        let task = try #require(await session.allTasks.first { $0.taskDescription == partID.uuidString })
+        #expect(task.state == .running)
+        if status == 503 {
+            let begins = try #require(task.earliestBeginDate)
+            #expect(begins.timeIntervalSince(failed) >= 1.5)
+            #expect(begins.timeIntervalSince(failed) < 10)
+        } else {
+            #expect(task.earliestBeginDate == nil)
+        }
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .running)
+        #expect(part.taskIdentifier == task.taskIdentifier)
+        #expect(harness.credentials.calls.count == 2)
+
+        // What the next launch finds: the transfer, running in the session.
+        let base = harness.base
+        let relaunched = harness.makeEngine(
+            registry: DownloadEngineRegistry(),
+            prepare: { stub in
+                let url = URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!
+                stub.leaveTask(URLRequest(url: url), description: partID.uuidString)
+            })
+        #expect(await relaunched.activate())
+        #expect(await relaunched.nextRecordComplete() != nil)
+        #expect(harness.credentials.calls.count == 2)
+        #expect(harness.requests.count == 3)
+    }
+
+    /// A completed part queued again downloads again: the file in place is from an earlier
+    /// transfer.
+    @Test func requeuedCompletedPartDownloadsAgain() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        // A second part keeps the record from being finalised.
+        let record = try await harness.addRecord(parts: [partID, UUID()])
+        let engine = harness.makeEngine()
+        let completed = DownloadUpdate.partCompleted(partID: partID, recordID: record.id)
+        await engine.start(partIDs: [partID])
+        #expect(await engine.next { $0 == completed } != nil)
+
+        #expect(try await harness.store.setPartState(.queued, partID: partID, taskIdentifier: nil, requeue: true))
+        await engine.start(partIDs: [partID])
+
+        #expect(await engine.next { $0 == completed } != nil)
+        #expect(harness.requests.count == 2)
+    }
+
     @Test func htmlBodyIsRetried() async throws {
         let harness = try await DownloadHarness {
             $0.stubCount == 1 ? .status(200, body: Data("<html>".utf8), contentType: "text/html") : .status(200)

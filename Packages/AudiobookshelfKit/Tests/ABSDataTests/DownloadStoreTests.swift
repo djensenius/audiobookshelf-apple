@@ -268,6 +268,41 @@ import Testing
         #expect(try await reread.record(id: created.id) == created)
     }
 
+    @Test func queuePartOnlyRequeuesExpectedStates() async throws {
+        let (store, _) = try makeStore()
+        var running = Self.part(state: .running)
+        running.taskIdentifier = 4
+        running.lastError = "lost"
+        running.hasResumeData = true
+        running.bytesWritten = 20
+        running.retryCount = 2
+        let failed = Self.part(trackIndex: 2, filename: "b.mp3", state: .failed)
+        let completed = Self.part(trackIndex: 3, filename: "c.mp3")
+        let created = try await store.upsertRecord(
+            Self.record(key: key, parts: [running, failed, completed], state: .downloading), now: now
+        ).record
+        #expect(try await store.completePart(partID: completed.id, finalBytes: 10, now: now))
+        let later = now.addingTimeInterval(5)
+
+        #expect(try await store.queuePart(partID: running.id, expecting: [.running], now: later))
+        var record = try #require(try await store.record(id: created.id))
+        var expected = running
+        expected.state = .queued
+        expected.taskIdentifier = nil
+        expected.lastError = nil
+        #expect(record.parts.first == expected)
+        #expect(record.updatedAt == later)
+        #expect(record.state == .downloading)
+
+        // A compare-and-set: a part that failed (or completed) since it was read is left alone.
+        #expect(try await store.queuePart(partID: failed.id, expecting: [.running]) == false)
+        #expect(try await store.queuePart(partID: completed.id, expecting: Set(DownloadPartState.allCases)) == false)
+        #expect(try await store.queuePart(partID: UUID(), expecting: [.running]) == false)
+        record = try #require(try await store.record(id: created.id))
+        #expect(record.parts.map(\.state) == [.queued, .failed, .completed])
+        #expect(record.updatedAt == later)
+    }
+
     /// The task finishes before its last throttled progress write lands, with an unknown length:
     /// the final size comes with the completion, and a late progress write can't change it.
     @Test func completionBeforeFinalProgressRecordsFinalSize() async throws {

@@ -188,6 +188,7 @@ final class DownloadHarness: Sendable {
         clock: (any Clock<Duration>)? = nil,
         registry: DownloadEngineRegistry? = nil,
         readRecords: (@Sendable (DownloadStore) async throws -> [DownloadRecordDTO])? = nil,
+        readRecord: (@Sendable (DownloadStore, UUID) async throws -> DownloadRecordDTO?)? = nil,
         cancel: (@Sendable (URLSessionDownloadTask) async -> Data?)? = nil,
         listing: (@Sendable () async -> Void)? = nil,
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
@@ -202,6 +203,7 @@ final class DownloadHarness: Sendable {
             retryPolicy: retryPolicy, networkAccess: { NetworkAccess(policy: .always) }, clock: clock ?? self.clock,
             now: { .now }, random: { 0.5 }, makeSession: factory,
             registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() },
+            readRecord: readRecord ?? { try await $0.record(id: $1) },
             cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() })
     }
 

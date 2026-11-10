@@ -145,7 +145,14 @@ iOS.
   401 for a token that was already replaced doesn't count.
 - 408, 429, 5xx, network errors, an unexpected body or a size mismatch are retried after
   1–2, 2–4, 4–8, 8–16 and 16–32 seconds. If it fails after the fifth retry, the part
-  fails.
+  fails. In the foreground the engine waits out the delay itself. After `deactivate()`
+  (and during a background wake) it creates the part's next task at once, with the delay
+  as the task's `earliestBeginDate`, before it lets the wake end: iOS may suspend the
+  process afterwards, and the system starts that task on time without it. A relaunch
+  adopts it like any surviving transfer. A 401's new task is also created before the
+  wake ends. To check, put the device in the background during a download, make the
+  server answer 503 once, and look for a second request in the server log about 1–2
+  seconds later, without opening the app.
 - A full disk, any other status (such as 404 or 204), or a response from another origin
   fails the part at once.
 - If the download's state can't be saved when a part starts, that counts as a failure
@@ -170,13 +177,20 @@ iOS.
   added to the library is added again on each `activate()`.
 - At the end of a background wake, the engine tries the writes that failed (finished files
   and failed downloads) up to three times, a second apart, before it lets the wake end:
-  iOS may end the process afterwards. If they still fail, the next launch of the part
-  finds its file already in `Downloads/` and records it as finished without a request.
-  It only accepts a file of the expected size written after the download was created, so
-  an older file or a file whose size changed on the server is downloaded again. To check,
-  set a breakpoint in `DownloadStore.completePart`, start a small download, go to the Home
-  Screen, and when the wake stops at the breakpoint, stop the app from Xcode. Open the app
-  again: the download completes without a new request in the server log.
+  iOS may end the process afterwards. If they still fail, the next activation finds the
+  part "downloading" without a task and its file already in `Downloads/`, and records it
+  as finished without a request. It only accepts a file of the expected size that the
+  part's current transfer moved: each start of a part writes a marker in
+  `Application Support/Transfers/` (after deleting the last one), and only a file
+  modified after that marker counts. So a file from an earlier transfer (for example a
+  completed part that was queued again) or a file whose size changed on the server is
+  downloaded again. To check, set a breakpoint in `DownloadStore.completePart`, start a
+  small download, go to the Home Screen, and when the wake stops at the breakpoint, stop
+  the app from Xcode. Open the app again: the download completes without a new request in
+  the server log.
+- At activation, a part the store has "downloading" without a task is queued again only
+  if the store still has it running then: a transfer that failed for good while the
+  engine listed the session's tasks keeps its failed state and error.
 - If a part's state can't be saved after a failure, the part stays "downloading" in the
   store without a task; the engine still retries it (or restarts it on the next
   `activate()`).
@@ -188,16 +202,26 @@ iOS.
   run, and its result (a finished file or a failure) counts only once it is adopted. If
   its download was paused or failed, or its state can't be saved, the transfer is
   cancelled and its part queued, keeping its resume data: a file it finished stays in
-  `Downloads/` for the part's next launch, and a failure doesn't change the download's
-  state.
-- Resuming a download waits for a pause that is still cancelling its transfers, so every
-  part of the download continues.
+  `Downloads/` until the part's next transfer replaces it, and a failure doesn't change
+  the download's state.
+- Pauses and resumes of a download run one at a time, in the order they were called: a
+  resume waits for the whole pause (its state change and every cancellation), so every
+  part of the download continues. A `start(partIDs:)` during a pause waits for each part's
+  cancellation.
 - If a background wake can't read the downloads from the store, it ends at once without a
   session. Its events wait for a later session, and the engine doesn't let them end a later
-  wake early.
+  wake early, even when they arrive while that wake waits: an abandoned wake's
+  events-finished call is matched first.
 
 ## Known limits
 
+- If a background wake's events-finished call never arrives after the wake was abandoned
+  (the store couldn't be read), the next wake waits for one more call than it needs, until
+  iOS suspends the app when its background time runs out.
+- Pausing a download while a background retry waits for its `earliestBeginDate` cancels
+  that task; its resume data was moved into it, so the part may continue from 0%.
+- Retries already waiting in the process when the app goes to the background stay in the
+  process; if iOS suspends it, they run when the app comes back.
 - Until #145 adds a foreground redirect check, the engine refuses to download from a
   server connection that has custom headers (for example `CF-Access-Client-Id` and
   `CF-Access-Client-Secret`): the part fails for good with the

@@ -344,6 +344,38 @@ import Testing
         #expect(harness.registry.consumeAbandonedWake() == false)
     }
 
+    /// An abandoned wake's events-finished call that comes once a later wake waits is the
+    /// abandoned wake's: the later wake waits for its own.
+    @Test func lateFinishOfAnAbandonedWakeDoesNotReleaseAWaitingOne() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let reads = Mutex(0)
+        let engine = harness.makeEngine(readRecords: { store in
+            guard
+                reads.withLock({
+                    $0 += 1; return $0
+                }) > 1
+            else { throw TestError() }
+            return try await store.allRecords()
+        })
+        await engine.handleBackgroundEvents()
+        #expect(await engine.activate())
+
+        let wake = Task { await engine.handleBackgroundEvents() }
+        for _ in 0..<400 {
+            if await engine.backgroundWaiterCount > 0 { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try #require(await engine.backgroundWaiterCount == 1)
+        harness.session?.finishBackgroundEvents()
+        await engine.processPendingEvents()
+        #expect(await engine.backgroundWaiterCount == 1)
+
+        harness.session?.finishBackgroundEvents()
+        await wake.value
+        #expect(await engine.unclaimedBackgroundFinishes == 0)
+        #expect(harness.registry.consumeAbandonedWake() == false)
+    }
+
     @Test func timedOutWaitLeavesNoEntry() async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let registry = DownloadEngineRegistry()
@@ -622,6 +654,34 @@ import Testing
         #expect(harness.session?.resumedData == (withResumeData ? [Data("resume".utf8)] : []))
     }
 
+    /// A surviving transfer that fails for good while the session lists its tasks leaves its
+    /// part failed: activation queues only parts the store still has running.
+    @Test func survivorFailingWhileTasksAreListedStaysFailed() async throws {
+        let harness = try await DownloadHarness { _ in .status(404, body: Data()) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let base = harness.base
+        let listed = StubGate()
+        let engine = harness.makeEngine(
+            listing: { await withCheckedContinuation { continuation in listed.run { continuation.resume() } } },
+            prepare: { stub in
+                let url = URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!
+                stub.leaveTask(URLRequest(url: url), description: partID.uuidString)
+            })
+
+        let activating = Task { await engine.activate() }
+        #expect(await engine.nextPermanentFailure() != nil)
+        listed.open()
+        #expect(await activating.value)
+        await engine.waitForRestart()
+
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .failed)
+        #expect(part.lastError == "The server returned HTTP 404.")
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        #expect(harness.requests.count == 1)
+    }
+
     @Test func unsavedRecordFailureBlocksRestartsUntilSaved() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { _ in .status(404, body: Data(), gate: gate) }
@@ -649,20 +709,25 @@ import Testing
     }
 
     /// What a background wake whose completion couldn't be saved leaves: the moved file, and
-    /// the part running. Only a file of the expected size written since the record was created
-    /// completes it.
-    @Test(arguments: [("audio-bytes", false, true), ("audio", false, false), ("audio-bytes", true, false)])
-    func fileAlreadyInPlaceCompletesThePart(contents: String, predatesRecord: Bool, isKept: Bool) async throws {
+    /// the part running. Only a file of the expected size that the part's current transfer
+    /// moved (modified after its start marker) completes it; otherwise the part downloads again.
+    @Test(arguments: [
+        ("audio-bytes", true, true, true), ("audio", true, true, false), ("audio-bytes", true, false, false),
+        ("audio-bytes", false, true, false),
+    ])
+    func fileAlreadyInPlaceCompletesThePart(
+        contents: String, hasMarker: Bool, isNewer: Bool, isKept: Bool
+    ) async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let partID = UUID()
         try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
         let file = harness.fileURL("li_1/1.mp3")
         try FileManager.default.createDirectory(at: harness.fileURL("li_1"), withIntermediateDirectories: true)
         try Data(contents.utf8).write(to: file)
-        if predatesRecord {
-            try FileManager.default.setAttributes(
-                [.modificationDate: Date.distantPast], ofItemAtPath: file.path(percentEncoded: false))
-        }
+        if hasMarker { try harness.locations.markTransferStart(partID: partID) }
+        try FileManager.default.setAttributes(
+            [.modificationDate: isNewer ? Date.now.addingTimeInterval(60) : Date.distantPast],
+            ofItemAtPath: file.path(percentEncoded: false))
         let engine = harness.makeEngine()
 
         #expect(await engine.activate())
@@ -694,10 +759,11 @@ import Testing
         #expect(try await engine.pause(recordID: UUID()) == false)
     }
 
-    /// A restart during a multi-part pause waits for each part's stop, then restarts every part:
-    /// a resume lists them in the record's order, and a start can list them in another.
+    /// A start during a multi-part pause's stops waits for each part's stop, then restarts every
+    /// part, in whatever order it lists them. (A resume waits for the whole pause; see
+    /// ``resumeWaitsForAPauseBeforeItsStops()``.)
     @Test(arguments: [false, true])
-    func resumeWaitsForAPauseUnderWay(reversingParts: Bool) async throws {
+    func startWaitsForAPauseUnderWay(reversingParts: Bool) async throws {
         let never = StubGate()
         let harness = try await DownloadHarness { $0.stubCount <= 2 ? .status(200, gate: never) : .status(200) }
         let partIDs = [UUID(), UUID()]
@@ -726,10 +792,9 @@ import Testing
         // The pause's first cancellation is held while the restart reads the downloads and launches.
         let pausing = Task { try await engine.pause(recordID: record.id) }
         _ = await cancelling.first { _ in true }
-        let resuming = Task {
-            guard reversingParts else { return try await engine.resume(recordID: record.id) }
+        let starting = Task {
             let isQueued = try await harness.store.setState(.queued, forRecord: record.id)
-            await engine.start(partIDs: partIDs.reversed())
+            await engine.start(partIDs: reversingParts ? partIDs.reversed() : partIDs)
             return isQueued
         }
         // The activation and the first start read twice; the restart's start reads the third time.
@@ -738,8 +803,47 @@ import Testing
         release.open()
 
         #expect(try await pausing.value)
-        #expect(try await resuming.value)
+        #expect(try await starting.value)
         // No part is left queued without a transfer (otherwise the record never completes).
+        for partID in partIDs {
+            try #require(try await harness.store.part(id: partID)?.state != .queued)
+        }
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 4)
+    }
+
+    /// A resume that comes while a pause is between its state write and its stops waits for the
+    /// whole pause, then restarts every part the pause stopped.
+    @Test func resumeWaitsForAPauseBeforeItsStops() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { $0.stubCount <= 2 ? .status(200, gate: never) : .status(200) }
+        let partIDs = [UUID(), UUID()]
+        let record = try await harness.addRecord(parts: partIDs)
+        let (reading, readStarted) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let reads = Mutex(0)
+        // The pause's read of its record, after it wrote `paused`, is held.
+        let engine = harness.makeEngine(readRecord: { store, id in
+            if reads.withLock({
+                $0 += 1; return $0
+            }) == 1 {
+                readStarted.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+            return try await store.record(id: id)
+        })
+        await engine.start(partIDs: partIDs)
+        await harness.waitForRequests(2)
+
+        let pausing = Task { try await engine.pause(recordID: record.id) }
+        _ = await reading.first { _ in true }
+        let resuming = Task { try await engine.resume(recordID: record.id) }
+        // Time for a resume that didn't wait to find both transfers still running.
+        try await Task.sleep(for: .milliseconds(200))
+        release.open()
+
+        #expect(try await pausing.value)
+        #expect(try await resuming.value)
         for partID in partIDs {
             try #require(try await harness.store.part(id: partID)?.state != .queued)
         }

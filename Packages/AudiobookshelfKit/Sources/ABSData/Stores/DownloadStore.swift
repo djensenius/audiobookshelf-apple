@@ -247,6 +247,29 @@ import SwiftData
         }
     }
 
+    /// Queues a part again, in one write, only while it is in one of `expecting`: the engine
+    /// queues a part it read as `.running` without a transfer, and must not overwrite a state
+    /// written since (a part that failed for good, say). The change is refused when the part
+    /// doesn't exist, is in another state, or is `.completed` (even if `expecting` has it; see
+    /// ``setPartState(_:partID:taskIdentifier:error:hasResumeData:requeue:now:)``). The task
+    /// identifier and error are cleared; progress, the retry count and the resume-data flag
+    /// are kept.
+    ///
+    /// - Returns: whether the part was queued.
+    @discardableResult
+    public func queuePart(partID: UUID, expecting: Set<DownloadPartState>, now: Date = .now) throws -> Bool {
+        try commit {
+            guard let part = try fetchPart(id: partID), let state = part.stateValue, state != .completed,
+                expecting.contains(state)
+            else { return false }
+            part.state = DownloadPartState.queued.rawValue
+            part.taskIdentifier = nil
+            part.lastError = nil
+            part.record?.updatedAt = now
+            return true
+        }
+    }
+
     /// Marks a part `.completed` with its final size, in one write: `bytesWritten` becomes
     /// `finalBytes`, and so does `expectedBytes` when it was unknown (≤ 0, as
     /// `NSURLSessionTransferSizeUnknown`). `finalBytes` is authoritative, even below the last
