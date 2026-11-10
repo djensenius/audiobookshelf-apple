@@ -32,6 +32,9 @@ public final class SleepTimer {
     public static let gracePeriod: TimeInterval = 120
     /// A running duration timer resets only after this many seconds (Android `checkShouldResetSleepTimer`).
     static let resetGuard: TimeInterval = 3
+    /// The shortest tick interval: a zero or negative one would tick without pause on the main actor and never
+    /// count a duration down.
+    static let minimumTickInterval: Duration = .milliseconds(100)
     /// An end-of-chapter timer started with less than this many media seconds of the chapter left waits for the next
     /// one (Android `getChapterEndTime`, at any rate; legacy iOS had no cutoff).
     static let minimumChapterRemaining: TimeInterval = 10
@@ -120,7 +123,7 @@ public final class SleepTimer {
 
     /// - Parameters:
     ///   - feedback: Plays the chime and the reset feedback; `nil` plays nothing.
-    ///   - tickInterval: How often the countdown, fade and chime update.
+    ///   - tickInterval: How often the countdown, fade and chime update; at least ``minimumTickInterval``.
     public init(
         control: any SleepTimerPlaybackControl,
         feedback: (any SleepTimerFeedback)? = nil,
@@ -134,7 +137,7 @@ public final class SleepTimer {
         self.options = options
         self.clock = clock
         self.calendar = calendar
-        self.tickInterval = tickInterval
+        self.tickInterval = max(tickInterval, Self.minimumTickInterval)
         now = Self.stopwatch(on: clock)
     }
 
@@ -178,6 +181,8 @@ public final class SleepTimer {
             run.goal = .chapterEnd(segmentEnd: segmentEnd, offset: min(end, limit) - segmentEnd)
         }
         run.wasCutShort = false
+        // Past what a Double holds, the timer would never expire.
+        guard remaining(of: run).isFinite else { return }
         update(run)
     }
 

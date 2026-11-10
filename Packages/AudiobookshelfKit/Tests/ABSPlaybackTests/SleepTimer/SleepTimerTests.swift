@@ -122,8 +122,25 @@ struct SleepTimerTests {
         #expect(harness.timer.start(.duration(0)) == false)
         #expect(harness.timer.start(.duration(-5)) == false)
         #expect(harness.timer.start(.duration(.infinity)) == false)
+        #expect(harness.timer.start(.duration(.nan)) == false)
         #expect(harness.timer.start(.endOfChapter) == false, "No timeline")
+        harness.control.timeline = chapters
+        harness.control.currentTime = 1800
+        #expect(harness.timer.start(.endOfChapter) == false, "No chapter end ahead")
         #expect(harness.timer.isRunning == false)
+    }
+
+    @Test func ignoresAddingOrSubtractingTimeThatCantCount() {
+        let harness = Harness()
+        harness.timer.start(.duration(600))
+        for seconds in [0, -5, .nan, .infinity, -.infinity] as [TimeInterval] {
+            harness.timer.add(seconds)
+            harness.timer.subtract(seconds)
+        }
+        #expect(harness.timer.mode == .duration(600))
+        harness.timer.add(.greatestFiniteMagnitude)
+        harness.timer.add(.greatestFiniteMagnitude)
+        #expect(harness.timer.mode == .duration(.greatestFiniteMagnitude), "Not infinity, which would never expire")
     }
 
     @Test func settingsLengthZeroMeansEndOfChapter() {
@@ -418,6 +435,92 @@ struct SleepTimerTests {
         #expect(harness.control.pauseCount == 1)
     }
 
+    /// A goal at or before the position expires at the next tick: while playing once playback passes it, and at
+    /// the end of the media while paused, whether the jump there was reported or not.
+    @Test(arguments: [(false, 451.0), (false, 1800), (true, 1800)])
+    func aChapterGoalAtOrBeforeThePositionExpiresAtTheNextTick(reported: Bool, time: Double) async {
+        let harness = Harness(timeline: chapters, at: 430)
+        harness.timer.start(.endOfChapter)
+        await harness.play(from: 430, to: 449)
+        harness.control.isPlaying = time < 1800
+        harness.control.currentTime = time
+        if reported { harness.timer.didSeek(to: time) }
+        await harness.advance(1)
+        #expect(harness.control.pauseCount == 1)
+        #expect(harness.timer.isTicking == false)
+    }
+
+    /// An unusable rate counts at 1× (legacy iOS); a chapter timer still expires at the chapter's end.
+    @Test(arguments: [0, -1, .nan, .infinity])
+    func anUnusableRateCountsAtNormalSpeed(rate: Double) async {
+        let harness = Harness(timeline: chapters, at: 430)
+        harness.control.rate = rate
+        harness.timer.start(.endOfChapter)
+        #expect(harness.timer.remaining == 20)
+        await harness.play(from: 430, to: 450)
+        #expect(harness.control.pauseCount == 1)
+    }
+
+    /// The timeline drops zero-length chapters, so they're never a goal; with only those, the track's end is.
+    @Test func zeroLengthChaptersArentGoals() async {
+        let track = AudioTrack(index: 1, startOffset: 0, duration: 200)
+        let harness = Harness(
+            timeline: PlaybackTimeline(
+                tracks: [track],
+                chapters: [
+                    Chapter(id: 0, start: 0, end: 100), Chapter(id: 1, start: 100, end: 100),
+                    Chapter(id: 2, start: 100, end: 200),
+                ]),
+            at: 95)
+        harness.timer.start(.endOfChapter)
+        #expect(harness.timer.remaining == 105, "Under 10 s left, so the next chapter with a length")
+        harness.control.currentTime = 85
+        harness.timer.start(.endOfChapter)
+        await harness.play(from: 85, to: 100)
+        #expect(harness.control.pauseCount == 1)
+
+        harness.control.timeline = PlaybackTimeline(tracks: [track], chapters: [Chapter(id: 0, start: 50, end: 50)])
+        harness.timer.start(.endOfChapter)
+        #expect(harness.timer.remaining == 100)
+    }
+
+    /// Without tracks nothing plays: no chapter timer starts, and a running one whose media empties ends.
+    @Test func anEmptyTimelineEndsAChapterTimer() async {
+        let empty = PlaybackTimeline(tracks: [], chapters: [])
+        let harness = Harness(timeline: empty)
+        #expect(harness.timer.start(.endOfChapter) == false)
+        harness.control.timeline = chapters
+        harness.control.currentTime = 100
+        harness.timer.start(.endOfChapter)
+        harness.control.timeline = empty
+        harness.timer.add(60)
+        #expect(harness.timer.remaining == 0)
+        await harness.advance(1)
+        #expect(harness.control.pauseCount == 1)
+    }
+
+    /// The engine puts playback at the end of the media with the same arithmetic as the timeline's duration, so
+    /// awkward track lengths and rates leave nothing just above zero.
+    @Test func aChapterTimerPausedAtTheEndOfAwkwardMediaExpires() async throws {
+        let timeline = PlaybackTimeline(
+            tracks: [
+                AudioTrack(index: 1, startOffset: 0.1, duration: 333.2),
+                AudioTrack(index: 2, startOffset: 333.3, duration: 901.267891),
+            ],
+            chapters: [Chapter(id: 0, start: 0, end: 700.7), Chapter(id: 1, start: 700.7, end: 1234.567891)])
+        let harness = Harness(timeline: timeline, at: 1200)
+        harness.control.rate = 0.75
+        harness.timer.start(.endOfChapter)
+        await harness.play(from: 1200, to: 1234)
+        #expect(harness.timer.isRunning)
+        let last = try #require(timeline.tracks.last)
+        harness.control.currentTime = try #require(
+            timeline.time(trackIndex: timeline.tracks.count - 1, offset: last.playbackDuration))
+        harness.control.isPlaying = false
+        await harness.advance(1)
+        #expect(harness.control.pauseCount == 1)
+    }
+
     // MARK: - Adjusting
 
     @Test func addsAndSubtractsTime() async {
@@ -483,6 +586,10 @@ struct SleepTimerTests {
             ([0...100, 110...150, 160...250, 260...400], 300, 2, -80, 20, 120),
             // 30 s to the end of the first track, then 20 of the second.
             ([5...100, 110...200], 100, 1, 20, 50, 130),
+            // Zero-length tracks at the gap's edge and inside it play nothing.
+            ([5...100, 100...100, 105...105, 110...200], 120, 1, -39, 1, 71),
+            // Past the end of the media, capped there.
+            ([5...100, 110...200], 120, 1, 1000, 120, 200),
             // Without gaps, as before.
             ([0...200], 120, 1, -39, 11, 81),
             ([0...200], 120, 1, 20, 70, 140),
@@ -665,6 +772,24 @@ struct SleepTimerTests {
         harness.clock.advance(by: .seconds(30))
         await until { harness.timer.tickCount > ticks }
         #expect(harness.timer.remaining == 598)
+    }
+
+    /// A zero or negative tick interval is raised to the minimum: it would tick without pause on the main actor and
+    /// never count down. Summing 0.1 s ticks drifts, but the elapsed time keeps growing while audio plays, so the
+    /// timer can't stay just above zero: 2.3 s expires on the 23rd tick.
+    @Test(arguments: [Duration.zero, .seconds(-1), .milliseconds(100)])
+    func aShortTickIntervalIsRaisedAndExpiresDespiteDrift(_ interval: Duration) async {
+        let clock = ManualClock()
+        let control = FakePlaybackControl()
+        let timer = SleepTimer(control: control, clock: clock, calendar: .gregorianUTC, tickInterval: interval)
+        timer.start(.duration(2.3))
+        for _ in 0..<30 where timer.isTicking {
+            let ticks = timer.tickCount
+            clock.advance(by: SleepTimer.minimumTickInterval)
+            await until { timer.tickCount > ticks }
+        }
+        #expect(timer.tickCount == 23)
+        #expect(control.pauseCount == 1)
     }
 
     @Test func deinitStopsTickingAndRestoresTheVolume() async {
