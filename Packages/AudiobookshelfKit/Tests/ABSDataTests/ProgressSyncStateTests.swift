@@ -613,6 +613,19 @@ import Testing
         #expect(state.truncated == .ebook)
     }
 
+    @Test func ebookSendWithBaselineShieldsNothing() throws {
+        var state = Self.seeded()
+        state.apply(Self.page("A", 0.3), now: Self.at(1))
+        let ebook = try Self.send(&state)
+        state.apply(Self.seek(200), now: Self.at(2))
+        state.apply(ProgressEdit(isFinished: true), now: Self.at(2))
+        state.merge(Self.server(lastUpdate: Self.t0), excluding: .ebook)
+        #expect(state.truncated.isEmpty)
+        state.acknowledge(ebook, serverLastUpdate: Self.at(3))
+        #expect(state.truncated.isEmpty)
+        #expect(state.dirty == [.audio, .finished])
+    }
+
     // MARK: - Interleavings
 
     /// Random interleavings against a simulated server. A PATCH reaches the server at a random
@@ -826,8 +839,7 @@ private struct Simulation {
             }
         }
         for (taken, value) in zip(taken, takenValues) {
-            let partner: ProgressGroups = taken.element == .audio ? .finished : taken.element == .finished ? .audio : []
-            if !sent.contains(partner) || partner.isEmpty {
+            if !(Self.partner(taken.element).map(sent.contains) ?? false) {
                 #expect(Self.values(taken.element, of: state) == value, "other device's \(taken.element.rawValue) lost")
             }
         }
@@ -854,7 +866,11 @@ private struct Simulation {
                 excluded.contains(group) || before.truncated.contains(group)
                 || before.serverBaseline.map { ProgressSyncState.matches(fetched, $0, group) } ?? false
                 || before.unacknowledgedSends.contains { ProgressSyncState.matches(fetched, $0, group) }
-                || (state.truncated.contains(group) && (inFlight != nil || echoed(fetched, in: before)))
+                // #53, modelled independently of the code: the partner group is in flight or echoed.
+                || Self.partner(group).map { partner in
+                    excluded.contains(partner)
+                        || before.unacknowledgedSends.contains { ProgressSyncState.matches(fetched, $0, partner) }
+                } ?? false
                 || (before.serverBaseline == nil && (inFlight != nil || !before.unacknowledgedSends.isEmpty))
             if fresh, before.dirty.contains(group), origins[index] == .other,
                 fetched.lastUpdate > before.editedAt(group) ?? .distantPast, !justified
@@ -870,10 +886,12 @@ private struct Simulation {
         }
     }
 
-    /// Whether `fetched` matches any group of an unacknowledged send (the echo of a lost send).
-    func echoed(_ fetched: ProgressBaseline, in state: ProgressSyncState) -> Bool {
-        state.unacknowledgedSends.contains { send in
-            ProgressGroups.each.contains { ProgressSyncState.matches(fetched, send, $0) }
+    /// The group a PATCH of `group` can change as a #53 side effect.
+    static func partner(_ group: ProgressGroups) -> ProgressGroups? {
+        switch group {
+        case .audio: .finished
+        case .finished: .audio
+        default: nil
         }
     }
 
