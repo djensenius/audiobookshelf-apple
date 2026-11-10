@@ -26,4 +26,13 @@ public enum APIError: Error, Sendable, Equatable {
     case http(status: Int, message: String?)
     /// The response body did not match the expected type.
     case decoding(String)
+
+    /// A connection failure, timeout or 5xx: the server may answer if asked again later.
+    var isTransient: Bool {
+        switch self {
+        case .network, .timedOut: true
+        case .http(let status, _): (500..<600).contains(status)
+        default: false
+        }
+    }
 }
