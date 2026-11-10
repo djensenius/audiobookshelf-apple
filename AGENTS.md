@@ -70,7 +70,8 @@ not built:
 | `android/` | Android app — ignore |
 | `strings/` | Translations for 42 locales — the source for localization |
 
-Repository tooling lives in `scripts/`, `.github/workflows/`, and `mise.toml`.
+Repository tooling lives in `scripts/`, `ci_scripts/` (Xcode Cloud),
+`.github/workflows/`, and `mise.toml`.
 
 ## Toolchain
 
@@ -114,7 +115,9 @@ Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing
 - Prefer built-in Apple frameworks. Any new Swift Package Manager dependency must be
   justified in the PR description.
 - Do not add CocoaPods, Carthage, Capacitor, or Fastlane. Releases go through
-  Xcode Cloud.
+  Xcode Cloud ([docs/release.md](docs/release.md)): `ci_scripts/` holds its build
+  scripts, the build number is the Xcode Cloud `CI_BUILD_NUMBER`, and builds are
+  referred to by their TestFlight build number.
 
 ## Pull requests
 
