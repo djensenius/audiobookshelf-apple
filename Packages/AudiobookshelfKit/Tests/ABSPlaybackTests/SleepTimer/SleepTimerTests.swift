@@ -702,6 +702,7 @@ struct SleepTimerTests {
         #expect(harness.control.plays == 0)
         #expect(harness.feedback.resets == 0)
         #expect(harness.timer.canRestart == !itemChanges)
+        #expect(harness.shake.sensitivity == (itemChanges ? nil : .medium), "Shake to reset follows the grace period")
 
         harness.clock.advance(by: .seconds(60))
         await until { !harness.timer.canRestart }
@@ -777,5 +778,16 @@ struct SleepTimerTests {
         await harness.expire()
         await harness.endGrace()
         #expect(harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 7, 0)) == 0)
+    }
+
+    // MARK: - Platform
+
+    @Test func chimeIsAQuietSecondAndAHalf() throws {
+        let buffer = try #require(SystemSleepTimerFeedback.makeChime())
+        #expect(buffer.frameLength == 66_150)
+        let samples = try #require(buffer.floatChannelData?[0])
+        let peak = (0..<Int(buffer.frameLength)).map { abs(samples[$0]) }.max() ?? 0
+        #expect(peak > 0.5)
+        #expect(peak <= 1)
     }
 }

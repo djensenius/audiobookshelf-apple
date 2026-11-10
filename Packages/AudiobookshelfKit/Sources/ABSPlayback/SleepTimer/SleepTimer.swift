@@ -119,7 +119,7 @@ public final class SleepTimer {
     var isTicking: Bool { tickTask != nil }
 
     /// - Parameters:
-    ///   - feedback: Plays the chime and the reset feedback; `nil` plays nothing.
+    ///   - feedback: Pass ``SystemSleepTimerFeedback`` for the chime and the reset feedback; `nil` plays nothing.
     ///   - shakeDetector: Pass ``ShakeDetector`` on iOS; `nil` disables shake to reset.
     ///   - tickInterval: How often the countdown, fade and chime update.
     public init(
