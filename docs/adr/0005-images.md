@@ -129,8 +129,8 @@ release v2.37.2):
 ## Decision drivers
 
 1. **Correct auth on every supported server (2.26.0+):** per-server custom headers
-   on every image request, no tokens, and no credentials sent to third-party
-   hosts.
+   on every image request, never the Audiobookshelf token, and no credentials
+   sent to third-party hosts, including through redirects.
 2. **Bounded memory** with a 2,000-item library on the smallest iPhone, including
    fast scrolling.
 3. **One image source for SwiftUI, CarPlay (`UIImage`), Now Playing (`CGImage`),
@@ -266,15 +266,33 @@ static, unauthenticated remote images (none are planned).
   `URLSession`'s `Accept` header. It is also smaller than JPEG.
 - **`ts`:** sending `ts` matches the legacy app, busts any proxy cache, and gets
   the server's `Cache-Control`.
-- **Auth:** image requests carry the server's custom headers only. There is no
-  `Authorization` header, no `?token=`, and no token refresh: both image routes
-  are unauthenticated on every supported server (2.26.0+). A 401 or 403 means a
-  proxy rejected the request (wrong custom headers). The pipeline shows the
-  placeholder and does not retry in a loop.
+- **Auth:** there are two kinds of header, and they are treated differently.
+  - The **Audiobookshelf bearer token** (the access token `ABSAPI` adds to API
+    calls) is never added to image requests. There is no `?token=` and no token
+    refresh either: both image routes are unauthenticated on every supported
+    server (2.26.0+).
+  - **User-configured custom headers** for the server (from the Keychain) are
+    always sent to the server's origin, whatever their name. That includes a
+    proxy credential such as `Authorization: Basic …`. The builder only
+    guarantees that it never adds the Audiobookshelf bearer itself.
+  - A 401 or 403 means a proxy rejected the request (wrong custom headers). The
+    pipeline shows the placeholder and does not retry in a loop.
 - **Custom headers:** they are applied per request, not through
   `httpAdditionalHeaders`, because one session serves several servers.
 - **Absolute `coverPath` URLs** (legacy external covers) are fetched without
   custom headers, so credentials never leave the server's origin.
+- **Redirects:** the image session's delegate implements
+  `urlSession(_:task:willPerformHTTPRedirection:newRequest:)`, because
+  `URLSession` would otherwise carry the custom headers to the new location.
+  - A redirect to the same origin (same host and port, or the same host
+    upgraded from `http` to `https` on default ports) is followed with the
+    headers unchanged.
+  - A redirect to any other origin is followed only after the new request is
+    rebuilt from the URL alone: every custom header (and any `Authorization`
+    or `Cookie` header) is stripped, and `Accept` is set again. If it can't be
+    rebuilt, the redirect is refused and the placeholder is shown.
+  - The same check runs for every hop, so a chain can't return to a
+    credentialed state after leaving the origin.
 - **Session:** a dedicated `URLSession` with `urlCache = nil` and
   `requestCachePolicy = .reloadIgnoringLocalCacheData`. Our own file cache is
   authoritative, and versioned keys never need revalidation. The default
@@ -300,7 +318,8 @@ static, unauthenticated remote images (none are planned).
   4. network.
 
   Steps 2–4 decode off the actor in a `@concurrent` function. Concurrent decodes
-  are capped at the active processor count.
+  are capped at 4 on iPhone and at the active processor count on iPad and Mac
+  (see the memory budget below).
 - **Deduplication and cancellation:**
   - In-flight work is a `[ImageKey: Task]` entry with a waiter count.
   - When the last waiter cancels (a cell scrolls away), the network task is
@@ -317,7 +336,8 @@ static, unauthenticated remote images (none are planned).
 - **`CoverFileStore`:**
   - **Location:** the store lives in the App Group container so the widget
     extension can read it (P5-11b, #89). Files are at
-    `<container for group.org.davidjensenius.Audiobookshelf>/Library/Caches/Images/<serverID>/<kind>-<entityID>-<updatedAt>-<bucket>.webp`.
+    `<container for group.org.davidjensenius.Audiobookshelf>/Library/Caches/Images/<serverID>/<kind>-<entityID>-<updatedAt>-<bucket>.<webp|jpg>`
+    (`.jpg` when the file was materialised from a downloaded cover).
     Entity IDs are sanitised before use in file names.
   - **Fallback:** if the App Group entitlement is missing (unsigned CI builds,
     for example), the store uses the app's own `Caches` directory. Widgets then
@@ -354,7 +374,9 @@ static, unauthenticated remote images (none are planned).
     ([0006](0006-now-playing.md)).
 - **Offline covers:**
   - `ABSDownloads` downloads the cover with
-    `width=1200&format=jpeg&ts=…`. It sends custom headers only, as above.
+    `width=1200&format=jpeg&ts=…`. Like other image requests, it sends the
+    user-configured custom headers but not the Audiobookshelf bearer token, and
+    it applies the same redirect policy.
   - It stores the result as `cover.jpg` in the item's download folder, which is
     not a cache directory. It records the relative path and
     `LocalLibraryItem.coverUpdatedAt` in ABSData, which is what
@@ -366,8 +388,20 @@ static, unauthenticated remote images (none are planned).
   - Offline, the pipeline always takes the downloaded file over the network.
 - **Widgets** (P5-11b, #89):
   - `WidgetSnapshotWriter` records each snapshot item's `ImageKey` (300 bucket).
-    It makes sure the pipeline has that file in the App Group cover cache, by
-    calling the pipeline, before reloading timelines.
+  - Before reloading timelines it calls
+    `ImagePipeline.ensureCoverFile(for: ImageKey) async throws -> URL` for each
+    of those keys. A normal `cgImage(for:size:)` call isn't enough, because it
+    can return early from the memory LRU or the downloaded cover without ever
+    writing `CoverFileStore`.
+  - `ensureCoverFile` skips the memory LRU and guarantees a file for that exact
+    key:
+    1. if `CoverFileStore` already has the file, it returns it;
+    2. if `DownloadedCoverLookup` has a usable downloaded cover, it downsamples
+       it to the bucket and writes it to `CoverFileStore` as JPEG with
+       `CGImageDestinationCreateWithURL`;
+    3. otherwise it fetches the bucket from the network and writes it.
+  - Readers find the file by key whatever its extension (`.webp` or `.jpg`);
+    ImageIO detects the format from the bytes.
   - The widget reads covers through the pipeline's App Group cover cache by
     `ImageKey`. It uses a read-only, cache-only pipeline: no request builder,
     no memory LRU. It downsamples to the widget's size.
@@ -405,8 +439,20 @@ static, unauthenticated remote images (none are planned).
 | List row or CarPlay (≈60 pt @3x → 180 × 288 px) | 0.20 MiB | 400 MiB | ≈ 320 rows in 64 MiB |
 | Player / Now Playing (1200 × 1200 px) | 5.5 MiB | n/a | 1 pinned |
 
-Peak image memory on iPhone is therefore about **70 MiB**: the 64 MiB LRU, the
-pinned artwork, and at most one in-flight decode buffer per core.
+Retained and peak memory are budgeted separately on iPhone:
+
+- **Retained** (what stays after loads settle): the 64 MiB LRU plus the
+  5.5 MiB pinned artwork, so **≤ 70 MiB**.
+- **Transient** (live only while decoding): concurrent decodes are capped at
+  **4 on iPhone** (the processor count on iPad and Mac). Four grid decodes of
+  510 × 816 px are ≈ 6.4 MiB of output buffers. Allow the same again for
+  encoded data and ImageIO scratch space, so ≈ **13 MiB**. If a Now Playing
+  decode of the 1200 bucket (5.5 MiB) takes one of the slots, the output
+  buffers are ≈ 10.3 MiB, still inside that allowance.
+- **Peak** = retained + transient, so **≤ 83 MiB** on iPhone.
+
+The iPad and Mac peaks are their LRU size + 5.5 MiB + their transient
+allowance, with the same rule.
 
 Disk for 2,000 items, assuming the sizes the spike will confirm (300 px WebP
 ≈ 15 KB, 600 px ≈ 45 KB, 1200 px ≈ 150 KB):
@@ -440,9 +486,11 @@ That fits under 256 MiB without eviction churn.
   - ABSData's `LocalLibraryItem` gains `coverUpdatedAt: Date?` (ADR 0003).
   - None of this needs a new module dependency. `ImagePipeline` depends on
     neither `ABSDownloads` nor `ABSData`.
-- **Auth:** image requests never carry tokens, so none end up in URLs, logs, the
-  database, or cached files. Proxies that require custom headers work for images
-  too, which fixes a legacy gap.
+- **Auth:** image requests never carry the Audiobookshelf token, so none end up
+  in URLs, logs, the database, or cached files. User-configured custom headers
+  (including proxy `Authorization: Basic …`) go to the server origin only and
+  are stripped on cross-origin redirects. Proxies that require custom headers
+  work for images too, which fixes a legacy gap.
 - **Server disk:** the server keeps at most three cover renditions per item for
   this app, plus the 1200 px JPEG for downloaded items.
 - **Follow-ups:**
@@ -462,8 +510,16 @@ That fits under 256 MiB without eviction churn.
 ## Validation
 
 - **Unit tests** (Swift Testing, `ABSCoreTests` and `ABSAPITests`; in #43):
-  - request building: custom headers present, no `Authorization` header and no
-    `token` query item, and no headers for absolute external URLs;
+  - request building: user-configured custom headers present (including a
+    user-configured `Authorization: Basic …`), the Audiobookshelf bearer token
+    never present, no `token` query item, and no headers for absolute external
+    URLs;
+  - redirects (through a `URLProtocol` stub): a same-origin redirect keeps the
+    custom headers; a cross-origin redirect arrives with no custom,
+    `Authorization`, or `Cookie` headers, and this holds for a later hop back
+    to the server origin as well;
+  - `ensureCoverFile(for:)`: after a memory hit and after a downloaded-cover
+    hit, the file for that exact `ImageKey` exists in `CoverFileStore`;
   - bucket selection;
   - key and file-path construction;
   - deduplication: two concurrent loads produce one `URLProtocol` hit;
@@ -475,8 +531,11 @@ That fits under 256 MiB without eviction churn.
 - **Memory spike** (performed in #43, P3-03, as an acceptance criterion):
   - Scroll a large library against a real server on the smallest supported
     iPhone and on an iPad.
-  - Record Instruments Allocations and the VM tracker. Pass: image memory stays
-    under the table above, with no hitches beyond one frame.
+  - Record Instruments Allocations and the VM tracker. Pass: retained image
+    memory after scrolling stops stays within the retained budget (≤ 70 MiB on
+    iPhone), peak image memory while flinging stays within the peak budget
+    (≤ 83 MiB on iPhone), and there are no hitches beyond one frame. If peak
+    goes over, lower the decode cap before the LRU size.
   - Record real encoded sizes per bucket and adjust the disk numbers in a
     follow-up.
 - **CarPlay** (performed in #80, P5-03): a manual check on a device (the
