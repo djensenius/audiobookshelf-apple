@@ -64,6 +64,8 @@ private final class LeaseCounts: Sendable {
 struct LeasedFile: Sendable {
     var url: URL
     var lease: FileLease
+    /// The write that produced the file at `url`; pass it to ``CoverFileStore/discard(_:version:)``.
+    var version: Int
 }
 
 /// The encoded image file cache (ADR 0005, "`CoverFileStore`").
@@ -82,6 +84,9 @@ public actor CoverFileStore {
     private var evictionTask: Task<Void, Never>?
     /// Bumped by ``removeServer(_:)``, so fetches started before it can't write.
     private var serverGenerations: [UUID: Int] = [:]
+    /// The write each path holds, by lease key; absent (`0`) for files from an earlier launch.
+    private var versions: [String: Int] = [:]
+    private var nextVersion = 1
     /// The number of background evictions started, for tests.
     private(set) var evictionCount = 0
 
@@ -135,7 +140,7 @@ public actor CoverFileStore {
             if let modified = values.contentModificationDate, now().timeIntervalSince(modified) > 86_400 {
                 try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: url.path)
             }
-            return LeasedFile(url: url, lease: lease(url))
+            return LeasedFile(url: url, lease: lease(url), version: versions[Self.leaseKey(url), default: 0])
         }
         return nil
     }
@@ -176,7 +181,10 @@ public actor CoverFileStore {
             throw error
         }
         try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: destination.path)
-        let leased = LeasedFile(url: destination, lease: lease(destination))
+        let version = nextVersion
+        nextVersion += 1
+        versions[Self.leaseKey(destination)] = version
+        let leased = LeasedFile(url: destination, lease: lease(destination), version: version)
         totalBytes += addedBytes - replacedBytes
         for other in Self.extensions where other != ext {
             retire(folder.appending(path: "\(key.fileStem).\(other)"))
@@ -199,13 +207,18 @@ public actor CoverFileStore {
         let removed = files(in: folder).reduce(0) { $0 + $1.size }
         try? FileManager.default.removeItem(at: folder)
         totalBytes = max(0, totalBytes - removed)
+        let prefix = Self.leaseKey(folder) + "/"
+        versions = versions.filter { !$0.key.hasPrefix(prefix) }
     }
 
-    /// Deletes a stored file that turned out not to decode, once its readers are done.
-    func discard(_ url: URL) {
+    /// Deletes a stored file that turned out not to decode, once its readers are done, but only
+    /// if `url` still holds `version`: a newer write there is a healthy replacement, which a
+    /// stale reader's failure must not delete.
+    func discard(_ url: URL, version: Int) {
         guard
             url.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path
-                == directory.standardizedFileURL.path
+                == directory.standardizedFileURL.path,
+            versions[Self.leaseKey(url), default: 0] == version
         else { return }
         retire(url)
     }
@@ -243,6 +256,7 @@ public actor CoverFileStore {
         let size = Self.allocatedSize(url)
         guard (try? FileManager.default.removeItem(at: url)) != nil else { return }
         totalBytes = max(0, totalBytes - size)
+        versions[Self.leaseKey(url)] = nil
     }
 
     private func lease(_ url: URL) -> FileLease {
