@@ -26,10 +26,10 @@ public enum NowPlayingCommandError: Error, Equatable {
 /// ``elapsedTolerance``), or when the item or chapter changes; between those the system extrapolates
 /// from the last snapshot, so periodic ticks publish nothing.
 ///
-/// Wiring to `PlaybackCoordinator` (P2-06a) is a later step. Its events map as follows; each builds a
-/// ``NowPlayingState`` from the coordinator's current properties (`mediaKey`, `currentTime`,
-/// `duration`, `rate`, `isPlaying`, `chapter`/`chapterIndex`/`chapterRange`, the session's
-/// metadata and cover) and passes it to ``update(_:)``:
+/// ``NowPlayingBridge`` wires it to `PlaybackCoordinator` (P2-06a). On every coordinator event it
+/// builds a ``NowPlayingState`` from the coordinator's current properties (`mediaKey`,
+/// `currentTime`, `duration`, `rate`, `isPlaying`, `chapterIndex`, the session's or restored
+/// record's metadata and cover) and passes it to ``update(_:)``; no item means ``clear()``:
 ///
 /// | Event | Effect |
 /// | --- | --- |
@@ -41,10 +41,10 @@ public enum NowPlayingCommandError: Error, Equatable {
 /// | `tick(time:)` | Elapsed `time`; publishes only on a chapter change (or drift past the tolerance). |
 /// | `ended` | Paused at the end; the item stays visible until the session closes. |
 /// | `failed` | Paused at the last position; the session stays until it closes or another item plays. |
-/// | `sessionWillClose` with reason `.stopped` or `.loadFailed` | ``clear()``. With `.itemChanged` the next item's state replaces it. |
+/// | `sessionWillClose` | `.stopped` is followed by `itemChanged(nil)`, which clears. After `.loadFailed` the item stays, paused and unloaded, so play retries it. With `.itemChanged` the next item's state replaces it. |
 ///
-/// Rate changes made through `setRate` don't emit an event; the integration also updates on the
-/// coordinator's observed `rate`. Settings changes are applied by assigning ``settings``.
+/// Rate changes made through `setRate` don't emit an event; the bridge also updates on the
+/// coordinator's observed `rate`, and assigns ``settings`` when the user's settings change.
 ///
 /// The session is created on the first ``update(_:)``, but `requestToBecomeApplicationPrimary()` is
 /// deferred to the first state with `isPlaying == true`: ADR 0006 requires the `.playback` audio

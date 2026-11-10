@@ -200,7 +200,9 @@ final class StubSessionService: PlaybackSessionService {
     }
 }
 
+/// Observable like ``AppSettings``, so rate changes reach observers (Now Playing).
 @MainActor
+@Observable
 final class StubPlaybackSettings: PlaybackSettingsProviding {
     var playbackRate = 1.0 {
         didSet { if !(playbackRate.isFinite && playbackRate > 0) { playbackRate = oldValue } }

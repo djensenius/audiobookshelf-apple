@@ -112,8 +112,8 @@ public struct NowPlayingSettings: Sendable, Equatable {
     }
 }
 
-/// The player that remote commands act on: `PlaybackCoordinator` (or an adapter it owns) once Now
-/// Playing is wired up. Times are global seconds.
+/// The player that remote commands act on: ``NowPlayingBridge``, which forwards them to
+/// `PlaybackCoordinator`. Times are global seconds.
 @MainActor
 public protocol NowPlayingCommandHandling: AnyObject {
     func play() async
