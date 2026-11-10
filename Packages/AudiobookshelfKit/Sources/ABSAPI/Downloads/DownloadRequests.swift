@@ -1,10 +1,21 @@
 import Foundation
 
+/// Why ``DownloadRequests`` won't build a background download request.
+public enum DownloadRequestError: Error, Equatable, Sendable {
+    /// The connection sends custom headers (a proxy's `CF-Access-Client-Secret`, say). A
+    /// background session follows redirects without asking its delegate and forwards custom
+    /// headers to the new address, even on another server, so they could leak before the
+    /// response is rejected. Downloads for such connections are refused until a foreground
+    /// redirect check exists (#145).
+    case customHeadersRequireRedirectCheck
+}
+
 /// Requests for background file downloads (ADR 0007).
 ///
-/// A download carries the access token in the `Authorization` header, with the connection's
-/// custom headers, and never as a `?token=` query, so the URL that `URLSession` and the store
-/// keep holds no credential.
+/// A download carries the access token in the `Authorization` header, never as a `?token=`
+/// query, so the URL that `URLSession` and the store keep holds no credential. `URLSession`
+/// drops `Authorization` on a redirect, but not custom headers, so connections with custom
+/// headers can't download in the background yet (#145).
 public enum DownloadRequests {
     /// The token-free API path of a library file's download, which is what a download part
     /// stores as its `serverPath`.
@@ -12,19 +23,19 @@ public enum DownloadRequests {
         "/api/items/\(pathSegment(itemID))/file/\(pathSegment(ino))/download"
     }
 
-    /// A `GET` request for `path` on the configured server, with the custom headers and
+    /// A background `GET` request for `path` on the configured server, with
     /// `Authorization: Bearer <accessToken>`. Cookies are never sent or stored.
     ///
-    /// - Throws: ``APIError/invalidURL`` if the server address and `path` don't form a URL.
+    /// - Throws: ``DownloadRequestError/customHeadersRequireRedirectCheck`` if the connection
+    ///   has custom headers, or ``APIError/invalidURL`` if the server address and `path`
+    ///   don't form a URL.
     public static func request(
         path: String, configuration: APIClientConfiguration, accessToken: String
     ) throws -> URLRequest {
+        guard configuration.customHeaders.isEmpty else { throw DownloadRequestError.customHeadersRequireRedirectCheck }
         var request = URLRequest(url: try APIClient.url(base: configuration.baseURL, path: path, query: []))
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
-        for (name, value) in configuration.customHeaders {
-            request.setValue(value, forHTTPHeaderField: name)
-        }
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         return request
     }
