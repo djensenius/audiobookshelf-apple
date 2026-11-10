@@ -6,7 +6,7 @@ import Observation
 import Synchronization
 import os
 
-private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "PlaybackCoordinator")
+private let logger = Log.playback
 
 /// Turns "play this" into playback, independent of any scene: checks the streaming policy, opens a
 /// server session, loads the engine at the resume position and applies the saved rate. Closes the
