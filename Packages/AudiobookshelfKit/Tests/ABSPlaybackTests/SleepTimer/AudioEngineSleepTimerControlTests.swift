@@ -84,7 +84,7 @@ extension AudioEngineTests {
             await advanceTicking(clock, timer, seconds: 3)
             #expect(timer.isRunning == false)
             #expect(engine.isPlaybackRequested == false)
-            #expect(players.created[1].volume == 1)
+            #expect(await eventually { players.created[1].volume == 1 }, "AVPlayer reads it back late after a pause")
             #expect(await eventually { engine.currentTime < 0.25 }, "Back to where the fade began")
             #expect(engine.state != .playing && !engine.isPlaybackRequested)
         }
