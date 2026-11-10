@@ -745,6 +745,50 @@ private func teardown(_ reason: String) -> [String] {
                 + teardown("expired"))
     }
 
+    @Test(arguments: [false, true])
+    func sourceDrivenTeardownMovesTheGateOffReadyBeforeItSuspends(expired: Bool) async throws {
+        let harness = Harness()
+        try await harness.started()
+        let endGate = Gate()
+        harness.socket.endGate = endGate
+        defer { endGate.open() }
+
+        if expired {
+            harness.source.expire()
+        } else {
+            harness.source.phase = .active(identityB, isOffline: false)
+        }
+        #expect(await eventually { harness.log.entries.contains("socket.end(\(expired ? "expired" : "switch"))") })
+        #expect(harness.lifecycle.gate == (expired ? .signingOut(from: identityA) : .switching(from: identityA)))
+
+        endGate.open()
+        let settled: AuthGate = expired ? .connect : .ready(identityB, isOffline: false)
+        #expect(await eventually { harness.lifecycle.gate == settled })
+    }
+
+    @Test(arguments: [false, true])
+    func switchingShowsUntilTheNextSessionHasStarted(explicit: Bool) async throws {
+        let harness = Harness()
+        try await harness.started()
+        let connectGate = Gate()
+        harness.library.connectGate = connectGate
+        defer { connectGate.open() }
+
+        let switching = Task {
+            if explicit {
+                try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+            } else {
+                harness.source.phase = .active(identityB, isOffline: false)
+            }
+        }
+        #expect(await eventually { harness.log.entries.contains("library.connect(b)") })
+        #expect(harness.lifecycle.gate == .switching(from: identityA))
+
+        connectGate.open()
+        try await switching.value
+        #expect(await eventually { harness.lifecycle.gate == .ready(identityB, isOffline: false) })
+    }
+
     // MARK: Flush
 
     @Test func flushIsBoundedAndASlowParticipantDoesNotStarveTheOthers() async throws {

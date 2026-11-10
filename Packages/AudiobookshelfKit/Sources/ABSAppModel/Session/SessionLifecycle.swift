@@ -416,6 +416,11 @@ public final class SessionLifecycle {
 
     /// Ends the running session, if any, without flushing.
     ///
+    /// Before anything suspends, a gate still showing ``AuthGate/ready(_:isOffline:)`` moves on,
+    /// so the root never shows a shell whose services are stopping: to
+    /// ``AuthGate/switching(from:)`` for a switch, which also covers the next session's start,
+    /// and to ``AuthGate/signingOut(from:)`` otherwise. A gate a transition already set is kept.
+    ///
     /// The whole teardown shares one `flushTimeout` budget. Every participant is still called in
     /// order, but once the budget is spent the lifecycle waits for each only until its
     /// synchronous part ran, then cancels it and moves on.
@@ -423,6 +428,10 @@ public final class SessionLifecycle {
         guard let running = session else { return }
         session = nil
         running.seed?.cancel()
+        if case .ready = gate {
+            let identity = running.context.identity
+            gate = reason == .switch ? .switching(from: identity) : .signingOut(from: identity)
+        }
         let clock = clock
         let timeout = flushTimeout
         let deadline = Deadline()

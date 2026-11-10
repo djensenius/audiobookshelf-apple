@@ -9,9 +9,11 @@ public enum AuthGate: Sendable, Equatable {
     /// A session is running. `isOffline` is `true` while the server can't be reached and the
     /// app runs from saved data.
     case ready(SessionIdentity, isOffline: Bool)
-    /// The session of `from` has ended and another account is being made active.
+    /// The session of `from` is ending, or has ended, and another account is being made active.
+    /// It stays until the next session has started.
     case switching(from: SessionIdentity)
-    /// The session of `from` is flushing and ending before a sign-out or removal.
+    /// The session of `from` is flushing and ending before a sign-out or removal, or ending
+    /// because the server rejected it. ``connect`` follows.
     case signingOut(from: SessionIdentity)
     /// The local store couldn't be opened, so nothing can be restored or saved.
     case storeUnavailable(SessionStoreError)
