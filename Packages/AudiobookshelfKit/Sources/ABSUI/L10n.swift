@@ -1,40 +1,79 @@
 import Foundation
 
 /// Strings from ABSUI's `Localizable.xcstrings`, which `mise run strings` generates from
-/// `strings/*.json`. Keys are the legacy keys, e.g. `ButtonCancel`. See
-/// `docs/localization.md`.
+/// `strings/*.json` and `Localization/native/*.json`. Keys are the legacy keys, e.g.
+/// `ButtonCancel`. See `docs/localization.md`.
 public enum L10n {
+    static var bundle: Bundle { .module }
     private static let table = "Localizable"
     private static let english = Bundle.module.url(forResource: "en", withExtension: "lproj").flatMap(Bundle.init(url:))
 
-    /// The string for `key`, with the legacy `{0}`, `{1}`, … placeholders replaced by
+    /// The plain string for `key`, with the legacy `{0}`, `{1}`, … placeholders replaced by
     /// `arguments` in order.
     ///
     /// `locale` picks the language; `nil` uses the app's preferred localization. The importer
     /// fills untranslated keys with English; if a lookup still returns the key itself, this
     /// falls back to the English table.
     ///
-    /// Values may contain Markdown such as `**bold**`; render it with
-    /// `AttributedString(markdown:)`.
+    /// Values may contain Markdown such as `**bold**`. Use ``attributed(_:_:locale:)`` to
+    /// render it; never parse this method's formatted result as Markdown, because the
+    /// arguments (often server data) would be parsed too.
     public static func string(_ key: String, _ arguments: String..., locale: Locale? = nil) -> String {
         let format = lookup(key, locale: locale)
         guard !arguments.isEmpty else { return format }
         return String(format: format, locale: locale ?? .current, arguments: arguments)
     }
 
-    private static func lookup(_ key: String, locale: Locale?) -> String {
-        let value: String
-        if let locale {
-            var resource = LocalizedStringResource(
-                String.LocalizationValue(key),
-                table: table,
-                bundle: .atURL(Bundle.module.bundleURL)
-            )
-            resource.locale = locale
-            value = String(localized: resource)
-        } else {
-            value = Bundle.module.localizedString(forKey: key, value: nil, table: table)
+    /// The string for `key` with its inline Markdown rendered and line breaks kept.
+    ///
+    /// Only the localized format is parsed as Markdown; `arguments` are inserted afterwards
+    /// as plain text with the attributes around their placeholder (e.g. bold), so they can't
+    /// add links or formatting.
+    public static func attributed(_ key: String, _ arguments: String..., locale: Locale? = nil) -> AttributedString {
+        var format = lookup(key, locale: locale)
+        // Each specifier becomes a private-use sentinel that Markdown leaves alone.
+        var values: [String] = []
+        if !arguments.isEmpty {
+            format = format.replacing(/%(?:(\d+)\$)?@|%%/) { match in
+                if match.output.0 == "%%" { return "%" }
+                let index = match.output.1.flatMap { Int($0) }.map { $0 - 1 } ?? values.count
+                values.append(arguments.indices.contains(index) ? arguments[index] : "")
+                return "\u{E000}\(values.count - 1)\u{E001}"
+            }
         }
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        let parsed = (try? AttributedString(markdown: format, options: options)) ?? AttributedString(format)
+        guard !values.isEmpty else { return parsed }
+        // Rebuild run by run so inserted arguments are never scanned for sentinels again.
+        var result = AttributedString()
+        for run in parsed.runs {
+            let text = String(parsed[run.range].characters)
+            var start = text.startIndex
+            for match in text.matches(of: /\u{E000}(\d+)\u{E001}/) {
+                let value = Int(match.output.1).flatMap { values.indices.contains($0) ? values[$0] : nil } ?? ""
+                result += AttributedString(String(text[start..<match.range.lowerBound]), attributes: run.attributes)
+                result += AttributedString(value, attributes: run.attributes)
+                start = match.range.upperBound
+            }
+            result += AttributedString(String(text[start...]), attributes: run.attributes)
+        }
+        return result
+    }
+
+    /// The localized value without the English fallback; `key` itself when the table lacks it.
+    static func localized(_ key: String, locale: Locale?) -> String {
+        guard let locale else { return Bundle.module.localizedString(forKey: key, value: nil, table: table) }
+        var resource = LocalizedStringResource(
+            String.LocalizationValue(key),
+            table: table,
+            bundle: .atURL(Bundle.module.bundleURL)
+        )
+        resource.locale = locale
+        return String(localized: resource)
+    }
+
+    private static func lookup(_ key: String, locale: Locale?) -> String {
+        let value = localized(key, locale: locale)
         guard value == key, let english else { return value }
         return english.localizedString(forKey: key, value: nil, table: table)
     }

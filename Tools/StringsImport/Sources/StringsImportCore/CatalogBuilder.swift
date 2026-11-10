@@ -11,8 +11,9 @@ public struct LocaleFile: Sendable, Equatable {
         self.strings = strings
     }
 
-    /// Loads every `*.json` file in `directory`, sorted by name.
+    /// Loads every `*.json` file in `directory`, sorted by name. A missing directory has none.
     public static func load(directory: URL) throws -> [LocaleFile] {
+        guard FileManager.default.fileExists(atPath: directory.path(percentEncoded: false)) else { return [] }
         let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
@@ -25,6 +26,23 @@ public struct LocaleFile: Sendable, Equatable {
                 throw ImportError.invalidFile(fileName: name, reason: "\(error)")
             }
         }
+    }
+
+    /// Merges native-only files (`Localization/native/`) over the legacy `strings/` files by
+    /// file name. Throws if a native key also exists in the legacy source file, so the
+    /// upstream data never overrides or is overridden silently.
+    public static func merging(legacy: [LocaleFile], native: [LocaleFile]) throws(ImportError) -> [LocaleFile] {
+        let legacySource = legacy.first { $0.name == CatalogBuilder.sourceFileName }
+        let legacyKeys = Set(legacySource.map { Array($0.strings.keys) } ?? [])
+        var merged = Dictionary(uniqueKeysWithValues: legacy.map { ($0.name, $0) })
+        for file in native {
+            if let key = file.strings.keys.sorted().first(where: legacyKeys.contains) {
+                throw .duplicateKey(key: key, fileName: file.name)
+            }
+            merged[file.name, default: LocaleFile(name: file.name, strings: [:])].strings
+                .merge(file.strings) { _, new in new }
+        }
+        return merged.values.sorted { $0.name < $1.name }
     }
 }
 
@@ -68,7 +86,13 @@ public enum CatalogBuilder {
                     warnings.append("\(file.name): skipped \(key): \(problem)")
                     continue
                 }
-                let isFormat = !StringConverter.placeholderIndices(in: sourceValue).isEmpty
+                let sourcePlaceholders = StringConverter.placeholderIndices(in: sourceValue)
+                let dropped = sourcePlaceholders.subtracting(StringConverter.placeholderIndices(in: value))
+                if !isSource, !dropped.isEmpty {
+                    let list = dropped.sorted().map { "{\($0)}" }.joined(separator: ", ")
+                    warnings.append("\(file.name): \(key) drops \(list)")
+                }
+                let isFormat = !sourcePlaceholders.isEmpty
                 let converted = StringConverter.convert(value, isFormat: isFormat)
                 for tag in StringConverter.unsupportedMarkup(in: converted) {
                     warnings.append("\(file.name): \(key) keeps unsupported markup \(tag)")

@@ -104,12 +104,12 @@ description = "Run package, tool, and app tests"
 depends = ["test:kit", "test:tools", "test:app"]
 
 [tasks.strings]
-description = "Generate ABSUI's Localizable.xcstrings from strings/*.json"
+description = "Generate ABSUI's Localizable.xcstrings from strings/ and Localization/native/"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "swift run --package-path Tools/StringsImport --scratch-path .build/strings-import import-strings"
 
 [tasks."strings:check"]
-description = "Verify Localizable.xcstrings and CFBundleLocalizations match strings/*.json"
+description = "Verify Localizable.xcstrings and CFBundleLocalizations are up to date"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "swift run --package-path Tools/StringsImport --scratch-path .build/strings-import import-strings --check"
 

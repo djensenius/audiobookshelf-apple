@@ -199,3 +199,112 @@ import Testing
         #expect(throws: ImportError.duplicateLocale(identifier: "nb")) { try CatalogBuilder.build(files: duplicate) }
     }
 }
+
+@Suite struct DroppedPlaceholderTests {
+    @Test func warnsButKeepsTranslationThatUsesOnlyLaterPlaceholder() throws {
+        let files = [
+            LocaleFile(name: "en-us", strings: ["LabelPair": "{0} of {1}"]),
+            LocaleFile(name: "de", strings: ["LabelPair": "nur {1}"]),
+        ]
+        let result = try CatalogBuilder.build(files: files)
+        #expect(result.warnings == ["de: LabelPair drops {0}"])
+        #expect(result.json.contains(#""value" : "nur %2$@""#))
+    }
+
+    @Test func literalPercentNextToPlaceholderFormatsAsPercent() {
+        let converted = StringConverter.convert("{0}% done", isFormat: true)
+        #expect(converted == "%1$@%% done")
+        #expect(String(format: converted, "50") == "50% done")
+    }
+}
+
+@Suite struct NativeMergeTests {
+    let legacy = [
+        LocaleFile(name: "de", strings: ["ButtonCancel": "Abbrechen"]),
+        LocaleFile(name: "en-us", strings: ["ButtonCancel": "Cancel"]),
+    ]
+
+    @Test func mergesNativeKeysAndFillsUntranslatedOnes() throws {
+        let native = [LocaleFile(name: "en-us", strings: ["NativeOnly": "Native"])]
+        let merged = try LocaleFile.merging(legacy: legacy, native: native)
+        #expect(merged.map(\.name) == ["de", "en-us"])
+        #expect(merged[1].strings == ["ButtonCancel": "Cancel", "NativeOnly": "Native"])
+        let json = try CatalogBuilder.build(files: merged).json
+        #expect(json.contains(#""state" : "new",\#n            "value" : "Native""#))
+    }
+
+    @Test func addsNativeTranslationFiles() throws {
+        let native = [
+            LocaleFile(name: "en-us", strings: ["NativeOnly": "Native"]),
+            LocaleFile(name: "fr", strings: ["NativeOnly": "Natif"]),
+        ]
+        let merged = try LocaleFile.merging(legacy: legacy, native: native)
+        #expect(merged.map(\.name) == ["de", "en-us", "fr"])
+        #expect(merged[2].strings == ["NativeOnly": "Natif"])
+    }
+
+    @Test func rejectsKeysThatExistInBoth() {
+        let native = [LocaleFile(name: "de", strings: ["ButtonCancel": "Abbruch"])]
+        #expect(throws: ImportError.duplicateKey(key: "ButtonCancel", fileName: "de")) {
+            try LocaleFile.merging(legacy: legacy, native: native)
+        }
+    }
+}
+
+@Suite struct ImportCommandTests {
+    let root: URL
+
+    init() throws {
+        root = FileManager.default.temporaryDirectory.appending(path: "StringsImportTests-\(UUID().uuidString)")
+        try write(#"{"ButtonCancel": "Cancel"}"#, to: "strings/en-us.json")
+        try write(#"{"ButtonCancel": "Abbrechen"}"#, to: "strings/de.json")
+        try write("{}", to: "Localization/native/en-us.json")
+        try write(plist(["en", "de"]), to: ImportCommand.infoPlistPath)
+        try FileManager.default.createDirectory(
+            at: root.appending(path: ImportCommand.catalogPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+    }
+
+    func write(_ text: String, to path: String) throws {
+        let url = root.appending(path: path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    func plist(_ locales: [String]) -> String {
+        let items = locales.map { "<string>\($0)</string>" }.joined()
+        return """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <plist version="1.0"><dict><key>CFBundleLocalizations</key><array>\(items)</array></dict></plist>
+            """
+    }
+
+    func run(_ arguments: String...) -> (status: Int32, log: [String]) {
+        var log: [String] = []
+        let status = ImportCommand.run(arguments: arguments + ["--root", root.path()], root: root) { log.append($0) }
+        return (status, log)
+    }
+
+    @Test func checkFailsUntilCatalogIsWritten() {
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(run("--check").status == 1)
+        #expect(run().status == 0)
+        #expect(run().status == 0)
+        #expect(run("--check").status == 0)
+    }
+
+    @Test func infoPlistMismatchFailsBothModes() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write(plist(["en"]), to: ImportCommand.infoPlistPath)
+        let written = run()
+        #expect(written.status == 1)
+        #expect(written.log.contains { $0.contains("CFBundleLocalizations") && $0.contains("<string>de</string>") })
+        #expect(run("--check").status == 1)
+    }
+
+    @Test func rejectsUnknownArguments() {
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(run("--bogus").status == 1)
+    }
+}

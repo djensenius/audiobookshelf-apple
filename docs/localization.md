@@ -1,11 +1,14 @@
 # Localization
 
-The flat JSON files in `strings/` stay the source of truth. Translators edit them in
-Weblate, as they did for the Capacitor app, and `mise run strings` generates the String
-Catalog the native app uses:
+The flat JSON files in `strings/` are legacy data synced from upstream
+([advplyr/audiobookshelf-app](https://github.com/advplyr/audiobookshelf-app)), where
+translators edit them in Weblate. They are read-only here, like the rest of the legacy
+code. Keys only the native app needs live in `Localization/native/`. `mise run strings`
+merges both into the String Catalog the native app uses:
 
 ```
-strings/*.json  ──mise run strings──▶  Packages/AudiobookshelfKit/Sources/ABSUI/Resources/Localizable.xcstrings
+strings/*.json + Localization/native/*.json
+  ── mise run strings ──▶  Packages/AudiobookshelfKit/Sources/ABSUI/Resources/Localizable.xcstrings
 ```
 
 Weblate can't edit `.xcstrings` files
@@ -23,19 +26,38 @@ never edit the catalog by hand or in Xcode's catalog editor: the next import ove
 The importer is the local package `Tools/StringsImport` (library `StringsImportCore`, executable
 `import-strings`). It is not part of the app or `AudiobookshelfKit`.
 
-## Adding or changing a string
+## Adding a string
 
-1. Add the key and English text to `strings/en-us.json`, keeping keys sorted and using
-   the legacy conventions (`Button…`, `Header…`, `Label…`, `Message…`; `{0}` placeholders;
-   `<strong>` for emphasis) so the file stays compatible with upstream and Weblate.
-2. Run `mise run strings` and commit both files.
-3. Use the key from Swift: `L10n.string("ButtonCancel")` or
-   `L10n.string("LabelByAuthor", author)`.
+1. If an upstream key already says what you need, use it. Otherwise add the key and
+   English text to `Localization/native/en-us.json`, keeping keys sorted and using the
+   legacy conventions (`Button…`, `Header…`, `Label…`, `Message…`; `{0}` placeholders;
+   `<strong>` for emphasis). Translations can go in `Localization/native/<file>.json`,
+   named like the `strings/` files (`de.json`, `no.json`, `pt-br.json`).
+2. Run `mise run strings` and commit the JSON and the catalog.
+3. Use the key from Swift: `L10n.string("ButtonCancel")`,
+   `L10n.string("LabelByAuthor", author)`, or `L10n.attributed("HeaderWelcome", name)` for
+   values with Markdown.
 
-Translations arrive through Weblate commits to `strings/*.json`; rerun `mise run strings`
-after merging them. If Weblate adds a locale, the importer either maps it or fails with a
-message asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
+The importer fails if a native key also exists in `strings/`; pick another key. Native
+keys nobody has translated get the English fill like any other key.
+
+Translations arrive through the upstream sync ([upstream-sync.md](upstream-sync.md)), not
+through Weblate commits to this repository; rerun `mise run strings` after syncing
+`strings/`. If upstream adds a locale, the importer either maps it or fails with a message
+asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
 `CFBundleLocalizations` in `Audiobookshelf/Info.plist` (`strings:check` prints the list).
+
+## Using strings in Swift
+
+- `L10n.string` returns plain text. `L10n.attributed` renders the localized value's inline
+  Markdown (`**bold**`, line breaks kept) and inserts the arguments as plain text.
+- Never run Markdown over formatted output (`AttributedString(markdown: L10n.string(…))`
+  or `Text(LocalizedStringKey(…))`): arguments are often server data such as user names or
+  titles, and would be parsed as links or formatting.
+- In ABSUI, look strings up only through `L10n` (which always uses `bundle: .module`) and
+  use `Text(verbatim:)` for literals that aren't localized. A `Text("…")` literal or
+  `String(localized:)` call in ABSUI would let Xcode's string extraction add entries to
+  the catalog, which then fails `strings:check`.
 
 ## Conversion rules
 
@@ -44,11 +66,11 @@ message asking for an entry in `LocaleMapping.overrides`; then add the new ident
   reorder arguments. Pass every argument as a `String`.
 - In strings with placeholders, a literal `%` becomes `%%`.
 - `<strong>x</strong>` and `<b>x</b>` become Markdown `**x**`; `<br>` becomes a newline.
-  The importer warns about any other tag. Render Markdown with
-  `AttributedString(markdown:)`.
+  The importer warns about any other tag. Render it with `L10n.attributed`.
 - Empty translations are skipped. So is a translation that uses a placeholder its English
   string doesn't have, or a malformed one such as `{0`; the importer prints a warning.
-  Skipped keys get the English fill described below.
+  Skipped keys get the English fill described below. A translation that drops a
+  placeholder is kept, with a warning.
 - Output is deterministic (sorted keys, Xcode's JSON layout), so rerunning is a no-op.
 
 There are no plurals in the legacy strings. RTL and pseudo-locale checks are out of scope
@@ -56,7 +78,8 @@ for now.
 
 ## Missing translations
 
-Keys a language hasn't translated in Weblate show English. For every locale in the
+Keys a language hasn't translated in Weblate (or native keys nobody has translated) show
+English. For every locale in the
 catalog, the importer writes the English value with `state: "new"` for each key that is
 missing, empty, or skipped, and real translations with `state: "translated"`. Xcode's
 catalog editor therefore lists those strings as "new" (untranslated), and its

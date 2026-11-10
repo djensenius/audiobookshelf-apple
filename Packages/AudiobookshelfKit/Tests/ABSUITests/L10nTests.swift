@@ -1,6 +1,7 @@
-import ABSUI
 import Foundation
 import Testing
+
+@testable import ABSUI
 
 @Suite struct L10nTests {
     @Test func looksUpGermanString() {
@@ -14,6 +15,7 @@ import Testing
     @Test func mappedLocalesResolve() {
         #expect(L10n.string("ButtonCancel", locale: Locale(identifier: "pt-BR")) == "Cancelar")
         #expect(L10n.string("ButtonCancel", locale: Locale(identifier: "zh-Hans")) == "取消")
+        #expect(L10n.string("ButtonCancel", locale: Locale(identifier: "zh-Hant")) == "取消")
         #expect(L10n.string("ButtonCancel", locale: Locale(identifier: "nb")) == "Avbryt")
     }
 
@@ -22,18 +24,50 @@ import Testing
         #expect(value == "3 episodes, 1 incomplete")
     }
 
-    @Test func fallsBackToEnglishForUntranslatedString() {
-        #expect(L10n.string("ButtonAllow", locale: Locale(identifier: "is")) == "Allow")
-    }
-
-    @Test func fallsBackToEnglishForUntranslatedFormat() {
-        // fi's HeaderWelcome has a malformed placeholder, so the importer skips it.
-        let value = L10n.string("HeaderWelcome", "Ada", locale: Locale(identifier: "fi"))
-        #expect(value == "Welcome, **Ada**")
-    }
-
     @Test func looksUpPreferredLocalization() {
         // The test runner has no localizations of its own, so it resolves to English.
         #expect(L10n.string("ButtonCancel") == "Cancel")
+    }
+
+    /// Every compiled locale has every key with a real value, so no lookup shows a key name,
+    /// even without `L10n`'s English fallback.
+    @Test func everyLocaleResolvesEveryKey() throws {
+        func table(_ localization: String) -> [String: String]? {
+            L10n.bundle.url(
+                forResource: "Localizable", withExtension: "strings", subdirectory: nil, localization: localization
+            )
+            .flatMap { NSDictionary(contentsOf: $0) as? [String: String] }
+        }
+        let keys = try #require(table("en")).keys
+        let locales = L10n.bundle.localizations.filter { $0 != "Base" }
+        #expect(locales.count > 1)
+        #expect(keys.count > 1)
+        var unresolved: [String] = []
+        for locale in locales {
+            let values = table(locale) ?? [:]
+            unresolved += keys.filter { values[$0] == nil || values[$0] == $0 }.map { "\(locale): \($0)" }
+            // Spot-check the lookup path itself once per locale.
+            if let key = keys.first, L10n.localized(key, locale: Locale(identifier: locale)) == key {
+                unresolved.append("\(locale): \(key) (lookup)")
+            }
+        }
+        #expect(unresolved.isEmpty)
+    }
+
+    @Test func attributedRendersMarkdownFromFormatOnly() throws {
+        let argument = "[x](https://evil) a_b_"
+        let value = L10n.attributed("HeaderWelcome", argument, locale: Locale(identifier: "en"))
+        #expect(String(value.characters) == "Welcome, \(argument)")
+        #expect(value.runs.allSatisfy { $0.link == nil })
+        let range = try #require(value.range(of: argument))
+        #expect(value[range].runs.allSatisfy { $0.inlinePresentationIntent == .stronglyEmphasized })
+    }
+
+    @Test func attributedPreservesLineBreaks() {
+        let value = L10n.attributed("MessageConfirmDeleteServerEpisode", "*Ep*", locale: Locale(identifier: "en"))
+        #expect(
+            String(value.characters)
+                == "Are you sure you want to delete episode \"*Ep*\" from the server?\nWarning: This will delete the audio file."
+        )
     }
 }
