@@ -81,10 +81,12 @@ public final class SessionLifecycle {
     public private(set) var linkEpoch: UInt64 = 0
 
     /// How many ``switchAccount(to:from:)`` calls ended signed out (``AuthGate/connect``): the
-    /// server rejected the saved session or its version. The shell that chose the switch is gone
-    /// by then, so the root watches this to say why; a count, not a gate change, so a view that
-    /// never rendered the switch still sees it.
+    /// server rejected the saved session or its version, or the switch threw after the session
+    /// expired. The shell that chose the switch is gone by then, so the root watches this to say
+    /// why; a count, not a gate change, so a view that never rendered the switch still sees it.
     public private(set) var signedOutSwitches = 0
+    /// What the last of those threw, if it threw, such as an unreadable Keychain.
+    public private(set) var signedOutSwitchError: (any Error)?
 
     /// The session the gate shows as ready, for a screen to name when the user chooses a sign-out,
     /// switch or sign-in (``signOut(of:)``, ``switchAccount(to:from:)``,
@@ -281,7 +283,14 @@ public final class SessionLifecycle {
                 result = .failure(error)
             }
             await self.reconcile()
-            if self.gate == .connect { self.signedOutSwitches += 1 }
+            if self.gate == .connect {
+                if case .failure(let error) = result {
+                    self.signedOutSwitchError = error
+                } else {
+                    self.signedOutSwitchError = nil
+                }
+                self.signedOutSwitches += 1
+            }
             return result
         }
         try result.get()
@@ -394,7 +403,11 @@ public final class SessionLifecycle {
         guard let origin else { return true }
         let running = session?.context
         if running.map({ $0.identity == origin.identity && $0.sessionID == origin.sessionID }) ?? false { return true }
-        if running == nil, !strictly, lastExpiredSession == origin.sessionID { return true }
+        if running == nil, !strictly, lastExpiredSession == origin.sessionID {
+            // Only the first switch from it, even if that one fails without starting a session.
+            lastExpiredSession = nil
+            return true
+        }
         Log.auth.info("Ignored an account change chosen from an account that is no longer signed in")
         // Follows the source, in case the stale session just ended.
         await reconcile()

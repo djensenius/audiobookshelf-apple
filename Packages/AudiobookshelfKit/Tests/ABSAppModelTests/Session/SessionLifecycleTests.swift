@@ -601,6 +601,28 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
+    /// A expires; the first switch chosen from it runs and throws without starting a session.
+    /// The second is still not the first change, and the root learns why the first failed.
+    @Test func onlyTheFirstSwitchFromAnExpiredAccountRunsEvenIfItFails() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let fromA = try #require(harness.lifecycle.readySession)
+        harness.source.phase = .signedOut
+        harness.source.switchError = StoreFailure()
+
+        await #expect(throws: StoreFailure.self) {
+            try await harness.lifecycle.switchAccount(to: identityB.connectionID, from: fromA)
+        }
+        harness.source.switchError = nil
+        try await harness.lifecycle.switchAccount(to: UUID(), from: fromA)
+
+        #expect(harness.log.count(of: "accounts.switch(b)") == 1)
+        #expect(harness.log.count(of: "accounts.switch(?)") == 0)
+        #expect(harness.lifecycle.gate == .connect)
+        #expect(harness.lifecycle.signedOutSwitches == 1)
+        #expect(harness.lifecycle.signedOutSwitchError is StoreFailure)
+    }
+
     /// A failed switch ends A and starts it again; A then expiring is still an expiry.
     @Test func aSwitchFromAnAccountThatRestartedThenExpiredStillRuns() async throws {
         let harness = Harness()

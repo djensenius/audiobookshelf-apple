@@ -37,7 +37,9 @@ struct RootView: View {
             // A count, not the gate: SwiftUI can coalesce the switch's gates. Every window shows it:
             // the switch replaced every window's shell, not only the one it was chosen in.
             .onChange(of: lifecycle.signedOutSwitches) {
-                switchSignedOutMessage = accounts?.signedOutSwitchMessage ?? L10n.string("MessageSwitchServerSignedOut")
+                switchSignedOutMessage =
+                    accounts?.signedOutSwitchMessage(after: lifecycle.signedOutSwitchError)
+                    ?? L10n.string("MessageSwitchServerSignedOut")
                 showsSwitchSignedOut = true
             }
             .alert(

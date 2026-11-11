@@ -33,17 +33,14 @@ struct AccountActions {
     }
 
     /// Switches to another saved connection.
-    /// - Returns: A task whose value is whether that connection's session is ready (a failure is
-    ///   logged), or `nil` when the session isn't ready. A switch can fail without throwing: the
-    ///   server can reject the saved session or its version, which signs out.
+    /// - Returns: The switch's task, or `nil` when the session isn't ready.
     @discardableResult
     func switchAccount(to connectionID: UUID) -> Task<SwitchOutcome, Never>? {
         guard let origin = lifecycle.readySession else { return nil }
         return Task { await switchAccount(to: connectionID, from: origin) }
     }
 
-    /// The switch, chosen from `origin`.
-    /// - Returns: Whether that connection's session is ready.
+    /// The switch, chosen from `origin`; it succeeds only if that connection's session is ready.
     func switchAccount(to connectionID: UUID, from origin: ReadySession) async -> SwitchOutcome {
         // Without a session the switch would only fail, after ending the running one.
         if let accounts, await !accounts.hasSession(connectionID) {
@@ -102,11 +99,14 @@ extension SessionLifecycle {
 }
 
 extension AccountManager {
-    /// What the root says when a switch ended signed out (``SessionLifecycle/signedOutSwitches``):
-    /// signing in again can't fix a server version the app no longer supports, so that gets the
-    /// connect screen's message; otherwise the server rejected the saved session.
-    var signedOutSwitchMessage: String {
-        if case .server(.unsupportedVersion(let version))? = lastError {
+    /// What the root says when a switch ended signed out (``SessionLifecycle/signedOutSwitches``),
+    /// having thrown `error`: an unreadable Keychain, or a server version the app no longer
+    /// supports, which signing in again can't fix, get the connect screen's message; otherwise
+    /// the server rejected the saved session.
+    func signedOutSwitchMessage(after error: (any Error)? = nil) -> String {
+        if let error, SwitchFailure(error) == .keychainUnavailable {
+            SwitchFailure.keychainUnavailable.message
+        } else if case .server(.unsupportedVersion(let version))? = lastError {
             ConnectFailure.unsupportedVersion(version).message
         } else {
             L10n.string("MessageSwitchServerSignedOut")

@@ -688,11 +688,12 @@ private func connection(username: String = "david", address: String = "https://a
             }
         }
         while backend.signInStarts == 0 { await Task.yield() }
-        #expect(model.phase == .signingIn(openID ? .openID : .password))
+        #expect(model.phase == .signingIn(openID ? .openID : .password) && model.canGoBack)
         if cancelCaller {
             task.cancel()
         } else {
-            model.cancel()
+            // The toolbar's Cancel.
+            model.goBack()
             #expect(model.phase == .login && !model.isBusy)
         }
         open.yield()

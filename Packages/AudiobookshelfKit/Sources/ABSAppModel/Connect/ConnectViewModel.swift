@@ -144,11 +144,12 @@ public final class ConnectViewModel {
         }
     }
 
-    /// Whether ``goBack()`` does anything. While busy, it cancels.
+    /// Whether ``goBack()`` does anything. While busy, it cancels: the toolbar's only way out of
+    /// a stalled sign-in in the add-server sheet, which can't be swiped away meanwhile.
     public var canGoBack: Bool {
         switch phase {
         case .address: !savedServers.isEmpty && !addsServerOnly
-        case .validating, .login: true
+        case .validating, .login, .signingIn(.password), .signingIn(.openID): true
         case .signingIn(.savedSession): !isResumingSession
         case .servers, .signingIn, .done: false
         }

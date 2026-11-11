@@ -4,13 +4,9 @@ import ABSData
 import ABSUI
 import SwiftUI
 
-/// The links a scene has received, as `RootView` keeps them: one waits at a time, the last
-/// received. Once the user confirms a switch to another server, links wait in a slot instead,
-/// starting with the confirmed one, and any newer link replaces it, including one that arrives
-/// before the switch has changed the gate (which the outgoing account's epoch would drop). When
-/// the switch has finished, the slot's link waits with the new account's
-/// ``SessionLifecycle/linkEpoch``. A failed switch drops the confirmed link, but a newer one
-/// waits as if it had just arrived (a link for another server asks again).
+/// The links a scene has received, as `RootView` keeps them: the last one waits. During a
+/// confirmed switch, the last one since confirming waits in a slot, then with the new account's
+/// ``SessionLifecycle/linkEpoch``. A failed switch drops only the confirmed link.
 struct SceneLinks {
     private(set) var pending: PendingLink?
     /// The link to open after the confirmed switch, while it runs.
@@ -121,13 +117,8 @@ struct ServerSwitchPrompt {
 }
 
 /// What the scene does with a link for another saved server (``Router/pendingServerSwitch``):
-/// drop it when the server isn't saved or has no session, or ask, then switch to it and open the
-/// link once confirmed.
-///
-/// The switch goes through ``SessionLifecycle/switchAccount(to:)``, so the current session
-/// flushes and ends first. It rebuilds the scene's host (`.id(identity)` in `RootView`), so the
-/// link is kept by the root (``LinkReopener``), not the old host, and opens there after the
-/// switch, with the new account's ``SessionLifecycle/linkEpoch``.
+/// drop it when the server isn't saved or has no session, or ask, then switch through the
+/// lifecycle. The switch rebuilds the host, so the root keeps the link (``LinkReopener``).
 @MainActor
 struct ServerSwitchConfirmation {
     let lifecycle: SessionLifecycle

@@ -298,11 +298,11 @@ private final class Recorder: SessionParticipant {
         #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
     }
 
-    /// A locked Keychain doesn't hide a saved session (``AccountManager/hasSession(_:)``), so a
-    /// switch can run and throw on it after a relaunch; the alert then gives the connect screen's
-    /// guidance for that, not the generic failure.
-    @Test func aSwitchThatCantReadTheKeychainSaysSo() {
+    /// A switch can throw on a locked Keychain (``AccountManager/hasSession(_:)`` lets it run).
+    @Test func aSwitchThatCantReadTheKeychainSaysSo() throws {
         let locked = KeychainError(status: errSecInteractionNotAllowed)
+        let accounts = try #require(try makeEnvironment().accounts)
+        defer { cleanUp([]) }
 
         #expect(SwitchFailure(locked) == .keychainUnavailable)
         #expect(SwitchFailure(AccountError.keychain(locked)) == .keychainUnavailable)
@@ -310,6 +310,11 @@ private final class Recorder: SessionParticipant {
         #expect(SwitchFailure(AccountError.notSignedIn) == .other)
         #expect(SwitchFailure.keychainUnavailable.message == ConnectFailure.keychainUnavailable.message)
         #expect(SwitchFailure.other.message == L10n.string("MessageSwitchServerFailed"))
+        // The root's, when the session expired first, so the switch's shell is gone.
+        #expect(accounts.signedOutSwitchMessage(after: locked) == ConnectFailure.keychainUnavailable.message)
+        #expect(
+            accounts.signedOutSwitchMessage(after: AccountError.notSignedIn)
+                == L10n.string("MessageSwitchServerSignedOut"))
     }
 
     /// Two windows can both take the ready gate before either change starts; the changes after
@@ -352,7 +357,7 @@ private final class Recorder: SessionParticipant {
         var prompt = ServerSwitchPrompt()
         let request = try await present(router, confirmation, in: &prompt)
         // Signing in again can't fix this, so the root says so rather than "signed out".
-        #expect(accounts.signedOutSwitchMessage == L10n.string("MessageSwitchServerSignedOut"))
+        #expect(accounts.signedOutSwitchMessage() == L10n.string("MessageSwitchServerSignedOut"))
 
         let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
 
@@ -362,8 +367,8 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.waitingLink(lifecycle) == nil && !recorder.links.isSwitching)
         // The old shell is gone; the root shows the message for this count.
         #expect(lifecycle.signedOutSwitches == 1)
-        #expect(accounts.signedOutSwitchMessage == ConnectFailure.unsupportedVersion("1.0.0").message)
-        #expect(accounts.signedOutSwitchMessage != L10n.string("MessageSwitchServerSignedOut"))
+        #expect(accounts.signedOutSwitchMessage() == ConnectFailure.unsupportedVersion("1.0.0").message)
+        #expect(accounts.signedOutSwitchMessage() != L10n.string("MessageSwitchServerSignedOut"))
     }
 
     /// Adding a server from the server list signs in as an account change: the session ends
