@@ -7,7 +7,7 @@ import Testing
 @testable import ABSPlayback
 
 @MainActor
-final class InMemoryQueueStore: PlaybackQueueStoring {
+private final class InMemoryQueueStore: PlaybackQueueStoring {
     var saved: [UUID: [QueueItem]] = [:]
     private(set) var saves = 0
 
@@ -23,12 +23,12 @@ final class InMemoryQueueStore: PlaybackQueueStoring {
     }
 }
 
-func queueItem(_ itemID: String, episode: String? = nil) -> QueueItem {
+private func queueItem(_ itemID: String, episode: String? = nil) -> QueueItem {
     QueueItem(libraryItemID: itemID, episodeID: episode, title: "Title \(itemID)")
 }
 
 /// A `UserDefaults` suite of its own, removed when the test ends.
-final class ScratchDefaults {
+private final class ScratchDefaults {
     let name = "PlaybackQueueTests.\(UUID().uuidString)"
     let defaults: UserDefaults
 
@@ -44,7 +44,7 @@ final class ScratchDefaults {
 @MainActor
 struct PlaybackQueueTests {
     let connection = UUID()
-    let store = InMemoryQueueStore()
+    private let store = InMemoryQueueStore()
 
     private func ids(_ queue: PlaybackQueue) -> [String] {
         queue.items.map { $0.episodeID.map { "\($0)" } ?? $0.libraryItemID }
@@ -161,6 +161,31 @@ struct PlaybackQueueTests {
         let cleared = PlaybackQueue(
             serverConnectionID: connection, store: UserDefaultsPlaybackQueueStore(defaults: scratch.defaults))
         #expect(cleared.items.isEmpty)
+    }
+
+    @Test func unencodableDurationsAreDroppedSoTheQueueStillSaves() throws {
+        let scratch = try ScratchDefaults()
+        let queue = PlaybackQueue(
+            serverConnectionID: connection, store: UserDefaultsPlaybackQueueStore(defaults: scratch.defaults))
+        queue.addToEnd(QueueItem(libraryItemID: "A", title: "A", duration: 60))
+        for (itemID, duration) in [("inf", Double.infinity), ("-inf", -.infinity), ("nan", .nan), ("neg", -1)] {
+            let item = QueueItem(libraryItemID: itemID, title: itemID, duration: duration)
+            #expect(item.duration == nil)
+            queue.addToEnd(item)
+        }
+        queue.addToEnd(QueueItem(libraryItemID: "zero", title: "zero", duration: 0))
+
+        // Every change saved: the earlier queue does not come back on relaunch.
+        let reloaded = PlaybackQueue(
+            serverConnectionID: connection, store: UserDefaultsPlaybackQueueStore(defaults: scratch.defaults))
+        #expect(reloaded.items == queue.items)
+        #expect(reloaded.items.map(\.libraryItemID) == ["A", "inf", "-inf", "nan", "neg", "zero"])
+        #expect(reloaded.items.map(\.duration) == [60, nil, nil, nil, nil, 0])
+
+        // Decoding goes through the same normalization.
+        let decoded = try JSONDecoder().decode(
+            QueueItem.self, from: Data(#"{"libraryItemID":"N","title":"T","duration":-5}"#.utf8))
+        #expect(decoded.duration == nil)
     }
 
     @Test func eachConnectionHasItsOwnQueue() throws {

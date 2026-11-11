@@ -96,7 +96,16 @@ Readers use `PlaybackQueueReading`; explicit mutations persist only actual chang
 Re-enqueueing media moves it rather than duplicating it. `UserDefaultsPlaybackQueueStore`
 stores ordered JSON under connection-specific keys in the App Group by default;
 tests inject a store or an isolated UserDefaults suite. Empty queues remove their
-key, and unreadable saved JSON loads as an empty queue.
+key, and unreadable saved JSON loads as an empty queue. `QueueItem` identity is
+immutable, and a non-finite or negative duration becomes `nil`, which keeps the
+queue encodable.
+
+Composition must own exactly one `PlaybackQueue` per connection and must drop it
+before (or instead of) calling the store's `removeQueue`. The store cannot reach
+a live instance, so a surviving or second instance would drift, and its next
+mutation would write the removed key back. Queue UI and other features mutate
+through that owned instance, never the store directly; only connection removal
+calls `removeQueue`, after dropping the instance.
 
 This core has no app wiring, playback end hook, auto-advance, episode lookup,
 account-removal composition, or queue UI. It makes no progress-sync or

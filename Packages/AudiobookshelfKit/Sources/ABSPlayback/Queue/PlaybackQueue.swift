@@ -4,15 +4,17 @@ import Observation
 
 /// A book or podcast episode waiting in the queue, with display metadata for queue readers.
 public struct QueueItem: Sendable, Hashable, Codable, Identifiable {
-    public var libraryItemID: String
-    public var episodeID: String?
+    /// Identity is fixed so `episodeID` stays normalized; create a new item to change it.
+    public let libraryItemID: String
+    public let episodeID: String?
     public var title: String
     /// The author, or the podcast's title for an episode.
     public var subtitle: String?
     /// The cover is `coverPath` on `libraryItemID`.
     public var coverPath: String?
-    /// Seconds, when known.
-    public var duration: Double?
+    /// Seconds, when known. Non-finite or negative values become `nil`, so the queue always
+    /// encodes as JSON.
+    public let duration: Double?
 
     public init(
         libraryItemID: String, episodeID: String? = nil, title: String, subtitle: String? = nil,
@@ -23,7 +25,7 @@ public struct QueueItem: Sendable, Hashable, Codable, Identifiable {
         self.title = title
         self.subtitle = subtitle
         self.coverPath = coverPath
-        self.duration = duration
+        self.duration = duration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
     }
 
     enum CodingKeys: String, CodingKey {
