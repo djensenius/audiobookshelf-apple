@@ -15,6 +15,7 @@ mise run test:server                              # server 2.26.0, the minimum, 
 ABS_SERVER_VERSION=2.37.2 mise run test:server    # another release
 mise run server:run                               # keep a seeded server for manual use
 scripts/test-server.sh test --filter ProgressContractTests   # swift test arguments replace the default filter
+scripts/test-server.sh test --search-contract                # only isolated owned search, not ordinary suites
 ```
 
 You need Docker (OrbStack or Docker Desktop), `ffmpeg` (`brew install ffmpeg`) and Xcode. A run
@@ -30,7 +31,10 @@ The script generates the media in a temporary directory with a random root passw
 `ghcr.io/advplyr/audiobookshelf:<version>` on a free port of 127.0.0.1, creates the root user
 (`POST /init`) and the two libraries, scans, waits for the items, exports `ABS_TEST_SERVER_URL`,
 `ABS_TEST_USERNAME`, `ABS_TEST_PASSWORD` and `ABS_TEST_SERVER_VERSION`, and runs
-`swift test --filter ABSServerContractTests`. The server runs with `RATE_LIMIT_AUTH_MAX=0`: its
+two sequential Swift test processes: `--filter ABSServerContractTests --skip SearchContractTests`,
+then an explicitly owned `--filter SearchContractTests` pass. Either failure fails the harness.
+Focused Swift arguments retain their existing behavior and do not add another pass.
+The server runs with `RATE_LIMIT_AUTH_MAX=0`: its
 default of 40 sign-ins and refreshes per 10 minutes would end the suite with 429 responses.
 `server:run` stops after the scan, prints the URL, user name and password to the terminal and
 keeps the server until Ctrl-C. Nothing is written to a file.
@@ -54,6 +58,7 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `TokenRefreshContractTests` | Refresh and rotation, the old refresh token, concurrent refreshes, refresh before expiry, logout |
 | `LibraryContractTests` | Libraries, minified and expanded books and podcasts, chapters, audio files, tracks, shelves, search, authors, series |
 | `RecentEpisodesContractTests` | Read-only normal/empty pages and book-library 404; strict raw counts, identities, podcast and audio expansions |
+| `SearchContractTests` | Separately gated owned libraries; all seven search groups plus genres, strict nested media, limits/errors, exact-ID cascade and failure cleanup |
 | `CollectionWriteContractTests` | Five collection writes; ordered two-book lifecycle and empty reads; permissions, atomic invalid create, no-ops/errors, version differences and failure teardown |
 | `PlaylistWriteContractTests` | Five owner-only writes; book/episode lifecycles, strict raw membership checks, ownership/access denials, atomic invalid add, safe characterization and exact-ID failure teardown |
 | `PlaybackSessionContractTests` | Start, sync and close; resume; same-device takeover; track URLs and ranges; downloads; local session upload |
@@ -62,6 +67,11 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 
 Not covered yet: bookmarks, listening stats, Socket.IO events
 (`ABSRealtime`) and OpenID sign-in (see [oidc.md](oidc.md) for the manual check).
+
+See [owned search contracts](search-contracts.md) for the explicit mode, fail-closed ownership,
+Docker/node provenance, disjoint media, capture format and reproduction commands. Default full
+runs require one of the two reviewed pins; other releases remain usable with focused ordinary
+Swift selectors. Search skips in ad-hoc/package runs are **not** live search evidence.
 
 ## Differences between versions
 
@@ -118,8 +128,10 @@ removes collections. Only run mutations against disposable servers you own. Pref
 `TMPDIR=$PWD/.build/server-tmp` (create it first); retain captures/helpers only under that worktree's
 `.build` or owned session artifacts.
 
-The script's trap removes the container and `${TMPDIR}/abs-contract.*` on success, failure,
-Ctrl-C and SIGTERM. A SIGKILL cannot be trapped; remove strays with:
+The script's trap bounds and verifies shutdown of its exact owned server on success, failure,
+Ctrl-C and SIGTERM, then removes its temporary directory. Unverified containment retains the data
+and fails an otherwise successful run; an existing primary failure code is preserved. See the
+[cleanup regressions](search-contracts.md#provenance-captures-and-cleanup). A SIGKILL cannot be trapped; remove strays with:
 
 ```sh
 docker rm -f $(docker ps -aq --filter label=abs-contract-test=1)
