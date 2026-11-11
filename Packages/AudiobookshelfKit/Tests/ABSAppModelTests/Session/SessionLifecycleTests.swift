@@ -477,17 +477,36 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
-    @Test func seedThatFinishesAfterTheSwitchIsDropped() async {
+    @Test(arguments: [true, false])
+    func seedThatFinishesAfterTheSwitchIsDropped(newSeedFirst: Bool) async throws {
         let harness = Harness()
-        let seedGate = Gate()
-        harness.library.seedGate = seedGate
+        let oldGate = Gate()
+        let newGate = Gate()
+        defer {
+            oldGate.open()
+            newGate.open()
+        }
+        harness.library.seedGate = oldGate
         await harness.lifecycle.start()
-        #expect(await eventually { harness.log.entries.contains("library.fetchMe(a)") })
+        try #require(await eventually { harness.log.entries.contains("library.fetchMe(a)") })
 
-        try? await harness.lifecycle.switchAccount(to: identityB.connectionID)
-        #expect(await eventually { harness.log.entries.contains("library.fetchMe(b)") })
-        seedGate.open()
-        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+        // A captured oldGate before suspending; B must capture its own gate.
+        harness.library.seedGate = newGate
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        try #require(await eventually { harness.log.entries.contains("library.fetchMe(b)") })
+
+        if newSeedFirst {
+            newGate.open()
+            try #require(await eventually { harness.log.entries.contains("library.seed(b)") })
+            oldGate.open()
+        } else {
+            oldGate.open()
+            try #require(await eventually { harness.log.entries.contains("library.seedDropped(a)") })
+            newGate.open()
+        }
+        // Opening a gate only resumes its waiter; the other seed finishing is not a completion signal.
+        try #require(await eventually { harness.log.entries.contains("library.seedDropped(a)") })
+        try #require(await eventually { harness.log.entries.contains("library.seed(b)") })
 
         #expect(harness.log.entries.contains("library.seedDropped(a)"))
         #expect(!harness.log.entries.contains("library.seed(a)"))
