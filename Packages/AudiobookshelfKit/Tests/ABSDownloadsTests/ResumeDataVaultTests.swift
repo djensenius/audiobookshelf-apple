@@ -1,3 +1,4 @@
+import ABSAPI
 import CryptoKit
 import Foundation
 import Security
@@ -106,6 +107,19 @@ import Testing
         #expect(ResumeDataVault.credentialTag(for: request) == tag)
         #expect(ResumeDataVault.credentialTag(for: refreshed) != tag)
         #expect(ResumeDataVault.credentialTag(for: edited) != tag)
+    }
+
+    /// A cover whose `ts` changed is a different file, so it can't resume from the old bytes.
+    @Test func credentialTagCoversCoverTimestamp() throws {
+        let configuration = try APIClientConfiguration(baseURL: URL(string: "https://abs.example.com")!)
+        func tag(_ updatedAt: Int) throws -> Data {
+            ResumeDataVault.credentialTag(
+                for: try DownloadRequests.request(
+                    path: DownloadRequests.coverPath(itemID: "li_1", updatedAt: updatedAt),
+                    configuration: configuration, accessToken: "tok"))
+        }
+        #expect(try tag(1) != tag(2))
+        #expect(try tag(1) == tag(1))
     }
 }
 

@@ -52,19 +52,6 @@ import Testing
         #expect(request.url?.path() == "/abs/api/items/li_1/cover")
     }
 
-    /// The resume-data credential tag hashes the request's absolute URL (and headers), so a
-    /// cover whose `ts` changed can't resume from the old cover's bytes.
-    @Test func differentTimestampsGiveDifferentRequestURLs() throws {
-        func url(_ updatedAt: Int) throws -> String? {
-            try DownloadRequests.request(
-                path: DownloadRequests.coverPath(itemID: "li_1", updatedAt: updatedAt),
-                configuration: configuration, accessToken: "tok"
-            ).url?.absoluteString
-        }
-        #expect(try url(1) != url(2))
-        #expect(try url(1) == url(1))
-    }
-
     /// A background session would forward custom headers to a redirect's new address (#145).
     @Test func refusesConnectionsWithCustomHeaders() throws {
         let proxied = try APIClientConfiguration(

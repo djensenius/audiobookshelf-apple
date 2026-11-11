@@ -36,6 +36,7 @@ public enum DownloadRequests {
     ///
     /// `path` may end in a `?query` (as ``coverPath(itemID:updatedAt:)`` does). The query is
     /// split off and sent as the URL's query, with `+` encoded as `%2B`, not as part of the path.
+    /// A `#fragment` after it is dropped; no stored path has one, because `pathSegment` escapes `#`.
     ///
     /// - Throws: ``DownloadRequestError/customHeadersRequireRedirectCheck`` if the connection
     ///   has custom headers, or ``APIError/invalidURL`` if the server address and `path`
