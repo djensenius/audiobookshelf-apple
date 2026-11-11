@@ -125,8 +125,8 @@ younger than 10 minutes is ready. Only the streaming decision for the path and
 setting known at the end counts, checked synchronously. The coordinator holds an injected
 `BackgroundActivity` around that work; `NoBackgroundActivity` is the default.
 
-Any user action, or a pause from an `.ended` observer such as the sleep timer,
-cancels the advance before its start. Once the start has begun it is an ordinary
+Any user action (a play request too, even one the policy blocks), or a pause from
+an `.ended` observer such as the sleep timer, cancels the advance before its start. Once the start has begun it is an ordinary
 play: a pause loads the next item paused, and a detach leaves it to finish. A
 blocked streaming decision keeps the item queued and never consents on the
 user's behalf. A queued item removed during the close wait gets no `/play` and

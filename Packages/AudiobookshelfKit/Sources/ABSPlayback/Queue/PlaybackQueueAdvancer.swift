@@ -34,6 +34,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     private var listing: (podcastItemID: String, listing: PodcastEpisodeListing)?
     /// Episodes that ended while attached, whose finish may not have reached the server yet.
     private var endedEpisodes: Set<MediaKey> = []
+    /// When the last preparation finished, with or without a next item.
     private var preparedAt: TimeInterval = 0
     /// Near-end refreshes done since the load, a resume or a seek out of them.
     private var refreshed: Set<NearEndTrigger> = []
@@ -78,7 +79,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         }
     }
 
-    /// Undoes ``attach(to:)``, cancelling any preparation and any advance in flight.
+    /// Undoes ``attach(to:)``, cancelling any preparation and any advance still preparing (one
+    /// whose start has begun finishes as an ordinary play).
     public func detach(from coordinator: PlaybackCoordinator) {
         guard self.coordinator === coordinator else { return }
         if let observerToken { coordinator.removeObserver(observerToken) }
@@ -99,8 +101,10 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// The current item's own progress changes nothing. An episode that ended here and changed
     /// since is no longer assumed finished.
     public func progressDidChange(for key: MediaKey) {
-        guard let current, key != current, key.serverConnectionID == queue.serverConnectionID else { return }
+        guard key != current, key.serverConnectionID == queue.serverConnectionID else { return }
+        // Even with nothing loaded: playing again later must not skip it.
         endedEpisodes.remove(key)
+        guard let current else { return }
         let samePodcast =
             current.episodeId != nil && key.episodeId != nil && key.libraryItemId == current.libraryItemId
         guard samePodcast || key == candidate?.key || key == firstQueued(after: current) else { return }
@@ -126,8 +130,10 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
 
     func prepareNext(after key: MediaKey) async -> PreparedNextItem? {
         guard key == current else { return nil }
-        // A preparation too old to use means its listing is as old: fetch that again too.
-        if preparedNext(after: key) == nil, task == nil { recompute(refetchListing: prepared != nil) }
+        // A preparation too old to use, or an old finding of none, means an old listing too.
+        if preparedNext(after: key) == nil, task == nil {
+            recompute(refetchListing: prepared != nil || uptime() - preparedAt > Self.maximumPreparationAge)
+        }
         while preparedNext(after: key) == nil, let running = task {
             await running.value
             if task == running { break }
@@ -254,6 +260,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         guard let next, let coordinator else {
             candidate = nil
             prepared = nil
+            preparedAt = uptime()
             return
         }
         candidate = next

@@ -120,6 +120,20 @@ struct AutoAdvanceTests {
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
     }
 
+    /// Marked unfinished while nothing is loaded: still no longer skipped once playing again.
+    @Test func episodeChangedWhileStoppedIsNoLongerSkipped() async {
+        a.episodes.set("P", episodes: ["e1", "e2"], finished: ["e2"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        coordinator.stop()
+
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
+        await a.play("P", episode: "e2")
+        await a.finish()
+
+        #expect(coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
     @Test func advanceStaysAtEndWhenAllEpisodesFinished() async {
         a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1", "e3"])
         await a.play("P", episode: "e2")
@@ -172,7 +186,7 @@ struct AutoAdvanceTests {
         #expect(a.activity.begun.isEmpty)
     }
 
-    enum UserAction: CaseIterable { case pause, seek, play, stop }
+    enum UserAction: CaseIterable { case pause, seek, play, blockedPlay, stop }
 
     /// The user acting while the next item is still being prepared cancels the advance.
     @Test(arguments: UserAction.allCases)
@@ -188,6 +202,10 @@ struct AutoAdvanceTests {
         case .pause: coordinator.pause()
         case .seek: _ = await coordinator.seek(to: 100)
         case .play: await coordinator.play(itemID: "Z")
+        case .blockedPlay:
+            a.h.policy.decision = .denied(.cellular)
+            await coordinator.play(itemID: "Z")
+            a.h.policy.decision = .allowed
         case .stop: coordinator.stop()
         }
         gate.open()
@@ -196,6 +214,7 @@ struct AutoAdvanceTests {
         #expect(a.service.starts == (action == .play ? ["P", "Z"] : ["P"]))
         #expect(a.activity.begun.count == 1)
         #expect(a.activity.active == 0)
+        if action == .blockedPlay { #expect(coordinator.error == .streamingNotAllowed(.cellular, key: a.key("Z"))) }
     }
 
     @Test func detachCancelsAdvanceInFlight() async {
@@ -211,6 +230,24 @@ struct AutoAdvanceTests {
 
         #expect(a.service.starts == ["P"])
         #expect(coordinator.nextItemProvider == nil)
+        #expect(a.activity.active == 0)
+    }
+
+    /// A detach once `/play` is under way leaves the start to finish as an ordinary play.
+    @Test func detachDuringTheStartLetsItFinish() async {
+        a.enqueue("B")
+        await a.play("A")
+        let gate = Gate()
+        a.service.state.withLock { $0.startGates["B"] = gate }
+        a.h.engine.finish()
+        await yieldUntil { a.service.starts == ["A", "B"] }
+
+        a.advancer.detach(from: coordinator)
+        gate.open()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(coordinator.mediaKey == a.key("B"))
+        #expect(coordinator.phase == .loaded)
         #expect(a.activity.active == 0)
     }
 

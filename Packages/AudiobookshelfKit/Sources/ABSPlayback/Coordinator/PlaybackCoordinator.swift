@@ -187,6 +187,8 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var queuedEvents: [PlaybackCoordinatorEvent] = []
     @ObservationIgnored private var isEmitting = false
     @ObservationIgnored private var advanceTask: Task<Void, Never>?
+    /// The advance in flight has begun its start: from then on it is an ordinary play.
+    @ObservationIgnored private var isStartingAdvance = false
 
     /// The last-played record is saved at most this often from time updates.
     static let lastPlayedSaveInterval: TimeInterval = 15
@@ -846,9 +848,10 @@ public final class PlaybackCoordinator {
             saveLastPlayed()
             // Taken before the observers run, so one that pauses or stops on the end (the sleep
             // timer) cancels the advance.
-            let ended = (key: mediaKey, generation: generation, intent: resumeIntent)
+            let ended = AdvanceSnapshot(generation: generation, intent: resumeIntent, playRequest: policyCheck)
+            let key = mediaKey
             emit(.ended)
-            if let key = ended.key { beginAdvance(after: key, generation: ended.generation, intent: ended.intent) }
+            if let key { beginAdvance(after: key, ended) }
         case .failed(let failure):
             // Recovery (ADR 0007 retries, rebuilds) hooks in here; for now the failure is surfaced.
             let error = PlaybackCoordinatorError(engineError: failure)
@@ -870,29 +873,26 @@ public final class PlaybackCoordinator {
 
     /// Starts the next item after `key` ended, holding background activity from now until the
     /// start succeeds, fails or is cancelled. A play, pause, seek, stop or detach before the
-    /// start cancels it. Once the start has begun it is an ordinary play: a pause loads the next
-    /// item paused, and a detach leaves it to finish.
-    private func beginAdvance(after key: MediaKey, generation ended: Int, intent: Int) {
-        guard let provider = nextItemProvider, isAdvancing(after: key, generation: ended, intent: intent) else {
-            return
-        }
+    /// start cancels it, as does any play request, even one the streaming policy blocks. Once the
+    /// start has begun it is an ordinary play: a pause loads the next item paused, and a detach
+    /// leaves it to finish.
+    private func beginAdvance(after key: MediaKey, _ ended: AdvanceSnapshot) {
+        guard let provider = nextItemProvider, isAdvancing(after: key, ended) else { return }
         advanceTask?.cancel()
         let activity = backgroundActivity
         let token = activity.begin(name: "Auto-advance")
         advanceTask = Task { [weak self] in
             defer { activity.end(token) }
-            await self?.advance(after: key, provider: provider, generation: ended, intent: intent)
+            await self?.advance(after: key, provider: provider, ended)
         }
     }
 
-    private func advance(after key: MediaKey, provider: any NextItemProvider, generation ended: Int, intent: Int)
-        async
-    {
+    private func advance(after key: MediaKey, provider: any NextItemProvider, _ ended: AdvanceSnapshot) async {
         var next = provider.preparedNext(after: key)
         if next == nil { next = await provider.prepareNext(after: key) }
         // Anything the user did meanwhile (play, pause, seek, stop), or a detach, cancels it.
         guard let next, !Task.isCancelled, nextItemProvider === provider,
-            isAdvancing(after: key, generation: ended, intent: intent)
+            isAdvancing(after: key, ended)
         else { return }
         // The path and setting now decide, not the prepared (possibly stale) decision; no waiting.
         switch policy.currentStreamingDecision() {
@@ -901,17 +901,30 @@ public final class PlaybackCoordinator {
         case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: next.key))
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: next.key))
         }
+        isStartingAdvance = true
         await start(key: next.key, startTime: nil, prepared: next)
+        isStartingAdvance = false
     }
 
-    /// The item that ended is still current, at its end, with nothing played, paused, sought or
-    /// stopped since (a play waiting on its policy check counts).
-    private func isAdvancing(after key: MediaKey, generation ended: Int, intent: Int) -> Bool {
-        !isRetired && phase == .loaded && mediaKey == key && reachedEnd && generation == ended
-            && resumeIntent == intent && pendingPlayKey == nil
+    /// What the advance must find unchanged when the item ended: the generation, the resume
+    /// intent and the play requests (``play(itemID:episodeID:startTime:allowingMeteredNetwork:)``).
+    private struct AdvanceSnapshot {
+        let generation: Int
+        let intent: Int
+        let playRequest: Int
     }
 
+    /// The item that ended is still current, at its end, with nothing played (or requested to,
+    /// even if blocked, or waiting on its policy check), paused, sought or stopped since.
+    private func isAdvancing(after key: MediaKey, _ ended: AdvanceSnapshot) -> Bool {
+        !isRetired && phase == .loaded && mediaKey == key && reachedEnd && generation == ended.generation
+            && resumeIntent == ended.intent && policyCheck == ended.playRequest && pendingPlayKey == nil
+    }
+
+    /// Cancels the advance while it prepares; once its start has begun, that finishes as an
+    /// ordinary play (`stop()` and retirement still cancel it, by their own path).
     func cancelAutoAdvance() {
+        guard !isStartingAdvance else { return }
         advanceTask?.cancel()
     }
 

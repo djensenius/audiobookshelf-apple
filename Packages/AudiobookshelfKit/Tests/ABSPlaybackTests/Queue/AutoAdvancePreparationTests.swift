@@ -99,6 +99,22 @@ struct AutoAdvancePreparationTests {
         #expect(a.activity.active == 0)
     }
 
+    /// Finding no next episode ages like a preparation: an old finding is redone with a new
+    /// listing (e2 was marked unfinished elsewhere meanwhile).
+    @Test(arguments: [599.0, 601.0])
+    func oldFindingOfNoneIsRedoneAtTheEnd(age: TimeInterval) async {
+        a.episodes.set("P", episodes: ["e1", "e2"], finished: ["e2"])
+        await a.play("P", episode: "e1")
+        a.h.clock.advance(by: age)
+        a.episodes.set("P", episodes: ["e1", "e2"])
+
+        await a.finish()
+
+        let isStale = age > PlaybackQueueAdvancer.maximumPreparationAge
+        #expect(a.coordinator.mediaKey == a.key("P", episode: isStale ? "e2" : "e1"))
+        #expect(a.activity.active == 0)
+    }
+
     /// M4: a preparation that a newer one overtook is dropped when it finally returns.
     @Test func overtakenPreparationIsDropped() async {
         a.enqueue("B")
