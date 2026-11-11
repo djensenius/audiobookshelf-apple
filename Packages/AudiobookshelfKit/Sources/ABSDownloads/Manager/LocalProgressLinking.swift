@@ -10,7 +10,7 @@ import Foundation
 /// or the deletion.
 ///
 /// The manager makes these calls for one library item one at a time, holding the item, and
-/// doesn't link a local item that a deletion through it removed first. A local item deleted
+/// doesn't link media that a deletion through it removed first. A local item deleted
 /// some other way (by `LocalItemStore` directly, such as with its connection) can still be
 /// linked after it is gone, so an implementation must accept a link to a missing item.
 public protocol LocalProgressLinking: Sendable {

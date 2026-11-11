@@ -63,6 +63,8 @@ public actor DownloadManager {
     private let subscriberRemoved: (@Sendable () -> Void)?
     private let trackingRecords: (@Sendable () async -> Void)?
     private let recordRead: (@Sendable (UUID) async -> Void)?
+    /// Called by a clean-up between its two reads of the paths still in use.
+    let usedPathsReading: (@Sendable () async -> Void)?
 
     /// Items with an enqueue, control, deletion or completion under way, by their item-level
     /// key (no episode). Each of these holds its item (``holdingItem(_:_:)``), so two calls for
@@ -118,7 +120,8 @@ public actor DownloadManager {
         progressHandled: (@Sendable (DownloadProgress) -> Void)?,
         subscriberRemoved: (@Sendable () -> Void)? = nil,
         trackingRecords: (@Sendable () async -> Void)? = nil,
-        recordRead: (@Sendable (UUID) async -> Void)? = nil
+        recordRead: (@Sendable (UUID) async -> Void)? = nil,
+        usedPathsReading: (@Sendable () async -> Void)? = nil
     ) {
         self.store = store
         self.localItems = localItems
@@ -133,6 +136,7 @@ public actor DownloadManager {
         self.subscriberRemoved = subscriberRemoved
         self.trackingRecords = trackingRecords
         self.recordRead = recordRead
+        self.usedPathsReading = usedPathsReading
     }
 
     deinit {
@@ -406,8 +410,9 @@ public actor DownloadManager {
 
     /// Reports a record that became the local item `itemID`, and links its progress, while it
     /// holds the item, so this runs before or after a deletion of the item, never during it.
-    /// A local item already deleted (its deletion ran while the engine finalised the record) is
-    /// reported as ``DownloadManagerEvent/recordRemoved(recordID:)`` and not linked.
+    /// Media deleted before this ran (the local item, or the episode, deleted while the engine
+    /// finalised the record or after) is reported as
+    /// ``DownloadManagerEvent/recordRemoved(recordID:)`` and not linked.
     private func complete(_ recordID: UUID, as itemID: UUID) async {
         var key = forget(recordID)
         if key == nil { key = await bookKey(ofLocalItem: itemID) }
@@ -416,15 +421,16 @@ public actor DownloadManager {
             return
         }
         await holdingItem(key) {
-            let exists: Bool
+            let downloaded: Bool
             do {
-                exists = try await localItems.item(id: itemID) != nil
+                // Another episode can keep the item after this one was deleted.
+                downloaded = try await localItems.item(id: itemID).map { Self.hasDownloaded(key, in: $0) } ?? false
             } catch {
                 // Reported as completed: the engine just saved the item.
                 logError("Couldn't read a downloaded item", error)
-                exists = true
+                downloaded = true
             }
-            guard exists else {
+            guard downloaded else {
                 reportRemoved(recordID)
                 return
             }

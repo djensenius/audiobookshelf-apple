@@ -14,10 +14,10 @@ public enum DownloadManagerEvent: Sendable, Equatable {
     /// A part failed for good, so its record is now `failed`. Nothing retries it on its own;
     /// the user does.
     case failed(recordID: UUID, code: DownloadFailureCode, message: String)
-    /// The record is gone and left no local item: it was cancelled
-    /// (``DownloadManager/cancel(recordID:)``), or the local item it completed into was deleted
-    /// while the engine finalised it. No other event follows for it. Deleted local items aren't
-    /// reported: the UI observes them.
+    /// The record is gone and left no downloaded media: it was cancelled
+    /// (``DownloadManager/cancel(recordID:)``), or what it completed into (the local item, or
+    /// the episode) was deleted before its completion was reported. No other event follows for
+    /// it. Deleted local items aren't reported: the UI observes them.
     case recordRemoved(recordID: UUID)
 }
 

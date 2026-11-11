@@ -34,7 +34,9 @@ extension DownloadManager {
     public func deleteLocalItem(id: UUID) async throws(DownloadManagerError) -> Bool {
         guard let item = try await read({ try await self.localItems.item(id: id) }) else { return false }
         return try await holdingItem(Self.key(of: item)) { () async throws(DownloadManagerError) -> Bool in
-            try await removeLocalItem(id: id, alsoRemoving: [])
+            guard let item = try await read({ try await self.localItems.deleteItem(id: id) }) else { return false }
+            await finishRemoving(item, alsoRemoving: [])
+            return true
         }
     }
 
@@ -42,7 +44,8 @@ extension DownloadManager {
     /// runs: its files and its entry in the item (`LocalItemStore.deleteEpisode(itemID:episodeId:)`),
     /// then its progress link (``LocalProgressLinking/detach(key:)``), then its files and the
     /// folders they leave empty. The cover and the other episodes stay. When the item has no
-    /// file left, it is deleted as by ``deleteLocalItem(id:)``.
+    /// file left, the same transaction deletes it, so an episode the engine finalises into it
+    /// meanwhile isn't deleted with it, and the rest goes as in ``deleteLocalItem(id:)``.
     ///
     /// - Returns: `false` when the item doesn't exist, or has neither a file nor an entry for
     ///   the episode; then nothing is deleted or detached.
@@ -58,7 +61,8 @@ extension DownloadManager {
                 item.files.contains(where: { $0.episodeId == episodeId })
                     || item.media.episodes.contains(where: { $0.id == episodeId }),
                 let deletion = try await read({
-                    try await self.localItems.deleteEpisode(itemID: itemID, episodeId: episodeId)
+                    try await self.localItems.deleteEpisode(
+                        itemID: itemID, episodeId: episodeId, deletingEmptyItem: true)
                 })
             else { return false }
             let key = MediaKey(
@@ -66,24 +70,28 @@ extension DownloadManager {
                 episodeId: episodeId)
             await detachProgress("Couldn't detach progress from a deleted episode") { try await $0.detach(key: key) }
             let paths = deletion.removedFiles.map(\.relativePath)
-            if deletion.itemIsEmpty, try await removeLocalItem(id: itemID, alsoRemoving: paths) { return true }
-            await cleanUp(after: itemKey, removing: paths, folder: nil, cover: nil)
+            if let emptied = deletion.deletedItem {
+                await finishRemoving(emptied, alsoRemoving: paths)
+            } else {
+                await cleanUp(after: itemKey, removing: paths, folder: nil, cover: nil)
+            }
             return true
         }
     }
 
-    /// ``deleteLocalItem(id:)`` for a caller that holds the item; `extra` are files it already
-    /// deleted from the item, to remove from disk too. The item's folder goes with everything
-    /// in it only when it is the folder ``DownloadLayout`` gives the item; any other stored
-    /// directory (a shallower one would hold other items) loses only the item's files.
-    private func removeLocalItem(id: UUID, alsoRemoving extra: [String]) async throws(DownloadManagerError) -> Bool {
-        guard let item = try await read({ try await self.localItems.deleteItem(id: id) }) else { return false }
-        await detachProgress("Couldn't detach progress from a deleted download") { try await $0.detach(itemID: id) }
+    /// The rest of the deletion of `item`, deleted from the store by a caller that holds it:
+    /// its progress link, its cover hand-off, then its files and `extra` (files already deleted
+    /// from it). Its folder goes with everything in it only when it is the folder
+    /// ``DownloadLayout`` gives the item; any other stored directory (a shallower one would
+    /// hold other items) loses only the item's files.
+    private func finishRemoving(_ item: LocalLibraryItemDTO, alsoRemoving extra: [String]) async {
+        await detachProgress("Couldn't detach progress from a deleted download") {
+            try await $0.detach(itemID: item.id)
+        }
         let cover = item.coverRelativePath.map { path in
             CoverSource(
                 serverPath: DownloadRequests.coverPath(
-                    itemID: item.libraryItemId,
-                    updatedAt: Int(((item.coverUpdatedAt?.timeIntervalSince1970 ?? 0) * 1000).rounded())),
+                    itemID: item.libraryItemId, updatedAt: Self.coverTimestamp(item.coverUpdatedAt)),
                 relativePath: path, isStored: true, updatedAt: item.coverUpdatedAt)
         }
         let paths = extra + item.files.map(\.relativePath) + (item.coverRelativePath.map { [$0] } ?? [])
@@ -92,7 +100,14 @@ extension DownloadManager {
         ).folder
         let folder = item.relativeDirectory == layoutFolder ? item.relativeDirectory : nil
         await cleanUp(after: Self.key(of: item), removing: paths, folder: folder, cover: cover)
-        return true
+    }
+
+    /// The server's `updatedAt`, in milliseconds, that a cover time (a snapshot's
+    /// `coverUpdatedAt`) was made from, for the cover's server path: 0, as the planner uses for
+    /// none, when there is none or it is out of range.
+    static func coverTimestamp(_ date: Date?) -> Int {
+        guard let date else { return 0 }
+        return Int(exactly: (date.timeIntervalSince1970 * 1000).rounded()) ?? 0
     }
 
     // MARK: - Cleaning up
@@ -165,12 +180,15 @@ extension DownloadManager {
         }
     }
 
-    /// The paths the item's local item and the connection's records still use.
+    /// The paths the connection's records and the item's local item still use. The records are
+    /// read first: the engine finalises a download into the local item before it deletes the
+    /// record, so one finalised between the two reads is in at least one of them.
     private func usedPaths(of key: MediaKey) async throws(DownloadManagerError) -> Set<String> {
+        let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
+        await usedPathsReading?()
         let localItem = try await read {
             try await self.localItems.item(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
         }
-        let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
         var used = Set(records.flatMap(\.parts).map(\.destinationRelativePath))
         used.formUnion(localItem?.files.map(\.relativePath) ?? [])
         if let cover = localItem?.coverRelativePath { used.insert(cover) }

@@ -103,7 +103,8 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     }
 }
 
-/// Records the manager's progress links and detaches; with `failing`, each then throws.
+/// Records the manager's progress links and detaches; `before` runs first, and with `failing`,
+/// each then throws.
 final class FakeProgressLinker: LocalProgressLinking {
     enum Call: Equatable {
         case link(MediaKey, UUID)
@@ -115,25 +116,28 @@ final class FakeProgressLinker: LocalProgressLinking {
 
     private let log = Mutex<[Call]>([])
     private let failing: Bool
+    private let before: (@Sendable (Call) async -> Void)?
     var calls: [Call] { log.withLock { $0 } }
 
-    init(failing: Bool = false) {
+    init(failing: Bool = false, before: (@Sendable (Call) async -> Void)? = nil) {
         self.failing = failing
+        self.before = before
     }
 
     func link(key: MediaKey, itemID: UUID) async throws {
-        try record(.link(key, itemID))
+        try await record(.link(key, itemID))
     }
 
     func detach(itemID: UUID) async throws {
-        try record(.detachItem(itemID))
+        try await record(.detachItem(itemID))
     }
 
     func detach(key: MediaKey) async throws {
-        try record(.detachKey(key))
+        try await record(.detachKey(key))
     }
 
-    private func record(_ call: Call) throws {
+    private func record(_ call: Call) async throws {
+        await before?(call)
         log.withLock { $0.append(call) }
         if failing { throw Failure() }
     }
@@ -195,6 +199,9 @@ final class ManagerFixture: Sendable {
         /// The first refresh after ``holdRecordRead()`` read this record; it waits until
         /// ``releaseRecordRead()``.
         case recordRead(UUID)
+        /// The first clean-up after ``holdUsedPaths()`` read one of the two sources of the paths
+        /// still in use; it waits until ``releaseUsedPaths()`` before reading the other.
+        case usedPathsReading
     }
 
     let root = FileManager.default.temporaryDirectory.appending(path: "manager-\(UUID().uuidString)")
@@ -208,6 +215,8 @@ final class ManagerFixture: Sendable {
     private let heldStart = Mutex<StubGate?>(nil)
     private let readGate = Mutex<StubGate?>(nil)
     private let heldRead = Mutex<StubGate?>(nil)
+    private let pathsGate = Mutex<StubGate?>(nil)
+    private let heldPaths = Mutex<StubGate?>(nil)
     let checkpoints: AsyncStream<Checkpoint>
     private let checkpoint: AsyncStream<Checkpoint>.Continuation
 
@@ -249,7 +258,31 @@ final class ManagerFixture: Sendable {
                 guard let gate = takeReadGate() else { return }
                 checkpoint.yield(.recordRead(recordID))
                 await withCheckedContinuation { continuation in gate.run { continuation.resume() } }
+            },
+            usedPathsReading: { [checkpoint, self] in
+                guard let gate = takePathsGate() else { return }
+                checkpoint.yield(.usedPathsReading)
+                await withCheckedContinuation { continuation in gate.run { continuation.resume() } }
             })
+    }
+
+    /// Holds the next clean-up between its reads of the paths still in use, until
+    /// ``releaseUsedPaths()``.
+    func holdUsedPaths() {
+        let gate = StubGate()
+        pathsGate.withLock { $0 = gate }
+        heldPaths.withLock { $0 = gate }
+    }
+
+    private func takePathsGate() -> StubGate? {
+        pathsGate.withLock { gate in
+            defer { gate = nil }
+            return gate
+        }
+    }
+
+    func releaseUsedPaths() {
+        heldPaths.withLock { $0 }?.open()
     }
 
     /// Holds the next refresh after it read its record, until ``releaseRecordRead()``.

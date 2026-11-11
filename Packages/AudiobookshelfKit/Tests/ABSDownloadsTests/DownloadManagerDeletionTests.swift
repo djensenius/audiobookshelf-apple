@@ -211,6 +211,96 @@ import Testing
         #expect(linker.calls == [.detachItem(local.id), .link(fixture.key(item), again.id)])
     }
 
+    /// The engine finalises another episode while the last stored one is being deleted: the
+    /// item went with that episode, in one transaction, so the new episode makes a new item and
+    /// keeps its files.
+    @Test func anEpisodeFinalisedDuringTheLastEpisodesDeletionIsKept() async throws {
+        let fixture = try await ManagerFixture()
+        let gate = StubGate()
+        let (detaches, detach) = AsyncStream.makeStream(of: Void.self)
+        let linker = FakeProgressLinker { call in
+            guard case .detachKey = call else { return }
+            detach.yield()
+            await withCheckedContinuation { continuation in gate.run { continuation.resume() } }
+        }
+        let manager = fixture.makeManager(progressLinking: linker)
+        let item = LibraryItemFixtures.podcast()
+        let local = try await fixture.storeDownloaded(item, episodeID: "ep_1")
+        for path in Self.paths(of: local) { try write(path, fixture) }
+        let second = try #require(
+            try await fixture.store.record(
+                id: Self.started(manager.enqueue(item: item, episodeID: "ep_2", connectionID: fixture.connectionID))))
+        for part in second.parts {
+            try write(part.destinationRelativePath, fixture)
+            try await fixture.store.completePart(partID: part.id, finalBytes: 5)
+        }
+        await fixture.engine.settle(second.id)
+
+        let deletion = Task { try await manager.deleteEpisode(itemID: local.id, episodeId: "ep_1") }
+        _ = await detaches.first { _ in true }
+        try await fixture.engine.finishSettling()
+        gate.open()
+
+        #expect(try await deletion.value)
+        let kept = try #require(
+            try await fixture.localItems.item(serverConnectionID: fixture.connectionID, libraryItemId: item.id))
+        #expect(kept.files.map(\.episodeId) == ["ep_2"])
+        #expect(second.parts.allSatisfy { exists($0.destinationRelativePath, fixture) })
+        #expect(!exists(local.files[0].relativePath, fixture))
+    }
+
+    /// A replacement finalised while the deletion of the item it replaces reads what is still in
+    /// use: its record, or else its new local item, keeps its files.
+    @Test func aReplacementFinalisedDuringTheCleanUpKeepsItsFiles() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        let local = try await fixture.storeDownloaded(item)
+        for path in Self.paths(of: local) { try write(path, fixture) }
+        let replacement = try #require(
+            try await fixture.store.record(
+                id: Self.started(
+                    manager.enqueue(
+                        item: item, episodeID: nil, connectionID: fixture.connectionID, replacingExisting: true))))
+        for part in replacement.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 5) }
+        await fixture.engine.settle(replacement.id)
+        fixture.holdUsedPaths()
+
+        let deletion = Task { try await manager.deleteLocalItem(id: local.id) }
+        #expect(await fixture.checkpoints.first { $0 == .usedPathsReading } != nil)
+        try await fixture.engine.finishSettling()
+        fixture.releaseUsedPaths()
+
+        #expect(try await deletion.value)
+        let replaced = try #require(
+            try await fixture.localItems.item(serverConnectionID: fixture.connectionID, libraryItemId: item.id))
+        #expect(replaced.id != local.id)
+        #expect(Self.paths(of: replaced).allSatisfy { exists($0, fixture) })
+    }
+
+    /// The server path of a deleted item's cover carries the item's `updatedAt` again; one out
+    /// of range falls back to 0 instead of trapping.
+    @Test(
+        arguments: [
+            (nil, 0),
+            (Date(timeIntervalSince1970: Double(LibraryItemFixtures.updatedAt) / 1000), LibraryItemFixtures.updatedAt),
+            (Date(timeIntervalSince1970: Double(Int.max) / 1000), 0),
+        ] as [(Date?, Int)])
+    func coverTimestamps(date: Date?, milliseconds: Int) {
+        #expect(DownloadManager.coverTimestamp(date) == milliseconds)
+    }
+
+    @Test func deletingAnItemWithAnOutOfRangeCoverTime() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let local = try await fixture.storeDownloaded(LibraryItemFixtures.book(updatedAt: .max))
+        try #require(local.coverUpdatedAt != nil)
+
+        #expect(try await manager.deleteLocalItem(id: local.id))
+
+        #expect(try await fixture.localItems.item(id: local.id) == nil)
+    }
+
     private static func started(_ result: DownloadManager.EnqueueResult) throws -> UUID {
         guard case .started(let id) = result else { throw UnexpectedResult(result: result) }
         return id

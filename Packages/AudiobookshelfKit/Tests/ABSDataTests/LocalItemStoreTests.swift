@@ -206,6 +206,28 @@ import Testing
         #expect(try await store.deleteEpisode(itemID: UUID(), episodeId: "ep_2") == nil)
     }
 
+    /// With `deletingEmptyItem`, the last episode takes the item with it, in one transaction.
+    @Test func deletingTheLastEpisodeCanDeleteTheItem() async throws {
+        let (store, _) = try makeStore()
+        let episode1 = Fixtures.podcastSnapshot.episodes[0]
+        var episode2 = episode1
+        episode2.id = "ep_2"
+        let item = try await store.upsertFromDownload(episodeDownload(episode1))
+        try await store.upsertFromDownload(episodeDownload(episode2))
+
+        let first = try #require(
+            try await store.deleteEpisode(itemID: item.id, episodeId: "ep_1", deletingEmptyItem: true))
+        #expect(first.deletedItem == nil)
+        #expect(try await store.item(id: item.id)?.files.map(\.episodeId) == ["ep_2"])
+        let last = try #require(
+            try await store.deleteEpisode(itemID: item.id, episodeId: "ep_2", deletingEmptyItem: true))
+        #expect(last.itemIsEmpty)
+        #expect(last.removedFiles.map(\.episodeId) == ["ep_2"])
+        #expect(last.deletedItem?.id == item.id)
+        #expect(last.deletedItem?.files.isEmpty == true)
+        #expect(try await store.item(id: item.id) == nil)
+    }
+
     @Test func podcastItemKeepsPodcastTitleAndDirectory() async throws {
         let (store, _) = try makeStore()
         let episode1 = Fixtures.podcastSnapshot.episodes[0]

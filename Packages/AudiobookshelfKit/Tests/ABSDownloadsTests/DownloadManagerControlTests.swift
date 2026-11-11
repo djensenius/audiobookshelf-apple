@@ -300,6 +300,27 @@ import Testing
         #expect(linker.calls == [.detachItem(local.id)])
     }
 
+    /// The episode was deleted before its completion was handled, and another episode keeps
+    /// the item: the completion is reported as a removal, and the episode isn't linked.
+    @Test func aRecordCompletingIntoADeletedEpisodeIsRemoved() async throws {
+        let fixture = try await ManagerFixture()
+        let linker = FakeProgressLinker()
+        let manager = fixture.makeManager(progressLinking: linker)
+        try await manager.start()
+        let item = LibraryItemFixtures.podcast()
+        let record = try await enqueue(item, episodeID: "ep_2", fixture, manager)
+        try await fixture.storeDownloaded(item, episodeID: "ep_1")
+        let local = try await fixture.storeDownloaded(item, episodeID: "ep_2")
+        try await fixture.store.deleteRecord(record.id)
+        #expect(try await manager.deleteEpisode(itemID: local.id, episodeId: "ep_2"))
+        let events = await manager.events()
+
+        fixture.engine.updateContinuation.yield(.recordComplete(recordID: record.id, itemID: local.id))
+
+        #expect(await events.next { _ in true } == .recordRemoved(recordID: record.id))
+        #expect(linker.calls == [.detachKey(record.key)])
+    }
+
     /// A completion waits while an enqueue, control or deletion of its item runs.
     @Test func aCompletionWaitsForItsItem() async throws {
         let fixture = try await ManagerFixture()
