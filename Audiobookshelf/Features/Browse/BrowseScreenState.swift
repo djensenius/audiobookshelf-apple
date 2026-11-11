@@ -80,8 +80,7 @@ struct BrowseModelKey: Hashable {
 struct BrowseModelHost<Model: AnyObject> {
     let key: BrowseModelKey
     let model: Model
-    /// The store's progress for item cards, built once so the cards don't all re-render on
-    /// every body.
+    /// The store's progress for item cards, built once so cards don't re-render on every body.
     let progressReader: ItemProgressReader
 
     /// Builds the model from the store's services; `nil` while the store serves no account or

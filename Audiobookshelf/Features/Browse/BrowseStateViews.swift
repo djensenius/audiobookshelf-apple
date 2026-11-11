@@ -32,19 +32,20 @@ struct BrowseStateView<Loaded: View>: View {
         case .loading:
             LoadingView()
         case .failed:
-            BrowseScrollableState {
-                ErrorStateView(title: L10n.string(messages.failed), retry: retry)
-            }
+            scrollable(BrowseMessageView(title: L10n.string(messages.failed), retry: retry))
         case .notFound:
-            BrowseScrollableState {
-                BrowseMessageView(title: L10n.string(messages.notFound), systemImage: "questionmark.circle")
-            }
+            scrollable(BrowseMessageView(title: L10n.string(messages.notFound), systemImage: "questionmark.circle"))
         case .empty:
-            BrowseScrollableState {
-                BrowseMessageView(title: L10n.string(messages.empty), systemImage: messages.systemImage)
-            }
+            scrollable(BrowseMessageView(title: L10n.string(messages.empty), systemImage: messages.systemImage))
         case .loaded(let failed):
             loaded(failed)
+        }
+    }
+
+    /// A full-screen state centred in a vertical scroll view, so `.refreshable` reaches it.
+    private func scrollable(_ content: some View) -> some View {
+        ScrollView(.vertical) {
+            content.containerRelativeFrame([.horizontal, .vertical])
         }
     }
 }
@@ -67,21 +68,12 @@ struct BrowsePlaceholder: View {
     }
 }
 
-/// A full-screen state centred in a vertical scroll view, so `.refreshable` reaches it.
-private struct BrowseScrollableState<Content: View>: View {
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        ScrollView(.vertical) {
-            content.containerRelativeFrame([.horizontal, .vertical])
-        }
-    }
-}
-
+/// A full-screen message; `retry` adds a Retry at least 44×44 points (unlike ABSUI's `ErrorStateView`).
 private struct BrowseMessageView: View {
     let title: String
     var message: String?
-    let systemImage: String
+    var systemImage = "exclamationmark.triangle"
+    var retry: (() -> Void)?
 
     var body: some View {
         ContentUnavailableView {
@@ -94,6 +86,15 @@ private struct BrowseMessageView: View {
         } description: {
             if let message {
                 Text(verbatim: message)
+            }
+        } actions: {
+            if let retry {
+                Button(action: retry) {
+                    Text(verbatim: L10n.string("ButtonRetry"))
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.borderedProminent)
             }
         }
     }
