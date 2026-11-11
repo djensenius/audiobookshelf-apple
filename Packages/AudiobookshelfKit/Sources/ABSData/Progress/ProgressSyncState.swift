@@ -254,6 +254,17 @@ struct ProgressSyncState: Sendable, Equatable {
         unacknowledgedSends.removeAll { $0.sessionAudio?.attemptID == attemptID }
     }
 
+    /// The server answered the PATCH carrying `send` with a rejection that a resend would meet
+    /// again, so it applied nothing: the send's entry goes, the baseline stays, and each sent
+    /// group stops being dirty unless it was edited while the request was in flight. Edit
+    /// identity decides, never the clock, so a later edit makes the row dirty again.
+    mutating func reject(_ send: ProgressSend) {
+        unacknowledgedSends.removeAll { $0 == send }
+        for group in ProgressGroups.each where send.groups.contains(group) && editedAt(group) == send.editedAt(group) {
+            dirty.remove(group)
+        }
+    }
+
     /// The PATCH carrying `send` succeeded: the server now holds the sent values, so they become
     /// the baseline, the sent groups' entries and truncation flags are cleared, and each sent
     /// group stops being dirty unless it was edited again while the request was in flight. Other

@@ -341,7 +341,7 @@ struct ProgressSyncerTests {
     /// every request (time-out, network, auth) stops the drain.
     @Test(arguments: [
         (APIError.http(status: 500, message: nil), 2),
-        (.notFound, 2),
+        (.http(status: 409, message: nil), 2),
         (.timedOut, 1),
         (.network(.networkConnectionLost), 1),
         (.sessionExpired, 1),

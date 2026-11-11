@@ -510,6 +510,23 @@ public enum SessionUploadResult: Sendable, Equatable {
         return true
     }
 
+    /// The server rejected the PATCH for good (for example, the item is gone), so resending it
+    /// can't succeed. Its groups stop being dirty unless edited since ``beginSend(for:now:)``,
+    /// so the row no longer keeps the connection retained; a later edit sends again. The
+    /// baseline is unchanged, and `error` is kept in `lastSyncError`. Returns `false`, changing
+    /// nothing, when `patch` is not the row's send in flight; throws like ``failSend(_:error:)``.
+    @discardableResult
+    public func rejectSend(_ patch: ProgressPatch, error: String) throws -> Bool {
+        guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
+        try settle(patch.key, sentFrom: flight.row) { row in
+            var state = ProgressSyncState(row)
+            state.reject(patch.values)
+            state.write(to: row)
+            row.lastSyncError = error
+        }
+        return true
+    }
+
     public func progress(for key: MediaKey) throws -> LocalMediaProgressDTO? {
         try fetchRow(key).map(LocalMediaProgressDTO.init)
     }
