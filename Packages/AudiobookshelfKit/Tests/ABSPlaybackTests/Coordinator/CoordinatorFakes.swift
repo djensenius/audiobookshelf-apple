@@ -195,6 +195,7 @@ final class StubSessionService: PlaybackSessionService {
         /// Opt-in shared server; legacy gates/overrides remain for unconfigured tests only.
         var sessionClient: SessionModelClient?
         var progress: [String: MediaProgress] = [:]
+        var progressReads: [MediaKey] = []
         var progressError: APIError?
         var serverTime: [String: Double] = [:]
         var sessionUpdatedAt: Date?
@@ -280,6 +281,10 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
+        state.withLock {
+            $0.progressReads.append(
+                MediaKey(serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID))
+        }
         if let client = state.withLock({ $0.sessionClient }) {
             return try await client.model.fetchProgress(client, itemID: itemID, episodeID: episodeID)
         }
