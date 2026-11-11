@@ -231,14 +231,17 @@ public final class PlayerViewModel {
 
     /// Moves the scrub position to `fraction` (`0...1`) of the shown range, beginning a scrub if
     /// none is in progress, unless an item change cancelled this gesture's scrub.
+    ///
+    /// A fraction within a tiny tolerance (1e-9) of the shown ``progress`` isn't a move, so
+    /// passing back the value read (a thumb that didn't move) never seeks. Fractions are compared,
+    /// not seconds: converting a fraction back to seconds doesn't round-trip exactly.
     public func scrub(to fraction: Double) {
         guard !scrubCancelled else { return }
         if activeScrub == nil { beginScrub() }
         guard var scrub = activeScrub else { return }
         let fraction = fraction.isNaN ? 0 : min(max(fraction, 0), 1)
-        let time = scrub.range.time(forElapsed: fraction * scrub.range.duration)
-        guard time != scrub.time else { return }
-        scrub.time = time
+        guard abs(fraction - scrub.range.fraction(at: scrub.time)) > Self.scrubFractionTolerance else { return }
+        scrub.time = scrub.range.time(forElapsed: fraction * scrub.range.duration)
         scrub.moved = true
         scrubState = scrub
     }
@@ -276,6 +279,10 @@ public final class PlayerViewModel {
     }
 
     // MARK: Private
+
+    /// Fractions this close are the same scrub position: rounding noise, under a millisecond for
+    /// any range shorter than about 277 hours.
+    private static let scrubFractionTolerance = 1e-9
 
     /// The scrub, while it is for the current item.
     private var activeScrub: Scrub? {

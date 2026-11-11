@@ -31,9 +31,9 @@ private func invalidates(_ read: () -> Void, when change: () -> Void) -> Bool {
     return changed.value
 }
 
-private func restoredRecord(duration: Double? = 400) -> LastPlayedRecord {
+private func restoredRecord(position: Double = 120, duration: Double? = 400) -> LastPlayedRecord {
     LastPlayedRecord(
-        serverConnectionID: FakePlaybackControl.serverID, libraryItemID: "li_book", episodeID: nil, position: 120,
+        serverConnectionID: FakePlaybackControl.serverID, libraryItemID: "li_book", episodeID: nil, position: position,
         duration: duration, timestamp: Date(timeIntervalSince1970: 0), title: "Restored", author: "Restored Author",
         coverPath: "/cover.jpg", chapterTitle: "Restored Chapter")
 }
@@ -398,6 +398,39 @@ private func restoredRecord(duration: Double? = 400) -> LastPlayedRecord {
             model.scrub(to: 0.5)
             await model.endScrub()
             #expect(playback.calls == [.seek(200)])
+        }
+    }
+
+    /// Passing back the progress read is no move, though 29 / 400 * 400 is 28.999999999999996 s.
+    @Test func scrubToTheShownProgressIsNotAMove() async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.restore(restoredRecord(position: 29))
+            let fraction: Double = 29.0 / 400
+            #expect(fraction * 400 != 29, "The seconds don't round-trip")
+            model.beginScrub()
+            model.scrub(to: model.progress)
+            await model.endScrub()
+            model.scrub(to: model.progress)
+            await model.endScrub()
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// The same over a chapter range, which doesn't start at 0.
+    @Test func scrubToTheShownChapterProgressIsNotAMove() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = true
+            playback.load(FakePlaybackControl.bookSession(), at: 177.1)
+            #expect(model.chapterTitle == "Middle")
+            let fraction: Double = (177.1 - 100) / 150
+            #expect(100 + fraction * 150 != 177.1, "The seconds don't round-trip")
+            model.beginScrub()
+            model.scrub(to: model.progress)
+            await model.endScrub()
+            #expect(playback.calls.isEmpty)
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            #expect(playback.calls == [.seek(175)])
         }
     }
 
