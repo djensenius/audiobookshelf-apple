@@ -48,8 +48,10 @@ public final class ItemDetailModel {
         }
     }
 
-    /// The book's display values from ``BookMetadata`` and its media. Empty lists and blank
-    /// strings are normalized to empty and `nil`, so the view hides those rows.
+    /// The book's display values from ``BookMetadata`` and its media. Blank (whitespace-only)
+    /// optional strings become `nil`, and list entries with a blank name (authors, narrators,
+    /// series, genres, tags) are dropped, so the view hides those rows. ``title`` is the server's
+    /// required title, as is.
     public struct Details: Sendable, Hashable {
         public let title: String
         public let subtitle: String?
@@ -240,7 +242,7 @@ public final class ItemDetailModel {
             subtitle: nonEmpty(metadata.subtitle),
             authors: (metadata.authors ?? []).filter { nonEmpty($0.name) != nil },
             narrators: (metadata.narrators ?? []).filter { nonEmpty($0) != nil },
-            series: (metadata.series ?? []).map {
+            series: (metadata.series ?? []).filter { nonEmpty($0.name) != nil }.map {
                 SeriesEntry(id: $0.id, name: $0.name, sequence: nonEmpty($0.sequence))
             },
             genres: (metadata.genres ?? []).filter { nonEmpty($0) != nil },

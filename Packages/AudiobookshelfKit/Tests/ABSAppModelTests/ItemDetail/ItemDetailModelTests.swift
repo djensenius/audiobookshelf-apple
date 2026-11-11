@@ -24,7 +24,10 @@ private func makeBook(
         title: title, subtitle: "A Subtitle",
         authors: [Author(id: "au-1", name: "Ann"), Author(id: "au-x", name: " "), Author(id: "au-2", name: "Bo")],
         narrators: ["Nora", ""],
-        series: [Series(id: "se-1", name: "Saga", sequence: "2"), Series(id: "se-2", name: "Arc")],
+        series: [
+            Series(id: "se-1", name: "Saga", sequence: "2"), Series(id: "se-blank", name: " "),
+            Series(id: "se-unnamed", name: "", sequence: "3"), Series(id: "se-2", name: "Arc"),
+        ],
         genres: ["Fantasy"], publishedYear: "2020", publisher: "Pub House", description: "<p>Hi</p>", language: " ",
         explicit: true, abridged: false)
     let book = Book(
@@ -95,6 +98,27 @@ private func loadedModel(
         #expect(details.size == 123)
         #expect(details.isExplicit)
         #expect(!details.isAbridged)
+    }
+
+    @Test func blankMetadataBecomesNil() {
+        let metadata = BookMetadata(
+            title: "T", subtitle: " ", authors: [Author(id: "au", name: "\n")], narrators: ["\t"],
+            series: [Series(id: "se", name: "  ")], genres: [" "], publishedYear: "", publisher: " ",
+            description: " \n", language: "")
+        let book = Book(id: "b", metadata: metadata, tags: [" "])
+        let item = LibraryItem(id: "li", libraryId: "lib", mediaType: .book, media: .book(book))
+        let details = ItemDetailModel.details(item: item, book: book)
+        #expect(details.title == "T")
+        #expect(details.subtitle == nil)
+        #expect(details.publisher == nil)
+        #expect(details.year == nil)
+        #expect(details.language == nil)
+        #expect(details.description == nil)
+        #expect(details.authors.isEmpty)
+        #expect(details.narrators.isEmpty)
+        #expect(details.series.isEmpty)
+        #expect(details.genres.isEmpty)
+        #expect(details.tags.isEmpty)
     }
 
     @Test func aFailedFirstLoadReportsTheError() async {
