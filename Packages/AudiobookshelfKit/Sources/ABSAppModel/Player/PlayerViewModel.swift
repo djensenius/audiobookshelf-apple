@@ -264,9 +264,14 @@ public final class PlayerViewModel {
         settings.chapterTrack.toggle()
     }
 
-    /// Stops playback and closes the item, as the user's close button.
+    /// Stops playback and closes the item, as the user's close button. Cancels any scrub like an
+    /// item change (the item-change observer won't see one cleared here), so the rest of a drag, in
+    /// any window, doesn't scrub an item loaded before it ends.
     public func close() {
-        scrubState = nil
+        if scrubState != nil {
+            scrubState = nil
+            scrubCancelled = true
+        }
         playback.stop(reason: .user)
     }
 

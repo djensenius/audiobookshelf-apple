@@ -401,6 +401,27 @@ private func restoredRecord(duration: Double? = 400) -> LastPlayedRecord {
         }
     }
 
+    /// Closing during a drag cancels the gesture too, so an item loaded before it ends isn't seeked.
+    @Test func closingCancelsTheGesture() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.beginScrub()
+            model.scrub(to: 0.9)
+            model.close()
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            model.scrub(to: 0.2)
+            #expect(model.elapsed == 10)
+            await model.endScrub()
+            #expect(playback.calls == [.stop(.user)])
+            // A fresh gesture scrubs normally.
+            model.beginScrub()
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            #expect(playback.calls == [.stop(.user), .seek(200)])
+        }
+    }
+
     /// Dragging back to where the scrub began isn't a move, so it doesn't seek; a later move
     /// still counts even if the drag ends where it began.
     @Test func scrubToTheSamePositionIsNotAMove() async throws {
