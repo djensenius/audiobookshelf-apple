@@ -11,21 +11,28 @@ import Foundation
 /// item) keep the last text rather than blanking it.
 struct PlayerDisplayInfo: Sendable, Hashable {
     var key: MediaKey
+    /// The session the text came from; `nil` for a restored record.
+    var sessionID: String?
     var title: String
     var author: String
-    /// The last chapter title seen for this item, or the restored record's.
+    /// The restored record's chapter title; `nil` for a session, whose chapters give it.
     var chapterTitle: String?
+    /// The session's chapters (normalised as the engine's timeline normalises them), so the chapter
+    /// title follows the position after the session drops; `nil` for a restored record.
+    var chapterTimeline: PlaybackTimeline?
     /// The item's cover at the default width bucket; views pick theirs with `with(bucket:)`.
     var coverKey: ImageKey?
 
     /// The live session's text. `session` must be for `key`.
     init(session: PlaybackSession, key: MediaKey) {
         self.key = key
+        sessionID = session.id
         title = session.displayTitle ?? ""
         author = session.displayAuthor ?? ""
         if case .podcast(let show) = session.mediaMetadata {
             author = show.title
         }
+        chapterTimeline = PlaybackTimeline(session: session)
         coverKey = Self.coverKey(key: key, path: session.coverPath, updatedAt: session.libraryItem?.updatedAt)
     }
 
@@ -38,8 +45,16 @@ struct PlayerDisplayInfo: Sendable, Hashable {
         coverKey = Self.coverKey(key: record.key, path: record.coverPath, updatedAt: nil)
     }
 
+    /// The title of the chapter at `time` (global seconds) in the session's chapters, `nil` in a gap
+    /// or without chapters; the record's chapter title for a restored record.
+    func chapterTitle(at time: Double) -> String? {
+        guard let chapterTimeline else { return chapterTitle }
+        return Self.nonEmpty(chapterTimeline.currentChapter(at: time)?.title)
+    }
+
     /// The text for `key`: the matching session's, else `previous` when it is for the same item,
-    /// else the matching restored record's; `nil` without an item or anything to show.
+    /// else the matching restored record's; `nil` without an item or anything to show. A session
+    /// that replaces a restored record keeps the record's cover key when only its date differs.
     static func resolve(
         key: MediaKey?, session: PlaybackSession?, restoredRecord: LastPlayedRecord?,
         retaining previous: PlayerDisplayInfo?
@@ -47,8 +62,11 @@ struct PlayerDisplayInfo: Sendable, Hashable {
         guard let key else { return nil }
         let previous = previous?.key == key ? previous : nil
         if let session, session.libraryItemId == key.libraryItemId, session.episodeId == key.episodeId {
+            if let previous, previous.sessionID == session.id { return previous }
             var info = PlayerDisplayInfo(session: session, key: key)
-            info.chapterTitle = previous?.chapterTitle
+            if let kept = previous?.coverKey, let fresh = info.coverKey, Self.isSameCover(kept, dated: fresh) {
+                info.coverKey = kept
+            }
             return info
         }
         if let previous { return previous }
@@ -66,6 +84,13 @@ struct PlayerDisplayInfo: Sendable, Hashable {
         }
         return CoverRef(entityID: key.libraryItemId, updatedAt: updatedAt, externalURL: external)
             .key(serverID: key.serverConnectionID)
+    }
+
+    /// Whether `fresh` is `kept` (a restored record's undated key) with only its `updatedAt` added.
+    /// Keeping `kept` then stops the cover reloading when a restored item's session starts.
+    private static func isSameCover(_ kept: ImageKey, dated fresh: ImageKey) -> Bool {
+        kept.updatedAt == nil && kept.serverID == fresh.serverID && kept.kind == fresh.kind
+            && kept.entityID == fresh.entityID && kept.bucket == fresh.bucket && kept.externalURL == fresh.externalURL
     }
 
     static func nonEmpty(_ text: String?) -> String? {

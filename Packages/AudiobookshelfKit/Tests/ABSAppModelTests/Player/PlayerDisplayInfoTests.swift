@@ -79,13 +79,36 @@ import Testing
         #expect(PlayerDisplayInfo.resolve(key: key, session: nil, restoredRecord: nil, retaining: nil) == nil)
     }
 
-    @Test func resolvePrefersTheMatchingSessionAndKeepsTheChapterTitle() {
-        var previous = PlayerDisplayInfo(record: record())
-        previous.chapterTitle = "Seen"
+    @Test func chapterTitleFollowsTheSessionsChaptersElseTheRecords() {
+        let live = PlayerDisplayInfo(session: FakePlaybackControl.bookSession(), key: key)
+        #expect(live.chapterTitle(at: 50) == "Opening")
+        #expect(live.chapterTitle(at: 260) == "Ending")
+        let noChapters = PlayerDisplayInfo(session: FakePlaybackControl.bookSession(chapters: []), key: key)
+        #expect(noChapters.chapterTitle(at: 50) == nil)
+        #expect(PlayerDisplayInfo(record: record()).chapterTitle(at: 50) == "Restored Chapter")
+    }
+
+    @Test func resolvePrefersTheMatchingSession() {
+        let previous = PlayerDisplayInfo(record: record())
         let info = PlayerDisplayInfo.resolve(
             key: key, session: FakePlaybackControl.bookSession(), restoredRecord: record(), retaining: previous)
         #expect(info?.title == "Dune")
-        #expect(info?.chapterTitle == "Seen")
+        #expect(info?.chapterTitle(at: 150) == "Middle")
+    }
+
+    @Test func restoredCoverKeyIsKeptWhenItsSessionStarts() throws {
+        let restored = PlayerDisplayInfo(record: record(coverPath: "/metadata/items/li_book/cover.jpg"))
+        let info = PlayerDisplayInfo.resolve(
+            key: key, session: FakePlaybackControl.bookSession(), restoredRecord: nil, retaining: restored)
+        #expect(info?.title == "Dune")
+        #expect(info?.coverKey == restored.coverKey)
+        // A different cover (here an external one) is not kept.
+        let external = PlayerDisplayInfo(record: record(coverPath: "https://img.example/c.jpg"))
+        let replaced = try #require(
+            PlayerDisplayInfo.resolve(
+                key: key, session: FakePlaybackControl.bookSession(), restoredRecord: nil, retaining: external))
+        #expect(replaced.coverKey?.externalURL == nil)
+        #expect(replaced.coverKey?.updatedAt == 1_700_000_000_000)
     }
 
     @Test func resolveKeepsTheLastTextWhenTheSessionDrops() {

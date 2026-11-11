@@ -109,6 +109,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     /// Makes `session` the loaded item at `time`.
     func load(_ session: PlaybackSession, at time: Double = 0, playing: Bool = false) {
         phase = .loaded
+        isBuffering = false
         mediaKey = Self.key(item: session.libraryItemId, episode: session.episodeId)
         self.session = session
         restoredRecord = nil
@@ -120,9 +121,23 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         isPlaybackRequested = playing
     }
 
+    /// Makes `session` the current item while the engine loads it, as the coordinator does in
+    /// `.starting`: the session is set, the timeline isn't, and the duration isn't known yet.
+    func start(_ session: PlaybackSession, at time: Double = 0) {
+        phase = .starting
+        mediaKey = Self.key(item: session.libraryItemId, episode: session.episodeId)
+        self.session = session
+        timeline = nil
+        duration = 0
+        currentTime = time
+        isBuffering = true
+        isPlaybackRequested = true
+    }
+
     /// Makes `record` the restored, unloaded item.
     func restore(_ record: LastPlayedRecord) {
         phase = .unloaded
+        isBuffering = false
         mediaKey = record.key
         session = nil
         restoredRecord = record

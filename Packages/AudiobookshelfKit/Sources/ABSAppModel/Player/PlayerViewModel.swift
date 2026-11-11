@@ -38,10 +38,10 @@ public enum PlayerErrorMessage: Sendable, Hashable {
 ///   session, a restart or a failed load keep the last text for the same item.
 /// - **Progress.** ``elapsed``, ``remaining`` and ``progress`` are relative to the current chapter
 ///   when ``AppSettings/chapterTrack`` is on and a chapter is playing, else to the whole item, in
-///   media seconds (not scaled by the rate).
+///   media seconds; ``remainingAtRate`` is the wall-clock time left.
 /// - **Scrubbing.** Between ``beginScrub()`` and ``endScrub()`` the times and progress show the
 ///   scrub position over the range fixed when it began, ignoring playback ticks; ``endScrub()``
-///   seeks once.
+///   seeks once, and only if the position moved. A change of item or session cancels the scrub.
 /// - **Presentation.** Whether the full player or an inspector is shown is per scene, on `Router`
 ///   (ADR 0004), not here.
 @MainActor
@@ -52,14 +52,16 @@ public final class PlayerViewModel {
     /// The scrub in progress, if any.
     private var scrubState: Scrub?
     /// The last display text seen, so a dropped session keeps it. Updated whenever the display is
-    /// read, and after each item or session change, so it holds a session's text even if no view
-    /// read it.
+    /// read, and synchronously just before each item, session or record change, so it holds a
+    /// session's text even if no view read it.
     @ObservationIgnored private var retainedDisplay: PlayerDisplayInfo?
 
     private struct Scrub {
         var key: MediaKey?
         var range: Span
         var time: Double
+        /// Whether ``scrub(to:)`` moved it; an unmoved scrub (a tap) doesn't seek.
+        var moved = false
     }
 
     /// The span the scrubber shows, with ``ABSPlayback/TimelineRange``'s clamping (whose
@@ -108,19 +110,20 @@ public final class PlayerViewModel {
     /// The book's author, or the podcast's title for an episode.
     public var author: String { display?.author ?? "" }
 
-    /// The current chapter's title; `nil` without one. Before the media loads, the last one seen
-    /// (or the restored record's).
+    /// The current chapter's title; `nil` without one. Before the media loads (or after its session
+    /// drops), the chapter at the position in the last session's chapters, else the restored
+    /// record's.
     public var chapterTitle: String? {
-        guard playback.timeline != nil else { return display?.chapterTitle }
-        let title = PlayerDisplayInfo.nonEmpty(playback.chapter?.title)
-        if retainedDisplay?.key == playback.mediaKey { retainedDisplay?.chapterTitle = title }
-        return title
+        guard playback.timeline != nil else { return display?.chapterTitle(at: playback.currentTime) }
+        return PlayerDisplayInfo.nonEmpty(playback.chapter?.title)
     }
 
     /// The item's cover; `nil` when it has none.
     public var coverKey: ImageKey? { display?.coverKey }
 
-    /// Which failure to show; `nil` when there is none.
+    /// Which failure to show; `nil` when there is none. It can be set while ``hasSession`` is
+    /// `false` (a play refused before any item was current), so the composition that starts playback
+    /// must surface it too, not only the player bar.
     public var errorMessageKey: PlayerErrorMessage? { playback.error.map(PlayerErrorMessage.init) }
 
     // MARK: Transport
@@ -136,10 +139,12 @@ public final class PlayerViewModel {
     /// Whether the scrubber shows the current chapter rather than the whole item.
     public var usesChapterTrack: Bool { settings.chapterTrack }
 
-    /// Whether previous chapter does anything: the loaded media has chapters (it restarts the first).
-    public var hasPreviousChapter: Bool { playback.timeline?.chapters.isEmpty == false }
+    /// Whether previous chapter does anything: media is loaded. Without chapters it restarts the
+    /// item, as the legacy player did.
+    public var hasPreviousChapter: Bool { playback.timeline != nil }
 
-    /// Whether a chapter starts after the current position.
+    /// Whether a chapter starts after the current position. Reads the playback time, so a view that
+    /// reads it updates on every tick; keep it out of the mini player's body.
     public var hasNextChapter: Bool {
         guard let timeline = playback.timeline else { return false }
         return timeline.nextChapterStart(from: playback.currentTime) != nil
@@ -157,6 +162,13 @@ public final class PlayerViewModel {
     public var remaining: Double {
         let (range, time) = shownPosition
         return range.remaining(at: time)
+    }
+
+    /// ``remaining`` in wall-clock seconds at the current rate (legacy `timeRemaining`); a
+    /// non-finite or non-positive rate counts as `1`.
+    public var remainingAtRate: Double {
+        let rate = playback.rate
+        return remaining / (rate.isFinite && rate > 0 ? rate : 1)
     }
 
     /// The fraction of the shown range played, `0...1`.
@@ -186,9 +198,10 @@ public final class PlayerViewModel {
 
     /// Restarts the current chapter when more than
     /// ``ABSPlayback/PlaybackTimeline/previousChapterRestartThreshold`` seconds in, else goes to the
-    /// previous one (legacy `jumpChapterStart`). Does nothing without chapters.
+    /// previous one (legacy `jumpChapterStart`). Without chapters it restarts the item; without
+    /// loaded media it does nothing.
     public func previousChapter() async {
-        guard let timeline = playback.timeline, !timeline.chapters.isEmpty else { return }
+        guard let timeline = playback.timeline else { return }
         await playback.seek(to: timeline.previousChapterStart(from: playback.currentTime))
     }
 
@@ -198,10 +211,12 @@ public final class PlayerViewModel {
         await playback.seek(to: start)
     }
 
-    /// Starts scrubbing over the range shown now. Does nothing without an item.
+    /// Starts scrubbing over the range shown now. Does nothing without an item or with an empty
+    /// range (an unloaded item of unknown duration, or one still starting).
     public func beginScrub() {
         guard hasSession else { return }
         let (range, time) = shownPosition
+        guard range.duration > 0 else { return }
         scrubState = Scrub(key: playback.mediaKey, range: range, time: range.time(forElapsed: range.elapsed(at: time)))
     }
 
@@ -212,15 +227,17 @@ public final class PlayerViewModel {
         guard var scrub = activeScrub else { return }
         let fraction = fraction.isNaN ? 0 : min(max(fraction, 0), 1)
         scrub.time = scrub.range.time(forElapsed: fraction * scrub.range.duration)
+        scrub.moved = true
         scrubState = scrub
     }
 
-    /// Ends scrubbing and seeks to the scrub position, once. A scrub begun on another item is
-    /// dropped without seeking.
+    /// Ends scrubbing and seeks to the scrub position, once. A scrub that never moved, or that a
+    /// change of item or session cancelled, ends without seeking: seeking an unloaded item would
+    /// replace its resume position.
     public func endScrub() async {
         let scrub = activeScrub
         scrubState = nil
-        guard let scrub else { return }
+        guard let scrub, scrub.moved else { return }
         await playback.seek(to: scrub.time)
     }
 
@@ -266,13 +283,21 @@ public final class PlayerViewModel {
         return info
     }
 
-    /// Refreshes ``retainedDisplay`` after every item, session or record change, so the text is
-    /// kept even when no view reads it in between.
+    /// Runs just before every item, session or record change (Observation calls `onChange` on
+    /// `willSet`, while the old values are still readable): captures the outgoing display text, so it
+    /// is kept even when no view read it, cancels any scrub, and observes again.
     private func trackDisplay() {
         withObservationTracking {
             _ = display
         } onChange: { [weak self] in
-            Task { @MainActor [weak self] in self?.trackDisplay() }
+            // Safe: every conformer is `@MainActor` (the protocol is), so its properties change, and
+            // `onChange` runs, on the main actor. This keeps the capture synchronous, before the change.
+            MainActor.assumeIsolated { self?.displayWillChange() }
         }
+    }
+
+    private func displayWillChange() {
+        scrubState = nil
+        trackDisplay()
     }
 }

@@ -31,16 +31,10 @@ private func invalidates(_ read: () -> Void, when change: () -> Void) -> Bool {
     return changed.value
 }
 
-/// Lets main-actor work queued by observation callbacks run.
-@MainActor
-private func settle() async {
-    for _ in 0..<10 { await Task.yield() }
-}
-
-private func restoredRecord() -> LastPlayedRecord {
+private func restoredRecord(duration: Double? = 400) -> LastPlayedRecord {
     LastPlayedRecord(
         serverConnectionID: FakePlaybackControl.serverID, libraryItemID: "li_book", episodeID: nil, position: 120,
-        duration: 400, timestamp: Date(timeIntervalSince1970: 0), title: "Restored", author: "Restored Author",
+        duration: duration, timestamp: Date(timeIntervalSince1970: 0), title: "Restored", author: "Restored Author",
         coverPath: "/cover.jpg", chapterTitle: "Restored Chapter")
 }
 
@@ -96,6 +90,24 @@ private func restoredRecord() -> LastPlayedRecord {
             #expect(model.isPlaying)
             playback.currentTime = 300
             #expect(model.chapterTitle == "Ending")
+        }
+    }
+
+    @Test func startingShowsTheSessionBeforeTheTimeline() async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.start(FakePlaybackControl.bookSession(), at: 150)
+            #expect(model.hasSession)
+            #expect(model.title == "Dune")
+            #expect(model.author == "Frank Herbert")
+            #expect(model.chapterTitle == "Middle")
+            #expect(model.isBuffering)
+            #expect(model.showsPause)
+            #expect(model.progress == 0)
+            #expect(!model.hasPreviousChapter)
+            #expect(!model.hasNextChapter)
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            #expect(model.chapterTitle == "Middle")
+            #expect(model.hasPreviousChapter)
         }
     }
 
@@ -189,15 +201,16 @@ private func restoredRecord() -> LastPlayedRecord {
         }
     }
 
-    @Test func noChapterNavigationWithoutChapters() async throws {
+    /// As the legacy player: previous restarts the item, next is unavailable.
+    @Test func withoutChaptersPreviousRestartsTheItem() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.load(FakePlaybackControl.bookSession(chapters: []), at: 150)
-            #expect(!model.hasPreviousChapter)
+            #expect(model.hasPreviousChapter)
             #expect(!model.hasNextChapter)
             #expect(model.chapterTitle == nil)
-            await model.previousChapter()
             await model.nextChapter()
-            #expect(playback.calls.isEmpty)
+            await model.previousChapter()
+            #expect(playback.calls == [.seek(0)])
         }
     }
 
@@ -229,6 +242,21 @@ private func restoredRecord() -> LastPlayedRecord {
             #expect(model.elapsed == 100)
             #expect(model.remaining == 300)
             #expect(model.progress == 0.25)
+        }
+    }
+
+    @Test func remainingAtRateIsWallClockTime() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 100)
+            #expect(model.remainingAtRate == 300)
+            playback.rate = 1.5
+            #expect(model.remaining == 300)
+            #expect(model.remainingAtRate == 200)
+            playback.rate = 0
+            #expect(model.remainingAtRate == 300)
+            playback.rate = .nan
+            #expect(model.remainingAtRate == 300)
         }
     }
 
@@ -295,6 +323,54 @@ private func restoredRecord() -> LastPlayedRecord {
         }
     }
 
+    @Test func scrubWithoutMovingDoesNotSeek() async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.beginScrub()
+            await model.endScrub()
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// An unloaded item of unknown duration, or one still starting, has an empty range: a scrub
+    /// there must not seek, which would replace the resume position with 0.
+    @Test func scrubOnAnEmptyRangeDoesNotSeek() async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.restore(restoredRecord(duration: nil))
+            model.beginScrub()
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            playback.start(FakePlaybackControl.bookSession(), at: 120)
+            model.beginScrub()
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            #expect(playback.calls.isEmpty)
+            #expect(model.elapsed == 0)
+        }
+    }
+
+    @Test func aScrubDoesNotSurviveTheItemClosing() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = true
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.beginScrub()
+            model.scrub(to: 0.9)
+            playback.stop(reason: .user)
+            playback.load(FakePlaybackControl.bookSession(), at: 10)
+            #expect(model.elapsed == 10)
+            playback.currentTime = 20
+            #expect(model.elapsed == 20)
+            await model.endScrub()
+            #expect(playback.calls == [.stop(.user)])
+            // A new scrub starts from the current chapter, "Opening".
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            #expect(playback.calls == [.stop(.user), .seek(50)])
+        }
+    }
+
     @Test func beginScrubNeedsAnItem() async throws {
         try await withPlayer { model, playback, _, _ in
             model.beginScrub()
@@ -347,11 +423,15 @@ private func restoredRecord() -> LastPlayedRecord {
     @Test func textIsKeptEvenIfNoViewReadIt() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            await settle()
+            playback.currentTime = 300
             playback.phase = .unloaded
             playback.session = nil
             playback.timeline = nil
             #expect(model.title == "Dune")
+            // The chapter follows the position in the dropped session's chapters.
+            #expect(model.chapterTitle == "Ending")
+            playback.currentTime = 50
+            #expect(model.chapterTitle == "Opening")
         }
     }
 
@@ -366,6 +446,19 @@ private func restoredRecord() -> LastPlayedRecord {
             playback.timeline = nil
             playback.restoredRecord = restoredRecord()
             #expect(model.title == "Dune")
+        }
+    }
+
+    @Test func restoredCoverIsKeptWhenItsSessionStarts() async throws {
+        try await withPlayer { model, playback, _, _ in
+            var record = restoredRecord()
+            record.coverPath = "/metadata/items/li_book/cover.jpg"
+            playback.restore(record)
+            let restoredCover = model.coverKey
+            #expect(restoredCover?.updatedAt == nil)
+            playback.load(FakePlaybackControl.bookSession(), at: 120)
+            #expect(model.title == "Dune")
+            #expect(model.coverKey == restoredCover)
         }
     }
 
