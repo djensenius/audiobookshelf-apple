@@ -429,6 +429,87 @@ data directories, including failed initial capture attempts; raw proof remains l
 SwiftPM may leave its own empty temporary directories/locks in the owned TMPDIR.
 This is API contract acceptance only, not UI/device or parent-issue completion.
 
+## Complete expanded-book evidence
+
+`ExpandedBookContractTests` adds read-only admin GETs through the existing
+`ItemEndpoints.item(id:)` (`expanded=1&include=rssfeed`). Item/library IDs come from the
+unchanged seed and media IDs independently from the minified listing. Both books retain every
+ordered library file, audio file, track, metadata array and chapter. Each raw element is decoded
+independently with its production type and compared in full with the endpoint value, then with
+independent seed expectations. An explicit array-path inventory rejects unverified new arrays.
+Raw track chapters are decoded as `Chapter` too: `AudioTrack` does not expose them.
+Multifile expectations are two MP3s/tracks and generated chapters; M4B expectations are one
+file/track and Opening/Middle/Ending in book, file **and raw track** expansions. Inodes, filenames,
+content URLs, offsets, durations, complete metadata and `ItemSummary` identity/title/audio are checked.
+No decoder, endpoint, `libraryFiles` policy or existing `LibraryContractTests` assertion changed.
+
+Live paths use the independent seeded library's exactly-one folder, with matching folder IDs and
+exact `Ada Fixture/<title>` item and filename-relative file paths, on Docker **and Node**.
+The initial Node 2.26.0 focused run exposed five Docker-root path failures plus four timing/chapter
+failures (seven tests passed, one failed). Its MP3 durations were 30/20/50 s, not the Docker
+capture's padding-inclusive 30.096/20.088/50.184 s. Independent live expectations now use nominal
+30/20/50 s (M4B 40 s) with the existing **±0.5 s** default of `approximately` in `ContractServer.swift`.
+Raw-to-typed comparisons, ordered arrays, track/file durations, cumulative offsets and chapter
+relationships remain exact; no additional numerical tolerance was needed. Offline Docker
+fixture values, path expectations and sanitizer remain unchanged.
+
+The four complete `expanded-item-{multifile,m4b}-{2.26.0,2.37.2}.json` fixtures were captured
+from owned official Docker servers on 2026-11-10, using the exact revisions/digests in the
+provenance table above. Original bytes, SHA-256s, full image labels, runtime image identities,
+HTTP 200 status and `/status` responses remain private in `.build/expanded-item-evidence`.
+All six original captures, including the separately tracked podcast evidence, remain unchanged.
+Docker runs independently verified matching image source/revision/version labels, RepoDigest,
+running image ID and actual server version. Node runs used the harness's public source checkouts:
+`git rev-parse HEAD` matched the same exact pins, origin was the official repository, and tracked
+install changes were limited to `package-lock.json`. Runtime listener PID, executable (Node
+20.20.2), owned working directory/parent process chain and HTTP 200 `/status` version were verified.
+
+Sanitization substitutes only item/library/folder/media/author IDs, item and file inodes, and
+the corresponding track content URLs. The explicit JSON-path allowlist is in
+`ExpandedBookResponseTests.substitutions`; synthetic `/audiobooks/Ada Fixture/...` paths are
+already safe and remain unchanged. No timestamps, probe fields, nulls, keys or arrays were
+removed or rewritten. Optional `ABS_EXPANDED_BOOK_CAPTURE_DIR` verification checks original-byte
+hashes, runs the same strict matrix against original responses using captured listing identities,
+and recursively compares fixtures against originals: identical structure, scalar types, ordered
+array lengths/values and every non-substituted value. Fixtures always run even without that mode.
+
+Observed expanded counts (not inferred from minified source): on 2.26.0, item `numFiles` and
+book `numTracks/numAudioFiles/numChapters` are **absent**, not null. On 2.37.2 they are respectively
+`2/2/2/2` for multifile and `1/1/1/3` for M4B. Existing `ItemSummary` falls back to expanded tracks
+on the older pin; no fallback change was needed.
+
+Validation used `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`,
+`MISE_TRUSTED_CONFIG_PATHS=$PWD`, and owned `TMPDIR=$PWD/.build/server-tmp`:
+
+```sh
+ABS_EXPANDED_BOOK_CAPTURE_DIR=$PWD/.build/expanded-item-evidence \
+  swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+  --filter 'ExpandedBookResponseTests|LibraryEndpointsTests|ItemEndpointsTests|LibraryModelTests|ItemSummaryTests'
+ABS_SERVER_VERSION=2.26.0 scripts/test-server.sh test --filter 'ExpandedBookContractTests|LibraryContractTests'
+ABS_SERVER_VERSION=2.37.2 scripts/test-server.sh test --filter 'ExpandedBookContractTests|LibraryContractTests'
+ABS_SERVER_BACKEND=node ABS_SERVER_VERSION=2.26.0 mise exec node@20 -- scripts/test-server.sh test
+ABS_SERVER_BACKEND=node ABS_SERVER_VERSION=2.37.2 mise exec node@20 -- scripts/test-server.sh test
+mise run --jobs 1 lint
+mise run xcproj:check
+mise run --jobs 1 test
+git diff --check
+```
+
+Focused offline: 53 tests passed, zero skips (four book cases, each also checking original proof).
+Each corrected focused Docker run: eight tests passed, zero skips, including both book cases
+and the unchanged podcast index-1 assertion. Each full Node run: 70 passed, one existing
+series-fixture skip (71 reported), including both book cases. Initial full Docker runs also passed
+70 with that one skip; after correction, Docker focused runs were repeated, not the full suites.
+Mandatory tasks ran serially: package tests 2,142 passed, 70 skipped (68 server configuration,
+one opt-in OSLog, one Keychain); tools: 24 passed; macOS app: seven functions/21 executions passed,
+one Keychain skip. Lint and project canonicalization passed; no manual dependency restoration.
+Private `.build/expanded-book-validation` logs record exact commands, full provenance and exact-ID
+cleanup: all six validation containers and three Node server PIDs (including the red reproduction),
+with their exact owned data directories, were removed by the unchanged harness traps. Original
+capture servers were already removed. No shared resources were cleaned. This two-book seed proves
+no missing-media, permission, progress, RSS or malformed real-world inventory behavior; podcast
+evidence is separate. No UI/device acceptance is claimed.
+
 ## CI
 
 `.github/workflows/server-contract.yml` runs on `workflow_dispatch` (optionally with one
