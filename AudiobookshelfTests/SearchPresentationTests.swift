@@ -14,26 +14,18 @@ private struct EmptySearchService: SearchService {
     }
 }
 
-/// A library client that can't search.
-private struct LibraryOnlyService: LibraryService {
+/// A library client that also searches, as `APIClient` does: finds Emma in every library.
+private struct SearchingLibraryService: LibraryService, SearchService {
     struct Failure: Error {}
 
     func libraries() async throws -> [Library] { [] }
     func library(id: String) async throws -> LibraryWithFilterData { throw Failure() }
     func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
-    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Failure() }
-}
-
-/// A library client that also searches, as `APIClient` does.
-private struct SearchingLibraryService: LibraryService, SearchService {
-    func libraries() async throws -> [Library] { [] }
-    func library(id: String) async throws -> LibraryWithFilterData { throw LibraryOnlyService.Failure() }
-    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
     func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
-        throw LibraryOnlyService.Failure()
+        throw Failure()
     }
     func searchLibrary(id: String, query: String, limit: Int?) async throws -> LibrarySearchResults {
-        LibrarySearchResults()
+        LibrarySearchResults(books: [SampleLibrary.emma])
     }
 }
 
@@ -354,18 +346,28 @@ private final class StoreToken {}
 }
 
 @MainActor
-@Suite struct SearchServiceSourceTests {
-    @Test func theServiceIsTheAccountsClientWhenItCanSearch() async throws {
-        let suiteName = "SearchServiceSourceTests.\(UUID().uuidString)"
+@Suite struct SearchSessionModelTests {
+    @Test func theModelSearchesWithTheStoresServicesForItsAccount() async throws {
+        let suiteName = "SearchSessionModelTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let store = LibraryStore(settings: AppSettings(defaults: defaults))
-        #expect(SearchServiceSource.service(from: store) == nil)
-
-        await store.connect(client: LibraryOnlyService(), connectionKey: account)
-        #expect(SearchServiceSource.service(from: store) == nil)
+        let settings = AppSettings(defaults: defaults)
+        let store = LibraryStore(settings: settings)
+        let token = ObjectIdentifier(store)
+        let key = SearchSession.Key(store: token, connectionKey: account, libraryID: "books")
+        #expect(SearchSession.makeModel(for: key, store: store, settings: settings) == nil)
 
         await store.connect(client: SearchingLibraryService(), connectionKey: account)
-        #expect(SearchServiceSource.service(from: store) is SearchingLibraryService)
+        let otherAccount = LibraryConnectionKey(connectionID: account.connectionID, userID: "user-2")
+        let otherKey = SearchSession.Key(store: token, connectionKey: otherAccount, libraryID: "books")
+        #expect(SearchSession.makeModel(for: otherKey, store: store, settings: settings) == nil)
+
+        SearchRecentsStore(settings: settings).setRecentSearches(["Dune"], connectionKey: account, libraryID: "books")
+        let model = try #require(SearchSession.makeModel(for: key, store: store, settings: settings))
+        #expect(model.recentSearches == ["Dune"])
+        model.setQuery("emma")
+        model.submit()
+        while model.isSearching || model.searchedQuery == nil { await Task.yield() }
+        #expect(model.results.rows(.books).count == 1)
     }
 }

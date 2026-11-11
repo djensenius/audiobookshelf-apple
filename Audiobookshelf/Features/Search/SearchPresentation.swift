@@ -175,20 +175,3 @@ struct SearchRecentsStore {
         }
     }
 }
-
-/// Where Search gets its ``SearchService``. The one place that knows how, so switching source is
-/// a one-line change.
-enum SearchServiceSource {
-    /// The service of `store`'s account, or `nil` (logged) when its client can't search.
-    // TODO(#314): use the store's account-scoped services
-    @MainActor
-    static func service(from store: LibraryStore) -> (any SearchService)? {
-        guard let client = store.client else { return nil }
-        guard let service = client as? any SearchService else {
-            Log.ui.error(
-                "Search: the library client \(String(describing: type(of: client)), privacy: .public) can't search")
-            return nil
-        }
-        return service
-    }
-}

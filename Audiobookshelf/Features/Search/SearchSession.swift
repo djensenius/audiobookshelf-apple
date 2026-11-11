@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import Foundation
 
 /// Which ``SearchModel`` the Search tab shows, and what happens to its query when the account or
@@ -45,6 +46,17 @@ struct SearchSession {
             model.submit()
         }
         return true
+    }
+
+    /// A model for `key` searching with `store`'s services, with the library's saved recent
+    /// searches. `nil` when `store` isn't connected to `key`'s account.
+    static func makeModel(for key: Key, store: LibraryStore, settings: AppSettings?) -> SearchModel? {
+        guard store.connectionKey == key.connectionKey, let services = store.makeServices() else { return nil }
+        let recents = settings.map { SearchRecentsStore(settings: $0) }
+        return SearchModel(
+            service: services, libraryID: key.libraryID,
+            recentSearches: recents?.recentSearches(connectionKey: key.connectionKey, libraryID: key.libraryID) ?? [],
+            persistRecents: recents?.persist(connectionKey: key.connectionKey, libraryID: key.libraryID))
     }
 
     /// Searches the router's pending `search?q=` query and clears it. Without a model the query

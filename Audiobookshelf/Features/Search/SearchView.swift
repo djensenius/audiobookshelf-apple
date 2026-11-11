@@ -7,10 +7,10 @@ import SwiftUI
 /// types, in sections of books, podcasts, episodes, series, authors, narrators and tags.
 ///
 /// The model belongs to one account and library (ADR 0004): ``SearchSession`` makes it with the
-/// account's ``SearchService`` (from ``SearchServiceSource``) and replaces it when the store, its
+/// account's services (`LibraryStore.makeServices()`) and replaces it when the store, its
 /// account or the router's library changes, keeping the query across a library switch. Its recent
-/// searches are kept per account and library in `AppSettings`. Signed out, or without a service,
-/// the screen shows the signed-out state.
+/// searches are kept per account and library in `AppSettings`. Signed out, the screen shows the
+/// signed-out state.
 struct SearchView: View {
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
@@ -35,7 +35,9 @@ struct SearchView: View {
         }
         .navigationTitle(Text(verbatim: L10n.string("ButtonSearch")))
         .task(id: key) {
-            session.adopt(key) { makeModel(for: $0) }
+            session.adopt(key) { key in
+                store.flatMap { SearchSession.makeModel(for: key, store: $0, settings: settings) }
+            }
             session.runPendingQuery(from: router)
         }
         .onChange(of: router?.pendingSearchQuery) {
@@ -43,14 +45,6 @@ struct SearchView: View {
         }
     }
 
-    private func makeModel(for key: SearchSession.Key) -> SearchModel? {
-        guard let store, let service = SearchServiceSource.service(from: store) else { return nil }
-        let recents = settings.map { SearchRecentsStore(settings: $0) }
-        return SearchModel(
-            service: service, libraryID: key.libraryID,
-            recentSearches: recents?.recentSearches(connectionKey: key.connectionKey, libraryID: key.libraryID) ?? [],
-            persistRecents: recents?.persist(connectionKey: key.connectionKey, libraryID: key.libraryID))
-    }
 }
 
 /// Search while signed in with a library: the search field bound to the model, focused when the
