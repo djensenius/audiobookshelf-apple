@@ -21,6 +21,35 @@ public struct DownloadLocations: Sendable {
         transfersRoot = root.appending(path: "Transfers", directoryHint: .isDirectory)
     }
 
+    /// Creates ``downloadsRoot`` and ``resumeDataRoot`` if needed and excludes both from
+    /// backups: downloads can be fetched again, and resume data is sealed to this device's key.
+    /// Safe to call again; existing contents are kept.
+    ///
+    /// Both directories also get `completeUntilFirstUserAuthentication` protection, which new
+    /// files inherit, so downloads play while the device is locked. Failing to set it (for
+    /// example on a volume without data protection, as on many Macs) is logged, not fatal.
+    ///
+    /// - Throws: if a directory can't be created or excluded from backups.
+    public func prepare() throws {
+        let manager = FileManager.default
+        for directory in [downloadsRoot, resumeDataRoot] {
+            try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var directory = directory
+            try directory.setResourceValues(values)
+            do {
+                try manager.setAttributes(
+                    [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                    ofItemAtPath: directory.path(percentEncoded: false))
+            } catch {
+                Log.downloads.error(
+                    "Couldn't set file protection on a download directory: \(Log.redact(String(describing: error)), privacy: .public)"
+                )
+            }
+        }
+    }
+
     public enum PathError: Error, Equatable {
         /// The stored path is empty, absolute, or leaves the downloads root.
         case invalidRelativePath(String)
@@ -31,9 +60,14 @@ public struct DownloadLocations: Sendable {
     /// - Throws: ``PathError/invalidRelativePath(_:)`` for an empty or absolute path or one
     ///   with `.` or `..` components, so a stored path can't point outside the root.
     public func fileURL(forRelativePath path: String) throws -> URL {
-        let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard !path.isEmpty, !path.hasPrefix("/"),
-            components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." })
+        // Split on scalars, not Characters: a `/` followed by a combining mark is one Character,
+        // which would hide the boundary (`../\u{301}x` would pass as one component), but the file
+        // system still sees the `/`. A component such as `..\u{301}` is an ordinary name.
+        let components = path.unicodeScalars.split(separator: "/", omittingEmptySubsequences: false)
+        guard !path.unicodeScalars.isEmpty, path.unicodeScalars.first != "/",
+            components.allSatisfy({
+                !$0.isEmpty && !$0.elementsEqual(".".unicodeScalars) && !$0.elementsEqual("..".unicodeScalars)
+            })
         else { throw PathError.invalidRelativePath(path) }
         return downloadsRoot.appending(path: path, directoryHint: .notDirectory)
     }

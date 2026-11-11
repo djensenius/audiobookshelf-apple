@@ -140,10 +140,12 @@ public final class PlaybackCoordinator {
     // MARK: Bookkeeping
 
     @ObservationIgnored private var generation = 0
-    @ObservationIgnored private var playWhenLoaded = true
+    /// Observed (like `isFinishingLoad` and `resumingIntent`) because ``isPlaybackRequested``
+    /// reads it: a pause while starting changes only this.
+    private var playWhenLoaded = true
     /// Loaded, but `play()` hasn't finished: a catch-up seek may be in flight before the engine
     /// starts. Play intent is `playWhenLoaded` until then.
-    @ObservationIgnored private var isFinishingLoad = false
+    private var isFinishingLoad = false
     /// A position chosen while starting or unloaded (a seek, or a play with a start time).
     private var pendingStartTime: Double?
     /// Jumps made while starting, or while unloaded without a chosen position; applied after the
@@ -163,7 +165,7 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var awaitingSeekLanding = false
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
-    @ObservationIgnored private var resumingIntent: Int?
+    private var resumingIntent: Int?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var closeOperations: [PlaybackCloseOperation] = []

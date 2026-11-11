@@ -6,10 +6,24 @@ import SwiftUI
 /// elsewhere, with a `NavigationStack` per tab driven by the scene's ``Router``. Every stack has
 /// the one `Route` destination, so a screen is added in ``RouteDestination``, not here. Each tab's
 /// root is its feature's screen (``TabRoot``); the sidebar shows only the library's sections.
-struct MainTabView: View {
+/// Every screen can read the router as `@Environment(Router.self)`, for its `libraryID` and
+/// `libraryKind`.
+struct MainTabView<Root: View>: View {
     @Bindable var router: Router
     let player: any PlayerSlotState
+    /// The root screen of a tab, given the tab and the router's ``Router/librarySection``.
+    /// ``TabRoot`` in the app; tests pass their own.
+    let root: (AppTab, AppTab?) -> Root
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    /// Tests only; the app uses `init(router:player:)`, whose roots are ``TabRoot``.
+    init(
+        router: Router, player: any PlayerSlotState, @ViewBuilder root: @escaping (AppTab, AppTab?) -> Root
+    ) {
+        self.router = router
+        self.player = player
+        self.root = root
+    }
 
     var body: some View {
         TabView(selection: $router.selectedTab) {
@@ -42,12 +56,15 @@ struct MainTabView: View {
         .onChange(of: horizontalSizeClass) { _, sizeClass in
             router.normalize(isCompact: sizeClass == .compact)
         }
+        // Keep this the outermost modifier, so every tab stack, pushed `RouteDestination`, the
+        // sidebar header and `PlayerSlot`'s presentations inherit the scene's router.
+        .environment(router)
     }
 
     private func tab(_ tab: AppTab, role: TabRole? = nil) -> some TabContent<AppTab> {
         Tab(value: tab, role: role) {
             NavigationStack(path: $router[path: tab]) {
-                TabRoot(tab: tab, librarySection: router.librarySection)
+                root(tab, router.librarySection)
                     .navigationDestination(for: Route.self) { route in
                         RouteDestination(route: route)
                     }
@@ -58,6 +75,14 @@ struct MainTabView: View {
             } icon: {
                 Image(systemName: tab.systemImage)
             }
+        }
+    }
+}
+
+extension MainTabView where Root == TabRoot {
+    init(router: Router, player: any PlayerSlotState) {
+        self.init(router: router, player: player) { tab, librarySection in
+            TabRoot(tab: tab, librarySection: librarySection)
         }
     }
 }
