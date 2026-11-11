@@ -1,0 +1,227 @@
+{
+  "id": "item-m4b",
+  "ino": "2000",
+  "oldLibraryItemId": null,
+  "libraryId": "library-books",
+  "folderId": "folder-books",
+  "path": "/audiobooks/Ada Fixture/Single File Tale",
+  "relPath": "Ada Fixture/Single File Tale",
+  "isFile": false,
+  "mtimeMs": 1794356814808,
+  "ctimeMs": 1794356814808,
+  "birthtimeMs": 0,
+  "addedAt": 1794356816805,
+  "updatedAt": 1794356816805,
+  "isMissing": false,
+  "isInvalid": false,
+  "mediaType": "book",
+  "media": {
+    "id": "book-m4b",
+    "metadata": {
+      "title": "Single File Tale",
+      "subtitle": null,
+      "authors": [
+        {
+          "id": "author-fixture",
+          "name": "Ada Fixture"
+        }
+      ],
+      "narrators": [],
+      "series": [],
+      "genres": [],
+      "publishedYear": null,
+      "publishedDate": null,
+      "publisher": null,
+      "description": null,
+      "isbn": null,
+      "asin": null,
+      "language": null,
+      "explicit": false,
+      "abridged": false,
+      "titleIgnorePrefix": "Single File Tale",
+      "authorName": "Ada Fixture",
+      "authorNameLF": "Fixture, Ada",
+      "narratorName": "",
+      "seriesName": "",
+      "descriptionPlain": null
+    },
+    "coverPath": null,
+    "tags": [],
+    "numTracks": 1,
+    "numAudioFiles": 1,
+    "numChapters": 3,
+    "duration": 40,
+    "size": 84643,
+    "libraryItemId": "item-m4b",
+    "audioFiles": [
+      {
+        "index": 1,
+        "ino": "2001",
+        "metadata": {
+          "filename": "Single File Tale.m4b",
+          "ext": ".m4b",
+          "path": "/audiobooks/Ada Fixture/Single File Tale/Single File Tale.m4b",
+          "relPath": "Single File Tale.m4b",
+          "size": 84643,
+          "mtimeMs": 1794356814906,
+          "ctimeMs": 1794356814906,
+          "birthtimeMs": 0
+        },
+        "addedAt": 1794356816804,
+        "updatedAt": 1794356816804,
+        "trackNumFromMeta": null,
+        "discNumFromMeta": null,
+        "trackNumFromFilename": null,
+        "discNumFromFilename": null,
+        "manuallyVerified": false,
+        "exclude": false,
+        "error": null,
+        "format": "QuickTime / MOV",
+        "duration": 40,
+        "bitRate": 16082,
+        "language": "und",
+        "codec": "aac",
+        "timeBase": "1/16000",
+        "channels": 1,
+        "channelLayout": "mono",
+        "chapters": [
+          {
+            "start": 0,
+            "end": 10,
+            "title": "Opening",
+            "id": 0
+          },
+          {
+            "start": 10,
+            "end": 25,
+            "title": "Middle",
+            "id": 1
+          },
+          {
+            "start": 25,
+            "end": 40,
+            "title": "Ending",
+            "id": 2
+          }
+        ],
+        "embeddedCoverArt": null,
+        "metaTags": {
+          "tagAlbum": "Single File Tale",
+          "tagArtist": "Ada Fixture",
+          "tagTitle": "Single File Tale",
+          "tagEncoder": "Lavf63.1.102"
+        },
+        "mimeType": "audio/mp4"
+      }
+    ],
+    "chapters": [
+      {
+        "start": 0,
+        "end": 10,
+        "title": "Opening",
+        "id": 0
+      },
+      {
+        "start": 10,
+        "end": 25,
+        "title": "Middle",
+        "id": 1
+      },
+      {
+        "start": 25,
+        "end": 40,
+        "title": "Ending",
+        "id": 2
+      }
+    ],
+    "ebookFile": null,
+    "tracks": [
+      {
+        "index": 1,
+        "ino": "2001",
+        "metadata": {
+          "filename": "Single File Tale.m4b",
+          "ext": ".m4b",
+          "path": "/audiobooks/Ada Fixture/Single File Tale/Single File Tale.m4b",
+          "relPath": "Single File Tale.m4b",
+          "size": 84643,
+          "mtimeMs": 1794356814906,
+          "ctimeMs": 1794356814906,
+          "birthtimeMs": 0
+        },
+        "addedAt": 1794356816804,
+        "updatedAt": 1794356816804,
+        "trackNumFromMeta": null,
+        "discNumFromMeta": null,
+        "trackNumFromFilename": null,
+        "discNumFromFilename": null,
+        "manuallyVerified": false,
+        "exclude": false,
+        "error": null,
+        "format": "QuickTime / MOV",
+        "duration": 40,
+        "bitRate": 16082,
+        "language": "und",
+        "codec": "aac",
+        "timeBase": "1/16000",
+        "channels": 1,
+        "channelLayout": "mono",
+        "chapters": [
+          {
+            "start": 0,
+            "end": 10,
+            "title": "Opening",
+            "id": 0
+          },
+          {
+            "start": 10,
+            "end": 25,
+            "title": "Middle",
+            "id": 1
+          },
+          {
+            "start": 25,
+            "end": 40,
+            "title": "Ending",
+            "id": 2
+          }
+        ],
+        "embeddedCoverArt": null,
+        "metaTags": {
+          "tagAlbum": "Single File Tale",
+          "tagArtist": "Ada Fixture",
+          "tagTitle": "Single File Tale",
+          "tagEncoder": "Lavf63.1.102"
+        },
+        "mimeType": "audio/mp4",
+        "title": "Single File Tale.m4b",
+        "startOffset": 0,
+        "contentUrl": "/api/items/item-m4b/file/2001"
+      }
+    ]
+  },
+  "numFiles": 1,
+  "size": 84643,
+  "lastScan": 1794356816804,
+  "scanVersion": "2.37.2",
+  "libraryFiles": [
+    {
+      "ino": "2001",
+      "metadata": {
+        "filename": "Single File Tale.m4b",
+        "ext": ".m4b",
+        "path": "/audiobooks/Ada Fixture/Single File Tale/Single File Tale.m4b",
+        "relPath": "Single File Tale.m4b",
+        "size": 84643,
+        "mtimeMs": 1794356814906,
+        "ctimeMs": 1794356814906,
+        "birthtimeMs": 0
+      },
+      "isSupplementary": null,
+      "addedAt": 1794356816679,
+      "updatedAt": 1794356816679,
+      "fileType": "audio"
+    }
+  ],
+  "rssFeed": null
+}
