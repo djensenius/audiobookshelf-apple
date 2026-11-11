@@ -417,6 +417,134 @@ data directories, including failed initial capture attempts; raw proof remains l
 SwiftPM may leave its own empty temporary directories/locks in the owned TMPDIR.
 This is API contract acceptance only, not UI/device or parent-issue completion.
 
+## Expanded podcast: complete captures and strict contracts
+
+`ExpandedPodcastContractTests` adds read-only seeded-admin evidence for the unchanged
+`ItemEndpoints.item(id:)`: `GET /api/items/:id?expanded=1&include=rssfeed`.
+It does not modify production decoding, `LibraryContractTests`, the seed or the harness.
+`ExpandedPodcastResponseTests` uses complete `expanded-item-podcast-{2.26.0,2.37.2}.json`
+fixtures, not re-encoded models or trimmed collection/playlist responses.
+
+The original HTTP 200 responses were captured on 2026-11-10 from the official images.
+The revisions, RepoDigests, all eight OCI labels and actual `/status.serverVersion` match
+the provenance table in the recent-episodes section above. Retained container inspection
+matches each inspected image ID and official versioned image reference. Before copying,
+both complete label dictionaries, manifest hashes/byte counts, response paths, pretty JSON
+and exact-resource cleanup records were verified. Capture provenance is separate from the
+executed Swift and live validation recorded below.
+
+| Pin | Original bytes / pretty lines | Original response SHA-256 |
+| --- | --- | --- |
+| 2.26.0 | 3658 / 180 | `7ff93daaa043c3c6d7e660e95de6d158b6a7137816aff82e5f2d182165bb03a2` |
+| 2.37.2 | 3675 / 182 | `d6a4c5b683f38cceebbd9906acf8527bdd6e464f23a15f57db1771740c92c0af` |
+
+Owned, ignored `.build/expanded-podcast-evidence/{2.26.0,2.37.2}/` retains byte-identical
+`podcast.json`, `podcast.pretty.json`, `manifest.json`, `image-inspect.json`,
+`runtime-inspect.json`, `status.json` and `cleanup.json`. These are copies of immutable
+capture artifacts, not another worker's implementation/helper. Manifests also describe book
+captures; no book responses were copied. Private originals/runtime paths stay untracked.
+The original harness recorded exit 143 after intentional shutdown and both exact owned
+containers/data directories absent. Validation used eight fresh Docker containers (initial
+and final runs) and two Node processes; original evidence and others' resources were unchanged.
+
+Sanitization changes exactly 13 string leaves per response, at this explicit allowlist:
+`/id`, `/ino`, `/libraryId`, `/folderId`, `/media/id`, `/media/libraryItemId`,
+`/media/episodes/0/{libraryItemId,podcastId,id,audioFile/ino,audioTrack/ino,audioTrack/contentUrl}`,
+and `/libraryFiles/0/ino`. Item/podcast/episode/library/folder IDs and inodes become fixed
+fixture tokens; all references and the content URL use the same substitutions.
+The generated seed's `/podcasts/Synthetic Cast` paths and filenames are already synthetic
+and remain unchanged. No timestamps, keys, nulls, scalar types, array order/lengths, tags,
+probe fields or non-identifying values change. The local `verify.py` recursively checks
+this allowlist and provenance; both pins passed, preserving 133/135 other scalar leaves.
+The fixture test also implements the recursive comparison in optional original-capture mode.
+
+Observed raw shape: both pins have one library file and one expanded episode, track/file
+index **1**, empty episode/file/track chapters, null publication dates and `rssFeed`.
+2.26.0 has **absent**, not null, `numFiles` and media `numEpisodes`; 2.37.2 has both equal
+to **1**. Neither media object has `numTracks`, `numAudioFiles` or `numChapters`.
+Durations are 20.088 / 20 seconds; captured size is 40494 bytes.
+Tests require the independent one-episode seed, exact identities and complete ordered
+decoded arrays, independently decoding every raw library file/metadata, podcast metadata,
+episode, audio file, track and chapter. Track file fields are additionally decoded as
+`AudioFile`; raw track chapters are decoded as `Chapter`, despite not being in `AudioTrack`.
+The live media ID is cross-checked against the separate raw minified listing.
+The live item/file paths use the independently fetched seeded library's exactly one folder,
+plus exact seed-relative paths. The original suffix assertion was not Docker-only, but was
+strengthened to exact equality after the Node CI requirement was clarified; no failing
+Docker-only podcast assertion was found or claimed. Docker fixtures/sanitization stayed unchanged.
+`ItemSummary` stays unchanged: a podcast is non-playable; its episode has audio, the
+composite item/episode identity, episode title, podcast subtitle and positive duration.
+Unmodeled `metaTags`/`timeBase` remain in fixtures and recursive proof, not new model claims.
+
+Executed on 2026-11-10, after capacity authorization, with
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`, `MISE_TRUSTED_CONFIG_PATHS=$PWD`
+and a separate owned `TMPDIR=$PWD/.build/podcast-validation/tmp/<run>` for every command.
+Server runs set `ABS_SERVER_BACKEND=docker` or `node`; heavy checks ran sequentially, and the
+mandatory mise test graph used **`--jobs 1`**. The owned `.build/podcast-validation/run.py`
+wrapper retained exact child argv/environment, complete output and exit status under
+`.build/podcast-validation/runs/<run>/`; it did not modify the harness. Child commands:
+
+```sh
+swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+  --filter 'ExpandedPodcastResponseTests|LibraryEndpointsTests|ItemEndpointsTests|LibraryModelTests|ItemSummaryTests'
+ABS_EXPANDED_PODCAST_CAPTURE_DIR=$PWD/.build/expanded-podcast-evidence \
+  swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+  --filter 'ExpandedPodcastResponseTests|LibraryEndpointsTests|ItemEndpointsTests|LibraryModelTests|ItemSummaryTests'
+ABS_SERVER_BACKEND=docker ABS_SERVER_VERSION=2.26.0 scripts/test-server.sh test --filter 'ExpandedPodcastContractTests|LibraryContractTests'
+ABS_SERVER_BACKEND=docker ABS_SERVER_VERSION=2.26.0 mise run test:server
+ABS_SERVER_BACKEND=docker ABS_SERVER_VERSION=2.37.2 scripts/test-server.sh test --filter 'ExpandedPodcastContractTests|LibraryContractTests'
+ABS_SERVER_BACKEND=docker ABS_SERVER_VERSION=2.37.2 mise run test:server
+ABS_SERVER_BACKEND=node ABS_SERVER_VERSION=2.26.0 mise exec node@20 -- scripts/test-server.sh test
+ABS_SERVER_BACKEND=node ABS_SERVER_VERSION=2.37.2 mise exec node@20 -- scripts/test-server.sh test
+mise run lint
+mise run xcproj:check
+mise run --jobs 1 test
+git diff --check
+```
+
+Both offline modes passed **53 tests across five suites** (38 core + 15 API), zero skips;
+both fixture cases executed in each mode, including recursive originals comparison when enabled.
+Each Docker focused run passed **8 tests**, zero skips. Each Docker/Node full run reported 71 tests:
+**70 executed/passed, one existing series-fixture skip**, no server-configuration skips.
+The new strict contract and unchanged `LibraryContractTests.podcast` index-1 assertion
+passed on both pins/backends. All validation commands exited 0; no assertions were weakened.
+Mandatory lint and project canonicalization passed. Serialized mandatory tests reported
+2,212 package tests: **2,142 passed, 70 skipped** (68 default server-configuration skips,
+one opt-in OSLog test, one Keychain test). Tools: 24 passed, no skips. macOS app:
+seven test functions passed (21 executions), one Keychain test skipped; `TEST SUCCEEDED`.
+Direct Swift formatting/lint, recursive JSON/provenance verification and whitespace checks
+(including new untracked files via `git diff --no-index --check`) also passed.
+
+Every Docker run verified the full official image labels/revision/RepoDigest before startup,
+then running image identity, exact owned mounts/localhost port and actual HTTP 200 `/status`
+version before accepting the suite result. Each run directory retains `image-inspect.json`,
+`runtime-inspect.json`, `status.json`, `ownership.json`, `cleanup.json`, `command.json`,
+`result.json` and `output.log`. Both Node runs used **20.20.2**, verified the canonical source
+remote, exact pinned HEAD, clean tracked checkout, package/status version, owned running PID,
+source working directory and listening localhost port. Node runs retain `source-provenance.json`
+instead of image inspection, plus status, ownership, cleanup, command, result and complete log.
+Git printed annotated-tag warnings during cloning; resolved HEADs matched the required commits.
+Final-source resources were verified absent (Node full runs include the podcast contract):
+
+| Run directory | Container / Node PID | Data-directory basename under that run's owned TMPDIR |
+| --- | --- | --- |
+| `final-docker-focused-2.26.0` | `abs-contract-11fd7b68` | `abs-contract.09h5jh` |
+| `final-docker-full-2.26.0` | `abs-contract-b73b8c0f` | `abs-contract.65KrJB` |
+| `final-docker-focused-2.37.2` | `abs-contract-fa450f94` | `abs-contract.Mcj7HG` |
+| `final-docker-full-2.37.2` | `abs-contract-9dcfee4a` | `abs-contract.bKBJlY` |
+| `node-full-2.26.0` | `85193` | `abs-contract.71rJw3` |
+| `node-full-2.37.2` | `90722` | `abs-contract.mMvjO2` |
+
+The four initial Docker runs also passed and cleaned up: `0429e321/Q3BVMa`,
+`f2bd895c/y3lp8U`, `52965d03/teteoC`, `e79a21d6/o2SLZa` (standard `abs-contract-`/`abs-contract.`
+prefixes); their full records remain under `live-{focused,full}-<pin>`.
+Final offline and mandatory logs use `final-offline-*` and `final-mandatory-*` run directories.
+Disk stayed above the 5 GiB safety floor; no unrelated process or directory was cleaned.
+This is API contract validation, frozen for fresh review, not publication or parent completion.
+One episode/empty chapters do not prove multi-episode order/paging, nonempty podcast chapters,
+RSS, progress, permissions, malformed real-world files or missing-media behavior.
+Strict `libraryFiles` decoding is unchanged; leniency remains deferred.
+
 ## CI
 
 `.github/workflows/server-contract.yml` runs on `workflow_dispatch` (optionally with one
