@@ -26,6 +26,7 @@ public final class AudioEngine: AudioEngineProtocol {
     public private(set) var volume: Float = 1
     public private(set) var isPlaybackRequested = false
     public private(set) var pendingSeekTarget: Double?
+    public private(set) var isAudioSessionActive = false
     public private(set) var timeline: PlaybackTimeline?
     public var duration: Double { timeline?.duration ?? 0 }
 
@@ -173,6 +174,7 @@ public final class AudioEngine: AudioEngineProtocol {
         loadGeneration += 1
         reset()
         refreshState()
+        isAudioSessionActive = false
         audioSession?.deactivate()
     }
 
@@ -396,12 +398,14 @@ public final class AudioEngine: AudioEngineProtocol {
             // may already be playing, for example on a repeated play()). The media is still usable,
             // so this is not a sticky failure: the next play() activates again.
             logger.error("Audio session activation failed: \(error.localizedDescription, privacy: .public)")
+            isAudioSessionActive = false
             isPlaybackRequested = false
             player.pause()
             refreshState()
             onEvent?(.failed(.audioSessionActivationFailed(description: error.localizedDescription)))
             return
         }
+        if !isAudioSessionActive { isAudioSessionActive = true }
         player.defaultRate = defaultRate
         player.play()
         if player.rate != defaultRate { player.rate = defaultRate }

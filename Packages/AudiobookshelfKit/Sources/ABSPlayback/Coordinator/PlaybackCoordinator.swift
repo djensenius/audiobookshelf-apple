@@ -105,6 +105,10 @@ public final class PlaybackCoordinator {
         case .idle, .unloaded: false
         }
     }
+    /// Whether the loaded engine has activated its audio session to play
+    /// (``AudioEngineProtocol/isAudioSessionActive``); `false` while starting or before the catch-up
+    /// seek lands.
+    var isAudioSessionActive: Bool { phase == .loaded && engine.isAudioSessionActive }
     public var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
     public var chapter: Chapter? { timeline?.currentChapter(at: currentTime) }
     /// The current chapter's span, for chapter-relative times (`elapsed(at:)`, `remaining(at:)`).
