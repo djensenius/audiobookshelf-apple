@@ -13,8 +13,17 @@ struct MainTabView<Root: View>: View {
     let player: any PlayerSlotState
     /// The root screen of a tab, given the tab and the router's ``Router/librarySection``.
     /// ``TabRoot`` in the app; tests pass their own.
-    @ViewBuilder let root: (AppTab, AppTab?) -> Root
+    let root: (AppTab, AppTab?) -> Root
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    /// Tests only; the app uses `init(router:player:)`, whose roots are ``TabRoot``.
+    init(
+        router: Router, player: any PlayerSlotState, @ViewBuilder root: @escaping (AppTab, AppTab?) -> Root
+    ) {
+        self.router = router
+        self.player = player
+        self.root = root
+    }
 
     var body: some View {
         TabView(selection: $router.selectedTab) {
@@ -47,6 +56,8 @@ struct MainTabView<Root: View>: View {
         .onChange(of: horizontalSizeClass) { _, sizeClass in
             router.normalize(isCompact: sizeClass == .compact)
         }
+        // Keep this the outermost modifier, so every tab stack, pushed `RouteDestination`, the
+        // sidebar header and `PlayerSlot`'s presentations inherit the scene's router.
         .environment(router)
     }
 
