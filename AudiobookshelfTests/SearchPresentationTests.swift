@@ -1,0 +1,250 @@
+import ABSAPI
+import ABSAppModel
+import ABSCore
+import ABSUI
+import Foundation
+import Testing
+
+@testable import Audiobookshelf
+
+/// Answers every search with no results.
+private struct EmptySearchService: SearchService {
+    func searchLibrary(id: String, query: String, limit: Int?) async throws -> LibrarySearchResults {
+        LibrarySearchResults()
+    }
+}
+
+/// A library client that can't search.
+private struct LibraryOnlyService: LibraryService {
+    struct Failure: Error {}
+
+    func libraries() async throws -> [Library] { [] }
+    func library(id: String) async throws -> LibraryWithFilterData { throw Failure() }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Failure() }
+}
+
+/// A library client that also searches, as `APIClient` does.
+private struct SearchingLibraryService: LibraryService, SearchService {
+    func libraries() async throws -> [Library] { [] }
+    func library(id: String) async throws -> LibraryWithFilterData { throw LibraryOnlyService.Failure() }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
+        throw LibraryOnlyService.Failure()
+    }
+    func searchLibrary(id: String, query: String, limit: Int?) async throws -> LibrarySearchResults {
+        LibrarySearchResults()
+    }
+}
+
+private let english = Locale(identifier: "en")
+
+private let account = LibraryConnectionKey(
+    connectionID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA") ?? UUID(), userID: "user-1")
+
+/// Every section filled, as a book library and a podcast library would between them.
+private let allResults = SearchResultGroups(
+    LibrarySearchResults(
+        books: [SampleLibrary.emma], podcasts: [SampleLibrary.podcast], episodes: [SampleLibrary.episodeItems[0]],
+        series: [
+            LibrarySearchResults.SeriesMatch(
+                series: SampleLibrary.series[0], books: SampleLibrary.series[0].books ?? [])
+        ],
+        authors: [SampleLibrary.authors[0]],
+        narrators: [LibrarySearchResults.NameMatch(name: "Stephen Fry", count: 3)],
+        tags: [LibrarySearchResults.NameMatch(name: "Classics", count: 12)]))
+
+@MainActor
+@Suite struct SearchPresentationTests {
+    private func row(_ kind: SearchSectionKind) throws -> SearchResultRow {
+        try #require(allResults.rows(kind).first)
+    }
+
+    @Test func sectionsUseTheLegacyHeadersInTheLegacyOrder() {
+        #expect(
+            allResults.sections.map { SearchPresentation.titleKey(of: $0.kind) } == [
+                "LabelBooks", "LabelPodcasts", "HeaderEpisodes", "LabelSeries", "LabelAuthors", "LabelNarrators",
+                "LabelTags",
+            ])
+    }
+
+    @Test(arguments: SearchSectionKind.allCases)
+    func everySectionHasLocalizedHeaderAndKind(_ kind: SearchSectionKind) {
+        for key in [SearchPresentation.titleKey(of: kind), SearchPresentation.kindKey(of: kind)] {
+            #expect(L10n.string(key, locale: english) != key, "\(key) is missing from the catalog")
+        }
+    }
+
+    @Test func rowsShowTitleAndSecondLine() throws {
+        #expect(SearchPresentation.title(of: try row(.books)) == "Emma")
+        #expect(SearchPresentation.subtitle(of: try row(.books)) == "Jane Austen")
+        #expect(SearchPresentation.title(of: try row(.episodes)) == SampleLibrary.episodes[0].title)
+        #expect(SearchPresentation.subtitle(of: try row(.episodes)) == "Classic Tales")
+        #expect(SearchPresentation.title(of: try row(.series)) == "Barsoom")
+        #expect(SearchPresentation.subtitle(of: try row(.series), locale: english) == "3 books")
+        #expect(SearchPresentation.title(of: try row(.narrators)) == "Stephen Fry")
+        #expect(SearchPresentation.subtitle(of: try row(.narrators)) == nil)
+        #expect(SearchPresentation.subtitle(of: try row(.tags)) == nil)
+    }
+
+    @Test func voiceOverSpeaksTitleAuthorAndKind() throws {
+        #expect(
+            SearchPresentation.accessibilityLabel(of: try row(.books), in: .books, locale: english)
+                == "Emma, Jane Austen, Book")
+        #expect(
+            SearchPresentation.accessibilityLabel(of: try row(.podcasts), in: .podcasts, locale: english)
+                == "Classic Tales, Public Domain Players, Podcast")
+        #expect(
+            SearchPresentation.accessibilityLabel(of: try row(.series), in: .series, locale: english)
+                == "Barsoom, 3 books, Series")
+        #expect(
+            SearchPresentation.accessibilityLabel(of: try row(.narrators), in: .narrators, locale: english)
+                == "Stephen Fry, Narrator")
+        #expect(
+            SearchPresentation.accessibilityLabel(of: try row(.tags), in: .tags, locale: english) == "Classics, Tag")
+    }
+
+    @Test func narratorsAndTagsOpenTheFilteredLibraryOnTheSearchStack() throws {
+        let router = Router()
+        router[path: .home] = [.stats]
+        SearchPresentation.open(try row(.narrators).route, in: router)
+        #expect(router[path: .search] == [.libraryFilter(kind: .narrators, value: "Stephen Fry")])
+
+        router[path: .search] = []
+        SearchPresentation.open(try row(.tags).route, in: router)
+        #expect(router[path: .search] == [.libraryFilter(kind: .tags, value: "Classics")])
+        #expect(router[path: .home] == [.stats])
+        #expect(router[path: .library].isEmpty)
+    }
+
+    @Test func itemsEpisodesSeriesAndAuthorsOpenTheirScreens() throws {
+        let router = Router()
+        for kind in [SearchSectionKind.books, .podcasts, .episodes, .series, .authors] {
+            SearchPresentation.open(try row(kind).route, in: router)
+        }
+        let author = SampleLibrary.authors[0].id
+        #expect(
+            router[path: .search] == [
+                .item(id: "li_emma"), .item(id: "li_podcast"),
+                .episode(itemID: "li_podcast", episodeID: SampleLibrary.episodes[0].id), .series(id: "ser_barsoom"),
+                .author(id: author),
+            ])
+    }
+
+    @Test func aDoubleTapPushesOnce() throws {
+        let router = Router()
+        SearchPresentation.open(try row(.books).route, in: router)
+        SearchPresentation.open(try row(.books).route, in: router)
+        #expect(router[path: .search] == [.item(id: "li_emma")])
+        SearchPresentation.open(try row(.books).route, in: nil)
+    }
+}
+
+@MainActor
+@Suite struct SearchScreenStateTests {
+    private typealias Inputs = SearchScreenState.Inputs
+
+    @Test func withoutAnAccountOrLibraryThereIsNothingToSearch() {
+        #expect(SearchScreenState.placeholder(canSearch: false, libraryID: "lib") == .signedOut)
+        #expect(SearchScreenState.placeholder(canSearch: true, libraryID: nil) == .noLibrary)
+        #expect(SearchScreenState.placeholder(canSearch: true, libraryID: "lib") == .loading)
+    }
+
+    @Test func aBlankQueryShowsTheRecentSearches() {
+        #expect(SearchScreenState.resolve(Inputs()) == .idle)
+        #expect(SearchScreenState.resolve(Inputs(query: "  ", hasError: true, hasResults: true)) == .idle)
+    }
+
+    @Test func aQueryWithoutResultsIsSearchingUntilItsSearchFinishes() {
+        // Waiting for the debounce.
+        #expect(SearchScreenState.resolve(Inputs(query: "dune")) == .searching)
+        #expect(SearchScreenState.resolve(Inputs(query: "dune", searchedQuery: "dun")) == .searching)
+        #expect(SearchScreenState.resolve(Inputs(query: "dune", isSearching: true)) == .searching)
+        #expect(SearchScreenState.resolve(Inputs(query: " dune ", searchedQuery: "dune")) == .noResults)
+    }
+
+    @Test func aFailureShowsRetryOrKeepsTheResults() {
+        #expect(SearchScreenState.resolve(Inputs(query: "dune", hasError: true)) == .failed)
+        #expect(SearchScreenState.resolve(Inputs(query: "dune", isSearching: true, hasError: true)) == .searching)
+        #expect(
+            SearchScreenState.resolve(Inputs(query: "dune", searchedQuery: "dun", hasError: true, hasResults: true))
+                == .results(isSearching: false, failed: true))
+        #expect(
+            SearchScreenState.resolve(Inputs(query: "dune", searchedQuery: "dun", isSearching: true, hasResults: true))
+                == .results(isSearching: true, failed: false))
+    }
+
+    @Test func aTypedQueryIsSearchingOnTheModel() {
+        let model = SearchModel(service: EmptySearchService(), libraryID: "lib")
+        #expect(SearchScreenState.resolve(model) == .idle)
+        model.setQuery("dune")
+        #expect(SearchScreenState.resolve(model) == .searching)
+    }
+}
+
+@MainActor
+@Suite struct SearchRecentsStoreTests {
+    private func withStore(_ body: (SearchRecentsStore, UserDefaults) throws -> Void) throws {
+        let suiteName = "SearchRecentsStoreTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        try body(SearchRecentsStore(defaults: defaults), defaults)
+    }
+
+    @Test func recentSearchesAreKeptPerAccountAndLibrary() throws {
+        try withStore { store, _ in
+            let other = LibraryConnectionKey(connectionID: account.connectionID, userID: "user-2")
+            store.setRecentSearches(["Dune"], connectionKey: account, libraryID: "books")
+            store.setRecentSearches(["Serial"], connectionKey: account, libraryID: "podcasts")
+            #expect(store.recentSearches(connectionKey: account, libraryID: "books") == ["Dune"])
+            #expect(store.recentSearches(connectionKey: account, libraryID: "podcasts") == ["Serial"])
+            #expect(store.recentSearches(connectionKey: other, libraryID: "books").isEmpty)
+        }
+    }
+
+    @Test func clearingTheLastLibraryRemovesTheDefaultsEntry() throws {
+        try withStore { store, defaults in
+            store.setRecentSearches(["Dune"], connectionKey: account, libraryID: "books")
+            store.setRecentSearches([], connectionKey: account, libraryID: "books")
+            #expect(defaults.object(forKey: SearchRecentsStore.defaultsKey) == nil)
+        }
+    }
+
+    @Test func theModelSavesAndRestoresItsLibrarysRecentSearches() throws {
+        try withStore { store, _ in
+            let model = SearchModel(
+                service: EmptySearchService(), libraryID: "books",
+                persistRecents: store.persist(connectionKey: account, libraryID: "books"))
+            model.setQuery("Dune")
+            model.submit()
+            model.setQuery("Emma")
+            model.submit()
+            #expect(store.recentSearches(connectionKey: account, libraryID: "books") == ["Emma", "Dune"])
+
+            let restored = SearchModel(
+                service: EmptySearchService(), libraryID: "books",
+                recentSearches: store.recentSearches(connectionKey: account, libraryID: "books"))
+            #expect(restored.recentSearches == ["Emma", "Dune"])
+
+            model.clearRecentSearches()
+            #expect(store.recentSearches(connectionKey: account, libraryID: "books").isEmpty)
+        }
+    }
+}
+
+@MainActor
+@Suite struct SearchServiceSourceTests {
+    @Test func theServiceIsTheAccountsClientWhenItCanSearch() async throws {
+        let suiteName = "SearchServiceSourceTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LibraryStore(settings: AppSettings(defaults: defaults))
+        #expect(SearchServiceSource.service(from: store) == nil)
+
+        await store.connect(client: LibraryOnlyService(), connectionKey: account)
+        #expect(SearchServiceSource.service(from: store) == nil)
+
+        await store.connect(client: SearchingLibraryService(), connectionKey: account)
+        #expect(SearchServiceSource.service(from: store) is SearchingLibraryService)
+    }
+}
