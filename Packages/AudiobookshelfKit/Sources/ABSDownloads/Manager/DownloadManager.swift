@@ -62,12 +62,14 @@ public actor DownloadManager {
     private let progressHandled: (@Sendable (DownloadProgress) -> Void)?
     private let subscriberRemoved: (@Sendable () -> Void)?
     private let trackingRecords: (@Sendable () async -> Void)?
+    private let recordRead: (@Sendable (UUID) async -> Void)?
 
-    /// Items with an enqueue, control or deletion under way, by their item-level key (no
-    /// episode). Each of these calls holds its item (``holdingItem(_:_:)``), so two calls for
+    /// Items with an enqueue, control, deletion or completion under way, by their item-level
+    /// key (no episode). Each of these holds its item (``holdingItem(_:_:)``), so two calls for
     /// the same media can't both plan a record across the actor's suspension points, two
-    /// episodes of one podcast can't both plan the shared cover, and a cancel or deletion can't
-    /// interleave with an enqueue of the same item.
+    /// episodes of one podcast can't both plan the shared cover, a cancel or deletion can't
+    /// interleave with an enqueue of the same item, and a completion is reported and linked
+    /// before or after a deletion of its item, not during it.
     private var enqueuing: Set<MediaKey> = []
     private var enqueueWaiters: [MediaKey: [CheckedContinuation<Void, Never>]] = [:]
     private var subscribers: [UUID: AsyncStream<DownloadManagerEvent>.Continuation] = [:]
@@ -80,6 +82,9 @@ public actor DownloadManager {
     private var progressWindows: [UUID: Task<Void, Never>] = [:]
     /// Records whose progress changed during their window.
     private var pendingProgress: Set<UUID> = []
+    /// How many times a record stopped being tracked (``forget(_:)``); a read of records that
+    /// overlapped one is made again (``readSettled(_:)``).
+    private var forgotten = 0
 
     /// - Parameters:
     ///   - store: the same actor the engine uses.
@@ -112,7 +117,8 @@ public actor DownloadManager {
         enqueueWaiting: (@Sendable (MediaKey) -> Void)?,
         progressHandled: (@Sendable (DownloadProgress) -> Void)?,
         subscriberRemoved: (@Sendable () -> Void)? = nil,
-        trackingRecords: (@Sendable () async -> Void)? = nil
+        trackingRecords: (@Sendable () async -> Void)? = nil,
+        recordRead: (@Sendable (UUID) async -> Void)? = nil
     ) {
         self.store = store
         self.localItems = localItems
@@ -126,6 +132,7 @@ public actor DownloadManager {
         self.progressHandled = progressHandled
         self.subscriberRemoved = subscriberRemoved
         self.trackingRecords = trackingRecords
+        self.recordRead = recordRead
     }
 
     deinit {
@@ -165,7 +172,10 @@ public actor DownloadManager {
             ]
             await trackingRecords?()
             do {
-                for record in try await store.allRecords() where tracked[record.id] == nil { track(record) }
+                for record in try await readSettled({ try await self.store.allRecords() })
+                where tracked[record.id] == nil {
+                    track(record)
+                }
             } catch {
                 logError("Couldn't read downloads to track", error)
             }
@@ -289,9 +299,9 @@ public actor DownloadManager {
 
     /// Runs `body` while it holds the item of `key` (see ``enqueuing``). Not reentrant: `body`
     /// must not hold the same item again.
-    func holdingItem<T: Sendable>(
-        _ key: MediaKey, _ body: () async throws(DownloadManagerError) -> T
-    ) async throws(DownloadManagerError) -> T {
+    func holdingItem<T: Sendable, Failure: Error>(
+        _ key: MediaKey, _ body: () async throws(Failure) -> T
+    ) async throws(Failure) -> T {
         let itemKey = MediaKey(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
         await beginEnqueuing(itemKey)
         defer { endEnqueuing(itemKey) }
@@ -383,18 +393,43 @@ public actor DownloadManager {
             await refresh(recordID, announce: true)
         case .partFailed(_, let recordID, let code, let message, let willRetry):
             await refresh(recordID, announce: true)
-            if !willRetry { emit(.failed(recordID: recordID, code: code, message: message)) }
-        case .recordComplete(let recordID, let itemID):
-            var key = forget(recordID)
-            if key == nil { key = await bookKey(ofLocalItem: itemID) }
-            if let key {
-                await linkProgress(key: key, itemID: itemID)
-                emit(.completed(recordID: recordID, itemID: itemID, key: key))
-            } else {
-                Log.downloads.fault("A download completed that the manager didn't track")
+            // A record cancelled meanwhile isn't tracked any more, and isn't reported again.
+            if !willRetry, tracked[recordID] != nil {
+                emit(.failed(recordID: recordID, code: code, message: message))
             }
+        case .recordComplete(let recordID, let itemID):
+            await complete(recordID, as: itemID)
         case .sessionUnavailable(let code, _):
             Log.downloads.error("Downloads are waiting for the session: \(code.rawValue, privacy: .public)")
+        }
+    }
+
+    /// Reports a record that became the local item `itemID`, and links its progress, while it
+    /// holds the item, so this runs before or after a deletion of the item, never during it.
+    /// A local item already deleted (its deletion ran while the engine finalised the record) is
+    /// reported as ``DownloadManagerEvent/recordRemoved(recordID:)`` and not linked.
+    private func complete(_ recordID: UUID, as itemID: UUID) async {
+        var key = forget(recordID)
+        if key == nil { key = await bookKey(ofLocalItem: itemID) }
+        guard let key else {
+            Log.downloads.fault("A download completed that the manager didn't track")
+            return
+        }
+        await holdingItem(key) {
+            let exists: Bool
+            do {
+                exists = try await localItems.item(id: itemID) != nil
+            } catch {
+                // Reported as completed: the engine just saved the item.
+                logError("Couldn't read a downloaded item", error)
+                exists = true
+            }
+            guard exists else {
+                reportRemoved(recordID)
+                return
+            }
+            await linkProgress(key: key, itemID: itemID)
+            emit(.completed(recordID: recordID, itemID: itemID, key: key))
         }
     }
 
@@ -477,19 +512,32 @@ public actor DownloadManager {
         tracked[record.id] = TrackedRecord(key: record.key, parts: parts)
     }
 
-    /// Stops tracking a record; returns its key.
+    /// Stops tracking a record; returns its key. A refresh that read the record before reads
+    /// again (``readSettled(_:)``), so it doesn't track it again or report it after this.
     @discardableResult
     func forget(_ recordID: UUID) -> MediaKey? {
+        forgotten &+= 1
         progressWindows.removeValue(forKey: recordID)?.cancel()
         pendingProgress.remove(recordID)
         return tracked.removeValue(forKey: recordID)?.key
+    }
+
+    /// Stops tracking a record that is gone and left no local item, and reports it with
+    /// ``DownloadManagerEvent/recordRemoved(recordID:)``; nothing about it is reported after.
+    func reportRemoved(_ recordID: UUID) {
+        forget(recordID)
+        emit(.recordRemoved(recordID: recordID))
     }
 
     /// Reads a record again and tracks it; with `announce`, reports it.
     func refresh(_ recordID: UUID, announce: Bool) async {
         let record: DownloadRecordDTO?
         do {
-            record = try await store.record(id: recordID)
+            record = try await readSettled {
+                let record = try await self.store.record(id: recordID)
+                await self.recordRead?(recordID)
+                return record
+            }
         } catch {
             logError("Couldn't read a download", error)
             return
@@ -498,6 +546,16 @@ public actor DownloadManager {
         guard let record else { return }
         track(record)
         if announce { emit(.recordChanged(record)) }
+    }
+
+    /// Runs `body` until no record was forgotten while it ran, so what it read doesn't include
+    /// a record deleted, replaced or completed meanwhile.
+    private func readSettled<T: Sendable>(_ body: () async throws -> T) async rethrows -> T {
+        while true {
+            let before = forgotten
+            let value = try await body()
+            if forgotten == before { return value }
+        }
     }
 
     // MARK: - Helpers

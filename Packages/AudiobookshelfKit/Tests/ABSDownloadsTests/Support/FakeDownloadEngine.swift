@@ -8,8 +8,10 @@ import Synchronization
 /// Records the manager's calls; the test drives its streams. Like ``DownloadEngine``, a resume
 /// queues the record in the store, and nothing ever downloads. A record marked ``settle(_:)``
 /// has a part settling, which a stop leaves alone: ``finishSettling()`` then finalises it late,
-/// deleting it by ID, as the engine does.
+/// as a local item, deleting it by ID, as the engine does.
 actor FakeDownloadEngine: DownloadEngineControlling {
+    struct ResumeFailure: Error {}
+
     struct Stop: Equatable {
         var partIDs: [UUID]
         var keepingResumeData: Bool
@@ -32,6 +34,7 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     nonisolated let updateContinuation: AsyncStream<DownloadUpdate>.Continuation
     nonisolated let progressContinuation: AsyncStream<DownloadProgress>.Continuation
     private let store: DownloadStore
+    private let localItems: LocalItemStore
     private(set) var started: [[UUID]] = []
     private(set) var stopped: [Stop] = []
     private(set) var resumed: [UUID] = []
@@ -40,9 +43,11 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     private var settling: Set<UUID> = []
     /// Whether ``resume(recordID:)`` deletes the record first, as a finalise running meanwhile does.
     private var finaliseBeforeResume = false
+    private var failingResumes = 0
 
-    init(store: DownloadStore) {
+    init(store: DownloadStore, localItems: LocalItemStore) {
         self.store = store
+        self.localItems = localItems
         (updateStream, updateContinuation) = AsyncStream.makeStream()
         (progress, progressContinuation) = AsyncStream.makeStream()
     }
@@ -60,13 +65,21 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         settling.insert(recordID)
     }
 
-    /// Ends the finalise of every settling record: deletes it by ID and reports it complete.
+    /// Ends the finalise of every settling record: makes it a local item, deletes it by ID and
+    /// reports it complete.
     func finishSettling() async throws {
         for recordID in settling {
+            guard let record = try await store.record(id: recordID) else { continue }
+            let item = try await localItems.upsertFromDownload(record)
             try await store.deleteRecord(recordID)
-            updateContinuation.yield(.recordComplete(recordID: recordID, itemID: UUID()))
+            updateContinuation.yield(.recordComplete(recordID: recordID, itemID: item.id))
         }
         settling = []
+    }
+
+    /// Makes the next `count` resumes throw before they change anything.
+    func failNextResumes(_ count: Int) {
+        failingResumes = count
     }
 
     func finaliseOnResume() {
@@ -80,13 +93,17 @@ actor FakeDownloadEngine: DownloadEngineControlling {
 
     func resume(recordID: UUID) async throws -> Bool {
         calls.append(.resume(recordID))
+        if failingResumes > 0 {
+            failingResumes -= 1
+            throw ResumeFailure()
+        }
         resumed.append(recordID)
         if finaliseBeforeResume { try await store.deleteRecord(recordID) }
         return try await store.setState(.queued, forRecord: recordID)
     }
 }
 
-/// Records the manager's progress links and detaches.
+/// Records the manager's progress links and detaches; with `failing`, each then throws.
 final class FakeProgressLinker: LocalProgressLinking {
     enum Call: Equatable {
         case link(MediaKey, UUID)
@@ -94,19 +111,31 @@ final class FakeProgressLinker: LocalProgressLinking {
         case detachKey(MediaKey)
     }
 
+    struct Failure: Error {}
+
     private let log = Mutex<[Call]>([])
+    private let failing: Bool
     var calls: [Call] { log.withLock { $0 } }
 
+    init(failing: Bool = false) {
+        self.failing = failing
+    }
+
     func link(key: MediaKey, itemID: UUID) async throws {
-        log.withLock { $0.append(.link(key, itemID)) }
+        try record(.link(key, itemID))
     }
 
     func detach(itemID: UUID) async throws {
-        log.withLock { $0.append(.detachItem(itemID)) }
+        try record(.detachItem(itemID))
     }
 
     func detach(key: MediaKey) async throws {
-        log.withLock { $0.append(.detachKey(key)) }
+        try record(.detachKey(key))
+    }
+
+    private func record(_ call: Call) throws {
+        log.withLock { $0.append(call) }
+        if failing { throw Failure() }
     }
 }
 
@@ -163,6 +192,9 @@ final class ManagerFixture: Sendable {
         /// ``DownloadManager/start()`` is about to track the stored records; the first call
         /// after ``holdStart()`` waits there until ``releaseStart()``.
         case trackingRecords
+        /// The first refresh after ``holdRecordRead()`` read this record; it waits until
+        /// ``releaseRecordRead()``.
+        case recordRead(UUID)
     }
 
     let root = FileManager.default.temporaryDirectory.appending(path: "manager-\(UUID().uuidString)")
@@ -174,6 +206,8 @@ final class ManagerFixture: Sendable {
     let clock = FiringClock()
     private let startGate = Mutex<StubGate?>(nil)
     private let heldStart = Mutex<StubGate?>(nil)
+    private let readGate = Mutex<StubGate?>(nil)
+    private let heldRead = Mutex<StubGate?>(nil)
     let checkpoints: AsyncStream<Checkpoint>
     private let checkpoint: AsyncStream<Checkpoint>.Continuation
 
@@ -189,7 +223,7 @@ final class ManagerFixture: Sendable {
         ).id
         store = DownloadStore(modelContainer: container)
         localItems = LocalItemStore(modelContainer: container)
-        engine = FakeDownloadEngine(store: store)
+        engine = FakeDownloadEngine(store: store, localItems: localItems)
     }
 
     deinit {
@@ -210,7 +244,30 @@ final class ManagerFixture: Sendable {
                 if let gate = takeStartGate() {
                     await withCheckedContinuation { continuation in gate.run { continuation.resume() } }
                 }
+            },
+            recordRead: { [checkpoint, self] recordID in
+                guard let gate = takeReadGate() else { return }
+                checkpoint.yield(.recordRead(recordID))
+                await withCheckedContinuation { continuation in gate.run { continuation.resume() } }
             })
+    }
+
+    /// Holds the next refresh after it read its record, until ``releaseRecordRead()``.
+    func holdRecordRead() {
+        let gate = StubGate()
+        readGate.withLock { $0 = gate }
+        heldRead.withLock { $0 = gate }
+    }
+
+    private func takeReadGate() -> StubGate? {
+        readGate.withLock { gate in
+            defer { gate = nil }
+            return gate
+        }
+    }
+
+    func releaseRecordRead() {
+        heldRead.withLock { $0 }?.open()
     }
 
     /// Holds the next ``DownloadManager/start()`` before it tracks the stored records, until

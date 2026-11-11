@@ -25,8 +25,9 @@ extension DownloadManager {
         try await control(recordID) { try await $0.resume(recordID: $1) }
     }
 
-    /// Retries a download that failed for good, as ``resume(recordID:)`` does: its parts that
-    /// haven't completed start again with a fresh retry budget.
+    /// Retries a download, as ``resume(recordID:)`` does: its parts that haven't completed start
+    /// again with a fresh retry budget. Meant for one that failed for good, but any state is
+    /// accepted: the engine resets the budget whatever the record's state.
     ///
     /// - Returns: `false` when the record doesn't exist: it completed or was cancelled.
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or saved.
@@ -38,22 +39,53 @@ extension DownloadManager {
     /// Pauses, then resumes, every `downloading` record, for a network policy that just got
     /// stricter: a transfer under way keeps the network access it started with, and resume data
     /// made under another access isn't used, so each transfer starts again under the new policy.
-    /// Records that are queued, paused or failed are left alone; each restart is reported with
-    /// ``DownloadManagerEvent/recordChanged(_:)``.
+    /// Records that are queued, paused or failed are left alone, as is one paused or cancelled
+    /// meanwhile; each restart is reported with ``DownloadManagerEvent/recordChanged(_:)``.
     ///
-    /// - Throws: ``DownloadManagerError/storeFailure`` at the first record that couldn't be read
-    ///   or saved; the records after it aren't restarted.
+    /// A resume that fails is tried once more. If that fails too, the record is queued again,
+    /// so it doesn't look paused by the user, and the engine starts it at its next activation.
+    ///
+    /// - Throws: the first ``DownloadManagerError/storeFailure``, once every record was tried:
+    ///   the records couldn't be read, or one couldn't be paused or resumed.
     public func restartActiveTransfers() async throws(DownloadManagerError) {
+        var firstError: DownloadManagerError?
         for record in try await read({ try await self.store.records(state: .downloading) }) {
-            try await holdingItem(record.key) { () async throws(DownloadManagerError) in
-                // Paused or cancelled by the user meanwhile: not restarted.
-                guard try await read({ try await self.store.record(id: record.id) })?.state == .downloading,
-                    try await read({ try await self.engine.pause(recordID: record.id) })
-                else { return }
-                _ = try await read { try await self.engine.resume(recordID: record.id) }
-                await refresh(record.id, announce: true)
+            do throws(DownloadManagerError) {
+                try await holdingItem(record.key) { () async throws(DownloadManagerError) in
+                    try await restart(record.id)
+                }
+            } catch {
+                firstError = firstError ?? error
             }
         }
+        if let firstError { throw firstError }
+    }
+
+    /// Pauses, then resumes, a record that is still `downloading`, for
+    /// ``restartActiveTransfers()``; its caller holds the item.
+    private func restart(_ recordID: UUID) async throws(DownloadManagerError) {
+        // Paused or cancelled by the user meanwhile: not restarted.
+        guard try await read({ try await self.store.record(id: recordID) })?.state == .downloading,
+            try await read({ try await self.engine.pause(recordID: recordID) })
+        else { return }
+        var failure: DownloadManagerError?
+        for _ in 0..<2 {
+            do throws(DownloadManagerError) {
+                _ = try await read { try await self.engine.resume(recordID: recordID) }
+                failure = nil
+                break
+            } catch {
+                failure = error
+            }
+        }
+        if failure != nil {
+            // Not left paused, as if by the user.
+            _ = try? await read {
+                try await self.store.setState(.queued, forRecord: recordID, expecting: [.paused])
+            }
+        }
+        await refresh(recordID, announce: true)
+        if let failure { throw failure }
     }
 
     /// Cancels a download, while no enqueue, control or deletion of its item runs:
@@ -61,8 +93,9 @@ extension DownloadManager {
     /// 1. its record becomes `paused`, so no part starts again, and the engine stops its
     ///    transfers, deleting their resume data;
     /// 2. the record and its parts are deleted, unless every part has completed meanwhile
-    ///    (``DownloadStore/deleteUnfinishedRecord(_:)``): then the engine is finalising it, and
-    ///    the result is `false`; ``DownloadManagerEvent/completed(recordID:itemID:key:)``
+    ///    (``DownloadStore/deleteUnfinishedRecord(_:)``): then the engine is finalising it, so
+    ///    its state is put back and reported with ``DownloadManagerEvent/recordChanged(_:)``,
+    ///    and the result is `false`; ``DownloadManagerEvent/completed(recordID:itemID:key:)``
     ///    follows, and the user can delete the new local item instead;
     /// 3. ``DownloadManagerEvent/recordRemoved(recordID:)`` is reported;
     /// 4. if its cover part was the item's only cover stored or on its way, another record of
@@ -77,9 +110,10 @@ extension DownloadManager {
     /// files no local item or record references, and blobs whose part is gone.
     ///
     /// - Returns: whether the record was deleted.
-    /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or deleted. Once
-    ///   it is deleted, the hand-off and file removal are best effort: failures are logged and
-    ///   leave files for the sweep.
+    /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or deleted. When
+    ///   the deletion itself fails, the record is left `paused` with its resume data deleted:
+    ///   resumed, its transfers start over. Once it is deleted, the hand-off and file removal
+    ///   are best effort: failures are logged and leave files for the sweep.
     @discardableResult
     public func cancel(recordID: UUID) async throws(DownloadManagerError) -> Bool {
         guard let first = try await read({ try await self.store.record(id: recordID) }) else { return false }
@@ -89,10 +123,17 @@ extension DownloadManager {
                 try await read({ try await self.store.setState(.paused, forRecord: recordID) })
             else { return false }
             await engine.stop(partIDs: record.parts.map(\.id), keepingResumeData: false)
-            guard case .deleted(let deleted) = try await read({ try await self.store.deleteUnfinishedRecord(recordID) })
-            else { return false }
-            forget(recordID)
-            emit(.recordRemoved(recordID: recordID))
+            let deletion = try await read { try await self.store.deleteUnfinishedRecord(recordID) }
+            guard case .deleted(let deleted) = deletion else {
+                if case .complete = deletion {
+                    _ = try? await read {
+                        try await self.store.setState(record.state, forRecord: recordID, expecting: [.paused])
+                    }
+                    await refresh(recordID, announce: true)
+                }
+                return false
+            }
+            reportRemoved(recordID)
             for part in deleted.parts { locations.clearTransferMarker(partID: part.id) }
             let cover = deleted.parts.first { $0.kind == .cover }.map {
                 CoverSource(

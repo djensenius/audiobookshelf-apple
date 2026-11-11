@@ -47,6 +47,52 @@ import Testing
         #expect(try await fixture.store.record(id: episode.id)?.state == .queued)
     }
 
+    /// A resume that fails twice leaves its record queued, not paused as if by the user; the
+    /// other record still restarts, and the failure is thrown at the end.
+    @Test func restartQueuesARecordItCouldNotResumeAndGoesOn() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        let episode = try await enqueue(LibraryItemFixtures.podcast(), episodeID: "ep_1", fixture, manager)
+        for id in [book.id, episode.id] { try await fixture.store.setState(.downloading, forRecord: id) }
+        await fixture.engine.failNextResumes(2)
+
+        await #expect(throws: DownloadManagerError.storeFailure) { try await manager.restartActiveTransfers() }
+
+        let calls = await fixture.engine.calls
+        let order = calls.compactMap { if case .pause(let id) = $0 { id } else { nil } }
+        try #require(Set(order) == [book.id, episode.id] && order.count == 2)
+        #expect(calls == [.pause(order[0]), .resume(order[0]), .resume(order[0]), .pause(order[1]), .resume(order[1])])
+        #expect(await fixture.engine.resumed == [order[1]])
+        #expect(try await fixture.store.record(id: book.id)?.state == .queued)
+        #expect(try await fixture.store.record(id: episode.id)?.state == .queued)
+    }
+
+    /// A restart waits for an enqueue of the item, and leaves a record paused meanwhile alone.
+    @Test func restartSkipsARecordPausedMeanwhile() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.podcast()
+        let connectionID = fixture.connectionID
+        let first = try await enqueue(item, episodeID: "ep_1", fixture, manager)
+        #expect(await fixture.nextCheckpoint() == .capacity)
+        try await fixture.store.setState(.downloading, forRecord: first.id)
+        fixture.capacity.hold()
+
+        let second = Task { try await manager.enqueue(item: item, episodeID: "ep_2", connectionID: connectionID) }
+        #expect(await fixture.nextCheckpoint() == .capacity)
+        let restart = Task { try await manager.restartActiveTransfers() }
+        let reached = await fixture.nextCheckpoint()
+        try await fixture.store.setState(.paused, forRecord: first.id)
+        fixture.capacity.release()
+
+        #expect(reached == .waiting(fixture.key(item)))
+        try await restart.value
+        _ = try await second.value
+        #expect(await fixture.engine.calls.isEmpty)
+        #expect(try await fixture.store.record(id: first.id)?.state == .paused)
+    }
+
     @Test func cancelRemovesTheRecordAndItsFiles() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()
@@ -73,14 +119,17 @@ import Testing
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()
         try await manager.start()
-        let events = await manager.events()
         let item = LibraryItemFixtures.book()
         let record = try await enqueue(item, fixture, manager)
         for part in record.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 1) }
         await fixture.engine.settle(record.id)
+        let events = await manager.events()
 
         #expect(try await manager.cancel(recordID: record.id) == false)
-        #expect(try await fixture.store.record(id: record.id) != nil)
+        // Its state is put back, and reported.
+        let kept = try #require(try await fixture.store.record(id: record.id))
+        #expect(kept.state == record.state)
+        #expect(await events.next { _ in true } == .recordChanged(kept))
         try await fixture.engine.finishSettling()
 
         let next = await events.next {
@@ -94,6 +143,27 @@ import Testing
             return
         }
         #expect(key == fixture.key(item))
+    }
+
+    /// A refresh that read a record before a cancel deleted it reads again: nothing about the
+    /// record is reported after its removal, and it isn't tracked again.
+    @Test func aRefreshOverlappingACancelReportsNothingAfterTheRemoval() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        try await manager.start()
+        let record = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        let other = try await enqueue(LibraryItemFixtures.podcast(), episodeID: "ep_1", fixture, manager)
+        let events = await manager.events()
+        fixture.holdRecordRead()
+
+        fixture.engine.updateContinuation.yield(.partCompleted(partID: record.parts[0].id, recordID: record.id))
+        #expect(await fixture.checkpoints.first { $0 == .recordRead(record.id) } != nil)
+        #expect(try await manager.cancel(recordID: record.id))
+        fixture.releaseRecordRead()
+        fixture.engine.updateContinuation.yield(.partCompleted(partID: other.parts[0].id, recordID: other.id))
+
+        #expect(await events.next { _ in true } == .recordRemoved(recordID: record.id))
+        #expect(await events.next { _ in true } == .recordChanged(other))
     }
 
     /// Episode 2 was planned without a cover because episode 1's was on its way; cancelling
@@ -199,7 +269,7 @@ import Testing
         let events = await manager.events()
         let item = LibraryItemFixtures.podcast()
         let record = try await enqueue(item, episodeID: "ep_1", fixture, manager)
-        let itemID = UUID()
+        let itemID = try await fixture.storeDownloaded(item, episodeID: "ep_1").id
 
         fixture.engine.updateContinuation.yield(.recordComplete(recordID: record.id, itemID: itemID))
 
@@ -208,6 +278,52 @@ import Testing
         }
         #expect(completed == .completed(recordID: record.id, itemID: itemID, key: record.key))
         #expect(linker.calls == [.link(record.key, itemID)])
+    }
+
+    /// The local item was deleted while the engine finalised the record: the completion is
+    /// reported as a removal, and the deleted item isn't linked.
+    @Test func aRecordCompletingIntoADeletedItemIsRemoved() async throws {
+        let fixture = try await ManagerFixture()
+        let linker = FakeProgressLinker()
+        let manager = fixture.makeManager(progressLinking: linker)
+        try await manager.start()
+        let item = LibraryItemFixtures.podcast()
+        let record = try await enqueue(item, episodeID: "ep_1", fixture, manager)
+        let local = try await fixture.storeDownloaded(item, episodeID: "ep_1")
+        try await fixture.store.deleteRecord(record.id)
+        #expect(try await manager.deleteLocalItem(id: local.id))
+        let events = await manager.events()
+
+        fixture.engine.updateContinuation.yield(.recordComplete(recordID: record.id, itemID: local.id))
+
+        #expect(await events.next { _ in true } == .recordRemoved(recordID: record.id))
+        #expect(linker.calls == [.detachItem(local.id)])
+    }
+
+    /// A completion waits while an enqueue, control or deletion of its item runs.
+    @Test func aCompletionWaitsForItsItem() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        try await manager.start()
+        #expect(await fixture.nextCheckpoint() == .trackingRecords)
+        let item = LibraryItemFixtures.podcast()
+        let connectionID = fixture.connectionID
+        let record = try await enqueue(item, episodeID: "ep_1", fixture, manager)
+        #expect(await fixture.nextCheckpoint() == .capacity)
+        let local = try await fixture.storeDownloaded(item, episodeID: "ep_1")
+        fixture.capacity.hold()
+        let second = Task { try await manager.enqueue(item: item, episodeID: "ep_2", connectionID: connectionID) }
+        #expect(await fixture.nextCheckpoint() == .capacity)
+        let events = await manager.events()
+
+        fixture.engine.updateContinuation.yield(.recordComplete(recordID: record.id, itemID: local.id))
+        let reached = await fixture.nextCheckpoint()
+        fixture.capacity.release()
+
+        #expect(reached == .waiting(fixture.key(item)))
+        _ = try await second.value
+        let completed = await events.next { if case .completed = $0 { true } else { false } }
+        #expect(completed == .completed(recordID: record.id, itemID: local.id, key: record.key))
     }
 
     /// With the real engine: a completed part's file and a failed part's resume data go.

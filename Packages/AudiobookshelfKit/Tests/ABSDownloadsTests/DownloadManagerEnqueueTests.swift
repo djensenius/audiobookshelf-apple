@@ -393,7 +393,7 @@ import Testing
 
         // The engine deletes a record once it is a local item.
         try await fixture.store.deleteRecord(recordID)
-        let itemID = UUID()
+        let itemID = try await fixture.storeDownloaded(item).id
         fixture.engine.updateContinuation.yield(.recordComplete(recordID: recordID, itemID: itemID))
         #expect(
             await events.next { _ in true }
@@ -456,7 +456,7 @@ import Testing
         fixture.engine.updateContinuation.yield(.partCompleted(partID: partID, recordID: recordID))
         #expect(await events.next { _ in true } == .recordChanged(record))
         try await fixture.store.deleteRecord(recordID)
-        let itemID = UUID()
+        let itemID = try await fixture.storeDownloaded(item).id
         fixture.engine.updateContinuation.yield(.recordComplete(recordID: recordID, itemID: itemID))
         #expect(
             await events.next { _ in true }

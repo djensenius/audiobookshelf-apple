@@ -8,6 +8,11 @@ import Foundation
 /// Its implementation over `LocalProgressStore.setLocalLibraryItemID(_:for:)`, and the seeding of
 /// local progress, arrive with #74 (decision Q4). Errors are logged; they never undo the download
 /// or the deletion.
+///
+/// The manager makes these calls for one library item one at a time, holding the item, and
+/// doesn't link a local item that a deletion through it removed first. A local item deleted
+/// some other way (by `LocalItemStore` directly, such as with its connection) can still be
+/// linked after it is gone, so an implementation must accept a link to a missing item.
 public protocol LocalProgressLinking: Sendable {
     /// The media of `key` is now downloaded, as the local item `itemID`.
     func link(key: MediaKey, itemID: UUID) async throws

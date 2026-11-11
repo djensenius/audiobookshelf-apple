@@ -113,6 +113,109 @@ import Testing
         #expect(linker.calls == [.detachItem(local.id)])
     }
 
+    /// A stored folder shallower than the item's own (here the connection's) holds other items
+    /// too: only the item's files go.
+    @Test func deletingAnItemWithAShallowFolderKeepsOtherItems() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let sibling = try await fixture.storeDownloaded(LibraryItemFixtures.podcast(), episodeID: "ep_1")
+        var record = try DownloadPlanner(locations: fixture.locations).plan(
+            item: LibraryItemFixtures.book(), episodeID: nil, connectionID: fixture.connectionID,
+            existingCoverPath: nil)
+        for index in record.parts.indices { record.parts[index].state = .completed }
+        record.relativeDirectory = fixture.connectionID.uuidString
+        let local = try await fixture.localItems.upsertFromDownload(record)
+        for path in Self.paths(of: sibling) + Self.paths(of: local) { try write(path, fixture) }
+
+        #expect(try await manager.deleteLocalItem(id: local.id))
+
+        #expect(Self.paths(of: sibling).allSatisfy { exists($0, fixture) })
+        #expect(Self.paths(of: local).allSatisfy { !exists($0, fixture) })
+    }
+
+    @Test func deletingAnUnknownEpisodeDoesNothing() async throws {
+        let fixture = try await ManagerFixture()
+        let linker = FakeProgressLinker()
+        let manager = fixture.makeManager(progressLinking: linker)
+        let local = try await fixture.storeDownloaded(LibraryItemFixtures.podcast(), episodeID: "ep_1")
+        for path in Self.paths(of: local) { try write(path, fixture) }
+
+        #expect(try await manager.deleteEpisode(itemID: local.id, episodeId: "ep_9") == false)
+
+        #expect(try await fixture.localItems.item(id: local.id) == local)
+        #expect(Self.paths(of: local).allSatisfy { exists($0, fixture) })
+        #expect(linker.calls.isEmpty)
+    }
+
+    /// A book downloading again keeps its folder, and the files the new download replaces.
+    @Test func deletingABookKeepsTheFilesOfItsPendingReplacement() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        let local = try await fixture.storeDownloaded(item)
+        for path in Self.paths(of: local) { try write(path, fixture) }
+        _ = try await manager.enqueue(
+            item: item, episodeID: nil, connectionID: fixture.connectionID, replacingExisting: true)
+
+        #expect(try await manager.deleteLocalItem(id: local.id))
+
+        #expect(try await fixture.localItems.item(id: local.id) == nil)
+        #expect(Self.paths(of: local).allSatisfy { exists($0, fixture) })
+        #expect(try await fixture.store.record(key: fixture.key(item)) != nil)
+    }
+
+    /// Current behaviour: an episode the engine is finalising can't take a cover part, so a
+    /// cancelled episode's cover, with no other episode to go to, is removed.
+    @Test func aRefusedHandOffRemovesTheCover() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.podcast()
+        let connectionID = fixture.connectionID
+        let first = try #require(
+            try await fixture.store.record(
+                id: Self.started(manager.enqueue(item: item, episodeID: "ep_1", connectionID: connectionID))))
+        let second = try #require(
+            try await fixture.store.record(
+                id: Self.started(manager.enqueue(item: item, episodeID: "ep_2", connectionID: connectionID))))
+        let cover = try #require(first.parts.last { $0.kind == .cover })
+        try write(cover.destinationRelativePath, fixture)
+        try await fixture.store.completePart(partID: cover.id, finalBytes: 5)
+        for part in second.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 1) }
+
+        #expect(try await manager.cancel(recordID: first.id))
+
+        #expect(try await fixture.store.record(id: second.id)?.parts.map(\.id) == second.parts.map(\.id))
+        #expect(!exists(cover.destinationRelativePath, fixture))
+    }
+
+    /// A link or detach that fails is logged; the deletion and the completion stand.
+    @Test func aFailingProgressLinkerUndoesNothing() async throws {
+        let fixture = try await ManagerFixture()
+        let linker = FakeProgressLinker(failing: true)
+        let manager = fixture.makeManager(progressLinking: linker)
+        try await manager.start()
+        let events = await manager.events()
+        let item = LibraryItemFixtures.book()
+        let local = try await fixture.storeDownloaded(item)
+        for path in Self.paths(of: local) { try write(path, fixture) }
+
+        #expect(try await manager.deleteLocalItem(id: local.id))
+
+        #expect(try await fixture.localItems.item(id: local.id) == nil)
+        #expect(!exists(local.relativeDirectory, fixture))
+        let again = try await fixture.storeDownloaded(item)
+        let recordID = UUID()
+        fixture.engine.updateContinuation.yield(.recordComplete(recordID: recordID, itemID: again.id))
+        #expect(
+            await events.next { _ in true } == .completed(recordID: recordID, itemID: again.id, key: fixture.key(item)))
+        #expect(linker.calls == [.detachItem(local.id), .link(fixture.key(item), again.id)])
+    }
+
+    private static func started(_ result: DownloadManager.EnqueueResult) throws -> UUID {
+        guard case .started(let id) = result else { throw UnexpectedResult(result: result) }
+        return id
+    }
+
     private static func paths(of item: LocalLibraryItemDTO) -> [String] {
         item.files.map(\.relativePath) + [item.coverRelativePath].compactMap { $0 }
     }

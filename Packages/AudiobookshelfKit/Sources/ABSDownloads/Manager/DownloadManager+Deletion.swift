@@ -17,11 +17,14 @@ extension DownloadManager {
 
     /// Deletes a downloaded item, while no enqueue, control or deletion of it runs: its local
     /// item and files (`LocalItemStore.deleteItem(id:)`), then its progress link
-    /// (``LocalProgressLinking/detach(itemID:)``), then its folder with everything in it.
+    /// (``LocalProgressLinking/detach(itemID:)``), then its folder with everything in it (only
+    /// if its stored folder is the item's own `<connectionID>/<libraryItemID>`; otherwise only
+    /// its files).
     ///
-    /// While a download of the item is still pending (another podcast episode), the folder
-    /// stays: only the files nothing else uses are removed, and if the cover was the item's
-    /// only one, a pending record without a cover part gets one (see ``handOffCover(_:of:)``).
+    /// While a download of the item is still pending (another podcast episode, or the item
+    /// downloading again), the folder stays: only the files nothing else uses are removed, and
+    /// if the cover was the item's only one, a pending episode record without a cover part gets
+    /// one (see ``handOffCover(_:of:)``).
     ///
     /// - Returns: `false` when the item doesn't exist.
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or deleted. Once
@@ -41,7 +44,8 @@ extension DownloadManager {
     /// folders they leave empty. The cover and the other episodes stay. When the item has no
     /// file left, it is deleted as by ``deleteLocalItem(id:)``.
     ///
-    /// - Returns: `false` when the item doesn't exist.
+    /// - Returns: `false` when the item doesn't exist, or has neither a file nor an entry for
+    ///   the episode; then nothing is deleted or detached.
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or deleted; file
     ///   removal is best effort, as in ``deleteLocalItem(id:)``.
     @discardableResult
@@ -49,7 +53,10 @@ extension DownloadManager {
         guard let item = try await read({ try await self.localItems.item(id: itemID) }) else { return false }
         let itemKey = Self.key(of: item)
         return try await holdingItem(itemKey) { () async throws(DownloadManagerError) -> Bool in
-            guard
+            // Read again under the hold: a finalise can only add episodes meanwhile.
+            guard let item = try await read({ try await self.localItems.item(id: itemID) }),
+                item.files.contains(where: { $0.episodeId == episodeId })
+                    || item.media.episodes.contains(where: { $0.id == episodeId }),
                 let deletion = try await read({
                     try await self.localItems.deleteEpisode(itemID: itemID, episodeId: episodeId)
                 })
@@ -66,7 +73,9 @@ extension DownloadManager {
     }
 
     /// ``deleteLocalItem(id:)`` for a caller that holds the item; `extra` are files it already
-    /// deleted from the item, to remove from disk too.
+    /// deleted from the item, to remove from disk too. The item's folder goes with everything
+    /// in it only when it is the folder ``DownloadLayout`` gives the item; any other stored
+    /// directory (a shallower one would hold other items) loses only the item's files.
     private func removeLocalItem(id: UUID, alsoRemoving extra: [String]) async throws(DownloadManagerError) -> Bool {
         guard let item = try await read({ try await self.localItems.deleteItem(id: id) }) else { return false }
         await detachProgress("Couldn't detach progress from a deleted download") { try await $0.detach(itemID: id) }
@@ -78,7 +87,11 @@ extension DownloadManager {
                 relativePath: path, isStored: true, updatedAt: item.coverUpdatedAt)
         }
         let paths = extra + item.files.map(\.relativePath) + (item.coverRelativePath.map { [$0] } ?? [])
-        await cleanUp(after: Self.key(of: item), removing: paths, folder: item.relativeDirectory, cover: cover)
+        let layoutFolder = try? DownloadLayout(
+            connectionID: item.serverConnectionID, libraryItemID: item.libraryItemId, locations: locations
+        ).folder
+        let folder = item.relativeDirectory == layoutFolder ? item.relativeDirectory : nil
+        await cleanUp(after: Self.key(of: item), removing: paths, folder: folder, cover: cover)
         return true
     }
 
@@ -87,13 +100,14 @@ extension DownloadManager {
     /// After media of the item of `key` was deleted: hands `cover` over (``handOffCover(_:of:)``),
     /// then removes `paths` that no local item or record still uses, and `folder` with
     /// everything in it unless one of them lies inside it. Folders left empty are removed too.
-    /// Best effort: if what is still used can't be read, nothing is removed.
+    /// Best effort: if what is still used can't be read, nothing is removed, and that is logged.
     func cleanUp(after key: MediaKey, removing paths: [String], folder: String?, cover: CoverSource?) async {
         let used: Set<String>
         do throws(DownloadManagerError) {
             if let cover { try await handOffCover(cover, of: key) }
             used = try await usedPaths(of: key)
         } catch {
+            logError("Couldn't clean up after a deletion", error)
             return
         }
         var removed = paths.filter { !used.contains($0) }
