@@ -14,7 +14,8 @@ import SwiftUI
 /// never opens for another, even when this view didn't render the gates in between.
 ///
 /// The lifecycle and the accounts are in the environment of everything below, so a screen such
-/// as the Account tab reads them with `@Environment` instead of through its initializer.
+/// as the Account tab reads them with `@Environment` instead of through its initializer, and so is
+/// the shown account's `serverID` (``SceneContent/serverID``).
 struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
@@ -27,6 +28,7 @@ struct RootView: View {
         content
             .environment(lifecycle)
             .environment(accounts)
+            .environment(\.serverID, SceneContent(lifecycle.gate).serverID)
             .task { await lifecycle.start() }
             .onChange(of: scenePhase) { _, phase in
                 Task { await lifecycle.handle(scenePhase: SessionScenePhase(phase)) }
@@ -89,6 +91,14 @@ struct RootView: View {
                 systemImage: "externaldrive.badge.exclamationmark"
             )
         }
+    }
+}
+
+extension SceneContent {
+    /// The connection whose shell is on screen, for `\.serverID`: the ready account's, or the
+    /// outgoing account's while a switch keeps its shell up; `nil` when no shell is shown.
+    var serverID: UUID? {
+        if case .shell(let identity, _) = self { identity.connectionID } else { nil }
     }
 }
 

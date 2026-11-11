@@ -102,6 +102,19 @@ private final class Recorder: SessionParticipant {
         return (a, b, hosts)
     }
 
+    // MARK: Server ID
+
+    @Test func theShownShellsConnectionIsTheServerID() {
+        let identity = SessionIdentity(connectionID: UUID(), userID: "user")
+        #expect(SceneContent(.ready(identity, isOffline: false)).serverID == identity.connectionID)
+        #expect(SceneContent(.ready(identity, isOffline: true)).serverID == identity.connectionID)
+        // The outgoing shell stays up during a switch, still showing its own server's covers.
+        #expect(SceneContent(.switching(from: identity)).serverID == identity.connectionID)
+        for gate: AuthGate in [.launching, .connect, .signingOut(from: identity)] {
+            #expect(SceneContent(gate).serverID == nil, "\(gate)")
+        }
+    }
+
     // MARK: Account session adapter
 
     @Test func adapterReportsRestoringUntilTheServerAnswers() async throws {
