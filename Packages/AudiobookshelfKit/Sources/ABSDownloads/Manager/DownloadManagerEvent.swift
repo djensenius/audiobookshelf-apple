@@ -14,10 +14,13 @@ public enum DownloadManagerEvent: Sendable, Equatable {
     /// A part failed for good, so its record is now `failed`. Nothing retries it on its own;
     /// the user does.
     case failed(recordID: UUID, code: DownloadFailureCode, message: String)
+    /// The record was cancelled (``DownloadManager/cancel(recordID:)``) and deleted; no other
+    /// event follows for it. Deleted local items aren't reported: the UI observes them.
+    case recordRemoved(recordID: UUID)
 }
 
-/// Why ``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:)`` didn't queue
-/// a download.
+/// Why a ``DownloadManager`` call, such as
+/// ``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:)``, failed.
 public enum DownloadManagerError: Error, Equatable, Sendable {
     /// An episode was asked for, but the item isn't a podcast.
     case notPodcast

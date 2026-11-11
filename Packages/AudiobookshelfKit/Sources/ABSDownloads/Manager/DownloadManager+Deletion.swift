@@ -1,0 +1,195 @@
+import ABSAPI
+import ABSData
+import Foundation
+
+extension DownloadManager {
+    /// An item's cover that is leaving: the cover part of a cancelled record, or a deleted local
+    /// item's cover.
+    struct CoverSource {
+        var serverPath: String
+        var relativePath: String
+        /// Whether the file was fetched; it is handed over completed only if it is still there.
+        var isStored: Bool
+        var updatedAt: Date?
+    }
+
+    // MARK: - Deletion
+
+    /// Deletes a downloaded item, while no enqueue, control or deletion of it runs: its local
+    /// item and files (`LocalItemStore.deleteItem(id:)`), then its progress link
+    /// (``LocalProgressLinking/detach(itemID:)``), then its folder with everything in it.
+    ///
+    /// While a download of the item is still pending (another podcast episode), the folder
+    /// stays: only the files nothing else uses are removed, and if the cover was the item's
+    /// only one, a pending record without a cover part gets one (see ``handOffCover(_:of:)``).
+    ///
+    /// - Returns: `false` when the item doesn't exist.
+    /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or deleted. Once
+    ///   it is deleted, the hand-off and file removal are best effort: failures are logged and
+    ///   leave files for the `DownloadJanitor`'s sweep (#192).
+    @discardableResult
+    public func deleteLocalItem(id: UUID) async throws(DownloadManagerError) -> Bool {
+        guard let item = try await read({ try await self.localItems.item(id: id) }) else { return false }
+        return try await holdingItem(Self.key(of: item)) { () async throws(DownloadManagerError) -> Bool in
+            try await removeLocalItem(id: id, alsoRemoving: [])
+        }
+    }
+
+    /// Deletes one downloaded podcast episode, while no enqueue, control or deletion of its item
+    /// runs: its files and its entry in the item (`LocalItemStore.deleteEpisode(itemID:episodeId:)`),
+    /// then its progress link (``LocalProgressLinking/detach(key:)``), then its files and the
+    /// folders they leave empty. The cover and the other episodes stay. When the item has no
+    /// file left, it is deleted as by ``deleteLocalItem(id:)``.
+    ///
+    /// - Returns: `false` when the item doesn't exist.
+    /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or deleted; file
+    ///   removal is best effort, as in ``deleteLocalItem(id:)``.
+    @discardableResult
+    public func deleteEpisode(itemID: UUID, episodeId: String) async throws(DownloadManagerError) -> Bool {
+        guard let item = try await read({ try await self.localItems.item(id: itemID) }) else { return false }
+        let itemKey = Self.key(of: item)
+        return try await holdingItem(itemKey) { () async throws(DownloadManagerError) -> Bool in
+            guard
+                let deletion = try await read({
+                    try await self.localItems.deleteEpisode(itemID: itemID, episodeId: episodeId)
+                })
+            else { return false }
+            let key = MediaKey(
+                serverConnectionID: itemKey.serverConnectionID, libraryItemId: itemKey.libraryItemId,
+                episodeId: episodeId)
+            await detachProgress("Couldn't detach progress from a deleted episode") { try await $0.detach(key: key) }
+            let paths = deletion.removedFiles.map(\.relativePath)
+            if deletion.itemIsEmpty, try await removeLocalItem(id: itemID, alsoRemoving: paths) { return true }
+            await cleanUp(after: itemKey, removing: paths, folder: nil, cover: nil)
+            return true
+        }
+    }
+
+    /// ``deleteLocalItem(id:)`` for a caller that holds the item; `extra` are files it already
+    /// deleted from the item, to remove from disk too.
+    private func removeLocalItem(id: UUID, alsoRemoving extra: [String]) async throws(DownloadManagerError) -> Bool {
+        guard let item = try await read({ try await self.localItems.deleteItem(id: id) }) else { return false }
+        await detachProgress("Couldn't detach progress from a deleted download") { try await $0.detach(itemID: id) }
+        let cover = item.coverRelativePath.map { path in
+            CoverSource(
+                serverPath: DownloadRequests.coverPath(
+                    itemID: item.libraryItemId,
+                    updatedAt: Int(((item.coverUpdatedAt?.timeIntervalSince1970 ?? 0) * 1000).rounded())),
+                relativePath: path, isStored: true, updatedAt: item.coverUpdatedAt)
+        }
+        let paths = extra + item.files.map(\.relativePath) + (item.coverRelativePath.map { [$0] } ?? [])
+        await cleanUp(after: Self.key(of: item), removing: paths, folder: item.relativeDirectory, cover: cover)
+        return true
+    }
+
+    // MARK: - Cleaning up
+
+    /// After media of the item of `key` was deleted: hands `cover` over (``handOffCover(_:of:)``),
+    /// then removes `paths` that no local item or record still uses, and `folder` with
+    /// everything in it unless one of them lies inside it. Folders left empty are removed too.
+    /// Best effort: if what is still used can't be read, nothing is removed.
+    func cleanUp(after key: MediaKey, removing paths: [String], folder: String?, cover: CoverSource?) async {
+        let used: Set<String>
+        do throws(DownloadManagerError) {
+            if let cover { try await handOffCover(cover, of: key) }
+            used = try await usedPaths(of: key)
+        } catch {
+            return
+        }
+        var removed = paths.filter { !used.contains($0) }
+        if let folder, !used.contains(where: { $0.hasPrefix(folder + "/") }) { removed = [folder] }
+        var directories: [URL] = []
+        for path in removed {
+            guard let url = try? locations.fileURL(forRelativePath: path) else { continue }
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch CocoaError.fileNoSuchFile {
+                // Never fetched, or already gone.
+            } catch {
+                logError("Couldn't remove a downloaded file", error)
+            }
+            directories.append(url.deletingLastPathComponent())
+        }
+        removeEmptyDirectories(directories)
+    }
+
+    /// Gives the item of `key` its cover again when `cover` was the only one stored or on its
+    /// way (``existingCoverPath(for:localItem:)``): the first podcast episode record of the item
+    /// without a cover part, queued or downloading ones first, gets a part like `cover`'s, saved
+    /// completed when its file is still there and started otherwise. Queued episodes share one
+    /// cover part, so without this the episodes left would complete without a cover. (A book
+    /// record always plans its own.)
+    func handOffCover(_ cover: CoverSource, of key: MediaKey) async throws(DownloadManagerError) {
+        let itemKey = Self.itemKey(key)
+        let localItem = try await read {
+            try await self.localItems.item(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+        }
+        guard try await existingCoverPath(for: itemKey, localItem: localItem) == nil else { return }
+        let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
+            .filter {
+                $0.key.libraryItemId == key.libraryItemId && $0.key.episodeId != nil
+                    && !$0.parts.contains { $0.kind == .cover }
+            }
+        let size =
+            cover.isStored
+            ? (try? locations.fileURL(forRelativePath: cover.relativePath)).flatMap(DownloadLocations.fileSize(at:))
+            : nil
+        let part = DownloadPartDTO(
+            kind: .cover, serverPath: cover.serverPath, filename: DownloadLayout.coverFilename, mimeType: "image/jpeg",
+            expectedBytes: size ?? 0, bytesWritten: size ?? 0, destinationRelativePath: cover.relativePath,
+            state: size == nil ? .queued : .completed)
+        let isActive: (DownloadRecordDTO) -> Bool = { $0.state == .queued || $0.state == .downloading }
+        for record in records.filter(isActive) + records.filter({ !isActive($0) }) {
+            guard
+                try await read({
+                    try await self.store.addCoverPart(part, coverUpdatedAt: cover.updatedAt, toRecord: record.id)
+                })
+            else { continue }
+            await refresh(record.id, announce: true)
+            if part.state == .queued, isActive(record) { await engine.start(partIDs: [part.id]) }
+            return
+        }
+    }
+
+    /// The paths the item's local item and the connection's records still use.
+    private func usedPaths(of key: MediaKey) async throws(DownloadManagerError) -> Set<String> {
+        let localItem = try await read {
+            try await self.localItems.item(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+        }
+        let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
+        var used = Set(records.flatMap(\.parts).map(\.destinationRelativePath))
+        used.formUnion(localItem?.files.map(\.relativePath) ?? [])
+        if let cover = localItem?.coverRelativePath { used.insert(cover) }
+        return used
+    }
+
+    /// Removes each directory and then its parents, below the downloads root, while they are
+    /// empty. `rmdir` refuses a directory that isn't, so a file the engine moves in meanwhile
+    /// is never removed with it.
+    private nonisolated func removeEmptyDirectories(_ directories: [URL]) {
+        let rootDepth = locations.downloadsRoot.standardizedFileURL.pathComponents.count
+        for start in directories.sorted(by: { $0.pathComponents.count > $1.pathComponents.count }) {
+            var directory = start.standardizedFileURL
+            while directory.pathComponents.count > rootDepth, rmdir(directory.path(percentEncoded: false)) == 0 {
+                directory = directory.deletingLastPathComponent()
+            }
+        }
+    }
+
+    private func detachProgress(_ message: String, _ call: (any LocalProgressLinking) async throws -> Void) async {
+        guard let progressLinking else { return }
+        do {
+            try await call(progressLinking)
+        } catch {
+            logError(message, error)
+        }
+    }
+
+    private static func key(of item: LocalLibraryItemDTO) -> MediaKey {
+        MediaKey(serverConnectionID: item.serverConnectionID, libraryItemId: item.libraryItemId)
+    }
+
+    private static func itemKey(_ key: MediaKey) -> MediaKey {
+        MediaKey(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+    }
+}

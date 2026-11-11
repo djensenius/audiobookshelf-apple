@@ -7,6 +7,9 @@ import Foundation
 /// - ``enqueue(item:episodeID:connectionID:replacingExisting:)`` plans a ``DownloadRecordDTO``
 ///   (``DownloadPlanner``), skips media that is already queued or downloaded, checks the disk
 ///   space, saves the record and starts its parts on the engine.
+/// - ``pause(recordID:)``, ``resume(recordID:)``, ``retry(recordID:)``, ``cancel(recordID:)``
+///   and ``restartActiveTransfers()`` control downloads; ``deleteLocalItem(id:)`` and
+///   ``deleteEpisode(itemID:episodeId:)`` delete downloaded media.
 /// - ``start()`` makes the manager the only reader of the engine's streams; ``events()`` passes
 ///   what it reads on to any number of subscribers.
 ///
@@ -46,23 +49,25 @@ public actor DownloadManager {
         }
     }
 
-    private let store: DownloadStore
-    private let localItems: LocalItemStore
-    private let engine: any DownloadEngineControlling
-    private let locations: DownloadLocations
+    let store: DownloadStore
+    let localItems: LocalItemStore
+    let engine: any DownloadEngineControlling
+    let locations: DownloadLocations
     private let planner: DownloadPlanner
     private let capacity: any StorageCapacityProviding
     private let clock: any Clock<Duration>
+    let progressLinking: (any LocalProgressLinking)?
     /// Test seams, optional so production makes no actor hop for them.
     private let enqueueWaiting: (@Sendable (MediaKey) -> Void)?
     private let progressHandled: (@Sendable (DownloadProgress) -> Void)?
     private let subscriberRemoved: (@Sendable () -> Void)?
     private let trackingRecords: (@Sendable () async -> Void)?
 
-    /// Items with an enqueue under way, by their item-level key (no episode). Every enqueue of
-    /// one item runs alone, so two calls for the same media can't both plan a record across
-    /// the actor's suspension points, and two episodes of one podcast can't both plan the
-    /// shared cover.
+    /// Items with an enqueue, control or deletion under way, by their item-level key (no
+    /// episode). Each of these calls holds its item (``holdingItem(_:_:)``), so two calls for
+    /// the same media can't both plan a record across the actor's suspension points, two
+    /// episodes of one podcast can't both plan the shared cover, and a cancel or deletion can't
+    /// interleave with an enqueue of the same item.
     private var enqueuing: Set<MediaKey> = []
     private var enqueueWaiters: [MediaKey: [CheckedContinuation<Void, Never>]] = [:]
     private var subscribers: [UUID: AsyncStream<DownloadManagerEvent>.Continuation] = [:]
@@ -80,17 +85,20 @@ public actor DownloadManager {
     ///   - store: the same actor the engine uses.
     ///   - capacity: ``VolumeStorageCapacity`` in the app.
     ///   - clock: paces progress events.
+    ///   - progressLinking: links local progress to downloaded media; `nil` until #74.
     public init(
         store: DownloadStore,
         localItems: LocalItemStore,
         engine: any DownloadEngineControlling,
         locations: DownloadLocations,
         capacity: any StorageCapacityProviding,
-        clock: any Clock<Duration> = ContinuousClock()
+        clock: any Clock<Duration> = ContinuousClock(),
+        progressLinking: (any LocalProgressLinking)? = nil
     ) {
         self.init(
             store: store, localItems: localItems, engine: engine, locations: locations, capacity: capacity,
-            clock: clock, enqueueWaiting: nil, progressHandled: nil, subscriberRemoved: nil)
+            clock: clock, progressLinking: progressLinking, enqueueWaiting: nil, progressHandled: nil,
+            subscriberRemoved: nil)
     }
 
     init(
@@ -100,6 +108,7 @@ public actor DownloadManager {
         locations: DownloadLocations,
         capacity: any StorageCapacityProviding,
         clock: any Clock<Duration>,
+        progressLinking: (any LocalProgressLinking)? = nil,
         enqueueWaiting: (@Sendable (MediaKey) -> Void)?,
         progressHandled: (@Sendable (DownloadProgress) -> Void)?,
         subscriberRemoved: (@Sendable () -> Void)? = nil,
@@ -112,6 +121,7 @@ public actor DownloadManager {
         planner = DownloadPlanner(locations: locations)
         self.capacity = capacity
         self.clock = clock
+        self.progressLinking = progressLinking
         self.enqueueWaiting = enqueueWaiting
         self.progressHandled = progressHandled
         self.subscriberRemoved = subscriberRemoved
@@ -183,7 +193,7 @@ public actor DownloadManager {
     /// How many ``events()`` streams are open, for tests.
     var subscriberCount: Int { subscribers.count }
 
-    private func emit(_ event: DownloadManagerEvent) {
+    func emit(_ event: DownloadManagerEvent) {
         for subscriber in subscribers.values { subscriber.yield(event) }
     }
 
@@ -261,7 +271,7 @@ public actor DownloadManager {
         return .started(record.id)
     }
 
-    /// Waits until no other enqueue of the item is under way, then claims it.
+    /// Waits until no other enqueue, control or deletion of the item is under way, then claims it.
     private func beginEnqueuing(_ itemKey: MediaKey) async {
         while enqueuing.contains(itemKey) {
             await withCheckedContinuation { continuation in
@@ -275,6 +285,17 @@ public actor DownloadManager {
     private func endEnqueuing(_ itemKey: MediaKey) {
         enqueuing.remove(itemKey)
         for waiter in enqueueWaiters.removeValue(forKey: itemKey) ?? [] { waiter.resume() }
+    }
+
+    /// Runs `body` while it holds the item of `key` (see ``enqueuing``). Not reentrant: `body`
+    /// must not hold the same item again.
+    func holdingItem<T: Sendable>(
+        _ key: MediaKey, _ body: () async throws(DownloadManagerError) -> T
+    ) async throws(DownloadManagerError) -> T {
+        let itemKey = MediaKey(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+        await beginEnqueuing(itemKey)
+        defer { endEnqueuing(itemKey) }
+        return try await body()
     }
 
     /// Keeps an existing record, resuming it when it is paused or failed; `nil` when the record
@@ -306,7 +327,7 @@ public actor DownloadManager {
     /// of another record of the same item, so two episodes queued together fetch it once. A
     /// cover part counts only when it has completed or its record is queued or downloading: a
     /// paused or failed record may never fetch it.
-    private func existingCoverPath(
+    func existingCoverPath(
         for key: MediaKey, localItem: LocalLibraryItemDTO?
     ) async throws(DownloadManagerError) -> String? {
         if let path = localItem?.coverRelativePath { return path }
@@ -367,6 +388,7 @@ public actor DownloadManager {
             var key = forget(recordID)
             if key == nil { key = await bookKey(ofLocalItem: itemID) }
             if let key {
+                await linkProgress(key: key, itemID: itemID)
                 emit(.completed(recordID: recordID, itemID: itemID, key: key))
             } else {
                 Log.downloads.fault("A download completed that the manager didn't track")
@@ -384,6 +406,16 @@ public actor DownloadManager {
     private func bookKey(ofLocalItem itemID: UUID) async -> MediaKey? {
         guard let item = try? await localItems.item(id: itemID), item.mediaType == .book else { return nil }
         return MediaKey(serverConnectionID: item.serverConnectionID, libraryItemId: item.libraryItemId)
+    }
+
+    /// Links local progress to the downloaded media; a failure is logged.
+    private func linkProgress(key: MediaKey, itemID: UUID) async {
+        guard let progressLinking else { return }
+        do {
+            try await progressLinking.link(key: key, itemID: itemID)
+        } catch {
+            logError("Couldn't link progress to a download", error)
+        }
     }
 
     // MARK: - Progress
@@ -430,7 +462,7 @@ public actor DownloadManager {
 
     // MARK: - Tracking
 
-    private func track(_ record: DownloadRecordDTO) {
+    func track(_ record: DownloadRecordDTO) {
         let previous = tracked[record.id]?.parts ?? [:]
         var parts: [UUID: (written: Int64, expected: Int64)] = [:]
         for part in record.parts {
@@ -447,14 +479,14 @@ public actor DownloadManager {
 
     /// Stops tracking a record; returns its key.
     @discardableResult
-    private func forget(_ recordID: UUID) -> MediaKey? {
+    func forget(_ recordID: UUID) -> MediaKey? {
         progressWindows.removeValue(forKey: recordID)?.cancel()
         pendingProgress.remove(recordID)
         return tracked.removeValue(forKey: recordID)?.key
     }
 
     /// Reads a record again and tracks it; with `announce`, reports it.
-    private func refresh(_ recordID: UUID, announce: Bool) async {
+    func refresh(_ recordID: UUID, announce: Bool) async {
         let record: DownloadRecordDTO?
         do {
             record = try await store.record(id: recordID)
@@ -471,7 +503,7 @@ public actor DownloadManager {
     // MARK: - Helpers
 
     /// Runs a store call, mapping its error.
-    private func read<T: Sendable>(_ body: () async throws -> T) async throws(DownloadManagerError) -> T {
+    func read<T: Sendable>(_ body: () async throws -> T) async throws(DownloadManagerError) -> T {
         do {
             return try await body()
         } catch DownloadStore.StoreError.connectionNotFound(let id) {
@@ -482,7 +514,7 @@ public actor DownloadManager {
         }
     }
 
-    private nonisolated func logError(_ message: String, _ error: any Error) {
+    nonisolated func logError(_ message: String, _ error: any Error) {
         Log.downloads.error(
             "\(message, privacy: .public): \(Log.redact(String(describing: error)), privacy: .public)")
     }

@@ -15,6 +15,11 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         var keepingResumeData: Bool
     }
 
+    enum Call: Equatable {
+        case pause(UUID)
+        case resume(UUID)
+    }
+
     nonisolated var updates: AsyncStream<DownloadUpdate> {
         updateReads.withLock { $0 += 1 }
         return updateStream
@@ -30,6 +35,8 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     private(set) var started: [[UUID]] = []
     private(set) var stopped: [Stop] = []
     private(set) var resumed: [UUID] = []
+    /// Pauses and resumes, in call order.
+    private(set) var calls: [Call] = []
     private var settling: Set<UUID> = []
     /// Whether ``resume(recordID:)`` deletes the record first, as a finalise running meanwhile does.
     private var finaliseBeforeResume = false
@@ -67,13 +74,39 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     }
 
     func pause(recordID: UUID) async throws -> Bool {
-        try await store.setState(.paused, forRecord: recordID)
+        calls.append(.pause(recordID))
+        return try await store.setState(.paused, forRecord: recordID)
     }
 
     func resume(recordID: UUID) async throws -> Bool {
+        calls.append(.resume(recordID))
         resumed.append(recordID)
         if finaliseBeforeResume { try await store.deleteRecord(recordID) }
         return try await store.setState(.queued, forRecord: recordID)
+    }
+}
+
+/// Records the manager's progress links and detaches.
+final class FakeProgressLinker: LocalProgressLinking {
+    enum Call: Equatable {
+        case link(MediaKey, UUID)
+        case detachItem(UUID)
+        case detachKey(MediaKey)
+    }
+
+    private let log = Mutex<[Call]>([])
+    var calls: [Call] { log.withLock { $0 } }
+
+    func link(key: MediaKey, itemID: UUID) async throws {
+        log.withLock { $0.append(.link(key, itemID)) }
+    }
+
+    func detach(itemID: UUID) async throws {
+        log.withLock { $0.append(.detachItem(itemID)) }
+    }
+
+    func detach(key: MediaKey) async throws {
+        log.withLock { $0.append(.detachKey(key)) }
     }
 }
 
@@ -165,10 +198,11 @@ final class ManagerFixture: Sendable {
 
     var locations: DownloadLocations { DownloadLocations(root: root) }
 
-    func makeManager() -> DownloadManager {
+    func makeManager(progressLinking: (any LocalProgressLinking)? = nil) -> DownloadManager {
         DownloadManager(
             store: store, localItems: localItems, engine: engine, locations: locations, capacity: capacity,
-            clock: clock, enqueueWaiting: { [checkpoint] in checkpoint.yield(.waiting($0)) },
+            clock: clock, progressLinking: progressLinking,
+            enqueueWaiting: { [checkpoint] in checkpoint.yield(.waiting($0)) },
             progressHandled: { [checkpoint] in checkpoint.yield(.progressHandled($0)) },
             subscriberRemoved: { [checkpoint] in checkpoint.yield(.subscriberRemoved) },
             trackingRecords: { [checkpoint, self] in
