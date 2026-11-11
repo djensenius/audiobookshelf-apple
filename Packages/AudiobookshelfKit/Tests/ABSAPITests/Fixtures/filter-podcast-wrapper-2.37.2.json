@@ -1,0 +1,52 @@
+{
+  "filterdata": {
+    "authors": [],
+    "genres": [
+      "search0000000000000258 Podcast Genre"
+    ],
+    "tags": [
+      "search0000000000000258 Podcast Tag"
+    ],
+    "series": [],
+    "narrators": [],
+    "languages": [],
+    "publishers": [],
+    "publishedDecades": [],
+    "bookCount": 0,
+    "authorCount": 0,
+    "seriesCount": 0,
+    "podcastCount": 0,
+    "numIssues": 0,
+    "loadedAt": 1794366009382
+  },
+  "issues": 0,
+  "numUserPlaylists": 0,
+  "library": {
+    "id": "filter-library-podcast",
+    "name": "search0000000000000258 podcast",
+    "folders": [
+      {
+        "id": "filter-folder-podcast",
+        "fullPath": "/search-fixtures/casts",
+        "libraryId": "filter-library-podcast",
+        "addedAt": 1794366009052
+      }
+    ],
+    "displayOrder": 4,
+    "icon": "database",
+    "mediaType": "podcast",
+    "provider": "google",
+    "settings": {
+      "coverAspectRatio": 1,
+      "disableWatcher": true,
+      "autoScanCronExpression": null,
+      "podcastSearchRegion": "us",
+      "markAsFinishedPercentComplete": null,
+      "markAsFinishedTimeRemaining": 10
+    },
+    "lastScan": 1794366009432,
+    "lastScanVersion": "2.37.2",
+    "createdAt": 1794366009041,
+    "lastUpdate": 1794366009432
+  }
+}

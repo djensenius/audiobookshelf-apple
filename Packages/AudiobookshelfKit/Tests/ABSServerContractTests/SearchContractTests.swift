@@ -8,16 +8,48 @@ import Testing
         if: ProcessInfo.processInfo.environment["ABS_SEARCH_CONTRACT_MODE"] != nil,
         "Owned search NOT RUN: use scripts/test-server.sh test --search-contract; package skips are not evidence"))
 struct SearchContractTests {
-    @Test("all search groups and strict nested media agree with independently read owned fixtures")
+    @Test("all search groups plus positive book filters and podcast tags/genres match owned fixtures")
     func completeSearch() async throws {
         try await SearchContractFixture.withFixture { fixture, ledger, user in
             for podcast in [false, true] {
                 let library = podcast ? ledger.podcastLibrary : ledger.bookLibrary
+                let label = podcast ? "podcast" : "book"
+                let detail = LibraryEndpoints.library(id: library)
+                let wrapper = try await fixture.request(
+                    detail.path, query: detail.query, as: user, captureLabel: "\(label)-filter-wrapper")
+                let dedicated = try await fixture.request(
+                    "/api/libraries/\(library)/filterdata", as: user, captureLabel: "\(label)-filter-dedicated")
+                let configuration = fixture.configuration
+                _ = try SearchFilterRaw.positivePair(
+                    wrapper: wrapper, dedicated: dedicated, ledger: ledger, podcast: podcast,
+                    version: configuration.version, folder: podcast ? configuration.podcasts : configuration.books)
                 let endpoint = LibraryEndpoints.search(libraryID: library, query: ledger.token)
                 let data = try await fixture.request(endpoint.path, query: endpoint.query, as: user)
                 try await fixture.capture(data, label: podcast ? "podcast-search" : "book-search")
                 _ = try SearchRaw.search(data, ledger: ledger, podcast: podcast)
             }
+        }
+    }
+
+    @Test("CHARACTERIZATION: scan-primed podcast language is missing; nonempty acceptance #263 remains open")
+    func scanPrimedPodcastLanguageDiscrepancy() async throws {
+        try await SearchContractFixture.withFixture { fixture, ledger, user in
+            let endpoint = LibraryEndpoints.library(id: ledger.podcastLibrary)
+            let wrapper = try await fixture.request(
+                endpoint.path, query: endpoint.query, as: user, captureLabel: "podcast-language-wrapper")
+            let dedicated = try await fixture.request(
+                "/api/libraries/\(ledger.podcastLibrary)/filterdata", as: user,
+                captureLabel: "podcast-language-dedicated")
+            let configuration = fixture.configuration
+            let result = try SearchFilterRaw.positivePair(
+                wrapper: wrapper, dedicated: dedicated, ledger: ledger, podcast: true,
+                version: configuration.version, folder: configuration.podcasts)
+            let itemLanguage = try #require(ledger.podcast.podcast?.metadata.language)
+            #expect(itemLanguage == "de")
+            #expect(result.filterData.languages == [])
+            #expect(!result.filterData.languages.contains(itemLanguage))
+            // This pins an observed server omission, NOT a passing nonempty-language contract.
+            // Both cold queries support language; no cache expiry/reload or workaround is exercised.
         }
     }
 
