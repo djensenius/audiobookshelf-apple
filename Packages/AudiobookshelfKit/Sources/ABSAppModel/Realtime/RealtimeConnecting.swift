@@ -8,8 +8,8 @@ public protocol RealtimeConnecting: AnyObject, Sendable {
     var events: AsyncStream<RealtimeEvent> { get }
     /// Connects, or reconnects at once; also resumes after `auth_failed`.
     func connect() async
-    /// Closes the socket and stops reconnecting.
-    func disconnect() async
+    /// Closes the socket and stops reconnecting; with `sendingFarewell`, tells the server first.
+    func disconnect(sendingFarewell: Bool) async
     /// Reconnects at once, unless idle or halted by `auth_failed`.
     func networkChanged() async
     /// Reconnects with `token`, also after `auth_failed`.

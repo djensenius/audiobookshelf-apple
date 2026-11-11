@@ -447,6 +447,19 @@ struct SocketClientTests {
         #expect(harness.transport.requests.count == 1)
     }
 
+    @Test func disconnectWithoutFarewellSendsNothing() async throws {
+        var harness = try Harness()
+        await harness.client.connect()
+        let connection = try await harness.nextConnection()
+        var sent = await harness.handshake(connection)
+
+        await harness.client.disconnect(sendingFarewell: false)
+        #expect(await harness.nextEvent() == .disconnected(.clientRequested))
+        // Closing finishes the sent frames, so a `41` would show up before the end.
+        #expect(await sent.next() == nil)
+        #expect(connection.isClosed)
+    }
+
     @Test func aStalledFarewellStillClosesTheSocket() async throws {
         var harness = try Harness()
         let clock = harness.clock

@@ -5,26 +5,51 @@ import Foundation
 
 @testable import ABSAppModel
 
-/// Records values and lets a test wait, without sleeping, until they satisfy a condition.
+/// Records values and lets a test wait, without sleeping, until they satisfy a condition. A
+/// wait ends early when its task is cancelled, as by a test's time limit.
 @MainActor
 final class Recorder<Value> {
+    private struct Waiter {
+        let condition: ([Value]) -> Bool
+        let continuation: CheckedContinuation<Void, Never>
+    }
+
     private(set) var values: [Value] = []
-    private var waiters: [(condition: ([Value]) -> Bool, continuation: CheckedContinuation<Void, Never>)] = []
+    private var waiters: [Int: Waiter] = [:]
+    private var nextWaiterID = 0
 
     func append(_ value: Value) {
         values.append(value)
-        let ready = waiters.filter { $0.condition(values) }
-        waiters.removeAll { $0.condition(values) }
-        for waiter in ready { waiter.continuation.resume() }
+        let ready = waiters.filter { $0.value.condition(values) }
+        for (id, waiter) in ready {
+            waiters[id] = nil
+            waiter.continuation.resume()
+        }
     }
 
     func wait(until condition: @escaping ([Value]) -> Bool) async {
         guard !condition(values) else { return }
-        await withCheckedContinuation { waiters.append((condition, $0)) }
+        nextWaiterID += 1
+        let id = nextWaiterID
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    waiters[id] = Waiter(condition: condition, continuation: continuation)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancelWait(id) }
+        }
     }
 
     func wait(count: Int) async {
         await wait { $0.count >= count }
+    }
+
+    private func cancelWait(_ id: Int) {
+        waiters.removeValue(forKey: id)?.continuation.resume()
     }
 }
 
@@ -50,7 +75,9 @@ final class FakeSocket: RealtimeConnecting {
     }
 
     func connect() async { calls.append("connect") }
-    func disconnect() async { calls.append("disconnect") }
+    func disconnect(sendingFarewell: Bool) async {
+        calls.append(sendingFarewell ? "disconnect" : "disconnect(noFarewell)")
+    }
     func networkChanged() async { calls.append("networkChanged") }
     func updateToken(_ token: String) async { calls.append("updateToken(\(token))") }
 }
@@ -63,8 +90,12 @@ final class FakeTokenSource: RealtimeTokenSource {
     var refreshResults: [Result<String, any Error>] = []
     /// When set, a refresh waits for it after being recorded.
     var refreshGate: Gate?
+    /// When set, reading the token to connect with waits for it.
+    var readGate: Gate?
     /// The rejected token of each refresh.
     let refreshes = Recorder<String?>()
+    /// How often the token to connect with was read.
+    let reads = Recorder<Void>()
 
     init(current: String?) {
         self.current = current
@@ -73,6 +104,12 @@ final class FakeTokenSource: RealtimeTokenSource {
     func currentAccessToken() async -> String? { current }
 
     func accessToken(replacing rejected: String?) async throws -> String {
+        guard let rejected else {
+            reads.append(())
+            await readGate?.wait()
+            guard let current else { throw APIError.notAuthenticated }
+            return current
+        }
         refreshes.append(rejected)
         await refreshGate?.wait()
         let index = min(refreshes.values.count, refreshResults.count) - 1

@@ -111,12 +111,14 @@ public actor SocketClient {
     }
 
     /// Closes the socket and stops reconnecting.
-    public func disconnect() {
+    /// - Parameter sendingFarewell: Whether to tell the server with a `41` first. Pass `false`
+    ///   when nothing may be sent, for example after the session expired.
+    public func disconnect(sendingFarewell: Bool = true) {
         mode = .idle
         cancelReconnect()
         // All state changes happen before anything is awaited, so a `connect()` can't interleave
         // with a half-finished disconnect. The farewell `41` is sent off the actor.
-        let farewell = isConnected ? connection : nil
+        let farewell = sendingFarewell && isConnected ? connection : nil
         if farewell != nil { connection = nil }
         tearDown(reason: .clientRequested)
         if let farewell {
