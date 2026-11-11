@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSCore
+import ABSUI
 import Foundation
 
 /// What the Account tab and the server list do, outside the views so tests can drive them.
@@ -14,6 +15,8 @@ import Foundation
 @MainActor
 struct AccountActions {
     let lifecycle: SessionLifecycle
+    /// Checks that a server switched to has a saved session before the running one ends.
+    var accounts: AccountManager?
 
     /// Signs out, then opens the identity provider's end-session page with `openURL` if the
     /// server returned one (an OpenID session).
@@ -42,6 +45,11 @@ struct AccountActions {
     /// The switch, chosen while `identity` was signed in.
     /// - Returns: Whether that connection's session is ready.
     func switchAccount(to connectionID: UUID, from identity: SessionIdentity) async -> Bool {
+        // Without a session the switch would only fail, after ending the running one.
+        if let accounts, await !accounts.hasSession(connectionID) {
+            Log.ui.notice("Didn't switch to a server without a saved session")
+            return false
+        }
         do {
             try await lifecycle.switchAccount(to: connectionID, from: identity)
         } catch {
@@ -62,11 +70,15 @@ extension SessionLifecycle {
     var acceptsAccountChanges: Bool { gate.identity != nil }
 }
 
-extension AuthGate {
-    /// Whether going from this gate to `next` is a switch that ended signed out: the server
-    /// rejected the saved session (or its version) of the account switched to. The old shell,
-    /// and any message it would show, is gone by then, so the root tells the user.
-    func signsOutSwitch(to next: AuthGate) -> Bool {
-        if case .switching = self { next == .connect } else { false }
+extension AccountManager {
+    /// What the root says when a switch ended signed out (``SessionLifecycle/signedOutSwitches``):
+    /// signing in again can't fix a server version the app no longer supports, so that gets the
+    /// connect screen's message; otherwise the server rejected the saved session.
+    var signedOutSwitchMessage: String {
+        if case .server(.unsupportedVersion(let version))? = lastError {
+            ConnectFailure.unsupportedVersion(version).message
+        } else {
+            L10n.string("MessageSwitchServerSignedOut")
+        }
     }
 }

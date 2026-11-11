@@ -2,6 +2,7 @@ import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSData
+import ABSUI
 import Foundation
 import Observation
 import Testing
@@ -18,19 +19,28 @@ private final class Recorder: SessionParticipant {
     }
 
     var events: [Event] = []
-    /// Each reopened link, with the lifecycle's link epoch when it was reopened.
-    var reopened: [(link: DeepLink, epoch: UInt64)] = []
     /// Each opened end-session URL, with the gate when it was opened.
     var opened: [(url: URL, gate: AuthGate)] = []
-    /// How many links the root has received, as `RootView` counts them.
-    var receivedLinks = 0
+    /// The root's links, as `RootView` keeps them.
+    var links = SceneLinks()
 
-    /// Records each link reopened after a switch, as `RootView` would receive it.
+    /// Hands a confirmed switch's link to ``links``, as `RootView` does.
     func reopener(_ lifecycle: SessionLifecycle) -> LinkReopener {
-        LinkReopener(receivedLinks: { self.receivedLinks }) { link in
-            self.receivedLinks += 1
-            self.reopened.append((link, lifecycle.linkEpoch))
-        }
+        LinkReopener(
+            beginSwitch: { self.links.beginSwitch(with: $0) },
+            finishSwitch: {
+                self.links.finishSwitch(succeeded: $0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
+            })
+    }
+
+    /// A link reaching the root now.
+    func receive(_ link: DeepLink, _ lifecycle: SessionLifecycle) {
+        links.receive(link, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
+    }
+
+    /// The link the root hands the host now.
+    func waitingLink(_ lifecycle: SessionLifecycle) -> DeepLink? {
+        links.link(atEpoch: lifecycle.linkEpoch)
     }
 
     func sessionDidStart(_ context: SessionContext) async { events.append(.start(context.identity)) }
@@ -115,6 +125,15 @@ private final class Recorder: SessionParticipant {
         let b = try await signIn(accounts, to: hosts[1])
         await waitFor(.ready(b, isOffline: false), in: environment.lifecycle)
         return (a, b, hosts)
+    }
+
+    /// Shows the router's pending link in `prompt`, as the dialog does, and returns its request.
+    private func present(
+        _ router: Router, _ confirmation: ServerSwitchConfirmation, in prompt: inout ServerSwitchPrompt
+    ) async throws -> ServerSwitchRequest {
+        let target = try #require(await confirmation.review(router))
+        prompt.present(target.link, for: target.connection)
+        return try #require(prompt.shown)
     }
 
     // MARK: Server ID
@@ -223,29 +242,42 @@ private final class Recorder: SessionParticipant {
         let recorder = Recorder()
         let held = Self.host("hold-")
         let (a, b, hosts) = try await twoServers(environment, recorder: recorder, hostA: held)
+        let added = Self.host()
         defer {
             ConnectTestProtocol.release(held)
-            cleanUp(hosts)
+            cleanUp(hosts + [added])
         }
+        let accounts = try #require(environment.accounts)
+        let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: accounts)
+        let router = Router(identity: b)
+        let link = DeepLink(.downloads, serverID: a.connectionID.uuidString)
+        router.open(link)
+        var prompt = ServerSwitchPrompt()
+        let request = try await present(router, confirmation, in: &prompt)
+        // The add-server sheet, open in another window, has its server checked.
+        let sheet = connectModel(accounts, lifecycle: lifecycle)
+        sheet.startAddingServer()
+        sheet.address = "https://\(added)"
+        await sheet.submitAddress()
+        sheet.username = "reader"
         // A's authorization is held, so the switch stays in progress.
         let switching = Task { try await lifecycle.switchAccount(to: a.connectionID) }
         await waitFor(.switching(from: b), in: lifecycle)
         let actions = AccountActions(lifecycle: lifecycle)
-        let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: environment.accounts)
-        let router = Router(identity: b)
-        let link = DeepLink(.downloads, serverID: a.connectionID.uuidString)
-        router.open(link)
 
         #expect(actions.signOut { recorder.opened.append(($0, lifecycle.gate)) } == nil)
         #expect(actions.switchAccount(to: b.connectionID) == nil)
-        #expect(confirmation.confirm(link, in: router, reopen: recorder.reopener(lifecycle)) == nil)
-        #expect(router.pendingServerSwitch == link)
+        #expect(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)) == nil)
+        #expect(prompt.shown != nil)
+        await sheet.signIn()
+        #expect(sheet.phase == .login)
+        #expect(accounts.connections.count == 2)
 
         ConnectTestProtocol.release(held)
         try await switching.value
         #expect(lifecycle.gate == .ready(a, isOffline: false))
         #expect(recorder.events.suffix(3) == [.flush, .end(.switch), .start(a)])
-        #expect(recorder.opened.isEmpty && recorder.reopened.isEmpty)
+        #expect(recorder.opened.isEmpty && !recorder.links.isSwitching)
     }
 
     @Test func choosingAnotherServerSwitchesThroughTheLifecycle() async throws {
@@ -297,22 +329,26 @@ private final class Recorder: SessionParticipant {
         let recorder = Recorder()
         let (a, b, hosts) = try await twoServers(environment, recorder: recorder, hostA: Self.host("old-"))
         defer { cleanUp(hosts) }
-        let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: environment.accounts)
+        let accounts = try #require(environment.accounts)
+        let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: accounts)
         let router = Router(identity: b)
         let link = DeepLink(.downloads, serverID: a.connectionID.uuidString)
         router.open(link)
+        var prompt = ServerSwitchPrompt()
+        let request = try await present(router, confirmation, in: &prompt)
+        // Signing in again can't fix this, so the root says so rather than "signed out".
+        #expect(accounts.signedOutSwitchMessage == L10n.string("MessageSwitchServerSignedOut"))
 
-        let task = try #require(confirmation.confirm(link, in: router, reopen: recorder.reopener(lifecycle)))
+        let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
 
         #expect(await !task.value)
         #expect(lifecycle.gate == .connect)
         #expect(recorder.events.suffix(2) == [.flush, .end(.switch)])
-        #expect(recorder.reopened.isEmpty)
-        // The old shell is gone, so the root shows the message on this change of gate only.
-        #expect(AuthGate.switching(from: b).signsOutSwitch(to: .connect))
-        #expect(!AuthGate.signingOut(from: b).signsOutSwitch(to: .connect))
-        #expect(!AuthGate.ready(b, isOffline: false).signsOutSwitch(to: .connect))
-        #expect(!AuthGate.switching(from: b).signsOutSwitch(to: .ready(a, isOffline: false)))
+        #expect(recorder.waitingLink(lifecycle) == nil && !recorder.links.isSwitching)
+        // The old shell is gone; the root shows the message for this count.
+        #expect(lifecycle.signedOutSwitches == 1)
+        #expect(accounts.signedOutSwitchMessage == ConnectFailure.unsupportedVersion("1.0.0").message)
+        #expect(accounts.signedOutSwitchMessage != L10n.string("MessageSwitchServerSignedOut"))
     }
 
     /// Adding a server from the server list signs in as an account change: the session ends
@@ -413,6 +449,37 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
+    /// An expiry deletes the session without setting `signedOutAt`; such a server can't be
+    /// switched to, so nothing ends the running session to try.
+    @Test func aServerWhoseSessionWasDeletedIsntSwitchedTo() async throws {
+        let environment = try makeEnvironment()
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        // A relaunch after A's session was deleted.
+        keychain.deleteItems(of: a.connectionID)
+        let accounts = try relaunchedAccounts(environment)
+        let lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: accounts))
+        let recorder = Recorder()
+        lifecycle.register(recorder, stage: .connect)
+        await lifecycle.start()
+        await waitFor(.ready(b, isOffline: false), in: lifecycle)
+        #expect(accounts.connections.first { $0.id == a.connectionID }?.signedOutAt == nil)
+        #expect(await !accounts.hasSession(a.connectionID))
+        #expect(await accounts.hasSession(b.connectionID))
+
+        let switched = try await #require(
+            AccountActions(lifecycle: lifecycle, accounts: accounts).switchAccount(to: a.connectionID)
+        ).value
+        let router = Router(identity: b)
+        router.open(DeepLink(.downloads, serverID: a.connectionID.uuidString))
+        let target = await ServerSwitchConfirmation(lifecycle: lifecycle, accounts: accounts).review(router)
+
+        #expect(!switched)
+        #expect(target == nil && router.pendingServerSwitch == nil)
+        #expect(recorder.events == [.start(b)])
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
+    }
+
     // MARK: Server switch for a link
 
     @Test func aLinkForAnotherServerSwitchesOnlyOnceConfirmed() async throws {
@@ -424,32 +491,88 @@ private final class Recorder: SessionParticipant {
         let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: environment.accounts)
         let router = Router(identity: b)
         let link = DeepLink(.item(id: "li_1", episodeID: nil), serverID: a.connectionID.uuidString)
+        var prompt = ServerSwitchPrompt()
 
         router.open(link)
-        confirmation.dropIfUnknown(router)
-        #expect(router.pendingServerSwitch == link)
-        #expect(confirmation.connection(for: link)?.id == a.connectionID)
-
-        confirmation.cancel(router)
+        let request = try await present(router, confirmation, in: &prompt)
         #expect(router.pendingServerSwitch == nil)
+        #expect(request.link == link && request.connection.id == a.connectionID)
+
+        prompt.dismiss(request)
+        #expect(prompt.shown == nil)
         #expect(lifecycle.gate == .ready(b, isOffline: false))
 
         // SwiftUI may dismiss the dialog, which cancels, before it runs the confirm action.
         let epochBefore = lifecycle.linkEpoch
-        let task = try #require(confirmation.confirm(link, in: router, reopen: recorder.reopener(lifecycle)))
+        let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
         #expect(await task.value)
 
         #expect(lifecycle.gate == .ready(a, isOffline: false))
         #expect(recorder.events.suffix(3) == [.flush, .end(.switch), .start(a)])
-        // Reopened after the switch, so it waits for the new account's host, not the old one's.
-        #expect(recorder.reopened.map(\.link) == [link])
-        #expect(recorder.reopened.map(\.epoch) == [lifecycle.linkEpoch])
+        // Opened after the switch, so it waits for the new account's host, not the old one's.
         #expect(lifecycle.linkEpoch > epochBefore)
-        let pending = try #require(PendingLink(link, arrivingAt: lifecycle.gate, epoch: lifecycle.linkEpoch))
+        let waiting = try #require(recorder.waitingLink(lifecycle))
+        #expect(waiting == link)
         let next = Router(identity: a)
-        next.open(try #require(pending.link(atEpoch: lifecycle.linkEpoch)))
+        next.open(waiting)
         #expect(next.pendingServerSwitch == nil)
         #expect(next[path: .library] == [.item(id: "li_1")])
+        // Confirmed once only.
+        #expect(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)) == nil)
+    }
+
+    /// A newer link replaces the one the dialog asked about; the dialog's actions for the old one,
+    /// which SwiftUI may still run, do nothing.
+    @Test func theDialogsActionsForAReplacedLinkDoNothing() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let recorder = Recorder()
+        let (a, b, hosts) = try await twoServers(environment, recorder: recorder)
+        defer { cleanUp(hosts) }
+        let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: environment.accounts)
+        let router = Router(identity: b)
+        let older = DeepLink(.downloads, serverID: a.connectionID.uuidString)
+        let newer = DeepLink(.item(id: "li_2", episodeID: nil), serverID: a.connectionID.uuidString)
+        var prompt = ServerSwitchPrompt()
+        router.open(older)
+        let replaced = try await present(router, confirmation, in: &prompt)
+        router.open(newer)
+        let request = try await present(router, confirmation, in: &prompt)
+        let before = recorder.events.count
+
+        prompt.dismiss(replaced)
+        #expect(confirmation.confirm(replaced, prompt: &prompt, reopen: recorder.reopener(lifecycle)) == nil)
+
+        #expect(prompt.shown?.link == newer)
+        #expect(recorder.events.count == before && !recorder.links.isSwitching)
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
+        let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
+        #expect(await task.value)
+        #expect(recorder.waitingLink(lifecycle) == newer)
+    }
+
+    /// A link that arrives once the switch is confirmed but before it has changed the gate is
+    /// newer than the confirmed one, so it opens after the switch, for the new account.
+    @Test func aLinkThatArrivesBeforeTheSwitchStartsOpensAfterIt() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let recorder = Recorder()
+        let (a, b, hosts) = try await twoServers(environment, recorder: recorder)
+        defer { cleanUp(hosts) }
+        let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: environment.accounts)
+        let router = Router(identity: b)
+        let newer = DeepLink(.item(id: "li_3", episodeID: nil), serverID: a.connectionID.uuidString)
+        router.open(DeepLink(.downloads, serverID: a.connectionID.uuidString))
+        var prompt = ServerSwitchPrompt()
+        let request = try await present(router, confirmation, in: &prompt)
+
+        let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
+        recorder.receive(newer, lifecycle)
+
+        #expect(await task.value)
+        #expect(lifecycle.gate == .ready(a, isOffline: false))
+        #expect(recorder.waitingLink(lifecycle) == newer)
     }
 
     @Test func aLinkThatArrivesDuringTheSwitchWinsOverTheConfirmedOne() async throws {
@@ -464,18 +587,20 @@ private final class Recorder: SessionParticipant {
         }
         let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: environment.accounts)
         let router = Router(identity: b)
-        let link = DeepLink(.downloads, serverID: a.connectionID.uuidString)
-        router.open(link)
+        let newer = DeepLink(.item(id: "li_4", episodeID: nil), serverID: nil)
+        router.open(DeepLink(.downloads, serverID: a.connectionID.uuidString))
+        var prompt = ServerSwitchPrompt()
+        let request = try await present(router, confirmation, in: &prompt)
 
-        let task = try #require(confirmation.confirm(link, in: router, reopen: recorder.reopener(lifecycle)))
+        let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
         await waitFor(.switching(from: b), in: lifecycle)
         // A's authorization is held, so a newer link reaches the root while the switch runs.
-        recorder.receivedLinks += 1
+        recorder.receive(newer, lifecycle)
         ConnectTestProtocol.release(held)
 
         #expect(await task.value)
         #expect(lifecycle.gate == .ready(a, isOffline: false))
-        #expect(recorder.reopened.isEmpty)
+        #expect(recorder.waitingLink(lifecycle) == newer)
     }
 
     @Test func aLinkForASignedOutServerIsDropped() async throws {
@@ -497,12 +622,9 @@ private final class Recorder: SessionParticipant {
         router.open(link)
         #expect(router.pendingServerSwitch == link)
 
-        confirmation.dropIfUnknown(router)
+        let target = await confirmation.review(router)
 
-        #expect(router.pendingServerSwitch == nil)
-        #expect(
-            confirmation.confirm(link, in: router, reopen: LinkReopener(receive: { Issue.record("Reopened \($0)") }))
-                == nil)
+        #expect(target == nil && router.pendingServerSwitch == nil)
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
@@ -521,12 +643,9 @@ private final class Recorder: SessionParticipant {
         router.open(link)
         #expect(router.pendingServerSwitch == link)
 
-        confirmation.dropIfUnknown(router)
+        let target = await confirmation.review(router)
 
-        #expect(router.pendingServerSwitch == nil)
-        #expect(
-            confirmation.confirm(link, in: router, reopen: LinkReopener(receive: { Issue.record("Reopened \($0)") }))
-                == nil)
+        #expect(target == nil && router.pendingServerSwitch == nil)
         #expect(environment.lifecycle.gate == .ready(identity, isOffline: false))
     }
 }

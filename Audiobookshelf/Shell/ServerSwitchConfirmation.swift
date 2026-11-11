@@ -4,79 +4,154 @@ import ABSData
 import ABSUI
 import SwiftUI
 
-/// Hands a link back to the root (`RootView`) after a confirmed server switch. The root counts
-/// the links it receives, so a link that arrived while the switch ran wins over the one handed
-/// back: the root keeps one link, the last received.
+/// The links a scene has received, as `RootView` keeps them: one waits at a time, the last
+/// received. Once the user confirms a switch to another server, links wait in a slot instead,
+/// starting with the confirmed one, and any newer link replaces it, including one that arrives
+/// before the switch has changed the gate (which the outgoing account's epoch would drop). When
+/// the switch has finished, the slot's link waits with the new account's
+/// ``SessionLifecycle/linkEpoch``; a failed switch drops it.
+struct SceneLinks {
+    private(set) var pending: PendingLink?
+    /// The link to open after the confirmed switch, while it runs.
+    private(set) var afterSwitch: DeepLink?
+    private(set) var isSwitching = false
+
+    mutating func receive(_ link: DeepLink, gate: AuthGate, epoch: UInt64) {
+        if isSwitching {
+            afterSwitch = link
+        } else {
+            pending = PendingLink(link, arrivingAt: gate, epoch: epoch)
+        }
+    }
+
+    /// Keeps `link`, the confirmed one, until ``finishSwitch(succeeded:gate:epoch:)``. A link
+    /// already waiting is older, so it goes.
+    mutating func beginSwitch(with link: DeepLink) {
+        isSwitching = true
+        afterSwitch = link
+        pending = nil
+    }
+
+    mutating func finishSwitch(succeeded: Bool, gate: AuthGate, epoch: UInt64) {
+        guard isSwitching else { return }
+        isSwitching = false
+        defer { afterSwitch = nil }
+        guard let link = afterSwitch else { return }
+        if succeeded {
+            pending = PendingLink(link, arrivingAt: gate, epoch: epoch)
+        } else {
+            Log.ui.notice("Dropped a link: the server switch failed")
+        }
+    }
+
+    func link(atEpoch epoch: UInt64) -> DeepLink? {
+        pending?.link(atEpoch: epoch)
+    }
+
+    /// Drops a waiting link that arrived before `epoch`.
+    mutating func dropStale(atEpoch epoch: UInt64) {
+        if link(atEpoch: epoch) == nil { pending = nil }
+    }
+
+    mutating func clearPending() {
+        pending = nil
+    }
+}
+
+/// How a confirmed server switch hands its link to the root (`RootView`, ``SceneLinks``), which
+/// outlives the scene's host that the switch rebuilds.
 @MainActor
 struct LinkReopener {
-    /// How many links the root has received.
-    var receivedLinks: @MainActor () -> Int = { 0 }
-    var receive: @MainActor (DeepLink) -> Void = { _ in }
+    var beginSwitch: @MainActor (DeepLink) -> Void = { _ in }
+    var finishSwitch: @MainActor (_ succeeded: Bool) -> Void = { _ in }
+}
 
-    /// Notes the links received so far; the returned closure hands its link to the root only if
-    /// none arrived since.
-    func reopenUnlessSuperseded() -> @MainActor (DeepLink) -> Void {
-        let received = receivedLinks()
-        return { [self] link in
-            guard receivedLinks() == received else {
-                Log.ui.notice("Dropped a link a newer link replaced during a server switch")
-                return
-            }
-            receive(link)
-        }
+/// The link the confirmation dialog asks about, for a saved server with a session.
+struct ServerSwitchRequest {
+    let link: DeepLink
+    let connection: ServerConnectionDTO
+    fileprivate let generation: Int
+}
+
+/// What the dialog shows. Each link presented gets a new generation, so the dialog's actions for
+/// one a newer link replaced do nothing. Dismissing keeps the generation: SwiftUI may dismiss the
+/// dialog before it runs the confirm action, which must still work.
+struct ServerSwitchPrompt {
+    private(set) var shown: ServerSwitchRequest?
+    private var generation = 0
+
+    mutating func present(_ link: DeepLink, for connection: ServerConnectionDTO) {
+        generation += 1
+        shown = ServerSwitchRequest(link: link, connection: connection, generation: generation)
+    }
+
+    mutating func dismiss(_ request: ServerSwitchRequest) {
+        if request.generation == generation { shown = nil }
+    }
+
+    /// Takes `request` to confirm, once: `false` when a newer one was presented since, or it was
+    /// taken already.
+    mutating func take(_ request: ServerSwitchRequest) -> Bool {
+        guard request.generation == generation else { return false }
+        generation += 1
+        shown = nil
+        return true
     }
 }
 
 /// What the scene does with a link for another saved server (``Router/pendingServerSwitch``):
-/// drop it when the server isn't saved, or switch to it and reopen the link once confirmed.
+/// drop it when the server isn't saved or has no session, or ask, then switch to it and open the
+/// link once confirmed.
 ///
 /// The switch goes through ``SessionLifecycle/switchAccount(to:)``, so the current session
 /// flushes and ends first. It rebuilds the scene's host (`.id(identity)` in `RootView`), so the
-/// link is kept here, not in the old host, and handed back to the root after the switch, where
-/// it carries the new account's ``SessionLifecycle/linkEpoch``.
+/// link is kept by the root (``LinkReopener``), not the old host, and opens there after the
+/// switch, with the new account's ``SessionLifecycle/linkEpoch``.
 @MainActor
 struct ServerSwitchConfirmation {
     let lifecycle: SessionLifecycle
     let accounts: AccountManager?
 
-    /// The saved connection `link` is for, or `nil` if it isn't saved, or is signed out, so
-    /// there's no session to switch to.
+    /// The saved connection `link` is for, or `nil` if it isn't saved, or is signed out.
     func connection(for link: DeepLink) -> ServerConnectionDTO? {
         guard let id = link.serverID.flatMap(UUID.init(uuidString:)) else { return nil }
         return accounts?.connections.first { $0.id == id && !$0.isDisconnected && $0.signedOutAt == nil }
     }
 
-    /// Clears a pending link whose server can't be switched to, so nothing asks about it.
-    func dropIfUnknown(_ router: Router) {
-        guard let link = router.pendingServerSwitch, connection(for: link) == nil else { return }
+    /// Takes the router's pending link to ask about, clearing it. Returns the link and its
+    /// connection, or `nil` after dropping a link whose server isn't saved or has no session to
+    /// switch to (``AccountManager/hasSession(_:)``), or when a newer link replaced it meanwhile.
+    func review(_ router: Router) async -> (link: DeepLink, connection: ServerConnectionDTO)? {
+        guard let link = router.pendingServerSwitch else { return nil }
+        var connection = connection(for: link)
+        if let id = connection?.id, let accounts, await !accounts.hasSession(id) { connection = nil }
+        guard router.pendingServerSwitch == link else { return nil }
         router.pendingServerSwitch = nil
-        Log.ui.notice("Dropped a link for a server that isn't saved")
-    }
-
-    func cancel(_ router: Router) {
-        router.pendingServerSwitch = nil
-    }
-
-    /// Switches to the server of `link`, the pending link the user confirmed, then hands the
-    /// link to `reopen`. The link is cleared from the router first, whichever order SwiftUI
-    /// runs the dialog's action and its dismissal in. The switch runs in its own task
-    /// (``AccountActions/switchAccount(to:)``), so the old host going away doesn't cancel it; a
-    /// failed switch drops the link, as does a newer link arriving meanwhile.
-    /// - Returns: A task whose value is whether the switch succeeded, or `nil` when the server is
-    ///   unknown or the session isn't ready (then nothing changes).
-    @discardableResult
-    func confirm(_ link: DeepLink, in router: Router, reopen: LinkReopener) -> Task<Bool, Never>? {
-        guard lifecycle.acceptsAccountChanges else { return nil }
-        if router.pendingServerSwitch == link { router.pendingServerSwitch = nil }
-        guard let connection = connection(for: link) else {
-            Log.ui.notice("Dropped a link for a server that isn't saved")
+        guard let connection else {
+            Log.ui.notice("Dropped a link for a server that isn't saved or is signed out")
             return nil
         }
-        guard let switching = AccountActions(lifecycle: lifecycle).switchAccount(to: connection.id) else { return nil }
-        let reopen = reopen.reopenUnlessSuperseded()
+        return (link, connection)
+    }
+
+    /// Switches to the server of `request`, if it's still the one the prompt shows (or showed,
+    /// if SwiftUI dismissed the dialog first), and hands its link to the root, which opens it, or
+    /// a newer one, after the switch. The switch runs in its own task
+    /// (``AccountActions/switchAccount(to:)``), so the old host going away doesn't cancel it.
+    /// - Returns: A task whose value is whether the switch succeeded, or `nil` when the request
+    ///   was replaced, or the session isn't ready (then nothing changes).
+    @discardableResult
+    func confirm(
+        _ request: ServerSwitchRequest, prompt: inout ServerSwitchPrompt, reopen: LinkReopener
+    ) -> Task<Bool, Never>? {
+        guard lifecycle.acceptsAccountChanges, prompt.take(request),
+            let switching = AccountActions(lifecycle: lifecycle, accounts: accounts)
+                .switchAccount(to: request.connection.id)
+        else { return nil }
+        reopen.beginSwitch(request.link)
         return Task {
             let switched = await switching.value
-            if switched { reopen(link) }
+            reopen.finishSwitch(switched)
             return switched
         }
     }
@@ -89,28 +164,32 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
     let reopen: LinkReopener
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @Environment(AccountManager.self) private var accounts: AccountManager?
+    @State private var prompt = ServerSwitchPrompt()
     @State private var switchFailed = false
 
     func body(content: Content) -> some View {
         if let lifecycle {
             let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: accounts)
-            let target = router.pendingServerSwitch.flatMap { link in
-                confirmation.connection(for: link).map { (link: link, connection: $0) }
-            }
+            // The request this render shows, so a dismissal can't clear a newer one.
+            let shown = prompt.shown
             content
-                .onChange(of: router.pendingServerSwitch, initial: true) { confirmation.dropIfUnknown(router) }
+                .task(id: router.pendingServerSwitch) {
+                    if let target = await confirmation.review(router) {
+                        prompt.present(target.link, for: target.connection)
+                    }
+                }
                 .confirmationDialog(
                     Text(verbatim: L10n.string("HeaderOpenLinkOnAnotherServer")),
                     isPresented: Binding {
-                        target != nil
+                        shown != nil
                     } set: {
-                        if !$0 { confirmation.cancel(router) }
+                        if !$0, let shown { prompt.dismiss(shown) }
                     },
                     titleVisibility: .visible,
-                    presenting: target
-                ) { target in
+                    presenting: shown
+                ) { request in
                     Button {
-                        let switching = confirmation.confirm(target.link, in: router, reopen: reopen)
+                        let switching = confirmation.confirm(request, prompt: &prompt, reopen: reopen)
                         Task {
                             if let switching, await !switching.value { switchFailed = true }
                         }
@@ -119,14 +198,14 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
                     }
                     .disabled(!lifecycle.acceptsAccountChanges)
                     Button(role: .cancel) {
-                        confirmation.cancel(router)
+                        prompt.dismiss(request)
                     } label: {
                         Text(verbatim: L10n.string("ButtonCancel"))
                     }
-                } message: { target in
+                } message: { request in
                     Text(
                         verbatim: L10n.string(
-                            "MessageSwitchServerForLink", target.connection.username, target.connection.address))
+                            "MessageSwitchServerForLink", request.connection.username, request.connection.address))
                 }
                 .switchServerFailedAlert(isPresented: $switchFailed)
         } else {

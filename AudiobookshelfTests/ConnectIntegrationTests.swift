@@ -28,6 +28,11 @@ final class ConnectTestKeychain: KeychainStoring {
     func delete(_ item: KeychainItem) throws(KeychainError) {
         items.withLock { $0[item] = nil }
     }
+
+    /// Deletes a connection's saved session and custom headers, as an expiry deletes its session.
+    func deleteItems(of connectionID: UUID) {
+        items.withLock { $0 = $0.filter { $0.key.account != connectionID.uuidString } }
+    }
 }
 
 /// Answers for `*.connect-ui.test` hosts. Host prefixes change some answers: `offline-` refuses

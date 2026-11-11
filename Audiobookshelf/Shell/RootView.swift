@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The root of every window scene: shows what the session lifecycle's gate says (ADR 0004).
 ///
-/// Links reach the scene here, from `onOpenURL` and Handoff. A link waits in ``pendingLink``,
+/// Links reach the scene here, from `onOpenURL` and Handoff. A link waits in ``links``,
 /// tagged with ``SessionLifecycle/linkEpoch``, until a signed-in host can open it, so a cold launch
 /// from a link, or a link that arrives while the session restores, isn't lost. Only a ready
 /// session's shell gets the binding: during an account switch the outgoing shell has none, so the
@@ -22,11 +22,9 @@ struct RootView: View {
     let accounts: AccountManager?
 
     @Environment(\.scenePhase) private var scenePhase
-    @State private var pendingLink: PendingLink?
-    /// How many links have arrived, so a link reopened after a switch can't replace a newer one.
-    @State private var receivedLinks = 0
-    /// Set when a switch ends signed out; the old shell, which would have said so, is gone.
-    @State private var switchSignedOut = false
+    @State private var links = SceneLinks()
+    /// Why a switch ended signed out; the old shell, which would have said so, is gone.
+    @State private var switchSignedOutMessage: String?
 
     var body: some View {
         content
@@ -34,10 +32,18 @@ struct RootView: View {
             .environment(accounts)
             .environment(\.serverID, SceneContent(lifecycle.gate).serverID)
             .task { await lifecycle.start() }
-            .onChange(of: lifecycle.gate) { old, new in
-                if old.signsOutSwitch(to: new) { switchSignedOut = true }
+            // A count, not the gate: SwiftUI can coalesce the switch's gates.
+            .onChange(of: lifecycle.signedOutSwitches) {
+                switchSignedOutMessage = accounts?.signedOutSwitchMessage ?? L10n.string("MessageSwitchServerSignedOut")
             }
-            .alert(Text(verbatim: L10n.string("MessageSwitchServerSignedOut")), isPresented: $switchSignedOut) {
+            .alert(
+                Text(verbatim: switchSignedOutMessage ?? ""),
+                isPresented: Binding {
+                    switchSignedOutMessage != nil
+                } set: {
+                    if !$0 { switchSignedOutMessage = nil }
+                }
+            ) {
                 Button(role: .cancel) {
                 } label: {
                     Text(verbatim: L10n.string("ButtonOk"))
@@ -47,9 +53,7 @@ struct RootView: View {
                 Task { await lifecycle.handle(scenePhase: SessionScenePhase(phase)) }
             }
             // Only a stale link goes: one that arrived after the bump carries the new epoch.
-            .onChange(of: lifecycle.linkEpoch) { _, epoch in
-                if pendingLink?.link(atEpoch: epoch) == nil { pendingLink = nil }
-            }
+            .onChange(of: lifecycle.linkEpoch) { _, epoch in links.dropStale(atEpoch: epoch) }
             .onOpenURL { url in
                 if let link = DeepLink(url: url) { receive(link) }
             }
@@ -61,19 +65,18 @@ struct RootView: View {
             .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
     }
 
-    /// One link waits at a time: the last one received wins. A link reopened after a confirmed
-    /// server switch counts as received when it was confirmed (``LinkReopener``).
+    /// One link waits at a time: the last one received wins, including over a confirmed server
+    /// switch's link (``SceneLinks``).
     private func receive(_ link: DeepLink) {
-        receivedLinks += 1
-        pendingLink = PendingLink(link, arrivingAt: lifecycle.gate, epoch: lifecycle.linkEpoch)
+        links.receive(link, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
     }
 
     /// Checked when the host reads it, not only when the epoch changes: SwiftUI orders a new
     /// host's `onAppear` and this view's `onChange` arbitrarily.
     private var linkBinding: Binding<DeepLink?> {
         Binding(
-            get: { pendingLink?.link(atEpoch: lifecycle.linkEpoch) },
-            set: { if $0 == nil { pendingLink = nil } }
+            get: { links.link(atEpoch: lifecycle.linkEpoch) },
+            set: { if $0 == nil { links.clearPending() } }
         )
     }
 
@@ -91,11 +94,15 @@ struct RootView: View {
             // A switch keeps the old shell on screen until the next session has started, so a
             // sign-in presented from it isn't torn down. It is the same case as a ready session,
             // so the shell, its router and its scene storage survive until the identity changes.
-            // A confirmed switch to another server reopens its link here, after the switch, so
-            // the link carries the new account's epoch and reaches the new host.
+            // A confirmed switch to another server hands its link here, to open after the
+            // switch, so the link carries the new account's epoch and reaches the new host.
             SceneRouterHost(
                 identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil),
-                reopen: LinkReopener(receivedLinks: { receivedLinks }, receive: { receive($0) })
+                reopen: LinkReopener(
+                    beginSwitch: { links.beginSwitch(with: $0) },
+                    finishSwitch: {
+                        links.finishSwitch(succeeded: $0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
+                    })
             )
             .id(identity)
         case .storeUnavailable:

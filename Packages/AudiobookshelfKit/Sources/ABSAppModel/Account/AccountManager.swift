@@ -496,6 +496,18 @@ public final class AccountManager {
         try await credentials(for: id).load().customHeaders
     }
 
+    /// Whether ``switch(to:)`` has a saved session to use for a connection: it isn't signed out
+    /// and its tokens are saved. An expiry can delete the tokens without setting `signedOutAt`.
+    /// A Keychain that can't be read counts as a session, so the switch says why it failed.
+    public func hasSession(_ id: UUID) async -> Bool {
+        guard connections.contains(where: { $0.id == id && $0.signedOutAt == nil }) else { return false }
+        do {
+            return try await credentials(for: id).load().session != nil
+        } catch {
+            return true
+        }
+    }
+
     // MARK: - Private
 
     private func begin() -> Int {

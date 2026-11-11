@@ -80,6 +80,8 @@ struct ServersView: View {
     @State private var switchingTo: UUID?
     @State private var switchFailed = false
     @State private var isAddingServer = false
+    /// Whether each connection has a saved session to switch to (``AccountManager/hasSession(_:)``).
+    @State private var hasSession: [UUID: Bool] = [:]
 
     var body: some View {
         Form {
@@ -92,7 +94,7 @@ struct ServersView: View {
                         row(server, isActive: isActive)
                     }
                     .disabled(
-                        isActive || switchingTo != nil || server.signedOutAt != nil
+                        isActive || switchingTo != nil || hasSession[server.id] != true
                             || lifecycle?.acceptsAccountChanges != true
                     )
                     .accessibilityAddTraits(isActive ? .isSelected : [])
@@ -114,6 +116,12 @@ struct ServersView: View {
         .formStyle(.grouped)
         .navigationTitle(Text(verbatim: L10n.string("HeaderServers")))
         .switchServerFailedAlert(isPresented: $switchFailed)
+        .task(id: accounts?.connections) {
+            guard let accounts else { return }
+            var sessions: [UUID: Bool] = [:]
+            for server in accounts.connections { sessions[server.id] = await accounts.hasSession(server.id) }
+            hasSession = sessions
+        }
         .sheet(isPresented: $isAddingServer) {
             if let accounts, let lifecycle {
                 // Signing in replaces the shell, and this sheet with it.
@@ -127,7 +135,7 @@ struct ServersView: View {
     private func switchServer(to id: UUID) {
         // Two quick taps on different rows must not queue two switches.
         guard switchingTo == nil, let lifecycle,
-            let task = AccountActions(lifecycle: lifecycle).switchAccount(to: id)
+            let task = AccountActions(lifecycle: lifecycle, accounts: accounts).switchAccount(to: id)
         else { return }
         switchingTo = id
         // On success the shell is replaced; on failure this screen stays, so let it retry.
@@ -155,7 +163,7 @@ struct ServersView: View {
             } else if isActive {
                 Image(systemName: "checkmark")
                     .foregroundStyle(.tint)
-            } else if server.signedOutAt != nil {
+            } else if hasSession[server.id] == false {
                 Text(verbatim: L10n.string("LabelLoggedOut"))
                     .font(.footnote)
                     .foregroundStyle(.secondary)

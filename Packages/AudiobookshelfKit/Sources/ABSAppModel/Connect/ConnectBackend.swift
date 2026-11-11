@@ -118,11 +118,12 @@ struct AccountConnectBackend: ConnectBackend {
     }
 
     private func changingAccount(_ body: @MainActor () async throws -> Void) async throws {
-        if let lifecycle {
-            try await lifecycle.performAccountChange(body)
-        } else {
-            try await body()
-        }
+        guard let lifecycle else { return try await body() }
+        // Chosen from the account on screen, as the server list's actions are: refused unless that
+        // session is ready, and again at its turn if another change (say, another window's switch)
+        // left it first. The sheet goes with the shell then, so there's nothing to report.
+        guard let identity = lifecycle.gate.identity, try await lifecycle.performAccountChange(from: identity, body)
+        else { throw CancellationError() }
     }
 
     private static func validated(_ server: ConnectServer) throws -> ValidatedServer {

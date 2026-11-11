@@ -72,6 +72,12 @@ public final class SessionLifecycle {
     /// is dropped as well; a mounted host normally takes a link at once, so this is rare.
     public private(set) var linkEpoch: UInt64 = 0
 
+    /// How many ``switchAccount(to:from:)`` calls ended signed out (``AuthGate/connect``): the
+    /// server rejected the saved session or its version. The shell that chose the switch is gone
+    /// by then, so the root watches this to say why; a count, not a gate change, so a view that
+    /// never rendered the switch still sees it.
+    public private(set) var signedOutSwitches = 0
+
     @ObservationIgnored private let source: any AccountSessionSource
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let flushTimeout: Duration
@@ -248,6 +254,7 @@ public final class SessionLifecycle {
                 result = .failure(error)
             }
             await self.reconcile()
+            if self.gate == .connect { self.signedOutSwitches += 1 }
             return result
         }
         try result.get()
@@ -290,10 +297,24 @@ public final class SessionLifecycle {
     /// presentation anchor) outside the gated content, or keep the current shell on screen
     /// while the gate is ``AuthGate/switching(from:)``; otherwise the sign-in is torn down
     /// with the shell.
-    public func performAccountChange(_ body: @MainActor () async throws -> Void) async rethrows {
-        if rejectReentrant("performAccountChange(_:)") { return }
-        accountChanges += 1
-        await serialized { await self.endForAccountChange() }
+    /// - Parameter identity: The account the change was chosen from, when it comes from that
+    ///   account's screen (adding a server while signed in). When the change's turn comes, it
+    ///   does nothing unless that account's session is still running, so a sign-in submitted
+    ///   while another window's switch was queued can't overtake it.
+    /// - Returns: Whether `body` ran.
+    @discardableResult
+    public func performAccountChange(
+        from identity: SessionIdentity? = nil, _ body: @MainActor () async throws -> Void
+    ) async rethrows -> Bool {
+        if rejectReentrant("performAccountChange(_:)") { return false }
+        let proceeds = await serialized { () -> Bool in
+            if identity != nil, await !self.isStillRunning(identity, strictly: true) { return false }
+            // Counted at its turn, so a change refused here never holds up a queued switch.
+            self.accountChanges += 1
+            await self.endForAccountChange()
+            return true
+        }
+        guard proceeds else { return false }
         do {
             try await body()
         } catch {
@@ -301,6 +322,7 @@ public final class SessionLifecycle {
             throw error
         }
         await finishAccountChange()
+        return true
     }
 
     /// Flushes the running session when a scene goes to the background, for at most the flush
