@@ -97,7 +97,7 @@ public final class ProgressSyncer {
     var afterProgressSendPreparation: (@MainActor (ProgressPatch) async -> Void)?
     /// Test seam before the active refresh's throwing provenance lookup.
     var beforeActiveProgressCapture: (@MainActor () async -> Void)?
-    /// Observes admission without suspending between ownership validation and store submission.
+    /// Test seam: observes admission without suspending between ownership validation and store submission.
     var activeProgressIntakeSubmitted: (@MainActor () -> Void)?
     private var pendingPositions: [MediaKey: Position] = [:]
     private var positionRevision: UInt64 = 0
@@ -583,7 +583,7 @@ public final class ProgressSyncer {
 
     /// Admission belongs to this loaded session, not merely its media key.
     private func ownsActiveRefresh(_ session: CurrentSession) -> Bool {
-        !isDetached && !isTransportQuiesced && pendingPositions.isEmpty
+        !isDetached && !isTransportQuiesced && pendingPositions.isEmpty && pendingSettlements.isEmpty
             && current?.ownership == session.ownership && current?.hasLoaded == true
     }
 
