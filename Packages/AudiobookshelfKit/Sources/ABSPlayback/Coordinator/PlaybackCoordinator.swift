@@ -368,7 +368,15 @@ public final class PlaybackCoordinator {
         unloadedDuration = source.timeline.duration
         emit(.sessionStarted(sessionID: session.id, key: key))
 
-        let local = try? await progressStore.progress(for: key)
+        // Keep the original selection inputs: a newly cached server value is not local intent.
+        let local: LocalMediaProgressDTO?
+        var localReadSucceeded = false
+        do {
+            local = try await progressStore.progress(for: key)
+            localReadSucceeded = true
+        } catch {
+            local = nil
+        }
         let server = started.serverProgress
         guard current == generation else { return }
         // On equal dates the first candidate wins, so the server's goes first: an unsent edit beats
@@ -448,6 +456,14 @@ public final class PlaybackCoordinator {
             guard current == generation else { return }
             tearDown(reason: .loadFailed)
             return fail(PlaybackCoordinatorError(engineError: error), generation: current)
+        }
+        guard current == generation else { return }
+        // Admit only after a successful load. Invalidation prevents a new submission, not an
+        // already submitted actor mutation; the store independently checks atomic provenance.
+        if !Task.isCancelled, localReadSucceeded, let capture = started.progressCapture,
+            case .success(let progress?) = server
+        {
+            _ = try? await progressStore.applyStartProgress(progress, captured: capture)
         }
         guard current == generation else { return }
         phase = .loaded
@@ -992,12 +1008,17 @@ public final class PlaybackCoordinator {
         await waitForCloses()
         guard self.generation == generation else { return nil }
         let sessions = self.sessions
+        let progressStore = self.progressStore
+        let key = MediaKey(
+            serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
         let task = Task { @MainActor in
             try Task.checkCancellation()
-            // Read only, but after the closes: a restart must see the previous final report.
+            let capture = try? await progressStore.captureStartProgress(for: key)
+            try Task.checkCancellation()
+            // After the closes: a restart must see the previous final report.
             async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
             let session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
-            return StartedSession(session: session, serverProgress: await serverProgress)
+            return StartedSession(session: session, serverProgress: await serverProgress, progressCapture: capture)
         }
         startTask = task
         defer { startTask = nil }
@@ -1145,6 +1166,7 @@ extension PlaybackCoordinator: SleepTimerPlaybackControl {
 private struct StartedSession {
     let session: PlaybackSession
     let serverProgress: Result<MediaProgress?, any Error>
+    let progressCapture: PlaybackStartProgressCapture?
 }
 
 /// Admits one session start at a time, in arrival order, with no timeout.

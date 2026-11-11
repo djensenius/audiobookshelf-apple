@@ -33,6 +33,26 @@ public struct ProgressGeneration: Sendable, Hashable, Comparable {
     public static func < (lhs: ProgressGeneration, rhs: ProgressGeneration) -> Bool { lhs.value < rhs.value }
 }
 
+/// One start's pre-GET provenance. Retain only for the lifetime of that start.
+/// The issuing store alone can consume it; deletion invalidates it even if the key becomes
+/// absent again. No persistent tombstone or per-key lifetime history is needed.
+public final class PlaybackStartProgressCapture: Sendable {
+    fileprivate let id = UUID()
+    fileprivate let key: MediaKey
+    fileprivate let generation: ProgressGeneration
+    fileprivate let row: PersistentIdentifier?
+
+    fileprivate init(key: MediaKey, generation: ProgressGeneration, row: PersistentIdentifier?) {
+        self.key = key
+        self.generation = generation
+        self.row = row
+    }
+}
+
+private struct WeakStartProgressCapture {
+    weak var value: PlaybackStartProgressCapture?
+}
+
 /// A progress PATCH to send: one group (`values.groups`), with its values when it was taken.
 public struct ProgressPatch: Sendable, Equatable {
     public var key: MediaKey
@@ -106,6 +126,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     // In memory only: no fetch or PATCH outlives the process.
     private var generation: UInt64 = 0
     private var rowGenerations: [String: UInt64] = [:]
+    /// Weak registrations are swept on every capture; storage is bounded by overlapping starts,
+    /// not every media key ever seen. Abandoned/failed starts need no asynchronous cleanup task.
+    private var startCaptures: [UUID: WeakStartProgressCapture] = [:]
     /// The generation after each row last merged server values: a fetch captured since was read
     /// after the server held them.
     private var mergedAt: [String: UInt64] = [:]
@@ -140,6 +163,58 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// creates this identity; edits, failed/obsolete settlements and duplicate outcomes do not.
     public func captureProgressFetch(for key: MediaKey) -> (generation: ProgressGeneration, acknowledgement: UUID?) {
         (captureGeneration(), awaitingFetch[key.rawValue]?.acknowledgement)
+    }
+
+    /// Capture before the start's existing GET. A failed lookup is not evidence of absence.
+    public func captureStartProgress(for key: MediaKey) throws -> PlaybackStartProgressCapture {
+        startCaptures = startCaptures.filter { $0.value.value != nil }
+        let row = try fetchRow(key)
+        let capture = PlaybackStartProgressCapture(
+            key: key, generation: captureGeneration(), row: row?.persistentModelID)
+        startCaptures[capture.id] = WeakStartProgressCapture(value: capture)
+        return capture
+    }
+
+    /// Narrow, one-shot canonical start intake. Validation, provenance and mutation are atomic
+    /// on this actor. Ordinary server intake still ignores unknown rows.
+    @discardableResult
+    public func applyStartProgress(_ progress: MediaProgress, captured: PlaybackStartProgressCapture) throws -> Bool {
+        guard startCaptures[captured.id]?.value === captured else { return false }
+        defer { startCaptures[captured.id] = nil }
+        let key = captured.key
+        guard progress.libraryItemId == key.libraryItemId,
+            (progress.episodeId ?? "") == (key.episodeId ?? ""),
+            let lastUpdate = progress.lastUpdate,
+            !hasChanged(key, since: captured.generation)
+        else { return false }
+        let row = try fetchRow(key)
+        guard row?.persistentModelID == captured.row else { return false }
+        let server = ProgressBaseline(
+            currentTime: progress.currentTime, progress: progress.progress, duration: progress.duration,
+            isFinished: progress.isFinished,
+            finishedAt: progress.finishedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
+            ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
+            lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
+        if row != nil {
+            return try applyServerProgress([key: server], capturedAt: captured.generation, source: .fetch).contains(key)
+        }
+        try commit {
+            let row = LocalMediaProgress(
+                key: key.rawValue, serverConnectionID: key.serverConnectionID,
+                libraryItemId: key.libraryItemId, episodeId: key.episodeId,
+                startedAt: progress.startedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
+                lastUpdate: server.lastUpdate)
+            modelContext.insert(row)
+            var state = ProgressSyncState(seed: server)
+            // An issued report can outlive a deletion. Preserve its evidence, not a local edit.
+            for owned in sessionAudioSends.values where owned.key == key {
+                state.recordSessionAudio(owned.values)
+            }
+            state.write(to: row)
+        }
+        generation += 1
+        mergedAt[key.rawValue] = generation
+        return true
     }
 
     /// Tests an authoritative absent lookup without synthesizing a baseline or confirming a
@@ -463,6 +538,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             return true
         }
         if deleted {
+            invalidateStartCaptures(for: key.rawValue)
             rowGenerations[key.rawValue] = nil
             mergedAt[key.rawValue] = nil
             awaitingFetch[key.rawValue] = nil
@@ -484,6 +560,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             return rows.map(\.key)
         }
         for key in keys {
+            invalidateStartCaptures(for: key)
             awaitingFetch[key] = nil
             mergedAt[key] = nil
             if inFlight[key] == nil { rowGenerations[key] = nil }
@@ -611,6 +688,10 @@ public enum SessionUploadResult: Sendable, Equatable {
     }
 
     // MARK: - Private
+
+    private func invalidateStartCaptures(for raw: String) {
+        startCaptures = startCaptures.filter { $0.value.value.map { $0.key.rawValue != raw } ?? false }
+    }
 
     /// Records a local edit or PATCH settlement: server values captured before it are dropped.
     private func advance(_ key: MediaKey) {

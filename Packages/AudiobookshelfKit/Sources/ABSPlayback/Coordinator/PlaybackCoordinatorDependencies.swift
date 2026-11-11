@@ -76,9 +76,12 @@ extension NetworkPolicy: StreamingPolicyChecking {
     }
 }
 
-/// Reads local progress; ``LocalProgressStore`` conforms.
+/// Reads local progress and admits the existing start GET as a baseline; ``LocalProgressStore`` conforms.
 public protocol LocalProgressReading: Sendable {
     func progress(for key: MediaKey) async throws -> LocalMediaProgressDTO?
+    func captureStartProgress(for key: MediaKey) async throws -> PlaybackStartProgressCapture
+    @discardableResult
+    func applyStartProgress(_ progress: MediaProgress, captured: PlaybackStartProgressCapture) async throws -> Bool
 }
 
 extension LocalProgressStore: LocalProgressReading {}
