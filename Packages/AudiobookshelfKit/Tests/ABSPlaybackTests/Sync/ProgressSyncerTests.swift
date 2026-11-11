@@ -199,6 +199,47 @@ struct ProgressSyncerTests {
         #expect(s.service.reports.map(\.timeListened) == [2, 0])
     }
 
+    @Test(arguments: [false, true])
+    func heldJumpRejectsRawAdvancementAndPreservesThePreStopSample(landBeforeStop: Bool) async throws {
+        let s = try SyncHarness()
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 2)
+        let gate = Gate()
+        defer { gate.open() }
+        s.h.engine.seekGates = [gate]
+        let jump = Task { await s.coordinator.jump(by: 30) }
+        await yieldUntil { s.h.engine.pendingSeekTarget == 32 }
+        #expect(s.coordinator.currentTime == 32)
+        #expect(s.coordinator.confirmedPlaybackTime == nil)
+
+        // Even a moving raw engine clock is not a confirmed sample while the jump is pending.
+        s.h.clock.advance(by: 0.25)
+        s.h.engine.currentTime += 0.25
+        await s.syncer.flush()
+        #expect(s.service.reports.map(\.currentTime) == [32])
+        #expect(s.service.reports.map(\.timeListened) == [2])
+        #expect(s.coordinator.confirmedPlaybackTime == nil)
+
+        if landBeforeStop {
+            gate.open()
+            #expect(await jump.value == 32)
+            await s.settle()
+            s.h.clock.advance(by: 0.25)
+            s.h.engine.currentTime += 0.25  // A real final sample, without a tick.
+            #expect(s.coordinator.confirmedPlaybackTime == 32.25)
+        }
+        s.coordinator.stop()
+        gate.open()
+        #expect(await jump.value == (landBeforeStop ? 32 : nil))
+        await s.coordinator.waitForPendingCloses()
+        await s.settle()
+        let closed = try #require(s.h.service.state.withLock { $0.closeReports["a-1"] })
+        #expect(closed.currentTime == (landBeforeStop ? 32.25 : 32))
+        #expect(closed.timeListened == (landBeforeStop ? 0.25 : 0))
+        #expect(s.service.reports.map(\.timeListened).reduce(0, +) + closed.timeListened == (landBeforeStop ? 2.25 : 2))
+        #expect(s.coordinator.confirmedPlaybackTime == nil)
+    }
+
     @Test func shortStallBetweenTicksIsCreditedInFull() async throws {
         let s = try SyncHarness()
         await s.coordinator.play(itemID: "a")
@@ -232,7 +273,8 @@ struct ProgressSyncerTests {
 
         gate.open()
         await s.settle()
-        #expect(s.service.log == ["sync 1", "sync 1 done", "patch a", "sync 2", "sync 2 done"])
+        #expect(
+            s.service.log == ["sync 1", "sync 1 done", "get a", "patch a", "get a", "sync 2", "sync 2 done", "get a"])
         #expect(
             s.service.reports == [
                 try #require(PlaybackSyncReport(currentTime: 15, timeListened: 15, duration: 3600)),
@@ -380,7 +422,14 @@ struct ProgressSyncerTests {
         #expect(closes["a-1"] == PlaybackSyncReport(currentTime: 20, timeListened: 5, duration: 3600))
         #expect(closes["b-2"] == PlaybackSyncReport(currentTime: 4, timeListened: 4, duration: 3600))
         #expect(s.service.reports.map(\.timeListened) == [15])
-        #expect(try await s.store.pendingSync(for: s.h.connectionID).isEmpty)
+        // Close now unconditionally commits audio positions, even for clean/missing rows.
+        // A close acknowledgement is not a PATCH acknowledgement or full-report durability.
+        let pending = try await s.store.pendingSync(for: s.h.connectionID)
+        #expect(
+            Dictionary(uniqueKeysWithValues: pending.map { ($0.key.libraryItemId, $0.currentTime) }) == [
+                "a": 20, "b": 4,
+            ])
+        #expect(try await s.coordinator.waitForClose().sessions.allSatisfy(\.audioPositionCommitted))
     }
 
     @Test func closeBringsAPendingRowUpToDate() async throws {

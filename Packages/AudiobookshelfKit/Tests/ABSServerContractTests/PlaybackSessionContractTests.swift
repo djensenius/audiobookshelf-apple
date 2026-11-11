@@ -37,6 +37,68 @@ private func localSession(
 
 @Suite("Server contract: playback sessions", .requiresServer, .tags(.serverContract))
 struct PlaybackSessionContractTests {
+    @Test("the sync that creates progress near the end uses defaults; a subsequent sync auto-finishes")
+    func syncCreationDefaultsAndAutoFinish() async throws {
+        let seed = try await ContractSeed.shared.data()
+        try await ContractServer.require().withUser { session in
+            let started = try await session.play(seed.taleID)
+            let nearEnd = started.duration - 1
+            try await session.sync(started, to: nearEnd, listened: 1)
+            let created = try #require(try await session.client.mediaProgress(itemID: seed.taleID))
+            #expect(created.currentTime == nearEnd && !created.isFinished && created.finishedAt == nil)
+            #expect(created.ebookLocation == nil && created.ebookProgress == 0)
+            #expect(try #require(created.lastUpdate) > 0)
+            try await session.sync(started, to: nearEnd, listened: 0)
+            let updated = try #require(try await session.client.mediaProgress(itemID: seed.taleID))
+            #expect(updated.currentTime == nearEnd && updated.isFinished && updated.progress == 1)
+            #expect(updated.finishedAt != nil)
+        }
+    }
+
+    @Test("online sync stores dated audio and has completion side effects without changing ebook intent")
+    func syncCanonicalAudioAndCompletion() async throws {
+        let seed = try await ContractSeed.shared.data()
+        try await ContractServer.require().withUser { session in
+            let started = try await session.play(seed.taleID)
+            #expect(try await session.client.mediaProgress(itemID: seed.taleID) == nil)
+            try await session.sync(started, to: 10.25, listened: 1)
+            let first = try #require(try await session.client.mediaProgress(itemID: seed.taleID))
+            let firstUpdate = try #require(first.lastUpdate)
+            #expect(firstUpdate > 0)
+            #expect(first.currentTime == 10.25 && approximately(first.duration, started.duration))
+            #expect(approximately(first.progress, 10.25 / started.duration, tolerance: 0.001))
+            #expect(!first.isFinished && first.finishedAt == nil)
+
+            try await session.patch(seed.taleID, .finished(true, at: nil))
+            try await session.patch(seed.taleID, .ebook(location: "retained-location", progress: 0.4))
+            // Same-position sync does not automatically unfinish. Moving away from the finish
+            // threshold does, through the same applyProgressUpdate path as an audio PATCH.
+            try await session.sync(started, to: 10.25, listened: 0)
+            #expect(try await session.client.mediaProgress(itemID: seed.taleID)?.isFinished == true)
+            try await session.sync(started, to: 15.5, listened: 1)
+            let moved = try #require(try await session.client.mediaProgress(itemID: seed.taleID))
+            #expect(moved.currentTime == 15.5 && approximately(moved.duration, started.duration))
+            #expect(!moved.isFinished && moved.finishedAt == nil)
+            #expect(moved.ebookLocation == "retained-location" && moved.ebookProgress == 0.4)
+            #expect(try #require(moved.lastUpdate) >= firstUpdate)
+
+            let nearEnd = started.duration - 1
+            try await session.sync(started, to: nearEnd, listened: 1)
+            let finished = try #require(try await session.client.mediaProgress(itemID: seed.taleID))
+            #expect(finished.currentTime == nearEnd && approximately(finished.duration, started.duration))
+            #expect(finished.isFinished && finished.finishedAt != nil && finished.progress == 1)
+            #expect(finished.ebookLocation == "retained-location" && finished.ebookProgress == 0.4)
+            #expect(try #require(finished.lastUpdate) >= #require(moved.lastUpdate))
+            let version = try #require(session.server.status.serverVersion)
+            print(
+                "CONTRACT-SYNC version=\(version) "
+                    + "created=\(first.currentTime)/\(firstUpdate) "
+                    + "moved=\(moved.currentTime)/\(String(describing: moved.lastUpdate)) "
+                    + "finished=\(finished.currentTime)/\(String(describing: finished.lastUpdate)) "
+                    + "isFinished=\(finished.isFinished) ebook=\(String(describing: finished.ebookProgress))")
+        }
+    }
+
     @Test("a session starts with the item's tracks and chapters, then syncs and closes")
     func startSyncClose() async throws {
         let seed = try await ContractSeed.shared.data()
@@ -127,10 +189,91 @@ struct PlaybackSessionContractTests {
             #expect(try await session.open(watch).id == watch.id)
             // What was synced before the takeover is kept.
             #expect(try await session.client.mediaProgress(itemID: seed.taleID)?.currentTime == 10)
+            let page = try await session.client.send(SessionEndpoints.listeningSessions(itemID: seed.taleID))
+            let stored = try #require(page.sessions.first { $0.id == first.id })
+            #expect(stored.timeListening == 3 && stored.currentTime == 10)
+            #expect(page.total == 1 && page.numPages == 1 && page.page == 0 && page.itemsPerPage == 10)
+            print("CONTRACT-TAKEOVER version=\(session.server.status.serverVersion ?? "?") stored=3/10")
 
             let third = try await session.play(seed.singleFileID, device: phone)
             await expectNotFound { try await session.open(second) }
             #expect(try await session.open(third).id == third.id)
+        }
+    }
+
+    @Test("stored sessions default to ten per page; first-page absence is not nonapplication")
+    func storedSessionPagination() async throws {
+        let seed = try await ContractSeed.shared.data()
+        try await ContractServer.require().withUser { session in
+            let device = contractDevice()
+            var ids: [String] = []
+            for index in 0..<12 {
+                let started = try await session.play(seed.taleID, device: device)
+                ids.append(started.id)
+                try await session.sync(started, to: Double(index + 1), listened: 2)
+                _ = try await session.client.send(SessionEndpoints.close(sessionID: started.id))
+            }
+            // Omit query parameters to test the server default, not just the endpoint's default.
+            let first = try await session.client.send(
+                Endpoint<ListeningSessionsPage>(.get, "/api/me/item/listening-sessions/\(seed.taleID)"))
+            let later = try await session.client.send(
+                SessionEndpoints.listeningSessions(itemID: seed.taleID, page: 1))
+            #expect(first.total == 12 && first.numPages == 2 && first.page == 0 && first.itemsPerPage == 10)
+            #expect(first.sessions.count == 10)
+            #expect(later.total == 12 && later.numPages == 2 && later.page == 1 && later.itemsPerPage == 10)
+            #expect(later.sessions.count == 2)
+            #expect(!first.sessions.contains { $0.id == ids[0] })
+            let oldest = try #require(later.sessions.first { $0.id == ids[0] })
+            #expect(oldest.timeListening == 2 && oldest.currentTime == 1)
+            #expect(Set((first.sessions + later.sessions).map(\.id)) == Set(ids))
+            #expect((first.sessions + later.sessions).allSatisfy { $0.timeListening == 2 })
+            #expect(try await session.progress(seed.taleID).currentTime == 12)
+            print(
+                "CONTRACT-PAGES version=\(session.server.status.serverVersion ?? "?") total=12 pages=2 counts=10/2 oldest=2/1"
+            )
+        }
+    }
+
+    @Test("zero-listening sync and close move progress without producing a stored record")
+    func zeroListeningVisibility() async throws {
+        let seed = try await ContractSeed.shared.data()
+        try await ContractServer.require().withUser { session in
+            let device = contractDevice()
+            let first = try await session.play(seed.taleID, device: device)
+            try await session.sync(first, to: 8, listened: 0)
+            #expect(try await session.open(first).timeListening == 0)
+            #expect(try await session.progress(seed.taleID).currentTime == 8)
+            let second = try await session.play(seed.singleFileID, device: device)
+            await expectNotFound { try await session.open(first) }
+            let report = try session.report(9, listened: 0, duration: second.duration)
+            _ = try await session.client.send(SessionEndpoints.close(sessionID: second.id, report: report))
+            await expectNotFound { try await session.open(second) }
+            #expect(try await session.progress(seed.singleFileID).currentTime == 9)
+            for item in [seed.taleID, seed.singleFileID] {
+                let page = try await session.client.send(SessionEndpoints.listeningSessions(itemID: item))
+                #expect(page.sessions.isEmpty && page.total == 0 && page.numPages == 0)
+                #expect(page.page == 0 && page.itemsPerPage == 10)
+            }
+            print(
+                "CONTRACT-ZERO version=\(session.server.status.serverVersion ?? "?") takeover=0 close=0 positions=8/9")
+        }
+    }
+
+    @Test("sequential stale sync and final close can overwrite a newer canonical position")
+    func staleReportAndClosePosition() async throws {
+        let seed = try await ContractSeed.shared.data()
+        try await ContractServer.require().withUser { session in
+            let started = try await session.play(seed.taleID)
+            try await session.sync(started, to: 20, listened: 2)
+            try await session.sync(started, to: 5, listened: 3)
+            #expect(try await session.progress(seed.taleID).currentTime == 5)
+            let report = try session.report(4, listened: 1, duration: started.duration)
+            _ = try await session.client.send(SessionEndpoints.close(sessionID: started.id, report: report))
+            #expect(try await session.progress(seed.taleID).currentTime == 4)
+            let page = try await session.client.send(SessionEndpoints.listeningSessions(itemID: seed.taleID))
+            let stored = try #require(page.sessions.first { $0.id == started.id })
+            #expect(stored.timeListening == 6 && stored.currentTime == 4)
+            print("CONTRACT-STALE version=\(session.server.status.serverVersion ?? "?") positions=20/5/4 stored=6/4")
         }
     }
 

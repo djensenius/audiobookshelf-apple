@@ -1,8 +1,8 @@
 import Foundation
 
-/// The playback a ``SleepTimer`` controls. ``AudioEngineSleepTimerControl`` adapts an engine directly; the playback
-/// coordinator (#52) should conform itself instead, so that pauses and resumes go through its interruption
-/// handling and Now Playing updates.
+/// The playback a ``SleepTimer`` controls. ``PlaybackCoordinator`` conforms so pauses and resumes go through its
+/// interruption handling, events and Now Playing updates. ``AudioEngineSleepTimerControl`` is a direct-engine
+/// adapter that bypasses the coordinator.
 @MainActor
 public protocol SleepTimerPlaybackControl: AnyObject {
     /// Whether audio is playing; an end-of-chapter timer only expires in a paused state at the end of the media.

@@ -31,7 +31,7 @@ struct CoordinatorHarness {
 
     init(
         lastPlayed: InMemoryLastPlayedStore = InMemoryLastPlayedStore(), progressStore: LocalProgressStore? = nil,
-        connectionID: UUID = UUID()
+        connectionID: UUID = UUID(), progressReader: (any LocalProgressReading)? = nil
     ) throws {
         self.connectionID = connectionID
         service = StubSessionService(serverConnectionID: connectionID)
@@ -41,7 +41,8 @@ struct CoordinatorHarness {
         let clock = clock
         let sleep = sleep
         coordinator = PlaybackCoordinator(
-            engine: engine, sessions: service, progressStore: self.progressStore, settings: settings, policy: policy,
+            engine: engine, sessions: service, progressStore: progressReader ?? self.progressStore,
+            settings: settings, policy: policy,
             lastPlayedStore: lastPlayed, now: { clock.now }, sleep: { await sleep.sleep($0) })
         let events = events
         _ = coordinator.addObserver { events.events.append($0) }
@@ -605,6 +606,7 @@ struct PlaybackCoordinatorTests {
         coordinator.finalCloseReport = {
             closing.append($0)
             return PlaybackSyncReport(currentTime: $0.currentTime, timeListened: 0, duration: $0.duration)
+                .map { PlaybackCloseHandoff(report: $0, position: PlaybackCloseResult()) }
         }
         await coordinator.play(itemID: "A", startTime: 42)
         coordinator.stop()

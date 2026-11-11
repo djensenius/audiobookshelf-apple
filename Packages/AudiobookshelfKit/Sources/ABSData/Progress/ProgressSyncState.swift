@@ -81,7 +81,10 @@ extension ProgressSend {
     }
 
     mutating func remove(_ group: ProgressGroups) {
-        if group.contains(.audio) { audio = nil }
+        if group.contains(.audio) {
+            audio = nil
+            sessionAudio = nil
+        }
         if group.contains(.finished) { finished = nil }
         if group.contains(.ebook) { ebook = nil }
     }
@@ -146,6 +149,9 @@ struct ProgressSyncState: Sendable, Equatable {
 
     /// Applies a local change: marks each changed group dirty and sets its edit time to `now`
     /// (or just after the group's previous edit time, if that isn't earlier).
+    /// Audio-only edits preserve the independent completion group, even when its edit is older:
+    /// moving the position does not imply a local unfinish. Server PATCH side effects are handled
+    /// by send/merge reconciliation (ADR 0003), not inferred here.
     mutating func apply(_ edit: ProgressEdit, now: Date) {
         if let audio = edit.audio {
             currentTime = audio.currentTime
@@ -201,7 +207,8 @@ struct ProgressSyncState: Sendable, Equatable {
         let chain = [ProgressGroups.audio, .finished].first { dirty.contains($0) }
         guard dirty.contains(.ebook) else { return chain }
         guard let chain else { return .ebook }
-        if !ebookSentLast, serverBaseline != nil, let last = unacknowledgedSends.last,
+        if !ebookSentLast, serverBaseline != nil,
+            let last = unacknowledgedSends.last(where: { $0.sessionAudio == nil }),
             !last.groups.contains(.ebook)
         {
             return .ebook
@@ -228,6 +235,23 @@ struct ProgressSyncState: Sendable, Equatable {
         }
         unacknowledgedSends.append(send)
         return send
+    }
+
+    /// Records only the actual report's audio. It neither selects dirty groups nor acknowledges
+    /// them. Attempts have distinct identities even when their audio values and edit are equal.
+    mutating func recordSessionAudio(_ send: ProgressSend) {
+        guard send.sessionAudio != nil, send.groups == .audio else { return }
+        unacknowledgedSends.removeAll { $0.sessionAudio?.attemptID == send.sessionAudio?.attemptID }
+        while unacknowledgedSends.count >= ProgressSend.historyLimit {
+            let dropped = unacknowledgedSends.removeFirst().groups
+            truncated.formUnion(dropped)
+            shieldSideEffects(of: dropped)
+        }
+        unacknowledgedSends.append(send)
+    }
+
+    mutating func rejectSessionAudio(_ attemptID: UUID) {
+        unacknowledgedSends.removeAll { $0.sessionAudio?.attemptID == attemptID }
     }
 
     /// The PATCH carrying `send` succeeded: the server now holds the sent values, so they become
@@ -297,6 +321,11 @@ struct ProgressSyncState: Sendable, Equatable {
         shieldSideEffects(of: excluded)
         // An echo of our audio or finished PATCH may carry the server's side effect on the other
         // group, so shield that group before resolving it.
+        if unacknowledgedSends.contains(where: {
+            $0.sessionAudio != nil && Self.matches(server, $0, .audio)
+        }) {
+            shieldSideEffects(of: .audio)
+        }
         for group in ProgressGroups.each where !excluded.contains(group) && dirty.contains(group) {
             if unacknowledgedSends.contains(where: { Self.matches(server, $0, group) }) {
                 shieldSideEffects(of: group)
@@ -328,6 +357,16 @@ struct ProgressSyncState: Sendable, Equatable {
         // one matching a send we hold may be the echo of a dropped send with the same value, the
         // held one never delivered: only an acknowledgement (``acknowledge``) settles the group.
         if truncated.contains(group) { return }
+        // A session report is evidence of a possible own echo, not a PATCH acknowledgement.
+        // Keep it through response delivery and repeated fetch/socket echoes. Only an ordinary
+        // PATCH may clear this evidence/dirty audio; equal values do not identify a local edit.
+        if group == .audio,
+            unacknowledgedSends.contains(where: {
+                $0.sessionAudio != nil && Self.matches(server, $0, .audio)
+            })
+        {
+            return
+        }
         // The echo of one of our PATCHes whose response was lost. Only this group's evidence is
         // settled and pruned (from that entry and every older one); other groups keep theirs.
         if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }),
@@ -361,7 +400,7 @@ struct ProgressSyncState: Sendable, Equatable {
         markClean(group)
         // Our older sends of the group can no longer be the server's value; drop them so they
         // can't match another device's value later.
-        dropEvidence(group)
+        dropEvidence(group, keepingSessionAudio: true)
     }
 
     /// #53: the server applies an audio PATCH by un-finishing or auto-finishing, a finished PATCH
@@ -391,8 +430,9 @@ struct ProgressSyncState: Sendable, Equatable {
     }
 
     /// Removes `groups` from every unacknowledged entry, dropping entries left empty.
-    private mutating func dropEvidence(_ groups: ProgressGroups) {
+    private mutating func dropEvidence(_ groups: ProgressGroups, keepingSessionAudio: Bool = false) {
         for index in unacknowledgedSends.indices {
+            if keepingSessionAudio, unacknowledgedSends[index].sessionAudio != nil { continue }
             unacknowledgedSends[index].remove(groups)
         }
         unacknowledgedSends.removeAll { $0.groups.isEmpty }

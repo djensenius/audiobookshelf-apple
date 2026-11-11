@@ -9,6 +9,262 @@ import Testing
 @MainActor
 struct ProgressSyncDurabilityTests {
     @Test(arguments: [false, true])
+    func sessionEvidenceFailureKeepsKnownUnsentListeningTime(lookupFails: Bool) async throws {
+        let s = try SyncHarness()
+        let preparing = Gate()
+        let preparation = Gate()
+        s.syncer.beforeSessionAudioPreparation = {
+            preparing.open()
+            await preparation.wait()
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await preparing.wait()
+        if lookupFails {
+            await s.store.failNextRowFetch(with: CocoaError(.fileReadUnknown))
+        } else {
+            await s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        }
+        preparation.open()
+        await s.settle()
+        s.syncer.beforeSessionAudioPreparation = nil
+        #expect(s.service.reports.isEmpty && s.service.patches.isEmpty)
+        #expect(try await s.store.progress(for: s.h.key("a"))?.currentTime == 15)
+        #expect(try await s.store.progress(for: s.h.key("a"))?.unacknowledgedSends.isEmpty == true)
+        await s.play(for: 15)
+        #expect(s.service.reports.map(\.timeListened) == [30])
+        #expect(s.service.reports.map(\.currentTime) == [30])
+        s.syncer.detach()
+    }
+
+    @Test func supersededCapturedReportDefersWithoutRelabelingOrConsumingItsDelta() async throws {
+        let s = try SyncHarness()
+        let preparing = Gate()
+        let preparation = Gate()
+        s.syncer.beforeSessionAudioPreparation = {
+            preparing.open()
+            await preparation.wait()
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await preparing.wait()
+        await s.coordinator.seek(to: 100)
+        await s.syncer.waitForPendingWrites()
+        preparation.open()
+        await s.settle()
+        s.syncer.beforeSessionAudioPreparation = nil
+        #expect(s.service.reports.map(\.currentTime) == [100])
+        #expect(s.service.reports.map(\.timeListened) == [15])
+        #expect(s.service.patches.map(\.update) == [SyncHarness.audio(100)])
+        s.syncer.detach()
+    }
+
+    @Test func ticksDuringEvidencePreparationBelongToTheNextReport() async throws {
+        let s = try SyncHarness()
+        let preparing = Gate()
+        let preparation = Gate()
+        s.syncer.beforeSessionAudioPreparation = {
+            preparing.open()
+            await preparation.wait()
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await preparing.wait()
+        await s.play(for: 5, settling: false)
+        preparation.open()
+        await s.settle()
+        s.syncer.beforeSessionAudioPreparation = nil
+        s.coordinator.pause()
+        await s.settle()
+        #expect(s.service.reports.map(\.currentTime) == [15, 20])
+        #expect(s.service.reports.map(\.timeListened) == [15, 5])
+        s.syncer.detach()
+    }
+
+    @Test func retirementDuringEvidencePreparationPreventsTransport() async throws {
+        let s = try SyncHarness()
+        let preparing = Gate()
+        let preparation = Gate()
+        s.syncer.beforeSessionAudioPreparation = {
+            preparing.open()
+            await preparation.wait()
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await preparing.wait()
+        s.syncer.quiesceTransport()
+        preparation.open()
+        await s.settle()
+        s.syncer.beforeSessionAudioPreparation = nil
+        #expect(s.service.reports.isEmpty && s.service.patches.isEmpty)
+        #expect(try await s.store.progress(for: s.h.key("a"))?.unacknowledgedSends.isEmpty == true)
+        #expect(try await s.store.progress(for: s.h.key("a"))?.audioDirty == true)
+        s.syncer.detach()
+    }
+
+    @Test(arguments: [false, true])
+    func retiredScopeStillRetriesOwnedSessionOutcome(transportFails: Bool) async throws {
+        let s = try SyncHarness()
+        let response = Gate()
+        s.service.state.withLock {
+            $0.syncGates = [response]
+            $0.syncErrors = transportFails ? [.network(.cannotConnectToHost)] : []
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await s.service.waitForSyncs(1)
+        await s.coordinator.seek(to: 100)
+        await s.syncer.waitForPendingWrites()
+        s.syncer.quiesceTransport()
+        // The outcome lookup and its queued retry both fail. Neither may issue new transport.
+        await s.store.failNextRowFetch(with: CocoaError(.fileReadUnknown))
+        await s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        response.open()
+        await s.settle()
+        await s.syncer.drainPendingProgress()
+        let row = try #require(try await s.store.progress(for: s.h.key("a")))
+        #expect(row.currentTime == 100 && row.audioDirty)
+        #expect(s.service.reports.map(\.currentTime) == [15] && s.service.patches.isEmpty)
+        #expect(row.unacknowledgedSends.isEmpty == transportFails)
+        if !transportFails {
+            #expect(row.unacknowledgedSends.first?.sessionAudio?.outcome == .succeeded)
+        }
+        s.syncer.detach()
+    }
+
+    @Test(arguments: [false, true])
+    func sessionOutcomeRetryDoesNotResendSuccessfulOrAmbiguousListeningTime(ambiguous: Bool) async throws {
+        let s = try SyncHarness()
+        let response = Gate()
+        s.service.state.withLock {
+            $0.syncGates = [response]
+            $0.syncErrors = ambiguous ? [.timedOut] : []
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await s.service.waitForSyncs(1)
+        await s.store.failNextRowFetch(with: CocoaError(.fileReadUnknown))
+        await s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        response.open()
+        await s.settle()
+        await s.syncer.drainPendingProgress()
+        #expect(s.service.reports.count == 1 && s.service.patches.isEmpty)
+        await s.syncer.drainPendingProgress()
+        #expect(s.service.reports.count == 1)
+        #expect(s.service.patches.map(\.update) == [SyncHarness.audio(15)])
+        await s.play(for: 15)
+        #expect(s.service.reports.map(\.timeListened) == [15, 15])
+        s.syncer.detach()
+    }
+
+    @Test(arguments: [false, true])
+    func heldReportEchoKeepsLatestPositionDurable(afterResponse: Bool) async throws {
+        let s = try SyncHarness()
+        let key = s.h.key("a")
+        let t0 = Date(timeIntervalSince1970: 1_800_000_015)
+        let t1 = t0.addingTimeInterval(1)
+        let t2 = t0.addingTimeInterval(2)
+        let processing = Gate()
+        let processed = Gate()
+        let response = Gate()
+        let patch = Gate()
+        let patchStarted = Gate()
+        s.service.state.withLock {
+            $0.serverSyncs = [
+                .init(
+                    key: key, processedAt: t2, beforeProcessing: processing,
+                    processed: processed, response: response)
+            ]
+            $0.patchGates = [patch]
+            $0.patchStarted = patchStarted
+        }
+
+        // Also runs on thrown requirements/store errors, not just failed nonthrowing expectations.
+        // Quiesce before opening gates so cleanup cannot issue the queued newer report or A's PATCH.
+        func cleanup() async {
+            s.syncer.quiesceTransport()
+            processing.open()
+            response.open()
+            patch.open()
+            await s.settle()
+            s.syncer.detach()
+        }
+
+        do {
+            s.h.clock.advance(by: t0.addingTimeInterval(-15).timeIntervalSince(s.h.clock.now))
+            await s.coordinator.play(itemID: "a")
+            await s.play(for: 15, settling: false)
+            await s.service.waitForSyncs(1)
+            let captured = try #require(try await s.store.progress(for: key))
+            #expect(captured.currentTime == 15 && captured.audioEditedAt == t0 && captured.audioDirty)
+            #expect(s.service.reports.map(\.currentTime) == [15])
+            #expect(s.service.state.withLock { $0.serverProgress[key] } == nil)
+            s.service.state.withLock { $0.log.append("local 15 committed T0") }
+
+            // The real drain sorts by lastUpdate. B must occupy transport before A begins PATCH.
+            try await s.store.recordEdit(
+                ProgressEdit(audio: .init(currentTime: 50, duration: 3600, progress: 50.0 / 3600)),
+                for: s.h.key("b"), now: t0.addingTimeInterval(-1))
+            s.h.clock.advance(by: t1.timeIntervalSince(s.h.clock.now))
+            await s.coordinator.seek(to: 100)
+            s.coordinator.pause()
+            await s.syncer.waitForPendingWrites()
+            let committed = try #require(try await s.store.progress(for: key))
+            #expect(committed.currentTime == 100 && committed.audioEditedAt == t1 && committed.audioDirty)
+            s.service.state.withLock { $0.log.append("local 100 committed T1") }
+
+            s.h.clock.advance(by: t2.timeIntervalSince(s.h.clock.now))
+            processing.open()
+            await processed.wait()
+            if afterResponse {
+                response.open()
+                // This is the automatic drain inside sendSync, not a separately invoked drain.
+                await patchStarted.wait()
+            }
+            #expect(s.service.reports.map(\.currentTime) == [15])
+            #expect(s.service.patches.map(\.itemID) == (afterResponse ? ["b"] : []))
+            #expect(try await s.store.progress(for: key)?.lastSyncAttemptAt == nil)
+
+            // Capture AFTER the committed edit, so the generation guard legitimately accepts GET.
+            let generation = await s.store.captureGeneration()
+            s.service.state.withLock { $0.log.append("capture generation after T1") }
+            let server = try #require(await s.service.mediaProgress(itemID: "a"))
+            let lastUpdate = try #require(server.lastUpdate)
+            #expect(server.currentTime == 15 && lastUpdate == Int(t2.timeIntervalSince1970 * 1000))
+            let baseline = ProgressBaseline(
+                currentTime: server.currentTime, progress: server.progress, duration: server.duration,
+                isFinished: server.isFinished, ebookLocation: server.ebookLocation,
+                ebookProgress: server.ebookProgress,
+                lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
+            let merged = try await s.store.applyServerProgress(
+                [key: baseline], capturedAt: generation, source: .fetch)
+            #expect(merged == [key])
+            let actual = try #require(try await s.store.progress(for: key))
+            s.service.state.withLock { $0.log.append("canonical intake complete") }
+
+            var expected = [
+                "sync 1", "local 15 committed T0", "local 100 committed T1",
+                "sync 1 processed a position=15.0 lastUpdate=1800000017000",
+            ]
+            if afterResponse { expected += ["sync 1 done", "get b", "patch b"] }
+            expected += ["capture generation after T1", "get a", "canonical intake complete"]
+            #expect(s.service.log == expected)
+            print(
+                "SYNC-ECHO afterResponse=\(afterResponse) position=\(actual.currentTime) "
+                    + "audioDirty=\(actual.audioDirty) needsServerSync=\(actual.needsServerSync) "
+                    + "events=\(s.service.log)")
+            #expect(
+                actual.currentTime == 100 && actual.audioDirty && actual.needsServerSync,
+                "An older /sync(15) processed at T2 must not erase the committed 100/T1 audio edit")
+        } catch {
+            await cleanup()
+            throw error
+        }
+        await cleanup()
+        print("SYNC-ECHO afterResponse=\(afterResponse) cleanup quiesced and idle")
+    }
+
+    @Test(arguments: [false, true])
     func heldReportKeepsLatestPositionDurable(fails: Bool) async throws {
         let s = try SyncHarness()
         let gate = Gate()

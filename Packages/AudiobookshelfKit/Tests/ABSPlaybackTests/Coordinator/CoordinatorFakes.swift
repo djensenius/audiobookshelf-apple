@@ -58,7 +58,12 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
 
     private(set) var loads: [(source: AudioEngineSource, time: Double)] = []
     private(set) var seeks: [Double] = []
+    /// Includes interrupted and superseded seeks, so tests can drain gated calls.
+    private(set) var returnedSeekCount = 0
     private(set) var stopCount = 0
+    private(set) var playCount = 0
+    private(set) var volumes: [Float] = []
+    private(set) var volumeAtPause: Float?
     /// Gates for the next loads and seeks, in order; without one they complete immediately.
     var loadGates: [Gate] = []
     var seekGates: [Gate] = []
@@ -74,6 +79,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     /// How many plays are silently refused while a prior engine failure remains sticky.
     var silentlyRefusingPlays = 0
     private var generation = 0
+    private var seekGeneration = 0
 
     func load(_ source: AudioEngineSource, at time: Double) async throws(AudioEngineError) {
         generation += 1
@@ -99,7 +105,9 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         state = isPlaybackRequested ? .playing : .paused
     }
 
+    /// As the real engine does, defers playing (shown as buffering) while a seek is in flight.
     func play() {
+        playCount += 1
         if silentlyRefusingPlays > 0 {
             silentlyRefusingPlays -= 1
             isPlaybackRequested = false
@@ -118,6 +126,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func pause() {
+        volumeAtPause = volume
         isPlaybackRequested = false
         state = .paused
     }
@@ -133,10 +142,16 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func seek(to time: Double) async -> SeekResult {
+        defer { returnedSeekCount += 1 }
+        seekGeneration += 1
+        let request = seekGeneration
+        let current = generation
         seeks.append(time)
         pendingSeekTarget = time
-        if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
         let result = seekResults.isEmpty ? SeekResult.completed : seekResults.removeFirst()
+        if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
+        // A late seek never overwrites a newer seek, load or stop (including the same target).
+        guard current == generation, request == seekGeneration else { return .superseded }
         if result == .completed {
             pendingSeekTarget = nil
             currentTime = time
@@ -166,7 +181,10 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func setRate(_ rate: Float) { defaultRate = rate }
-    func setVolume(_ volume: Float) { self.volume = volume }
+    func setVolume(_ volume: Float) {
+        self.volume = volume
+        volumes.append(volume)
+    }
 }
 
 /// Sessions per item (ids `<item>-<n>`, unique per start), with optional gates on starts and
@@ -174,17 +192,29 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
 /// start that reaches it takes over every other open session, and a close removes its own.
 final class StubSessionService: PlaybackSessionService {
     struct State {
+        /// Opt-in shared server; legacy gates/overrides remain for unconfigured tests only.
+        var sessionClient: SessionModelClient?
         var progress: [String: MediaProgress] = [:]
+        var progressReads: [MediaKey] = []
         var progressError: APIError?
         var serverTime: [String: Double] = [:]
         var sessionUpdatedAt: Date?
         var startGates: [String: Gate] = [:]
+        /// Metadata and expanded library item for an item's sessions (none by default).
+        var metadata: [String: (MediaMetadata, LibraryItem?)] = [:]
+        /// Native-engine fixtures; tests without overrides retain the default session and stream.
+        var sessionOverride: PlaybackSession?
+        var streamOverride: ResolvedStream?
         var closeGates: [String: Gate] = [:]
         var startError: APIError?
         var resolveError: (any Error)?
+        var resolveGate: Gate?
+        var resolutions = 0
+        var canceledResolutions = 0
         var closeError: APIError?
         var starts: [String] = []
         var closes: [String] = []
+        var canceledCloses: [String] = []
         var closeReports: [String: PlaybackSyncReport] = [:]
         var log: [String] = []
         var count = 0
@@ -210,13 +240,20 @@ final class StubSessionService: PlaybackSessionService {
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
         // As the API client's request does, a start for a cancelled caller sends nothing and throws.
         try Task.checkCancellation()
-        let (gate, error, time, id, updatedAt) = state.withLock { state in
+        if let client = state.withLock({ $0.sessionClient }) {
+            state.withLock {
+                $0.starts.append(itemID)
+                $0.log.append("start \(itemID)")
+            }
+            return try await client.model.start(client, itemID: itemID, episodeID: episodeID)
+        }
+        let (gate, error, time, id, updatedAt, metadata) = state.withLock { state in
             state.starts.append(itemID)
             state.log.append("start \(itemID)")
             state.count += 1
             return (
                 state.startGates.removeValue(forKey: itemID), state.startError, state.serverTime[itemID] ?? 0,
-                "\(itemID)-\(state.count)", state.sessionUpdatedAt
+                "\(itemID)-\(state.count)", state.sessionUpdatedAt, state.metadata[itemID]
             )
         }
         // The gate holds the request before it reaches the server.
@@ -229,8 +266,10 @@ final class StubSessionService: PlaybackSessionService {
             state.takenOver += state.openSessions
             state.openSessions = [id]
         }
+        if let session = state.withLock({ $0.sessionOverride }) { return session }
         return PlaybackSession(
             id: id, libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
+            mediaMetadata: metadata?.0,
             chapters: [Chapter(id: 0, start: 0, end: 1000, title: "One"), Chapter(id: 1, start: 1000, end: 3600)],
             displayTitle: "Title \(itemID)", displayAuthor: "Author", coverPath: "/covers/\(itemID).jpg",
             duration: 3600, currentTime: time,
@@ -238,18 +277,32 @@ final class StubSessionService: PlaybackSessionService {
             audioTracks: [
                 AudioTrack(index: 1, startOffset: 0, duration: 1800, mimeType: "audio/mpeg"),
                 AudioTrack(index: 2, startOffset: 1800, duration: 1800, mimeType: "audio/mpeg"),
-            ])
+            ], libraryItem: metadata?.1)
     }
 
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
-        try state.withLock { state in
+        state.withLock {
+            $0.progressReads.append(
+                MediaKey(serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID))
+        }
+        if let client = state.withLock({ $0.sessionClient }) {
+            return try await client.model.fetchProgress(client, itemID: itemID, episodeID: episodeID)
+        }
+        return try state.withLock { state in
             if let error = state.progressError { throw error }
             return state.progress[itemID]
         }
     }
 
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
+        let gate = state.withLock {
+            $0.resolutions += 1
+            return $0.resolveGate
+        }
+        await gate?.wait()
+        if Task.isCancelled { state.withLock { $0.canceledResolutions += 1 } }
         if let error = state.withLock({ $0.resolveError }) { throw error }
+        if let stream = state.withLock({ $0.streamOverride }) { return stream }
         let tracks = session.audioTracks.map { track in
             PlayableTrack(
                 url: URL(filePath: "/\(session.id)/\(track.index ?? 0)"), mimeType: track.mimeType,
@@ -267,15 +320,37 @@ final class StubSessionService: PlaybackSessionService {
             return (state.closeGates.removeValue(forKey: id), state.closeError)
         }
         await gate?.wait()
+        if Task.isCancelled { state.withLock { $0.canceledCloses.append(id) } }
+        if let client = state.withLock({ $0.sessionClient }) {
+            try await client.model.close(client, id: id, report: report)
+            state.withLock { $0.log.append("close \(id) done") }
+            return
+        }
         state.withLock { state in
             state.openSessions.removeAll { $0 == id }
             state.log.append("close \(id) done")
         }
         if let error { throw error }
     }
+
+    /// Model-only lookup seams; unlike the legacy recording arrays these share server state.
+    func openSession(id: String) async throws -> PlaybackSession {
+        guard let client = state.withLock({ $0.sessionClient }) else { preconditionFailure("Configure sessionClient") }
+        return try await client.model.lookup(client, id: id)
+    }
+
+    func listeningSessions(
+        itemID: String, episodeID: String? = nil, page: Int = 0, itemsPerPage: Int = 10
+    ) async throws -> ListeningSessionsPage {
+        guard let client = state.withLock({ $0.sessionClient }) else { preconditionFailure("Configure sessionClient") }
+        return try await client.model.records(
+            client, itemID: itemID, episodeID: episodeID, page: page, itemsPerPage: itemsPerPage)
+    }
 }
 
+/// Observable like ``AppSettings``, so rate changes reach observers (Now Playing).
 @MainActor
+@Observable
 final class StubPlaybackSettings: PlaybackSettingsProviding {
     var playbackRate = 1.0 {
         didSet { if !(playbackRate.isFinite && playbackRate > 0) { playbackRate = oldValue } }
@@ -317,6 +392,9 @@ final class InMemoryLastPlayedStore: LastPlayedStoring {
 /// finish) unless `elapsesImmediately` is set.
 final class TestSleep: Sendable {
     private let immediate = Mutex(false)
+    private let calls = Mutex<[Duration]>([])
+
+    var durations: [Duration] { calls.withLock { $0 } }
 
     var elapsesImmediately: Bool {
         get { immediate.withLock { $0 } }
@@ -324,6 +402,7 @@ final class TestSleep: Sendable {
     }
 
     func sleep(_ duration: Duration) async {
+        calls.withLock { $0.append(duration) }
         if elapsesImmediately { return }
         try? await Task.sleep(for: .seconds(3600))
     }
