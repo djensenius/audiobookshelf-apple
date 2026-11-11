@@ -119,11 +119,15 @@ public struct AuthorsResponse: Decodable, Sendable, Hashable {
 /// `GET /api/libraries/:id/recent-episodes`. The server sends no total.
 public struct RecentEpisodesPage: Decodable, Sendable, Hashable {
     public let episodes: [RecentEpisode]
+    /// The number of wire rows, including episodes skipped during lossy decoding.
+    public let rawCount: Int
     public let limit: Int
     public let page: Int
 
-    public init(episodes: [RecentEpisode], limit: Int, page: Int) {
+    /// `rawCount` defaults to the number of decoded `episodes`.
+    public init(episodes: [RecentEpisode], limit: Int, page: Int, rawCount: Int? = nil) {
         self.episodes = episodes
+        self.rawCount = rawCount ?? episodes.count
         self.limit = limit
         self.page = page
     }
@@ -135,6 +139,7 @@ public struct RecentEpisodesPage: Decodable, Sendable, Hashable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         episodes = try container.decodeLossyArrayIfPresent(RecentEpisode.self, forKey: .episodes) ?? []
+        rawCount = (try? container.nestedUnkeyedContainer(forKey: .episodes))?.count ?? episodes.count
         limit = try container.decodeLenientIntIfPresent(forKey: .limit) ?? 0
         page = try container.decodeLenientIntIfPresent(forKey: .page) ?? 0
     }

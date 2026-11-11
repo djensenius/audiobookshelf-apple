@@ -65,9 +65,16 @@ private let listSuffix = "minified=1&include=rssfeed,numEpisodesIncomplete"
     }
 
     @Test func recentEpisodes() throws {
+        let endpoint = LibraryEndpoints.recentEpisodes(libraryID: "lib1")
+        #expect(endpoint.method == .get)
+        #expect(endpoint.requiresAuthentication)
+        #expect(try url(endpoint) == "\(server)/api/libraries/lib1/recent-episodes?limit=50&page=0")
         #expect(
             try url(LibraryEndpoints.recentEpisodes(libraryID: "lib1", page: 3))
                 == "\(server)/api/libraries/lib1/recent-episodes?limit=50&page=3")
+        #expect(
+            try url(LibraryEndpoints.recentEpisodes(libraryID: "lib1", page: 1, limit: 1))
+                == "\(server)/api/libraries/lib1/recent-episodes?limit=1&page=1")
     }
 
     @Test func pagedItemsUseLegacyQueryOrder() throws {
