@@ -1,0 +1,508 @@
+{
+  "podcast": [
+    {
+      "libraryItem": {
+        "id": "item-podcast",
+        "ino": "65029",
+        "oldLibraryItemId": null,
+        "libraryId": "library-podcasts",
+        "folderId": "folder-podcasts",
+        "path": "/search-fixtures/casts/Owned Cast",
+        "relPath": "Owned Cast",
+        "isFile": false,
+        "mtimeMs": 1794362580691,
+        "ctimeMs": 1794362580691,
+        "birthtimeMs": 0,
+        "addedAt": 1794362655445,
+        "updatedAt": 1794362655639,
+        "lastScan": 1794362655444,
+        "scanVersion": "2.26.0",
+        "isMissing": false,
+        "isInvalid": false,
+        "mediaType": "podcast",
+        "media": {
+          "id": "podcast",
+          "libraryItemId": "item-podcast",
+          "metadata": {
+            "title": "Search Fixture Podcast",
+            "author": "Owned Cast",
+            "description": null,
+            "releaseDate": null,
+            "genres": [
+              "Search Fixture Podcast Genre"
+            ],
+            "feedUrl": null,
+            "imageUrl": null,
+            "itunesPageUrl": null,
+            "itunesId": null,
+            "itunesArtistId": null,
+            "explicit": false,
+            "language": null,
+            "type": "episodic",
+            "titleIgnorePrefix": "Search Fixture Podcast"
+          },
+          "coverPath": null,
+          "tags": [
+            "Search Fixture Podcast Tag"
+          ],
+          "episodes": [],
+          "autoDownloadEpisodes": false,
+          "autoDownloadSchedule": "0 * * * *",
+          "lastEpisodeCheck": null,
+          "maxEpisodesToKeep": 0,
+          "maxNewEpisodesToDownload": 3,
+          "size": 0
+        },
+        "libraryFiles": [
+          {
+            "ino": "65030",
+            "metadata": {
+              "filename": "Search Fixture Episode 1.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 1.mp3",
+              "relPath": "Search Fixture Episode 1.mp3",
+              "size": 40507,
+              "mtimeMs": 1794362580651,
+              "ctimeMs": 1794362580651,
+              "birthtimeMs": 0
+            },
+            "isSupplementary": null,
+            "addedAt": 1794362655412,
+            "updatedAt": 1794362655412,
+            "fileType": "audio"
+          },
+          {
+            "ino": "65031",
+            "metadata": {
+              "filename": "Search Fixture Episode 2.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 2.mp3",
+              "relPath": "Search Fixture Episode 2.mp3",
+              "size": 80539,
+              "mtimeMs": 1794362580748,
+              "ctimeMs": 1794362580748,
+              "birthtimeMs": 0
+            },
+            "isSupplementary": null,
+            "addedAt": 1794362655411,
+            "updatedAt": 1794362655411,
+            "fileType": "audio"
+          }
+        ],
+        "size": 121046
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "Search Fixture Podcast Tag",
+      "numItems": 1
+    }
+  ],
+  "genres": [
+    {
+      "name": "Search Fixture Podcast Genre",
+      "numItems": 1
+    }
+  ],
+  "episodes": [
+    {
+      "libraryItem": {
+        "id": "item-podcast",
+        "ino": "65029",
+        "oldLibraryItemId": null,
+        "libraryId": "library-podcasts",
+        "folderId": "folder-podcasts",
+        "path": "/search-fixtures/casts/Owned Cast",
+        "relPath": "Owned Cast",
+        "isFile": false,
+        "mtimeMs": 1794362580691,
+        "ctimeMs": 1794362580691,
+        "birthtimeMs": 0,
+        "addedAt": 1794362655445,
+        "updatedAt": 1794362655639,
+        "lastScan": 1794362655444,
+        "scanVersion": "2.26.0",
+        "isMissing": false,
+        "isInvalid": false,
+        "mediaType": "podcast",
+        "media": {
+          "id": "podcast",
+          "libraryItemId": "item-podcast",
+          "metadata": {
+            "title": "Search Fixture Podcast",
+            "author": "Owned Cast",
+            "description": null,
+            "releaseDate": null,
+            "genres": [
+              "Search Fixture Podcast Genre"
+            ],
+            "feedUrl": null,
+            "imageUrl": null,
+            "itunesPageUrl": null,
+            "itunesId": null,
+            "itunesArtistId": null,
+            "explicit": false,
+            "language": null,
+            "type": "episodic",
+            "titleIgnorePrefix": "Search Fixture Podcast"
+          },
+          "coverPath": null,
+          "tags": [
+            "Search Fixture Podcast Tag"
+          ],
+          "episodes": [],
+          "autoDownloadEpisodes": false,
+          "autoDownloadSchedule": "0 * * * *",
+          "lastEpisodeCheck": null,
+          "maxEpisodesToKeep": 0,
+          "maxNewEpisodesToDownload": 3,
+          "size": 0
+        },
+        "libraryFiles": [
+          {
+            "ino": "65030",
+            "metadata": {
+              "filename": "Search Fixture Episode 1.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 1.mp3",
+              "relPath": "Search Fixture Episode 1.mp3",
+              "size": 40507,
+              "mtimeMs": 1794362580651,
+              "ctimeMs": 1794362580651,
+              "birthtimeMs": 0
+            },
+            "isSupplementary": null,
+            "addedAt": 1794362655412,
+            "updatedAt": 1794362655412,
+            "fileType": "audio"
+          },
+          {
+            "ino": "65031",
+            "metadata": {
+              "filename": "Search Fixture Episode 2.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 2.mp3",
+              "relPath": "Search Fixture Episode 2.mp3",
+              "size": 80539,
+              "mtimeMs": 1794362580748,
+              "ctimeMs": 1794362580748,
+              "birthtimeMs": 0
+            },
+            "isSupplementary": null,
+            "addedAt": 1794362655411,
+            "updatedAt": 1794362655411,
+            "fileType": "audio"
+          }
+        ],
+        "size": 121046,
+        "recentEpisode": {
+          "libraryItemId": "item-podcast",
+          "podcastId": "podcast",
+          "id": "episode-1",
+          "oldEpisodeId": null,
+          "index": null,
+          "season": null,
+          "episode": null,
+          "episodeType": null,
+          "title": "Search Fixture Episode 1",
+          "subtitle": null,
+          "description": null,
+          "enclosure": null,
+          "guid": null,
+          "pubDate": null,
+          "chapters": [],
+          "audioFile": {
+            "index": 1,
+            "ino": "65030",
+            "metadata": {
+              "filename": "Search Fixture Episode 1.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 1.mp3",
+              "relPath": "Search Fixture Episode 1.mp3",
+              "size": 40507,
+              "mtimeMs": 1794362580651,
+              "ctimeMs": 1794362580651,
+              "birthtimeMs": 0
+            },
+            "addedAt": 1794362655444,
+            "updatedAt": 1794362655444,
+            "trackNumFromMeta": null,
+            "discNumFromMeta": null,
+            "trackNumFromFilename": null,
+            "discNumFromFilename": null,
+            "manuallyVerified": false,
+            "exclude": false,
+            "error": null,
+            "format": "MP2/3 (MPEG audio layer 2/3)",
+            "duration": 20.088,
+            "bitRate": 16000,
+            "language": null,
+            "codec": "mp3",
+            "timeBase": "1/14112000",
+            "channels": 1,
+            "channelLayout": "mono",
+            "chapters": [],
+            "embeddedCoverArt": null,
+            "metaTags": {
+              "tagAlbum": "Owned Cast",
+              "tagArtist": "Owned Cast",
+              "tagGenre": "Podcast",
+              "tagTitle": "Search Fixture Episode 1",
+              "tagEncoder": "Lavf63.1.102"
+            },
+            "mimeType": "audio/mpeg"
+          },
+          "publishedAt": null,
+          "addedAt": 1794362655450,
+          "updatedAt": 1794362655450,
+          "audioTrack": {
+            "index": 1,
+            "ino": "65030",
+            "metadata": {
+              "filename": "Search Fixture Episode 1.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 1.mp3",
+              "relPath": "Search Fixture Episode 1.mp3",
+              "size": 40507,
+              "mtimeMs": 1794362580651,
+              "ctimeMs": 1794362580651,
+              "birthtimeMs": 0
+            },
+            "addedAt": 1794362655444,
+            "updatedAt": 1794362655444,
+            "trackNumFromMeta": null,
+            "discNumFromMeta": null,
+            "trackNumFromFilename": null,
+            "discNumFromFilename": null,
+            "manuallyVerified": false,
+            "exclude": false,
+            "error": null,
+            "format": "MP2/3 (MPEG audio layer 2/3)",
+            "duration": 20.088,
+            "bitRate": 16000,
+            "language": null,
+            "codec": "mp3",
+            "timeBase": "1/14112000",
+            "channels": 1,
+            "channelLayout": "mono",
+            "chapters": [],
+            "embeddedCoverArt": null,
+            "metaTags": {
+              "tagAlbum": "Owned Cast",
+              "tagArtist": "Owned Cast",
+              "tagGenre": "Podcast",
+              "tagTitle": "Search Fixture Episode 1",
+              "tagEncoder": "Lavf63.1.102"
+            },
+            "mimeType": "audio/mpeg",
+            "startOffset": 0,
+            "title": "Search Fixture Episode 1.mp3",
+            "contentUrl": "/api/items/item-podcast/file/65030"
+          },
+          "size": 40507,
+          "duration": 20.088
+        }
+      }
+    },
+    {
+      "libraryItem": {
+        "id": "item-podcast",
+        "ino": "65029",
+        "oldLibraryItemId": null,
+        "libraryId": "library-podcasts",
+        "folderId": "folder-podcasts",
+        "path": "/search-fixtures/casts/Owned Cast",
+        "relPath": "Owned Cast",
+        "isFile": false,
+        "mtimeMs": 1794362580691,
+        "ctimeMs": 1794362580691,
+        "birthtimeMs": 0,
+        "addedAt": 1794362655445,
+        "updatedAt": 1794362655639,
+        "lastScan": 1794362655444,
+        "scanVersion": "2.26.0",
+        "isMissing": false,
+        "isInvalid": false,
+        "mediaType": "podcast",
+        "media": {
+          "id": "podcast",
+          "libraryItemId": "item-podcast",
+          "metadata": {
+            "title": "Search Fixture Podcast",
+            "author": "Owned Cast",
+            "description": null,
+            "releaseDate": null,
+            "genres": [
+              "Search Fixture Podcast Genre"
+            ],
+            "feedUrl": null,
+            "imageUrl": null,
+            "itunesPageUrl": null,
+            "itunesId": null,
+            "itunesArtistId": null,
+            "explicit": false,
+            "language": null,
+            "type": "episodic",
+            "titleIgnorePrefix": "Search Fixture Podcast"
+          },
+          "coverPath": null,
+          "tags": [
+            "Search Fixture Podcast Tag"
+          ],
+          "episodes": [],
+          "autoDownloadEpisodes": false,
+          "autoDownloadSchedule": "0 * * * *",
+          "lastEpisodeCheck": null,
+          "maxEpisodesToKeep": 0,
+          "maxNewEpisodesToDownload": 3,
+          "size": 0
+        },
+        "libraryFiles": [
+          {
+            "ino": "65030",
+            "metadata": {
+              "filename": "Search Fixture Episode 1.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 1.mp3",
+              "relPath": "Search Fixture Episode 1.mp3",
+              "size": 40507,
+              "mtimeMs": 1794362580651,
+              "ctimeMs": 1794362580651,
+              "birthtimeMs": 0
+            },
+            "isSupplementary": null,
+            "addedAt": 1794362655412,
+            "updatedAt": 1794362655412,
+            "fileType": "audio"
+          },
+          {
+            "ino": "65031",
+            "metadata": {
+              "filename": "Search Fixture Episode 2.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 2.mp3",
+              "relPath": "Search Fixture Episode 2.mp3",
+              "size": 80539,
+              "mtimeMs": 1794362580748,
+              "ctimeMs": 1794362580748,
+              "birthtimeMs": 0
+            },
+            "isSupplementary": null,
+            "addedAt": 1794362655411,
+            "updatedAt": 1794362655411,
+            "fileType": "audio"
+          }
+        ],
+        "size": 121046,
+        "recentEpisode": {
+          "libraryItemId": "item-podcast",
+          "podcastId": "podcast",
+          "id": "episode-2",
+          "oldEpisodeId": null,
+          "index": null,
+          "season": null,
+          "episode": null,
+          "episodeType": null,
+          "title": "Search Fixture Episode 2",
+          "subtitle": null,
+          "description": null,
+          "enclosure": null,
+          "guid": null,
+          "pubDate": null,
+          "chapters": [],
+          "audioFile": {
+            "index": 1,
+            "ino": "65031",
+            "metadata": {
+              "filename": "Search Fixture Episode 2.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 2.mp3",
+              "relPath": "Search Fixture Episode 2.mp3",
+              "size": 80539,
+              "mtimeMs": 1794362580748,
+              "ctimeMs": 1794362580748,
+              "birthtimeMs": 0
+            },
+            "addedAt": 1794362655444,
+            "updatedAt": 1794362655444,
+            "trackNumFromMeta": null,
+            "discNumFromMeta": null,
+            "trackNumFromFilename": null,
+            "discNumFromFilename": null,
+            "manuallyVerified": false,
+            "exclude": false,
+            "error": null,
+            "format": "MP2/3 (MPEG audio layer 2/3)",
+            "duration": 40.104,
+            "bitRate": 16000,
+            "language": null,
+            "codec": "mp3",
+            "timeBase": "1/14112000",
+            "channels": 1,
+            "channelLayout": "mono",
+            "chapters": [],
+            "embeddedCoverArt": null,
+            "metaTags": {
+              "tagAlbum": "Owned Cast",
+              "tagArtist": "Owned Cast",
+              "tagGenre": "Podcast",
+              "tagTitle": "Search Fixture Episode 2",
+              "tagEncoder": "Lavf63.1.102"
+            },
+            "mimeType": "audio/mpeg"
+          },
+          "publishedAt": null,
+          "addedAt": 1794362655450,
+          "updatedAt": 1794362655450,
+          "audioTrack": {
+            "index": 1,
+            "ino": "65031",
+            "metadata": {
+              "filename": "Search Fixture Episode 2.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/casts/Owned Cast/Search Fixture Episode 2.mp3",
+              "relPath": "Search Fixture Episode 2.mp3",
+              "size": 80539,
+              "mtimeMs": 1794362580748,
+              "ctimeMs": 1794362580748,
+              "birthtimeMs": 0
+            },
+            "addedAt": 1794362655444,
+            "updatedAt": 1794362655444,
+            "trackNumFromMeta": null,
+            "discNumFromMeta": null,
+            "trackNumFromFilename": null,
+            "discNumFromFilename": null,
+            "manuallyVerified": false,
+            "exclude": false,
+            "error": null,
+            "format": "MP2/3 (MPEG audio layer 2/3)",
+            "duration": 40.104,
+            "bitRate": 16000,
+            "language": null,
+            "codec": "mp3",
+            "timeBase": "1/14112000",
+            "channels": 1,
+            "channelLayout": "mono",
+            "chapters": [],
+            "embeddedCoverArt": null,
+            "metaTags": {
+              "tagAlbum": "Owned Cast",
+              "tagArtist": "Owned Cast",
+              "tagGenre": "Podcast",
+              "tagTitle": "Search Fixture Episode 2",
+              "tagEncoder": "Lavf63.1.102"
+            },
+            "mimeType": "audio/mpeg",
+            "startOffset": 0,
+            "title": "Search Fixture Episode 2.mp3",
+            "contentUrl": "/api/items/item-podcast/file/65031"
+          },
+          "size": 80539,
+          "duration": 40.104
+        }
+      }
+    }
+  ]
+}
