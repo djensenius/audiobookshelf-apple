@@ -179,6 +179,49 @@ private let account = LibraryConnectionKey(
         schedule.markLoaded(libraryID: "a", at: start)
         #expect(schedule.request(libraryID: "b", hasLoaded: true, now: start) == .refresh)
     }
+
+    private let loaded = HomeRefreshSchedule.ModelState(
+        libraryID: "a", hasLoaded: true, isLoading: false, hasError: false)
+
+    @Test func aCompletedRefreshMakesTheShelvesFresh() {
+        var schedule = HomeRefreshSchedule()
+        schedule.markLoaded(libraryID: "a", at: start)
+        let later = start.addingTimeInterval(HomeRefreshSchedule.maxAge)
+
+        let recorded = schedule.recordCompletion(of: "a", model: loaded, isCancelled: false, at: later)
+        #expect(recorded)
+        #expect(schedule.request(libraryID: "a", hasLoaded: true, now: later.addingTimeInterval(1)) == nil)
+    }
+
+    /// Home disappeared during a stale refresh: the old shelves are still there without an error,
+    /// but they aren't new, so the next appear still refreshes.
+    @Test func aCancelledRefreshLeavesTheShelvesStale() {
+        var schedule = HomeRefreshSchedule()
+        schedule.markLoaded(libraryID: "a", at: start)
+        let later = start.addingTimeInterval(HomeRefreshSchedule.maxAge)
+
+        let recorded = schedule.recordCompletion(of: "a", model: loaded, isCancelled: true, at: later)
+        #expect(!recorded)
+        #expect(schedule.request(libraryID: "a", hasLoaded: true, now: later.addingTimeInterval(1)) == .refresh)
+    }
+
+    @Test func failedSupersededOrSwitchedRequestsAreNotRecorded() {
+        var schedule = HomeRefreshSchedule()
+        var failed = loaded
+        failed.hasError = true
+        var running = loaded
+        running.isLoading = true
+        var switched = loaded
+        switched.libraryID = "b"
+        var notLoaded = loaded
+        notLoaded.hasLoaded = false
+
+        for state in [failed, running, switched, notLoaded] {
+            let recorded = schedule.recordCompletion(of: "a", model: state, isCancelled: false, at: start)
+            #expect(!recorded)
+        }
+        #expect(schedule.request(libraryID: "a", hasLoaded: true, now: start) == .refresh)
+    }
 }
 
 @MainActor

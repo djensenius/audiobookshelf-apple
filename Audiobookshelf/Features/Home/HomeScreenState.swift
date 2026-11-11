@@ -100,6 +100,29 @@ struct HomeRefreshSchedule {
         return now.timeIntervalSince(loaded.date) >= Self.maxAge ? .refresh : nil
     }
 
+    /// The model's state when a request it made finished.
+    struct ModelState {
+        var libraryID: String?
+        var hasLoaded: Bool
+        var isLoading: Bool
+        var hasError: Bool
+    }
+
+    /// Records the end of a load or refresh of `libraryID` as fresh shelves at `date`, only when it
+    /// actually completed with new data. A cancelled request (Home disappeared) leaves the earlier
+    /// shelves without an error, so it must not count, or returning to Home would skip the
+    /// refresh. Neither does one superseded by a load still running (that load records itself),
+    /// a failed one, or one for a library the model no longer shows.
+    ///
+    /// - Returns: Whether it was recorded.
+    @discardableResult
+    mutating func recordCompletion(of libraryID: String, model: ModelState, isCancelled: Bool, at date: Date) -> Bool {
+        guard !isCancelled, model.libraryID == libraryID, model.hasLoaded, !model.isLoading, !model.hasError
+        else { return false }
+        markLoaded(libraryID: libraryID, at: date)
+        return true
+    }
+
     /// Records a successful load or refresh of `libraryID`.
     mutating func markLoaded(libraryID: String, at date: Date) {
         loaded = (libraryID, date)

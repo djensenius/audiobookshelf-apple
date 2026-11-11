@@ -114,9 +114,12 @@ private struct HomeScreen: View {
         case .load: await model.load()
         case .refresh: await model.refresh()
         }
-        if model.libraryID == libraryID, model.hasLoaded, model.error == nil {
-            schedule.markLoaded(libraryID: libraryID, at: .now)
-        }
+        schedule.recordCompletion(
+            of: libraryID,
+            model: .init(
+                libraryID: model.libraryID, hasLoaded: model.hasLoaded, isLoading: model.isLoading,
+                hasError: model.error != nil),
+            isCancelled: Task.isCancelled, at: .now)
     }
 
     /// Pull to refresh, the Refresh command and Retry: the libraries while none is selected,
@@ -166,7 +169,10 @@ struct HomeContent: View {
         case .loading:
             LoadingView()
         case .failed, .librariesFailed:
-            ErrorStateView(title: L10n.string("MessageHomeLoadFailed"), retry: retry)
+            // In a scroll view, so pull to refresh works as well as Retry.
+            HomeScrollableState {
+                ErrorStateView(title: L10n.string("MessageHomeLoadFailed"), retry: retry)
+            }
         case .empty:
             HomeMessageView(
                 title: L10n.string("MessageBookshelfEmpty"), systemImage: "books.vertical", refreshable: true)
@@ -180,6 +186,17 @@ struct HomeContent: View {
 
 /// A full-screen message. In a scroll view when `refreshable`, so pull to refresh still works
 /// when there's nothing to show.
+/// A full-screen state centred in a vertical scroll view, so `.refreshable` reaches it.
+private struct HomeScrollableState<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollView(.vertical) {
+            content.containerRelativeFrame([.horizontal, .vertical])
+        }
+    }
+}
+
 private struct HomeMessageView: View {
     let title: String
     var message: String?
@@ -188,9 +205,7 @@ private struct HomeMessageView: View {
 
     var body: some View {
         if refreshable {
-            ScrollView(.vertical) {
-                unavailable.containerRelativeFrame([.horizontal, .vertical])
-            }
+            HomeScrollableState { unavailable }
         } else {
             unavailable
         }
