@@ -244,9 +244,13 @@ public actor DownloadManager {
         } catch {
             throw DownloadManagerError(error)
         }
-        if let shared = cover.completed, let index = plan.parts.firstIndex(where: { $0.kind == .cover }) {
+        if let shared = cover.completed,
+            let index = plan.parts.firstIndex(where: { $0.kind == .cover && $0.serverPath == shared.serverPath })
+        {
             // The cover is on disk, held by another record that may never complete: this record
             // carries it as a completed part, so its local item gets the cover without a fetch.
+            // Only the same version (the request path carries the item's `updatedAt`): the plan's
+            // `coverUpdatedAt` would mark an older image as current. Otherwise it is fetched.
             plan.parts[index].destinationRelativePath = shared.destinationRelativePath
             plan.parts[index].filename = shared.filename
             plan.parts[index].expectedBytes = shared.expectedBytes
@@ -352,12 +356,16 @@ public actor DownloadManager {
         // A cover's size is never known in advance; the headroom covers it.
         // Completed parts need nothing more. Sizes come from the server, so the sums saturate
         // at `Int64.max` (which never fits) instead of overflowing.
-        let files = record.parts.filter { $0.kind != .cover && $0.state != .completed }
-        var required = files.reduce(Int64(0)) {
-            Self.adding($0, max(max($1.expectedBytes, 0) - max($1.bytesWritten, 0), 0))
-        }
-        if files.contains(where: { $0.expectedBytes <= 0 }) {
-            required = max(required, Int64(Self.reportedSize(of: item, episodeID: record.key.episodeId) ?? 0))
+        let files = record.parts.filter { $0.kind != .cover }
+        let remaining = files.filter { $0.state != .completed }
+        var required = remaining.reduce(Int64(0)) { Self.adding($0, Self.bytesToFetch($1)) }
+        if remaining.contains(where: { $0.expectedBytes <= 0 }) {
+            // The reported size covers the whole media: what is on disk and kept doesn't count.
+            let kept = files.reduce(Int64(0)) {
+                Self.adding($0, $1.state == .completed || $1.hasResumeData ? max($1.bytesWritten, 0) : 0)
+            }
+            let reported = Int64(Self.reportedSize(of: item, episodeID: record.key.episodeId) ?? 0)
+            required = max(required, max(reported - kept, 0))
         }
         required = Self.adding(required, Self.storageHeadroom)
         let available: Int64
@@ -368,6 +376,13 @@ public actor DownloadManager {
             return
         }
         guard required <= available else { throw .insufficientStorage(required: required, available: available) }
+    }
+
+    /// The bytes a part that hasn't completed still has to fetch: the rest of the file when it
+    /// resumes, or all of it when it has no resume data and starts again from the beginning.
+    private static func bytesToFetch(_ part: DownloadPartDTO) -> Int64 {
+        let expected = max(part.expectedBytes, 0)
+        return part.hasResumeData ? max(expected - max(part.bytesWritten, 0), 0) : expected
     }
 
     /// The server's size of the episode, or of the whole item.
