@@ -119,6 +119,27 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
         }
     }
 
+    @Test func podcastEpisodeListPreferencesAreStoredOnceAndSurviveReload() async throws {
+        try await withIsolatedDefaults { defaults, _ in
+            let key = AppSettings.Key.podcastEpisodeListPreferences.rawValue
+            let settings = AppSettings(defaults: defaults)
+            #expect(settings.podcastEpisodeListPreferences == nil)
+            #expect(AppSettings.snapshot(from: defaults).podcastEpisodeListPreferences == nil)
+
+            settings.podcastEpisodeListPreferences = "{\"filter\":\"all\"}"
+            #expect(defaults.string(forKey: key) == "{\"filter\":\"all\"}")
+            #expect(AppSettings(defaults: defaults).podcastEpisodeListPreferences == "{\"filter\":\"all\"}")
+            #expect(AppSettings.snapshot(from: defaults).podcastEpisodeListPreferences == "{\"filter\":\"all\"}")
+
+            settings.podcastEpisodeListPreferences = nil
+            #expect(defaults.object(forKey: key) == nil)
+            #expect(AppSettings(defaults: defaults).podcastEpisodeListPreferences == nil)
+
+            defaults.set(3, forKey: key)
+            #expect(AppSettings(defaults: defaults).podcastEpisodeListPreferences == nil)
+        }
+    }
+
     @Test func valuesRoundTripAsPropertyListTypes() async throws {
         try await withIsolatedDefaults { defaults, _ in
             let settings = AppSettings(defaults: defaults)
