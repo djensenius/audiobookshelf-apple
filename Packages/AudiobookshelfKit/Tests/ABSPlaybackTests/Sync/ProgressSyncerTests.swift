@@ -273,7 +273,8 @@ struct ProgressSyncerTests {
 
         gate.open()
         await s.settle()
-        #expect(s.service.log == ["sync 1", "sync 1 done", "get a", "patch a", "sync 2", "sync 2 done"])
+        #expect(
+            s.service.log == ["sync 1", "sync 1 done", "get a", "patch a", "get a", "sync 2", "sync 2 done", "get a"])
         #expect(
             s.service.reports == [
                 try #require(PlaybackSyncReport(currentTime: 15, timeListened: 15, duration: 3600)),

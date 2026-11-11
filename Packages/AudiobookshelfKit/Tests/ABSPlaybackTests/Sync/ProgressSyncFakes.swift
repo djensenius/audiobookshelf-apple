@@ -38,6 +38,9 @@ final class StubProgressSyncService: ProgressSyncService {
         var fetches: [MediaKey] = []
         var fetchGates: [Gate] = []
         var fetchErrors: [APIError?] = []
+        /// Explicit sequential canonical replies, including post-PATCH values. PATCH itself
+        /// remains recording-only; an empty queue falls back to serverProgress.
+        var fetchReplies: [MediaProgress?] = []
         var fetchStarted: Gate?
         var patchGates: [Gate] = []
         var patchStarted: Gate?
@@ -70,7 +73,8 @@ final class StubProgressSyncService: ProgressSyncService {
             state.fetches.append(key)
             state.log.append("get \(itemID)")
             return (
-                state.serverProgress[key], state.fetchGates.isEmpty ? nil : state.fetchGates.removeFirst(),
+                state.fetchReplies.isEmpty ? state.serverProgress[key] : state.fetchReplies.removeFirst(),
+                state.fetchGates.isEmpty ? nil : state.fetchGates.removeFirst(),
                 state.fetchErrors.isEmpty ? nil : state.fetchErrors.removeFirst(), state.fetchStarted
             )
         }

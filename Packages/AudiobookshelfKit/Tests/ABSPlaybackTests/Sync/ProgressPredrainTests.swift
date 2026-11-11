@@ -37,11 +37,15 @@ struct ProgressPredrainTests {
         if localCompletion {
             try await s.store.recordEdit(ProgressEdit(isFinished: true), for: key, now: finishedAt)
         }
-        s.service.state.withLock { $0.serverProgress[key] = server(90, at: t0.addingTimeInterval(2)) }
+        let observed = server(90, at: t0.addingTimeInterval(2))
+        var confirmed = observed
+        confirmed.isFinished = localCompletion
+        confirmed.finishedAt = localCompletion ? Int(finishedAt.timeIntervalSince1970 * 1000) : nil
+        s.service.state.withLock { $0.fetchReplies = [observed, confirmed] }
 
         await s.syncer.drainPendingProgress()
 
-        #expect(s.service.state.withLock { $0.fetches } == [key])
+        #expect(s.service.state.withLock { $0.fetches } == (localCompletion ? [key, key] : [key]))
         #expect(
             s.service.patches
                 == (localCompletion ? [.init(itemID: "a", update: .finished(true, at: finishedAt))] : []))
@@ -75,16 +79,24 @@ struct ProgressPredrainTests {
         response.open()
         await drain.value
 
-        #expect(s.service.state.withLock { $0.fetches } == [key, other])
+        #expect(s.service.state.withLock { $0.fetches } == [key, other, other])
         #expect(s.service.patches == [.init(itemID: "b", update: SyncHarness.audio(30))])
         let deferred = try #require(try await s.store.progress(for: key))
         #expect(deferred.currentTime == 80 && deferred.audioDirty)
         #expect(deferred.serverBaseline == nil && deferred.lastSyncAttemptAt == nil)
 
+        s.service.state.withLock {
+            $0.fetchReplies = [
+                absent ? nil : server(90, at: t0.addingTimeInterval(2)),
+                server(80, at: t0.addingTimeInterval(4)),
+                server(30, at: t0.addingTimeInterval(4), itemID: "b"),
+            ]
+        }
         await s.syncer.drainPendingProgress()
-        #expect(s.service.state.withLock { $0.fetches } == [key, other, key])
+        #expect(s.service.state.withLock { $0.fetches } == [key, other, other, key, key, other])
         #expect(s.service.patches.last == .init(itemID: "a", update: SyncHarness.audio(80)))
         #expect(try await s.store.progress(for: key)?.needsServerSync == false)
+        #expect(try await s.store.progress(for: key)?.currentTime == 80)
     }
 
     @Test(arguments: ["undated", "wrongItem", "wrongEpisode"])
@@ -103,7 +115,7 @@ struct ProgressPredrainTests {
 
         await s.syncer.drainPendingProgress()
 
-        #expect(s.service.state.withLock { $0.fetches } == [key, other])
+        #expect(s.service.state.withLock { $0.fetches } == [key, other, other])
         #expect(s.service.patches == [.init(itemID: "b", update: SyncHarness.audio(30))])
         let row = try #require(try await s.store.progress(for: key))
         #expect(row.currentTime == 10 && row.audioDirty)
@@ -164,7 +176,7 @@ struct ProgressPredrainTests {
         await started.wait()
         // Observe intake BEFORE the next PATCH ACK could establish a new confirmation obligation.
         #expect(await s.store.needsConfirmationFetch.contains(key) == absent)
-        #expect(s.service.state.withLock { $0.fetches } == [key, key])
+        #expect(s.service.state.withLock { $0.fetches } == [key, key, key])
         #expect(s.service.patches.last?.update == .ebook(location: "epubcfi(/6/4)", progress: 0.4))
         response.open()
         await drain.value
@@ -336,6 +348,9 @@ struct ProgressPredrainTests {
         s.service.state.withLock {
             // Both a successful PATCH and an ambiguous lost response can leave this value.
             $0.serverProgress[key] = server(50, at: t0.addingTimeInterval(2))
+            $0.fetchReplies = [
+                server(50, at: t0.addingTimeInterval(2)), server(80, at: t0.addingTimeInterval(3)),
+            ]
             $0.fetchGates = [fetch]
             $0.fetchStarted = fetchStarted
         }
@@ -345,7 +360,7 @@ struct ProgressPredrainTests {
         fetch.open()
         await retry.value
         #expect(s.service.patches.map(\.update) == [SyncHarness.audio(50), SyncHarness.audio(80)])
-        #expect(s.service.state.withLock { $0.fetches } == [key, key])
+        #expect(s.service.state.withLock { $0.fetches } == [key, key, key])
         #expect(try await s.store.progress(for: key)?.needsServerSync == false)
     }
 
@@ -376,7 +391,7 @@ struct ProgressPredrainTests {
         #expect(s.service.state.withLock { $0.fetches.isEmpty })
         #expect(s.service.patches.isEmpty && s.service.reports.count == 1)
         await s.syncer.drainPendingProgress()
-        #expect(s.service.state.withLock { $0.fetches } == [s.h.key("a")])
+        #expect(s.service.state.withLock { $0.fetches } == [s.h.key("a"), s.h.key("a")])
         #expect(s.service.patches.map(\.update) == [SyncHarness.audio(15)])
         #expect(s.service.reports.count == 1)
     }
@@ -413,14 +428,20 @@ struct ProgressPredrainTests {
         processing.open()
         await processed.wait()
         #expect(s.service.state.withLock { $0.serverProgress[key]?.currentTime } == 15)
+        // The recording PATCH stub does not mutate canonical progress.
+        s.service.state.withLock {
+            $0.fetchReplies = [
+                server(15, at: processedAt), server(100, at: processedAt.addingTimeInterval(1)),
+            ]
+        }
         response.open()
         await s.settle()
 
         #expect(s.service.reports.map(\.currentTime) == [15])
-        #expect(s.service.state.withLock { $0.fetches } == [key])
+        #expect(s.service.state.withLock { $0.fetches } == [key, key])
         #expect(s.service.patches.map(\.update) == [SyncHarness.audio(100)])
         let row = try #require(try await s.store.progress(for: key))
         #expect(row.currentTime == 100 && !row.needsServerSync)
-        #expect(row.serverBaseline?.lastUpdate == processedAt)
+        #expect(row.serverBaseline?.lastUpdate == processedAt.addingTimeInterval(1))
     }
 }

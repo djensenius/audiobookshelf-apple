@@ -116,8 +116,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// acknowledgement, with the latest socket value received meanwhile and its capture.
     /// Rows whose latest send was an ebook one: their next send goes back to audio or finished.
     private var ebookSentLast: Set<String> = []
-    private var awaitingFetch: [String: (key: MediaKey, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] =
-        [:]
+    private var awaitingFetch:
+        [String: (key: MediaKey, acknowledgement: UUID, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] = [:]
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "persistence")
 
@@ -134,6 +134,12 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
     public func captureGeneration() -> ProgressGeneration {
         ProgressGeneration(value: generation)
+    }
+
+    /// Coherent admission snapshot for a canonical GET. Only a committed, genuine PATCH ACK
+    /// creates this identity; edits, failed/obsolete settlements and duplicate outcomes do not.
+    public func captureProgressFetch(for key: MediaKey) -> (generation: ProgressGeneration, acknowledgement: UUID?) {
+        (captureGeneration(), awaitingFetch[key.rawValue]?.acknowledgement)
     }
 
     /// Tests an authoritative absent lookup without synthesizing a baseline or confirming a
@@ -404,7 +410,9 @@ public enum SessionUploadResult: Sendable, Equatable {
             state.write(to: row)
             row.lastSyncError = nil
         }
-        if acknowledged, serverLastUpdate == nil { awaitingFetch[patch.key.rawValue] = (patch.key, nil) }
+        if acknowledged, serverLastUpdate == nil {
+            awaitingFetch[patch.key.rawValue] = (patch.key, patch.token, nil)
+        }
         return true
     }
 
