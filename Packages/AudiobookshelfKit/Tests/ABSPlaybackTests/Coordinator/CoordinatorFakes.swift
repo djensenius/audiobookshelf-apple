@@ -58,7 +58,12 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
 
     private(set) var loads: [(source: AudioEngineSource, time: Double)] = []
     private(set) var seeks: [Double] = []
+    /// Includes interrupted and superseded seeks, so tests can drain gated calls.
+    private(set) var returnedSeekCount = 0
     private(set) var stopCount = 0
+    private(set) var playCount = 0
+    private(set) var volumes: [Float] = []
+    private(set) var volumeAtPause: Float?
     /// Gates for the next loads and seeks, in order; without one they complete immediately.
     var loadGates: [Gate] = []
     var seekGates: [Gate] = []
@@ -102,6 +107,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
 
     /// As the real engine does, defers playing (shown as buffering) while a seek is in flight.
     func play() {
+        playCount += 1
         if silentlyRefusingPlays > 0 {
             silentlyRefusingPlays -= 1
             isPlaybackRequested = false
@@ -120,6 +126,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func pause() {
+        volumeAtPause = volume
         isPlaybackRequested = false
         state = .paused
     }
@@ -135,6 +142,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func seek(to time: Double) async -> SeekResult {
+        defer { returnedSeekCount += 1 }
         seekGeneration += 1
         let request = seekGeneration
         let current = generation
@@ -173,7 +181,10 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     func setRate(_ rate: Float) { defaultRate = rate }
-    func setVolume(_ volume: Float) { self.volume = volume }
+    func setVolume(_ volume: Float) {
+        self.volume = volume
+        volumes.append(volume)
+    }
 }
 
 /// Sessions per item (ids `<item>-<n>`, unique per start), with optional gates on starts and

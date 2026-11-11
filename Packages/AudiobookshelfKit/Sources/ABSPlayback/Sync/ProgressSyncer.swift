@@ -54,6 +54,8 @@ public final class ProgressSyncer {
     private struct CurrentSession {
         let sessionID: String
         let key: MediaKey
+        /// `sessionStarted` precedes position resolution; only `loaded` makes the position reportable.
+        var hasLoaded = false
         /// Listening time not yet handed to a report.
         var listened: TimeInterval = 0
         /// The latest report trigger, persisted independently of transport.
@@ -183,6 +185,7 @@ public final class ProgressSyncer {
             lastTick = nil
             loadedTime = nil
         case .loaded(let time):
+            current?.hasLoaded = true
             loadedTime = time
             lastSyncAt = now
             chapterIndex = source?.chapterIndex
@@ -286,6 +289,7 @@ public final class ProgressSyncer {
 
     private func requestSync() {
         guard !isDetached, !isTransportQuiesced, let session = current, let source,
+            session.hasLoaded,
             let position = queuePosition(session.key, time: source.currentTime, duration: source.duration)
         else { return }
         current?.position = position

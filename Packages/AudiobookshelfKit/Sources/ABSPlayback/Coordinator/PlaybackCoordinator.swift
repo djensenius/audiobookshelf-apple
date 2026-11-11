@@ -81,8 +81,6 @@ public final class PlaybackCoordinator {
     /// hasn't landed (an interrupted one stays pending); else the position play will resume from,
     /// moved by any jumps not yet applied.
     public var currentTime: Double { phase == .loaded ? position : unloadedPositionAfterJumps }
-    /// The loaded seek target, observable independently of the ticking engine clock.
-    var pendingSeekTarget: Double? { phase == .loaded ? engine.pendingSeekTarget : nil }
     /// A sample suitable for listening credit, unlike `currentTime` which may be a seek target.
     public var confirmedPlaybackTime: Double? {
         guard phase == .loaded else { return closingPlaybackTime }
@@ -498,7 +496,7 @@ public final class PlaybackCoordinator {
         }
     }
 
-    /// The single place loaded media resumes. In order: ``willResume``; one awaited seek (to
+    /// The user resume path for loaded media. In order: ``willResume``; one awaited seek (to
     /// `startTime`, else exactly to the target of an interrupted seek still pending, else to 0
     /// after the end, else back by `seconds` or ``AutoRewind``), which emits
     /// ``PlaybackCoordinatorEvent/didSeek(time:)`` with where it landed; then play. A pause during
@@ -553,7 +551,9 @@ public final class PlaybackCoordinator {
     }
 
     /// Pauses, and cancels a play waiting on its streaming-policy check (``pendingPlayKey``).
+    /// Always emits `paused`, even when already paused, so a sleep timer's pending resume can be cancelled.
     public func pause() {
+        defer { emit(.paused(time: currentTime)) }
         if pendingPlayKey != nil {
             policyCheck += 1
             pendingPlayKey = nil
@@ -568,7 +568,6 @@ public final class PlaybackCoordinator {
             engine.pause()
             lastPlayedAt = now()
             saveLastPlayed()
-            emit(.paused(time: position))
         case .idle, .unloaded: return
         }
     }
@@ -1112,6 +1111,25 @@ public final class PlaybackCoordinator {
 
     private static func date(ms: Int) -> Date {
         Date(timeIntervalSince1970: Double(ms) / 1000)
+    }
+}
+
+extension PlaybackCoordinator: SleepTimerPlaybackControl {
+    /// The loaded seek target, including an interrupted seek awaiting retry; observable independently
+    /// of the ticking engine clock. No loaded media means no pending target.
+    public var pendingSeekTarget: Double? { phase == .loaded ? engine.pendingSeekTarget : nil }
+
+    /// Resumes loaded media after the timer's grace-period rewind. The timer already prepared the
+    /// resume: do not call `willResume` again or seek (including AutoRewind).
+    public func play() {
+        guard !isRetired, phase == .loaded, !engine.isPlaybackRequested else { return }
+        resumeIntent += 1
+        resumingIntent = nil
+        startEngine()
+    }
+
+    public func setVolume(_ volume: Float) {
+        engine.setVolume(volume)
     }
 }
 

@@ -269,7 +269,6 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
         let coordinator = try liveCoordinator()
         if coordinator.isPlaybackRequested {
             coordinator.pause()
-            // A pause while starting emits no event.
             refresh()
         } else {
             await coordinator.resume()
