@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSAppModel
 import ABSCore
+import ABSUI
 import Foundation
 import Testing
 
@@ -66,6 +67,17 @@ import Testing
         #expect(text.detail == "3h 20m remaining")
     }
 
+    /// The template comes from the supplied locale too, not the app's language (English here).
+    @Test func progressTextUsesTheSuppliedLanguage() throws {
+        let german = Locale(identifier: "de_DE")
+        let text = try #require(
+            ItemDetailProgressText(
+                fraction: 0.424, isFinished: false, timeRemaining: 3 * 3_600 + 20 * 60, finishedAt: nil, locale: german)
+        )
+        let duration = DurationStyle.elapsed(showSeconds: false).string(3 * 3_600 + 20 * 60, locale: german)
+        #expect(text.detail == "\(duration) verbleibend")
+    }
+
     @Test func progressIsClampedToOneHundredPercent() throws {
         let over = try #require(
             ItemDetailProgressText(
@@ -102,22 +114,71 @@ import Testing
     }
 
     @Test func refreshFailureBannerSaysWhenTheItemIsGone() async {
-        let service = FailingAfterLoadService(item: ItemDetailPreviewData.book)
+        let service = ScriptedItemService(item: ItemDetailPreviewData.book)
         let model = ItemDetailModel(itemID: ItemDetailPreviewData.book.id, service: service, cache: ProgressCache())
+        var gone = ItemDetailGoneState()
+        func isGone() -> Bool {
+            let snapshot = ItemDetailGoneState.Snapshot(model: model)
+            gone.update(snapshot)
+            return gone.isGone(snapshot)
+        }
         await model.load()
-        #expect(ItemDetailRefreshFailure(model: model) == nil)
+        #expect(ItemDetailRefreshFailure(model: model, isGone: isGone()) == nil)
 
         await service.fail(with: APIError.timedOut)
         await model.load()
-        let failed = ItemDetailRefreshFailure(model: model)
-        #expect(failed?.messageKey == "MessageItemDetailRefreshFailed")
-        #expect(failed?.isGone == false)
+        #expect(!isGone())
+        #expect(
+            ItemDetailRefreshFailure(model: model, isGone: isGone())?.messageKey == "MessageItemDetailRefreshFailed")
 
         await service.fail(with: APIError.notFound)
         await model.load()
-        let gone = ItemDetailRefreshFailure(model: model)
-        #expect(gone?.messageKey == "MessageItemDetailNotFound")
-        #expect(gone?.isGone == true)
+        #expect(isGone())
+        #expect(ItemDetailRefreshFailure(model: model, isGone: isGone())?.messageKey == "MessageItemDetailNotFound")
+    }
+
+    @Test func goneItemStaysGoneUntilAReloadSucceeds() async throws {
+        let service = ScriptedItemService(item: ItemDetailPreviewData.book)
+        let model = ItemDetailModel(itemID: ItemDetailPreviewData.book.id, service: service, cache: ProgressCache())
+        var gone = ItemDetailGoneState()
+        func isGone() -> Bool {
+            let snapshot = ItemDetailGoneState.Snapshot(model: model)
+            gone.update(snapshot)
+            return gone.isGone(snapshot)
+        }
+        await model.load()
+        #expect(!isGone())
+        await service.fail(with: APIError.notFound)
+        await model.load()
+        #expect(isGone())
+
+        // Retry, held at the server: the banner hides, but Play stays disabled.
+        await service.hold()
+        let retry = Task { await model.load() }
+        try await service.waitForHeldRequest()
+        #expect(model.isLoading)
+        #expect(ItemDetailRefreshFailure(model: model, isGone: isGone()) == nil)
+        #expect(isGone())
+        #expect(!ItemDetailPlayPresentation(button: model.playButton, isMissing: false, canPlay: !isGone()).isEnabled)
+
+        // The retry fails another way: still gone, and the banner says so.
+        await service.fail(with: APIError.timedOut)
+        await service.release()
+        await retry.value
+        #expect(isGone())
+        #expect(ItemDetailRefreshFailure(model: model, isGone: isGone())?.messageKey == "MessageItemDetailNotFound")
+
+        // Another retry succeeds: Play is enabled again.
+        await service.succeed()
+        await service.hold()
+        let success = Task { await model.load() }
+        try await service.waitForHeldRequest()
+        #expect(isGone())
+        await service.release()
+        await success.value
+        #expect(!isGone())
+        #expect(ItemDetailRefreshFailure(model: model, isGone: isGone()) == nil)
+        #expect(ItemDetailPlayPresentation(button: model.playButton, isMissing: false, canPlay: !isGone()).isEnabled)
     }
 
     @Test func playFailureIgnoresCancellation() {
@@ -194,10 +255,13 @@ import Testing
     }
 }
 
-/// Serves the item until told to fail, for reloads that fail after a first load.
-private actor FailingAfterLoadService: ItemDetailService {
+/// Serves the item, or fails, as the test scripts it; ``hold()`` keeps the next request
+/// pending until ``release()``.
+private actor ScriptedItemService: ItemDetailService {
     let item: ABSCore.LibraryItem
     private var error: (any Error)?
+    private var isHolding = false
+    private var held: CheckedContinuation<Void, Never>?
 
     init(item: ABSCore.LibraryItem) {
         self.item = item
@@ -207,7 +271,34 @@ private actor FailingAfterLoadService: ItemDetailService {
         self.error = error
     }
 
+    func succeed() {
+        error = nil
+    }
+
+    func hold() {
+        isHolding = true
+    }
+
+    func release() {
+        isHolding = false
+        held?.resume()
+        held = nil
+    }
+
+    /// Waits until a request is held.
+    func waitForHeldRequest() async throws {
+        var attempts = 0
+        while held == nil, attempts < 1_000 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(held != nil)
+    }
+
     func item(id: String) async throws -> ABSCore.LibraryItem {
+        if isHolding {
+            await withCheckedContinuation { held = $0 }
+        }
         if let error { throw error }
         return item
     }

@@ -53,11 +53,11 @@ struct ItemDetailProgressText: Equatable {
             detail = finishedAt.map {
                 L10n.string(
                     "LabelItemDetailFinishedAt",
-                    $0.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted).locale(locale)))
+                    $0.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted).locale(locale)), locale: locale)
             }
         } else if let timeRemaining {
             let remaining = DurationStyle.elapsed(showSeconds: false).string(timeRemaining, locale: locale)
-            detail = remaining.isEmpty ? nil : L10n.string("LabelTimeRemaining", remaining)
+            detail = remaining.isEmpty ? nil : L10n.string("LabelTimeRemaining", remaining, locale: locale)
         } else {
             detail = nil
         }
@@ -71,17 +71,52 @@ enum ItemDetailLoadError {
     }
 }
 
+/// Whether the retained item is gone from the server: a reload answered 404, and no reload has
+/// succeeded since. It stays gone while a retry is pending and after a retry fails some other
+/// way, both of which replace or hide the model's 404, so Play stays disabled until the item
+/// loads again.
+struct ItemDetailGoneState: Equatable {
+    /// What the state follows from the model.
+    struct Snapshot: Equatable {
+        let hasLoaded: Bool
+        let isLoading: Bool
+        let hasError: Bool
+        let isNotFound: Bool
+
+        @MainActor init(model: ItemDetailModel) {
+            hasLoaded = model.hasLoaded
+            isLoading = model.isLoading
+            hasError = model.error != nil
+            isNotFound = ItemDetailLoadError.isNotFound(model.error)
+        }
+    }
+
+    /// A 404 seen since the last successful load.
+    private var sawNotFound = false
+
+    /// Records `snapshot`; call it whenever the snapshot changes.
+    mutating func update(_ snapshot: Snapshot) {
+        sawNotFound = isGone(snapshot)
+    }
+
+    /// Whether the item is gone in `snapshot`, given the snapshots recorded so far. Reads the
+    /// current 404 directly, so it's right before ``update(_:)`` records it.
+    func isGone(_ snapshot: Snapshot) -> Bool {
+        if snapshot.hasLoaded, snapshot.isNotFound { return true }
+        // Only a load that finished without an error clears it.
+        return sawNotFound && (snapshot.isLoading || snapshot.hasError)
+    }
+}
+
 /// The banner over a retained item whose reload failed.
 struct ItemDetailRefreshFailure: Equatable {
     /// The `L10n` key of the banner's message.
     let messageKey: String
-    /// The reload answered 404, so the item is gone from the server and can't be played.
-    let isGone: Bool
 
-    /// `nil` unless the model's last reload failed.
-    @MainActor init?(model: ItemDetailModel) {
+    /// `nil` unless the model's last reload failed. `isGone` (``ItemDetailGoneState``) says the
+    /// item isn't on the server anymore instead of that the reload failed.
+    @MainActor init?(model: ItemDetailModel, isGone: Bool) {
         guard model.refreshFailed else { return nil }
-        isGone = ItemDetailLoadError.isNotFound(model.error)
         messageKey = isGone ? "MessageItemDetailNotFound" : "MessageItemDetailRefreshFailed"
     }
 }
