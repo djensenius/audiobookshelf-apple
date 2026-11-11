@@ -100,7 +100,6 @@
   "MessageHomeRefreshFailed": "Couldn't refresh your shelves. Showing the last ones loaded.",
   "MessageItemDetailLoadFailed": "Couldn't load this item.",
   "MessageItemDetailNotFound": "This item isn't on the server anymore.",
-  "MessageItemDetailPlayFailed": "Couldn't start playback",
   "MessageItemDetailRefreshFailed": "Couldn't refresh this item. Showing the last one loaded.",
   "MessageItemDetailUnavailable": "Connect to a server to see this item.",
   "MessageItemDetailUnsupported": "This app can't show this kind of item yet.",

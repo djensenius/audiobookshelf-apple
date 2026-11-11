@@ -60,7 +60,7 @@ struct ItemDetailContent: View {
         .refreshable { await model.load() }
         .absBackground()
         .alert(
-            Text(verbatim: L10n.string("MessageItemDetailPlayFailed")),
+            Text(verbatim: L10n.string("MessagePlaybackStartFailed")),
             isPresented: Binding {
                 playFailure != nil
             } set: {

@@ -7,20 +7,22 @@ import SwiftUI
 /// ``PodcastDetailView`` for podcasts. Episodes have their own screen, ``EpisodeDetailView``.
 ///
 /// The model belongs to one item and account (ADR 0004): it is built from the environment's
-/// `libraryStore` (its client and progress cache) and rebuilt when the item ID or the store's
-/// account changes. The shell's `.id(identity)` already rebuilds this view on a server or user
-/// switch; the key also covers a store that clears or reconnects underneath it. Without a store
-/// (signed out, or before the shell provides one), or with a client that can't serve items, the
-/// screen says the item is unavailable.
+/// `libraryStore` (its services and progress cache) and rebuilt when the item ID, the store or
+/// the store's account changes. The shell's `.id(identity)` already rebuilds this view on a
+/// server or user switch; the key also covers a store that clears underneath it, and the
+/// store's services follow a reconnect of the same account. Without a store or a connected
+/// account (signed out, or before the shell provides one) the screen says the item is
+/// unavailable.
 struct ItemDetailView: View {
     let itemID: String
     @Environment(\.libraryStore) private var store
     @State private var host: ItemDetailHost?
-    /// The key the store couldn't serve items for.
+    /// The key the store had no client for.
     @State private var unavailableKey: ItemDetailHost.Key?
 
     private var key: ItemDetailHost.Key? {
-        store?.connectionKey.map { ItemDetailHost.Key(itemID: itemID, connectionKey: $0) }
+        guard let store, let connectionKey = store.connectionKey else { return nil }
+        return ItemDetailHost.Key(itemID: itemID, store: ObjectIdentifier(store), connectionKey: connectionKey)
     }
 
     var body: some View {
@@ -40,14 +42,14 @@ struct ItemDetailView: View {
                 return
             }
             if host?.key != key {
-                guard let service = ItemDetailServiceSource.service(from: store) else {
+                guard let services = store.makeServices(), services.connectionKey == key.connectionKey else {
                     host = nil
                     unavailableKey = key
                     return
                 }
                 unavailableKey = nil
                 host = ItemDetailHost(
-                    key: key, model: ItemDetailModel(itemID: itemID, service: service, cache: store.progress))
+                    key: key, model: ItemDetailModel(itemID: itemID, service: services, cache: store.progress))
             }
             // Also retries a first load cancelled when the view disappeared.
             await host?.model.loadIfNeeded()
@@ -55,30 +57,11 @@ struct ItemDetailView: View {
     }
 }
 
-/// Where the screen gets its ``ItemDetailService``.
-@MainActor
-enum ItemDetailServiceSource {
-    /// The store's client, which is the account's `APIClient` and so serves items too; `nil`
-    /// (logged) when the store has no client or its client can't serve items.
-    // TODO(#314): use the store's account-scoped services
-    static func service(from store: LibraryStore) -> (any ItemDetailService)? {
-        guard let client = store.client else {
-            Log.ui.error("Item detail: the library store has no client")
-            return nil
-        }
-        guard let service = client as? any ItemDetailService else {
-            Log.ui.error(
-                "Item detail: \(String(describing: type(of: client)), privacy: .public) can't serve items")
-            return nil
-        }
-        return service
-    }
-}
-
 /// The model for one item and account.
 private struct ItemDetailHost {
     struct Key: Hashable {
         let itemID: String
+        let store: ObjectIdentifier
         let connectionKey: LibraryConnectionKey
     }
 
