@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -36,21 +37,56 @@ def interrupted(signum, _frame):
 
 
 def command(args, *, capture=False, timeout=60):
-    # On timeout/signals stop only our CLI child, never a borrowed simulator.
-    process = subprocess.Popen(
-        args, cwd=PACKAGE, text=True,
-        stdout=subprocess.PIPE if capture else None,
-    )
+    pending = []
+    previous = {}
+
+    def defer(signum, _frame):
+        if not pending:
+            pending.append(InterruptedRunner(signum))
+
+    # Never raise asynchronously while acquiring or cleaning up the child.
+    # Recording (rather than masking) signals leaves the child's signal mask
+    # untouched. Bounded communicate slices make cancellation responsive.
     try:
-        output, _ = process.communicate(timeout=timeout)
-    except BaseException:
-        process.terminate()
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            previous[sig] = signal.getsignal(sig)
+            signal.signal(sig, defer)
+        process = subprocess.Popen(
+            args, cwd=PACKAGE, text=True,
+            stdout=subprocess.PIPE if capture else None,
+        )
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-        raise
+            deadline = time.monotonic() + timeout
+            interval = min(timeout, 0.1)
+            while True:
+                if pending:
+                    raise pending[0]
+                try:
+                    output, _ = process.communicate(timeout=interval)
+                    break
+                except subprocess.TimeoutExpired as error:
+                    if pending:
+                        raise pending[0]
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        error.timeout = timeout
+                        raise
+                    interval = min(remaining, 0.1)
+        except BaseException:
+            # Further handled signals cannot interrupt this exact-child cleanup
+            # or replace the original signal/deadline exception.
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            raise
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if pending:
+        raise pending[0]
     if process.returncode:
         raise subprocess.CalledProcessError(process.returncode, args)
     return output

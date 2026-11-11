@@ -367,6 +367,123 @@ class RunnerTests(unittest.TestCase):
     def test_command_deadline_kills_and_reaps_sigterm_ignoring_child(self):
         self.assert_command_deadline(ignore_term=True)
 
+    def assert_guarded_child_lifecycle(self, startup_signal=None):
+        handled = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        previous = {sig: signal.getsignal(sig) for sig in handled}
+        module = RUNNER["command"].__globals__
+        interrupted_type = RUNNER["InterruptedRunner"]
+        interrupts, timeouts, children = [], [], []
+        real_popen = subprocess.Popen
+        args = [sys.executable, "-c", (
+            "import json, signal\n"
+            "signal.alarm(12)\n"
+            "print(json.dumps({'blocked': list(signal.pthread_sigmask(signal.SIG_BLOCK, [])), "
+            "'termDefault': signal.getsignal(signal.SIGTERM) == signal.SIG_DFL}), flush=True)\n"
+            + ("" if startup_signal else "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n")
+            + "print('ready', flush=True)\n"
+            "while True: signal.pause()\n"
+        )]
+
+        def interruption(sig):
+            error = interrupted_type(sig)
+            interrupts.append(error)
+            return error
+
+        def starting_child(*popen_args, **kwargs):
+            process = real_popen(*popen_args, **kwargs)
+            real_wait, real_kill = process.wait, process.kill
+            children.append((process, real_wait, real_kill))
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0], "child readiness timed out")
+            state = json.loads(process.stdout.readline())
+            self.assertTrue(state["termDefault"])
+            self.assertTrue(set(state["blocked"]).isdisjoint(handled), state)
+            self.assertEqual(process.stdout.readline(), "ready\n")
+            real_communicate, real_terminate = process.communicate, process.terminate
+
+            def communicate(*, timeout):
+                try:
+                    return real_communicate(timeout=timeout)
+                except subprocess.TimeoutExpired as error:
+                    timeouts.append(error)
+                    raise
+
+            def terminate():
+                # Real additional signals during cleanup must not replace the
+                # first exception or prevent termination/reaping.
+                os.kill(os.getpid(), signal.SIGINT)
+                real_terminate()
+
+            def wait(*, timeout):
+                os.kill(os.getpid(), signal.SIGHUP)
+                return real_wait(timeout=timeout)
+
+            process.communicate = mock.Mock(side_effect=communicate)
+            process.terminate = mock.Mock(side_effect=terminate)
+            process.wait = mock.Mock(side_effect=wait)
+            process.kill = mock.Mock(wraps=real_kill)
+            print(f"Child startup: pid={process.pid} handled-signals-unblocked=True SIGTERM-default=True", flush=True)
+            if startup_signal:
+                # This is inside Popen's call boundary: command() has not yet
+                # received the real, live child handle. No sleep-based race.
+                os.kill(os.getpid(), startup_signal)
+            return process
+
+        try:
+            for sig in handled:
+                signal.signal(sig, RUNNER["interrupted"])
+            expected = interrupted_type if startup_signal else subprocess.TimeoutExpired
+            with mock.patch.dict(module, InterruptedRunner=interruption):
+                with mock.patch.object(subprocess, "Popen", side_effect=starting_child):
+                    with self.assertRaises(expected) as failure:
+                        RUNNER["command"](args, capture=True, timeout=0.1)
+            self.assertEqual(len(children), 1)
+            process = children[0][0]
+            self.assertIsNotNone(process.poll(), "owned child escaped startup interruption without cleanup")
+            self.assertIs(failure.exception, interrupts[0] if startup_signal else timeouts[0])
+            if startup_signal:
+                self.assertEqual(failure.exception.signum, startup_signal)
+                process.kill.assert_not_called()
+            else:
+                self.assertEqual(failure.exception.timeout, 0.1)
+                process.kill.assert_called_once_with()
+            process.terminate.assert_called_once_with()
+            self.assertEqual(process.returncode, -signal.SIGTERM if startup_signal else -signal.SIGKILL)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(process.pid, os.WNOHANG)
+            self.assertTrue(all(signal.getsignal(sig) is RUNNER["interrupted"] for sig in handled))
+            print(f"Lifecycle proof: startup-signal={startup_signal} pid={process.pid} "
+                  f"original-exception=True returncode={process.returncode} reaped=True handlers-restored=True",
+                  flush=True)
+        finally:
+            # Bypass the injected cleanup signals for the test's own safety net.
+            for process, real_wait, real_kill in children:
+                if process.poll() is None:
+                    real_kill()
+                real_wait(timeout=2)
+                process.stdout.close()
+                with self.assertRaises(ChildProcessError):
+                    os.waitpid(process.pid, os.WNOHANG)
+                print(f"Fixture cleanup: owned PID {process.pid} reaped", flush=True)
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+    def test_startup_signals_are_deferred_until_owned_child_is_guarded(self):
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=sig):
+                self.assert_guarded_child_lifecycle(startup_signal=sig)
+
+    def test_cleanup_signals_preserve_timeout_and_forced_kill(self):
+        self.assert_guarded_child_lifecycle()
+
+    def test_command_restores_handlers_on_success_and_spawn_failure(self):
+        handled = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+        previous = {sig: signal.getsignal(sig) for sig in handled}
+        self.assertEqual(RUNNER["command"]([sys.executable, "-c", "print('done')"], capture=True), "done\n")
+        self.assertEqual({sig: signal.getsignal(sig) for sig in handled}, previous)
+        with self.assertRaises(FileNotFoundError):
+            RUNNER["command"]([str(self.root / "missing-command")])
+        self.assertEqual({sig: signal.getsignal(sig) for sig in handled}, previous)
+
     def test_pid_marker_is_published_after_contents_are_complete(self):
         self.prepare()
         # Execute the actual fake producer, gating its real file open after
