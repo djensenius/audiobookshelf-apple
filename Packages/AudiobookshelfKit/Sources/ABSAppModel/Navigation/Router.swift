@@ -24,6 +24,10 @@ public final class Router {
     /// The Library root's selected section; `nil` is the default grid. In compact width this
     /// replaces the sidebar-only section tabs.
     public var librarySection: AppTab?
+    /// The sections ``libraryID`` shows for this user, as the scene last confirmed them in
+    /// ``selectLibrary(id:kind:supportedSections:)``. A restored scene assumes every section of
+    /// the library's kind until then. Empty without a library.
+    public private(set) var supportedSections: Set<AppTab> = []
     /// A library a deep link asked for, until the scene resolves it. A link carries only the
     /// ID, so the scene (S7a) looks up the library's kind and sections and calls
     /// ``selectLibrary(id:kind:supportedSections:)``, which clears this.
@@ -90,6 +94,11 @@ public final class Router {
         selectedTab = .library
     }
 
+    /// The sections the sidebar shows, in sidebar order (``supportedSections``).
+    public var visibleSections: [AppTab] {
+        AppTab.sections.filter(supportedSections.contains)
+    }
+
     /// Asks the scene to switch to library `id`, for a deep link that knows only the ID.
     /// Sets ``pendingLibraryID``; nothing else changes until the scene resolves it.
     public func requestLibrary(id: String) {
@@ -115,6 +124,7 @@ public final class Router {
         }
         libraryID = id
         libraryKind = kind
+        self.supportedSections = supportedSections
         if pendingLibraryID == id { pendingLibraryID = nil }
         repairSections(supported: supportedSections)
     }
@@ -160,14 +170,17 @@ public final class Router {
         selectedTab = .home
         libraryID = nil
         libraryKind = nil
+        supportedSections = []
         librarySection = nil
         paths = [:]
     }
 
     /// Restores the library and its kind without resetting paths; used by snapshot restore.
+    /// Until the scene confirms the library, it shows every section of its kind.
     func restoreLibrary(id: String?, kind: LibraryKind?) {
         libraryID = id
         libraryKind = kind
+        supportedSections = AppTab.sections(for: kind)
     }
 
     /// Falls back from unsupported sections: the selected tab to Library, the Library section

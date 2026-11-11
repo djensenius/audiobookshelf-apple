@@ -2,25 +2,20 @@ import ABSAppModel
 import ABSUI
 import SwiftUI
 
-/// The root of a tab, until the screen for it is built: the tab's name and icon. The Account
-/// tab also has the entry points to Logs and Settings.
-struct TabRootPlaceholder: View {
-    let tab: AppTab
-
+/// The Account tab (legacy `pages/account.vue`), with the entry points to Logs and Settings. A
+/// stub until the Account feature replaces this file.
+struct AccountView: View {
     var body: some View {
-        ContentUnavailableView {
-            Label {
-                Text(verbatim: L10n.string(tab.titleKey))
-            } icon: {
-                Image(systemName: tab.systemImage)
-            }
-        }
-        .navigationTitle(Text(verbatim: L10n.string(tab.titleKey)))
-        .toolbar {
-            if tab == .account {
-                DiagnosticsToolbar()
-            }
-        }
+        FeatureStub(titleKey: AppTab.account.titleKey, systemImage: AppTab.account.systemImage)
+            .toolbar { DiagnosticsToolbar() }
+    }
+}
+
+/// The saved server connections (`Route.servers`). A stub until the Account feature replaces
+/// this file.
+struct ServersView: View {
+    var body: some View {
+        FeatureStub(titleKey: "ButtonSwitchServerUser", systemImage: "server.rack")
     }
 }
 
@@ -53,13 +48,11 @@ struct DiagnosticsToolbar: ToolbarContent {
 
 #Preview("Account") {
     NavigationStack {
-        TabRootPlaceholder(tab: .account)
+        AccountView()
             .navigationDestination(for: Route.self) { RouteDestination(route: $0) }
     }
 }
 
-#Preview("Series") {
-    NavigationStack {
-        TabRootPlaceholder(tab: .series)
-    }
+#Preview("Servers") {
+    NavigationStack { ServersView() }
 }
