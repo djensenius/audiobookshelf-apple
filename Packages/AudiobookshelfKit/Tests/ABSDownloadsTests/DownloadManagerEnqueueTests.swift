@@ -390,6 +390,134 @@ import Testing
         #expect(local.coverRelativePath == cover.destinationRelativePath)
     }
 
+    /// A cover fetched for an older version of the item isn't carried: the new plan's
+    /// `coverUpdatedAt` would mark it current, so the new version is fetched.
+    @Test func aCoverOfAnOlderVersionIsFetchedAgain() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let old = LibraryItemFixtures.podcast()
+        guard
+            case .started(let firstID) = try await manager.enqueue(
+                item: old, episodeID: "ep_1", connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let cover = try #require(try await fixture.store.record(id: firstID)?.parts.first { $0.kind == .cover })
+        let file = try fixture.locations.fileURL(forRelativePath: cover.destinationRelativePath)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("cover".utf8).write(to: file)
+        try await fixture.store.completePart(partID: cover.id, finalBytes: 5)
+        try await fixture.store.setState(.failed, forRecord: firstID)
+        let updated = LibraryItem(
+            id: old.id, libraryId: old.libraryId, updatedAt: (old.updatedAt ?? 0) + 1_000, mediaType: .podcast,
+            media: old.media)
+
+        _ = try await manager.enqueue(item: updated, episodeID: "ep_2", connectionID: fixture.connectionID)
+
+        let second = try #require(try await fixture.store.record(key: fixture.key(updated, episodeID: "ep_2")))
+        let fetched = try #require(second.parts.first { $0.kind == .cover })
+        #expect(fetched.state == .queued)
+        #expect(fetched.serverPath != cover.serverPath)
+    }
+
+    /// A stopped part without resume data starts again from the beginning: its whole size counts.
+    /// One with resume data needs only the rest.
+    @Test func onlyResumableProgressIsSubtracted() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let parts = try #require(try await fixture.store.record(id: recordID)).parts
+        // Track 1 (1,000 bytes) stopped at 900 without resume data; track 2 (2,000) at 1,500 with it.
+        try await fixture.store.updateProgress(partID: parts[0].id, bytesWritten: 900, expectedBytes: 1_000)
+        try await fixture.store.updateProgress(partID: parts[1].id, bytesWritten: 1_500, expectedBytes: 2_000)
+        try await fixture.store.updatePart(partID: parts[1].id, hasResumeData: true)
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        let required = Self.bookBytes - 1_500 + DownloadManager.storageHeadroom
+        fixture.capacity.set(required - 1)
+
+        await #expect(throws: DownloadManagerError.insufficientStorage(required: required, available: required - 1)) {
+            try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+        }
+    }
+
+    /// With a file of unknown size left, the reported size stands in, less the bytes already on
+    /// disk and kept: completed files and resumable progress.
+    @Test func theReportedSizeFallbackSkipsKeptBytes() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let base = LibraryItemFixtures.book(
+            files: [
+                LibraryItemFixtures.BookFile(ino: "101", path: "/audiobooks/Dune/01.mp3", size: 1_000),
+                LibraryItemFixtures.BookFile(ino: "102", path: "/audiobooks/Dune/02.mp3", size: 0),
+                LibraryItemFixtures.BookFile(ino: "103", path: "/audiobooks/Dune/03.mp3", size: 0),
+            ], ebook: nil)
+        let item = LibraryItem(
+            id: base.id, libraryId: base.libraryId, updatedAt: base.updatedAt, mediaType: .book, media: base.media,
+            size: 5_000)
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let parts = try #require(try await fixture.store.record(id: recordID)).parts
+        // Track 1 completed; track 2 stopped at 500 with resume data; track 3 at 300 without.
+        try await fixture.store.completePart(partID: parts[0].id, finalBytes: 1_000)
+        try await fixture.store.updateProgress(partID: parts[1].id, bytesWritten: 500, expectedBytes: 0)
+        try await fixture.store.updatePart(partID: parts[1].id, hasResumeData: true)
+        try await fixture.store.updateProgress(partID: parts[2].id, bytesWritten: 300, expectedBytes: 0)
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        let required = 5_000 - 1_000 - 500 + DownloadManager.storageHeadroom
+        fixture.capacity.set(required - 1)
+
+        await #expect(throws: DownloadManagerError.insufficientStorage(required: required, available: required - 1)) {
+            try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+        }
+        // It fits with exactly that much free.
+        fixture.capacity.set(required)
+        #expect(
+            try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+                == .alreadyQueued(recordID))
+    }
+
+    /// A negative reported size counts as nothing, even with bytes kept on disk to subtract.
+    @Test func aNegativeReportedSizeCountsAsZero() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let base = LibraryItemFixtures.book(
+            files: [
+                LibraryItemFixtures.BookFile(ino: "101", path: "/audiobooks/Dune/01.mp3", size: 1_000),
+                LibraryItemFixtures.BookFile(ino: "102", path: "/audiobooks/Dune/02.mp3", size: 0),
+            ], ebook: nil)
+        let item = LibraryItem(
+            id: base.id, libraryId: base.libraryId, updatedAt: base.updatedAt, mediaType: .book, media: base.media,
+            size: .min)
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let completed = try #require(try await fixture.store.record(id: recordID)?.parts.first)
+        try await fixture.store.completePart(partID: completed.id, finalBytes: 1_000)
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        fixture.capacity.set(DownloadManager.storageHeadroom)
+
+        let result = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+
+        #expect(result == .alreadyQueued(recordID))
+    }
+
     @Test func planErrorsAreMapped() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()
