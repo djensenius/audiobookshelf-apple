@@ -91,6 +91,7 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run build:kit:extension` | Build AudiobookshelfKit with `-application-extension` for the iOS Simulator (run by `build:ios`) |
 | `mise run test` | Package tests (`test:kit`), tool tests (`test:tools`), and macOS app tests (`test:app`, signed ad hoc) |
 | `mise run test:kit:slow` | Slow package tests tagged `.slow` (opt-in via `ABS_SLOW_TESTS=1`; CI runs them on pushes to `main`) |
+| `TEST_RUNNER_ABS_OCR_TESTS=1 mise run test:app -- -only-testing:AudiobookshelfTests/ConnectOCRTests` | Vision OCR of the rendered connect screens; needs a Mac with a Neural Engine (skipped on CI) |
 | `mise run test:kit:ios` | Four iOS-only `ShakeDetectorTests` via the package scheme; required in PR CI, separate from `test` (see below) |
 | `mise run test:kit:ios:runner` | Bounded fake-CLI/result regressions for the iOS gate; also run by `lint:repo`, without Xcode or a simulator |
 | `mise run test:server` / `server:run` | Opt-in `ABSServerContractTests` against a real Audiobookshelf server in Docker (`ABS_SERVER_VERSION` picks the release, default 2.26.0), or start the same seeded server for manual use; `test:kit` compiles the suite and skips it; see [docs/testing/server-contracts.md](docs/testing/server-contracts.md) |

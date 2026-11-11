@@ -7,9 +7,12 @@ import SwiftUI
 struct CustomHeadersEditor: View {
     @Binding var headers: [CustomHeader]
 
+    /// Whether the editor shows the "no custom headers" message instead of rows.
+    var showsEmptyMessage: Bool { headers.isEmpty }
+
     var body: some View {
         Form {
-            if headers.isEmpty {
+            if showsEmptyMessage {
                 Section {
                     Text(verbatim: L10n.string("MessageNoCustomHeaders"))
                         .foregroundStyle(.secondary)

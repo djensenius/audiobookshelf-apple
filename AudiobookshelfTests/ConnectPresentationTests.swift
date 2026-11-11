@@ -75,7 +75,9 @@ import Testing
 
     /// Renders each connect view and checks the presentation state that decides its text.
     /// Runs everywhere, including CI VMs without a Neural Engine; ``ConnectOCRTests`` reads the
-    /// same renderings back with Vision.
+    /// same renderings back with Vision. Checks of the rendered text itself, such as the Connect
+    /// button label while validating or the empty-headers message, live only in the opt-in
+    /// ``ConnectOCRTests``.
     @MainActor @Suite(.serialized) struct ConnectPresentationTests {
         @Test(arguments: [false, true])
         func authenticationMethodsControlTheRenderedForm(openIDOnly: Bool) async throws {
@@ -117,10 +119,15 @@ import Testing
 
         @Test func customHeadersShowValidationAndCanRenderEmpty() throws {
             let headers = ConnectFixture.reservedHeaders
-            _ = try ConnectFixture.render(
-                CustomHeadersEditor(headers: .constant(headers)), named: "connect-custom-headers")
+            let invalid = CustomHeadersEditor(headers: .constant(headers))
+            _ = try ConnectFixture.render(invalid, named: "connect-custom-headers")
+            #expect(!invalid.showsEmptyMessage)
             #expect(headers.map(\.problem) == [.reservedHeader(name: "Authorization")])
-            _ = try ConnectFixture.render(CustomHeadersEditor(headers: .constant([])), named: "connect-no-headers")
+            let empty = CustomHeadersEditor(headers: .constant([]))
+            _ = try ConnectFixture.render(empty, named: "connect-no-headers")
+            #expect(empty.showsEmptyMessage)
+            let message = L10n.string("MessageNoCustomHeaders")
+            #expect(!message.isEmpty && message != "MessageNoCustomHeaders")
         }
 
         @Test(.timeLimit(.minutes(1)))
