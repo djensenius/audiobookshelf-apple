@@ -146,6 +146,9 @@ struct ProgressSyncState: Sendable, Equatable {
 
     /// Applies a local change: marks each changed group dirty and sets its edit time to `now`
     /// (or just after the group's previous edit time, if that isn't earlier).
+    /// Audio-only edits preserve the independent completion group, even when its edit is older:
+    /// moving the position does not imply a local unfinish. Server PATCH side effects are handled
+    /// by send/merge reconciliation (ADR 0003), not inferred here.
     mutating func apply(_ edit: ProgressEdit, now: Date) {
         if let audio = edit.audio {
             currentTime = audio.currentTime
