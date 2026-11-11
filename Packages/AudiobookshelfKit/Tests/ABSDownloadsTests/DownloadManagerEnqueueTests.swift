@@ -209,8 +209,8 @@ import Testing
         #expect(record.parts.last?.destinationRelativePath == local.coverRelativePath)
     }
 
-    /// Replacing a queued record pauses it, stops its transfers without resume data, and
-    /// saves the new plan under the same record.
+    /// Replacing a queued record pauses it, stops its transfers without resume data, deletes it
+    /// and saves the new plan as a new record.
     @Test func replacingAQueuedRecordStopsItsTransfers() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()
@@ -224,12 +224,86 @@ import Testing
         let records = try await fixture.store.allRecords()
         let record = try #require(records.first)
         #expect(records.count == 1)
-        #expect(result == .started(old.id))
-        #expect(record.id == old.id)
+        #expect(result == .started(record.id))
+        #expect(record.id != old.id)
         #expect(record.state == .queued)
         #expect(Set(record.parts.map(\.id)).isDisjoint(with: old.parts.map(\.id)))
         #expect(await fixture.engine.stopped == [.init(partIDs: old.parts.map(\.id), keepingResumeData: false)])
         #expect(await fixture.engine.started == [old.parts.map(\.id), record.parts.map(\.id)])
+    }
+
+    /// A stop skips a settling part, so the engine can finalise the old record after the
+    /// replacement is saved, deleting it by ID: the new record survives that late delete.
+    @Test func aLateFinaliseOfTheReplacedRecordKeepsTheNewOne() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        _ = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+        let old = try #require(try await fixture.store.record(key: fixture.key(item)))
+        await fixture.engine.settle(old.id)
+
+        let result = try await manager.enqueue(
+            item: item, episodeID: nil, connectionID: fixture.connectionID, replacingExisting: true)
+        try await fixture.engine.finishSettling()
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(record.id != old.id)
+        #expect(result == .started(record.id))
+        #expect(await fixture.engine.started.last == record.parts.map(\.id))
+    }
+
+    /// A record finalised between reading it and resuming it is planned again.
+    @Test func aRecordGoneBeforeItsResumeIsPlannedAgain() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let oldID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        try await fixture.store.setState(.paused, forRecord: oldID)
+        await fixture.engine.finaliseOnResume()
+
+        let result = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(record.id != oldID)
+        #expect(result == .started(record.id))
+    }
+
+    /// An episode doesn't wait for a cover part whose record failed: it plans its own.
+    @Test func aFailedRecordsCoverPartIsNotShared() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.podcast()
+        guard
+            case .started(let firstID) = try await manager.enqueue(
+                item: item, episodeID: "ep_1", connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        try await fixture.store.setState(.failed, forRecord: firstID)
+
+        _ = try await manager.enqueue(item: item, episodeID: "ep_2", connectionID: fixture.connectionID)
+
+        let second = try #require(try await fixture.store.record(key: fixture.key(item, episodeID: "ep_2")))
+        #expect(second.parts.map(\.kind) == [.audio, .cover])
+    }
+
+    @Test func anUnreadableCapacityStillQueues() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        fixture.capacity.set(nil)
+
+        let result = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(result == .started(record.id))
     }
 
     @Test func planErrorsAreMapped() async throws {
@@ -324,6 +398,88 @@ import Testing
         #expect(
             await events.next { _ in true }
                 == .completed(recordID: recordID, itemID: itemID, key: fixture.key(item)))
+    }
+
+    /// A failure the engine retries changes the record but isn't reported as a failure.
+    @Test func aRetriedFailureIsOnlyARecordChange() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        try await manager.start()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let record = try #require(try await fixture.store.record(id: recordID))
+        let partID = try #require(record.parts.first?.id)
+        let events = await manager.events()
+
+        fixture.engine.updateContinuation.yield(
+            .partFailed(partID: partID, recordID: recordID, code: .transfer, message: "offline", willRetry: true))
+        fixture.engine.updateContinuation.yield(.partCompleted(partID: partID, recordID: recordID))
+
+        // Updates are handled in order: a `.failed` would come between the two changes.
+        #expect(await events.next { _ in true } == .recordChanged(record))
+        #expect(await events.next { _ in true } == .recordChanged(record))
+    }
+
+    /// Overlapping starts read the engine's streams once, so updates are handled once each,
+    /// in order.
+    @Test func overlappingStartsReadTheEngineOnce() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let record = try #require(try await fixture.store.record(id: recordID))
+        let partID = try #require(record.parts.first?.id)
+        let events = await manager.events()
+
+        fixture.holdStart()
+        let first = Task { try await manager.start() }
+        #expect(await fixture.checkpoints.first { $0 == .trackingRecords } != nil)
+        // The first call waits after making its readers: the second must not make more.
+        let second = Task { try await manager.start() }
+        try await second.value
+        fixture.releaseStart()
+        try await first.value
+
+        #expect(fixture.engine.updatesReadCount == 1)
+        fixture.engine.updateContinuation.yield(.partCompleted(partID: partID, recordID: recordID))
+        #expect(await events.next { _ in true } == .recordChanged(record))
+        try await fixture.store.deleteRecord(recordID)
+        let itemID = UUID()
+        fixture.engine.updateContinuation.yield(.recordComplete(recordID: recordID, itemID: itemID))
+        #expect(
+            await events.next { _ in true }
+                == .completed(recordID: recordID, itemID: itemID, key: fixture.key(item)))
+    }
+
+    /// Every subscriber gets every event; one that stops iterating is removed.
+    @Test func everySubscriberGetsEveryEvent() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        let first = await manager.events()
+        let second = await manager.events()
+
+        _ = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(await first.next { _ in true } == .recordChanged(record))
+        #expect(await second.next { _ in true } == .recordChanged(record))
+        let reader = Task { for await _ in second {} }
+        reader.cancel()
+        _ = await fixture.checkpoints.first { $0 == .subscriberRemoved }
+        #expect(await manager.subscriberCount == 1)
     }
 
     @Test func readsTheVolumeCapacity() throws {

@@ -56,6 +56,8 @@ public actor DownloadManager {
     /// Test seams, optional so production makes no actor hop for them.
     private let enqueueWaiting: (@Sendable (MediaKey) -> Void)?
     private let progressHandled: (@Sendable (DownloadProgress) -> Void)?
+    private let subscriberRemoved: (@Sendable () -> Void)?
+    private let trackingRecords: (@Sendable () async -> Void)?
 
     /// Items with an enqueue under way, by their item-level key (no episode). Every enqueue of
     /// one item runs alone, so two calls for the same media can't both plan a record across
@@ -65,6 +67,9 @@ public actor DownloadManager {
     private var enqueueWaiters: [MediaKey: [CheckedContinuation<Void, Never>]] = [:]
     private var subscribers: [UUID: AsyncStream<DownloadManagerEvent>.Continuation] = [:]
     private var readers: [Task<Void, Never>] = []
+    /// Set by the first ``start()`` before it suspends, so overlapping calls read the engine's
+    /// streams once.
+    private var didStart = false
     private var tracked: [UUID: TrackedRecord] = [:]
     /// Records whose progress window is open: one event was just sent, so the next waits.
     private var progressWindows: [UUID: Task<Void, Never>] = [:]
@@ -85,7 +90,7 @@ public actor DownloadManager {
     ) {
         self.init(
             store: store, localItems: localItems, engine: engine, locations: locations, capacity: capacity,
-            clock: clock, enqueueWaiting: nil, progressHandled: nil)
+            clock: clock, enqueueWaiting: nil, progressHandled: nil, subscriberRemoved: nil)
     }
 
     init(
@@ -96,7 +101,9 @@ public actor DownloadManager {
         capacity: any StorageCapacityProviding,
         clock: any Clock<Duration>,
         enqueueWaiting: (@Sendable (MediaKey) -> Void)?,
-        progressHandled: (@Sendable (DownloadProgress) -> Void)?
+        progressHandled: (@Sendable (DownloadProgress) -> Void)?,
+        subscriberRemoved: (@Sendable () -> Void)? = nil,
+        trackingRecords: (@Sendable () async -> Void)? = nil
     ) {
         self.store = store
         self.localItems = localItems
@@ -107,6 +114,8 @@ public actor DownloadManager {
         self.clock = clock
         self.enqueueWaiting = enqueueWaiting
         self.progressHandled = progressHandled
+        self.subscriberRemoved = subscriberRemoved
+        self.trackingRecords = trackingRecords
     }
 
     deinit {
@@ -124,12 +133,10 @@ public actor DownloadManager {
     ///
     /// - Throws: the error of ``DownloadLocations/prepare()``; the streams are read anyway.
     public func start() async throws {
-        if readers.isEmpty {
-            do {
-                for record in try await store.allRecords() { track(record) }
-            } catch {
-                logError("Couldn't read downloads to track", error)
-            }
+        if !didStart {
+            didStart = true
+            // The readers exist before the first suspension, so an overlapping call can't make
+            // a second pair.
             let updates = engine.updates
             let progress = engine.progress
             readers = [
@@ -146,6 +153,12 @@ public actor DownloadManager {
                     }
                 },
             ]
+            await trackingRecords?()
+            do {
+                for record in try await store.allRecords() where tracked[record.id] == nil { track(record) }
+            } catch {
+                logError("Couldn't read downloads to track", error)
+            }
         }
         try locations.prepare()
     }
@@ -164,7 +177,11 @@ public actor DownloadManager {
 
     private func unsubscribe(_ id: UUID) {
         subscribers[id] = nil
+        subscriberRemoved?()
     }
+
+    /// How many ``events()`` streams are open, for tests.
+    var subscriberCount: Int { subscribers.count }
 
     private func emit(_ event: DownloadManagerEvent) {
         for subscriber in subscribers.values { subscriber.yield(event) }
@@ -178,15 +195,22 @@ public actor DownloadManager {
     ///   and the result is ``EnqueueResult/alreadyQueued(_:)``.
     /// - Media already downloaded gives ``EnqueueResult/alreadyDownloaded(_:)``: a book whose
     ///   local item has an audio or ebook file, or an episode with a file carrying its ID.
-    /// - With `replacingExisting`, neither check applies: a new plan replaces the record (its
-    ///   transfers are stopped and their resume data deleted), or downloads the media again
-    ///   over the stored files. Paths are deterministic, so files with the same names are
-    ///   replaced in place.
+    /// - With `replacingExisting`, neither check applies: an existing record is paused, its
+    ///   transfers stopped (deleting their resume data) and the record deleted, and the new
+    ///   plan is saved as a new record, so a late finalise of the old one can't delete it. If
+    ///   saving the new record fails, the old one is already gone: nothing is queued, and the
+    ///   caller can enqueue again.
+    /// - Downloading stored media again reuses its paths, which are deterministic: each new
+    ///   file replaces the old one in place, atomically. Files at old paths that the server no
+    ///   longer lists lose their rows when the record completes and are left for the
+    ///   `DownloadJanitor`'s orphan sweep (#192). Until the replacement completes, an item
+    ///   whose files changed content but kept their names can be a mix of old and new files.
     ///
-    /// The bytes still to fetch plus ``storageHeadroom`` must fit in the available capacity;
-    /// when a file's size is unknown, the item's (or episode's) reported size is used instead.
-    /// When the capacity can't be read, the download is queued anyway, and the engine's
-    /// `outOfSpace` failure catches a full disk.
+    /// The bytes still to fetch for this download plus ``storageHeadroom`` must fit in the
+    /// available capacity; other downloads under way aren't counted. When a file's size is
+    /// unknown, the item's (or episode's) reported size is used instead. When the capacity
+    /// can't be read, the download is queued anyway; in both cases the engine's `outOfSpace`
+    /// failure catches a full disk.
     ///
     /// - Parameter item: an expanded item (`ItemEndpoints.item(id:)`).
     /// - Throws: a ``DownloadManagerError``.
@@ -197,9 +221,11 @@ public actor DownloadManager {
         await beginEnqueuing(itemKey)
         defer { endEnqueuing(itemKey) }
         let key = MediaKey(serverConnectionID: connectionID, libraryItemId: item.id, episodeId: episodeID)
-        let existing = try await read { try await self.store.record(key: key) }
-        if let existing, !replacingExisting {
-            return try await keep(existing)
+        var existing = try await read { try await self.store.record(key: key) }
+        if let record = existing, !replacingExisting {
+            if let result = try await keep(record) { return result }
+            // The record was finalised or deleted meanwhile: plan as if it never existed.
+            existing = nil
         }
         let localItem = try await read {
             try await self.localItems.item(serverConnectionID: connectionID, libraryItemId: item.id)
@@ -222,6 +248,11 @@ public actor DownloadManager {
             _ = try await read { try await self.store.setState(.paused, forRecord: existing.id) }
             await engine.stop(partIDs: existing.parts.map(\.id), keepingResumeData: false)
             forget(existing.id)
+            // A part still settling isn't stopped: the engine may finalise the old record and
+            // then delete it by ID. Deleting it here, and saving the plan under the plan's new
+            // ID, keeps that late delete off the new record. The stop deleted the resume data
+            // of every part it stopped.
+            _ = try await read { try await self.store.deleteRecord(existing.id) }
         }
         let record = try await read { try await self.store.upsertRecord(plan).record }
         track(record)
@@ -246,16 +277,15 @@ public actor DownloadManager {
         for waiter in enqueueWaiters.removeValue(forKey: itemKey) ?? [] { waiter.resume() }
     }
 
-    /// Keeps an existing record, resuming it when it is paused or failed.
-    private func keep(_ record: DownloadRecordDTO) async throws(DownloadManagerError) -> EnqueueResult {
+    /// Keeps an existing record, resuming it when it is paused or failed; `nil` when the record
+    /// is gone by the time it is resumed.
+    private func keep(_ record: DownloadRecordDTO) async throws(DownloadManagerError) -> EnqueueResult? {
         if tracked[record.id] == nil { track(record) }
         switch record.state {
         case .paused, .failed:
-            do {
-                _ = try await engine.resume(recordID: record.id)
-            } catch {
-                logError("Couldn't resume a download", error)
-                throw .storeFailure
+            guard try await read({ try await self.engine.resume(recordID: record.id) }) else {
+                forget(record.id)
+                return nil
             }
             await refresh(record.id, announce: true)
         case .queued, .downloading:
@@ -273,7 +303,9 @@ public actor DownloadManager {
     }
 
     /// The item's cover that is stored or on its way: the local item's, or else a cover part
-    /// of another record of the same item, so two episodes queued together fetch it once.
+    /// of another record of the same item, so two episodes queued together fetch it once. A
+    /// cover part counts only when it has completed or its record is queued or downloading: a
+    /// paused or failed record may never fetch it.
     private func existingCoverPath(
         for key: MediaKey, localItem: LocalLibraryItemDTO?
     ) async throws(DownloadManagerError) -> String? {
@@ -283,7 +315,12 @@ public actor DownloadManager {
             records
             .lazy
             .filter { $0.key.libraryItemId == key.libraryItemId && $0.key != key }
-            .compactMap { $0.parts.first { $0.kind == .cover }?.destinationRelativePath }
+            .compactMap { record in
+                record.parts.first {
+                    $0.kind == .cover
+                        && ($0.state == .completed || record.state == .queued || record.state == .downloading)
+                }?.destinationRelativePath
+            }
             .first
     }
 
@@ -339,8 +376,11 @@ public actor DownloadManager {
         }
     }
 
-    /// The key of a downloaded book, for a record that wasn't tracked (an episode's key can't be
-    /// told from its local item).
+    /// The key of a downloaded book, for a record that wasn't tracked. An episode's key can't be
+    /// told from its local item, so an episode record the manager never tracked (saved after
+    /// ``start()`` by something other than ``enqueue(item:episodeID:connectionID:replacingExisting:)``,
+    /// and gone before any of its updates was handled) completes without a
+    /// ``DownloadManagerEvent/completed(recordID:itemID:key:)`` event.
     private func bookKey(ofLocalItem itemID: UUID) async -> MediaKey? {
         guard let item = try? await localItems.item(id: itemID), item.mediaType == .book else { return nil }
         return MediaKey(serverConnectionID: item.serverConnectionID, libraryItemId: item.libraryItemId)
