@@ -122,4 +122,10 @@ import Testing
         #expect(!failure.isBackgroundCancellation)
         #expect(outcome.moved == nil)
     }
+
+    /// At most three parts of one server transfer at once, as in the legacy app (#73, Q5).
+    @Test func backgroundSessionCapsConnectionsPerHost() {
+        let configuration = URLSessionConfiguration.absDownloads(identifier: "test-\(UUID().uuidString)")
+        #expect(configuration.httpMaximumConnectionsPerHost == 3)
+    }
 }
