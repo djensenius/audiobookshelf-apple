@@ -37,6 +37,8 @@ struct PodcastDetailScreen: View {
     @State private var failureKey: String?
     @State private var showsFailure = false
     @State private var goneState = ItemDetailGoneState()
+    /// The scroll view's width, which doesn't depend on the header layout chosen from it.
+    @State private var width: CGFloat?
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
 
@@ -61,7 +63,7 @@ struct PodcastDetailScreen: View {
                     .padding(.bottom, ABSSpacing.large)
                 }
                 PodcastDetailHeader(
-                    model: model, canPlay: context.canPlay && startingEpisodeID == nil,
+                    model: model, width: width, canPlay: context.canPlay && startingEpisodeID == nil,
                     isStarting: startingEpisodeID != nil && startingEpisodeID == model.nextEpisode?.id
                 ) {
                     if let next = model.nextEpisode { perform(.play, on: next) }
@@ -88,6 +90,11 @@ struct PodcastDetailScreen: View {
             .padding(ABSSpacing.large)
             .frame(maxWidth: 1_000)
             .frame(maxWidth: .infinity)
+        }
+        .onGeometryChange(for: CGFloat.self) {
+            $0.size.width
+        } action: {
+            width = $0
         }
         .searchable(text: $model.searchText, prompt: Text(verbatim: L10n.string("ButtonSearch")))
         .refreshable { await model.detail.load() }

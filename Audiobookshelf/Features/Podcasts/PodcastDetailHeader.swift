@@ -4,10 +4,13 @@ import ABSUI
 import SwiftUI
 
 /// The top of the podcast screen (legacy `index.vue` with a podcast): the cover, the title with
-/// its Explicit badge, Next Episode, the metadata and the description. Compact width stacks
-/// them; regular width puts the cover and Next Episode beside the rest.
+/// its Explicit badge, Next Episode, the metadata and the description. Compact width, or any
+/// width too narrow for two columns (``ItemDetailLayout``, as on the book screen), stacks them;
+/// otherwise the cover and Next Episode sit beside the rest.
 struct PodcastDetailHeader: View {
     let model: PodcastDetailModel
+    /// The screen's scroll view width; `nil` until measured.
+    let width: CGFloat?
     /// Next Episode can start: there is a player, the podcast is still on the server, and no
     /// other episode is starting.
     let canPlay: Bool
@@ -18,7 +21,7 @@ struct PodcastDetailHeader: View {
     @Environment(\.locale) private var locale
 
     var body: some View {
-        if horizontalSizeClass == .compact {
+        if ItemDetailLayout.usesStackedLayout(width: width, sizeClass: horizontalSizeClass) {
             VStack(alignment: .leading, spacing: ABSSpacing.large) {
                 cover
                     .frame(maxWidth: 240)
