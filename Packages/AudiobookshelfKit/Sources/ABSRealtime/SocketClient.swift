@@ -74,11 +74,12 @@ public actor SocketClient {
     private var attempt = 0
 
     /// - Parameters:
+    ///   - transport: Defaults to a transport with this client's own session and cookie jar.
     ///   - clock: Times heartbeats and reconnect backoff.
     ///   - random: Returns a value in `0..<1` for backoff jitter.
     public init(
         configuration: RealtimeConfiguration,
-        transport: any WebSocketTransport = URLSessionWebSocketTransport(),
+        transport: any WebSocketTransport = URLSessionWebSocketTransport.isolated(),
         clock: any Clock<Duration> = ContinuousClock(),
         random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }
     ) throws(RealtimeError) {

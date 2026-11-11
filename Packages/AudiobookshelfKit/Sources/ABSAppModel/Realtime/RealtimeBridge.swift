@@ -108,7 +108,10 @@ public final class RealtimeBridge: SessionParticipant {
 
     public init(
         progress: ProgressCache,
-        makeSocket: @escaping SocketFactory = { try SocketClient(configuration: $0) },
+        makeSocket: @escaping SocketFactory = {
+            // Each session's socket gets its own cookie jar.
+            try SocketClient(configuration: $0, transport: URLSessionWebSocketTransport.isolated())
+        },
         makeTokenSource: @escaping TokenSourceFactory = { $0 }
     ) {
         self.progress = progress
