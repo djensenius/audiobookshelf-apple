@@ -203,10 +203,19 @@ make_search_media() {
     -metadata title="First" -metadata album="First" -metadata artist="$search_token Shared Author"
   tone "$work/search-fixtures/books/Second/Second.mp3" 523 40 "${mp3[@]}" \
     -metadata title="Second" -metadata album="Second" -metadata artist="$search_token Shared Author"
+  # Scan primes the filter cache before PATCHes. Seed the final tags/genres/narrators
+  # at scan time; retain Shared Author from ID3 and let PATCH add authors/series.
+  printf '{"tags":["%s Shared Tag","%s Unique Tag"],"genres":["%s Shared Genre","%s Unique Genre"],"narrators":["%s Shared Narrator","%s Unique Narrator"],"publisher":"First Publisher","language":"en","publishedYear":"1984"}\n' \
+    "$search_token" "$search_token" "$search_token" "$search_token" "$search_token" "$search_token" \
+    >"$work/search-fixtures/books/First/metadata.json"
+  printf '{"tags":["%s Shared Tag"],"genres":["%s Shared Genre"],"narrators":["%s Shared Narrator"],"publisher":"Second Publisher","language":"fr","publishedYear":"2007"}\n' \
+    "$search_token" "$search_token" "$search_token" >"$work/search-fixtures/books/Second/metadata.json"
+  printf '{"tags":["%s Podcast Tag"],"genres":["%s Podcast Genre"],"language":"de"}\n' \
+    "$search_token" "$search_token" >"$work/search-fixtures/casts/Owned Cast/metadata.json"
   for number in 1 2; do
     tone "$work/search-fixtures/casts/Owned Cast/$search_token Episode $number.mp3" 392 "$((20 * number))" \
       "${mp3[@]}" -metadata title="$search_token Episode $number" \
-      -metadata album="Owned Cast" -metadata artist="Owned Cast" -metadata genre=Podcast
+      -metadata album="Owned Cast" -metadata artist="Owned Cast" -metadata genre="$search_token Podcast Genre"
   done
 }
 

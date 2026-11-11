@@ -6,6 +6,7 @@ installing dependencies or performing API writes. Only generated fake CLI/server
 PIDs are signalled. Every test has an outer deadline and exact-PID final cleanup.
 """
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -114,6 +115,77 @@ def stopped(pid):
 
 
 class CleanupTests(unittest.TestCase):
+    def test_owned_sidecars_match_declared_patch_values_and_exact_inventory(self):
+        temporary = ROOT / ".build/server-tmp"
+        temporary.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="search-generator.", dir=temporary) as directory:
+            root = Path(directory)
+            work = root / "data"
+            work.mkdir()
+            seed = [
+                "audiobooks/Ada Fixture/The Synthetic Tale/01 - Part One.mp3",
+                "audiobooks/Ada Fixture/The Synthetic Tale/02 - Part Two.mp3",
+                "audiobooks/Ada Fixture/Single File Tale/Single File Tale.m4b",
+                "podcasts/Synthetic Cast/Episode One.mp3",
+            ]
+            for name in seed:
+                path = work / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"unchanged ordinary seed sentinel")
+            # Only tone encoding is stubbed. Execute the actual owned generator and sidecar writes.
+            (root / "tone.py").write_text(
+                "import json, os, sys\nfrom pathlib import Path\n"
+                "Path(sys.argv[1]).write_bytes(b'synthetic tone stub')\n"
+                "with (Path(os.environ['CASE_ROOT']) / 'tones.jsonl').open('a') as out:\n"
+                "    out.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            )
+            definition = SOURCE[SOURCE.index("make_search_media() {"):SOURCE.index("\nstart_docker() {")]
+            result = subprocess.run(
+                ["/bin/bash", "-c",
+                 'set -euo pipefail\nwork=$CASE_WORK\n'
+                 'openssl() { printf "0123456789abcdef\\n"; }\n'
+                 'tone() { "$CASE_PYTHON" "$CASE_ROOT/tone.py" "$@"; }\n'
+                 + definition + "\nmake_search_media\n"],
+                env=dict(os.environ, CASE_ROOT=str(root), CASE_WORK=str(work), CASE_PYTHON=sys.executable),
+                capture_output=True, text=True, timeout=3
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            token = "search0123456789abcdef"
+            owned = set()
+            for name, unique, publisher, language, year in [
+                ("First", True, "First Publisher", "en", "1984"),
+                ("Second", False, "Second Publisher", "fr", "2007"),
+            ]:
+                folder = f"search-fixtures/books/{name}"
+                owned.update([f"{folder}/{name}.mp3", f"{folder}/metadata.json"])
+                def values(kind):
+                    return [f"{token} Shared {kind}"] + ([f"{token} Unique {kind}"] if unique else [])
+                self.assertEqual(json.loads((work / folder / "metadata.json").read_bytes()), {
+                    "tags": values("Tag"), "genres": values("Genre"), "narrators": values("Narrator"),
+                    "publisher": publisher, "language": language, "publishedYear": year,
+                })
+            folder = "search-fixtures/casts/Owned Cast"
+            owned.update([f"{folder}/{token} Episode {n}.mp3" for n in [1, 2]])
+            owned.add(f"{folder}/metadata.json")
+            self.assertEqual(json.loads((work / folder / "metadata.json").read_bytes()), {
+                "tags": [f"{token} Podcast Tag"], "genres": [f"{token} Podcast Genre"], "language": "de",
+            })
+            self.assertEqual({str(p.relative_to(work)) for p in work.rglob("*") if p.is_file()}, set(seed) | owned)
+            for name in seed:
+                self.assertEqual((work / name).read_bytes(), b"unchanged ordinary seed sentinel")
+            tones = [json.loads(line) for line in (root / "tones.jsonl").read_text().splitlines()]
+            self.assertEqual(len(tones), 4)
+            self.assertEqual([row[2] for row in tones], ["30", "40", "20", "40"])
+            for index, row in enumerate(tones):
+                if index < 2:
+                    name = ["First", "Second"][index]
+                    self.assertIn(f"artist={token} Shared Author", row)
+                    self.assertIn(f"title={name}", row)
+                    self.assertIn(f"album={name}", row)
+                else:
+                    self.assertIn(f"genre={token} Podcast Genre", row)
+                    self.assertIn(f"title={token} Episode {index - 1}", row)
+
     def run_case(self, backend, fault="", primary=0, expected=0, retained=False):
         temporary = ROOT / ".build/server-tmp"
         temporary.mkdir(parents=True, exist_ok=True)
