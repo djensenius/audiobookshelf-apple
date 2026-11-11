@@ -2,8 +2,8 @@
 
 `SearchContractTests` exercises production `LibraryEndpoints.search` and `LibrarySearchResults`
 against disposable, independently owned book and podcast libraries. It adds no production admin
-API, model change, dependency, target, permission-policy expansion or offline fixtures.
-Authentic sanitized offline fixtures are separate from this live harness (#251 for 2.26.0,
+API, model change, dependency, target or permission-policy expansion. #258 adds complete
+filter fixtures and positive filter checks. Authentic offline search fixtures are separate (#251 for 2.26.0,
 #259 for 2.37.2); see the offline evidence section below.
 
 ## Run and select
@@ -39,10 +39,12 @@ selectors, e.g. `test --filter LibraryContractTests/libraries`, run just that se
 The installed SwiftPM accepts regex `--filter` and `--skip`; executed identities, not merely
 `swift test list` output (which lists unselected tests too), establish selection.
 
-The three live identities are `ABSServerContractTests.SearchContractTests/completeSearch()`,
-`queries()` and `failureCleanup()`. The suite is serialized. It does not use `.requiresServer`,
+The live identities are `ABSServerContractTests.SearchContractTests/completeSearch()`,
+`queries()`, `failureCleanup()` and `scanPrimedPodcastLanguageDiscrepancy()`.
+The last is explicitly a cache-bug characterization, not positive language acceptance.
+The suite is serialized. It does not use `.requiresServer`,
 because an explicitly requested run with no server must **fail**, not skip.
-Without `ABS_SEARCH_CONTRACT_MODE`, all three report “Owned search NOT RUN”; these skips are
+Without `ABS_SEARCH_CONTRACT_MODE`, they report “Owned search NOT RUN”; these skips are
 never acceptance evidence. The two `SearchContractGateTests` are pure no-network configuration
 checks and can run in ordinary package tests.
 
@@ -244,6 +246,125 @@ Retained #250 live evidence covers both pins/backends, focused and full: reporte
 tests/0 skips, with full runs first executing 71 ordinary tests/1 known skip. No live matrix
 was rerun: only the one focused 2.26.0 runtime-binding recapture above was needed.
 #259 supplies the separate 2.37.2 fixtures.
+
+## Filter metadata: positives and separate cache characterization (#258 / #263)
+
+**#263 remains open and blocked:** successful nonempty podcast-language filter acceptance
+has not been established. An observed empty filter array is not an unsupported-dimension rule
+and is not successful positive coverage. Closing #258 must not close #263/#222.
+
+The owned generator places metadata.json beside both book files and the podcast episodes.
+Book tags/genres/narrators exactly match final shared/unique PATCH values at scan time.
+First declares First Publisher/en/1984; Second declares Second Publisher/fr/2007.
+Independent decade expectations are string values 1980 and 2000. Podcast declares
+its final token-derived tag/genre and language de; audio genre already matches.
+No sidecar authors, series or titles are supplied. Both audio artist tags remain Shared Author.
+Each pre-PATCH expanded book read strictly checks retained Shared Author and empty series;
+PATCH order and asymmetric search cardinalities are unchanged.
+
+Library scanning primes the in-memory filter cache BEFORE it scans any items. The cache's
+30-minute early return precedes DB change detection. Incremental additions fill arrays while
+cached count markers can remain zero. Final metadata PATCHes do not make tag/genre/narrator
+cache data current; matching scan-time metadata avoids that unrelated stale-PATCH scenario.
+
+There are two deliberately distinct assertions:
+
+- `completeSearch`: positive nonempty book authors, series, narrators, genres, tags, languages,
+  publishers and decades; positive podcast tags/genres. Independent expanded-item/author/series
+  reads establish identities and declared values. Expected-empty podcast author/series/narrator/
+  publisher/decade groups are verified. No nonempty podcast-language success is claimed.
+- `scanPrimedPodcastLanguageDiscrepancy`: same-run independent podcast language MUST equal de,
+  while the observed wrapper/dedicated filter languages are empty on both recorded pins.
+  Its test name says CHARACTERIZATION and explicitly leaves #263 unmet. No caught/ignored
+  positive failure, expected-failure wrapper, skip or changed decoder is used.
+
+Both require complete raw objects before trusting the native wrapper fallback or lossy arrays.
+All author/series rows are individually decoded and their complete modeled values compared in
+exact wire order. Every string array is strictly read, duplicate-free and order-preserving
+against its DTO. Semantic membership uses duplicate-free sets, never an invented cache sort order.
+The wrapper's raw filterdata equals the dedicated JSON, and both typed filter values must match.
+Required millisecond loadedAt stays Int?; issues/user playlists stay numeric zero for this fixture.
+
+### Actual preparation captures (2026-11-11 UTC)
+
+Both focused Docker processes ran the pre-assertion capture preparation: **3 passed, 0 failed,
+0 skipped** each. Those are existing search tests, not passing nonempty podcast-language tests.
+The independent original positive audit on EACH pin returned **378 checks passed, 1 failed,
+exit 1**, specifically expected `["de"]`, actual `[]`. These red reports remain immutable.
+The newer audit's only wire-shape adaptation is the source-backed absent provider field.
+
+| Pin | Full source revision | Official digest and running `.Image` |
+| --- | --- | --- |
+| 2.26.0 | `264ae928a9c1af620487488110eec816b14e23ec` | `sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5` |
+| 2.37.2 | `edb1f7efc92ecacdef51aafb4d9d5054ce10604f` | `sha256:b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa` |
+
+Registered full running container IDs, respectively:
+`94b958c00748c25e5b5eef009eda0a36190ce10b951128100fe293ded3a6a95f` and
+`911828a4a7505ce00118dbb2f45e80e540368d7274585cc2e5c22f9773fc19c5`.
+While-running inspection proved `.Image == actualImageID == canonicalImageID` with exact
+RepoDigest, full labels/revision and actual HTTP200 /status version. Tag inspection alone
+was not used as runtime proof. Exact registered-ID inventory and owned data removal succeeded.
+All three fixture cleanups per process verified all ten registered resources absent and four
+ordinary seed snapshots unchanged. No unrelated resource was inspected for cleanup or removed.
+
+For each pin, originals include four actual ordinary-user HTTP200 GETs: book/podcast
+`/api/libraries/:id?include=filterdata` through the native endpoint, and test-only raw
+`/api/libraries/:id/filterdata`. Bodies were not replayed for capture. Response headers/status
+come from the actual URLSession response; originals, command/env/output, ledger/item details,
+generated inventory and cleanup live privately under the owning worktree's .build.
+
+Observed cache loadedAt values (book/podcast):
+2.26.0 `1794365238238` / `1794365238493`;
+2.37.2 `1794366009137` / `1794366009382`.
+Each was unchanged between wrapper and dedicated and preceded scan completion.
+All four unmodeled count fields are present numeric zero: bookCount/authorCount/seriesCount/
+podcastCount. They are NOT current DB totals. Wrapper customMetadataProviders is present empty
+on 2.26.0 and absent on 2.37.2; no synthetic version differences were introduced.
+
+Expanded libraryFiles include exactly audio + metadata.json for each book and two episodes +
+metadata.json for the podcast. Added sidecars are 335/221/114 bytes; item totals include them
+while media sizes count audio only. File inventories/independent size sums are asserted, not
+dropped. Ordinary generated media are unchanged. Metadata additions do not rewrite historical
+#251 search fixtures.
+
+### Complete fixtures and optional original proof
+
+Eight `ABSAPITests/Fixtures/filter-{book,podcast}-{wrapper,dedicated}-{version}.json` files
+are full readable bodies, not trimmed/minified summaries. Only exact JSON-pointer-allowlisted
+library/folder/author/series IDs and the identifying query-token prefix were replaced.
+Every key, absent/null distinction, numeric/boolean/string type, timestamp and array order/length
+is unchanged. Paths were already synthetic and were not altered; no URL occurs in these bodies.
+The independent private proof records original SHA256s, each old/new identifying value and
+its exact pointer. Semantic groups retain all valid elements.
+
+`NonemptyFilterResponseTests.completeBodiesPreservePositiveGroupsAndOrderedDTOs` validates
+both bundled endpoints per media type/pin. The separately named offline language characterization
+compares the observed empty arrays to the declared de, without pretending bundled filter bodies
+contain expanded item evidence. Optional original verification also checks every independent
+pre/post expanded item, retained author, inventory and the actual podcast language.
+
+For optional original verification, set `ABS_FILTER_CAPTURE_DIR` to the private proof root,
+with per-version directories containing the four `{book,podcast}-{wrapper,dedicated}.json`
+originals, six `{first,second,podcast}-{before,after}.json` expanded item reads and manifest.json.
+Run `swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --jobs 2
+--filter NonemptyFilterResponseTests`. The test always checks bundled fixtures as well.
+The manifest holds each original hash and exact allowed substitutions; verification traverses
+every JSON value and rejects changes outside identifying string leaves.
+
+Required validation includes focused offline/original modes, owned search on both Docker/Node
+pins, existing cleanup/generator regressions and serial mandatory checks. Preparation capture
+passes alone are not evidence that the final assertion-bearing tests passed. The generator
+regression checks exact seven-file owned inventory, unchanged ordinary seed sentinels and
+declared sidecar/audio tags. Default live skips are not live evidence.
+
+Source at the full pins above: `LibraryScanner.js:143-156` primes the cache;
+`libraryFilters.js:445-452` / `450-457` returns it early. Podcast creation calls only
+genres/tags helpers at `PodcastScanner.js:347-348` / `358-359`; cold podcast query
+`libraryFilters.js:524-546` / `529-551` explicitly adds language.
+Books do call the language helper at `BookScanner.js:602` / `613`.
+Wrapper/dedicated routes share the same query (`LibraryController.js:221-231,880-882`
+/ `221-230,878-880`). No cold-cache execution, expiry, rescan, restart, bypass or client
+normalization is exercised. This records the server omission; it does not repair it.
 
 ## Offline search evidence (2.37.2)
 

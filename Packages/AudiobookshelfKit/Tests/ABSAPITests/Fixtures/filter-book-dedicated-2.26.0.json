@@ -1,0 +1,52 @@
+{
+  "authors": [
+    {
+      "id": "filter-author-shared",
+      "name": "search0000000000000258 Shared Author"
+    },
+    {
+      "id": "filter-author-unique",
+      "name": "search0000000000000258 Unique Author"
+    }
+  ],
+  "genres": [
+    "search0000000000000258 Shared Genre",
+    "search0000000000000258 Unique Genre"
+  ],
+  "tags": [
+    "search0000000000000258 Shared Tag",
+    "search0000000000000258 Unique Tag"
+  ],
+  "series": [
+    {
+      "id": "filter-series-shared",
+      "name": "search0000000000000258 Shared Series"
+    },
+    {
+      "id": "filter-series-unique",
+      "name": "search0000000000000258 Unique Series"
+    }
+  ],
+  "narrators": [
+    "search0000000000000258 Shared Narrator",
+    "search0000000000000258 Unique Narrator"
+  ],
+  "languages": [
+    "fr",
+    "en"
+  ],
+  "publishers": [
+    "Second Publisher",
+    "First Publisher"
+  ],
+  "publishedDecades": [
+    "2000",
+    "1980"
+  ],
+  "bookCount": 0,
+  "authorCount": 0,
+  "seriesCount": 0,
+  "podcastCount": 0,
+  "numIssues": 0,
+  "loadedAt": 1794365238238
+}
