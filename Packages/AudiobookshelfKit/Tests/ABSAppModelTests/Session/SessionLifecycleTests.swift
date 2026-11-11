@@ -468,10 +468,11 @@ private func teardown(_ reason: String) -> [String] {
         let harness = Harness()
         try await harness.started()
         let lifecycle = harness.lifecycle
+        // Holds the switch while B's session starts, inside its transition.
         let held = Gate()
-        harness.source.switchGate = held
+        harness.library.connectGate = held
         let switching = Task { try await lifecycle.switchAccount(to: identityB.connectionID, from: identityA) }
-        #expect(await eventually { harness.log.entries.contains("accounts.switch(b)") })
+        #expect(await eventually { harness.log.entries.contains("library.connect(b)") })
         var submitted = false
         let change = Task {
             submitted = true

@@ -72,8 +72,6 @@ final class FakeAccountSource: AccountSessionSource {
     @ObservationIgnored var switchSignsOut = false
     /// Runs inside ``switch(to:)``, before it changes anything.
     @ObservationIgnored var onSwitch: (@MainActor () -> Void)?
-    /// Holds ``switch(to:)`` after it's recorded, until opened.
-    @ObservationIgnored var switchGate: Gate?
     @ObservationIgnored private(set) var restoreCount = 0
 
     init(log: CallLog) {
@@ -102,7 +100,6 @@ final class FakeAccountSource: AccountSessionSource {
         let target = [identityA, identityB].first { $0.connectionID == connectionID }
         log.record("accounts.switch(\(target?.userID ?? "?"))")
         onSwitch?()
-        await switchGate?.wait()
         if let switchError { throw switchError }
         phase = .restoring
         await Task.yield()
