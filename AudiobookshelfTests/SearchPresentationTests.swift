@@ -345,6 +345,62 @@ private final class StoreToken {}
     }
 }
 
+/// Two windows' models of one account and library, made as the Search tab makes them.
+@MainActor
+@Suite struct SearchSharedRecentsTests {
+    private func withTwoModels(
+        _ body: (_ first: SearchModel, _ second: SearchModel, _ settings: AppSettings) throws -> Void
+    ) async throws {
+        let suiteName = "SearchSharedRecentsTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(defaults: defaults)
+        let store = LibraryStore(settings: settings)
+        await store.connect(client: SearchingLibraryService(), connectionKey: account)
+        let key = SearchSession.Key(store: ObjectIdentifier(store), connectionKey: account, libraryID: "books")
+        let first = try #require(SearchSession.makeModel(for: key, store: store, settings: settings))
+        let second = try #require(SearchSession.makeModel(for: key, store: store, settings: settings))
+        // Both windows searched before, so each has seen the old terms.
+        for (model, query) in [(first, "Dune"), (second, "Emma")] {
+            model.setQuery(query)
+            model.submit()
+        }
+        #expect(first.recentSearches == ["Emma", "Dune"])
+        #expect(second.recentSearches == ["Emma", "Dune"])
+        try body(first, second, settings)
+    }
+
+    private func stored(_ settings: AppSettings) -> [String] {
+        SearchRecentsStore(settings: settings).recentSearches(connectionKey: account, libraryID: "books")
+    }
+
+    @Test func clearingInOneWindowIsNotUndoneByAnotherWindowsSearch() async throws {
+        try await withTwoModels { first, second, settings in
+            first.clearRecentSearches()
+            #expect(second.recentSearches.isEmpty)
+
+            second.setQuery("Serial")
+            second.submit()
+            #expect(stored(settings) == ["Serial"])
+            #expect(first.recentSearches == ["Serial"])
+            #expect(second.recentSearches == ["Serial"])
+        }
+    }
+
+    @Test func resetAllIsNotUndoneByALiveModelsSearch() async throws {
+        try await withTwoModels { first, second, settings in
+            settings.resetAll()
+            #expect(first.recentSearches.isEmpty)
+            #expect(second.recentSearches.isEmpty)
+
+            second.setQuery("Serial")
+            second.submit()
+            #expect(stored(settings) == ["Serial"])
+            #expect(first.recentSearches == ["Serial"])
+        }
+    }
+}
+
 @MainActor
 @Suite struct SearchSessionModelTests {
     @Test func theModelSearchesWithTheStoresServicesForItsAccount() async throws {

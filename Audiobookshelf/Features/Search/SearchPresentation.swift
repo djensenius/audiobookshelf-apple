@@ -168,6 +168,12 @@ struct SearchRecentsStore {
             json, serverID: connectionKey.serverID, userID: connectionKey.userID, libraryID: libraryID)
     }
 
+    /// The closure a library's ``SearchModel`` reads its recent searches with. Reads the
+    /// observable settings, so views showing them update when they change.
+    func load(connectionKey: LibraryConnectionKey, libraryID: String) -> SearchModel.LoadRecents {
+        { recentSearches(connectionKey: connectionKey, libraryID: libraryID) }
+    }
+
     /// The closure a library's ``SearchModel`` saves its recent searches with.
     func persist(connectionKey: LibraryConnectionKey, libraryID: String) -> SearchModel.PersistRecents {
         { recentSearches in

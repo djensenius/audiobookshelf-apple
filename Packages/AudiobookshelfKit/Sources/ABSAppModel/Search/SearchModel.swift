@@ -17,6 +17,9 @@ import Observation
 public final class SearchModel {
     /// Saves the recent searches after they changed.
     public typealias PersistRecents = @MainActor (_ recentSearches: [String]) -> Void
+    /// Reads the saved recent searches. Observable storage (such as `AppSettings`) makes views
+    /// showing ``recentSearches`` update when another window or a reset changes them.
+    public typealias LoadRecents = @MainActor () -> [String]
 
     /// How many recent searches are kept.
     public static let maxRecentSearches = 10
@@ -33,8 +36,11 @@ public final class SearchModel {
     /// The error of the last search, cleared by the next successful one or a blank query. The
     /// previous ``results`` stay.
     public private(set) var error: (any Error)?
-    /// Most recent first, de-duplicated ignoring case, at most ``maxRecentSearches``.
-    public private(set) var recentSearches: [String]
+    /// Most recent first, de-duplicated ignoring case, at most ``maxRecentSearches``. With
+    /// `loadRecents`, always the saved list, so a clear or reset elsewhere shows here too.
+    public var recentSearches: [String] {
+        loadRecents.map { Self.cleaned($0()) } ?? savedRecents
+    }
 
     /// The running search, including its debounce. Tests await it.
     @ObservationIgnored private(set) var searchTask: Task<Void, Never>?
@@ -43,16 +49,25 @@ public final class SearchModel {
     @ObservationIgnored private let debounce: Duration
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let persistRecents: PersistRecents?
+    @ObservationIgnored private let loadRecents: LoadRecents?
+    /// The recent searches without `loadRecents`.
+    private var savedRecents: [String]
     @ObservationIgnored private var generation = 0
 
     /// - Parameters:
-    ///   - recentSearches: The library's saved recent searches, cleaned up like new ones.
+    ///   - recentSearches: The library's saved recent searches, cleaned up like new ones. Ignored
+    ///     with `loadRecents`.
     ///   - limit: The maximum results per group; `nil` uses the server's default.
     ///   - clock: Times the debounce; tests pass a manual clock.
+    ///   - persistRecents: Saves the recent searches after ``submit()`` or a clear changed them.
+    ///   - loadRecents: Reads the saved recent searches. When set, the saved list is the only
+    ///     copy: ``recentSearches`` reads it, and ``submit()`` and ``clearRecentSearches()`` change
+    ///     what is saved now, so several models of one library (one per window) don't restore
+    ///     each other's cleared searches.
     public init(
         service: any SearchService, libraryID: String, recentSearches: [String] = [], limit: Int? = nil,
         debounce: Duration = .milliseconds(300), clock: any Clock<Duration> = ContinuousClock(),
-        persistRecents: PersistRecents? = nil
+        persistRecents: PersistRecents? = nil, loadRecents: LoadRecents? = nil
     ) {
         self.service = service
         self.libraryID = libraryID
@@ -60,11 +75,8 @@ public final class SearchModel {
         self.debounce = debounce
         self.clock = clock
         self.persistRecents = persistRecents
-        var recents: [String] = []
-        for query in recentSearches.map(Self.trimmed) where !query.isEmpty {
-            if !recents.contains(where: { $0.caseInsensitiveCompare(query) == .orderedSame }) { recents.append(query) }
-        }
-        self.recentSearches = Array(recents.prefix(Self.maxRecentSearches))
+        self.loadRecents = loadRecents
+        self.savedRecents = loadRecents == nil ? Self.cleaned(recentSearches) : []
     }
 
     isolated deinit {
@@ -84,14 +96,18 @@ public final class SearchModel {
     /// recent search.
     public func submit() {
         let previous = recentSearches
-        Self.add(query, to: &recentSearches)
-        if recentSearches != previous { persistRecents?(recentSearches) }
+        var recents = previous
+        Self.add(query, to: &recents)
+        if recents != previous {
+            savedRecents = recents
+            persistRecents?(recents)
+        }
         search(after: nil)
     }
 
     public func clearRecentSearches() {
         guard !recentSearches.isEmpty else { return }
-        recentSearches = []
+        savedRecents = []
         persistRecents?([])
     }
 
@@ -138,6 +154,15 @@ public final class SearchModel {
         case .failure(let error):
             if !(error is CancellationError) { self.error = error }
         }
+    }
+
+    /// Trimmed, without blanks or case-insensitive duplicates, at most ``maxRecentSearches``.
+    private static func cleaned(_ queries: [String]) -> [String] {
+        var recents: [String] = []
+        for query in queries.map(trimmed) where !query.isEmpty {
+            if !recents.contains(where: { $0.caseInsensitiveCompare(query) == .orderedSame }) { recents.append(query) }
+        }
+        return Array(recents.prefix(maxRecentSearches))
     }
 
     /// Moves `query` to the front of `recents`, replacing a match that differs only in case.

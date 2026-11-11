@@ -261,6 +261,27 @@ import Testing
         #expect(saved.value.last == [])
     }
 
+    @Test func withLoadRecentsTheSavedListIsTheOnlyCopy() async throws {
+        let stored = Locked<[String]>(["Dune", "dune", " "])
+        func makeSharedModel() -> SearchModel {
+            SearchModel(
+                service: FakeSearchService { _ in LibrarySearchResults() }, libraryID: "lib", clock: clock,
+                persistRecents: { stored.value = $0 }, loadRecents: { stored.value })
+        }
+        let first = makeSharedModel()
+        let second = makeSharedModel()
+        #expect(first.recentSearches == ["Dune"])
+
+        first.clearRecentSearches()
+        #expect(second.recentSearches.isEmpty)
+
+        second.setQuery("Emma")
+        second.submit()
+        await second.searchTask?.value
+        #expect(stored.value == ["Emma"])
+        #expect(first.recentSearches == ["Emma"])
+    }
+
     @Test func savedRecentSearchesAreCapped() {
         let model = makeModel(recentSearches: (1...12).map { "q\($0)" })
         #expect(model.recentSearches == (1...10).map { "q\($0)" })

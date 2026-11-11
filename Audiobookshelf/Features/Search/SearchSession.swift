@@ -48,15 +48,16 @@ struct SearchSession {
         return true
     }
 
-    /// A model for `key` searching with `store`'s services, with the library's saved recent
-    /// searches. `nil` when `store` isn't connected to `key`'s account.
+    /// A model for `key` searching with `store`'s services. Its recent searches are the library's
+    /// list in `settings`, read live, so every window's model of the library shares them. `nil`
+    /// when `store` isn't connected to `key`'s account.
     static func makeModel(for key: Key, store: LibraryStore, settings: AppSettings?) -> SearchModel? {
         guard store.connectionKey == key.connectionKey, let services = store.makeServices() else { return nil }
         let recents = settings.map { SearchRecentsStore(settings: $0) }
         return SearchModel(
             service: services, libraryID: key.libraryID,
-            recentSearches: recents?.recentSearches(connectionKey: key.connectionKey, libraryID: key.libraryID) ?? [],
-            persistRecents: recents?.persist(connectionKey: key.connectionKey, libraryID: key.libraryID))
+            persistRecents: recents?.persist(connectionKey: key.connectionKey, libraryID: key.libraryID),
+            loadRecents: recents?.load(connectionKey: key.connectionKey, libraryID: key.libraryID))
     }
 
     /// Searches the router's pending `search?q=` query and clears it. Without a model the query
