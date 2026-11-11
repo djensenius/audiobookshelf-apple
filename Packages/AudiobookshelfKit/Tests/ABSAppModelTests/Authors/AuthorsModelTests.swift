@@ -240,4 +240,30 @@ private typealias F = SeriesAuthorsFixtures
         await model.load()
         #expect(model.phase == .failed)
     }
+
+    @Test func authorOfAnotherLibraryMovesTheBooksThere() async {
+        let authorRequests = Locked(0)
+        let cancelled = Locked<[String]>([])
+        let service = FakeSeriesAuthorsService(
+            authorDetailHandler: { id in
+                authorRequests.value += 1
+                return AuthorDetailResponse(author: Author(id: id, name: "A", libraryId: "lib_b"))
+            },
+            booksHandler: { libraryID, _ in
+                guard libraryID == "lib_b" else {
+                    // The opened library's page waits until the move cancels it.
+                    do { try await Task.sleep(for: .seconds(30)) } catch { cancelled.value.append(libraryID) }
+                    throw CancellationError()
+                }
+                return F.page([F.book("b1"), F.book("b2"), F.book("b3")])
+            })
+        let model = AuthorDetailModel(authorID: "a1", libraryID: "lib_a", service: service)
+
+        await model.loadIfNeeded()
+
+        #expect(authorRequests.value == 1)
+        #expect(model.books.items.map(\.id) == ["b1", "b2", "b3"])
+        #expect(model.books.total == 3)
+        #expect(cancelled.value == ["lib_a"])
+    }
 }

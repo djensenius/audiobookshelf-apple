@@ -7,20 +7,17 @@ import SwiftUI
 /// One author: photo, name, bio (collapsed when long) and their books in the author's library,
 /// paged through the `authors.<id>` filter.
 ///
-/// Builds one ``AuthorDetailModel`` per store, account and library from `makeServices()`; an
-/// author of another library than the selected one gets a model for their library.
+/// Builds one ``AuthorDetailModel`` per store, account and library from `makeServices()`; the
+/// model moves the books to the author's library when it isn't the selected one.
 struct AuthorDetailView: View {
     let authorID: String
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
     @State private var host: BrowseModelHost<AuthorDetailModel>?
-    /// The key for the author's library once they loaded from another one.
-    @State private var authorLibrary: BrowseModelKey?
 
     var body: some View {
         let libraryID = router?.libraryID
-        let key = AuthorsPresentation.key(
-            BrowseModelKey(store: store, libraryID: libraryID, entityID: authorID), authorLibrary: authorLibrary)
+        let key = BrowseModelKey(store: store, libraryID: libraryID, entityID: authorID)
         Group {
             if let host, let model = host.model(for: key) {
                 AuthorDetailContent(model: model)
@@ -36,9 +33,6 @@ struct AuthorDetailView: View {
                 AuthorsPresentation.makeDetail(authorID: authorID, key: key, services: services)
             }
             await host?.model.loadIfNeeded()
-            if let host, let next = AuthorsPresentation.authorLibraryKey(after: host) {
-                authorLibrary = next
-            }
         }
     }
 }
@@ -46,38 +40,49 @@ struct AuthorDetailView: View {
 /// The author screen for one model; previews give it a fixture service.
 struct AuthorDetailContent: View {
     let model: AuthorDetailModel
+    /// The last user refresh failed and nothing loaded since.
+    @State private var refreshFailed = false
 
     var body: some View {
         let messages = AuthorsPresentation.detailMessages
         BrowseStateView(
             state: AuthorsPresentation.state(of: model), messages: messages,
             retry: { Task { await model.loadIfNeeded() } }
-        ) { failed in
+        ) { _ in
             if let detail = model.detail {
+                let placement = AuthorsPresentation.failurePlacement(of: model, refreshFailed: refreshFailed)
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: ABSSpacing.large) {
-                        if failed {
-                            BrowseFailureRow(messageKey: messages.failed, retry: { Task { await model.load() } })
+                        if placement == .top {
+                            BrowseFailureRow(messageKey: messages.failed, retry: { Task { await refresh() } })
                         }
-                        AuthorDetailHeader(detail: detail, bookCount: AuthorsPresentation.bookCount(of: model))
-                        AuthorBooksSection(state: AuthorsPresentation.booksState(of: model), books: model.books)
+                        AuthorDetailHeader(detail: detail, booksTotal: model.books.total)
+                        AuthorBooksSection(books: model.books, failed: placement == .footer)
                     }
                     .padding(.vertical, ABSSpacing.large)
                 }
             }
         }
         .navigationTitle(Text(verbatim: model.detail?.name ?? L10n.string("LabelAuthor")))
-        .refreshable { await model.refresh() }
+        .refreshable { await refresh() }
         .refreshCommand(.pushed(.author(id: model.authorID)), isDisabled: model.isLoading || model.books.isLoading) {
-            Task { await model.refresh() }
+            Task { await refresh() }
         }
+        .onChange(of: model.error == nil && model.books.error == nil) { _, cleared in
+            if cleared { refreshFailed = false }
+        }
+    }
+
+    private func refresh() async {
+        refreshFailed = await AuthorsPresentation.refresh(model)
     }
 }
 
 /// The photo, name, book count and bio.
 private struct AuthorDetailHeader: View {
     let detail: AuthorDetail
-    let bookCount: String?
+    /// The books filter's count, once known.
+    let booksTotal: Int?
     @Environment(\.serverID) private var serverID
     @ScaledMetric(relativeTo: .title2) private var imageWidth: CGFloat = 120
 
@@ -93,7 +98,7 @@ private struct AuthorDetailHeader: View {
                         .font(.title2.bold())
                         .foregroundStyle(ABSColor.foreground)
                         .accessibilityAddTraits(.isHeader)
-                    if let bookCount {
+                    if let bookCount = AuthorsPresentation.bookCount(total: booksTotal, author: detail.summary) {
                         Text(verbatim: bookCount)
                             .font(.subheadline)
                             .foregroundStyle(ABSColor.mutedForeground)
@@ -108,20 +113,23 @@ private struct AuthorDetailHeader: View {
     }
 }
 
-/// The author's books: a spinner, a failure with Retry, "No items found", or the paged grid.
+/// The author's books: a spinner, "No items found", or the paged grid; their failure with Retry
+/// when `failed` (a failed refresh shows above the author instead).
 private struct AuthorBooksSection: View {
-    let state: BrowseScreenState
     let books: ItemListModel<LibraryQuery, ItemSummary>
+    let failed: Bool
 
     var body: some View {
         let failedMessage = AuthorsPresentation.booksFailedMessage
-        switch state {
+        switch BrowseScreenState.resolve(list: books) {
         case .loading:
             ProgressView()
                 .frame(maxWidth: .infinity)
         case .failed:
-            BrowseFailureRow(messageKey: failedMessage, retry: { BrowsePresentation.retry(books) })
-        case .loaded(let failed):
+            if failed {
+                BrowseFailureRow(messageKey: failedMessage, retry: { BrowsePresentation.retry(books) })
+            }
+        case .loaded:
             BrowseItemGrid(elements: books.items, item: { $0 }, onAppear: { books.itemAppeared(id: $0.id) })
             BrowsePagingFooter(
                 isLoading: books.isLoading, failed: failed, messageKey: failedMessage,

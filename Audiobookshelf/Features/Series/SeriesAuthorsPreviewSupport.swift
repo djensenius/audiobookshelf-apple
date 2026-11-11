@@ -33,17 +33,14 @@
         func seriesDetail(id: String) async throws -> SeriesDetailResponse {
             try check()
             return SeriesDetailResponse(
-                series: Series(
-                    id: id, name: "Barsoom", description: Self.text,
-                    libraryId: SampleLibrary.libraryID))
+                series: Series(id: id, name: "Barsoom", description: Self.text, libraryId: SampleLibrary.libraryID))
         }
 
         func authorDetail(id: String) async throws -> AuthorDetailResponse {
             try check()
             return AuthorDetailResponse(
                 author: Author(
-                    id: id, name: "Edgar Rice Burroughs", description: Self.text,
-                    libraryId: SampleLibrary.libraryID))
+                    id: id, name: "Edgar Rice Burroughs", description: Self.text, libraryId: SampleLibrary.libraryID))
         }
 
         func filteredBooksPage(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
@@ -88,8 +85,7 @@
         static func seriesDetail(fails: Bool = false) -> SeriesDetailModel {
             SeriesDetailModel(
                 seriesID: "ser_barsoom", libraryID: SampleLibrary.libraryID,
-                service: SeriesAuthorsPreviewService(fails: fails),
-                cache: progress)
+                service: SeriesAuthorsPreviewService(fails: fails), cache: progress)
         }
 
         static func authors(fails: Bool = false) -> AuthorsModel {

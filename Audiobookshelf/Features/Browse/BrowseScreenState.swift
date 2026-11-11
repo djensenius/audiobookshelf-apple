@@ -61,7 +61,7 @@ enum BrowseScreenState: Hashable {
 struct BrowseModelKey: Hashable {
     let store: ObjectIdentifier
     let connection: LibraryConnectionKey
-    private(set) var libraryID: String
+    let libraryID: String
     /// The series or author of a detail screen.
     let entityID: String?
 
@@ -73,13 +73,6 @@ struct BrowseModelKey: Hashable {
         self.connection = connection
         self.libraryID = libraryID
         self.entityID = entityID
-    }
-
-    /// This key in the library `libraryID` of the same store and account.
-    func inLibrary(_ libraryID: String) -> Self {
-        var key = self
-        key.libraryID = libraryID
-        return key
     }
 }
 

@@ -340,7 +340,7 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
             .root(.home), .root(.series), .root(.authors), .pushed(.series(id: "ser_1")),
             .pushed(.author(id: "aut_1")),
         ]
-        let frontmost = { screens.filter { $0.isFrontmost(in: router) } }
+        let frontmost = { screens.filter { $0.isFrontmost(in: router, isVisible: true) } }
         #expect(frontmost() == [.root(.home)])
         // Home opened a series, then its author.
         router[path: .home] = [.series(id: "ser_1")]
@@ -353,7 +353,22 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         router.selectedTab = .library
         router.librarySection = .authors
         #expect(frontmost() == [.root(.authors)])
-        #expect(RefreshCommandPlacement.root(.home).isFrontmost(in: nil))
+        #expect(RefreshCommandPlacement.root(.home).isFrontmost(in: nil, isVisible: true))
+        #expect(!RefreshCommandPlacement.root(.home).isFrontmost(in: nil, isVisible: false))
+
+        // Copies of a placement: covered stack screens and hidden tabs have disappeared.
+        let commands = { (screens: [(RefreshCommandPlacement, Bool)]) in
+            screens.filter { $0.0.isFrontmost(in: router, isVisible: $0.1) }.count
+        }
+        let seriesA = RefreshCommandPlacement.pushed(.series(id: "ser_a"))
+        router.librarySection = .series
+        #expect(commands([(.root(.series), true), (.root(.series), false)]) == 1)  // Library section, Series tab
+        router.selectedTab = .series
+        router[path: .series] = [.series(id: "ser_a"), .author(id: "aut_1"), .series(id: "ser_a")]
+        #expect(commands([(seriesA, false), (seriesA, true)]) == 1)  // Twice in one stack
+        router.selectedTab = .home
+        router[path: .home] = [.series(id: "ser_a")]
+        #expect(commands([(seriesA, true), (seriesA, false)]) == 1)  // Home, hidden Series tab
     }
 
     @Test func failedRefreshShowsAboveTheItemsAndAFailedPageAfterThem() async throws {
@@ -427,13 +442,18 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
             seriesText: "Other Series #9", duration: 60, isExplicit: true, isAbridged: true)
         let card = SeriesPresentation.card(for: SeriesBook(summary: summary, sequence: " 2 "), in: "Barsoom")
         #expect(card.seriesText == L10n.string("LabelSeriesBookNumber", "Barsoom", "2"))
-        #expect(card.seriesText == "Barsoom, book 2")
+        #expect(card.seriesText == "Barsoom, #2")
         #expect(
             card
                 == ItemSummary(
                     id: "li_2", itemID: "li_2", kind: .book, title: "The Gods of Mars",
-                    subtitle: "Edgar Rice Burroughs", seriesText: "Barsoom, book 2", duration: 60, isExplicit: true,
+                    subtitle: "Edgar Rice Burroughs", seriesText: "Barsoom, #2", duration: 60, isExplicit: true,
                     isAbridged: true))
+        // Any sequence reads as the badge shows it.
+        for sequence in ["Prequel", "2.5"] {
+            let card = SeriesPresentation.card(for: SeriesBook(summary: summary, sequence: sequence), in: "Barsoom")
+            #expect(card.seriesText == "Barsoom, #\(sequence)")
+        }
 
         // A collapsed sub-series, or a book without a number, reads the series alone.
         let collapsed = ItemSummary(id: "ser_2", itemID: "li_3", seriesID: "ser_2", kind: .series, title: "Early")
@@ -556,44 +576,33 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         }
     }
 
-    @Test func authorOfAnotherLibraryLoadsBooksFromTheirLibrary() async throws {
-        let client = FakeSeriesAuthorsClient(libraryID: "lib_b")
+    @Test func failedRefreshShowsOnceAboveTheAuthorAndRetryRefreshes() async throws {
+        let client = FakeSeriesAuthorsClient()
         try await withStore(client) { store in
-            try await withStore { otherStore in
-                let make = { (key: BrowseModelKey, services: LibraryStoreServices, _: ProgressCache) in
-                    AuthorsPresentation.makeDetail(authorID: "aut_burroughs", key: key, services: services)
-                }
-                // Opened in the selected library, lib_a, which has none of the author's books.
-                let selected = BrowseModelKey(store: store, libraryID: "lib_a", entityID: "aut_burroughs")
-                let first = try #require(BrowseModelHost.updated(nil, for: selected, store: store, make: make))
-                await first.model.loadIfNeeded()
-                #expect(first.model.books.total == 0)
-                #expect(AuthorsPresentation.otherLibraryID(of: first.model) == "lib_b")
-                #expect(AuthorsPresentation.booksState(of: first.model) == .loading)
-                // The author's own count, not lib_a's 0.
-                #expect(AuthorsPresentation.bookCount(of: first.model) == L10n.string("SharedBookCount", "3"))
+            let (key, services) = try keyAndServices(store, entityID: "aut_burroughs")
+            let model = AuthorsPresentation.makeDetail(authorID: "aut_burroughs", key: key, services: services)
+            await model.loadIfNeeded()
+            #expect(AuthorsPresentation.failurePlacement(of: model, refreshFailed: false) == nil)
 
-                let authorLibrary = try #require(AuthorsPresentation.authorLibraryKey(after: first))
-                let key = try #require(AuthorsPresentation.key(selected, authorLibrary: authorLibrary))
-                #expect(key.libraryID == "lib_b")
-                let second = try #require(BrowseModelHost.updated(first, for: key, store: store, make: make))
-                #expect(second.model !== first.model)
-                await second.model.loadIfNeeded()
-                #expect(client.bookRequests.withLock { $0.last?.libraryID } == "lib_b")
-                #expect(second.model.books.items.count == 3)
-                #expect(AuthorsPresentation.otherLibraryID(of: second.model) == nil)
-                #expect(AuthorsPresentation.authorLibraryKey(after: second) == nil)
-                #expect(AuthorsPresentation.booksState(of: second.model) == .loaded(failed: false))
-                #expect(AuthorsPresentation.bookCount(of: second.model) == L10n.string("SharedBookCount", "3"))
+            client.fails.withLock { $0 = true }
+            let failed = await AuthorsPresentation.refresh(model)
+            #expect(failed)
+            // One row above the author, none after the books, which stay.
+            #expect(AuthorsPresentation.failurePlacement(of: model, refreshFailed: failed) == .top)
+            #expect(model.books.items.count == 3)
 
-                // Selecting another library keeps the author's; another author or store doesn't.
-                let anotherLibrary = BrowseModelKey(store: store, libraryID: "lib_c", entityID: "aut_burroughs")
-                #expect(AuthorsPresentation.key(anotherLibrary, authorLibrary: authorLibrary) == authorLibrary)
-                let otherAuthor = BrowseModelKey(store: store, libraryID: "lib_a", entityID: "aut_other")
-                #expect(AuthorsPresentation.key(otherAuthor, authorLibrary: authorLibrary) == otherAuthor)
-                let other = BrowseModelKey(store: otherStore, libraryID: "lib_a", entityID: "aut_burroughs")
-                #expect(AuthorsPresentation.key(other, authorLibrary: authorLibrary) == other)
-            }
+            // Retry refreshes the author and the books from their first page.
+            client.fails.withLock { $0 = false }
+            client.bookRequests.withLock { $0.removeAll() }
+            #expect(await AuthorsPresentation.refresh(model) == false)
+            let request = try #require(client.bookRequests.withLock { $0.last })
+            #expect(request.query.queryItems.contains(URLQueryItem(name: "page", value: "0")))
+            #expect(AuthorsPresentation.state(of: model) == .loaded(failed: false))
+
+            // The books failing on their own (paging) show after them.
+            client.fails.withLock { $0 = true }
+            await model.books.refresh()?.value
+            #expect(AuthorsPresentation.failurePlacement(of: model, refreshFailed: false) == .footer)
         }
     }
 

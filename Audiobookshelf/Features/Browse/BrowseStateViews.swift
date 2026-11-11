@@ -118,7 +118,7 @@ struct BrowseFailureRow: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: retry) {
                 Text(verbatim: L10n.string("ButtonRetry"))
-                    .frame(minHeight: 44)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(.rect)
             }
             .buttonStyle(.borderless)
@@ -146,9 +146,9 @@ struct BrowsePagingFooter: View {
 }
 
 /// Item cards in a grid that open their screen and perform their context-menu actions through
-/// the environment (``ItemCardActions``), with an alert when an action fails. `badge` puts a label (a sequence) on a
-/// card's cover; it is hidden from VoiceOver, which reads the series from the card's label
-/// (``SeriesPresentation/card(for:in:)``).
+/// the environment (``ItemCardActions``), with an alert when an action fails. `badge` puts a
+/// label (a sequence) on a card's cover; it is hidden from VoiceOver, which reads the series from
+/// the card's label (``SeriesPresentation/card(for:in:)``).
 struct BrowseItemGrid<Element: Identifiable>: View {
     let elements: [Element]
     let item: (Element) -> ItemSummary

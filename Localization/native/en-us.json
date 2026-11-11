@@ -41,7 +41,7 @@
   "LabelMiniPlayerHint": "Opens the full player.",
   "LabelRemoveCustomHeader": "Remove {0}",
   "LabelRemoveUnnamedCustomHeader": "Remove header",
-  "LabelSeriesBookNumber": "{0}, book {1}",
+  "LabelSeriesBookNumber": "{0}, #{1}",
   "LabelThemeSystem": "System",
   "LabelToday": "Today",
   "LabelValue": "Value",

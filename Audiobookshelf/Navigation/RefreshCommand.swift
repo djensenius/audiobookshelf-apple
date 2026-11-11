@@ -2,18 +2,20 @@ import ABSAppModel
 import ABSUI
 import SwiftUI
 
-/// Where a screen with a Refresh command sits in the scene's navigation. Only the screen the
-/// window shows, the top of the selected tab's stack, gets ⌘R, so a window has one.
+/// Where a screen with a Refresh command sits in the scene's navigation. Only a visible screen on
+/// top of the selected tab's stack gets ⌘R: visibility rules out copies of a placement in a covered
+/// stack screen or a hidden tab, so a window has one ⌘R unless two visible screens share one.
 enum RefreshCommandPlacement: Hashable {
     /// The root screen of a tab.
     case root(AppTab)
     /// A screen pushed for the route.
     case pushed(Route)
 
-    /// Whether the screen is on top of the selected tab's stack; `true` without a router
-    /// (previews).
+    /// Whether the screen is visible and on top of the selected tab's stack; without a router
+    /// (previews), whether it is visible.
     @MainActor
-    func isFrontmost(in router: Router?) -> Bool {
+    func isFrontmost(in router: Router?, isVisible: Bool) -> Bool {
+        guard isVisible else { return false }
         guard let router else { return true }
         let selected = router.selectedTab
         let path = router[path: selected]
@@ -47,23 +49,28 @@ extension View {
         let isDisabled: Bool
         let refresh: () -> Void
         @Environment(Router.self) private var router: Router?
+        /// Between `onAppear` and `onDisappear`, which a covered stack screen or hidden tab isn't.
+        @State private var isVisible = false
 
         func body(content: Content) -> some View {
-            content.toolbar {
-                if placement.isFrontmost(in: router) {
-                    ToolbarItem(placement: .primaryAction) {
-                        Button(action: refresh) {
-                            Label {
-                                Text(verbatim: L10n.string("ButtonRefresh"))
-                            } icon: {
-                                Image(systemName: "arrow.clockwise")
+            content
+                .onAppear { isVisible = true }
+                .onDisappear { isVisible = false }
+                .toolbar {
+                    if placement.isFrontmost(in: router, isVisible: isVisible) {
+                        ToolbarItem(placement: .primaryAction) {
+                            Button(action: refresh) {
+                                Label {
+                                    Text(verbatim: L10n.string("ButtonRefresh"))
+                                } icon: {
+                                    Image(systemName: "arrow.clockwise")
+                                }
                             }
+                            .keyboardShortcut("r", modifiers: .command)
+                            .disabled(isDisabled)
                         }
-                        .keyboardShortcut("r", modifiers: .command)
-                        .disabled(isDisabled)
                     }
                 }
-            }
         }
     }
 #endif

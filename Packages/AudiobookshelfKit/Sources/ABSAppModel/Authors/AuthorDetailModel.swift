@@ -29,13 +29,14 @@ public struct AuthorDetail: Sendable, Hashable, Identifiable {
 ///   overlap, only the last one started is applied. A 404 (``APIError/notFound``) drops the
 ///   author and ``phase`` becomes ``Phase/notFound`` for the view to pop.
 /// - ``books`` is an ``ItemListModel`` and pages, refreshes and drops stale pages on its own. It
-///   loads from ``libraryID``, which the caller must set to the author's library: the books
-///   start loading before the author (and its `libraryId`) arrives. When the loaded
-///   ``AuthorDetail/libraryID`` differs, recreate the model for that library.
+///   starts in ``libraryID``, because the books start loading before the author (and its
+///   `libraryId`) arrives. When the loaded ``AuthorDetail/libraryID`` differs, ``books`` is
+///   replaced with a list for the author's library, whose first page loads; the old list is
+///   released, which cancels its page in flight.
 /// - ``books`` keeps its items on 404, so views must not show them in ``Phase/notFound``.
 ///
-/// A model belongs to one author, library, client and account: views recreate it per author ID
-/// and under the session's `.id(identity)` (ADR 0004), so a server or user switch never reuses it.
+/// A model belongs to one author, client and account: views recreate it per author ID and under
+/// the session's `.id(identity)` (ADR 0004), so a server or user switch never reuses it.
 @MainActor
 @Observable
 public final class AuthorDetailModel {
@@ -53,9 +54,10 @@ public final class AuthorDetailModel {
     }
 
     public let authorID: String
+    /// The library the screen was opened in, where ``books`` load until the author's arrives.
     public let libraryID: String
     /// The author's books. Nothing loads until ``loadIfNeeded()`` or `books.loadNextPage()`.
-    public let books: ItemListModel<LibraryQuery, ItemSummary>
+    public private(set) var books: ItemListModel<LibraryQuery, ItemSummary>
 
     /// The last loaded author; kept while reloading and after a failed reload, dropped on 404.
     public private(set) var detail: AuthorDetail?
@@ -67,6 +69,8 @@ public final class AuthorDetailModel {
 
     @ObservationIgnored private let service: any SeriesAuthorsService
     @ObservationIgnored private var sequence = 0
+    /// The library ``books`` load from.
+    @ObservationIgnored private var booksLibraryID: String
 
     /// - Parameter query: The books' sort and `collapseseries`; its filter is replaced with the
     ///   author's, and its page and limit are set by ``books``.
@@ -79,6 +83,7 @@ public final class AuthorDetailModel {
         self.service = service
         var query = query
         query.filter = .authors(id: authorID)
+        booksLibraryID = libraryID
         books = .filteredBooks(
             service: service, libraryID: libraryID, query: query, pageSize: pageSize,
             prefetchThreshold: prefetchThreshold, connectionKey: connectionKey)
@@ -109,8 +114,9 @@ public final class AuthorDetailModel {
         await booksLoad?.value
     }
 
-    /// Loads the author. A response to an older call that arrives after a newer one started is
-    /// dropped.
+    /// Loads the author; when they belong to another library than ``books``, moves the books there
+    /// and loads their first page. A response to an older call that arrives after a newer one
+    /// started is dropped.
     public func load() async {
         sequence += 1
         let sequence = sequence
@@ -128,6 +134,13 @@ public final class AuthorDetailModel {
             detail = AuthorDetail(author: response.author)
             error = nil
             isNotFound = false
+            if let libraryID = detail?.libraryID, libraryID != booksLibraryID {
+                booksLibraryID = libraryID
+                books = .filteredBooks(
+                    service: service, libraryID: libraryID, query: books.query, pageSize: books.pageSize,
+                    prefetchThreshold: books.prefetchThreshold, connectionKey: books.connectionKey)
+                await books.loadNextPage()?.value
+            }
         case .failure(let error):
             if error is CancellationError { return }
             self.error = error

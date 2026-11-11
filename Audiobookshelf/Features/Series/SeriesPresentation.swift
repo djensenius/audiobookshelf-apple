@@ -39,8 +39,9 @@ enum SeriesPresentation {
     }
 
     /// The card of a book in the series `seriesName`. VoiceOver reads the cover's sequence badge
-    /// from the label's series part, which becomes this series and number ("Barsoom, book 2"):
-    /// the book's own series text may name another series, and a collapsed sub-series has none.
+    /// from the label's series part, which becomes this series and sequence as the badge shows it
+    /// ("Barsoom, #2"): the book's own series text may name another series, and a collapsed
+    /// sub-series has none.
     static func card(for book: SeriesBook, in seriesName: String) -> ItemSummary {
         let item = book.summary
         let sequence = book.sequence?.trimmingCharacters(in: .whitespacesAndNewlines)
