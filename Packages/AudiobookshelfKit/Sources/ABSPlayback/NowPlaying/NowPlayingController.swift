@@ -35,7 +35,7 @@ public enum NowPlayingCommandError: Error, Equatable {
 /// | --- | --- |
 /// | `itemChanged(key)` | `key` set: new item, paused, metadata and artwork reload. `nil`: ``clear()``. |
 /// | `loaded(time:)` | Paused at `time` with the session's duration and chapter. |
-/// | `playbackStarted` | Playing at `rate`. The first playing state requests application primary, so the audio session must already be active (the engine activates it before playing). On iOS, then call ``requestSystemPrimary()`` when the user started playback in the foreground. |
+/// | `playbackStarted` | Accepted play intent, not necessarily playing: the engine may still be buffering or waiting for a seek. The bridge publishes actual state; initial buffering stays paused until the engine plays. |
 /// | `paused(time:)` | Paused at `time`. |
 /// | `didSeek(time:)` | Elapsed `time`; detected as a seek and pushed. |
 /// | `tick(time:)` | Elapsed `time`; publishes only on a chapter change (or drift past the tolerance). |
@@ -52,6 +52,7 @@ public enum NowPlayingCommandError: Error, Equatable {
 /// The session is created on the first ``update(_:)``, but `requestToBecomeApplicationPrimary()` is
 /// deferred to the first state with `isPlaying == true`: ADR 0006 requires the `.playback` audio
 /// session to be configured and active first, and the player only reports playing after that.
+/// On iOS, then call ``requestSystemPrimary()`` when the user started playback in the foreground.
 ///
 /// Unavailable in app extensions, where `MediaSession` doesn't exist; extensions trigger playback
 /// through app-process intents instead (ADR 0006).

@@ -59,6 +59,9 @@ jobs:
       - name: Test AudiobookshelfKit
         run: mise run test:kit
 
+      - name: Test iOS-only ShakeDetector package suite
+        run: mise run test:kit:ios
+
       - name: Slow AudiobookshelfKit tests
         if: github.event_name == 'push'
         run: mise run test:kit:slow
