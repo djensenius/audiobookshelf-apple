@@ -278,6 +278,54 @@ import Testing
         let details = try #require(model.details)
         #expect(ItemDetailMetadataRow.rows(for: details, locale: locale).map(\.labelKey) == ["LabelAuthor"])
     }
+
+    // MARK: Chapters
+
+    @Test func chapterTimestampsUnderAndOverOneHour() {
+        let short = ItemDetailChapterPresentation(
+            chapter: .init(id: 1, title: "Intro", start: 245.9, duration: 59), position: 1, bookTitle: "Book",
+            locale: locale)
+        #expect(short.title == "Intro")
+        #expect(short.startText == "4:05")
+        #expect(short.durationText == "0:59")
+        #expect(short.accessibilityLabel == "Intro, starts at 4 minutes, 5 seconds, duration 59 seconds")
+
+        let long = ItemDetailChapterPresentation(
+            chapter: .init(id: 2, title: "Late", start: 3_723, duration: 3_600), position: 2, bookTitle: "Book",
+            locale: locale)
+        #expect(long.startText == "1:02:03")
+        #expect(long.durationText == "1:00:00")
+        #expect(long.accessibilityLabel == "Late, starts at 1 hour, 2 minutes, 3 seconds, duration 1 hour")
+    }
+
+    @Test func untitledChapterUsesNumber() async throws {
+        let blank = ItemDetailChapterPresentation(
+            chapter: .init(id: 7, title: " \n", start: 0, duration: 10), position: 5, bookTitle: "Book",
+            locale: locale)
+        #expect(blank.title == "Chapter 5")
+        #expect(blank.accessibilityLabel.hasPrefix("Chapter 5, "))
+
+        // The preview book's fifth chapter has no title.
+        let model = await loadedModel(ItemDetailPreviewData.book)
+        let chapter = try #require(model.chapters.dropFirst(4).first)
+        #expect(chapter.title.isEmpty)
+        #expect(
+            ItemDetailChapterPresentation(chapter: chapter, position: 5, bookTitle: "B", locale: locale).title
+                == "Chapter 5")
+    }
+
+    @Test func confirmMessageHasBookTitleAndStart() async throws {
+        let model = await loadedModel(ItemDetailPreviewData.book)
+        let details = try #require(model.details)
+        let chapter = try #require(model.chapters.dropFirst(2).first)
+        let presentation = ItemDetailChapterPresentation(
+            chapter: chapter, position: 3, bookTitle: details.title, locale: locale)
+
+        #expect(presentation.title == "My Advent on Mars")
+        #expect(presentation.startText == "39:00")
+        #expect(presentation.confirmMessage == "Start playback for \"A Princess of Mars\" at 39:00?")
+        #expect(model.startTime(for: chapter) == 2_340)
+    }
 }
 
 /// Serves the item, or fails, as the test scripts it; ``hold()`` keeps the next request
