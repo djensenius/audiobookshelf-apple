@@ -123,7 +123,7 @@ struct AccountConnectBackend: ConnectBackend {
         // session is ready, and again at its turn if another change (say, another window's switch)
         // left it first. The sheet's controls are disabled while the gate isn't ready, so this is a
         // backstop, and a refusal ends the flow silently (as a cancel would).
-        guard let identity = lifecycle.gate.identity, try await lifecycle.performAccountChange(from: identity, body)
+        guard let origin = lifecycle.readySession, try await lifecycle.performAccountChange(from: origin, body)
         else { throw CancellationError() }
     }
 

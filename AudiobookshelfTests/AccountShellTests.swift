@@ -5,6 +5,7 @@ import ABSData
 import ABSUI
 import Foundation
 import Observation
+import Security
 import Testing
 
 @testable import Audiobookshelf
@@ -27,7 +28,7 @@ private final class Recorder: SessionParticipant {
     /// Hands a confirmed switch's link to ``links``, as `RootView` does.
     func reopener(_ lifecycle: SessionLifecycle) -> LinkReopener {
         LinkReopener(
-            beginSwitch: { self.links.beginSwitch(with: $0) },
+            beginSwitch: { self.links.beginSwitch(with: $0, epoch: lifecycle.linkEpoch) },
             finishSwitch: {
                 self.links.finishSwitch(succeeded: $0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
             })
@@ -292,9 +293,23 @@ private final class Recorder: SessionParticipant {
             AccountActions(lifecycle: environment.lifecycle).switchAccount(to: a.connectionID)
         ).value
 
-        #expect(switched)
+        #expect(switched == .switched)
         #expect(environment.lifecycle.gate == .ready(a, isOffline: false))
         #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
+    }
+
+    /// A locked Keychain doesn't hide a saved session (``AccountManager/hasSession(_:)``), so a
+    /// switch can run and throw on it after a relaunch; the alert then gives the connect screen's
+    /// guidance for that, not the generic failure.
+    @Test func aSwitchThatCantReadTheKeychainSaysSo() {
+        let locked = KeychainError(status: errSecInteractionNotAllowed)
+
+        #expect(SwitchFailure(locked) == .keychainUnavailable)
+        #expect(SwitchFailure(AccountError.keychain(locked)) == .keychainUnavailable)
+        #expect(SwitchFailure(KeychainError(status: errSecItemNotFound)) == .other)
+        #expect(SwitchFailure(AccountError.notSignedIn) == .other)
+        #expect(SwitchFailure.keychainUnavailable.message == ConnectFailure.keychainUnavailable.message)
+        #expect(SwitchFailure.other.message == L10n.string("MessageSwitchServerFailed"))
     }
 
     /// Two windows can both take the ready gate before either change starts; the changes after
@@ -309,11 +324,11 @@ private final class Recorder: SessionParticipant {
         let before = recorder.events.count
         let actions = AccountActions(lifecycle: lifecycle)
         // What every window read from the gate when the user chose.
-        let chosenFrom = try #require(lifecycle.gate.identity)
+        let chosenFrom = try #require(lifecycle.readySession)
 
-        #expect(await actions.switchAccount(to: a.connectionID, from: chosenFrom))
+        #expect(await actions.switchAccount(to: a.connectionID, from: chosenFrom).succeeded)
         await actions.signOut(from: chosenFrom) { recorder.opened.append(($0, lifecycle.gate)) }
-        #expect(await !actions.switchAccount(to: b.connectionID, from: chosenFrom))
+        #expect(await !actions.switchAccount(to: b.connectionID, from: chosenFrom).succeeded)
 
         #expect(lifecycle.gate == .ready(a, isOffline: false))
         #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
@@ -341,7 +356,7 @@ private final class Recorder: SessionParticipant {
 
         let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
 
-        #expect(await !task.value)
+        #expect(await !task.value.succeeded)
         #expect(lifecycle.gate == .connect)
         #expect(recorder.events.suffix(2) == [.flush, .end(.switch)])
         #expect(recorder.waitingLink(lifecycle) == nil && !recorder.links.isSwitching)
@@ -370,7 +385,8 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
         #expect(recorder.events == [.start(a), .flush, .end(.switch), .start(b)])
         #expect(accounts.connections.first { $0.id == a.connectionID }?.signedOutAt == nil)
-        #expect(try await #require(AccountActions(lifecycle: lifecycle).switchAccount(to: a.connectionID)).value)
+        #expect(
+            try await #require(AccountActions(lifecycle: lifecycle).switchAccount(to: a.connectionID)).value.succeeded)
         #expect(lifecycle.gate == .ready(a, isOffline: false))
     }
 
@@ -474,7 +490,7 @@ private final class Recorder: SessionParticipant {
         router.open(DeepLink(.downloads, serverID: a.connectionID.uuidString))
         let target = await ServerSwitchConfirmation(lifecycle: lifecycle, accounts: accounts).review(router)
 
-        #expect(!switched)
+        #expect(switched == .failed(.other))
         #expect(target == nil && router.pendingServerSwitch == nil)
         #expect(recorder.events == [.start(b)])
         #expect(lifecycle.gate == .ready(b, isOffline: false))
@@ -505,7 +521,7 @@ private final class Recorder: SessionParticipant {
         // SwiftUI may dismiss the dialog, which cancels, before it runs the confirm action.
         let epochBefore = lifecycle.linkEpoch
         let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
-        #expect(await task.value)
+        #expect(await task.value.succeeded)
 
         #expect(lifecycle.gate == .ready(a, isOffline: false))
         #expect(recorder.events.suffix(3) == [.flush, .end(.switch), .start(a)])
@@ -547,7 +563,7 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.events.count == before && !recorder.links.isSwitching)
         #expect(lifecycle.gate == .ready(b, isOffline: false))
         let task = try #require(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)))
-        #expect(await task.value)
+        #expect(await task.value.succeeded)
         #expect(recorder.waitingLink(lifecycle) == newer)
     }
 
@@ -570,8 +586,32 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
         recorder.receive(newer, lifecycle)
 
-        #expect(await task.value)
+        #expect(await task.value.succeeded)
         #expect(lifecycle.gate == .ready(a, isOffline: false))
+        #expect(recorder.waitingLink(lifecycle) == newer)
+    }
+
+    /// A link the root has received, but the scene hasn't opened yet (which would replace the
+    /// dialog's link), is newer than the dialog's: confirming then does nothing, and it waits.
+    @Test func confirmingWhileANewerLinkWaitsDoesNothing() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let recorder = Recorder()
+        let (a, b, hosts) = try await twoServers(environment, recorder: recorder)
+        defer { cleanUp(hosts) }
+        let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: environment.accounts)
+        let router = Router(identity: b)
+        let newer = DeepLink(.item(id: "li_7", episodeID: nil), serverID: nil)
+        router.open(DeepLink(.downloads, serverID: a.connectionID.uuidString))
+        var prompt = ServerSwitchPrompt()
+        let request = try await present(router, confirmation, in: &prompt)
+        recorder.receive(newer, lifecycle)
+        let before = recorder.events.count
+
+        #expect(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)) == nil)
+
+        #expect(recorder.events.count == before && !recorder.links.isSwitching)
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
         #expect(recorder.waitingLink(lifecycle) == newer)
     }
 
@@ -598,7 +638,7 @@ private final class Recorder: SessionParticipant {
         recorder.receive(newer, lifecycle)
         ConnectTestProtocol.release(held)
 
-        #expect(await task.value)
+        #expect(await task.value.succeeded)
         #expect(lifecycle.gate == .ready(a, isOffline: false))
         #expect(recorder.waitingLink(lifecycle) == newer)
     }
@@ -612,7 +652,8 @@ private final class Recorder: SessionParticipant {
         let newer = DeepLink(.item(id: "li_5", episodeID: nil), serverID: nil)
         var links = SceneLinks()
 
-        links.beginSwitch(with: confirmed)
+        let began = links.beginSwitch(with: confirmed, epoch: 1)
+        #expect(began)
         if replaced { links.receive(newer, gate: .switching(from: identity), epoch: 1) }
         links.finishSwitch(succeeded: false, gate: .ready(identity, isOffline: false), epoch: 2)
 

@@ -808,14 +808,16 @@ public final class AccountManager {
     }
 
     /// `POST /logout`, best effort, in its own task so that cancelling the caller, such as a
-    /// sign-in, doesn't stop the revoke. Returns the end-session URL if it's `http` or `https`.
+    /// sign-in, doesn't stop the revoke. Returns the end-session URL if
+    /// ``isAllowedEndSessionURL(_:server:)``.
     private func serverLogout(_ session: StoredSession, client: APIClient) async -> URL? {
         await Task {
             do {
+                let server = await client.configuration.baseURL
                 let response = try await client.send(
                     AuthEndpoints.logout(refreshToken: session.refreshToken, openIDSession: session.openIDSession))
                 guard let string = response.redirectURL, let url = URL(string: string),
-                    ["https", "http"].contains(url.scheme?.lowercased())
+                    Self.isAllowedEndSessionURL(url, server: server)
                 else { return nil }
                 return url
             } catch {
@@ -823,6 +825,17 @@ public final class AccountManager {
                 return nil
             }
         }.value
+    }
+
+    /// Whether to open `url`, an end-session URL the server at `server` returned: `https`, or
+    /// `http` only from an `http` server. It can carry an OpenID `id_token_hint`, which an `https`
+    /// account must not send in cleartext.
+    static func isAllowedEndSessionURL(_ url: URL, server: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case "https": true
+        case "http": server.scheme?.lowercased() == "http"
+        default: false
+        }
     }
 }
 

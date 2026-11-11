@@ -442,6 +442,34 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(try #require(server.requests("/logout").first).value(forHTTPHeaderField: "Cookie") == nil)
     }
 
+    /// An end-session URL can carry the OpenID `id_token_hint`: an `https` account never opens it
+    /// over `http`.
+    @Test func anHTTPSAccountIgnoresAnHTTPEndSessionURL() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        _ = try await signIn(manager, to: server, oidc: true)
+        server.update { $0.logoutRedirect = "http://idp.example/end-session?id_token_hint=id.token.sig" }
+
+        #expect(await manager.logout() == nil)
+        #expect(manager.state == .signedOut)
+        #expect(server.requests("/logout").count == 1)
+    }
+
+    @Test(arguments: [
+        ("https://abs.example", "https://idp.example/end", true),
+        ("https://abs.example", "http://idp.example/end", false),
+        ("HTTPS://abs.example", "HTTP://idp.example/end", false),
+        ("http://abs.example", "http://idp.example/end", true),
+        ("http://abs.example", "https://idp.example/end", true),
+        ("http://abs.example", "javascript:alert(1)", false),
+    ])
+    func endSessionURLsKeepTheServersTransport(server: String, endSession: String, allowed: Bool) throws {
+        let server = try #require(URL(string: server))
+        let url = try #require(URL(string: endSession))
+        #expect(AccountManager.isAllowedEndSessionURL(url, server: server) == allowed)
+    }
+
     @Test func removeDeletesCredentialsAndConnection() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()

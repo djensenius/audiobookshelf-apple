@@ -54,7 +54,11 @@ struct ConnectFlowView: View {
         // sign-in moves the gate off ready too, so that only counts when idle.
         ConnectFlowStack(
             model: model, onFinish: onFinish, onCancel: onCancel,
-            isEnabled: model.isBusy || lifecycle?.acceptsAccountChanges != false)
+            isEnabled: model.isBusy || lifecycle?.acceptsAccountChanges != false
+        )
+        // In the add-server sheet, a sign-in (an OpenID one waits for the browser) keeps running
+        // when the stack disappears; Cancel stops it, so a swipe can't dismiss the sheet meanwhile.
+        .interactiveDismissDisabled(model.isBusy)
     }
 }
 

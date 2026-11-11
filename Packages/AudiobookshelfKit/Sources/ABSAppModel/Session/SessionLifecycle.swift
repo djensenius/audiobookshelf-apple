@@ -11,6 +11,14 @@ public enum SessionScenePhase: Sendable, Hashable {
     case background
 }
 
+/// The ready session a sign-out, switch or sign-in was chosen from (``SessionLifecycle/readySession``):
+/// its account, and which of that account's sessions it was, so restarting the same account (say,
+/// after a failed switch) doesn't make a change chosen from the earlier session valid again.
+public struct ReadySession: Hashable, Sendable {
+    public let identity: SessionIdentity
+    let sessionID: UInt64
+}
+
 /// Starts and ends the per-account session, in an order that keeps the library's progress seed
 /// correct, and decides the ``AuthGate``.
 ///
@@ -78,6 +86,16 @@ public final class SessionLifecycle {
     /// never rendered the switch still sees it.
     public private(set) var signedOutSwitches = 0
 
+    /// The session the gate shows as ready, for a screen to name when the user chooses a sign-out,
+    /// switch or sign-in (``signOut(of:)``, ``switchAccount(to:from:)``,
+    /// ``performAccountChange(from:_:)``); `nil` unless the gate is ready.
+    public var readySession: ReadySession? {
+        guard let identity = gate.identity, let running = session, running.context.identity == identity else {
+            return nil
+        }
+        return ReadySession(identity: identity, sessionID: running.context.sessionID)
+    }
+
     @ObservationIgnored private let source: any AccountSessionSource
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let flushTimeout: Duration
@@ -85,11 +103,10 @@ public final class SessionLifecycle {
     @ObservationIgnored private var connectParticipants: [any SessionParticipant] = []
     @ObservationIgnored private var progressSources: [any SessionParticipant] = []
     @ObservationIgnored private var session: RunningSession?
-    /// The account whose session a transition ended last, other than by expiring (a switch, a
-    /// sign-out, a removal or another sign-in), until the next session starts. A switch chosen
-    /// from it then does nothing: the first change chosen from an account wins, even one that
-    /// failed and left no session.
-    @ObservationIgnored private var endedByChange: SessionIdentity?
+    /// The session that ended last, if it expired. With no session running, a switch chosen from
+    /// it still runs; one chosen from a session another transition ended (a switch, even one that
+    /// failed and left no session, a sign-out, a removal or another sign-in) does nothing.
+    @ObservationIgnored private var lastExpiredSession: UInt64?
     /// How many ``performAccountChange(from:_:)`` calls are running. No session starts until the
     /// last one finishes; an expiry still ends one.
     @ObservationIgnored private var accountChanges = 0
@@ -194,20 +211,21 @@ public final class SessionLifecycle {
 
     /// Flushes and ends the session, then signs out. Does nothing when already signed out.
     /// From inside a transition, use ``requestSignOut(of:)`` instead.
-    /// - Parameter identity: The account the user chose to sign out of, when the request comes
-    ///   from its screen. When the sign-out's turn comes, it does nothing unless that account's
-    ///   session is still running, so a sign-out queued behind a switch (say, from another
-    ///   window) can't sign out the account switched to.
+    /// - Parameter origin: The session the user chose to sign out of, when the request comes
+    ///   from its screen. When the sign-out's turn comes, it does nothing unless that session is
+    ///   still running, so a sign-out queued behind a switch (say, from another window) can't
+    ///   sign out the account switched to. Either way, it doesn't sign out an account the source
+    ///   shows instead while the session flushes and ends.
     /// - Returns: An OpenID end-session URL to open, if the server returned one.
     @discardableResult
-    public func signOut(of identity: SessionIdentity? = nil) async -> URL? {
+    public func signOut(of origin: ReadySession? = nil) async -> URL? {
         if rejectReentrant("signOut()") {
             if let context = session?.context ?? beginning { requestSignOut(of: context) }
             return nil
         }
         return await serialized {
-            guard await self.isStillRunning(identity, strictly: true) else { return nil }
-            return await self.performSignOut()
+            guard await self.isStillRunning(origin, strictly: true) else { return nil }
+            return await self.performSignOut(expectedIdentity: self.session?.context.identity)
         }
     }
 
@@ -241,17 +259,18 @@ public final class SessionLifecycle {
     ///
     /// Returning doesn't mean `connectionID` is active: the server can reject its saved session
     /// or its version, which signs out (``AuthGate/connect``). Check ``gate``.
-    /// - Parameter identity: The account the switch was chosen from, when the request comes from
-    ///   its screen. When the switch's turn comes, it does nothing if another account's session
-    ///   is running, so of two switches chosen from the same account, only the first runs. If
-    ///   no session is running because it expired meanwhile, the switch still runs; if another
-    ///   transition ended it (an earlier switch, even one that failed and left no session, or
-    ///   ``performAccountChange(from:_:)``), the switch does nothing.
-    public func switchAccount(to connectionID: UUID, from identity: SessionIdentity? = nil) async throws {
+    /// - Parameter origin: The session the switch was chosen from, when the request comes from
+    ///   its screen. When the switch's turn comes, it does nothing if another session is
+    ///   running, even the same account's restarted one, so of two switches chosen from the same
+    ///   session, only the first runs. If no session is running because that one expired
+    ///   meanwhile, the switch still runs; if another transition ended it (an earlier switch,
+    ///   even one that failed and left no session, or ``performAccountChange(from:_:)``), the
+    ///   switch does nothing.
+    public func switchAccount(to connectionID: UUID, from origin: ReadySession? = nil) async throws {
         if rejectReentrant("switchAccount(to:)") { return }
         let result: Result<Void, any Error> = await serialized {
             // A session an account change ended, while its sign-in runs, hasn't expired.
-            guard await self.isStillRunning(identity, strictly: self.accountChanges > 0) else { return .success(()) }
+            guard await self.isStillRunning(origin, strictly: self.accountChanges > 0) else { return .success(()) }
             if self.session?.context.identity.connectionID == connectionID { return .success(()) }
             await self.endForAccountChange()
             let result: Result<Void, any Error>
@@ -305,18 +324,18 @@ public final class SessionLifecycle {
     /// presentation anchor) outside the gated content, or keep the current shell on screen
     /// while the gate is ``AuthGate/switching(from:)``; otherwise the sign-in is torn down
     /// with the shell.
-    /// - Parameter identity: The account the change was chosen from, when it comes from that
+    /// - Parameter origin: The session the change was chosen from, when it comes from that
     ///   account's screen (adding a server while signed in). When the change's turn comes, it
-    ///   does nothing unless that account's session is still running, so a sign-in submitted
-    ///   while another window's switch was queued can't overtake it.
+    ///   does nothing unless that session is still running, so a sign-in submitted while another
+    ///   window's switch was queued can't overtake it.
     /// - Returns: Whether `body` ran.
     @discardableResult
     public func performAccountChange(
-        from identity: SessionIdentity? = nil, _ body: @MainActor () async throws -> Void
+        from origin: ReadySession? = nil, _ body: @MainActor () async throws -> Void
     ) async rethrows -> Bool {
         if rejectReentrant("performAccountChange(_:)") { return false }
         let proceeds = await serialized { () -> Bool in
-            if identity != nil, await !self.isStillRunning(identity, strictly: true) { return false }
+            if origin != nil, await !self.isStillRunning(origin, strictly: true) { return false }
             // Counted at its turn, so a change refused here never holds up a queued switch.
             self.accountChanges += 1
             await self.endForAccountChange()
@@ -366,16 +385,16 @@ public final class SessionLifecycle {
         return url
     }
 
-    /// Whether the session of `identity`, the account a sign-out or switch was chosen from, is
-    /// still the one running, ending a session the source has left first. `nil` matches any.
-    /// Unless `strictly`, no running session matches too, when the account's session expired
-    /// rather than another change ending it: a switch from an account that has expired still goes
-    /// where the user chose.
-    private func isStillRunning(_ identity: SessionIdentity?, strictly: Bool) async -> Bool {
+    /// Whether `origin`, the session a sign-out or switch was chosen from, is still the one
+    /// running, ending a session the source has left first. `nil` matches any. Unless `strictly`,
+    /// no running session matches too, when `origin` expired rather than another change ending
+    /// it: a switch from an account that has expired still goes where the user chose.
+    private func isStillRunning(_ origin: ReadySession?, strictly: Bool) async -> Bool {
         await endStaleSession()
-        guard let identity else { return true }
-        let running = session?.context.identity
-        if running == identity || (running == nil && !strictly && endedByChange != identity) { return true }
+        guard let origin else { return true }
+        let running = session?.context
+        if running.map({ $0.identity == origin.identity && $0.sessionID == origin.sessionID }) ?? false { return true }
+        if running == nil, !strictly, lastExpiredSession == origin.sessionID { return true }
         Log.auth.info("Ignored an account change chosen from an account that is no longer signed in")
         // Follows the source, in case the stale session just ended.
         await reconcile()
@@ -449,7 +468,6 @@ public final class SessionLifecycle {
     }
 
     private func begin(_ context: SessionContext) async {
-        endedByChange = nil
         beginning = context
         defer { beginning = nil }
         let seeder = self.seeder
@@ -513,7 +531,7 @@ public final class SessionLifecycle {
     private func end(_ reason: SessionEndReason) async {
         guard let running = session else { return }
         session = nil
-        if reason != .expired { endedByChange = running.context.identity }
+        lastExpiredSession = reason == .expired ? running.context.sessionID : nil
         running.seed?.cancel()
         if let workers = flushWorkers.removeValue(forKey: running.context.sessionID) {
             for worker in workers.values { worker.cancel() }

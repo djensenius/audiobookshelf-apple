@@ -85,6 +85,7 @@ struct ServersView: View {
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @State private var switchingTo: UUID?
     @State private var switchFailed = false
+    @State private var switchFailure = SwitchFailure.other
     @State private var isAddingServer = false
     /// Whether each connection has a saved session to switch to (``AccountManager/hasSession(_:)``).
     @State private var hasSession: [UUID: Bool] = [:]
@@ -121,7 +122,7 @@ struct ServersView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(Text(verbatim: L10n.string("HeaderServers")))
-        .switchServerFailedAlert(isPresented: $switchFailed)
+        .switchServerFailedAlert(isPresented: $switchFailed, failure: switchFailure)
         .task(id: accounts?.connections) {
             guard let accounts else { return }
             var sessions: [UUID: Bool] = [:]
@@ -148,8 +149,9 @@ struct ServersView: View {
         switchingTo = id
         // On success the shell is replaced; on failure this screen stays, so let it retry.
         Task {
-            if await !task.value {
+            if case .failed(let failure) = await task.value {
                 switchingTo = nil
+                switchFailure = failure
                 switchFailed = true
             }
         }

@@ -99,7 +99,7 @@ struct RootView: View {
             SceneRouterHost(
                 identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil),
                 reopen: LinkReopener(
-                    beginSwitch: { links.beginSwitch(with: $0) },
+                    beginSwitch: { links.beginSwitch(with: $0, epoch: lifecycle.linkEpoch) },
                     finishSwitch: {
                         links.finishSwitch(succeeded: $0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
                     })

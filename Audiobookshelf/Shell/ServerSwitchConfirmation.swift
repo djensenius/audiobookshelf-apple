@@ -28,13 +28,17 @@ struct SceneLinks {
         }
     }
 
-    /// Keeps `link`, the confirmed one, until ``finishSwitch(succeeded:gate:epoch:)``. A link
-    /// already waiting is older, so it goes.
-    mutating func beginSwitch(with link: DeepLink) {
+    /// Keeps `link`, the confirmed one, until ``finishSwitch(succeeded:gate:epoch:)``.
+    /// - Returns: `false`, changing nothing, when a link is waiting for `epoch`: it arrived after
+    ///   the dialog's link, and the scene hasn't opened it yet (which would have replaced the
+    ///   dialog's), so it wins. A link waiting for an older epoch goes.
+    mutating func beginSwitch(with link: DeepLink, epoch: UInt64) -> Bool {
+        guard self.link(atEpoch: epoch) == nil else { return false }
         isSwitching = true
         afterSwitch = link
         replacedConfirmed = false
         pending = nil
+        return true
     }
 
     mutating func finishSwitch(succeeded: Bool, gate: AuthGate, epoch: UInt64) {
@@ -67,7 +71,8 @@ struct SceneLinks {
 /// outlives the scene's host that the switch rebuilds.
 @MainActor
 struct LinkReopener {
-    var beginSwitch: @MainActor (DeepLink) -> Void = { _ in }
+    /// Whether the root took the link; not when a newer one waits.
+    var beginSwitch: @MainActor (DeepLink) -> Bool = { _ in true }
     var finishSwitch: @MainActor (_ succeeded: Bool) -> Void = { _ in }
 }
 
@@ -155,20 +160,26 @@ struct ServerSwitchConfirmation {
     /// a newer one, after the switch. The switch runs in its own task
     /// (``AccountActions/switchAccount(to:)``), so the old host going away doesn't cancel it.
     /// - Returns: A task whose value is whether the switch succeeded, or `nil` when the request
-    ///   was replaced, or the session isn't ready (then nothing changes).
+    ///   was replaced, including by a link the root has received but the scene hasn't opened yet,
+    ///   or the session isn't ready (then nothing changes).
     @discardableResult
     func confirm(
         _ request: ServerSwitchRequest, prompt: inout ServerSwitchPrompt, reopen: LinkReopener
-    ) -> Task<Bool, Never>? {
-        guard lifecycle.acceptsAccountChanges, prompt.take(request),
+    ) -> Task<SwitchOutcome, Never>? {
+        guard lifecycle.acceptsAccountChanges, prompt.take(request), reopen.beginSwitch(request.link) else {
+            return nil
+        }
+        guard
             let switching = AccountActions(lifecycle: lifecycle, accounts: accounts)
                 .switchAccount(to: request.connection.id)
-        else { return nil }
-        reopen.beginSwitch(request.link)
+        else {
+            reopen.finishSwitch(false)
+            return nil
+        }
         return Task {
-            let switched = await switching.value
-            reopen.finishSwitch(switched)
-            return switched
+            let outcome = await switching.value
+            reopen.finishSwitch(outcome.succeeded)
+            return outcome
         }
     }
 }
@@ -183,6 +194,7 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var switchFailed = false
+    @State private var switchFailure = SwitchFailure.other
 
     func body(content: Content) -> some View {
         if let lifecycle {
@@ -208,7 +220,10 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
                     Button {
                         let switching = confirmation.confirm(request, prompt: &prompt, reopen: reopen)
                         Task {
-                            if let switching, await !switching.value { switchFailed = true }
+                            if let switching, case .failed(let failure) = await switching.value {
+                                switchFailure = failure
+                                switchFailed = true
+                            }
                         }
                     } label: {
                         Text(verbatim: L10n.string("ButtonSwitchServer"))
@@ -224,7 +239,7 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
                         verbatim: L10n.string(
                             "MessageSwitchServerForLink", request.connection.username, request.connection.address))
                 }
-                .switchServerFailedAlert(isPresented: $switchFailed)
+                .switchServerFailedAlert(isPresented: $switchFailed, failure: switchFailure)
         } else {
             content
         }
@@ -232,10 +247,10 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
 }
 
 extension View {
-    /// Tells the user a server switch failed. A failed switch leaves the account where it was, so
-    /// the same shell, and this alert, stays on screen.
-    func switchServerFailedAlert(isPresented: Binding<Bool>) -> some View {
-        alert(Text(verbatim: L10n.string("MessageSwitchServerFailed")), isPresented: isPresented) {
+    /// Tells the user a server switch failed, and why. A failed switch leaves the account where it
+    /// was, so the same shell, and this alert, stays on screen.
+    func switchServerFailedAlert(isPresented: Binding<Bool>, failure: SwitchFailure) -> some View {
+        alert(Text(verbatim: failure.message), isPresented: isPresented) {
             Button(role: .cancel) {
             } label: {
                 Text(verbatim: L10n.string("ButtonOk"))
