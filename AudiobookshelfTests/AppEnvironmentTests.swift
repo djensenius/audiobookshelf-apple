@@ -25,10 +25,12 @@ import Testing
 
     @Test func buildsWithAnInMemoryStoreAndSettlesSignedOut() async throws {
         try await withSettings { settings in
-            let environment = AppEnvironment(settings: settings, storeLocation: .inMemory)
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain())
 
             #expect(environment.settings === settings)
             #expect(environment.dataStack != nil)
+            #expect(environment.accounts != nil)
             #expect(environment.lifecycle.gate == .launching)
 
             await environment.lifecycle.start()
@@ -48,9 +50,11 @@ import Testing
 
         try await withSettings { settings in
             let location = DataStack.Location.url(blocker.appending(path: "Audiobookshelf.store"))
-            let environment = AppEnvironment(settings: settings, storeLocation: location)
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: location, keychain: ConnectTestKeychain())
 
             #expect(environment.dataStack == nil)
+            #expect(environment.accounts == nil)
 
             await environment.lifecycle.start()
 

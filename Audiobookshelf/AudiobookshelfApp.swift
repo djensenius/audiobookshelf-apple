@@ -12,7 +12,7 @@ struct AudiobookshelfApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(lifecycle: environment.lifecycle, player: environment.player)
+            RootView(lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts)
                 .environment(settings)
                 .modifier(AppThemeModifier(settings: settings))
         }

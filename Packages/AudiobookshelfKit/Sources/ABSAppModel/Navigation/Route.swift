@@ -11,7 +11,12 @@ public enum Route: Hashable, Codable, Sendable {
     case episode(itemID: String, episodeID: String)
     case series(id: String)
     case author(id: String)
+    /// A narrator, kept so saved scenes and legacy routes still decode. Screens push
+    /// ``libraryFilter(kind:value:)`` with `.narrators` instead; both open the same screen.
     case narrator(name: String)
+    /// The library filtered to one narrator, tag or genre, opened by tapping it on an item
+    /// (legacy `pages/bookshelf/library` with a `filter` query). `value` is the unencoded name.
+    case libraryFilter(kind: LibraryFilterKind, value: String)
     case collection(id: String)
     case playlist(id: String)
     /// The playback history of a book, or of one podcast episode when `episodeID` is set
@@ -26,4 +31,10 @@ public enum Route: Hashable, Codable, Sendable {
     case servers
     /// Settings, pushed from Account on iOS. The Mac uses its Settings scene instead.
     case settings
+}
+
+/// The filter a ``Route/libraryFilter(kind:value:)`` opens. The raw values are the server's filter
+/// groups and are stored in scene snapshots, so they must not change.
+public enum LibraryFilterKind: String, Hashable, Codable, Sendable, CaseIterable {
+    case narrators, tags, genres
 }
