@@ -14,15 +14,22 @@ struct SceneRouterHost: View {
     let player: any PlayerSlotState
     /// A link waiting for a scene that can open it. The host takes it, opens it and clears it.
     @Binding var pendingLink: DeepLink?
+    /// Hands a link back to the root, which holds it for the next account's host; used after a
+    /// confirmed server switch (``ServerSwitchConfirmation``).
+    let reopen: @MainActor (DeepLink) -> Void
 
     @State private var navigation: SceneNavigation
     @SceneStorage private var snapshot: Data?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
 
-    init(identity: SessionIdentity, player: any PlayerSlotState, pendingLink: Binding<DeepLink?>) {
+    init(
+        identity: SessionIdentity, player: any PlayerSlotState, pendingLink: Binding<DeepLink?>,
+        reopen: @escaping @MainActor (DeepLink) -> Void = { _ in }
+    ) {
         self.player = player
         _pendingLink = pendingLink
+        self.reopen = reopen
         _navigation = State(initialValue: SceneNavigation(identity: identity))
         _snapshot = SceneStorage(identity.snapshotKey)
     }
@@ -35,6 +42,7 @@ struct SceneRouterHost: View {
                 LoadingView()
             }
         }
+        .modifier(ServerSwitchConfirmationModifier(router: navigation.router, reopen: reopen))
         .focusedSceneValue(navigation.router)
         .onAppear(perform: restoreOnce)
         .onChange(of: pendingLink) { openPendingLink() }

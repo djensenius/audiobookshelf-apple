@@ -30,8 +30,33 @@ final class ConnectTestKeychain: KeychainStoring {
     }
 }
 
-private final class ConnectTestProtocol: URLProtocol {
+/// Answers for `*.connect-ui.test` hosts. Two host prefixes change how the server authorizes a
+/// saved session (`/api/authorize`): `offline-` answers like a proxy refusing it (403), and
+/// `hold-` waits until ``release(_:)``.
+final class ConnectTestProtocol: URLProtocol {
     static let requests = Mutex<[String: [URLRequest]]>([:])
+    private static let held = Mutex<(responses: [String: [HeldResponse]], released: Set<String>)>(([:], []))
+
+    private struct HeldResponse: @unchecked Sendable {
+        let send: () -> Void
+    }
+
+    /// Answers the held requests to `host`, and from now on its requests at once.
+    static func release(_ host: String) {
+        let responses = held.withLock { state in
+            state.released.insert(host)
+            return state.responses.removeValue(forKey: host) ?? []
+        }
+        for response in responses { response.send() }
+    }
+
+    static func forget(_ host: String) {
+        requests.withLock { $0[host] = nil }
+        held.withLock { state in
+            state.responses[host] = nil
+            state.released.remove(host)
+        }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.host()?.hasSuffix(".connect-ui.test") == true
@@ -46,6 +71,9 @@ private final class ConnectTestProtocol: URLProtocol {
         var status = 200
         var headers = ["Content-Type": "application/json"]
         switch url.path() {
+        case "/api/authorize" where host.hasPrefix("offline-"):
+            status = 403
+            json = "{}"
         case "/status":
             json = #"{"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"authMethods":["local","openid"]}"#
         case "/auth/openid":
@@ -63,9 +91,18 @@ private final class ConnectTestProtocol: URLProtocol {
         }
         let response = HTTPURLResponse(
             url: url, statusCode: status, httpVersion: nil, headerFields: headers)!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(json.utf8))
-        client?.urlProtocolDidFinishLoading(self)
+        let send = HeldResponse { [self] in
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(json.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        let holds = url.path() == "/api/authorize" && host.hasPrefix("hold-")
+        let isHeld = Self.held.withLock { state in
+            guard holds, !state.released.contains(host) else { return false }
+            state.responses[host, default: []].append(send)
+            return true
+        }
+        if !isHeld { send.send() }
     }
 
     override func stopLoading() {}

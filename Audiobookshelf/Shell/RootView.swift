@@ -12,6 +12,9 @@ import SwiftUI
 /// without a store is kept (``PendingLink/init(_:arrivingAt:epoch:)``), and the binding hands the
 /// host a link only while the epoch is the one it arrived in, so a link queued for one account
 /// never opens for another, even when this view didn't render the gates in between.
+///
+/// The lifecycle and the accounts are in the environment of everything below, so a screen such
+/// as the Account tab reads them with `@Environment` instead of through its initializer.
 struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
@@ -22,6 +25,8 @@ struct RootView: View {
 
     var body: some View {
         content
+            .environment(lifecycle)
+            .environment(accounts)
             .task { await lifecycle.start() }
             .onChange(of: scenePhase) { _, phase in
                 Task { await lifecycle.handle(scenePhase: SessionScenePhase(phase)) }
@@ -68,8 +73,11 @@ struct RootView: View {
             // A switch keeps the old shell on screen until the next session has started, so a
             // sign-in presented from it isn't torn down. It is the same case as a ready session,
             // so the shell, its router and its scene storage survive until the identity changes.
+            // A confirmed switch to another server reopens its link here, after the switch, so
+            // the link carries the new account's epoch and reaches the new host.
             SceneRouterHost(
-                identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil)
+                identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil),
+                reopen: { receive($0) }
             )
             .id(identity)
         case .storeUnavailable:
