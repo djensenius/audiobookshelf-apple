@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSCore
 import Foundation
+import Observation
 import Testing
 
 @testable import ABSAppModel
@@ -83,6 +84,70 @@ private typealias F = GroupFixtures
 
         cache.apply(F.progress(a, finished: false, at: 3))
         #expect(model.nextToPlay == a)
+    }
+
+    @Test func nextToPlayInvalidatesOnlyForTheCurrentTarget() async throws {
+        let cache = ProgressCache()
+        let service = FakeGroupsService(collectionHandler: { id in
+            F.collection(id, books: [F.book("a"), F.book("b"), F.book("c")])
+        })
+        let model = CollectionDetailModel(id: "c1", service: service, cache: cache)
+        await model.load()
+        let changed = Locked(false)
+
+        let next = withObservationTracking {
+            model.nextToPlay
+        } onChange: {
+            changed.value = true
+        }
+        #expect(next == GroupPlayTarget(itemID: "a"))
+
+        cache.apply(F.progress(GroupPlayTarget(itemID: "c"), finished: true, at: 1))
+        #expect(!changed.value)
+        cache.apply(F.progress(GroupPlayTarget(itemID: "a"), finished: true, at: 1))
+        #expect(changed.value)
+        #expect(model.nextToPlay == GroupPlayTarget(itemID: "b"))
+    }
+
+    @Test func aSuccessfulReloadClearsNotFound() async throws {
+        let answer = Locked<Result<LibraryCollection, APIError>>(.failure(.notFound))
+        let service = FakeGroupsService(collectionHandler: { _ in try answer.value.get() })
+        let model = CollectionDetailModel(id: "c1", service: service, cache: ProgressCache())
+        await model.load()
+        #expect(model.phase == .notFound)
+
+        answer.value = .success(F.collection("c1", books: [F.book("a")]))
+        await model.load()
+
+        #expect(model.phase == .loaded)
+        #expect(!model.isNotFound)
+        #expect(model.error == nil)
+    }
+
+    @Test func aCancelledLoadLeavesNoError() async throws {
+        let service = FakeGroupsService(collectionHandler: { _ in throw CancellationError() })
+        let model = CollectionDetailModel(id: "c1", service: service, cache: ProgressCache())
+
+        await model.load()
+
+        #expect(model.error == nil)
+        #expect(model.phase == .idle)
+        #expect(!model.isLoading)
+    }
+
+    @Test func loadIfNeededLoadsOnce() async throws {
+        let calls = Locked(0)
+        let service = FakeGroupsService(collectionHandler: { id in
+            calls.value += 1
+            return F.collection(id, books: [])
+        })
+        let model = CollectionDetailModel(id: "c1", service: service, cache: ProgressCache())
+
+        await model.loadIfNeeded()
+        await model.loadIfNeeded()
+
+        #expect(calls.value == 1)
+        #expect(model.phase == .loaded)
     }
 
     @Test func notFoundDropsTheGroup() async throws {
@@ -184,7 +249,15 @@ private typealias F = GroupFixtures
 
         await model.load()
 
-        #expect(model.detail?.members.count == 8)
+        let members = try #require(model.detail?.members)
+        #expect(members.count == 8)
+        // A view greying rows by the summary's flags agrees with play-all.
+        #expect(members.allSatisfy { $0.isPlayable == (!$0.summary.isMissing && $0.summary.hasAudio) })
+        #expect(members[0].summary.isMissing == false)
+        #expect(members[0].summary.hasAudio == false)
+        #expect(members[3].summary.isMissing)
+        #expect(members[3].summary.subtitle == "Show show")
+        #expect(members[3].summary.cover?.entityID == "show")
         #expect(
             model.playTargets == [GroupPlayTarget(itemID: "show", episodeID: "e1"), GroupPlayTarget(itemID: "b1")])
     }
@@ -242,7 +315,10 @@ private typealias F = GroupFixtures
         #expect(members.map(\.isPlayable) == [true, false, false])
         #expect(members[1].summary.kind == .episode)
         #expect(members[1].summary.subtitle == "Show")
-        #expect(members[2].summary.isMissing)
+        #expect(members.map(\.summary.isMissing) == [false, true, true])
+        #expect(members.map(\.summary.hasAudio) == [true, false, false])
+        #expect(members[1].summary.title == "show-e1")
+        #expect(members[1].summary.cover?.entityID == nil)
         #expect(members[2].summary.title == "b2")
         #expect(model.nextToPlay == GroupPlayTarget(itemID: "b1"))
     }

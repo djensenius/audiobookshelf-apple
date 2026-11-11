@@ -96,7 +96,9 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
         case loaded
         /// The last load failed and nothing was loaded before; see ``GroupDetailModel/error``.
         case failed
-        /// The server answered 404.
+        /// The server answered 404. It stays until a load succeeds: a later failure that isn't a
+        /// 404 (offline, timeout) doesn't bring the deleted group back, it only updates
+        /// ``GroupDetailModel/error``.
         case notFound
     }
 

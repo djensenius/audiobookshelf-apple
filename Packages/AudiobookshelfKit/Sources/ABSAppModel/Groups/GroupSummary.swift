@@ -74,12 +74,17 @@ public struct GroupMember: Sendable, Hashable, Identifiable {
     /// The item ID, or `"<item>-<episode>"` for an episode, like ``PlaylistItem/id``.
     public var id: String { target.progressKey }
     public let target: GroupPlayTarget
-    /// The row's display values. A member whose expansion is missing or failed to decode keeps
-    /// its row: it is titled with its ID and marked missing.
+    /// The row's display values. Its flags agree with ``isPlayable``: `isMissing` is set when the
+    /// item is missing or invalid, or its playlist expansion is absent or failed to decode, and
+    /// `hasAudio` when the book has audio tracks or the episode an audio file. A playlist entry
+    /// whose item failed to decode keeps its row, titled with its ID; an episode whose episode
+    /// failed to decode keeps the podcast's subtitle and cover and is titled with its ID. (A
+    /// collection's malformed book is dropped when the response decodes, so it has no row.)
     public let summary: ItemSummary
     /// It can be played: the item isn't missing or invalid, and has audio tracks or, for an
-    /// episode, an audio file. A port of `playableItems` in the legacy `pages/collection/_id.vue`
-    /// and `pages/playlist/_id.vue`.
+    /// episode, an audio file; that is, `!summary.isMissing && summary.hasAudio` for members
+    /// built from a book or playlist item. A port of `playableItems` in the legacy
+    /// `pages/collection/_id.vue` and `pages/playlist/_id.vue`.
     public let isPlayable: Bool
 
     public init(target: GroupPlayTarget, summary: ItemSummary, isPlayable: Bool) {
@@ -104,6 +109,8 @@ public struct GroupMember: Sendable, Hashable, Identifiable {
         // An empty episode ID counts as none, as in progress keys.
         let episodeID = episodeID.flatMap { $0.isEmpty ? nil : $0 }
         let target = GroupPlayTarget(itemID: itemID, episodeID: episodeID)
+        let isPresent = Self.isPresent(item: item, episodeID: episodeID, episode: episode)
+        let hasAudio = Self.hasAudio(item: item, episodeID: episodeID, episode: episode)
         let summary: ItemSummary
         if let item, let episodeID, item.mediaType == .podcast {
             summary = ItemSummary(
@@ -113,18 +120,34 @@ public struct GroupMember: Sendable, Hashable, Identifiable {
         } else {
             summary = ItemSummary(
                 id: target.progressKey, itemID: itemID, episodeID: episodeID, kind: episodeID == nil ? .book : .episode,
-                title: target.progressKey, isMissing: true, hasAudio: false)
+                title: target.progressKey)
         }
         self.init(
-            target: target, summary: summary,
-            isPlayable: Self.isPlayable(item: item, episodeID: episodeID, episode: episode))
+            target: target, summary: summary.with(isMissing: !isPresent, hasAudio: hasAudio),
+            isPlayable: isPresent && hasAudio)
     }
 
-    static func isPlayable(item: LibraryItem?, episodeID: String?, episode: PodcastEpisode?) -> Bool {
+    /// The item is there and valid, and an episode entry has its episode.
+    static func isPresent(item: LibraryItem?, episodeID: String?, episode: PodcastEpisode?) -> Bool {
         guard let item, !item.isMissing, !item.isInvalid else { return false }
+        return episodeID == nil || episode != nil
+    }
+
+    /// The episode has an audio file, or the book audio tracks.
+    static func hasAudio(item: LibraryItem?, episodeID: String?, episode: PodcastEpisode?) -> Bool {
         if episodeID != nil { return episode?.audioFile != nil }
-        guard let book = item.book else { return false }
+        guard let book = item?.book else { return false }
         return (book.tracks?.count ?? book.numTracks ?? 0) > 0
+    }
+}
+
+extension ItemSummary {
+    /// The summary with `isMissing` and `hasAudio` replaced.
+    fileprivate func with(isMissing: Bool, hasAudio: Bool) -> ItemSummary {
+        ItemSummary(
+            id: id, itemID: itemID, episodeID: episodeID, seriesID: seriesID, kind: kind, title: title,
+            subtitle: subtitle, seriesText: seriesText, duration: duration, bookCount: bookCount, cover: cover,
+            isExplicit: isExplicit, isAbridged: isAbridged, isMissing: isMissing, hasAudio: hasAudio)
     }
 }
 
