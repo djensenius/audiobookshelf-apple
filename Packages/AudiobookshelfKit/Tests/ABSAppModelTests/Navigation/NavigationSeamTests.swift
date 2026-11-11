@@ -40,16 +40,11 @@ import Testing
         #expect(restored[path: .library] == [.item(id: "li_1"), .libraryFilter(kind: .narrators, value: "Ned")])
     }
 
-    /// A narrator is stored as the library filtered by it, so the two never stack as duplicates,
-    /// including a narrator restored from an older snapshot.
-    @Test func narratorIsStoredAsItsLibraryFilter() throws {
+    /// A stack's path keeps exactly what SwiftUI pushed, so its top entry never changes under it.
+    @Test func pathStoresANarratorUnchanged() {
         let router = Router(serverID: "s", userID: "u")
         router[path: .library] = [.item(id: "a"), .narrator(name: "Ned")]
-        #expect(router[path: .library] == [.item(id: "a"), .libraryFilter(kind: .narrators, value: "Ned")])
-
-        let restored = Router(serverID: "s", userID: "u")
-        restored.snapshot = Router.Snapshot(serverID: "s", userID: "u", paths: [.home: [.narrator(name: "Ned")]])
-        #expect(restored[path: .home] == [.libraryFilter(kind: .narrators, value: "Ned")])
+        #expect(router[path: .library] == [.item(id: "a"), .narrator(name: "Ned")])
     }
 
     /// A snapshot saved before the route existed still restores as it was.

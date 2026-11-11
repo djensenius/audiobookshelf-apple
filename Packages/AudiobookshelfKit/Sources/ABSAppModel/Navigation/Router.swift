@@ -68,13 +68,11 @@ public final class Router {
 
     /// A tab's path; empty when the tab is at its root. `NavigationStack(path:)` binds to
     /// `$router[path: tab]`, because `$router.paths[tab, default: []]` isn't a valid key path.
-    /// A narrator is stored as its ``Route/libraryFilter(kind:value:)``, the screen both open, so
-    /// the two never stack as distinct duplicates.
+    /// It stores exactly what it's given: a stack's top entry must stay the route SwiftUI pushed.
     public subscript(path tab: AppTab) -> [Route] {
         get { paths[tab] ?? [] }
         set {
-            let path = newValue.map(\.canonical)
-            paths[tab] = path.isEmpty ? nil : path
+            paths[tab] = newValue.isEmpty ? nil : newValue
             if tab == .library { dropPendingPlayLinkIfOffPath() }
         }
     }
