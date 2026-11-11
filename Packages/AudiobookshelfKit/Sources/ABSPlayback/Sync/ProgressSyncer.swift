@@ -36,6 +36,9 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   A successful `/sync` still drains the saved position through PATCH: only the store's PATCH
 ///   acknowledgement clears the dirty group, without clearing a newer edit. Clean rows are kept.
 ///   Failed settlements retain their token and outcome for the next drain.
+///   Each pending row is fetched once before sending. Unusable or rejected progress defers that
+///   row; a thrown lookup stops the pass. This protects observed server values, not another
+///   device's write between GET and PATCH (the server offers no conditional write here).
 @MainActor
 public final class ProgressSyncer {
     /// Seconds between reports while playing (legacy `TIME_BETWEEN_SESSION_SYNC_IN_SECONDS`).
@@ -84,6 +87,8 @@ public final class ProgressSyncer {
     var beforePositionPersistence: (@MainActor () async -> Void)?
     /// Test seam at the capture-to-evidence boundary; no transport has been issued here.
     var beforeSessionAudioPreparation: (@MainActor () async -> Void)?
+    /// Test seam: hold a prepared PATCH before its return is consumed by transport checks.
+    var afterProgressSendPreparation: (@MainActor (ProgressPatch) async -> Void)?
     private var pendingPositions: [MediaKey: Position] = [:]
     private var positionRevision: UInt64 = 0
     private var positionReceipts: [MediaKey: [(revision: UInt64, receipt: PlaybackCloseResult<Void>)]] = [:]
@@ -461,12 +466,27 @@ public final class ProgressSyncer {
             return
         }
         for row in rows {
+            await waitForPendingWrites()
+            guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
+            do {
+                guard try await fetchPendingProgress(for: row.key) else { continue }
+            } catch {
+                logger.error("Fetching pending progress failed: \(String(describing: error), privacy: .public)")
+                return
+            }
             for _ in 0..<Self.maxSendsPerRow {
                 await waitForPendingWrites()
                 guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
                 let patch: ProgressPatch?
+                let sendPositionRevision: UInt64
                 do {
+                    // Intake may have cleaned the row; edits made during suspension belong to
+                    // the current row, never the pre-fetch pendingSync snapshot.
+                    guard try await store.progress(for: row.key)?.needsServerSync == true else { break }
+                    guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
+                    sendPositionRevision = positionRevision
                     patch = try await store.beginSend(for: row.key, now: clock.now())
+                    if let patch { await afterProgressSendPreparation?(patch) }
                 } catch {
                     logger.error("Starting a progress send failed: \(String(describing: error), privacy: .public)")
                     break
@@ -474,6 +494,11 @@ public final class ProgressSyncer {
                 guard let patch else { break }
                 guard !isDetached, !isTransportQuiesced else {
                     _ = await settle(patch, error: "accountEnded")
+                    return
+                }
+                // A newer owned write may already have persisted and left pendingPositions.
+                guard pendingPositions.isEmpty, positionRevision == sendPositionRevision else {
+                    _ = await settle(patch, error: "pendingPosition")
                     return
                 }
                 guard let update = Self.update(for: patch.values) else {
@@ -492,6 +517,35 @@ public final class ProgressSyncer {
                 guard await settle(patch, error: nil) else { return }
             }
         }
+    }
+
+    /// At most one lookup per row/pass, outside the group-send loop. `false` defers this row,
+    /// including when the request completed but canonical intake rejected the captured value.
+    private func fetchPendingProgress(for key: MediaKey) async throws -> Bool {
+        let capturedAt = await store.captureGeneration()
+        guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return false }
+        let progress = try await service.fetchProgress(itemID: key.libraryItemId, episodeID: key.episodeId)
+        await waitForPendingWrites()
+        guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return false }
+        guard let progress else {
+            // Both pinned servers return 404 for absent user progress; the canonical API maps
+            // only that error to nil. Permit first-progress creation without inventing a dated
+            // zero baseline or releasing post-ACK socket suppression.
+            return !(await store.hasChanged(key, since: capturedAt))
+        }
+        guard progress.libraryItemId == key.libraryItemId,
+            (progress.episodeId ?? "") == (key.episodeId ?? ""),
+            let lastUpdate = progress.lastUpdate
+        else { return false }
+        let baseline = ProgressBaseline(
+            currentTime: progress.currentTime, progress: progress.progress, duration: progress.duration,
+            isFinished: progress.isFinished,
+            finishedAt: progress.finishedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
+            ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
+            lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
+        let merged = try await store.applyServerProgress(
+            [key: baseline], capturedAt: capturedAt, source: .fetch)
+        return merged.contains(key)
     }
 
     /// Retry this exact local outcome before taking another PATCH. If the store released the

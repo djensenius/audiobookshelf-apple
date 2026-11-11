@@ -136,6 +136,12 @@ public enum SessionUploadResult: Sendable, Equatable {
         ProgressGeneration(value: generation)
     }
 
+    /// Tests an authoritative absent lookup without synthesizing a baseline or confirming a
+    /// PATCH. Dated values must still go through `applyServerProgress` and its merge rules.
+    public func hasChanged(_ key: MediaKey, since capturedAt: ProgressGeneration) -> Bool {
+        (rowGenerations[key.rawValue] ?? 0) > capturedAt.value
+    }
+
     /// Reserves order synchronously at intent capture, not when a delayed write reaches the actor.
     public nonisolated func reservePlaybackPosition(for key: MediaKey) -> PlaybackPositionToken {
         let sequence = playbackSequence.withLock {
@@ -317,7 +323,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             for (key, server) in updates {
                 let raw = key.rawValue
                 guard let row = rows[raw] else { continue }
-                if let edited = rowGenerations[raw], edited > capturedAt.value { continue }
+                if hasChanged(key, since: capturedAt) { continue }
                 let takingTies = source == .fetch && capturedAt.value >= mergedAt[raw] ?? 0
                 guard let awaiting = awaitingFetch[raw] else {
                     if merge(server, into: row, takingTies: takingTies) { merged.insert(key) }

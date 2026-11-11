@@ -246,7 +246,7 @@ struct ProgressSyncDurabilityTests {
                 "sync 1", "local 15 committed T0", "local 100 committed T1",
                 "sync 1 processed a position=15.0 lastUpdate=1800000017000",
             ]
-            if afterResponse { expected += ["sync 1 done", "patch b"] }
+            if afterResponse { expected += ["sync 1 done", "get b", "patch b"] }
             expected += ["capture generation after T1", "get a", "canonical intake complete"]
             #expect(s.service.log == expected)
             print(

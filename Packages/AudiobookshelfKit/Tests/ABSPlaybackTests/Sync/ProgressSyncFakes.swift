@@ -33,6 +33,10 @@ final class StubProgressSyncService: ProgressSyncService {
         var syncGates: [Gate] = []
         var serverSyncs: [ServerSync] = []
         var serverProgress: [MediaKey: MediaProgress] = [:]
+        var fetches: [MediaKey] = []
+        var fetchGates: [Gate] = []
+        var fetchErrors: [APIError?] = []
+        var fetchStarted: Gate?
         var patchGates: [Gate] = []
         var patchStarted: Gate?
         var log: [String] = []
@@ -50,6 +54,27 @@ final class StubProgressSyncService: ProgressSyncService {
     var reports: [PlaybackSyncReport] { state.withLock { $0.syncs.map(\.report) } }
     var patches: [Patch] { state.withLock { $0.patches } }
     var log: [String] { state.withLock { $0.log } }
+
+    /// Snapshot at request time, then hold response delivery independently of local writes.
+    /// The existing recording fixture starts with no canonical rows; explicit ServerSync
+    /// fixtures populate this same map. No production fallback or synthetic dated zero is used.
+    func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
+        let key = MediaKey(
+            serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
+        let (progress, gate, error, started) = state.withLock { state in
+            state.fetches.append(key)
+            state.log.append("get \(itemID)")
+            return (
+                state.serverProgress[key], state.fetchGates.isEmpty ? nil : state.fetchGates.removeFirst(),
+                state.fetchErrors.isEmpty ? nil : state.fetchErrors.removeFirst(), state.fetchStarted
+            )
+        }
+        started?.open()
+        await gate?.wait()
+        if Task.isCancelled { state.withLock { $0.canceledCalls.append("get") } }
+        if let error { throw error }
+        return progress
+    }
 
     /// Canonical GET representation: an absent row is nil, never an undated zero.
     func mediaProgress(itemID: String, episodeID: String? = nil) async -> MediaProgress? {
