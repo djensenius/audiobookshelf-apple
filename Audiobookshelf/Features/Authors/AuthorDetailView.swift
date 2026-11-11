@@ -4,11 +4,10 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
-/// One author: photo, name, bio (collapsed when long) and their books in the author's library,
-/// paged through the `authors.<id>` filter.
+/// One author: photo, name, bio (collapsed when long) and their books in the author's library, paged through the
+/// `authors.<id>` filter.
 ///
-/// Builds one ``AuthorDetailModel`` per store, account and library from `makeServices()`; the
-/// model moves the books to the author's library when it isn't the selected one.
+/// Builds one ``AuthorDetailModel`` per store, account and library from `makeServices()`.
 struct AuthorDetailView: View {
     let authorID: String
     @Environment(\.libraryStore) private var store
@@ -42,6 +41,8 @@ struct AuthorDetailContent: View {
     let model: AuthorDetailModel
     /// The last user refresh failed and nothing loaded since.
     @State private var refreshFailed = false
+    /// Successful user refreshes; book cards report appearing again after each (``BrowseItemGrid``).
+    @State private var refreshes = 0
 
     var body: some View {
         let messages = AuthorsPresentation.detailMessages
@@ -57,7 +58,7 @@ struct AuthorDetailContent: View {
                             BrowseFailureRow(messageKey: messages.failed, retry: { Task { await refresh() } })
                         }
                         AuthorDetailHeader(detail: detail, booksTotal: model.books.total)
-                        AuthorBooksSection(books: model.books, failed: placement == .footer)
+                        AuthorBooksSection(books: model.books, failed: placement == .footer, refreshes: refreshes)
                     }
                     .padding(.vertical, ABSSpacing.large)
                 }
@@ -75,6 +76,7 @@ struct AuthorDetailContent: View {
 
     private func refresh() async {
         refreshFailed = await AuthorsPresentation.refresh(model)
+        if !refreshFailed { refreshes += 1 }
     }
 }
 
@@ -113,11 +115,11 @@ private struct AuthorDetailHeader: View {
     }
 }
 
-/// The author's books: a spinner, "No items found", or the paged grid; their failure with Retry
-/// when `failed` (a failed refresh shows above the author instead).
+/// The author's books: a spinner, "No items found", or the paged grid, with their paging failure when `failed`.
 private struct AuthorBooksSection: View {
     let books: ItemListModel<LibraryQuery, ItemSummary>
     let failed: Bool
+    let refreshes: Int
 
     var body: some View {
         let failedMessage = AuthorsPresentation.booksFailedMessage
@@ -130,7 +132,9 @@ private struct AuthorBooksSection: View {
                 BrowseFailureRow(messageKey: failedMessage, retry: { BrowsePresentation.retry(books) })
             }
         case .loaded:
-            BrowseItemGrid(elements: books.items, item: { $0 }, onAppear: { books.itemAppeared(id: $0.id) })
+            BrowseItemGrid(
+                elements: books.items, item: { $0 }, onAppear: { books.itemAppeared(id: $0.id) },
+                appearanceID: refreshes)
             BrowsePagingFooter(
                 isLoading: books.isLoading, failed: failed, messageKey: failedMessage,
                 retry: { BrowsePresentation.retry(books) })

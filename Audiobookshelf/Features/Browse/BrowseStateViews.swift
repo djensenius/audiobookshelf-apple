@@ -100,8 +100,7 @@ private struct BrowseMessageView: View {
     }
 }
 
-/// An inline "couldn't load" row with Retry, for a failure while content is on screen. Retry
-/// goes under the message at accessibility text sizes.
+/// An inline "couldn't load" row with Retry (under the message at accessibility text sizes).
 struct BrowseFailureRow: View {
     let messageKey: String
     let retry: () -> Void
@@ -155,6 +154,9 @@ struct BrowseItemGrid<Element: Identifiable>: View {
     let item: (Element) -> ItemSummary
     var badge: (Element) -> String? = { _ in nil }
     var onAppear: (Element) -> Void = { _ in }
+    /// Cards call `onAppear` again when this changes, as after a refresh: the cards it kept don't
+    /// appear again, so a first page that fits on screen would otherwise never load the next.
+    var appearanceID = 0
     @Environment(Router.self) private var router: Router?
     @Environment(\.serverID) private var serverID
     @Environment(\.itemActions) private var itemActions
@@ -180,7 +182,7 @@ struct BrowseItemGrid<Element: Identifiable>: View {
                         .accessibilityHidden(true)
                 }
             }
-            .onAppear { onAppear(element) }
+            .task(id: appearanceID) { onAppear(element) }
         }
         .alert(
             Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,

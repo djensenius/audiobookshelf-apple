@@ -14,8 +14,7 @@ enum AuthorsPresentation {
     /// The failure of the author's books, under the author.
     static let booksFailedMessage = "MessageAuthorBooksLoadFailed"
 
-    /// The author's books by title, like the legacy bookshelf's default sort. The model adds the
-    /// `authors.<id>` filter and the paging.
+    /// The author's books by title, like the legacy bookshelf; the model adds the `authors.<id>` filter and paging.
     static let booksQuery = LibraryQuery(sort: LibrarySortKey.title.rawValue, descending: false)
 
     /// The author screen's model for the key's library and account.
@@ -36,8 +35,7 @@ enum AuthorsPresentation {
                 hasError: model.error != nil))
     }
 
-    /// The author screen's state. The header shows once the author loaded, so loaded is never
-    /// empty; the books have their own state under it (``BrowseScreenState/resolve(list:)``).
+    /// The author screen's state, never empty once the author loaded; the books have their own under the header.
     @MainActor
     static func state(of model: AuthorDetailModel) -> BrowseScreenState {
         .resolve(
@@ -46,14 +44,12 @@ enum AuthorsPresentation {
                 hasError: model.error != nil, isNotFound: model.isNotFound))
     }
 
-    /// "12 books" under the author's name: the books filter's `total` once known, else the
-    /// author's own count; `nil` when neither is known.
+    /// "12 books": the books filter's `total` once known, else the author's own count; `nil` when neither is.
     static func bookCount(total: Int?, author: AuthorSummary) -> String? {
         (total ?? author.bookCount).map { L10n.string("SharedBookCount", $0.formatted()) }
     }
 
-    /// Refreshes the author and their books for the user (pull to refresh, Refresh, Retry) and
-    /// returns whether either failed.
+    /// Refreshes the author and their books for the user (pull to refresh, Refresh, Retry); `true` if either failed.
     @MainActor
     static func refresh(_ model: AuthorDetailModel) async -> Bool {
         await model.refresh()

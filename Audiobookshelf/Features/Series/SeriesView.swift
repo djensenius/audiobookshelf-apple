@@ -42,6 +42,8 @@ struct SeriesListContent: View {
     @Environment(\.serverID) private var serverID
     /// The last user refresh failed and nothing loaded since.
     @State private var refreshFailed = false
+    /// Successful user refreshes; cards report appearing again after each (as in ``BrowseItemGrid``).
+    @State private var refreshes = 0
 
     var body: some View {
         let messages = SeriesPresentation.listMessages
@@ -56,7 +58,7 @@ struct SeriesListContent: View {
                         SeriesCard(series: series, serverID: serverID) {
                             BrowsePresentation.open(.series(id: series.id), in: router)
                         }
-                        .onAppear { model.itemAppeared(id: series.id) }
+                        .task(id: refreshes) { model.itemAppeared(id: series.id) }
                     }
                     BrowsePagingFooter(
                         isLoading: model.isLoading, failed: placement == .footer, messageKey: messages.failed,
@@ -74,6 +76,7 @@ struct SeriesListContent: View {
 
     private func refresh() async {
         refreshFailed = await BrowsePresentation.refresh(model)
+        if !refreshFailed { refreshes += 1 }
     }
 
     private func retry() {

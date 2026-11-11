@@ -46,8 +46,7 @@ enum BrowseScreenState: Hashable {
                 isLoading: list.isLoading, hasError: list.error != nil))
     }
 
-    /// The state while the screen has no model: signed out, waiting for the libraries (or Retry
-    /// when they failed), or empty when they loaded and none is selected.
+    /// The state without a model: signed out, waiting for the libraries (Retry if they failed), or empty.
     @MainActor
     static func placeholder(store: LibraryStore?, libraryID: String?) -> BrowseScreenState {
         guard let store, store.client != nil, store.connectionKey != nil else { return .signedOut }
@@ -83,8 +82,7 @@ struct BrowseModelHost<Model: AnyObject> {
     /// The store's progress for item cards, built once so cards don't re-render on every body.
     let progressReader: ItemProgressReader
 
-    /// Builds the model from the store's services; `nil` while the store serves no account or
-    /// serves another account than `key`'s.
+    /// Builds the model from the store's services; `nil` without an account or for another one than `key`'s.
     @MainActor
     init?(key: BrowseModelKey, store: LibraryStore, make: (LibraryStoreServices) -> Model) {
         guard let services = store.makeServices(), services.connectionKey == key.connection else { return nil }
@@ -93,9 +91,8 @@ struct BrowseModelHost<Model: AnyObject> {
         progressReader = BrowsePresentation.progressReader(store.progress)
     }
 
-    /// The host a screen's task keeps for `key`: `host` itself when it was built for `key`, so
-    /// the model and what it loaded survive, else a new one; `nil` without a key or a store.
-    /// `make` gets the key, the store's services and its progress.
+    /// The host a screen's task keeps for `key`: `host` when built for it (keeping what it loaded), else a new one;
+    /// `nil` without a key or a store. `make` gets the key, the store's services and its progress.
     @MainActor
     static func updated(
         _ host: Self?, for key: BrowseModelKey?, store: LibraryStore?,
@@ -114,8 +111,7 @@ struct BrowseModelHost<Model: AnyObject> {
 
 /// Navigation and paging shared by the series and author screens.
 enum BrowsePresentation {
-    /// Pushes `route` on the selected tab's path (the stack showing the screen) unless it is
-    /// already on top, so a double tap opens one screen.
+    /// Pushes `route` on the selected tab's path unless it is already on top, so a double tap opens one screen.
     @MainActor
     static func open(_ route: Route, in router: Router?) {
         guard let router else { return }
@@ -132,8 +128,7 @@ enum BrowsePresentation {
         list.reachedEnd ? list.refresh() : list.loadNextPage()
     }
 
-    /// Refreshes a paged list for the user (pull to refresh, Refresh) and returns whether it
-    /// failed, which keeps the old items on screen.
+    /// Refreshes a paged list for the user and returns whether it failed, which keeps the old items on screen.
     @MainActor
     static func refresh<Query, Item>(_ list: ItemListModel<Query, Item>) async -> Bool {
         await list.refresh()?.value
