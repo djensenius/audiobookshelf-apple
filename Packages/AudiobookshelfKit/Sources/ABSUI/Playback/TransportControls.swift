@@ -64,6 +64,18 @@ public struct TransportControls: View {
         return numberedJumpSymbols.contains(seconds) ? "\(base).\(seconds)" : base
     }
 
+    /// The interval shown under a jump button's plain arrow, for example "2m" or "20s", like the
+    /// legacy full player's `getJumpLabel` (minutes from 120 seconds); `nil` when the symbol is
+    /// numbered and already shows it.
+    nonisolated static func jumpCaption(seconds: Int, locale: Locale) -> String? {
+        guard !numberedJumpSymbols.contains(seconds) else { return nil }
+        let minutes = seconds >= 120
+        let value = minutes ? Double(seconds) / 60 : Double(seconds)
+        return L10n.string(
+            minutes ? "UnitMinutesShort" : "UnitSecondsShort", value.formatted(.number.locale(locale)),
+            locale: locale)
+    }
+
     /// The VoiceOver label of a jump button, for example "Jump forward 30 seconds".
     nonisolated static func jumpLabel(forward: Bool, seconds: Int, locale: Locale) -> String {
         let interval = DurationStyle.timestamp.accessibilityString(Double(seconds), locale: locale)
@@ -141,10 +153,19 @@ public struct TransportControls: View {
         return Button {
             tap(forward ? .jumpForward : .jumpBackward)
         } label: {
-            Image(systemName: Self.jumpSymbol(forward: forward, seconds: seconds))
-                .font(iconFont)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(.rect)
+            VStack(spacing: 0) {
+                Image(systemName: Self.jumpSymbol(forward: forward, seconds: seconds))
+                    .font(iconFont)
+                if let caption = Self.jumpCaption(seconds: seconds, locale: locale) {
+                    Text(verbatim: caption)
+                        .font(.caption2.weight(.semibold))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+            }
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(.rect)
         }
         .accessibilityLabel(Text(verbatim: Self.jumpLabel(forward: forward, seconds: seconds, locale: locale)))
     }

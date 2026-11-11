@@ -94,6 +94,16 @@ private final class Recorder {
         )
     }
 
+    /// Intervals without a numbered symbol show their length under the plain arrow.
+    @Test func jumpCaptionShowsIntervalsWithoutANumberedSymbol() {
+        #expect(TransportControls.jumpCaption(seconds: 10, locale: locale) == nil)
+        #expect(TransportControls.jumpCaption(seconds: 30, locale: locale) == nil)
+        #expect(TransportControls.jumpCaption(seconds: 120, locale: locale) == "2m")
+        #expect(TransportControls.jumpCaption(seconds: 300, locale: locale) == "5m")
+        #expect(TransportControls.jumpCaption(seconds: 150, locale: locale) == "2.5m")
+        #expect(TransportControls.jumpCaption(seconds: 20, locale: locale) == "20s")
+    }
+
     @Test func playPauseLabelFollowsTheIntent() {
         #expect(TransportControls.playPauseLabel(showsPause: true) == "Pause")
         #expect(TransportControls.playPauseLabel(showsPause: false) == "Play")
