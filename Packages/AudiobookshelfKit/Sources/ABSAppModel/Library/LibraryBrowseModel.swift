@@ -8,6 +8,9 @@ import Observation
 public struct LibraryBrowseQuery: Sendable, Hashable {
     public var libraryID: String
     public var query: LibraryQuery
+    /// The filter isn't offered for the library's type, so ``query`` lacks it: the list loads an
+    /// empty page without a request instead of the whole library.
+    public var isFilterUnsupported = false
 }
 
 /// The bookshelf of one library at a time: turns ``LibraryViewPreferences`` into a query and
@@ -18,9 +21,15 @@ public struct LibraryBrowseQuery: Sendable, Hashable {
 /// this model doesn't depend on the UI kit.
 ///
 /// ``preferences`` are always the stored ones repaired for the library's type
-/// (``LibraryViewPreferences/resolved(for:)``). Nothing is saved until the user changes
-/// something with ``update(_:)``, which saves the whole repaired value through `persist`; opening
-/// a library, or switching to a library of another type, never writes.
+/// (``LibraryViewPreferences/resolved(for:)``), with the ``pinnedFilter`` in place of the stored
+/// filter when one is pinned. Nothing is saved until the user changes something with
+/// ``update(_:)``, which saves the whole repaired value through `persist`; opening a library, or
+/// switching to a library of another type, never writes.
+///
+/// A pinned filter (for example a narrator's route) is shown and queried but never saved: the
+/// library keeps its stored filter. When the library's type doesn't offer the pinned filter
+/// (``isFilterUnsupported``), the list stays empty and no items are requested, rather than
+/// showing the whole library.
 ///
 /// Changing the preferences or the library starts a new query on the list, which cancels the page
 /// in flight and drops a response that arrives after (``ItemListModel``'s generation).
@@ -32,12 +41,22 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
 
     public private(set) var libraryID: String
     public private(set) var mediaType: MediaType
-    /// What to show and query with, repaired for ``mediaType``.
+    /// What to show and query with: the stored preferences repaired for ``mediaType``, with the
+    /// ``pinnedFilter`` (as is, even if unsupported) in place of their filter.
     public private(set) var preferences: LibraryViewPreferences
+    /// A filter shown and queried instead of the stored one, and never saved. It stays pinned
+    /// across ``switchLibrary(id:mediaType:stored:)``.
+    public let pinnedFilter: LibraryViewPreferences.Filter?
     public let list: ItemListModel<LibraryBrowseQuery, Item>
+
+    /// The library's type doesn't offer ``pinnedFilter``'s group (for example narrators in a
+    /// podcast library): the list requests no items and ends empty, so views show no items.
+    public var isFilterUnsupported: Bool { Self.isUnsupported(pinnedFilter, in: mediaType) }
 
     @ObservationIgnored private let defaults: LibraryViewPreferences
     @ObservationIgnored private let persist: Persist?
+    /// The stored preferences repaired for ``mediaType``: what ``update(_:)`` saves.
+    @ObservationIgnored private var storedPreferences: LibraryViewPreferences
 
     public var items: [Item] { list.items }
     public var total: Int? { list.total }
@@ -47,26 +66,33 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
 
     /// - Parameters:
     ///   - stored: The library's saved preferences, if any.
+    ///   - pinnedFilter: A filter to show and query instead of the stored one, without saving it.
     ///   - defaults: Used when nothing is saved.
     ///   - map: Turns a loaded item into the display value; runs off the main actor.
     ///
     /// Nothing loads until ``load()``.
     public init(
         client: any LibraryService, libraryID: String, mediaType: MediaType, stored: LibraryViewPreferences? = nil,
-        defaults: LibraryViewPreferences = LibraryViewPreferences(), pageSize: Int = 20, prefetchThreshold: Int = 5,
-        connectionKey: LibraryConnectionKey? = nil, persist: Persist? = nil,
-        map: @escaping @Sendable (LibraryItem) -> Item
+        pinnedFilter: LibraryViewPreferences.Filter? = nil, defaults: LibraryViewPreferences = LibraryViewPreferences(),
+        pageSize: Int = 20, prefetchThreshold: Int = 5, connectionKey: LibraryConnectionKey? = nil,
+        persist: Persist? = nil, map: @escaping @Sendable (LibraryItem) -> Item
     ) {
         self.libraryID = libraryID
         self.mediaType = mediaType
+        self.pinnedFilter = pinnedFilter
         self.defaults = defaults
         self.persist = persist
-        let preferences = (stored ?? defaults).resolved(for: mediaType)
+        let storedPreferences = (stored ?? defaults).resolved(for: mediaType)
+        self.storedPreferences = storedPreferences
+        let preferences = Self.pinning(pinnedFilter, to: storedPreferences)
         self.preferences = preferences
         list = ItemListModel(
-            query: LibraryBrowseQuery(libraryID: libraryID, query: preferences.query(for: mediaType)),
+            query: Self.makeBrowseQuery(
+                libraryID: libraryID, mediaType: mediaType, preferences: preferences, pinnedFilter: pinnedFilter),
             pageSize: pageSize, prefetchThreshold: prefetchThreshold, connectionKey: connectionKey
         ) { browse, page, limit in
+            // The query lacks the unsupported filter: sending it would list the whole library.
+            if browse.isFilterUnsupported { return PagedResults(results: [], total: 0, limit: limit, page: page) }
             var query = browse.query
             query.page = page
             query.limit = limit
@@ -78,30 +104,60 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
     @discardableResult
     public func load() -> Task<Void, Never>? { list.loadNextPage() }
 
-    /// Changes the preferences and reloads from the first page. The change applies to the
-    /// repaired preferences and the result is saved. Returns the first page's load.
+    /// Changes the preferences and reloads from the first page. The change applies to
+    /// ``preferences`` and the result, repaired, is saved. While a filter is pinned, the stored
+    /// filter is saved and a filter change is ignored. Returns the first page's load.
     @discardableResult
     public func update(_ change: (inout LibraryViewPreferences) -> Void) -> Task<Void, Never>? {
         var changed = preferences
         change(&changed)
-        preferences = changed.resolved(for: mediaType)
-        persist?(libraryID, preferences)
+        if pinnedFilter != nil { changed.filter = storedPreferences.filter }
+        storedPreferences = changed.resolved(for: mediaType)
+        persist?(libraryID, storedPreferences)
+        preferences = Self.pinning(pinnedFilter, to: storedPreferences)
         return list.setQuery(browseQuery)
     }
 
-    /// Shows another library with its saved preferences (or the defaults), repaired for its type.
-    /// Nothing is saved. A page of the previous library still in flight is dropped.
+    /// Shows another library with its saved preferences (or the defaults), repaired for its type,
+    /// and the same ``pinnedFilter``. Nothing is saved. A page of the previous library still in
+    /// flight is dropped.
     @discardableResult
     public func switchLibrary(
         id: String, mediaType: MediaType, stored: LibraryViewPreferences? = nil
     ) -> Task<Void, Never>? {
         libraryID = id
         self.mediaType = mediaType
-        preferences = (stored ?? defaults).resolved(for: mediaType)
+        storedPreferences = (stored ?? defaults).resolved(for: mediaType)
+        preferences = Self.pinning(pinnedFilter, to: storedPreferences)
         return list.setQuery(browseQuery)
     }
 
     private var browseQuery: LibraryBrowseQuery {
-        LibraryBrowseQuery(libraryID: libraryID, query: preferences.query(for: mediaType))
+        Self.makeBrowseQuery(
+            libraryID: libraryID, mediaType: mediaType, preferences: preferences, pinnedFilter: pinnedFilter)
+    }
+
+    private static func makeBrowseQuery(
+        libraryID: String, mediaType: MediaType, preferences: LibraryViewPreferences,
+        pinnedFilter: LibraryViewPreferences.Filter?
+    ) -> LibraryBrowseQuery {
+        LibraryBrowseQuery(
+            libraryID: libraryID, query: preferences.query(for: mediaType),
+            isFilterUnsupported: isUnsupported(pinnedFilter, in: mediaType))
+    }
+
+    /// `preferences` with `pinnedFilter`, if any, in place of their filter.
+    private static func pinning(
+        _ pinnedFilter: LibraryViewPreferences.Filter?, to preferences: LibraryViewPreferences
+    ) -> LibraryViewPreferences {
+        guard let pinnedFilter else { return preferences }
+        var pinned = preferences
+        pinned.filter = pinnedFilter
+        return pinned
+    }
+
+    private static func isUnsupported(_ filter: LibraryViewPreferences.Filter?, in mediaType: MediaType) -> Bool {
+        guard let filter else { return false }
+        return !LibraryFilterGroup.groups(for: mediaType).contains(filter.group)
     }
 }

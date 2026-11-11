@@ -269,6 +269,22 @@ public final class LibraryStore {
         }
         return libraries.first?.id
     }
+
+    // MARK: View preferences
+
+    /// The account's saved preferences for a library, or `nil` when none are saved, they can't be
+    /// read, or no account is connected. Pass them to ``LibraryBrowseModel`` as `stored`.
+    public func viewPreferences(libraryID: String) -> LibraryViewPreferences? {
+        guard let connectionKey else { return nil }
+        return settings.libraryViewPreferences(for: connectionKey, libraryID: libraryID)
+    }
+
+    /// Saves the account's preferences for a library, for example as ``LibraryBrowseModel``'s
+    /// `persist`; does nothing when no account is connected.
+    public func saveViewPreferences(_ preferences: LibraryViewPreferences, libraryID: String) {
+        guard let connectionKey else { return }
+        settings.saveLibraryViewPreferences(preferences, for: connectionKey, libraryID: libraryID)
+    }
 }
 
 /// Thrown by ``LibraryStoreServices`` when the store's current client doesn't implement the

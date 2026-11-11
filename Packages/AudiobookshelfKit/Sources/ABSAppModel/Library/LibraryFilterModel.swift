@@ -17,11 +17,17 @@ public final class LibraryFilterModel {
     public struct Choice: Sendable, Hashable, Identifiable {
         public let id: String
         public let name: String
+
+        /// Books in no series (`LibraryFilter.noSeries`), first in ``Choices/series`` as in the
+        /// legacy `FilterModal.vue`. Views show it localized (legacy `MessageNoSeries`), not
+        /// ``name``.
+        public static let noSeries = Choice(id: "no-series", name: "No series")
     }
 
     public struct Choices: Sendable, Hashable {
         public var genres: [Choice] = []
         public var tags: [Choice] = []
+        /// ``Choice/noSeries`` first, then the library's series.
         public var series: [Choice] = []
         public var authors: [Choice] = []
         public var narrators: [Choice] = []
@@ -34,6 +40,13 @@ public final class LibraryFilterModel {
         case inProgress = "in-progress"
         case notStarted = "not-started"
         case notFinished = "not-finished"
+    }
+
+    /// The fixed ebook filter values (the `ebooks` group's values); views localize the names
+    /// (legacy `LabelHasEbook` and `LabelHasSupplementaryEbook`).
+    public enum EbookKind: String, Sendable, CaseIterable {
+        case ebook
+        case supplementary
     }
 
     public private(set) var libraryID: String?
@@ -129,7 +142,7 @@ public final class LibraryFilterModel {
         func named(_ names: [String]) -> [Choice] { sorted(names.map { Choice(id: $0, name: $0) }) }
         return Choices(
             genres: named(data.genres), tags: named(data.tags),
-            series: sorted(data.series.map { Choice(id: $0.id, name: $0.name) }),
+            series: [.noSeries] + sorted(data.series.map { Choice(id: $0.id, name: $0.name) }),
             authors: sorted(data.authors.map { Choice(id: $0.id, name: $0.name) }),
             narrators: named(data.narrators), languages: named(data.languages))
     }

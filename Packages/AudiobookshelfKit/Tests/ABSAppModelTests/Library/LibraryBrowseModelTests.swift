@@ -28,7 +28,7 @@ private struct Harness {
 
     init(
         libraryID: String = "books", mediaType: MediaType = .book, stored: LibraryViewPreferences? = nil,
-        pageSize: Int = 2
+        pinnedFilter: LibraryViewPreferences.Filter? = nil, pageSize: Int = 2
     ) {
         let gate = gate
         let saved = saved
@@ -36,8 +36,8 @@ private struct Harness {
             try await gate.call(ItemsRequest(libraryID: libraryID, query: query))
         })
         model = LibraryBrowseModel(
-            client: service, libraryID: libraryID, mediaType: mediaType, stored: stored, pageSize: pageSize,
-            persist: { id, preferences in saved.value[id] = preferences },
+            client: service, libraryID: libraryID, mediaType: mediaType, stored: stored, pinnedFilter: pinnedFilter,
+            pageSize: pageSize, persist: { id, preferences in saved.value[id] = preferences },
             map: { Slim(id: $0.id) })
     }
 }
@@ -143,6 +143,67 @@ private func page(_ ids: [String], total: Int, page: Int = 0) throws -> PagedRes
         _ = harness.model.switchLibrary(id: "books", mediaType: .book, stored: stored)
         _ = try #require(await calls.next())
         #expect(harness.model.preferences == stored)
+    }
+
+    @Test func aPinnedFilterIsQueriedButAnUpdateSavesTheStoredFilter() async throws {
+        let stored = LibraryViewPreferences(filter: .init(group: .genres, value: "G"))
+        let pinned = LibraryViewPreferences.Filter(group: .narrators, value: "Jim Dale")
+        let harness = Harness(stored: stored, pinnedFilter: pinned)
+        #expect(harness.model.preferences.filter == pinned)
+        #expect(!harness.model.isFilterUnsupported)
+
+        _ = harness.model.load()
+        var calls = harness.gate.calls.makeAsyncIterator()
+        let first = try #require(await calls.next())
+        #expect(first.request.query.filter == LibraryFilter.narrators("Jim Dale"))
+        // The name goes out Base64-encoded, like the legacy `$encode`.
+        #expect(first.request.query.queryItems.first == URLQueryItem(name: "filter", value: "narrators.SmltIERhbGU%3D"))
+        first.reply.resume(returning: try page([], total: 0))
+        #expect(harness.saved.value.isEmpty)
+
+        _ = harness.model.update {
+            $0.selectSort(.title)
+            $0.viewMode = .list
+            $0.collapseSeries = true
+            $0.filter = nil
+        }
+        let second = try #require(await calls.next())
+        #expect(second.request.query.sort == "media.metadata.title")
+        #expect(second.request.query.filter == LibraryFilter.narrators("Jim Dale"))
+        second.reply.resume(returning: try page([], total: 0))
+        #expect(harness.model.preferences.filter == pinned)
+        #expect(
+            harness.saved.value["books"]
+                == LibraryViewPreferences(
+                    sort: .title, descending: false, filter: stored.filter, viewMode: .list, collapseSeries: true))
+    }
+
+    @Test func anUnsupportedPinnedFilterRequestsNothing() async throws {
+        let requests = Locked<[LibraryQuery]>([])
+        let service = FakeLibraryService(itemsHandler: { _, query in
+            requests.value.append(query)
+            return try page(["item"], total: 1)
+        })
+        let pinned = LibraryViewPreferences.Filter(group: .narrators, value: "N")
+        let model = LibraryBrowseModel(
+            client: service, libraryID: "pods", mediaType: .podcast, pinnedFilter: pinned, map: { Slim(id: $0.id) })
+        #expect(model.isFilterUnsupported)
+        #expect(model.preferences.filter == pinned)
+
+        await model.load()?.value
+        await model.update { $0.selectSort(.title) }?.value
+        await model.list.refresh()?.value
+        #expect(requests.value.isEmpty)
+        #expect(model.items.isEmpty && model.total == 0 && model.reachedEnd)
+
+        // Book libraries offer narrators; back in a podcast library the list empties again.
+        await model.switchLibrary(id: "books", mediaType: .book)?.value
+        #expect(!model.isFilterUnsupported)
+        #expect(requests.value.map(\.filter) == [LibraryFilter.narrators("N")])
+        #expect(model.items.map(\.id) == ["item"])
+        await model.switchLibrary(id: "pods", mediaType: .podcast)?.value
+        #expect(requests.value.count == 1)
+        #expect(model.items.isEmpty && model.reachedEnd)
     }
 
     @Test func settingTheSameQueryAgainDoesNotReload() async throws {

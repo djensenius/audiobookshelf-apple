@@ -329,6 +329,50 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func viewPreferencesAreSavedForTheConnectedAccountOnly() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let preferences = LibraryViewPreferences(sort: .title, descending: false, viewMode: .list)
+
+            // Without an account nothing is read or written.
+            store.saveViewPreferences(preferences, libraryID: "books")
+            #expect(settings.libraryViewPreferences.isEmpty)
+            #expect(store.viewPreferences(libraryID: "books") == nil)
+
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+            store.saveViewPreferences(preferences, libraryID: "books")
+            #expect(store.viewPreferences(libraryID: "books") == preferences)
+            #expect(settings.libraryViewPreferences(for: serverA, libraryID: "books") == preferences)
+            #expect(store.viewPreferences(libraryID: "pods") == nil)
+
+            // Another account has its own; after a logout nothing is written.
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverB)
+            #expect(store.viewPreferences(libraryID: "books") == nil)
+            store.clear()
+            store.saveViewPreferences(LibraryViewPreferences(sort: .size), libraryID: "books")
+            #expect(store.viewPreferences(libraryID: "books") == nil)
+            #expect(settings.libraryViewPreferences.count == 1)
+            #expect(settings.libraryViewPreferences(for: serverA, libraryID: "books") == preferences)
+        }
+    }
+
+    @Test func aBrowseModelSavesThroughTheStoreWithoutItsPinnedFilter() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+            let genre = LibraryViewPreferences.Filter(group: .genres, value: "G")
+            store.saveViewPreferences(LibraryViewPreferences(filter: genre), libraryID: "books")
+
+            let model = LibraryBrowseModel(
+                client: FakeLibraryService(), libraryID: "books", mediaType: .book,
+                stored: store.viewPreferences(libraryID: "books"), pinnedFilter: .init(group: .narrators, value: "N"),
+                persist: { [weak store] id, preferences in store?.saveViewPreferences(preferences, libraryID: id) },
+                map: { Slim(id: $0.id) })
+            await model.update { $0.viewMode = .list }?.value
+            #expect(store.viewPreferences(libraryID: "books") == LibraryViewPreferences(filter: genre, viewMode: .list))
+        }
+    }
+
     @Test func loadDetailsStoresFilterDataByLibrary() async throws {
         try await withLibrarySettings { settings in
             let store = LibraryStore(settings: settings)
