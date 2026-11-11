@@ -15,11 +15,27 @@ import Testing
 
     @Test(arguments: [
         "", "/etc/passwd", "../outside.mp3", "li_1/../../outside.mp3", "./li_1/1.mp3", "li_1//1.mp3", "li_1/",
+        // A combining mark after `/` joins it into one Character, but the `/` still separates.
+        "../\u{0301}x", "li_1/../\u{0301}../x", "/\u{0301}etc/passwd", "./\u{0301}x", "li_1//\u{0301}x",
     ])
     func rejectsPathsThatCouldLeaveTheRoot(path: String) {
         #expect(throws: DownloadLocations.PathError.invalidRelativePath(path)) {
             try DownloadLocations(root: root).fileURL(forRelativePath: path)
         }
+    }
+
+    /// `..` followed by a combining mark is an ordinary name, not the parent directory.
+    @Test(arguments: ["li_1/..\u{0301}/1.mp3", "li_1/\u{0301}x/1.mp3", "\u{0301}../1.mp3", ".\u{0301}/1.mp3"])
+    func acceptsCombiningMarkNamesInsideTheRoot(path: String) throws {
+        let locations = DownloadLocations(root: root)
+        let url = try locations.fileURL(forRelativePath: path)
+        // Compare scalars: a combining mark would merge with the root's trailing `/` as Characters.
+        let resolved = url.standardizedFileURL.path(percentEncoded: false).unicodeScalars
+        #expect(
+            resolved.starts(
+                with: locations.downloadsRoot.standardizedFileURL.path(percentEncoded: false).unicodeScalars))
+        let depth = path.unicodeScalars.split(separator: "/").count
+        #expect(url.standardizedFileURL.pathComponents.count == locations.downloadsRoot.pathComponents.count + depth)
     }
 
     @Test func prepareCreatesDirectoriesExcludedFromBackup() throws {
