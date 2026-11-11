@@ -295,7 +295,8 @@ struct StoreFailure: Error, CustomStringConvertible {
     var description: String { "The store couldn't be opened." }
 }
 
-/// A clock that only moves when the test advances it.
+/// A clock that only moves when the test advances it. Each sleep that isn't cancelled reports
+/// its delay on ``sleeps`` as it starts, so tests can wait for it without polling.
 final class ManualClock: Clock, Sendable {
     struct Instant: InstantProtocol {
         var offset: Duration
@@ -317,6 +318,13 @@ final class ManualClock: Clock, Sendable {
     }
 
     private let state = Mutex(State())
+    /// The delay of each sleep, relative to the clock's time when it started.
+    let sleeps: AsyncStream<Duration>
+    private let sleepContinuation: AsyncStream<Duration>.Continuation
+
+    init() {
+        (sleeps, sleepContinuation) = AsyncStream.makeStream()
+    }
 
     var now: Instant { state.withLock { $0.now } }
     var minimumResolution: Duration { .zero }
@@ -329,11 +337,14 @@ final class ManualClock: Clock, Sendable {
         }
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let resumeNow = state.withLock { state -> Bool in
-                    if deadline <= state.now || Task.isCancelled { return true }
+                let (resumeNow, delay) = state.withLock { state -> (Bool, Duration?) in
+                    if Task.isCancelled { return (true, nil) }
+                    let delay = state.now.duration(to: deadline)
+                    if deadline <= state.now { return (true, delay) }
                     state.sleepers[id] = Sleeper(deadline: deadline, continuation: continuation)
-                    return false
+                    return (false, delay)
                 }
+                if let delay { sleepContinuation.yield(delay) }
                 if resumeNow { continuation.resume() }
             }
         } onCancel: {

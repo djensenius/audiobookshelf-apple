@@ -1,0 +1,193 @@
+import ABSAPI
+import ABSCore
+import Foundation
+import Observation
+
+/// A loaded collection or playlist: its name, description and rows in server order.
+public struct GroupDetail: Sendable, Hashable, Identifiable {
+    public let id: String
+    public let libraryID: String
+    public let name: String
+    /// `nil` when blank.
+    public let description: String?
+    /// Books, or a playlist's books and episodes, in order. A member listed twice keeps its
+    /// first row, so IDs are unique.
+    public let members: [GroupMember]
+    /// The group cover's images, like ``GroupSummary/covers``.
+    public let covers: [CoverRef]
+
+    public init(
+        id: String, libraryID: String, name: String, description: String?, members: [GroupMember], covers: [CoverRef]
+    ) {
+        self.id = id
+        self.libraryID = libraryID
+        self.name = name
+        self.description = description.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        var seen: Set<String> = []
+        self.members = members.filter { seen.insert($0.id).inserted }
+        self.covers = Array(covers.prefix(GroupSummary.maxCovers))
+    }
+
+    public init(collection: LibraryCollection) {
+        let books = collection.books ?? []
+        self.init(
+            id: collection.id, libraryID: collection.libraryId, name: collection.name,
+            description: collection.description, members: books.map(GroupMember.init(book:)),
+            covers: GroupSummary.covers(of: books))
+    }
+
+    public init(playlist: Playlist) {
+        self.init(
+            id: playlist.id, libraryID: playlist.libraryId, name: playlist.name, description: playlist.description,
+            members: playlist.items.map(GroupMember.init(playlistItem:)),
+            covers: GroupSummary.covers(of: playlist.items.compactMap(\.libraryItem)))
+    }
+}
+
+/// How a ``GroupDetailModel`` loads its group.
+public protocol GroupDetailKind: Sendable {
+    static func detail(id: String, service: any GroupsService) async throws -> GroupDetail
+}
+
+/// Loads `GET /api/collections/:id`.
+public enum CollectionGroupKind: GroupDetailKind {
+    public static func detail(id: String, service: any GroupsService) async throws -> GroupDetail {
+        GroupDetail(collection: try await service.collectionDetail(id: id))
+    }
+}
+
+/// Loads `GET /api/playlists/:id`.
+public enum PlaylistGroupKind: GroupDetailKind {
+    public static func detail(id: String, service: any GroupsService) async throws -> GroupDetail {
+        GroupDetail(playlist: try await service.playlistDetail(id: id))
+    }
+}
+
+/// The collection detail screen; a port of the legacy `pages/collection/_id.vue`.
+public typealias CollectionDetailModel = GroupDetailModel<CollectionGroupKind>
+/// The playlist detail screen; a port of the legacy `pages/playlist/_id.vue`. Its rows mix books
+/// and podcast episodes.
+public typealias PlaylistDetailModel = GroupDetailModel<PlaylistGroupKind>
+
+/// A collection or playlist screen: the group by ID, the user's progress on its members from
+/// ``ProgressCache``, and what play-all would start. Use ``CollectionDetailModel`` or
+/// ``PlaylistDetailModel``.
+///
+/// - Loading keeps the last group while reloading and after a failed reload, like ``StatsModel``.
+///   When loads overlap, only the last one started is applied. A 404 (``APIError/notFound``) is
+///   different: the group was deleted or never existed, so the group is dropped and
+///   ``phase`` becomes ``Phase/notFound`` for the view to pop.
+/// - Progress and ``nextToPlay`` are read from the cache on every access, so a view reading
+///   them invalidates when one of its members' cache entries changes.
+/// - Play-all is data only: the model never starts playback.
+///
+/// A model belongs to one group, client and account: it holds the signed-in account's service
+/// and that account's ``ProgressCache``. Views recreate it per group ID and under the session's
+/// `.id(identity)` (ADR 0004), so a server or user switch never reuses it.
+@MainActor
+@Observable
+public final class GroupDetailModel<Kind: GroupDetailKind> {
+    public enum Phase: Sendable, Hashable {
+        /// Not loaded yet, and no load running.
+        case idle
+        /// The first load is running.
+        case loading
+        /// ``GroupDetailModel/detail`` is set; a reload may be running or may have failed.
+        case loaded
+        /// The last load failed and nothing was loaded before; see ``GroupDetailModel/error``.
+        case failed
+        /// The server answered 404. It stays until a load succeeds: a later failure that isn't a
+        /// 404 (offline, timeout) doesn't bring the deleted group back, it only updates
+        /// ``GroupDetailModel/error``.
+        case notFound
+    }
+
+    public let groupID: String
+
+    /// The last loaded group; kept while reloading and after a failed reload, dropped on 404.
+    public private(set) var detail: GroupDetail?
+    public private(set) var isLoading = false
+    /// The error of the last load, cleared by the next successful one.
+    public private(set) var error: (any Error)?
+    /// The last load answered 404.
+    public private(set) var isNotFound = false
+
+    @ObservationIgnored private let service: any GroupsService
+    @ObservationIgnored private let cache: ProgressCache
+    @ObservationIgnored private var sequence = 0
+
+    public init(id: String, service: any GroupsService, cache: ProgressCache) {
+        groupID = id
+        self.service = service
+        self.cache = cache
+    }
+
+    public var phase: Phase {
+        if isNotFound { return .notFound }
+        if detail != nil { return .loaded }
+        if isLoading { return .loading }
+        return error == nil ? .idle : .failed
+    }
+
+    /// The group has been loaded and is still there.
+    public var hasLoaded: Bool { detail != nil }
+
+    /// Loaded with no members.
+    public var isEmpty: Bool { detail?.members.isEmpty ?? false }
+
+    /// Loads unless the group has already loaded. Views call it each time they appear, so a load
+    /// cancelled before it finished runs again.
+    public func loadIfNeeded() async {
+        guard !hasLoaded else { return }
+        await load()
+    }
+
+    /// Loads the group. A response to an older call that arrives after a newer one started is
+    /// dropped.
+    public func load() async {
+        sequence += 1
+        let sequence = sequence
+        isLoading = true
+        let result: Result<GroupDetail, any Error>
+        do {
+            result = .success(try await Kind.detail(id: groupID, service: service))
+        } catch {
+            result = .failure(error)
+        }
+        guard sequence == self.sequence else { return }
+        isLoading = false
+        switch result {
+        case .success(let loaded):
+            detail = loaded
+            error = nil
+            isNotFound = false
+        case .failure(let error):
+            if error is CancellationError { return }
+            self.error = error
+            if error as? APIError == .notFound {
+                isNotFound = true
+                detail = nil
+            }
+        }
+    }
+
+    // MARK: Progress and play-all
+
+    /// The user's progress on `member`, if any.
+    public func progress(of member: GroupMember) -> MediaProgress? {
+        cache.progress(libraryItemID: member.target.itemID, episodeID: member.target.episodeID)
+    }
+
+    /// The members play-all can play, in order. Empty hides the Play button, as in legacy.
+    public var playTargets: [GroupPlayTarget] {
+        detail?.members.filter(\.isPlayable).map(\.target) ?? []
+    }
+
+    /// What play-all starts: the first playable member that isn't finished, or `nil` when every
+    /// playable member is finished or none is playable (legacy then plays nothing).
+    public var nextToPlay: GroupPlayTarget? {
+        playTargets.first { target in
+            !(cache.progress(libraryItemID: target.itemID, episodeID: target.episodeID)?.isFinished ?? false)
+        }
+    }
+}
