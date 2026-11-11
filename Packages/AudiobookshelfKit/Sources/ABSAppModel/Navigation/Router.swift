@@ -26,7 +26,7 @@ public final class Router {
     public var librarySection: AppTab?
     /// The sections ``libraryID`` shows for this user, as the scene last confirmed them in
     /// ``selectLibrary(id:kind:supportedSections:)``. A restored scene assumes every section of
-    /// the library's kind until then. Empty without a library.
+    /// the library's kind until then, or every section when its kind is unknown.
     public private(set) var supportedSections: Set<AppTab> = []
     /// A library a deep link asked for, until the scene resolves it. A link carries only the
     /// ID, so the scene (S7a) looks up the library's kind and sections and calls
@@ -68,10 +68,13 @@ public final class Router {
 
     /// A tab's path; empty when the tab is at its root. `NavigationStack(path:)` binds to
     /// `$router[path: tab]`, because `$router.paths[tab, default: []]` isn't a valid key path.
+    /// A narrator is stored as its ``Route/libraryFilter(kind:value:)``, the screen both open, so
+    /// the two never stack as distinct duplicates.
     public subscript(path tab: AppTab) -> [Route] {
         get { paths[tab] ?? [] }
         set {
-            paths[tab] = newValue.isEmpty ? nil : newValue
+            let path = newValue.map(\.canonical)
+            paths[tab] = path.isEmpty ? nil : path
             if tab == .library { dropPendingPlayLinkIfOffPath() }
         }
     }
@@ -94,9 +97,11 @@ public final class Router {
         selectedTab = .library
     }
 
-    /// The sections the sidebar shows, in sidebar order (``supportedSections``).
+    /// The sections the sidebar shows, in sidebar order: ``supportedSections`` once a library is
+    /// selected, and every section before that, so the sidebar is never empty while the scene
+    /// has no library yet.
     public var visibleSections: [AppTab] {
-        AppTab.sections.filter(supportedSections.contains)
+        libraryID == nil ? AppTab.sections : AppTab.sections.filter(supportedSections.contains)
     }
 
     /// Asks the scene to switch to library `id`, for a deep link that knows only the ID.
@@ -176,11 +181,12 @@ public final class Router {
     }
 
     /// Restores the library and its kind without resetting paths; used by snapshot restore.
-    /// Until the scene confirms the library, it shows every section of its kind.
+    /// Until the scene confirms the library, it shows every section of its kind, or every
+    /// section when the kind is unknown.
     func restoreLibrary(id: String?, kind: LibraryKind?) {
         libraryID = id
         libraryKind = kind
-        supportedSections = AppTab.sections(for: kind)
+        supportedSections = kind == nil ? Set(AppTab.sections) : AppTab.sections(for: kind)
     }
 
     /// Falls back from unsupported sections: the selected tab to Library, the Library section

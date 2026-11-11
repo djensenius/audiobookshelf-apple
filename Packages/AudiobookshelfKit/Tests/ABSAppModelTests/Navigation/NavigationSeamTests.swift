@@ -40,6 +40,18 @@ import Testing
         #expect(restored[path: .library] == [.item(id: "li_1"), .libraryFilter(kind: .narrators, value: "Ned")])
     }
 
+    /// A narrator is stored as the library filtered by it, so the two never stack as duplicates,
+    /// including a narrator restored from an older snapshot.
+    @Test func narratorIsStoredAsItsLibraryFilter() throws {
+        let router = Router(serverID: "s", userID: "u")
+        router[path: .library] = [.item(id: "a"), .narrator(name: "Ned")]
+        #expect(router[path: .library] == [.item(id: "a"), .libraryFilter(kind: .narrators, value: "Ned")])
+
+        let restored = Router(serverID: "s", userID: "u")
+        restored.snapshot = Router.Snapshot(serverID: "s", userID: "u", paths: [.home: [.narrator(name: "Ned")]])
+        #expect(restored[path: .home] == [.libraryFilter(kind: .narrators, value: "Ned")])
+    }
+
     /// A snapshot saved before the route existed still restores as it was.
     @Test func snapshotFromBeforeTheRouteDecodes() throws {
         let json = """
@@ -94,13 +106,28 @@ import Testing
         #expect(!router.visibleSections.contains(.playlists))
     }
 
-    @Test func noLibraryShowsNoSections() {
+    /// Before the scene has a library, the sidebar lists every section, as it did before
+    /// filtering; selecting a library narrows it.
+    @Test func noLibraryShowsEverySectionUntilOneIsSelected() {
         let router = Router(serverID: "s", userID: "u")
-        #expect(router.visibleSections == [])
+        #expect(router.visibleSections == AppTab.sections)
 
-        router.selectLibrary(id: "books", kind: .book, supportedSections: AppTab.sections(for: .book))
+        router.selectLibrary(id: "books", kind: .book, supportedSections: [.series])
+        #expect(router.visibleSections == [.series])
+
         router.resetForIdentityChange(serverID: "s", userID: "other")
-        #expect(router.visibleSections == [])
+        #expect(router.visibleSections == AppTab.sections)
+    }
+
+    @Test func restoredSceneOfUnknownKindShowsEverySection() throws {
+        let json = """
+            {"serverID": "s", "userID": "u", "selectedTab": "home", "libraryID": "lib",
+             "libraryKind": "music", "isQueueInspectorPresented": false, "paths": {}}
+            """
+        let router = Router(serverID: "s", userID: "u")
+        router.restore(from: Data(json.utf8))
+        #expect(router.libraryID == "lib")
+        #expect(router.visibleSections == AppTab.sections)
     }
 
     /// A restored scene shows every section of its library's kind until the scene confirms the

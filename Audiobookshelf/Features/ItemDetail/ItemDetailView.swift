@@ -1,7 +1,9 @@
 import SwiftUI
 
-/// An item (legacy `pages/item/_id/index.vue`). A stub until the item detail feature replaces
-/// this file.
+/// An item (legacy `pages/item/_id/index.vue`). A stub until the book detail feature (#66)
+/// replaces this file. #66 owns this view and will route podcast items to a separate
+/// `PodcastDetailView` stub, which the podcast detail feature (#68) fills; episodes have their
+/// own file, ``EpisodeDetailView`` (#69).
 struct ItemDetailView: View {
     let itemID: String
 
@@ -10,21 +12,6 @@ struct ItemDetailView: View {
     }
 }
 
-/// A podcast episode (legacy `pages/item/_id/_episode`). A stub until the item detail feature
-/// replaces this file.
-struct EpisodeDetailView: View {
-    let itemID: String
-    let episodeID: String
-
-    var body: some View {
-        FeatureStub(titleKey: "LabelEpisode", systemImage: "waveform", details: [itemID, episodeID])
-    }
-}
-
-#Preview("Item") {
+#Preview {
     NavigationStack { ItemDetailView(itemID: "li_1") }
-}
-
-#Preview("Episode") {
-    NavigationStack { EpisodeDetailView(itemID: "li_1", episodeID: "ep_1") }
 }

@@ -31,6 +31,15 @@ public enum Route: Hashable, Codable, Sendable {
     case settings
 }
 
+extension Route {
+    /// The route as a router stores it: ``narrator(name:)`` becomes the library filtered by that
+    /// narrator, which is the screen it opens.
+    var canonical: Route {
+        if case .narrator(let name) = self { return .libraryFilter(kind: .narrators, value: name) }
+        return self
+    }
+}
+
 /// The filter a ``Route/libraryFilter(kind:value:)`` opens. The raw values are the server's filter
 /// groups and are stored in scene snapshots, so they must not change.
 public enum LibraryFilterKind: String, Hashable, Codable, Sendable, CaseIterable {

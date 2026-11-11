@@ -6,6 +6,10 @@ import SwiftUI
 /// The screen for a ``Route``, for each tab stack's single `.navigationDestination(for:)`
 /// (ADR 0004). Every route opens a screen in the feature folder that owns it; a feature that
 /// isn't built yet has a stub there, which its feature PR replaces without touching this file.
+///
+/// The rule that keeps it that way: each screen is constructed here only from the route's own
+/// values (IDs and names). A screen gets its models and services from `@Environment` inside its
+/// own file, so a feature PR never needs to change this switch or a screen's initializer.
 struct RouteDestination: View {
     let route: Route
     @Environment(AppSettings.self) private var settings: AppSettings?
@@ -52,7 +56,8 @@ struct RouteDestination: View {
 }
 
 /// A screen whose feature isn't built yet: its localized title and the IDs it was opened with.
-/// Each feature's stub uses it until the feature PR replaces the stub; delete it with the last.
+/// Each feature's stub uses it until the feature PR replaces the stub. Delete it together with
+/// the last stub.
 struct FeatureStub: View {
     let titleKey: String
     let systemImage: String

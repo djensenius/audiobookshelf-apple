@@ -95,4 +95,17 @@ enum RouteCase: CaseIterable {
         #endif
         #expect(size.width > 0 && size.height > 0)
     }
+
+    /// In compact width the Library tab shows the selected section's root.
+    @Test(arguments: AppTab.sections)
+    func everyLibrarySectionHasARootScreen(section: AppTab) {
+        let root = TabRoot(tab: .library, librarySection: section)
+        let proposal = CGSize(width: 400, height: 800)
+        #if canImport(AppKit)
+            let size = NSHostingController(rootView: root).sizeThatFits(in: proposal)
+        #else
+            let size = UIHostingController(rootView: root).sizeThatFits(in: proposal)
+        #endif
+        #expect(size.width > 0 && size.height > 0)
+    }
 }
