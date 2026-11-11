@@ -261,13 +261,9 @@ public final class SessionLifecycle {
     ///
     /// Returning doesn't mean `connectionID` is active: the server can reject its saved session
     /// or its version, which signs out (``AuthGate/connect``). Check ``gate``.
-    /// - Parameter origin: The session the switch was chosen from, when the request comes from
-    ///   its screen. When the switch's turn comes, it does nothing if another session is
-    ///   running, even the same account's restarted one, so of two switches chosen from the same
-    ///   session, only the first runs. If no session is running because that one expired
-    ///   meanwhile, the switch still runs; if another transition ended it (an earlier switch,
-    ///   even one that failed and left no session, or ``performAccountChange(from:_:)``), the
-    ///   switch does nothing.
+    /// - Parameter origin: The session the switch was chosen from, when it comes from its screen.
+    ///   At its turn, the switch runs only if that session is still running, or expired meanwhile
+    ///   (once): of two switches chosen from one session, even if the first failed, only it runs.
     public func switchAccount(to connectionID: UUID, from origin: ReadySession? = nil) async throws {
         if rejectReentrant("switchAccount(to:)") { return }
         let result: Result<Void, any Error> = await serialized {

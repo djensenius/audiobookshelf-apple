@@ -451,6 +451,31 @@ private final class Recorder: SessionParticipant {
         #expect(model.phase == .login && model.failure != nil)
         #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
         #expect(lifecycle.gate == .ready(a, isOffline: false))
+        // The sheet's own change left A running, so trying again isn't refused as stale.
+        await model.signIn()
+        #expect(Array(recorder.events.dropFirst(before)).count == 6)
+    }
+
+    /// A sheet opened from B and submitted after another window switched to A does nothing.
+    @Test func aSheetOpenedBeforeASwitchDoesNotChangeAccounts() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let recorder = Recorder()
+        let (a, _, hosts) = try await twoServers(environment, recorder: recorder)
+        let added = Self.host()
+        defer { cleanUp(hosts + [added]) }
+        let accounts = try #require(environment.accounts)
+        let sheet = connectModel(accounts, lifecycle: lifecycle)
+        sheet.startAddingServer()
+        sheet.address = "https://\(added)"
+        await sheet.submitAddress()
+        sheet.username = "reader"
+        try await lifecycle.switchAccount(to: a.connectionID)
+        let before = recorder.events.count
+
+        await sheet.signIn()
+        #expect(sheet.phase == .login && accounts.connections.count == 2)
+        #expect(recorder.events.count == before && lifecycle.gate == .ready(a, isOffline: false))
     }
 
     @Test func removingAnotherServerInTheSheetKeepsTheSession() async throws {

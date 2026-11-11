@@ -25,9 +25,8 @@ struct SceneLinks {
     }
 
     /// Keeps `link`, the confirmed one, until ``finishSwitch(succeeded:gate:epoch:)``.
-    /// - Returns: `false`, changing nothing, when a link is waiting for `epoch`: it arrived after
-    ///   the dialog's link, and the scene hasn't opened it yet (which would have replaced the
-    ///   dialog's), so it wins. A link waiting for an older epoch goes.
+    /// - Returns: `false`, changing nothing, when a newer link waits for `epoch` (it wins); one
+    ///   waiting for an older epoch goes.
     mutating func beginSwitch(with link: DeepLink, epoch: UInt64) -> Bool {
         guard self.link(atEpoch: epoch) == nil else { return false }
         isSwitching = true
@@ -79,18 +78,14 @@ struct ServerSwitchRequest {
     fileprivate let generation: Int
 }
 
-/// What the dialog shows. Every link the scene opens, wherever it goes (``open(_:with:)``), and
-/// each link presented get a new generation, so the dialog's actions for one a newer link
-/// replaced do nothing. Dismissing keeps the generation: SwiftUI may dismiss the dialog before it
-/// runs the confirm action, which must still work.
+/// What the dialog shows. Each link opened or presented gets a new generation, so actions for a
+/// replaced one do nothing; dismissing keeps it, as SwiftUI may dismiss before confirming.
 struct ServerSwitchPrompt {
     private(set) var shown: ServerSwitchRequest?
     private var generation = 0
 
-    /// Opens a newer link with `open` (the scene's router), replacing the request shown first,
-    /// before the router decides where the link goes and before any session check: a link that
-    /// navigates here, or is dropped, replaces it as one for another server does.
-    /// - Returns: What `open` returned.
+    /// Opens a newer link with `open` (the router), first replacing the request shown, wherever
+    /// the link goes. Returns what `open` returned.
     mutating func open(_ link: DeepLink, with open: (DeepLink) -> Bool) -> Bool {
         generation += 1
         shown = nil
@@ -130,9 +125,8 @@ struct ServerSwitchConfirmation {
         return accounts?.connections.first { $0.id == id && !$0.isDisconnected && $0.signedOutAt == nil }
     }
 
-    /// Takes the router's pending link to ask about, clearing it. Returns the link and its
-    /// connection, or `nil` after dropping a link whose server isn't saved or has no session to
-    /// switch to (``AccountManager/hasSession(_:)``), or when a newer link replaced it meanwhile.
+    /// Takes the router's pending link to ask about, or `nil` if a newer link replaced it or it
+    /// was dropped: its server isn't saved or has no session (``AccountManager/hasSession(_:)``).
     func review(_ router: Router) async -> (link: DeepLink, connection: ServerConnectionDTO)? {
         guard let link = router.pendingServerSwitch else { return nil }
         var connection = connection(for: link)
@@ -146,13 +140,10 @@ struct ServerSwitchConfirmation {
         return (link, connection)
     }
 
-    /// Switches to the server of `request`, if it's still the one the prompt shows (or showed,
-    /// if SwiftUI dismissed the dialog first), and hands its link to the root, which opens it, or
-    /// a newer one, after the switch. The switch runs in its own task
-    /// (``AccountActions/switchAccount(to:)``), so the old host going away doesn't cancel it.
-    /// - Returns: A task whose value is whether the switch succeeded, or `nil` when the request
-    ///   was replaced, including by a link the root has received but the scene hasn't opened yet,
-    ///   or the session isn't ready (then nothing changes).
+    /// Switches to `request`'s server if the prompt still shows (or showed) it, in its own task
+    /// (``AccountActions/switchAccount(to:)``), and hands the link to the root to open after.
+    /// - Returns: The switch's task, or `nil`, changing nothing, when the request was replaced
+    ///   (also by a link the root holds but the scene hasn't opened) or the session isn't ready.
     @discardableResult
     func confirm(
         _ request: ServerSwitchRequest, prompt: inout ServerSwitchPrompt, reopen: LinkReopener

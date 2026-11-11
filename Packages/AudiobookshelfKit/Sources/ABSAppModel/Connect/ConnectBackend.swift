@@ -48,26 +48,23 @@ public protocol ConnectBackend {
 /// The app's ``ConnectBackend``: validates with ``ServerValidator`` and signs in through
 /// ``AccountManager``, which saves the session and the custom headers.
 ///
-/// With a `lifecycle`, the flow runs while signed in (adding a server from the Account tab): a
-/// sign-in or resume is an account change (``SessionLifecycle/performAccountChange(from:_:)``), so the
-/// running session ends first, and the other accounts keep their sessions; a removal goes
-/// through ``SessionLifecycle/removeAccount(_:)``. Resuming the active connection changes
-/// nothing, and a signed-out one goes straight to the login step, so neither ends the running
-/// session.
-///
-/// The account change starts before the server checks the credentials, so a wrong password or
-/// a cancelled OpenID sign-in still ends the running session (and its playback), which then
-/// starts again. Checking first needs `AccountManager` to sign in before it activates; that is
-/// a follow-up.
-struct AccountConnectBackend: ConnectBackend {
+/// With a `lifecycle` (adding a server while signed in), a sign-in or resume is an account change
+/// (``SessionLifecycle/performAccountChange(from:_:)``) from the session the sheet opened on, and
+/// a removal goes through ``SessionLifecycle/removeAccount(_:)``. Resuming the active connection
+/// or a signed-out one ends nothing. The change starts before the server checks the credentials,
+/// so a wrong password still restarts the running session; checking first is a follow-up.
+final class AccountConnectBackend: ConnectBackend {
     let accounts: AccountManager
     private let validator: ServerValidator
     private let lifecycle: SessionLifecycle?
+    /// The session the sheet was opened from; after a change of its own, the one it left running.
+    private var origin: ReadySession?
 
     init(accounts: AccountManager, validator: ServerValidator = ServerValidator(), lifecycle: SessionLifecycle? = nil) {
         self.accounts = accounts
         self.validator = validator
         self.lifecycle = lifecycle
+        origin = lifecycle?.readySession
     }
 
     var connections: [ServerConnectionDTO] { accounts.connections }
@@ -119,12 +116,13 @@ struct AccountConnectBackend: ConnectBackend {
 
     private func changingAccount(_ body: @MainActor () async throws -> Void) async throws {
         guard let lifecycle else { return try await body() }
-        // Chosen from the account on screen, as the server list's actions are: refused unless that
-        // session is ready, and again at its turn if another change (say, another window's switch)
-        // left it first. The sheet's controls are disabled while the gate isn't ready, so this is a
-        // backstop, and a refusal ends the flow silently (as a cancel would).
-        guard let origin = lifecycle.readySession, try await lifecycle.performAccountChange(from: origin, body)
-        else { throw CancellationError() }
+        // Refused, silently as a cancel, unless the sheet's session is ready now and still
+        // running at the change's turn: another window may have switched since the sheet opened.
+        guard let origin, lifecycle.readySession == origin else { throw CancellationError() }
+        var ran = true  // Unless refused; `body` may throw.
+        defer { if ran { self.origin = lifecycle.readySession } }
+        ran = try await lifecycle.performAccountChange(from: origin, body)
+        guard ran else { throw CancellationError() }
     }
 
     private static func validated(_ server: ConnectServer) throws -> ValidatedServer {

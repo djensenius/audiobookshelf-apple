@@ -3,9 +3,8 @@ import ABSData
 import ABSUI
 import SwiftUI
 
-/// The Account tab, a port of `pages/account.vue`: who is signed in to which server, switching
-/// servers, signing out, and the entry points to Logs and (on iOS; a Mac has the Settings
-/// window) Settings. Reads the accounts and the lifecycle from the environment (`RootView`).
+/// The Account tab (`pages/account.vue`): the signed-in user and server, switching, signing out,
+/// Logs and (on iOS) Settings. Reads the accounts and lifecycle from the environment (`RootView`).
 struct AccountView: View {
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
@@ -77,9 +76,8 @@ struct AccountView: View {
     }
 }
 
-/// The saved server connections (`Route.servers`): selecting another one switches to it through
-/// the session lifecycle. Adding a server signs in to it with the connect flow in a sheet, as an
-/// account change, so the account signed in now keeps its session to switch back to.
+/// The saved servers (`Route.servers`): selecting one switches through the lifecycle; adding one
+/// signs in with the connect flow in a sheet, keeping the current account's session.
 struct ServersView: View {
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?

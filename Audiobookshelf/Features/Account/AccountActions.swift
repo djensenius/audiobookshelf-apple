@@ -5,13 +5,10 @@ import Foundation
 
 /// What the Account tab and the server list do, outside the views so tests can drive them.
 ///
-/// Both go through the session lifecycle, never straight to `AccountManager`, so the running
-/// session flushes and ends before the account changes. Each runs in its own task, not the
-/// view's: the change replaces the shell, and that must not cancel it half way. Neither starts
-/// unless the session is ready (``SessionLifecycle/acceptsAccountChanges``): while it switches,
-/// the old shell stays on screen but is no longer interactive. Each also names the session it
-/// was chosen from (``SessionLifecycle/readySession``), and the lifecycle drops it if another
-/// change (say, from another window) left that session first.
+/// Both go through the session lifecycle, so the running session ends first, each in its own
+/// task, as the change replaces the shell. Neither starts unless the session is ready
+/// (``SessionLifecycle/acceptsAccountChanges``), and each names the session it was chosen from
+/// (``SessionLifecycle/readySession``), so the lifecycle drops it if another change left it.
 @MainActor
 struct AccountActions {
     let lifecycle: SessionLifecycle
@@ -99,10 +96,9 @@ extension SessionLifecycle {
 }
 
 extension AccountManager {
-    /// What the root says when a switch ended signed out (``SessionLifecycle/signedOutSwitches``),
-    /// having thrown `error`: an unreadable Keychain, or a server version the app no longer
-    /// supports, which signing in again can't fix, get the connect screen's message; otherwise
-    /// the server rejected the saved session.
+    /// What the root says when a switch ended signed out (``SessionLifecycle/signedOutSwitches``)
+    /// after `error`: an unreadable Keychain or unsupported version, which signing in again can't
+    /// fix, get the connect screen's message; otherwise the server rejected the saved session.
     func signedOutSwitchMessage(after error: (any Error)? = nil) -> String {
         if let error, SwitchFailure(error) == .keychainUnavailable {
             SwitchFailure.keychainUnavailable.message
