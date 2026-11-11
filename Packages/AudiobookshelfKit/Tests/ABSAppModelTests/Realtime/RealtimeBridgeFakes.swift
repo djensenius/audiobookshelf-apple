@@ -168,12 +168,13 @@ final class BridgeHarness {
 }
 
 func progressUpdate(
-    _ itemID: String, episode: String? = nil, currentTime: Double, lastUpdate: Int?, sessionID: String? = "remote"
+    _ itemID: String, episode: String? = nil, currentTime: Double, isFinished: Bool = false, lastUpdate: Int?,
+    sessionID: String? = "remote"
 ) -> RealtimeEvent {
     .userItemProgressUpdated(
         UserItemProgressUpdate(
             id: "p-\(itemID)", sessionId: sessionID, deviceDescription: nil,
             progress: MediaProgress(
                 id: "p-\(itemID)", libraryItemId: itemID, episodeId: episode, currentTime: currentTime,
-                lastUpdate: lastUpdate)))
+                isFinished: isFinished, lastUpdate: lastUpdate)))
 }
