@@ -7,13 +7,16 @@ import SwiftUI
 /// badges, which open the episode; then Play with the time left, the finished toggle and the
 /// progress bar.
 ///
-/// The episode's actions, Play included, are also in a context menu and the VoiceOver actions
-/// of the link. Play and the finished toggle are left out or disabled as
-/// `ItemAction.available(for:progress:context:)` says, so a missing podcast can't change.
+/// Play and the finished toggle are also in a context menu and the VoiceOver actions of the
+/// link, as ``PodcastEpisodeActions/available(for:progress:context:isGone:)`` offers them; when
+/// the podcast is gone from the server only the link, which opens the episode, still works.
+/// VoiceOver reads the start of the summary, with the rest under More Content.
 struct PodcastEpisodeRow: View {
     let model: PodcastDetailModel
     let episode: PodcastEpisode
     let context: ItemActionContext
+    /// The podcast is gone from the server, so its episodes can't be played or marked.
+    let isGone: Bool
     /// This episode's Play is starting.
     let isStarting: Bool
     /// Another episode's Play is starting, so this one can't start too.
@@ -26,17 +29,28 @@ struct PodcastEpisodeRow: View {
 
     var body: some View {
         let progress = model.itemProgress(for: episode)
-        let actions =
-            model.summary(for: episode).map {
-                ItemAction.available(for: $0, progress: progress, context: context).filter { $0.kind != .openDetails }
-            } ?? []
+        let actions = PodcastEpisodeActions.available(
+            for: model.summary(for: episode), progress: progress, context: context, isGone: isGone)
+        let published = PodcastDetailPresentation.publishedText(episode.publishedAt, locale: locale)
+        let badges = PodcastDetailPresentation.badges(episode, locale: locale)
+        let summary = PodcastDetailPresentation.summaryText(episode)
+        let spokenSummary = summary.map { PodcastDetailPresentation.spokenSummary($0) }
         VStack(alignment: .leading, spacing: ABSSpacing.small) {
             NavigationLink(value: Route.episode(itemID: model.itemID, episodeID: episode.id)) {
-                details
+                details(published: published, summary: summary, badges: badges)
             }
             .buttonStyle(.plain)
             .accessibilityLabel(Text(verbatim: episode.title))
-            .accessibilityValue(Text(verbatim: spokenDetails))
+            // The date, badges and the start of the summary, after the title.
+            .accessibilityValue(
+                Text(
+                    verbatim: ([published] + badges.map(Optional.some) + [spokenSummary]).compactMap { $0 }
+                        .joined(separator: ", "))
+            )
+            .accessibilityCustomContent(
+                AccessibilityCustomContentKey(Text(verbatim: L10n.string("LabelDescription")), id: "description"),
+                summary == spokenSummary ? nil : summary.map { Text(verbatim: $0) }
+            )
             .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
             .itemActions(actions, perform: perform)
             controls(progress: progress, actions: actions.map(\.kind))
@@ -49,10 +63,7 @@ struct PodcastEpisodeRow: View {
         .padding(.vertical, ABSSpacing.medium)
     }
 
-    private var published: String? { PodcastDetailPresentation.publishedText(episode.publishedAt, locale: locale) }
-    private var badges: [String] { PodcastDetailPresentation.badges(episode, locale: locale) }
-
-    private var details: some View {
+    private func details(published: String?, summary: String?, badges: [String]) -> some View {
         VStack(alignment: .leading, spacing: ABSSpacing.xSmall) {
             if let published {
                 Text(verbatim: published)
@@ -61,7 +72,7 @@ struct PodcastEpisodeRow: View {
             }
             Text(verbatim: episode.title)
                 .font(.subheadline.weight(.semibold))
-            if let summary = PodcastDetailPresentation.summaryText(episode) {
+            if let summary {
                 Text(verbatim: summary)
                     .font(.subheadline)
                     .lineLimit(2)
@@ -81,13 +92,6 @@ struct PodcastEpisodeRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(.rect)
-    }
-
-    /// The date, badges and summary, after the title.
-    private var spokenDetails: String {
-        ([published] + badges.map(Optional.some) + [PodcastDetailPresentation.summaryText(episode)])
-            .compactMap { $0 }
-            .joined(separator: ", ")
     }
 
     private func controls(progress: ItemProgress?, actions: [ItemActionKind]) -> some View {
@@ -129,6 +133,8 @@ struct PodcastEpisodeRow: View {
                 }
                 .labelStyle(.iconOnly)
                 .imageScale(.large)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(.rect)
             }
             .buttonStyle(.borderless)
             .disabled(!actions.contains(toggle) || isUpdating)

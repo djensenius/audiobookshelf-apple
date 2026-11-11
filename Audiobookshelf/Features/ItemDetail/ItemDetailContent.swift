@@ -291,8 +291,9 @@ private struct ItemDetailProgress: View {
     }
 }
 
-/// Shown above the retained item when a reload fails or finds the item gone.
-private struct ItemDetailRefreshFailedBanner: View {
+/// Shown above the retained item when a reload fails or finds the item gone; the podcast screen
+/// shows it too.
+struct ItemDetailRefreshFailedBanner: View {
     /// `MessageItemDetailRefreshFailed`, or `MessageItemDetailNotFound` when the item is gone.
     let messageKey: String
     let retry: () -> Void

@@ -199,6 +199,53 @@ private func makeModel(
         }
     }
 
+    /// Two windows on one podcast, and a settings reset: each change starts from what is saved now.
+    @Test func everyModelReadsTheSavedPreferencesLive() async throws {
+        try await withLibrarySettings { settings in
+            let first = await makeModel(settings: settings)
+            let second = await makeModel(settings: settings)
+            #expect(first.filter == .incomplete && second.sort == .publishedAt)
+            let changed = Locked(false)
+            withObservationTracking {
+                _ = second.filter
+            } onChange: {
+                changed.value = true
+            }
+
+            first.filter = .complete
+            #expect(changed.value)
+            second.sort = .title
+            #expect(first.preferences == EpisodeListPreferences(filter: .complete, sort: .title))
+            #expect(second.filter == .complete)
+            #expect(settings.podcastEpisodeListPreferences == #"{"filter":"complete","sort":"title"}"#)
+
+            settings.resetAll()
+            #expect(first.preferences == EpisodeListPreferences())
+            #expect(second.filter == .incomplete)
+        }
+    }
+
+    @Test func progressAndSearchChangesReuseTheSortedOrder() async {
+        let cache = ProgressCache()
+        let model = await makeModel(cache: cache)
+        #expect(model.episodes.map(\.id) == ["e3", "e2", "e1"])
+        #expect(model.sortCount == 1)
+
+        cache.apply(progress("e2", currentTime: 600, isFinished: true))
+        #expect(model.episodes.map(\.id) == ["e3", "e1"])
+        model.searchText = "d"
+        #expect(model.episodes.map(\.id) == ["e1"])
+        model.filter = .all
+        #expect(model.episodes.map(\.id) == ["e2", "e1"])
+        #expect(model.sortCount == 1)
+
+        model.isDescending = false
+        #expect(model.episodes.map(\.id) == ["e1", "e2"])
+        model.sort = .title
+        #expect(model.episodes.map(\.id) == ["e2", "e1"])
+        #expect(model.sortCount == 3)
+    }
+
     @Test func unreadableSavedPreferencesFallBackToTheDefaults() async throws {
         try await withLibrarySettings { settings in
             settings.podcastEpisodeListPreferences = "not json"

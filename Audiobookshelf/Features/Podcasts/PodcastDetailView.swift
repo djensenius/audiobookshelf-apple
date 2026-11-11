@@ -51,11 +51,11 @@ struct PodcastDetailScreen: View {
         let isGone = goneState.isGone(snapshot)
         let refreshFailure = ItemDetailRefreshFailure(model: model.detail, isGone: isGone)
         // A podcast gone from the server can't be played, as on the book screen.
-        let context = HomePresentation.actionContext(canPlay: playItem != nil && !isGone)
+        let context = PodcastEpisodeActions.context(canPlay: playItem != nil && !isGone)
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if let refreshFailure {
-                    PodcastDetailRefreshBanner(messageKey: refreshFailure.messageKey) {
+                    ItemDetailRefreshFailedBanner(messageKey: refreshFailure.messageKey) {
                         Task { await model.detail.load() }
                     }
                     .padding(.bottom, ABSSpacing.large)
@@ -74,7 +74,7 @@ struct PodcastDetailScreen: View {
                 } else {
                     ForEach(episodes) { episode in
                         PodcastEpisodeRow(
-                            model: model, episode: episode, context: context,
+                            model: model, episode: episode, context: context, isGone: isGone,
                             isStarting: startingEpisodeID == episode.id,
                             isOtherStarting: startingEpisodeID != nil && startingEpisodeID != episode.id,
                             isUpdating: updatingEpisodeIDs.contains(episode.id)
@@ -150,6 +150,7 @@ struct PodcastDetailScreen: View {
     /// Plays or marks `episode`, as Home performs its card actions; a failure shows the alert.
     private func perform(_ kind: ItemActionKind, on episode: PodcastEpisode) {
         guard let summary = model.summary(for: episode) else { return }
+        let isFinished = model.itemProgress(for: episode)?.isFinished == true
         let actions = itemActions
         let play = playItem
         let isPlay = kind == .play
@@ -160,7 +161,8 @@ struct PodcastDetailScreen: View {
             guard updatingEpisodeIDs.insert(episode.id).inserted else { return }
         }
         Task {
-            let key = await HomePresentation.perform(kind, on: summary, actions: actions, play: play)
+            let key = await PodcastEpisodeActions.perform(
+                kind, on: summary, isFinished: isFinished, actions: actions, play: play)
             if isPlay {
                 startingEpisodeID = nil
             } else {
@@ -180,6 +182,7 @@ private struct PodcastEpisodeListControls: View {
     @Bindable var model: PodcastDetailModel
     let count: Int
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.locale) private var locale
 
     var body: some View {
         let layout =
@@ -187,9 +190,12 @@ private struct PodcastEpisodeListControls: View {
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: ABSSpacing.small))
             : AnyLayout(HStackLayout(spacing: ABSSpacing.small))
         layout {
-            Text(verbatim: L10n.string("HeaderPodcastDetailEpisodes", count.formatted()))
-                .font(.title3.bold())
-                .accessibilityAddTraits(.isHeader)
+            Text(
+                verbatim: L10n.string(
+                    "HeaderPodcastDetailEpisodes", count.formatted(.number.locale(locale)), locale: locale)
+            )
+            .font(.title3.bold())
+            .accessibilityAddTraits(.isHeader)
             if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
             HStack(spacing: ABSSpacing.small) {
                 filterMenu
@@ -197,7 +203,6 @@ private struct PodcastEpisodeListControls: View {
             }
         }
         .buttonStyle(.bordered)
-        .controlSize(.small)
     }
 
     private var filterMenu: some View {
@@ -258,34 +263,6 @@ private struct PodcastEpisodeListControls: View {
         .fixedSize()
         .accessibilityLabel(Text(verbatim: menuTitle))
         .accessibilityValue(Text(verbatim: [title, direction].joined(separator: ", ")))
-    }
-}
-
-/// Shown above the retained podcast when a reload fails or finds it gone (the book screen's
-/// banner is private to it).
-private struct PodcastDetailRefreshBanner: View {
-    /// `MessageItemDetailRefreshFailed`, or `MessageItemDetailNotFound` when the item is gone.
-    let messageKey: String
-    let retry: () -> Void
-
-    var body: some View {
-        HStack(spacing: ABSSpacing.medium) {
-            Label {
-                Text(verbatim: L10n.string(messageKey))
-            } icon: {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundStyle(ABSColor.mutedForeground)
-                    .accessibilityHidden(true)
-            }
-            Spacer(minLength: ABSSpacing.small)
-            Button(action: retry) {
-                Text(verbatim: L10n.string("ButtonRetry"))
-            }
-            .buttonStyle(.borderless)
-        }
-        .font(.footnote)
-        .padding(ABSSpacing.medium)
-        .background(ABSColor.secondarySurface, in: .rect(cornerRadius: ABSRadius.medium))
     }
 }
 

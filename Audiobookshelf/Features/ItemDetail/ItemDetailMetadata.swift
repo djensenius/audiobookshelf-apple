@@ -63,13 +63,33 @@ struct ItemDetailMetadataRow: Identifiable, Equatable {
 }
 
 /// The metadata rows: labels beside their values, or above them at accessibility text sizes.
+/// Shows a book's details, or rows built elsewhere, such as a podcast's.
 struct ItemDetailMetadata: View {
-    let details: ItemDetailModel.Details
+    private enum Source {
+        case details(ItemDetailModel.Details)
+        case rows([ItemDetailMetadataRow])
+    }
+
+    private let source: Source
     @Environment(\.locale) private var locale
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
+    init(rows: [ItemDetailMetadataRow]) {
+        source = .rows(rows)
+    }
+
+    /// The rows of `details` (``ItemDetailMetadataRow/rows(for:locale:)``) in the environment's
+    /// locale.
+    init(details: ItemDetailModel.Details) {
+        source = .details(details)
+    }
+
     var body: some View {
-        let rows = ItemDetailMetadataRow.rows(for: details, locale: locale)
+        let rows =
+            switch source {
+            case .details(let details): ItemDetailMetadataRow.rows(for: details, locale: locale)
+            case .rows(let rows): rows
+            }
         if dynamicTypeSize.isAccessibilitySize {
             VStack(alignment: .leading, spacing: ABSSpacing.medium) {
                 ForEach(rows) { row in

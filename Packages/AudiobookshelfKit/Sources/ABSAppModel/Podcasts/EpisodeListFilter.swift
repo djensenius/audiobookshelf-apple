@@ -114,9 +114,10 @@ public enum EpisodeList {
     /// - Search ignores case, diacritics and surrounding whitespace; an empty search matches all.
     /// - Text compares like legacy `localeCompare` with `numeric` and base sensitivity, so
     ///   "Episode 9" comes before "Episode 10".
-    /// - An episode without a published date counts as the oldest (as the legacy comment in
-    ///   `episodesSorted` intends); one without a season or episode number sorts after numbered
-    ///   ones.
+    /// - A missing (or zero) published date counts as the oldest, as the legacy comment in
+    ///   `episodesSorted` intends, and a blank season or episode number as higher than every
+    ///   number, as legacy's `"undefined"` does. Like every value they follow the direction: missing
+    ///   dates come first ascending and last descending, blank numbers the other way round.
     /// - Ties fall back to the other number and then the published date (season and episode
     ///   sorts) or to the published date (title sort), in the same direction, and finally to the
     ///   server's order, so the result is deterministic.
@@ -126,12 +127,22 @@ public enum EpisodeList {
         _ episodes: [PodcastEpisode], filter: EpisodeListFilter, search: String = "", sort: EpisodeSortKey,
         descending: Bool, locale: Locale, progress: (PodcastEpisode) -> ItemProgress?
     ) -> [PodcastEpisode] {
+        sorted(
+            filtered(episodes, filter: filter, search: search, locale: locale, progress: progress), by: sort,
+            descending: descending, locale: locale)
+    }
+
+    /// The episodes that pass `filter` and whose title contains `search`, in their order. Sorting
+    /// before or after filtering gives the same list.
+    static func filtered(
+        _ episodes: [PodcastEpisode], filter: EpisodeListFilter, search: String, locale: Locale,
+        progress: (PodcastEpisode) -> ItemProgress?
+    ) -> [PodcastEpisode] {
         let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
-        let matching = episodes.filter { episode in
+        return episodes.filter { episode in
             guard filter.includes(progress(episode)) else { return false }
             return query.isEmpty || titleMatches(episode.title, query: query, locale: locale)
         }
-        return sorted(matching, by: sort, descending: descending, locale: locale)
     }
 
     /// The episode Next Episode plays (legacy `index.vue` `play()`): the first unfinished one,

@@ -59,7 +59,7 @@ struct PodcastDetailHeader: View {
 
     /// Shown while the podcast can play (legacy `showPlay`); disabled without a player.
     @ViewBuilder private var nextEpisode: some View {
-        if model.nextEpisode != nil {
+        if model.canPlay {
             Button(action: playNext) {
                 Label {
                     Text(verbatim: L10n.string("ButtonNextEpisode"))
@@ -80,7 +80,7 @@ struct PodcastDetailHeader: View {
 
     private var details: some View {
         VStack(alignment: .leading, spacing: ABSSpacing.large) {
-            PodcastDetailMetadata(rows: PodcastDetailPresentation.metadataRows(for: model, locale: locale))
+            ItemDetailMetadata(rows: PodcastDetailPresentation.metadataRows(for: model, locale: locale))
             if let description = model.descriptionHTML {
                 VStack(alignment: .leading, spacing: ABSSpacing.small) {
                     Text(verbatim: L10n.string("LabelDescription"))
@@ -105,71 +105,5 @@ private struct PodcastDetailCover: View {
         CoverView(
             key: serverID.flatMap { summary?.coverKey(serverID: $0, bucket: .medium) }, title: title,
             author: author, shape: .square, accessibility: .hidden)
-    }
-}
-
-/// The metadata rows: labels beside their values, or above them at accessibility text sizes.
-/// Laid out like the book screen's metadata, which only takes a book's details.
-private struct PodcastDetailMetadata: View {
-    let rows: [ItemDetailMetadataRow]
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    var body: some View {
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: ABSSpacing.medium) {
-                ForEach(rows) { row in
-                    VStack(alignment: .leading, spacing: ABSSpacing.xxSmall) {
-                        label(row)
-                        values(row)
-                    }
-                }
-            }
-        } else {
-            Grid(alignment: .topLeading, horizontalSpacing: ABSSpacing.large, verticalSpacing: ABSSpacing.small) {
-                ForEach(rows) { row in
-                    GridRow {
-                        label(row)
-                        values(row)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Hidden from VoiceOver: ``values(_:)`` speaks it with each value.
-    private func label(_ row: ItemDetailMetadataRow) -> some View {
-        Text(verbatim: L10n.string(row.labelKey))
-            .font(.subheadline)
-            .foregroundStyle(ABSColor.mutedForeground)
-            .accessibilityHidden(true)
-    }
-
-    @ViewBuilder private func values(_ row: ItemDetailMetadataRow) -> some View {
-        let label = Text(verbatim: L10n.string(row.labelKey))
-        let layout = ItemDetailFlowLayout(spacing: ABSSpacing.small) {
-            ForEach(Array(row.values.enumerated()), id: \.offset) { _, value in
-                switch value {
-                case .text(let text, let spoken):
-                    Text(verbatim: text)
-                        .accessibilityLabel(Text(verbatim: spoken ?? text))
-                case .link(let name, let route):
-                    NavigationLink(value: route) {
-                        Text(verbatim: name)
-                    }
-                    .buttonStyle(.borderless)
-                    .accessibilityValue(label)
-                }
-            }
-        }
-        .font(.subheadline)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        if let spoken = row.spokenText {
-            layout
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(label)
-                .accessibilityValue(Text(verbatim: spoken))
-        } else {
-            layout
-        }
     }
 }

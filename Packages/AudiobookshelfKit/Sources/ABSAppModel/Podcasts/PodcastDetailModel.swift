@@ -10,8 +10,11 @@ import Observation
 ///   podcast is read from it on every access, so a reload shows here.
 /// - Progress is read from the ``ProgressCache`` on every access, per episode, so a view reading
 ///   one episode's progress invalidates when that episode's cache entry changes.
-/// - The filter, sort and direction are saved in ``AppSettings`` as they change, once for every
-///   podcast, as legacy did; the search is not saved.
+/// - The filter, sort and direction are saved in ``AppSettings``, once for every podcast, as
+///   legacy did, and read from it on every access, so every window and a settings reset agree;
+///   the search is not saved.
+/// - The sorted order is kept until the episodes, sort or direction change, so progress, filter
+///   and search changes only filter it again.
 ///
 /// Like ``ItemDetailModel``, it belongs to one item and account.
 @MainActor
@@ -30,10 +33,14 @@ public final class PodcastDetailModel {
     public let detail: ItemDetailModel
     /// The words the list searches with; trimmed when used.
     public var searchText = ""
-    /// The saved filter and sort.
-    public private(set) var preferences: EpisodeListPreferences {
-        didSet { if preferences != oldValue { settings?.podcastEpisodeListPreferences = preferences.json } }
-    }
+    /// The filter and sort, kept here only without settings.
+    private var localPreferences = EpisodeListPreferences()
+    /// The last stored text decoded, so reads don't decode it again.
+    @ObservationIgnored private var decoded: (json: String?, preferences: EpisodeListPreferences)?
+    /// The last sorted order and what it was sorted from.
+    @ObservationIgnored private var sortedCache: (key: SortKey, episodes: [PodcastEpisode])?
+    /// How many times the episodes were sorted, for tests.
+    @ObservationIgnored private(set) var sortCount = 0
 
     @ObservationIgnored private let cache: ProgressCache
     @ObservationIgnored private let settings: AppSettings?
@@ -42,7 +49,8 @@ public final class PodcastDetailModel {
     /// - Parameters:
     ///   - detail: The item's model, which loads it.
     ///   - cache: The account's progress, the same cache `detail` reads.
-    ///   - settings: Where the filter and sort are saved; `nil` keeps them for this screen only.
+    ///   - settings: Where the filter and sort are saved and read; `nil` keeps them for this
+    ///     screen only.
     ///   - locale: How text is compared and searched.
     public init(
         detail: ItemDetailModel, cache: ProgressCache, settings: AppSettings?, locale: Locale = .autoupdatingCurrent
@@ -51,9 +59,6 @@ public final class PodcastDetailModel {
         self.cache = cache
         self.settings = settings
         self.locale = locale
-        preferences =
-            settings?.podcastEpisodeListPreferences.flatMap(EpisodeListPreferences.init(json:))
-            ?? EpisodeListPreferences()
     }
 
     // MARK: Podcast
@@ -77,27 +82,46 @@ public final class PodcastDetailModel {
 
     // MARK: Episode list
 
+    /// The saved filter and sort, read from the settings each time; unreadable text reads as the
+    /// defaults.
+    public var preferences: EpisodeListPreferences {
+        guard let settings else { return localPreferences }
+        let json = settings.podcastEpisodeListPreferences
+        if let decoded, decoded.json == json { return decoded.preferences }
+        let preferences = json.flatMap(EpisodeListPreferences.init(json:)) ?? EpisodeListPreferences()
+        decoded = (json, preferences)
+        return preferences
+    }
+
     public var filter: EpisodeListFilter {
         get { preferences.filter }
-        set { preferences.filter = newValue }
+        set { updatePreferences { $0.filter = newValue } }
     }
 
     public var sort: EpisodeSortKey {
         get { preferences.sort }
-        set { preferences.sort = newValue }
+        set { updatePreferences { $0.sort = newValue } }
     }
 
     /// The list's direction: the user's choice, else the podcast type's default.
     public var isDescending: Bool {
         get { preferences.isDescending(podcastType: podcastType) }
-        set { preferences.descending = newValue }
+        set { updatePreferences { $0.descending = newValue } }
     }
 
-    /// The episodes shown, filtered, searched and sorted. Rebuilt on every read: read it once.
+    /// The episodes shown, filtered, searched and sorted. Filtered on every read: read it once.
     public var episodes: [PodcastEpisode] {
-        EpisodeList.arrange(
-            allEpisodes, filter: filter, search: searchText, sort: sort, descending: isDescending, locale: locale,
-            progress: itemProgress(for:))
+        let key = SortKey(episodes: allEpisodes, sort: sort, descending: isDescending)
+        let sorted: [PodcastEpisode]
+        if let sortedCache, sortedCache.key == key {
+            sorted = sortedCache.episodes
+        } else {
+            sorted = EpisodeList.sorted(key.episodes, by: key.sort, descending: key.descending, locale: locale)
+            sortedCache = (key, sorted)
+            sortCount += 1
+        }
+        return EpisodeList.filtered(
+            sorted, filter: filter, search: searchText, locale: locale, progress: itemProgress(for:))
     }
 
     /// The filter or search hides episodes the podcast has, so the view can offer to clear them.
@@ -159,6 +183,25 @@ public final class PodcastDetailModel {
         guard canPlay else { return nil }
         return EpisodeList.nextEpisode(
             allEpisodes, podcastType: podcastType, locale: locale, progress: itemProgress(for:))
+    }
+
+    /// Changes the saved preferences as they are now, so another window's change isn't undone.
+    private func updatePreferences(_ change: (inout EpisodeListPreferences) -> Void) {
+        let current = preferences
+        var updated = current
+        change(&updated)
+        guard updated != current else { return }
+        if let settings {
+            settings.podcastEpisodeListPreferences = updated.json
+        } else {
+            localPreferences = updated
+        }
+    }
+
+    private struct SortKey: Equatable {
+        let episodes: [PodcastEpisode]
+        let sort: EpisodeSortKey
+        let descending: Bool
     }
 
     private nonisolated static func nonEmpty(_ text: String?) -> String? {

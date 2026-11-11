@@ -71,6 +71,57 @@ import Testing
         #expect(PodcastDetailPresentation.summaryText(PodcastEpisode(id: "4")) == nil)
     }
 
+    @Test func voiceOverReadsTheFirstSentenceCutOnAWord() {
+        #expect(PodcastDetailPresentation.spokenSummary("Short one. Then more.") == "Short one.")
+        #expect(PodcastDetailPresentation.spokenSummary("No full stop") == "No full stop")
+        #expect(PodcastDetailPresentation.spokenSummary("one two three", limit: 9) == "one two…")
+        #expect(PodcastDetailPresentation.spokenSummary("one two three", limit: 7) == "one two…")
+        #expect(PodcastDetailPresentation.spokenSummary("one two three", limit: 13) == "one two three")
+
+        let words = (1...40).map { "word\($0)" }.joined(separator: " ")
+        let spoken = PodcastDetailPresentation.spokenSummary(words + ". Next.")
+        #expect(spoken.count <= 151)
+        let kept = String(spoken.dropLast())
+        #expect(spoken.hasSuffix("…"))
+        #expect(words.hasPrefix(kept + " "))
+        #expect(kept.count > 140)
+
+        let long = String(repeating: "a", count: 200)
+        #expect(PodcastDetailPresentation.spokenSummary(long) == String(repeating: "a", count: 150) + "…")
+    }
+
+    @Test func episodeRowsOfferPlayAndTheFinishedToggleUntilThePodcastIsGone() {
+        let episode = ItemSummary(id: "e1", itemID: "li", episodeID: "e1", kind: .episode, title: "E", duration: 600)
+        let context = PodcastEpisodeActions.context(canPlay: true)
+        func kinds(_ progress: ItemProgress?, canPlay: Bool = true, isGone: Bool = false) -> [ItemActionKind] {
+            PodcastEpisodeActions.available(
+                for: episode, progress: progress, context: PodcastEpisodeActions.context(canPlay: canPlay),
+                isGone: isGone
+            ).map(\.kind)
+        }
+        // In progress: no Hide from Continue Listening, and the row opens the episode itself.
+        #expect(kinds(ItemProgress(fraction: 0.5)) == [.play, .markFinished])
+        #expect(kinds(ItemProgress(fraction: 1, isFinished: true)) == [.play, .markNotFinished])
+        #expect(kinds(nil, canPlay: false) == [.markFinished])
+        #expect(kinds(ItemProgress(fraction: 0.5), isGone: true).isEmpty)
+        #expect(PodcastEpisodeActions.available(for: nil, progress: nil, context: context, isGone: false).isEmpty)
+    }
+
+    @Test func aFinishedEpisodePlaysFromTheStart() async {
+        let episode = ItemSummary(id: "e1", itemID: "li", episodeID: "e1", kind: .episode, title: "E")
+        let played = PlayedStarts()
+        let play = PlayItemAction { itemID, episodeID, startTime in played.starts.append((itemID, episodeID, startTime))
+        }
+        for isFinished in [true, false] {
+            let failure = await PodcastEpisodeActions.perform(
+                .play, on: episode, isFinished: isFinished, actions: NoOpItemActions(), play: play)
+            #expect(failure == nil)
+        }
+        #expect(played.starts.map(\.0) == ["li", "li"])
+        #expect(played.starts.map(\.1) == ["e1", "e1"])
+        #expect(played.starts.map(\.2) == [0, nil])
+    }
+
     @Test func badgesShowNumberSeasonAndUnusualTypes() {
         let trailer = PodcastEpisode(id: "1", season: "2", episode: "10", episodeType: .trailer)
         #expect(PodcastDetailPresentation.badges(trailer, locale: locale) == ["Episode #10", "Season #2", "Trailer"])
@@ -107,4 +158,10 @@ import Testing
         let rows = PodcastDetailPresentation.metadataRows(for: model, locale: locale)
         #expect(rows.map(\.labelKey) == ["LabelAuthor"])
     }
+}
+
+/// What a test's player was asked to play: the item, episode and start time.
+@MainActor
+private final class PlayedStarts {
+    var starts: [(String, String?, Double?)] = []
 }

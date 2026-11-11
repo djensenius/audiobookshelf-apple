@@ -72,6 +72,25 @@ enum PodcastDetailPresentation {
         return text.isEmpty ? nil : text
     }
 
+    /// What VoiceOver reads of a ``summaryText(_:)``: its first sentence, cut after the last
+    /// whole word within `limit` characters, with "…", when that is longer.
+    static func spokenSummary(_ summary: String, limit: Int = 150) -> String {
+        var sentence = summary
+        summary.enumerateSubstrings(in: summary.startIndex..., options: .bySentences) { substring, _, _, stop in
+            if let substring { sentence = substring.trimmingCharacters(in: .whitespacesAndNewlines) }
+            stop = true
+        }
+        guard sentence.count > limit else { return sentence }
+        let cut = sentence.index(sentence.startIndex, offsetBy: limit)
+        var end: String.Index?
+        sentence.enumerateSubstrings(in: sentence.startIndex..., options: [.byWords, .substringNotRequired]) {
+            _, range, _, stop in
+            if range.upperBound <= cut { end = range.upperBound } else { stop = true }
+        }
+        // A first word longer than the limit is cut where the limit falls.
+        return sentence[..<(end ?? cut)] + "…"
+    }
+
     /// The episode's badges: its number, season, and type unless it is a full episode.
     static func badges(_ episode: PodcastEpisode, locale: Locale) -> [String] {
         var badges: [String] = []
@@ -119,5 +138,42 @@ enum PodcastDetailPresentation {
     private static func nonEmpty(_ text: String?) -> String? {
         guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return nil }
         return text
+    }
+}
+
+/// The actions of the podcast screen's episodes, performed as Home performs its card actions.
+/// The only place the screen uses Home's helpers, so moving them changes one file.
+enum PodcastEpisodeActions {
+    /// The actions an episode's row offers: Play and the finished toggle, as legacy's rows did;
+    /// none when the podcast is gone from the server. The row itself opens the episode.
+    static func available(
+        for summary: ItemSummary?, progress: ItemProgress?, context: ItemActionContext, isGone: Bool
+    ) -> [ItemAction] {
+        guard let summary, !isGone else { return [] }
+        let offered: Set<ItemActionKind> = [.play, .markFinished, .markNotFinished]
+        return ItemAction.available(for: summary, progress: progress, context: context)
+            .filter { offered.contains($0.kind) }
+    }
+
+    static func context(canPlay: Bool) -> ItemActionContext {
+        HomePresentation.actionContext(canPlay: canPlay)
+    }
+
+    /// Performs `kind` on the episode `summary` stands for. A finished episode plays from the
+    /// start, as the book screen's Play Again does.
+    ///
+    /// - Returns: The key of the message to show when the action failed.
+    @MainActor
+    static func perform(
+        _ kind: ItemActionKind, on summary: ItemSummary, isFinished: Bool, actions: any ItemActionPerforming,
+        play: PlayItemAction?
+    ) async -> String? {
+        let play = play.map { play in
+            isFinished
+                ? PlayItemAction { itemID, episodeID, _ in
+                    try await play(itemID: itemID, episodeID: episodeID, startTime: 0)
+                } : play
+        }
+        return await HomePresentation.perform(kind, on: summary, actions: actions, play: play)
     }
 }
