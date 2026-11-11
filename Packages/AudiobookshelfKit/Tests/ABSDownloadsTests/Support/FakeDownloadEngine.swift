@@ -6,9 +6,10 @@ import Synchronization
 @testable import ABSDownloads
 
 /// Records the manager's calls; the test drives its streams. Like ``DownloadEngine``, a resume
-/// queues the record in the store, and nothing ever downloads. A record marked ``settle(_:)``
-/// has a part settling, which a stop leaves alone: ``finishSettling()`` then finalises it late,
-/// as a local item, deleting it by ID, as the engine does.
+/// queues the record in the store, and nothing ever downloads. A complete record marked
+/// ``settle(_:)`` is being finalised, which a stop leaves alone: ``finishSettling()`` then
+/// finalises it late, as the engine does, from the record as it was read then, even if it was
+/// deleted since: as a local item, deleting it by ID.
 actor FakeDownloadEngine: DownloadEngineControlling {
     struct ResumeFailure: Error {}
 
@@ -40,7 +41,8 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     private(set) var resumed: [UUID] = []
     /// Pauses and resumes, in call order.
     private(set) var calls: [Call] = []
-    private var settling: Set<UUID> = []
+    /// The records being finalised, as they were read when it began.
+    private var settling: [DownloadRecordDTO] = []
     /// Whether ``resume(recordID:)`` deletes the record first, as a finalise running meanwhile does.
     private var finaliseBeforeResume = false
     private var failingResumes = 0
@@ -60,19 +62,23 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         stopped.append(Stop(partIDs: partIDs, keepingResumeData: keepingResumeData))
     }
 
-    /// Marks a record as being finalised.
-    func settle(_ recordID: UUID) {
-        settling.insert(recordID)
+    /// Marks a record whose parts have all completed as being finalised, reading it now.
+    ///
+    /// - Throws: `incompleteDownload` when it doesn't exist or isn't complete.
+    func settle(_ recordID: UUID) async throws {
+        guard let record = try await store.record(id: recordID), record.isComplete else {
+            throw LocalItemStore.StoreError.incompleteDownload
+        }
+        settling.append(record)
     }
 
-    /// Ends the finalise of every settling record: makes it a local item, deletes it by ID and
-    /// reports it complete.
+    /// Ends the finalise of every settling record, in the order they began: makes the record
+    /// read then a local item, deletes it by ID (if it is still there) and reports it complete.
     func finishSettling() async throws {
-        for recordID in settling {
-            guard let record = try await store.record(id: recordID) else { continue }
+        for record in settling {
             let item = try await localItems.upsertFromDownload(record)
-            try await store.deleteRecord(recordID)
-            updateContinuation.yield(.recordComplete(recordID: recordID, itemID: item.id))
+            try await store.deleteRecord(record.id)
+            updateContinuation.yield(.recordComplete(recordID: record.id, itemID: item.id))
         }
         settling = []
     }

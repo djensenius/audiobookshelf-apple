@@ -14,26 +14,29 @@ extension DownloadManager {
         try await control(recordID) { try await $0.pause(recordID: $1) }
     }
 
-    /// Resumes a paused download: its record is queued again and its parts that haven't
-    /// completed start, continuing from their resume data. Reported with
+    /// Resumes a paused or failed download: its record is queued again and its parts that
+    /// haven't completed start, continuing from their resume data. Reported with
     /// ``DownloadManagerEvent/recordChanged(_:)``.
     ///
-    /// - Returns: `false` when the record doesn't exist: it completed or was cancelled.
+    /// - Returns: `false` when the record doesn't exist (it completed or was cancelled), or
+    ///   isn't paused or failed. A queued or downloading one is left alone: the engine would
+    ///   queue it while its transfers run on, and ``restartActiveTransfers()`` would then skip
+    ///   them.
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or saved.
     @discardableResult
     public func resume(recordID: UUID) async throws(DownloadManagerError) -> Bool {
-        try await control(recordID) { try await $0.resume(recordID: $1) }
+        try await control(recordID, from: [.paused, .failed]) { try await $0.resume(recordID: $1) }
     }
 
-    /// Retries a download, as ``resume(recordID:)`` does: its parts that haven't completed start
-    /// again with a fresh retry budget. Meant for one that failed for good, but any state is
-    /// accepted: the engine resets the budget whatever the record's state.
+    /// Retries a download that failed for good (or is paused), as ``resume(recordID:)`` does:
+    /// its parts that haven't completed start again with a fresh retry budget.
     ///
-    /// - Returns: `false` when the record doesn't exist: it completed or was cancelled.
+    /// - Returns: `false` when the record doesn't exist (it completed or was cancelled), or
+    ///   isn't paused or failed, as for ``resume(recordID:)``.
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or saved.
     @discardableResult
     public func retry(recordID: UUID) async throws(DownloadManagerError) -> Bool {
-        try await control(recordID) { try await $0.resume(recordID: $1) }
+        try await control(recordID, from: [.paused, .failed]) { try await $0.resume(recordID: $1) }
     }
 
     /// Pauses, then resumes, every `downloading` record, for a network policy that just got
@@ -146,12 +149,19 @@ extension DownloadManager {
         }
     }
 
-    /// Runs an engine call on a record while its item is held, then reports the record.
+    /// Runs an engine call on a record while its item is held, then reports the record. With
+    /// `states`, only if the record is in one of them once the item is held.
     private func control(
-        _ recordID: UUID, _ call: (any DownloadEngineControlling, UUID) async throws -> Bool
+        _ recordID: UUID, from states: [DownloadState]? = nil,
+        _ call: (any DownloadEngineControlling, UUID) async throws -> Bool
     ) async throws(DownloadManagerError) -> Bool {
         guard let record = try await read({ try await self.store.record(id: recordID) }) else { return false }
         return try await holdingItem(record.key) { () async throws(DownloadManagerError) -> Bool in
+            if let states {
+                // Read again: another control may have changed its state.
+                let current = try await read { try await self.store.record(id: recordID) }
+                guard let current, states.contains(current.state) else { return false }
+            }
             // A record gone meanwhile keeps its tracked key for its `recordComplete`.
             guard try await read({ try await call(self.engine, recordID) }) else { return false }
             await refresh(recordID, announce: true)

@@ -240,12 +240,18 @@ import Testing
         let item = LibraryItemFixtures.book()
         _ = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
         let old = try #require(try await fixture.store.record(key: fixture.key(item)))
-        await fixture.engine.settle(old.id)
+        for part in old.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 1) }
+        try await fixture.engine.settle(old.id)
 
         let result = try await manager.enqueue(
             item: item, episodeID: nil, connectionID: fixture.connectionID, replacingExisting: true)
+        try #require(try await fixture.store.record(id: old.id) == nil)
         try await fixture.engine.finishSettling()
 
+        // The old record was finalised: it made the local item.
+        let local = try await fixture.localItems.item(
+            serverConnectionID: fixture.connectionID, libraryItemId: item.id)
+        #expect(local?.files.count == old.parts.filter { $0.kind != .cover }.count)
         let record = try #require(try await fixture.store.record(key: fixture.key(item)))
         #expect(record.id != old.id)
         #expect(result == .started(record.id))

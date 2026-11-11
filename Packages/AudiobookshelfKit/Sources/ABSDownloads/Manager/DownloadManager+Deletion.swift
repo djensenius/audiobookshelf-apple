@@ -116,17 +116,26 @@ extension DownloadManager {
     /// then removes `paths` that no local item or record still uses, and `folder` with
     /// everything in it unless one of them lies inside it. Folders left empty are removed too.
     /// Best effort: if what is still used can't be read, nothing is removed, and that is logged.
+    ///
+    /// Paths are compared by their ``DownloadLayout/collisionKey(_:)``, as a case-insensitive
+    /// volume does: after a case-only rename on the server, a replacement's `chapter.mp3` is the
+    /// stored `Chapter.mp3` there, so a reference to either keeps the file. On a case-sensitive
+    /// volume, such a file is kept too, for the `DownloadJanitor`'s sweep (#192).
     func cleanUp(after key: MediaKey, removing paths: [String], folder: String?, cover: CoverSource?) async {
         let used: Set<String>
         do throws(DownloadManagerError) {
             if let cover { try await handOffCover(cover, of: key) }
-            used = try await usedPaths(of: key)
+            used = Set(try await usedPaths(of: key).map(DownloadLayout.collisionKey))
         } catch {
             logError("Couldn't clean up after a deletion", error)
             return
         }
-        var removed = paths.filter { !used.contains($0) }
-        if let folder, !used.contains(where: { $0.hasPrefix(folder + "/") }) { removed = [folder] }
+        var removed = paths.filter { !used.contains(DownloadLayout.collisionKey($0)) }
+        if let folder {
+            // Scalars, not Characters: a name starting with a combining mark still lies inside.
+            let inside = DownloadLayout.collisionKey(folder + "/").unicodeScalars
+            if !used.contains(where: { $0.unicodeScalars.starts(with: inside) }) { removed = [folder] }
+        }
         var directories: [URL] = []
         for path in removed {
             guard let url = try? locations.fileURL(forRelativePath: path) else { continue }

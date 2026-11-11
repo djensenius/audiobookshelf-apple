@@ -33,6 +33,26 @@ import Testing
         #expect(try await manager.pause(recordID: UUID()) == false)
     }
 
+    /// Only a paused or failed record is resumed or retried. The engine would queue a
+    /// downloading one while its transfers run on, so a restart for a stricter network policy
+    /// would skip them.
+    @Test func resumeAndRetryLeaveARunningRecordToTheRestart() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let queued = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        let downloading = try await enqueue(LibraryItemFixtures.podcast(), episodeID: "ep_1", fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: downloading.id)
+
+        for record in [queued, downloading] {
+            #expect(try await manager.resume(recordID: record.id) == false)
+            #expect(try await manager.retry(recordID: record.id) == false)
+        }
+        try await manager.restartActiveTransfers()
+
+        #expect(await fixture.engine.calls == [.pause(downloading.id), .resume(downloading.id)])
+        #expect(try await fixture.store.record(id: queued.id)?.state == .queued)
+    }
+
     @Test func restartActiveTransfersPausesThenResumesDownloadingRecords() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()
@@ -113,6 +133,32 @@ import Testing
         #expect(try await manager.cancel(recordID: record.id) == false)
     }
 
+    /// The server renamed a file in case only. On a case-insensitive volume the replacement's
+    /// `chapter.mp3` is the stored `Chapter.mp3`, so cancelling the replacement keeps it (on a
+    /// case-sensitive one, the replacement's own file is kept too, for the sweep).
+    @Test func cancellingACaseOnlyRenamedReplacementKeepsTheStoredFile() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        var file = LibraryItemFixtures.BookFile(ino: "101", path: "/audiobooks/Dune/Chapter.mp3", size: 1_000)
+        let local = try await fixture.storeDownloaded(LibraryItemFixtures.book(files: [file], ebook: nil))
+        let stored = try #require(local.files.first).relativePath
+        try write(stored, fixture)
+        file.path = "/audiobooks/Dune/chapter.mp3"
+        let result = try await manager.enqueue(
+            item: LibraryItemFixtures.book(files: [file], ebook: nil), episodeID: nil,
+            connectionID: fixture.connectionID, replacingExisting: true)
+        guard case .started(let replacementID) = result else { throw UnexpectedResult(result: result) }
+        let replacement = try #require(try await fixture.store.record(id: replacementID))
+        let renamed = try #require(replacement.parts.first { $0.kind == .audio }).destinationRelativePath
+        try #require(renamed != stored && renamed.lowercased() == stored.lowercased())
+        try write(renamed, fixture)
+
+        #expect(try await manager.cancel(recordID: replacementID))
+
+        #expect(exists(stored, fixture))
+        #expect(exists(renamed, fixture))
+    }
+
     /// Every part completed before the cancel: the engine is finalising the record, so it's
     /// kept, and the download completes.
     @Test func cancelLeavesARecordTheEngineIsFinalising() async throws {
@@ -122,7 +168,7 @@ import Testing
         let item = LibraryItemFixtures.book()
         let record = try await enqueue(item, fixture, manager)
         for part in record.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 1) }
-        await fixture.engine.settle(record.id)
+        try await fixture.engine.settle(record.id)
         let events = await manager.events()
 
         #expect(try await manager.cancel(recordID: record.id) == false)

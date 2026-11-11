@@ -164,6 +164,25 @@ import Testing
         #expect(try await fixture.store.record(key: fixture.key(item)) != nil)
     }
 
+    /// A pending file whose name starts with a combining mark still lies inside the folder.
+    @Test func deletingABookKeepsAFolderWhosePendingFileStartsWithACombiningMark() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        // The planner drops the leading dot, so the name starts with U+0301.
+        let item = LibraryItemFixtures.book(
+            files: [.init(ino: "101", path: "/audiobooks/Dune/.\u{301}1.mp3", size: 1_000)], ebook: nil,
+            coverPath: nil)
+        let local = try await fixture.storeDownloaded(item)
+        try #require(local.files.map(\.relativePath) == ["\(local.relativeDirectory)/\u{301}1.mp3"])
+        for path in Self.paths(of: local) { try write(path, fixture) }
+        _ = try await manager.enqueue(
+            item: item, episodeID: nil, connectionID: fixture.connectionID, replacingExisting: true)
+
+        #expect(try await manager.deleteLocalItem(id: local.id))
+
+        #expect(Self.paths(of: local).allSatisfy { exists($0, fixture) })
+    }
+
     /// Current behaviour: an episode the engine is finalising can't take a cover part, so a
     /// cancelled episode's cover, with no other episode to go to, is removed.
     @Test func aRefusedHandOffRemovesTheCover() async throws {
@@ -234,7 +253,7 @@ import Testing
             try write(part.destinationRelativePath, fixture)
             try await fixture.store.completePart(partID: part.id, finalBytes: 5)
         }
-        await fixture.engine.settle(second.id)
+        try await fixture.engine.settle(second.id)
 
         let deletion = Task { try await manager.deleteEpisode(itemID: local.id, episodeId: "ep_1") }
         _ = await detaches.first { _ in true }
@@ -263,7 +282,7 @@ import Testing
                     manager.enqueue(
                         item: item, episodeID: nil, connectionID: fixture.connectionID, replacingExisting: true))))
         for part in replacement.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 5) }
-        await fixture.engine.settle(replacement.id)
+        try await fixture.engine.settle(replacement.id)
         fixture.holdUsedPaths()
 
         let deletion = Task { try await manager.deleteLocalItem(id: local.id) }
