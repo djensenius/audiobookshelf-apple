@@ -85,6 +85,11 @@ public final class SessionLifecycle {
     @ObservationIgnored private var connectParticipants: [any SessionParticipant] = []
     @ObservationIgnored private var progressSources: [any SessionParticipant] = []
     @ObservationIgnored private var session: RunningSession?
+    /// The account whose session a transition ended last, other than by expiring (a switch, a
+    /// sign-out, a removal or another sign-in), until the next session starts. A switch chosen
+    /// from it then does nothing: the first change chosen from an account wins, even one that
+    /// failed and left no session.
+    @ObservationIgnored private var endedByChange: SessionIdentity?
     /// How many ``performAccountChange(from:_:)`` calls are running. No session starts until the
     /// last one finishes; an expiry still ends one.
     @ObservationIgnored private var accountChanges = 0
@@ -239,8 +244,9 @@ public final class SessionLifecycle {
     /// - Parameter identity: The account the switch was chosen from, when the request comes from
     ///   its screen. When the switch's turn comes, it does nothing if another account's session
     ///   is running, so of two switches chosen from the same account, only the first runs. If
-    ///   no session is running because it expired meanwhile, the switch still runs; if an
-    ///   account change (``performAccountChange(from:_:)``) ended it, the switch does nothing.
+    ///   no session is running because it expired meanwhile, the switch still runs; if another
+    ///   transition ended it (an earlier switch, even one that failed and left no session, or
+    ///   ``performAccountChange(from:_:)``), the switch does nothing.
     public func switchAccount(to connectionID: UUID, from identity: SessionIdentity? = nil) async throws {
         if rejectReentrant("switchAccount(to:)") { return }
         let result: Result<Void, any Error> = await serialized {
@@ -362,13 +368,14 @@ public final class SessionLifecycle {
 
     /// Whether the session of `identity`, the account a sign-out or switch was chosen from, is
     /// still the one running, ending a session the source has left first. `nil` matches any.
-    /// Unless `strictly`, no running session matches too: a switch from an account that has
-    /// expired still goes where the user chose.
+    /// Unless `strictly`, no running session matches too, when the account's session expired
+    /// rather than another change ending it: a switch from an account that has expired still goes
+    /// where the user chose.
     private func isStillRunning(_ identity: SessionIdentity?, strictly: Bool) async -> Bool {
         await endStaleSession()
         guard let identity else { return true }
         let running = session?.context.identity
-        if running == identity || (running == nil && !strictly) { return true }
+        if running == identity || (running == nil && !strictly && endedByChange != identity) { return true }
         Log.auth.info("Ignored an account change chosen from an account that is no longer signed in")
         // Follows the source, in case the stale session just ended.
         await reconcile()
@@ -442,6 +449,7 @@ public final class SessionLifecycle {
     }
 
     private func begin(_ context: SessionContext) async {
+        endedByChange = nil
         beginning = context
         defer { beginning = nil }
         let seeder = self.seeder
@@ -505,6 +513,7 @@ public final class SessionLifecycle {
     private func end(_ reason: SessionEndReason) async {
         guard let running = session else { return }
         session = nil
+        if reason != .expired { endedByChange = running.context.identity }
         running.seed?.cancel()
         if let workers = flushWorkers.removeValue(forKey: running.context.sessionID) {
             for worker in workers.values { worker.cancel() }

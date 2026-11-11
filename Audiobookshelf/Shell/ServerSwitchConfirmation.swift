@@ -78,12 +78,23 @@ struct ServerSwitchRequest {
     fileprivate let generation: Int
 }
 
-/// What the dialog shows. Each link presented gets a new generation, so the dialog's actions for
-/// one a newer link replaced do nothing. Dismissing keeps the generation: SwiftUI may dismiss the
-/// dialog before it runs the confirm action, which must still work.
+/// What the dialog shows. Every link the scene opens, wherever it goes (``open(_:with:)``), and
+/// each link presented get a new generation, so the dialog's actions for one a newer link
+/// replaced do nothing. Dismissing keeps the generation: SwiftUI may dismiss the dialog before it
+/// runs the confirm action, which must still work.
 struct ServerSwitchPrompt {
     private(set) var shown: ServerSwitchRequest?
     private var generation = 0
+
+    /// Opens a newer link with `open` (the scene's router), replacing the request shown first,
+    /// before the router decides where the link goes and before any session check: a link that
+    /// navigates here, or is dropped, replaces it as one for another server does.
+    /// - Returns: What `open` returned.
+    mutating func open(_ link: DeepLink, with open: (DeepLink) -> Bool) -> Bool {
+        generation += 1
+        shown = nil
+        return open(link)
+    }
 
     mutating func present(_ link: DeepLink, for connection: ServerConnectionDTO) {
         generation += 1
@@ -167,9 +178,10 @@ struct ServerSwitchConfirmation {
 struct ServerSwitchConfirmationModifier: ViewModifier {
     let router: Router
     let reopen: LinkReopener
+    /// The scene's prompt, which the host also replaces when it opens a link.
+    @Binding var prompt: ServerSwitchPrompt
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @Environment(AccountManager.self) private var accounts: AccountManager?
-    @State private var prompt = ServerSwitchPrompt()
     @State private var switchFailed = false
 
     func body(content: Content) -> some View {

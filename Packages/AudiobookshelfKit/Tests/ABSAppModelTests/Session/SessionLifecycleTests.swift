@@ -535,6 +535,24 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.signedOutSwitches == 1)
     }
 
+    /// Two switches chosen from A (say, in two windows); the first ends A, then fails because B
+    /// rejects its session. The second checks at its turn, so running them in order is the same.
+    @Test func aSwitchChosenFromAnAccountAFailedSwitchEndedDoesNothing() async throws {
+        let harness = Harness()
+        try await harness.started()
+        harness.source.switchSignsOut = true
+        let other = UUID()
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID, from: identityA)
+        #expect(harness.lifecycle.gate == .connect)
+        try await harness.lifecycle.switchAccount(to: other, from: identityA)
+
+        #expect(harness.log.count(of: "accounts.switch(b)") == 1)
+        #expect(harness.log.count(of: "accounts.switch(?)") == 0)
+        #expect(harness.lifecycle.gate == .connect)
+        #expect(harness.lifecycle.signedOutSwitches == 1)
+    }
+
     @Test func aSwitchChosenFromAnAccountThatExpiredStillRuns() async throws {
         let harness = Harness()
         try await harness.started()
@@ -545,6 +563,25 @@ private func teardown(_ reason: String) -> [String] {
         #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
 
         #expect(harness.log.count(of: "accounts.switch(b)") == 1)
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
+    /// A failed switch ends A and starts it again; A then expiring is still an expiry.
+    @Test func aSwitchFromAnAccountThatRestartedThenExpiredStillRuns() async throws {
+        let harness = Harness()
+        try await harness.started()
+        harness.source.switchError = StoreFailure()
+        await #expect(throws: StoreFailure.self) {
+            try await harness.lifecycle.switchAccount(to: identityB.connectionID, from: identityA)
+        }
+        #expect(await eventually { harness.log.entries.contains("library.seed(a)") })
+        harness.source.switchError = nil
+        harness.source.phase = .signedOut
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID, from: identityA)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        #expect(harness.log.count(of: "accounts.switch(b)") == 2)
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 

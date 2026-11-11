@@ -29,8 +29,14 @@ struct AccountView: View {
                 }
                 if let lifecycle {
                     Button(role: .destructive) {
-                        if AccountActions(lifecycle: lifecycle).signOut(openURL: { openURL($0) }) != nil {
-                            isSigningOut = true
+                        guard let task = AccountActions(lifecycle: lifecycle).signOut(openURL: { openURL($0) })
+                        else { return }
+                        isSigningOut = true
+                        // Only while it runs: the lifecycle can refuse it (another window's change
+                        // left this account first), and this screen may then stay.
+                        Task {
+                            await task.value
+                            isSigningOut = false
                         }
                     } label: {
                         label("ButtonLogout", systemImage: "rectangle.portrait.and.arrow.right")

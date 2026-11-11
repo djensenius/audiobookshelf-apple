@@ -620,6 +620,56 @@ private final class Recorder: SessionParticipant {
         #expect(links.link(atEpoch: 2) == (replaced ? newer : nil))
     }
 
+    /// Every newer link replaces the one the dialog asks about, wherever the router sends it:
+    /// one for this server navigates, one for an unknown or signed-out server is dropped.
+    @Test(arguments: ["current", "unknown", "signedOut"])
+    func aNewerLinkOfAnyKindReplacesTheDialogsLink(kind: String) async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let accounts = try #require(environment.accounts)
+        let recorder = Recorder()
+        lifecycle.register(recorder, stage: .connect)
+        await lifecycle.start()
+        let hosts = [Self.host(), Self.host(), Self.host()]
+        defer { cleanUp(hosts) }
+        let signedOut = try await signIn(accounts, to: hosts[2])
+        await waitFor(.ready(signedOut, isOffline: false), in: lifecycle)
+        await lifecycle.signOut()
+        let a = try await signIn(accounts, to: hosts[0])
+        await waitFor(.ready(a, isOffline: false), in: lifecycle)
+        let b = try await signIn(accounts, to: hosts[1])
+        await waitFor(.ready(b, isOffline: false), in: lifecycle)
+        let confirmation = ServerSwitchConfirmation(lifecycle: lifecycle, accounts: accounts)
+        let router = Router(identity: b)
+        var prompt = ServerSwitchPrompt()
+        #expect(
+            prompt.open(DeepLink(.downloads, serverID: a.connectionID.uuidString)) {
+                router.open($0)
+                return true
+            })
+        let request = try await present(router, confirmation, in: &prompt)
+        let before = recorder.events.count
+        let server =
+            switch kind {
+            case "current": b.connectionID.uuidString
+            case "unknown": UUID().uuidString
+            default: signedOut.connectionID.uuidString
+            }
+
+        #expect(
+            prompt.open(DeepLink(.item(id: "li_6", episodeID: nil), serverID: server)) {
+                router.open($0)
+                return true
+            })
+        #expect(await confirmation.review(router) == nil)
+
+        #expect(prompt.shown == nil)
+        #expect(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)) == nil)
+        #expect(recorder.events.count == before && !recorder.links.isSwitching)
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
+        #expect(router[path: .library] == (kind == "current" ? [.item(id: "li_6")] : []))
+    }
+
     @Test func aLinkForASignedOutServerIsDropped() async throws {
         let environment = try makeEnvironment()
         let accounts = try #require(environment.accounts)

@@ -19,6 +19,7 @@ struct SceneRouterHost: View {
     let reopen: LinkReopener
 
     @State private var navigation: SceneNavigation
+    @State private var serverSwitchPrompt = ServerSwitchPrompt()
     @SceneStorage private var snapshot: Data?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
@@ -42,7 +43,9 @@ struct SceneRouterHost: View {
                 LoadingView()
             }
         }
-        .modifier(ServerSwitchConfirmationModifier(router: navigation.router, reopen: reopen))
+        .modifier(
+            ServerSwitchConfirmationModifier(router: navigation.router, reopen: reopen, prompt: $serverSwitchPrompt)
+        )
         .focusedSceneValue(navigation.router)
         .onAppear(perform: restoreOnce)
         .onChange(of: pendingLink) { openPendingLink() }
@@ -64,7 +67,8 @@ struct SceneRouterHost: View {
     }
 
     private func openPendingLink() {
-        if let link = pendingLink, navigation.open(link) { pendingLink = nil }
+        // Through the prompt: a newer link replaces the one the server switch dialog asks about.
+        if let link = pendingLink, serverSwitchPrompt.open(link, with: navigation.open) { pendingLink = nil }
     }
 
     private func save() {
