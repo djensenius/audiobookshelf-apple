@@ -54,6 +54,16 @@ import Testing
         #expect(!kinds(summary(kind: .series), canEditPlaylists: true).contains(.addToPlaylist))
     }
 
+    @Test func playAndShareNeedTheirContext() {
+        let progress = ItemProgress(fraction: 0.4)
+        let actions = ItemAction.available(
+            for: summary(), progress: progress, context: ItemActionContext(canPlay: false, canShare: false)
+        )
+        .map(\.kind)
+        #expect(actions == [.markFinished, .hideFromContinueListening, .openDetails])
+        #expect(ItemActionContext() == ItemActionContext(canEditPlaylists: false, canPlay: true, canShare: true))
+    }
+
     @Test func itemWithoutAudioCannotBePlayedButCanBeMarked() {
         #expect(kinds(summary(audio: false)) == [.markFinished, .share, .openDetails])
     }
