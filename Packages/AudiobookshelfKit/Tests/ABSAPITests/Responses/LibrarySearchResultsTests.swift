@@ -86,6 +86,10 @@ import Testing
             "ctimeMs", "birthtimeMs", "addedAt", "updatedAt", "lastScan", "scanVersion", "isMissing", "isInvalid",
             "mediaType", "media", "libraryFiles",
         ]
+        if let count = expected.numFiles {
+            keys.insert("numFiles")
+            try integer(raw["numFiles"], count)
+        }
         if expected.size != nil { keys.insert("size") }
         if expected.recentEpisode != nil { keys.insert("recentEpisode") }
         #expect(Set(raw.keys) == keys)
@@ -121,8 +125,14 @@ import Testing
                     "subtitle", "publishedYear", "publishedDate", "publisher", "description",
                     "isbn", "asin", "language",
                 ])
-            // These expanded 2.26.0 results have no minified/expanded count fields.
-            for key in ["numTracks", "numAudioFiles", "numChapters", "ebookFormat"] { #expect(media[key] == nil) }
+            // Expanded 2.37.2 includes counts; neither pin's series members do.
+            for (key, count) in [
+                ("numTracks", book.numTracks), ("numAudioFiles", book.numAudioFiles),
+                ("numChapters", book.numChapters),
+            ] {
+                if let count { try integer(media[key], count) } else { #expect(media[key] == nil) }
+            }
+            #expect(media["ebookFormat"] == nil)
             #expect(raw["series"] == nil)
         } else {
             let podcast = try #require(expected.podcast)
@@ -130,7 +140,11 @@ import Testing
             try equal(metadata, podcast.metadata)
             _ = try array(media["episodes"], podcast.episodes)
             #expect(podcast.episodes == [])
-            #expect(media["numEpisodes"] == nil)
+            if let count = podcast.numEpisodes {
+                try integer(media["numEpisodes"], count)
+            } else {
+                #expect(media["numEpisodes"] == nil)
+            }
             nulls(media, ["lastEpisodeCheck"])
             nulls(
                 metadata,
@@ -204,18 +218,58 @@ import Testing
     }
 
     @Test func complete226CapturesRetainEveryRowAndNestedValue() throws {
+        try completeCaptures(version: "2.26.0")
+    }
+
+    @Test func complete237CapturesRetainEveryRowAndNestedValue() throws {
+        try completeCaptures(version: "2.37.2")
+    }
+
+    private enum SelectionError: Error { case invalid }
+
+    private func originalVersions(directory: String?, selection: String?) throws -> [String] {
+        guard let directory else {
+            guard selection == nil else { throw SelectionError.invalid }
+            return []
+        }
+        guard !directory.isEmpty else { throw SelectionError.invalid }
+        switch selection ?? "2.26.0" {
+        case "2.26.0": return ["2.26.0"]
+        case "2.37.2": return ["2.37.2"]
+        case "all": return ["2.26.0", "2.37.2"]
+        default: throw SelectionError.invalid
+        }
+    }
+
+    @Test func originalCaptureVersionSelectionIsExplicit() throws {
+        #expect(try originalVersions(directory: nil, selection: nil) == [])
+        #expect(try originalVersions(directory: "/private", selection: nil) == ["2.26.0"])
+        #expect(try originalVersions(directory: "/private", selection: "2.26.0") == ["2.26.0"])
+        #expect(try originalVersions(directory: "/private", selection: "2.37.2") == ["2.37.2"])
+        #expect(try originalVersions(directory: "/private", selection: "all") == ["2.26.0", "2.37.2"])
+        #expect(throws: SelectionError.self) { try originalVersions(directory: nil, selection: "2.37.2") }
+        #expect(throws: SelectionError.self) { try originalVersions(directory: "", selection: "2.37.2") }
+        #expect(throws: SelectionError.self) { try originalVersions(directory: "/private", selection: "unknown") }
+    }
+
+    private func completeCaptures(version: String) throws {
         for podcast in [false, true] {
             let kind = podcast ? "podcast" : "book"
             let url = try #require(
-                Bundle.module.url(forResource: "search-\(kind)-2.26.0", withExtension: "json", subdirectory: "Fixtures")
+                Bundle.module.url(
+                    forResource: "search-\(kind)-\(version)", withExtension: "json", subdirectory: "Fixtures")
             )
-            try verify(Data(contentsOf: url), podcast: podcast, expected: SearchCaptureExpected())
+            try verify(Data(contentsOf: url), podcast: podcast, expected: SearchCaptureExpected(version: version))
         }
         // Optional ADDITIONAL evidence: never replaces the bundled fixture checks.
-        if let path = ProcessInfo.processInfo.environment["ABS_SEARCH_RESPONSE_CAPTURE_DIR"] {
-            let root = URL(fileURLWithPath: path).appendingPathComponent("2.26.0")
+        let environment = ProcessInfo.processInfo.environment
+        let path = environment["ABS_SEARCH_RESPONSE_CAPTURE_DIR"]
+        let versions = try originalVersions(
+            directory: path, selection: environment["ABS_SEARCH_RESPONSE_CAPTURE_VERSION"])
+        if versions.contains(version) {
+            let root = URL(fileURLWithPath: try #require(path)).appendingPathComponent(version)
             let ledgerData = try Data(contentsOf: root.appendingPathComponent("26-verified-ledger.json"))
-            let expected = try SearchCaptureExpected(originalLedger: ledgerData)
+            let expected = try SearchCaptureExpected(originalLedger: ledgerData, version: version)
             for (podcast, name) in [(false, "27-book-search.json"), (true, "28-podcast-search.json")] {
                 try verify(Data(contentsOf: root.appendingPathComponent(name)), podcast: podcast, expected: expected)
             }
@@ -229,7 +283,12 @@ private struct SearchCaptureExpected {
     private var identities: [String: String] = [:]
     private var token = "Search Fixture"
 
-    init() {}
+    private let newer: Bool
+    private var version: String { newer ? "2.37.2" : "2.26.0" }
+
+    init(version: String) { newer = version == "2.37.2" }
+
+    private func value<T>(_ older: T, _ current: T) -> T { newer ? current : older }
 
     private func id(_ value: String) -> String { identities[value] ?? value }
     private func name(_ suffix: String) -> String { "\(token) \(suffix)" }
@@ -244,7 +303,8 @@ private struct SearchCaptureExpected {
         let token: String
     }
 
-    init(originalLedger data: Data) throws {
+    init(originalLedger data: Data, version: String) throws {
+        self.init(version: version)
         let ledger = try JSONDecoder().decode(Ledger.self, from: data)
         token = ledger.token
         try #require(ledger.books.count == 2 && ledger.authors.count == 2 && ledger.series.count == 2)
@@ -272,17 +332,24 @@ private struct SearchCaptureExpected {
         }
         #expect(ledger.books == [book(1, detail: true), book(2, detail: true)])
         #expect(ledger.podcast == podcast(detail: true))
-        #expect(ledger.authors == [author("Shared", detail: true), author("Unique", detail: true)])
-        #expect(ledger.series == [series("Unique"), series("Shared")])
+        #expect(
+            ledger.authors == (newer ? ["Unique", "Shared"] : ["Shared", "Unique"]).map { author($0, detail: true) })
+        #expect(ledger.series == (newer ? ["Shared", "Unique"] : ["Unique", "Shared"]).map { series($0) })
     }
 
     private func file(_ index: Int) -> AudioFile {
         let names = ["First.mp3", "Second.mp3", name("Episode 1.mp3"), name("Episode 2.mp3")]
         let paths = ["books/First", "books/Second", "casts/Owned Cast", "casts/Owned Cast"]
-        let inos = ["65036", "65034", "65030", "65031"]
+        let inos = [value("65036", "67023"), value("65034", "67029"), value("65030", "67020"), value("65031", "67024")]
         let sizes = [60498, 80516, 40507, 80539]
-        let modified: [Double] = [1794362580494, 1794362580587, 1794362580651, 1794362580748]
-        let added = [1794362655220, 1794362655139, 1794362655444, 1794362655444]
+        let modified: [Double] = [
+            value(1794362580494, 1794367837892), value(1794362580587, 1794367837983),
+            value(1794362580651, 1794367838049), value(1794362580748, 1794367838143),
+        ]
+        let added = [
+            value(1794362655220, 1794368004988), value(1794362655139, 1794368004932),
+            value(1794362655444, 1794368005117), value(1794362655444, 1794368005124),
+        ]
         return AudioFile(
             index: 1, ino: inos[index],
             metadata: FileMetadata(
@@ -290,7 +357,8 @@ private struct SearchCaptureExpected {
                 relPath: names[index], size: sizes[index], mtimeMs: modified[index], ctimeMs: modified[index],
                 birthtimeMs: 0),
             addedAt: added[index], updatedAt: added[index], manuallyVerified: false, exclude: false,
-            format: "MP2/3 (MPEG audio layer 2/3)", duration: [30.096, 40.104, 20.088, 40.104][index],
+            format: "MP2/3 (MPEG audio layer 2/3)",
+            duration: value([30.096, 40.104, 20.088, 40.104], [30, 40, 20, 40])[index],
             bitRate: 16_000, codec: "mp3", channels: 1, channelLayout: "mono", chapters: [], mimeType: "audio/mpeg")
     }
 
@@ -305,20 +373,23 @@ private struct SearchCaptureExpected {
 
     private func libraryFile(_ index: Int) -> LibraryFile {
         let file = file(index)
-        let added = [1794362655007, 1794362655006, 1794362655412, 1794362655411][index]
+        let added = [
+            value(1794362655007, 1794368004843), value(1794362655006, 1794368004843),
+            value(1794362655412, 1794368005088), value(1794362655411, 1794368005088),
+        ][index]
         return LibraryFile(
             ino: file.ino, metadata: file.metadata, fileType: "audio", addedAt: added, updatedAt: added)
     }
 
     private func author(_ role: String, detail: Bool = false) -> Author {
-        let time = role == "Shared" ? 1794362655146 : 1794362655569
+        let time = role == "Shared" ? value(1794362655146, 1794368004941) : value(1794362655569, 1794368005250)
         return Author(
             id: id("author-\(role.lowercased())"), name: name("\(role) Author"), libraryId: id("library-books"),
             addedAt: time, updatedAt: time, numBooks: detail ? nil : (role == "Shared" ? 2 : 1))
     }
 
     private func series(_ role: String) -> Series {
-        let time = role == "Shared" ? 1794362655554 : 1794362655562
+        let time = role == "Shared" ? value(1794362655554, 1794368005234) : value(1794362655562, 1794368005242)
         return Series(
             id: id("series-\(role.lowercased())"), name: name("\(role) Series"),
             nameIgnorePrefix: name("\(role) Series"), libraryId: id("library-books"), addedAt: time, updatedAt: time)
@@ -326,9 +397,10 @@ private struct SearchCaptureExpected {
 
     private func book(_ number: Int, member: Bool = false, detail: Bool = false) -> LibraryItem {
         let first = number == 1
-        // Detail series membership is shared/unique; expanded search series are unique/shared.
-        let authorRoles = first ? ["Shared", "Unique"] : ["Shared"]
-        let roles = first ? (detail ? ["Shared", "Unique"] : ["Unique", "Shared"]) : ["Shared"]
+        // Detail series are shared/unique. Older search series reverse that order;
+        // newer search instead reverses Book 1's author order.
+        let authorRoles = first ? (newer && !detail ? ["Unique", "Shared"] : ["Shared", "Unique"]) : ["Shared"]
+        let roles = first ? (detail || newer ? ["Shared", "Unique"] : ["Unique", "Shared"]) : ["Shared"]
         let associations = roles.map {
             Series(
                 id: id("series-\($0.lowercased())"), name: name("\($0) Series"),
@@ -351,21 +423,26 @@ private struct SearchCaptureExpected {
             id: id("book-\(number)"), libraryItemId: id("item-book-\(number)"), metadata: metadata,
             tags: (first ? ["Shared", "Unique"] : ["Shared"]).map { name("\($0) Tag") },
             audioFiles: [audio], chapters: [], tracks: member ? nil : [track(number - 1)],
-            duration: member ? nil : audio.duration, size: member ? nil : audio.metadata!.size)
+            duration: member ? nil : audio.duration, size: member ? nil : audio.metadata!.size,
+            numTracks: newer && !member ? 1 : nil, numAudioFiles: newer && !member ? 1 : nil,
+            numChapters: newer && !member ? 0 : nil)
         return LibraryItem(
-            id: id("item-book-\(number)"), ino: first ? "65035" : "65033", libraryId: id("library-books"),
+            id: id("item-book-\(number)"), ino: first ? value("65035", "67022") : value("65033", "67028"),
+            libraryId: id("library-books"),
             folderId: id("folder-books"), path: "/search-fixtures/books/\(first ? "First" : "Second")",
             relPath: first ? "First" : "Second", isFile: false,
-            mtimeMs: first ? 1794362580454 : 1794362580529, ctimeMs: first ? 1794362580454 : 1794362580529,
-            birthtimeMs: 0, addedAt: first ? 1794362655222 : 1794362655140,
-            updatedAt: first ? 1794362655578 : 1794362655599, lastScan: first ? 1794362655220 : 1794362655139,
-            scanVersion: "2.26.0", mediaType: .book, media: .book(media), libraryFiles: [libraryFile(number - 1)],
-            size: member ? nil : audio.metadata!.size)
+            mtimeMs: first ? value(1794362580454, 1794367837850) : value(1794362580529, 1794367837928),
+            ctimeMs: first ? value(1794362580454, 1794367837850) : value(1794362580529, 1794367837928),
+            birthtimeMs: 0, addedAt: first ? value(1794362655222, 1794368004989) : value(1794362655140, 1794368004935),
+            updatedAt: first ? value(1794362655578, 1794368005257) : value(1794362655599, 1794368005277),
+            lastScan: first ? value(1794362655220, 1794368004988) : value(1794362655139, 1794368004933),
+            scanVersion: version, mediaType: .book, media: .book(media), libraryFiles: [libraryFile(number - 1)],
+            numFiles: newer && !member ? 1 : nil, size: member ? nil : audio.metadata!.size)
     }
 
     private func episode(_ number: Int) -> PodcastEpisode {
         let audio = file(number + 1)
-        let time = 1794362655450
+        let time = value(1794362655450, 1794368005129)
         return PodcastEpisode(
             id: id("episode-\(number)"), libraryItemId: id("item-podcast"), podcastId: id("podcast"),
             title: name("Episode \(number)"), chapters: [], audioFile: audio, audioTrack: track(number + 1),
@@ -379,14 +456,19 @@ private struct SearchCaptureExpected {
                 title: name("Podcast"), titleIgnorePrefix: name("Podcast"), author: "Owned Cast",
                 genres: [name("Podcast Genre")], explicit: false, type: "episodic"),
             tags: [name("Podcast Tag")], episodes: detail ? [episode(1), episode(2)] : [],
-            autoDownloadEpisodes: false, autoDownloadSchedule: "0 * * * *", maxEpisodesToKeep: 0,
+            numEpisodes: newer ? (detail ? 2 : 0) : nil, autoDownloadEpisodes: false, autoDownloadSchedule: "0 * * * *",
+            maxEpisodesToKeep: 0,
             maxNewEpisodesToDownload: 3, size: detail ? 121046 : 0)
         return LibraryItem(
-            id: id("item-podcast"), ino: "65029", libraryId: id("library-podcasts"), folderId: id("folder-podcasts"),
+            id: id("item-podcast"), ino: value("65029", "67019"), libraryId: id("library-podcasts"),
+            folderId: id("folder-podcasts"),
             path: "/search-fixtures/casts/Owned Cast", relPath: "Owned Cast", isFile: false,
-            mtimeMs: 1794362580691, ctimeMs: 1794362580691, birthtimeMs: 0, addedAt: 1794362655445,
-            updatedAt: 1794362655639, lastScan: 1794362655444, scanVersion: "2.26.0", mediaType: .podcast,
-            media: .podcast(media), libraryFiles: [libraryFile(2), libraryFile(3)], size: 121046,
+            mtimeMs: value(1794362580691, 1794367838084), ctimeMs: value(1794362580691, 1794367838084), birthtimeMs: 0,
+            addedAt: value(1794362655445, 1794368005125),
+            updatedAt: value(1794362655639, 1794368005292), lastScan: value(1794362655444, 1794368005125),
+            scanVersion: version, mediaType: .podcast,
+            media: .podcast(media), libraryFiles: [libraryFile(2), libraryFile(3)], numFiles: newer ? 2 : nil,
+            size: 121046,
             recentEpisode: recent.map { episode($0) })
     }
 

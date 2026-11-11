@@ -244,3 +244,89 @@ Retained #250 live evidence covers both pins/backends, focused and full: reporte
 tests/0 skips, with full runs first executing 71 ordinary tests/1 known skip. No live matrix
 was rerun: only the one focused 2.26.0 runtime-binding recapture above was needed.
 #259 supplies the separate 2.37.2 fixtures.
+
+## Offline search evidence (2.37.2)
+
+`LibrarySearchResultsTests` also consumes complete `search-book-2.37.2.json`
+(806 readable lines) and `search-podcast-2.37.2.json` (514), retaining every key,
+row and nested value. They are genuine sanitized responses, not model re-encodings.
+Source: `advplyr/audiobookshelf` 2.37.2 revision
+`edb1f7efc92ecacdef51aafb4d9d5054ce10604f`, canonical image digest
+`sha256:b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa`.
+
+The unchanged harness ran once with `ABS_SERVER_BACKEND=docker`,
+`ABS_SERVER_VERSION=2.37.2` and `scripts/test-server.sh test --search-contract`
+under `nice -n 10`. A private transparent Docker observer retained the exact
+registered container ID and inspected it while alive, before and after the
+status observation. Its `.Image` matched both the actual and canonical image
+`.Id`, with matching full revision/source/version labels and RepoDigest above.
+Actual GET `/status` on that owned port returned HTTP 200 and version `2.37.2`;
+its body, status and response headers are retained privately. The observer
+resolved real executables before prefixing PATH. A declared private Swift
+forwarder added only `--jobs 2` to the harness's focused test invocation.
+No production, tracked harness, shared seed or endpoint behavior changed.
+
+The focused suite passed 3 tests/0 skips. Across its three owned namespaces,
+all 30 exact-ID absence checks returned 404, all 12 seed before/after pairs were
+unchanged and cleanup reported zero failures. The harness verified exact owned
+container removal; an independent successful exact-ID inventory was empty, the
+registered harness process exited and its owned temporary data directory was
+absent. Full commands, output, runtime inspection, cleanup and hashes remain
+private. No unchanged live backend/version matrix was rerun.
+
+Both searches were ordinary-user GET requests with the owned query token and no
+explicit limit. `SearchContractFixture.request` requires HTTP 200 before saving
+either complete body. This is code-enforced search success, NOT a separately
+retained search status/header sidecar; the observer's sidecar covers `/status`
+only. Pair, ledger and independent item/author/series details share one namespace:
+
+| Original body | SHA-256 before sanitization or whitespace changes |
+| --- | --- |
+| `27-book-search.json` | `600a59a033bbd41c6abd4940d89121a4ead76114baece6eb5aa8b02be7414d25` |
+| `28-podcast-search.json` | `192aa02cafc3d45da189d50ecefe9e3fdc060e4fb09b6b557c10b316c82aead2` |
+| `26-verified-ledger.json` | `8e3d435343c90ccbd69eafd61b4443b69bc7edf8005565958b3fa9c76cffd836` |
+
+Earlier #250 captures lacked the running-container image binding and were used
+only for private shape/budget preparation. All earlier originals are unchanged;
+no older response fragments or ledger values are used in this newer pair.
+Sanitization substitutes only explicit identity UUIDs, item IDs within content
+URLs and the owned query token in names/flattened metadata/ID3 fields/paths.
+Synthetic paths, inode strings, timestamps, sizes, durations and all other
+nonidentifying values are retained. The separate private recursive audit compares
+key presence/order, scalar types, nulls and every array length/order/value; its
+negative mutations must fail. Original bytes and explicit substitutions stay
+private and are never uploaded.
+
+Newer expanded books include item `numFiles: 1` and media `numTracks: 1`,
+`numAudioFiles: 1`, `numChapters: 0`. Series members still omit these counts and
+expanded tracks/duration/size, have empty author/series arrays and no per-series
+sequences. Podcast wrappers include item `numFiles: 2` and media `numEpisodes: 0`
+with empty episodes; independent detail contains two episodes. Episode matches
+remain in `libraryItem.recentEpisode`, with null episode index/publication fields
+and audio index 1. Author/narrator counts use `numBooks`; tags/genres use
+`numItems`, with asymmetric shared/unique counts 2/1. This capture's durations
+are 30/40/20/40 seconds, not the older pair's 30.096/40.104/20.088/40.104;
+this is an observation, not an asserted universal version rule.
+
+Independent raw details and their verified ledger supply identities and values;
+search determines only its projection/order. The newer Book 1 search author order
+is unique/shared, while independent detail is shared/unique. Its search and
+detail series are both shared/unique. Fresh inodes and timestamps, including
+distinct audio-added and item-last-scan times, are not normalized. Strict
+per-element/nested decoding compares complete ordered typed expectations and
+selected raw fields, in addition to whole-response equality. Existing synthetic
+compatibility cases remain separate; no malformed-input version differences
+are invented.
+
+Both bundled pairs always run in the focused `LibrarySearchResultsTests` suite.
+`ABS_SEARCH_RESPONSE_CAPTURE_DIR` alone preserves legacy additional 2.26.0
+original verification. Set `ABS_SEARCH_RESPONSE_CAPTURE_VERSION=2.37.2` to
+require newer originals, or `all` to require both. Each selected version reads
+`<root>/<version>/{26-verified-ledger,27-book-search,28-podcast-search}.json`.
+Unknown/empty selectors, a selector without a root, an empty root, missing files
+and decoding failures fail, without a bundled fallback for original evidence.
+Run the whole focused suite, not a filter selecting only the other version.
+This mode checks the specific documented runs, not arbitrary future captures.
+Swift original checks cover typed expectations and selected raw fields; they
+are NOT recursive original-to-bundled verification. That proof belongs to the
+separate private recursive audit and its negative mutations.
