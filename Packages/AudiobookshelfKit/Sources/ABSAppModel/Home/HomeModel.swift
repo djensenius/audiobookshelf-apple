@@ -5,10 +5,18 @@ import Observation
 /// Home's state for one scene: the personalized shelves of ``libraryID`` as ``HomeSection``s,
 /// filtered by the store's ``LibraryStore/progress``.
 ///
-/// The model creates its ``PersonalizedShelvesModel`` with ``LibraryStore/makeShelves(libraryID:)``
-/// and replaces it on the next ``load()`` or ``refresh()`` once the store's ``LibraryStore/connectionKey``
-/// or ``libraryID`` no longer matches. Until then a stale model's state is not shown: ``sections``
-/// is empty and ``hasLoaded`` is `false`, so another account's shelves never appear.
+/// Like ``PersonalizedShelvesModel``, a model belongs to one account: views create it per account
+/// identity (ADR 0004's identity-keyed subtree, `.id(identity)`) and recreate it when the identity
+/// changes.
+///
+/// Within that identity it follows changes: it creates its ``PersonalizedShelvesModel`` with
+/// ``LibraryStore/makeShelves(libraryID:)`` and replaces it on the next ``load()`` or
+/// ``refresh()`` once ``libraryID`` or the store's ``LibraryStore/connectionKey`` no longer
+/// matches. Until then the old model's state isn't shown (``sections`` is empty and ``hasLoaded``
+/// is `false`), and responses to the old model's requests are dropped. A ``load()`` or
+/// ``refresh()`` while the store is cleared drops the old model. Without one, signing out and
+/// back in to the same account (the same `connectionKey`) shows the old model's shelves again;
+/// recreating the model per identity avoids that.
 @MainActor
 @Observable
 public final class HomeModel {
@@ -26,6 +34,8 @@ public final class HomeModel {
 
     /// The sections in server order. Items hidden from Continue Listening or finished leave the
     /// continue shelves as soon as the progress cache has the change.
+    ///
+    /// Rebuilt from the shelves on every read, so read it once per view body.
     public var sections: [HomeSection] {
         guard let shelves = current else { return [] }
         return HomeSection.sections(from: shelves.shelves) { [store] itemID, episodeID in

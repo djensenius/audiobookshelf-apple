@@ -195,4 +195,95 @@ private func ids(_ model: HomeModel, _ sectionID: String) -> [String] {
             #expect(callsB.value == ["books"])
         }
     }
+
+    /// Signing out and back in to the same account keeps the `connectionKey`, so the model can't
+    /// tell the sessions apart on its own; views recreate it per identity instead.
+    @Test func signingOutAndBackInToTheSameAccount() async throws {
+        try await withLibrarySettings { settings in
+            let calls = Locked<[String]>([])
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service(calls: calls), connectionKey: serverA)
+            let model = HomeModel(store: store, libraryID: "books")
+            await model.load()
+
+            // Without a load while signed out, the old shelves show again.
+            store.clear()
+            #expect(model.sections.isEmpty)
+            await store.connect(client: service(calls: calls), connectionKey: serverA)
+            #expect(model.hasLoaded)
+            #expect(model.sections.map(\.id) == ["continue-listening", "recently-added"])
+
+            // A load while signed out drops the old model, so the next load fetches again.
+            store.clear()
+            await model.load()
+            await store.connect(client: service(calls: calls), connectionKey: serverA)
+            #expect(!model.hasLoaded)
+            #expect(model.sections.isEmpty)
+            await model.load()
+            #expect(model.hasLoaded)
+            #expect(calls.value == ["books", "books"])
+        }
+    }
+
+    @Test func aLoadForThePreviousLibraryIsDropped() async throws {
+        try await withLibrarySettings { settings in
+            let gate = GatedCalls<String, [Shelf]>()
+            var gated = FakeLibraryService()
+            gated.shelvesHandler = { libraryID in try await gate.call(libraryID) }
+            var calls = gate.calls.makeAsyncIterator()
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: gated, connectionKey: serverA)
+            let model = HomeModel(store: store, libraryID: "books")
+
+            let books = Task { await model.load() }
+            let booksCall = try #require(await calls.next())
+            #expect(booksCall.request == "books")
+            #expect(model.isLoading)
+
+            model.libraryID = "pods"
+            #expect(!model.isLoading)
+            let pods = Task { await model.load() }
+            let podsCall = try #require(await calls.next())
+            #expect(podsCall.request == "pods")
+            podsCall.reply.resume(returning: [recentlyAdded])
+            await pods.value
+            #expect(model.sections.map(\.id) == ["recently-added"])
+
+            booksCall.reply.resume(returning: [continueListening, recentlyAdded])
+            await books.value
+            #expect(model.sections.map(\.id) == ["recently-added"])
+            #expect(model.hasLoaded)
+            #expect(!model.isLoading)
+            #expect(model.error == nil)
+        }
+    }
+
+    @Test func aLoadForThePreviousAccountIsDropped() async throws {
+        try await withLibrarySettings { settings in
+            let gate = GatedCalls<String, [Shelf]>()
+            var gated = FakeLibraryService()
+            gated.shelvesHandler = { libraryID in try await gate.call(libraryID) }
+            var calls = gate.calls.makeAsyncIterator()
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: gated, connectionKey: serverA)
+            let model = HomeModel(store: store, libraryID: "books")
+
+            let accountA = Task { await model.load() }
+            let callA = try #require(await calls.next())
+
+            var serviceB = FakeLibraryService()
+            serviceB.shelvesHandler = { _ in [recentlyAdded] }
+            await store.connect(client: serviceB, connectionKey: serverB)
+            #expect(!model.isLoading)
+            await model.load()
+            #expect(model.sections.map(\.id) == ["recently-added"])
+
+            callA.reply.resume(returning: [continueListening, recentlyAdded])
+            await accountA.value
+            #expect(model.sections.map(\.id) == ["recently-added"])
+            #expect(model.hasLoaded)
+            #expect(!model.isLoading)
+            #expect(model.error == nil)
+        }
+    }
 }

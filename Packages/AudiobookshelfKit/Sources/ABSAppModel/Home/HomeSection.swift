@@ -63,6 +63,10 @@ public struct HomeSection: Sendable, Hashable, Identifiable {
     /// `progress` looks up an item's progress by library item and episode ID (pass
     /// ``ProgressCache/progress(libraryItemID:episodeID:)``). It is only called for the items of
     /// Continue Listening shelves, so observation tracks just those keys.
+    ///
+    /// An item without progress stays, because the cache can't tell progress not loaded yet from
+    /// progress removed: progress dropped with ``ProgressCache/remove(libraryItemID:episodeID:)``
+    /// (or by a seed) also keeps its item until the next reload of the shelves.
     public static func sections(
         from shelves: [Shelf], progress: (_ libraryItemID: String, _ episodeID: String?) -> MediaProgress?
     ) -> [HomeSection] {
