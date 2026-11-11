@@ -66,17 +66,29 @@ actor SearchContractFixture {
     }
 
     func request(
-        _ path: String, query: [URLQueryItem] = [], as session: ContractSession? = nil
+        _ path: String, query: [URLQueryItem] = [], as session: ContractSession? = nil,
+        captureLabel: String? = nil
     ) async throws -> Data {
-        try await request(.get, path, query: query, as: session)
+        try await request(.get, path, query: query, as: session, captureLabel: captureLabel)
     }
 
     func request(
         _ method: HTTPMethod, _ path: String, body: (any Encodable & Sendable)? = nil,
-        query: [URLQueryItem] = [], as session: ContractSession? = nil
+        query: [URLQueryItem] = [], as session: ContractSession? = nil, captureLabel: String? = nil
     ) async throws -> Data {
         let response = try await (session ?? admin).client.response(
             for: Endpoint<Data>(method, path, query: query, body: body, timeout: 5, followsRedirects: false))
+        if let captureLabel {
+            try capture(response.value, label: captureLabel)
+            let http = response.httpResponse
+            try capture(
+                JSONSerialization.data(
+                    withJSONObject: [
+                        "url": http.url?.absoluteString ?? "", "method": method.rawValue,
+                        "status": http.statusCode, "headers": http.allHeaderFields,
+                        "userID": (session ?? admin).user.id, "userType": (session ?? admin).user.type.rawValue,
+                    ], options: [.prettyPrinted, .sortedKeys]), label: "\(captureLabel)-http")
+        }
         try #require(response.httpResponse.statusCode == 200)
         return response.value
     }
@@ -133,6 +145,9 @@ actor SearchContractFixture {
         try #require(ordered.compactMap { $0.book?.metadata.title } == ["First", "Second"])
         let token = configuration.token
         for (offset, item) in ordered.enumerated() {
+            let item = try await readItem(item.id)
+            try #require(item.book?.metadata.authors?.map(\.name) == ["\(token) Shared Author"])
+            try #require(item.book?.metadata.series == [])
             let unique = offset == 0
             let metadata = BookMetadata(
                 title: "\(token) Book \(offset + 1)",
@@ -169,6 +184,9 @@ actor SearchContractFixture {
             try #require(Set(book.metadata.narrators ?? []) == Set(names("Narrator", unique: unique)))
             try #require(Set(book.metadata.genres ?? []) == Set(names("Genre", unique: unique)))
             try #require(Set(book.tags ?? []) == Set(names("Tag", unique: unique)))
+            try #require(book.metadata.publisher == (unique ? "First Publisher" : "Second Publisher"))
+            try #require(book.metadata.language == (unique ? "en" : "fr"))
+            try #require(book.metadata.publishedYear == (unique ? "1984" : "2007"))
             let associations = try #require(book.metadata.series)
             try #require(associations.count == (unique ? 2 : 1))
             try #require(associations.first { $0.name == "\(token) Shared Series" }?.sequence == "\(offset + 1)")
@@ -180,6 +198,7 @@ actor SearchContractFixture {
         try #require(podcast.podcast?.metadata.title == "\(token) Podcast")
         try #require(podcast.podcast?.metadata.genres == ["\(token) Podcast Genre"])
         try #require(podcast.podcast?.tags == ["\(token) Podcast Tag"])
+        try #require(podcast.podcast?.metadata.language == "de")
         try #require(podcast.podcast?.episodes == episodes)
 
         var verifiedAuthors: [Author] = []
@@ -289,7 +308,10 @@ actor SearchContractFixture {
         let data = try await request("/api/items/\(id)", query: [URLQueryItem(name: "expanded", value: "1")])
         try registerRelations(SearchRaw.object(data))
         try capture(data, label: "item-detail")
-        return try SearchRaw.item(SearchRaw.object(data))
+        let raw = try SearchRaw.object(data)
+        let item = try SearchRaw.item(raw)
+        try SearchFilterRaw.inventory(raw, item: item, token: configuration.token)
+        return item
     }
 
     private func user() async throws -> ContractSession {
