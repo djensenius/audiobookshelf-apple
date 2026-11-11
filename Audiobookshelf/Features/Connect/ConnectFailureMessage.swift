@@ -74,6 +74,25 @@ extension ConnectFailure {
             URL(string: UIApplication.openSettingsURLString)
         #endif
     }
+
+    /// The recovery buttons shown under this failure, in order.
+    var recoveries: [ConnectRecovery] {
+        switch self {
+        case .httpsUnavailable: [.connectWithoutEncryption]
+        case .localNetworkDenied: (Self.localNetworkSettingsURL == nil ? [] : [.openSettings]) + [.retry]
+        default: []
+        }
+    }
+}
+
+/// A way out of a connect failure, offered as a button.
+enum ConnectRecovery: Hashable {
+    /// Connect over `http` after the `https` attempt failed.
+    case connectWithoutEncryption
+    /// Open Settings to turn local network access back on.
+    case openSettings
+    /// Try the same connection again.
+    case retry
 }
 
 /// The last failure, with its recovery: connecting over `http` after the `https` attempt
@@ -91,28 +110,29 @@ struct ConnectFailureSection: View {
                 Image(systemName: "exclamationmark.octagon.fill")
                     .foregroundStyle(.red)
             }
-            switch failure {
-            case .httpsUnavailable:
-                Button {
-                    Task { await model.connectWithoutEncryption() }
-                } label: {
-                    Text(verbatim: L10n.string("ButtonConnectWithoutEncryption"))
-                }
-            case .localNetworkDenied:
-                if let url = ConnectFailure.localNetworkSettingsURL {
+            ForEach(failure.recoveries, id: \.self) { recovery in
+                switch recovery {
+                case .connectWithoutEncryption:
                     Button {
-                        openURL(url)
+                        Task { await model.connectWithoutEncryption() }
                     } label: {
-                        Text(verbatim: L10n.string("ButtonOpenSettings"))
+                        Text(verbatim: L10n.string("ButtonConnectWithoutEncryption"))
+                    }
+                case .openSettings:
+                    if let url = ConnectFailure.localNetworkSettingsURL {
+                        Button {
+                            openURL(url)
+                        } label: {
+                            Text(verbatim: L10n.string("ButtonOpenSettings"))
+                        }
+                    }
+                case .retry:
+                    Button {
+                        Task { await model.retry() }
+                    } label: {
+                        Text(verbatim: L10n.string("ButtonRetry"))
                     }
                 }
-                Button {
-                    Task { await model.retry() }
-                } label: {
-                    Text(verbatim: L10n.string("ButtonRetry"))
-                }
-            default:
-                EmptyView()
             }
         }
         .disabled(model.isBusy)
