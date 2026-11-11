@@ -63,6 +63,9 @@ public final class PlaybackCoordinator {
     /// The current server session: display metadata, chapters and the expanded library item.
     /// Its id is a capability (ADR 0007); never log it.
     public private(set) var session: PlaybackSession?
+    /// The latest failure. Cleared when committing to a new session attempt after the policy
+    /// check, when the engine accepts a play request, or on stop. A refused start retains the
+    /// failure; no-op, seek-only and queued same-item play intents do not themselves clear it.
     public private(set) var error: PlaybackCoordinatorError?
     /// The restored record, for display (title, author, cover, chapter) until the item loads.
     public private(set) var restoredRecord: LastPlayedRecord?
@@ -376,8 +379,7 @@ public final class PlaybackCoordinator {
             // An unsent audio edit stays the newest audio while the server's is as the row last saw
             // it: the server's date is row-wide, so another device's ebook or finished change moves it.
             if let local, local.audioDirty, local.serverAudioUnchanged(in: progress) { break }
-            // Playing again intentionally unfinishes a book, so the next audio PATCH keeps the local flag.
-            // Otherwise the position, date and flag all come from the fetched progress: `/play` may
+            // The position, date and flag all come from the fetched progress: `/play` may
             // have captured an older position than the fetch returned.
             if progress.isFinished || progress.currentTime > 0 || progress.duration > 0 {
                 candidates.append(
@@ -398,6 +400,9 @@ public final class PlaybackCoordinator {
         // A row with no saved audio has no position to offer, so a finished-only edit on it (an item
         // never played here, marked finished) adds no candidate: its flag carries no position, and
         // the server's progress, which has the flag once sent, or the record is the position to use.
+        // Completion remains authoritative even when older than the audio edit: audio-only local
+        // edits do not infer an unfinish. If this candidate wins while still finished,
+        // ResumePosition starts at zero unless an explicit start time was supplied.
         if let local, let audioSavedAt = local.audioSavedAt {
             let finishedSavedAt = local.isFinished || local.finishedDirty ? local.finishedSavedAt : nil
             candidates.append(
@@ -777,6 +782,9 @@ public final class PlaybackCoordinator {
         guard phase == .loaded else { return }
         switch event {
         case .tick(let time):
+            // An internal engine.play() retry has no awaited coordinator seek completion.
+            // Its owed didSeek waits for the first tick with no pending target after loaded;
+            // clearing the flag before emitting prevents later ticks from announcing it again.
             if awaitingSeekLanding, !isFinishingLoad, engine.pendingSeekTarget == nil {
                 awaitingSeekLanding = false
                 emit(.didSeek(time: engine.currentTime))
