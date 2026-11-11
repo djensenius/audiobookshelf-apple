@@ -26,6 +26,8 @@ final class StubProgressSyncService: ProgressSyncService {
     }
 
     struct State {
+        /// Opt-in to the same session state used by StubSessionService.
+        var sessionClient: SessionModelClient?
         var syncs: [(id: String, report: PlaybackSyncReport)] = []
         var patches: [Patch] = []
         var syncErrors: [APIError?] = []
@@ -59,6 +61,9 @@ final class StubProgressSyncService: ProgressSyncService {
     /// The existing recording fixture starts with no canonical rows; explicit ServerSync
     /// fixtures populate this same map. No production fallback or synthetic dated zero is used.
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
+        if let client = state.withLock({ $0.sessionClient }) {
+            return try await client.model.fetchProgress(client, itemID: itemID, episodeID: episodeID)
+        }
         let key = MediaKey(
             serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
         let (progress, gate, error, started) = state.withLock { state in
@@ -112,6 +117,11 @@ final class StubProgressSyncService: ProgressSyncService {
         }
         for continuation in reached { continuation.resume() }
         await gate?.wait()
+        if let client = state.withLock({ $0.sessionClient }) {
+            try await client.model.sync(client, id: id, report: report)
+            state.withLock { $0.log.append("sync \(number) done") }
+            return
+        }
         if let serverSync, error == nil {
             await serverSync.beforeProcessing.wait()
             // Online /sync carries no client edit timestamp. The server dates the write when
