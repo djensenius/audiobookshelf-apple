@@ -235,4 +235,58 @@ struct ProgressSyncBackoffTests {
         await s.syncer.flush()
         #expect(s.service.patches.map(\.update) == [SyncHarness.audio(15), SyncHarness.audio(30)])
     }
+
+    /// Holds the first report at t = 15 and answers it with `error` once a pause at t = 17 has
+    /// queued another report behind it.
+    private static func queueBehindAFailure(_ error: APIError) async throws -> (SyncHarness, Gate) {
+        let s = try SyncHarness()
+        let response = Gate()
+        s.service.state.withLock {
+            $0.syncErrors = [error]
+            $0.syncGates = [response]
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await s.service.waitForSyncs(1)
+        await s.play(for: 2, settling: false)
+        s.coordinator.pause()
+        await s.syncer.waitForPendingWrites()
+        return (s, response)
+    }
+
+    @Test func aReportQueuedBehindA429WaitsForTheBackoff() async throws {
+        let (s, response) = try await Self.queueBehindAFailure(Self.status(429))
+        response.open()
+        await s.settle()
+        #expect(s.service.reports.count == 1)
+
+        await s.syncer.flush()
+
+        #expect(s.service.reports.map(\.currentTime) == [15, 17])
+        #expect(s.service.reports.map(\.timeListened) == [15, 17])
+    }
+
+    @Test func aReportQueuedBehindA404IsPatchedInstead() async throws {
+        let (s, response) = try await Self.queueBehindAFailure(.notFound)
+        response.open()
+        await s.settle()
+
+        #expect(s.service.reports.count == 1)
+        #expect(s.service.patches.last?.update == SyncHarness.audio(17))
+        #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
+    }
+
+    /// A flush that joins the queued report still bypasses the backoff the failure starts.
+    @Test func aFlushJoiningAQueuedReportIgnoresTheBackoff() async throws {
+        let (s, response) = try await Self.queueBehindAFailure(Self.status(500))
+        let flushQueued = Gate()
+        s.syncer.beforePositionPersistence = { flushQueued.open() }
+        let flushing = Task { await s.syncer.flush() }
+        await flushQueued.wait()
+        s.syncer.beforePositionPersistence = nil
+        response.open()
+        await flushing.value
+
+        #expect(s.service.reports.map(\.currentTime) == [15, 17])
+    }
 }

@@ -216,14 +216,15 @@ struct SyncHarness {
     }
 }
 
-/// One path stream that tests feed by hand; the syncer opens it once.
+/// One path stream that tests feed by hand; the syncer opens it once. Like
+/// `SystemNetworkPathSource`, it keeps only the newest path while its consumer is busy.
 final class StubNetworkPathSource: NetworkPathSource, Sendable {
     private let stream: AsyncStream<NetworkPath>
     private let continuation: AsyncStream<NetworkPath>.Continuation
     private let terminated = Mutex(false)
 
     init() {
-        (stream, continuation) = AsyncStream.makeStream()
+        (stream, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
         continuation.onTermination = { [weak self] _ in self?.terminated.withLock { $0 = true } }
     }
 

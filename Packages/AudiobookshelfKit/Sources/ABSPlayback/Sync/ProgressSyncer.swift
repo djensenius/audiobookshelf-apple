@@ -112,6 +112,8 @@ public final class ProgressSyncer {
     private var loadedTime: Double?
     /// The session with a `/sync` queued but not started; later requests join it.
     private var queuedSyncSessionID: String?
+    /// Whether a ``flush()`` joined the queued `/sync`, so it goes out despite a backoff.
+    private var queuedSyncIgnoresBackoff = false
     private var tail: Task<Void, Never>?
     private var persistenceTail: Task<Void, Never>?
     /// Test seam: hold local persistence independently of transport.
@@ -137,7 +139,8 @@ public final class ProgressSyncer {
     private var isDrainQueued = false
     /// Follows the network path; cancelled on detach and quiesce. Readable for tests to join.
     private(set) var pathTask: Task<Void, Never>?
-    /// Test seam: called after each network path is handled, with whether it drained.
+    /// Test seam: called after each network path is handled, with whether it queued a drain
+    /// (join it with ``waitForIdle()``).
     var pathHandled: (@MainActor (NetworkPath, Bool) -> Void)?
 
     /// Starts following `source`: observes its events and supplies its `finalCloseReport`.
@@ -216,6 +219,8 @@ public final class ProgressSyncer {
     }
 
     /// Drains on each offline-to-online transition, not on repeated or initial online paths.
+    /// The drain is queued, not awaited: the system source keeps only the newest path, so
+    /// blocking here could miss an offline-to-online cycle while a drain's request is in flight.
     private func watch(_ paths: AsyncStream<NetworkPath>) {
         pathTask = Task { [weak self] in
             var wasOnline: Bool?
@@ -223,7 +228,7 @@ public final class ProgressSyncer {
                 guard let self, !self.isDetached, !self.isTransportQuiesced else { return }
                 let reconnected = wasOnline == false && path.isOnline
                 wasOnline = path.isOnline
-                if reconnected { await self.drainPendingProgress() }
+                if reconnected { self.requestDrain() }
                 self.pathHandled?(path, reconnected)
             }
         }
@@ -385,20 +390,39 @@ public final class ProgressSyncer {
             if !session.isRowRejected { requestDrain() }
             return
         }
-        guard queuedSyncSessionID != sessionID else { return }
+        guard queuedSyncSessionID != sessionID else {
+            // A flush joining a queued report keeps its bypass of the backoff.
+            if ignoringBackoff { queuedSyncIgnoresBackoff = true }
+            return
+        }
         queuedSyncSessionID = sessionID
+        queuedSyncIgnoresBackoff = ignoringBackoff
         enqueue { [weak self] in await self?.sendSync(sessionID: sessionID) }
     }
 
     /// Sends the latest saved trigger for `sessionID`, if it is still current.
     private func sendSync(sessionID: String) async {
         await waitForPendingWrites()
-        if queuedSyncSessionID == sessionID { queuedSyncSessionID = nil }
+        var ignoringBackoff = false
+        if queuedSyncSessionID == sessionID {
+            queuedSyncSessionID = nil
+            ignoringBackoff = queuedSyncIgnoresBackoff
+        }
         guard await settleSessionAudioOutcomes() else { return }
         guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty,
             let session = current, session.sessionID == sessionID,
             let position = session.position
         else { return }
+        // A failure answered while this report was queued may have abandoned or backed off the
+        // session; its listening time stays for the next report.
+        if session.isAbandoned {
+            if !session.isRowRejected { await drain() }
+            return
+        }
+        if !ignoringBackoff, let retryAt = session.retryAt, clock.uptime() < retryAt {
+            lastSyncAt = retryAt - Self.syncInterval
+            return
+        }
         let listened = session.listened
         guard
             let report = PlaybackSyncReport(

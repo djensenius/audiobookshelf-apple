@@ -14,22 +14,64 @@ struct ProgressSyncReconnectTests {
     private struct Fixture {
         let paths = StubNetworkPathSource()
         let s: SyncHarness
-        var handled: AsyncStream<Bool>.Iterator
+        var handled: AsyncStream<(NetworkPath, Bool)>.Iterator
 
         init() throws {
             s = try SyncHarness(paths: paths)
-            let (stream, continuation) = AsyncStream.makeStream(of: Bool.self)
-            s.syncer.pathHandled = { _, drained in continuation.yield(drained) }
+            let (stream, continuation) = AsyncStream.makeStream(of: (NetworkPath, Bool).self)
+            s.syncer.pathHandled = { path, drained in continuation.yield((path, drained)) }
             handled = stream.makeAsyncIterator()
         }
 
-        /// Sends `path` and returns whether handling it drained.
+        /// Sends `path` and returns whether handling it drained, once that drain finished.
         mutating func send(_ path: NetworkPath) async -> Bool? {
             paths.send(path)
+            let drained = await nextHandled()?.1
+            await s.settle()
+            return drained
+        }
+
+        /// The next path the syncer handled, and whether it queued a drain.
+        mutating func nextHandled() async -> (NetworkPath, Bool)? {
             var iterator = handled
             defer { handled = iterator }
             return await iterator.next(isolation: #isolation)
         }
+    }
+
+    /// Offline and online again while a drain's lookup is in flight, and the lookup fails: the
+    /// newest-only path buffer must not hide the reconnect, so the drain is retried.
+    @Test func reconnectDuringAnInFlightDrainRetriesIt() async throws {
+        var f = try Fixture()
+        let s = f.s
+        try await s.store.recordEdit(ActiveRefreshFixture.edit(50), for: s.h.key("a"), now: s.h.clock.now)
+        let lookup = Gate()
+        let lookupStarted = Gate()
+        s.service.state.withLock {
+            $0.fetchGates = [lookup]
+            $0.fetchStarted = lookupStarted
+            $0.fetchErrors = [.network(.notConnectedToInternet)]
+        }
+        #expect(await f.send(.offline) == false)
+        f.paths.send(.wifi)
+        await lookupStarted.wait()
+
+        f.paths.send(.offline)
+        f.paths.send(.wifi)
+        lookup.open()
+        // A sentinel path: everything sent before it was handled once it is.
+        f.paths.send(.cellular)
+        var drained: [Bool] = []
+        while let handled = await f.nextHandled() {
+            drained.append(handled.1)
+            if handled.0 == .cellular { break }
+        }
+        await s.settle()
+
+        #expect(drained.first == true)
+        #expect(s.service.state.withLock { $0.fetches.count } >= 2)
+        #expect(s.service.patches == [.init(itemID: "a", update: SyncHarness.audio(50))])
+        #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
     }
 
     @Test func reconnectDrainsPendingProgressOnce() async throws {
