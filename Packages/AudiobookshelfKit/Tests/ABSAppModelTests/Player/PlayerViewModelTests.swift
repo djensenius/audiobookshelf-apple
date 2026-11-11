@@ -351,6 +351,22 @@ private func restoredRecord(duration: Double? = 400) -> LastPlayedRecord {
         }
     }
 
+    /// The same item loading (session set, restored record cleared) keeps a scrub begun while it
+    /// was restored, over the range fixed when it began.
+    @Test func aScrubSurvivesTheSameItemLoading() async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.restore(restoredRecord())
+            model.beginScrub()
+            model.scrub(to: 0.5)
+            playback.start(FakePlaybackControl.bookSession(), at: 120)
+            #expect(model.elapsed == 200)
+            playback.load(FakePlaybackControl.bookSession(), at: 120)
+            #expect(model.elapsed == 200)
+            await model.endScrub()
+            #expect(playback.calls == [.seek(200)])
+        }
+    }
+
     @Test func aScrubDoesNotSurviveTheItemClosing() async throws {
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = true
@@ -459,6 +475,9 @@ private func restoredRecord(duration: Double? = 400) -> LastPlayedRecord {
             playback.load(FakePlaybackControl.bookSession(), at: 120)
             #expect(model.title == "Dune")
             #expect(model.coverKey == restoredCover)
+            // A restart is a new session, which gets the dated key.
+            playback.start(FakePlaybackControl.bookSession(id: "sess_2"), at: 120)
+            #expect(model.coverKey?.updatedAt == 1_700_000_000_000)
         }
     }
 

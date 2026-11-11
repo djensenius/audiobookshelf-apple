@@ -97,9 +97,11 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         Chapter(id: 2, start: 250, end: 400, title: "Ending"),
     ]
 
-    nonisolated static func bookSession(item: String = "li_book", chapters: [Chapter] = chapters) -> PlaybackSession {
+    nonisolated static func bookSession(
+        item: String = "li_book", id: String? = nil, chapters: [Chapter] = chapters
+    ) -> PlaybackSession {
         PlaybackSession(
-            id: "sess_\(item)", libraryItemId: item, mediaType: .book,
+            id: id ?? "sess_\(item)", libraryItemId: item, mediaType: .book,
             mediaMetadata: .book(BookMetadata(title: "Dune")), chapters: chapters, displayTitle: "Dune",
             displayAuthor: "Frank Herbert", coverPath: "/metadata/items/\(item)/cover.jpg", duration: 400,
             audioTracks: [AudioTrack(index: 1, startOffset: 0, duration: 400, mimeType: "audio/mpeg")],
@@ -110,7 +112,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     func load(_ session: PlaybackSession, at time: Double = 0, playing: Bool = false) {
         phase = .loaded
         isBuffering = false
-        mediaKey = Self.key(item: session.libraryItemId, episode: session.episodeId)
+        setKey(for: session)
         self.session = session
         restoredRecord = nil
         let timeline = PlaybackTimeline(session: session)
@@ -125,13 +127,19 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     /// `.starting`: the session is set, the timeline isn't, and the duration isn't known yet.
     func start(_ session: PlaybackSession, at time: Double = 0) {
         phase = .starting
-        mediaKey = Self.key(item: session.libraryItemId, episode: session.episodeId)
+        setKey(for: session)
         self.session = session
         timeline = nil
         duration = 0
         currentTime = time
         isBuffering = true
         isPlaybackRequested = true
+    }
+
+    /// Like the coordinator, the key is only set when the item changes, not when it restarts.
+    private func setKey(for session: PlaybackSession) {
+        let key = Self.key(item: session.libraryItemId, episode: session.episodeId)
+        if mediaKey != key { mediaKey = key }
     }
 
     /// Makes `record` the restored, unloaded item.

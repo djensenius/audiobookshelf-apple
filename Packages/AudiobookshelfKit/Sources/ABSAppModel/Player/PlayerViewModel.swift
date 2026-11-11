@@ -41,7 +41,8 @@ public enum PlayerErrorMessage: Sendable, Hashable {
 ///   media seconds; ``remainingAtRate`` is the wall-clock time left.
 /// - **Scrubbing.** Between ``beginScrub()`` and ``endScrub()`` the times and progress show the
 ///   scrub position over the range fixed when it began, ignoring playback ticks; ``endScrub()``
-///   seeks once, and only if the position moved. A change of item or session cancels the scrub.
+///   seeks once, and only if the position moved. A change of item cancels the scrub; the same item
+///   loading (a new session, the restored record cleared) doesn't.
 /// - **Presentation.** Whether the full player or an inspector is shown is per scene, on `Router`
 ///   (ADR 0004), not here.
 @MainActor
@@ -98,6 +99,7 @@ public final class PlayerViewModel {
         self.playback = playback
         self.settings = settings
         trackDisplay()
+        trackItem()
     }
 
     // MARK: Item
@@ -232,7 +234,7 @@ public final class PlayerViewModel {
     }
 
     /// Ends scrubbing and seeks to the scrub position, once. A scrub that never moved, or that a
-    /// change of item or session cancelled, ends without seeking: seeking an unloaded item would
+    /// change of item cancelled, ends without seeking: seeking an unloaded item would
     /// replace its resume position.
     public func endScrub() async {
         let scrub = activeScrub
@@ -285,19 +287,30 @@ public final class PlayerViewModel {
 
     /// Runs just before every item, session or record change (Observation calls `onChange` on
     /// `willSet`, while the old values are still readable): captures the outgoing display text, so it
-    /// is kept even when no view read it, cancels any scrub, and observes again.
+    /// is kept even when no view read it, and observes again.
     private func trackDisplay() {
         withObservationTracking {
             _ = display
         } onChange: { [weak self] in
             // Safe: every conformer is `@MainActor` (the protocol is), so its properties change, and
             // `onChange` runs, on the main actor. This keeps the capture synchronous, before the change.
-            MainActor.assumeIsolated { self?.displayWillChange() }
+            MainActor.assumeIsolated { self?.trackDisplay() }
         }
     }
 
-    private func displayWillChange() {
-        scrubState = nil
-        trackDisplay()
+    /// Cancels any scrub whenever the item changes. Closing always passes through no item, so even
+    /// the same item coming back starts without the old scrub. The coordinator doesn't set the key
+    /// when the same item restarts, so a scrub survives its loading.
+    private func trackItem() {
+        withObservationTracking {
+            _ = playback.mediaKey
+        } onChange: { [weak self] in
+            // Safe for the same reason as in `trackDisplay()`.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.scrubState != nil { self.scrubState = nil }
+                self.trackItem()
+            }
+        }
     }
 }

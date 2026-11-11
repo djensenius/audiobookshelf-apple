@@ -111,6 +111,18 @@ import Testing
         #expect(replaced.coverKey?.updatedAt == 1_700_000_000_000)
     }
 
+    @Test func aLaterSessionGetsTheDatedCoverKey() throws {
+        let restored = PlayerDisplayInfo(record: record(coverPath: "/metadata/items/li_book/cover.jpg"))
+        let first = try #require(
+            PlayerDisplayInfo.resolve(
+                key: key, session: FakePlaybackControl.bookSession(id: "s1"), restoredRecord: nil,
+                retaining: restored))
+        #expect(first.coverKey?.updatedAt == nil)
+        let second = PlayerDisplayInfo.resolve(
+            key: key, session: FakePlaybackControl.bookSession(id: "s2"), restoredRecord: nil, retaining: first)
+        #expect(second?.coverKey?.updatedAt == 1_700_000_000_000)
+    }
+
     @Test func resolveKeepsTheLastTextWhenTheSessionDrops() {
         let live = PlayerDisplayInfo(session: FakePlaybackControl.bookSession(), key: key)
         // A failed load keeps the restored record; it must not overwrite the live text.

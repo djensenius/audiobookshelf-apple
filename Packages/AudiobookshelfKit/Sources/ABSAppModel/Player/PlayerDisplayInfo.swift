@@ -53,8 +53,9 @@ struct PlayerDisplayInfo: Sendable, Hashable {
     }
 
     /// The text for `key`: the matching session's, else `previous` when it is for the same item,
-    /// else the matching restored record's; `nil` without an item or anything to show. A session
-    /// that replaces a restored record keeps the record's cover key when only its date differs.
+    /// else the matching restored record's; `nil` without an item or anything to show. The first
+    /// session after a restored record keeps the record's cover key when only its date differs; a
+    /// later session doesn't, so the undated key (any cached version) doesn't stick.
     static func resolve(
         key: MediaKey?, session: PlaybackSession?, restoredRecord: LastPlayedRecord?,
         retaining previous: PlayerDisplayInfo?
@@ -64,7 +65,9 @@ struct PlayerDisplayInfo: Sendable, Hashable {
         if let session, session.libraryItemId == key.libraryItemId, session.episodeId == key.episodeId {
             if let previous, previous.sessionID == session.id { return previous }
             var info = PlayerDisplayInfo(session: session, key: key)
-            if let kept = previous?.coverKey, let fresh = info.coverKey, Self.isSameCover(kept, dated: fresh) {
+            if let previous, previous.sessionID == nil, let kept = previous.coverKey, let fresh = info.coverKey,
+                Self.isSameCover(kept, dated: fresh)
+            {
                 info.coverKey = kept
             }
             return info
@@ -89,8 +92,9 @@ struct PlayerDisplayInfo: Sendable, Hashable {
     /// Whether `fresh` is `kept` (a restored record's undated key) with only its `updatedAt` added.
     /// Keeping `kept` then stops the cover reloading when a restored item's session starts.
     private static func isSameCover(_ kept: ImageKey, dated fresh: ImageKey) -> Bool {
-        kept.updatedAt == nil && kept.serverID == fresh.serverID && kept.kind == fresh.kind
-            && kept.entityID == fresh.entityID && kept.bucket == fresh.bucket && kept.externalURL == fresh.externalURL
+        var undated = fresh
+        undated.updatedAt = nil
+        return kept.updatedAt == nil && kept == undated
     }
 
     static func nonEmpty(_ text: String?) -> String? {
