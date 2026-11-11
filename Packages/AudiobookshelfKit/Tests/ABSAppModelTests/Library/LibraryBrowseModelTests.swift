@@ -206,6 +206,26 @@ private func page(_ ids: [String], total: Int, page: Int = 0) throws -> PagedRes
         #expect(model.items.isEmpty && model.reachedEnd)
     }
 
+    @Test(arguments: [
+        LibraryViewPreferences.Filter(group: .narrators),
+        LibraryViewPreferences.Filter(group: .progress, value: "bogus"),
+    ])
+    func aPinnedFilterWithoutAUsableValueRequestsNothing(pinned: LibraryViewPreferences.Filter) async throws {
+        let requests = Locked(0)
+        let service = FakeLibraryService(itemsHandler: { _, _ in
+            requests.value += 1
+            return try page(["item"], total: 1)
+        })
+        let model = LibraryBrowseModel(
+            client: service, libraryID: "books", mediaType: .book, pinnedFilter: pinned, map: { Slim(id: $0.id) })
+        #expect(model.isFilterUnsupported)
+
+        await model.load()?.value
+        await model.list.refresh()?.value
+        #expect(requests.value == 0)
+        #expect(model.items.isEmpty && model.reachedEnd)
+    }
+
     @Test func settingTheSameQueryAgainDoesNotReload() async throws {
         let harness = Harness()
         let load = harness.model.load()

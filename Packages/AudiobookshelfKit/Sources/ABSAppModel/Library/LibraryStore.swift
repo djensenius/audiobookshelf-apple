@@ -279,10 +279,22 @@ public final class LibraryStore {
         return settings.libraryViewPreferences(for: connectionKey, libraryID: libraryID)
     }
 
-    /// Saves the account's preferences for a library, for example as ``LibraryBrowseModel``'s
-    /// `persist`; does nothing when no account is connected.
-    public func saveViewPreferences(_ preferences: LibraryViewPreferences, libraryID: String) {
-        guard let connectionKey else { return }
+    /// Saves the preferences for a library of `connectionKey`'s account, the one the caller loaded
+    /// them for. Does nothing unless the store still serves that account, so a model left over
+    /// from before a logout or an account switch can't write into another account.
+    ///
+    /// Use it as ``LibraryBrowseModel``'s `persist`, capturing the model's account:
+    ///
+    /// ```swift
+    /// guard let key = store.connectionKey else { return }
+    /// let persist: LibraryBrowseModel<Item>.Persist = { [weak store] libraryID, preferences in
+    ///     store?.saveViewPreferences(preferences, libraryID: libraryID, connectionKey: key)
+    /// }
+    /// ```
+    public func saveViewPreferences(
+        _ preferences: LibraryViewPreferences, libraryID: String, connectionKey: LibraryConnectionKey
+    ) {
+        guard connectionKey == self.connectionKey else { return }
         settings.saveLibraryViewPreferences(preferences, for: connectionKey, libraryID: libraryID)
     }
 }

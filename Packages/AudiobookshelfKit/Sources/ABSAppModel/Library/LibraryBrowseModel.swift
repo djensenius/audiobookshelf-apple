@@ -8,8 +8,9 @@ import Observation
 public struct LibraryBrowseQuery: Sendable, Hashable {
     public var libraryID: String
     public var query: LibraryQuery
-    /// The filter isn't offered for the library's type, so ``query`` lacks it: the list loads an
-    /// empty page without a request instead of the whole library.
+    /// The pinned filter can't be queried in the library
+    /// (``LibraryBrowseModel/isFilterUnsupported``), so ``query`` lacks it: the list loads an empty
+    /// page without a request instead of the whole library.
     public var isFilterUnsupported = false
 }
 
@@ -27,8 +28,8 @@ public struct LibraryBrowseQuery: Sendable, Hashable {
 /// switching to a library of another type, never writes.
 ///
 /// A pinned filter (for example a narrator's route) is shown and queried but never saved: the
-/// library keeps its stored filter. When the library's type doesn't offer the pinned filter
-/// (``isFilterUnsupported``), the list stays empty and no items are requested, rather than
+/// library keeps its stored filter. When the repair for the library's type would drop the pinned
+/// filter (``isFilterUnsupported``), the list stays empty and no items are requested, rather than
 /// showing the whole library.
 ///
 /// Changing the preferences or the library starts a new query on the list, which cancels the page
@@ -49,9 +50,13 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
     public let pinnedFilter: LibraryViewPreferences.Filter?
     public let list: ItemListModel<LibraryBrowseQuery, Item>
 
-    /// The library's type doesn't offer ``pinnedFilter``'s group (for example narrators in a
-    /// podcast library): the list requests no items and ends empty, so views show no items.
-    public var isFilterUnsupported: Bool { Self.isUnsupported(pinnedFilter, in: mediaType) }
+    /// The repair for ``mediaType`` (``LibraryViewPreferences/resolved(for:)``) would drop
+    /// ``pinnedFilter``: the type doesn't offer its group (for example narrators in a podcast
+    /// library), or it has no usable value (for example a narrator without a name). The list then
+    /// requests no items and ends empty, so views show no items.
+    public var isFilterUnsupported: Bool {
+        Self.isUnsupported(pinnedFilter, in: preferences, mediaType: mediaType)
+    }
 
     @ObservationIgnored private let defaults: LibraryViewPreferences
     @ObservationIgnored private let persist: Persist?
@@ -143,7 +148,7 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
     ) -> LibraryBrowseQuery {
         LibraryBrowseQuery(
             libraryID: libraryID, query: preferences.query(for: mediaType),
-            isFilterUnsupported: isUnsupported(pinnedFilter, in: mediaType))
+            isFilterUnsupported: isUnsupported(pinnedFilter, in: preferences, mediaType: mediaType))
     }
 
     /// `preferences` with `pinnedFilter`, if any, in place of their filter.
@@ -156,8 +161,12 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
         return pinned
     }
 
-    private static func isUnsupported(_ filter: LibraryViewPreferences.Filter?, in mediaType: MediaType) -> Bool {
-        guard let filter else { return false }
-        return !LibraryFilterGroup.groups(for: mediaType).contains(filter.group)
+    /// Whether repairing `preferences`, which hold `pinnedFilter`, for `mediaType` drops or changes
+    /// the pin (``LibraryViewPreferences/resolved(for:)``), so their query wouldn't apply it.
+    private static func isUnsupported(
+        _ pinnedFilter: LibraryViewPreferences.Filter?, in preferences: LibraryViewPreferences, mediaType: MediaType
+    ) -> Bool {
+        guard let pinnedFilter else { return false }
+        return preferences.resolved(for: mediaType).filter != pinnedFilter
     }
 }

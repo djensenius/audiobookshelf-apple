@@ -102,6 +102,19 @@ public struct LibraryViewPreferences: Sendable, Hashable, Codable {
         }
 
         public var libraryFilter: LibraryFilter { LibraryFilter(group: group.rawValue, value: value) }
+
+        /// Whether the filter has a value its group can filter by: any non-empty value, except that
+        /// progress and ebooks take only their fixed values (``LibraryFilterModel/ProgressState``,
+        /// ``LibraryFilterModel/EbookKind``). Groups that take no value need none.
+        fileprivate var hasUsableValue: Bool {
+            guard group.needsValue else { return true }
+            guard let value, !value.isEmpty else { return false }
+            switch group {
+            case .progress: return LibraryFilterModel.ProgressState(rawValue: value) != nil
+            case .ebooks: return LibraryFilterModel.EbookKind(rawValue: value) != nil
+            default: return true
+            }
+        }
     }
 
     public var sort: LibrarySortKey
@@ -144,7 +157,9 @@ public struct LibraryViewPreferences: Sendable, Hashable, Codable {
     /// unless they name something the type doesn't support:
     /// - a sort of the other type becomes its counterpart (author, duration and number of
     ///   episodes swap; anything else becomes the title) and keeps the direction;
-    /// - a filter group the type doesn't offer is dropped (`nil`);
+    /// - a filter is dropped (`nil`) when the type doesn't offer its group, or when it has no
+    ///   usable value: none or an empty one for a group that takes a value, or a progress or
+    ///   ebooks value that isn't one of the group's fixed values;
     /// - series collapsing is off for podcasts.
     ///
     /// Callers use the repaired value to query and to show; they save only what the user changes
@@ -153,7 +168,7 @@ public struct LibraryViewPreferences: Sendable, Hashable, Codable {
     public func resolved(for mediaType: MediaType) -> LibraryViewPreferences {
         var result = self
         result.sort = sort.repaired(for: mediaType)
-        if let filter, !LibraryFilterGroup.groups(for: mediaType).contains(filter.group) {
+        if let filter, !LibraryFilterGroup.groups(for: mediaType).contains(filter.group) || !filter.hasUsableValue {
             result.filter = nil
         }
         if mediaType == .podcast { result.collapseSeries = false }
