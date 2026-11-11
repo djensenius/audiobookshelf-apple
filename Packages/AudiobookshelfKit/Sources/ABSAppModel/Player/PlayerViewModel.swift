@@ -41,8 +41,10 @@ public enum PlayerErrorMessage: Sendable, Hashable {
 ///   media seconds; ``remainingAtRate`` is the wall-clock time left.
 /// - **Scrubbing.** Between ``beginScrub()`` and ``endScrub()`` the times and progress show the
 ///   scrub position over the range fixed when it began, ignoring playback ticks; ``endScrub()``
-///   seeks once, and only if the position moved. A change of item cancels the scrub; the same item
-///   loading (a new session, the restored record cleared) doesn't.
+///   seeks once, and only if the position moved. A change of item cancels the scrub, and the rest
+///   of that gesture is ignored until ``endScrub()`` or a new ``beginScrub()``; the same item
+///   loading (a new session, the restored record cleared) doesn't cancel it. No scrub begins while
+///   an item is starting, before its resume position is known.
 /// - **Presentation.** Whether the full player or an inspector is shown is per scene, on `Router`
 ///   (ADR 0004), not here.
 @MainActor
@@ -56,6 +58,9 @@ public final class PlayerViewModel {
     /// read, and synchronously just before each item, session or record change, so it holds a
     /// session's text even if no view read it.
     @ObservationIgnored private var retainedDisplay: PlayerDisplayInfo?
+    /// An item change cancelled the scrub: further ``scrub(to:)`` calls from the same gesture must
+    /// not begin a scrub on the new item.
+    @ObservationIgnored private var scrubCancelled = false
 
     private struct Scrub {
         var key: MediaKey?
@@ -213,22 +218,27 @@ public final class PlayerViewModel {
         await playback.seek(to: start)
     }
 
-    /// Starts scrubbing over the range shown now. Does nothing without an item or with an empty
-    /// range (an unloaded item of unknown duration, or one still starting).
+    /// Starts scrubbing over the range shown now. Does nothing without an item, while it is
+    /// starting (a seek would replace the resume position still being resolved), or with an empty
+    /// range (an unloaded item of unknown duration).
     public func beginScrub() {
-        guard hasSession else { return }
+        scrubCancelled = false
+        guard hasSession, playback.phase != .starting else { return }
         let (range, time) = shownPosition
         guard range.duration > 0 else { return }
         scrubState = Scrub(key: playback.mediaKey, range: range, time: range.time(forElapsed: range.elapsed(at: time)))
     }
 
     /// Moves the scrub position to `fraction` (`0...1`) of the shown range, beginning a scrub if
-    /// none is in progress.
+    /// none is in progress, unless an item change cancelled this gesture's scrub.
     public func scrub(to fraction: Double) {
+        guard !scrubCancelled else { return }
         if activeScrub == nil { beginScrub() }
         guard var scrub = activeScrub else { return }
         let fraction = fraction.isNaN ? 0 : min(max(fraction, 0), 1)
-        scrub.time = scrub.range.time(forElapsed: fraction * scrub.range.duration)
+        let time = scrub.range.time(forElapsed: fraction * scrub.range.duration)
+        guard time != scrub.time else { return }
+        scrub.time = time
         scrub.moved = true
         scrubState = scrub
     }
@@ -237,6 +247,7 @@ public final class PlayerViewModel {
     /// change of item cancelled, ends without seeking: seeking an unloaded item would
     /// replace its resume position.
     public func endScrub() async {
+        scrubCancelled = false
         let scrub = activeScrub
         scrubState = nil
         guard let scrub, scrub.moved else { return }
@@ -308,7 +319,10 @@ public final class PlayerViewModel {
             // Safe for the same reason as in `trackDisplay()`.
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if self.scrubState != nil { self.scrubState = nil }
+                if self.scrubState != nil {
+                    self.scrubState = nil
+                    self.scrubCancelled = true
+                }
                 self.trackItem()
             }
         }

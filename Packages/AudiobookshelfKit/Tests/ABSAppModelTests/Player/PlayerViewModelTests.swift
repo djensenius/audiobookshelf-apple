@@ -367,6 +367,57 @@ private func restoredRecord(duration: Double? = 400) -> LastPlayedRecord {
         }
     }
 
+    /// A starting item can know its duration before its resume position is resolved; a new scrub
+    /// then must not replace that position with an explicit seek.
+    @Test func noScrubBeginsWhileStarting() async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.start(FakePlaybackControl.bookSession(), at: 0)
+            playback.duration = 400
+            model.beginScrub()
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// After an item change cancels a scrub, the rest of that drag doesn't scrub the new item.
+    @Test func aCancelledGestureDoesNotScrubTheNextItem() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.beginScrub()
+            model.scrub(to: 0.9)
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            model.scrub(to: 0.2)
+            #expect(model.elapsed == 10)
+            await model.endScrub()
+            #expect(playback.calls.isEmpty)
+            // The next gesture scrubs normally.
+            model.scrub(to: 0.5)
+            await model.endScrub()
+            #expect(playback.calls == [.seek(200)])
+        }
+    }
+
+    /// Dragging back to where the scrub began isn't a move, so it doesn't seek; a later move
+    /// still counts even if the drag ends where it began.
+    @Test func scrubToTheSamePositionIsNotAMove() async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.restore(restoredRecord())
+            model.beginScrub()
+            model.scrub(to: 0.3)
+            await model.endScrub()
+            #expect(playback.calls.isEmpty)
+            model.beginScrub()
+            model.scrub(to: 0.5)
+            model.scrub(to: 0.3)
+            await model.endScrub()
+            #expect(playback.calls == [.seek(120)])
+        }
+    }
+
     @Test func aScrubDoesNotSurviveTheItemClosing() async throws {
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = true
