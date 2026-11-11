@@ -2,6 +2,7 @@ import ABSAPI
 import ABSAppModel
 import ABSUI
 import Foundation
+import SwiftUI
 
 /// The primary button's label, icon and state for an ``ItemDetailModel/PlayButton``, kept apart
 /// from the view so it can be tested.
@@ -33,6 +34,36 @@ struct ItemDetailPlayPresentation: Equatable {
             systemImage = isMissing ? "exclamationmark.triangle" : "play.fill"
         }
         isEnabled = button != .unavailable && canPlay
+    }
+}
+
+/// Whether the screen stacks everything in one column or puts the cover, actions and progress
+/// beside the rest.
+enum ItemDetailLayout {
+    /// The side column with the cover, actions and progress.
+    static let sideColumnWidth: CGFloat = 300
+    /// Between the two columns.
+    static let columnSpacing = ABSSpacing.xLarge
+    /// Around the content, on each side.
+    static let padding = ABSSpacing.large
+    /// The narrowest the title, metadata and description column gets beside the side column.
+    static let minimumTextColumnWidth: CGFloat = 320
+
+    /// The narrowest content width for two columns: 300 + 24 + 2 × 16 + 320 = 676 points.
+    static var twoColumnMinimumWidth: CGFloat {
+        sideColumnWidth + columnSpacing + 2 * padding + minimumTextColumnWidth
+    }
+
+    /// - Parameters:
+    ///   - width: The scroll view's width; `nil` until measured.
+    ///   - sizeClass: The horizontal size class; `nil` on macOS.
+    /// - Returns: `true` for a compact size class, as before, and for any other (or no) size
+    ///   class when `width` is too narrow for two columns, such as a narrow macOS window or a
+    ///   narrow iPad split. An unmeasured width keeps two columns.
+    static func usesStackedLayout(width: CGFloat?, sizeClass: UserInterfaceSizeClass?) -> Bool {
+        if sizeClass == .compact { return true }
+        guard let width else { return false }
+        return width < twoColumnMinimumWidth
     }
 }
 
