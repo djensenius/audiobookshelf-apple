@@ -12,12 +12,14 @@ import SwiftData
         case incompleteDownload
     }
 
-    /// What ``deleteEpisode(itemID:episodeId:now:)`` removed.
+    /// What ``deleteEpisode(itemID:episodeId:deletingEmptyItem:now:)`` removed.
     public struct EpisodeDeletion: Sendable, Equatable {
         /// The deleted files, to remove from disk (empty when the episode had none).
         public var removedFiles: [LocalFileDTO]
         /// Whether the item has no files left, so the caller can delete it.
         public var itemIsEmpty: Bool
+        /// The item as it was deleted, with no files, when `deletingEmptyItem` deleted it too.
+        public var deletedItem: LocalLibraryItemDTO?
     }
 
     var pendingCommitFailure: (any Error)?
@@ -130,9 +132,13 @@ import SwiftData
     /// Removes one downloaded podcast episode, its files and its snapshot entry, in one
     /// transaction. Returns the deleted files, so the caller can remove them from disk, and
     /// whether the item is now empty, so the caller can delete it; `nil` when the item doesn't
-    /// exist.
+    /// exist. With `deletingEmptyItem`, an item left without files is deleted in the same
+    /// transaction, and returned: an episode saved into it meanwhile (a download finalised by
+    /// ``upsertFromDownload(_:coverUpdatedAt:now:)``) either keeps it or comes after, as a new item.
     @discardableResult
-    public func deleteEpisode(itemID: UUID, episodeId: String, now: Date = .now) throws -> EpisodeDeletion? {
+    public func deleteEpisode(
+        itemID: UUID, episodeId: String, deletingEmptyItem: Bool = false, now: Date = .now
+    ) throws -> EpisodeDeletion? {
         try commit {
             guard let item = try fetchItem(id: itemID) else { return nil }
             let removed = item.files.filter { $0.episodeId == episodeId }
@@ -143,7 +149,12 @@ import SwiftData
             item.files.removeAll { $0.episodeId == episodeId }
             item.media.episodes.removeAll { $0.id == episodeId }
             item.updatedAt = now
-            return EpisodeDeletion(removedFiles: deleted, itemIsEmpty: item.files.isEmpty)
+            var deletion = EpisodeDeletion(removedFiles: deleted, itemIsEmpty: item.files.isEmpty)
+            if deletingEmptyItem, deletion.itemIsEmpty {
+                deletion.deletedItem = LocalLibraryItemDTO(item)
+                modelContext.delete(item)
+            }
+            return deletion
         }
     }
 
