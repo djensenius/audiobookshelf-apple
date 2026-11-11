@@ -294,6 +294,15 @@ final class DownloadHarness: Sendable {
         }
     }
 
+    /// Returns once the stub has seen `count` requests for the file with this `ino`; the suite's
+    /// time limit bounds the wait. A resumed task reaches the stub later, on the session's queue.
+    func waitForRequests(file ino: Int, count: Int) async {
+        guard requestCount(file: ino) < count else { return }
+        for await _ in requestStream where requestCount(file: ino) >= count {
+            return
+        }
+    }
+
     /// Returns once the delegate has handled `count` task completions; the suite's time limit
     /// bounds the wait. Follow with `processPendingEvents()` for the engine to handle them.
     func waitForCompletions(_ count: Int) async {

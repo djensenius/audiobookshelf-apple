@@ -1337,6 +1337,12 @@ import Testing
             await waking.value
             let resumed = (try? await resuming.value) ?? false
             await engine.waitForRestart()
+            if !isInlineRetryLaunch {
+                // The restart has resumed both transfers, but the stub sees them only once the
+                // session starts loading them.
+                await harness.waitForRequests(file: 1, count: 2)
+                await harness.waitForRequests(file: 2, count: 1)
+            }
             let requestsMatch =
                 isInlineRetryLaunch
                 ? harness.requestCount(file: 1) == 1 && harness.requestCount(file: 2) == 0
