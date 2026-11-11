@@ -54,9 +54,12 @@ struct MiniPlayerView: View {
         } label: {
             HStack(spacing: 10) {
                 if !isInline {
-                    CoverView(key: model.coverKey, title: model.title, author: model.author, accessibility: .hidden)
-                        .frame(height: coverHeight)
-                        .clipShape(.rect(cornerRadius: 4))
+                    CoverView(
+                        key: model.coverKey, title: model.title, author: model.author, shape: model.coverShape,
+                        accessibility: .hidden
+                    )
+                    .frame(height: coverHeight)
+                    .clipShape(.rect(cornerRadius: 4))
                 }
                 VStack(alignment: .leading, spacing: 0) {
                     Text(verbatim: model.title)
@@ -70,6 +73,7 @@ struct MiniPlayerView: View {
                 .lineLimit(1)
                 Spacer(minLength: 0)
             }
+            .frame(minHeight: 44)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -126,6 +130,14 @@ extension PlayerViewModel {
         case .jumpForward: await jumpForward()
         case .nextChapter: await nextChapter()
         }
+    }
+
+    /// The shape of the playing item's cover, the same in the mini and full players.
+    var coverShape: CoverShape { Self.coverShape(isPodcastEpisode: isPodcastEpisode) }
+
+    /// Square artwork for a podcast episode, else a book cover.
+    nonisolated static func coverShape(isPodcastEpisode: Bool) -> CoverShape {
+        isPodcastEpisode ? .square : .book
     }
 }
 

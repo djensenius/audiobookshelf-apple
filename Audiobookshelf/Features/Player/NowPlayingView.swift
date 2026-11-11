@@ -53,8 +53,7 @@ struct NowPlayingView: View {
 
     private var cover: some View {
         CoverView(
-            key: model.coverKey, title: model.title, author: model.author,
-            shape: model.isPodcastEpisode ? .square : .book
+            key: model.coverKey, title: model.title, author: model.author, shape: model.coverShape
         )
         .clipShape(.rect(cornerRadius: 8))
         .shadow(radius: 8, y: 4)
@@ -111,49 +110,23 @@ private struct NowPlayingTitles: View {
 
 /// The scrubber, redrawn on every playback tick. Swipe up and down jump by the skip intervals.
 ///
-/// If it disappears mid-drag (the cover closed, so the drag never reported its end), it ends the
-/// scrub, but only one this view started: the view model is shared by every window, and another
-/// window may be scrubbing.
+/// The view model is shared by every window, so each scrubber scrubs as its own
+/// ``PlayerViewModel/ScrubOwner``: a drag in another window can't move or end this one's scrub.
+/// If it disappears mid-drag (the cover closed, so the drag never reported its end), it cancels
+/// its own scrub without seeking.
 private struct NowPlayingScrubber: View {
     let model: PlayerViewModel
-    @State private var ownership = ScrubOwnership()
+    @State private var owner = PlayerViewModel.ScrubOwner()
 
     var body: some View {
         PlayerScrubber(
             progress: model.progress, elapsed: model.elapsed, remaining: model.remainingAtRate,
-            onScrub: {
-                ownership.scrubbed()
-                model.scrub(to: $0)
-            },
-            onScrubEnd: {
-                ownership.ended()
-                Task { await model.endScrub() }
-            },
+            onScrub: { model.scrub(to: $0, owner: owner) },
+            onScrubEnd: { Task { await model.endScrub(owner: owner) } },
             onIncrement: { Task { await model.jumpForward() } },
             onDecrement: { Task { await model.jumpBackward() } }
         )
-        .onDisappear {
-            if ownership.disappeared() { Task { await model.endScrub() } }
-        }
-    }
-}
-
-/// Whether one scrubber view has a drag in progress, so it ends only its own scrub when it
-/// disappears.
-struct ScrubOwnership: Equatable {
-    private(set) var isScrubbing = false
-
-    /// The view's drag moved the scrub.
-    mutating func scrubbed() { isScrubbing = true }
-
-    /// The view's drag ended and ended the scrub itself.
-    mutating func ended() { isScrubbing = false }
-
-    /// The view disappeared; returns whether it must end the scrub, because its drag was in
-    /// progress.
-    mutating func disappeared() -> Bool {
-        defer { isScrubbing = false }
-        return isScrubbing
+        .onDisappear { model.cancelScrub(owner: owner) }
     }
 }
 
