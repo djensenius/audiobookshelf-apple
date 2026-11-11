@@ -372,6 +372,10 @@ Cons:
    - Sync with `POST /api/session/{id}/sync` `{currentTime, timeListened, duration}`.
    - Close with `POST /api/session/{id}/close` when playback stops, the item changes or the user signs out.
    - These calls use `Authorization: Bearer` (plus any custom headers) through the shared API client with token refresh.
+   - **Active baseline refresh (#281).** After a progress drain's dirty-row and PATCH-acknowledgement confirmation work, the still-loaded session's key gets one canonical `GET /api/me/progress/:id` if that drain has not already issued a GET for it. There is no timer, immediate retry or reconnect wiring (#184), and the refresh never sends a sync, PATCH or close.
+     - GET-attempt deduplication is separate from acknowledgement accounting: a genuinely new acknowledgement after a pre-drain read still gets its confirmation GET. Retained settlements and owned position writes still block the request.
+     - It reuses the start GET's one-shot store capture and intake: capture before the request, then validate the dated item/episode, generation and row identity atomically, seeding a missing row cleanly. Ordinary server intake still skips unknown rows. A failed read is not absence, a failed save rolls back, and local edits, new acknowledgements or deletion (including absent → created → deleted) invalidate the old read. An unusable response creates no baseline or confirmation; a later drain may try again.
+     - It changes durable progress only, never the loaded position, playback state, LastPlayed or the current resume decision. Admission belongs to the loaded session, not just its media key: stop, replacement, detach or quiescence prevents a new stale submission. Already-submitted store work is not cancelled and stays provenance-guarded. This adds no backend fence, conditional write, exactly-once or listening-time guarantee (#195).
 
 ## Consequences
 

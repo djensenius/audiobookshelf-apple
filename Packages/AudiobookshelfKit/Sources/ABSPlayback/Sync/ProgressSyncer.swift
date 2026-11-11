@@ -41,6 +41,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   device's write between GET and PATCH (the server offers no conditional write here).
 ///   After settlements, outstanding PATCH acknowledgements get one confirmation lookup per key,
 ///   even on clean-only drains. Unresolved obligations remain for a later drain, without a resend.
+///   Finally, the still-loaded session gets one baseline lookup if its key was not already read.
+///   This only refreshes storage; it never changes playback or creates a report trigger.
 @MainActor
 public final class ProgressSyncer {
     /// Seconds between reports while playing (legacy `TIME_BETWEEN_SESSION_SYNC_IN_SECONDS`).
@@ -57,6 +59,8 @@ public final class ProgressSyncer {
     }
 
     private struct CurrentSession {
+        /// Local ownership, not just the media key (or a server's reused session identifier).
+        let ownership = UUID()
         let sessionID: String
         let key: MediaKey
         /// `sessionStarted` precedes position resolution; only `loaded` makes the position reportable.
@@ -91,6 +95,10 @@ public final class ProgressSyncer {
     var beforeSessionAudioPreparation: (@MainActor () async -> Void)?
     /// Test seam: hold a prepared PATCH before its return is consumed by transport checks.
     var afterProgressSendPreparation: (@MainActor (ProgressPatch) async -> Void)?
+    /// Test seam before the active refresh's throwing provenance lookup.
+    var beforeActiveProgressCapture: (@MainActor () async -> Void)?
+    /// Observes admission without suspending between ownership validation and store submission.
+    var activeProgressIntakeSubmitted: (@MainActor () -> Void)?
     private var pendingPositions: [MediaKey: Position] = [:]
     private var positionRevision: UInt64 = 0
     private var positionReceipts: [MediaKey: [(revision: UInt64, receipt: PlaybackCloseResult<Void>)]] = [:]
@@ -151,7 +159,7 @@ public final class ProgressSyncer {
         await drainPendingProgress()
     }
 
-    /// PATCHes the connection's dirty rows and confirms outstanding ACKs, including clean rows;
+    /// PATCHes dirty rows, confirms outstanding ACKs and refreshes the still-loaded baseline;
     /// returns when done. Call on launch and when the network comes back.
     public func drainPendingProgress() async {
         enqueue { [weak self] in await self?.drain() }
@@ -468,11 +476,16 @@ public final class ProgressSyncer {
             return
         }
         var attemptedConfirmations: [MediaKey: UUID] = [:]
+        // A GET attempt suppresses only the extra active refresh, never a genuinely new ACK.
+        var attemptedKeys: Set<MediaKey> = []
         for row in rows {
             await waitForPendingWrites()
             guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
             do {
-                guard try await fetchProgress(for: row.key, attempted: &attemptedConfirmations) else { continue }
+                guard
+                    try await fetchProgress(
+                        for: row.key, attempted: &attemptedConfirmations, attemptedKeys: &attemptedKeys)
+                else { continue }
             } catch {
                 logger.error("Fetching pending progress failed: \(String(describing: error), privacy: .public)")
                 return
@@ -529,18 +542,56 @@ public final class ProgressSyncer {
             await waitForPendingWrites()
             guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
             do {
-                _ = try await fetchProgress(for: key, attempted: &attemptedConfirmations, confirmationOnly: true)
+                _ = try await fetchProgress(
+                    for: key, attempted: &attemptedConfirmations, attemptedKeys: &attemptedKeys,
+                    confirmationOnly: true)
             } catch {
                 logger.error("Confirming progress failed: \(String(describing: error), privacy: .public)")
                 return
             }
         }
+        await refreshActiveProgress(unlessAttempted: attemptedKeys)
+    }
+
+    /// At most one canonical GET for the still-loaded session's key, if this drain has not read it.
+    /// Durable progress only: never the engine, playback state, LastPlayed or the resume decision.
+    private func refreshActiveProgress(unlessAttempted attemptedKeys: Set<MediaKey>) async {
+        await waitForPendingWrites()
+        guard let session = current, session.hasLoaded,
+            session.key.serverConnectionID == service.serverConnectionID,
+            !attemptedKeys.contains(session.key), ownsActiveRefresh(session)
+        else { return }
+        do {
+            await beforeActiveProgressCapture?()
+            guard ownsActiveRefresh(session) else { return }
+            // Reuse the start capability: pre-request generation AND row identity, including
+            // explicit absence and deletion invalidation. A failed read is never absence.
+            let capture = try await store.captureStartProgress(for: session.key)
+            guard ownsActiveRefresh(session) else { return }
+            let progress = try await service.fetchProgress(
+                itemID: session.key.libraryItemId, episodeID: session.key.episodeId)
+            await waitForPendingWrites()
+            guard ownsActiveRefresh(session), let progress else { return }
+            // No suspension between ownership admission and submission. Already-submitted
+            // actor work is not retroactively cancelled; atomic store provenance still applies.
+            activeProgressIntakeSubmitted?()
+            _ = try await store.applyStartProgress(progress, captured: capture)
+        } catch {
+            logger.error("Refreshing active progress failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Admission belongs to this loaded session, not merely its media key.
+    private func ownsActiveRefresh(_ session: CurrentSession) -> Bool {
+        !isDetached && !isTransportQuiesced && pendingPositions.isEmpty
+            && current?.ownership == session.ownership && current?.hasLoaded == true
     }
 
     /// Shared canonical intake for pre-drain and confirmation. A successful merge is not a
     /// confirmation receipt: the store alone owns and releases the acknowledgement obligation.
     private func fetchProgress(
-        for key: MediaKey, attempted: inout [MediaKey: UUID], confirmationOnly: Bool = false
+        for key: MediaKey, attempted: inout [MediaKey: UUID], attemptedKeys: inout Set<MediaKey>,
+        confirmationOnly: Bool = false
     ) async throws -> Bool {
         let capture = await store.captureProgressFetch(for: key)
         guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return false }
@@ -551,6 +602,7 @@ public final class ProgressSyncer {
         }
         if let acknowledgement = capture.acknowledgement { attempted[key] = acknowledgement }
         let capturedAt = capture.generation
+        attemptedKeys.insert(key)
         let progress = try await service.fetchProgress(itemID: key.libraryItemId, episodeID: key.episodeId)
         await waitForPendingWrites()
         guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return false }
