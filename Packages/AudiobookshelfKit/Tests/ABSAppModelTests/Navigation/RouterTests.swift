@@ -17,6 +17,19 @@ private func routerInBookLibrary() -> Router {
 @Suite struct RouterTests {
     // MARK: Paths
 
+    @Test func searchFocusRequestDismissesTheFullPlayer() {
+        let router = routerInBookLibrary()
+        router.selectedTab = .home
+        router[path: .search] = [.item(id: "li_1")]
+        router.isFullPlayerPresented = true
+
+        router.requestSearchFocus()
+        #expect(!router.isFullPlayerPresented)
+        #expect(router.selectedTab == .search)
+        #expect(router[path: .search].isEmpty)
+        #expect(router.isSearchFocusRequested)
+    }
+
     @Test func searchFocusRequestSelectsSearchAtItsRootUntilHandled() {
         let router = routerInBookLibrary()
         router[path: .search] = [.item(id: "li_1")]

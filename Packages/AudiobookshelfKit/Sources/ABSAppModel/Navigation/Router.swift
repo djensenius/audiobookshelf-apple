@@ -115,7 +115,9 @@ public final class Router {
 
     /// Asks for the search field (Cmd+F): selects Search at its root, where the field is, and
     /// sets ``isSearchFocusRequested`` so the Search screen focuses it, even if it is already shown.
+    /// Like ``open(_:)``, it dismisses the full player, which would cover the field.
     public func requestSearchFocus() {
+        isFullPlayerPresented = false
         selectedTab = .search
         self[path: .search] = []
         isSearchFocusRequested = true
