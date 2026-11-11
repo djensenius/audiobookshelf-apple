@@ -1,0 +1,137 @@
+import SwiftUI
+
+/// The player's position slider (port of the legacy player's track bar), with the elapsed time
+/// under its leading end and the remaining time under its trailing end.
+///
+/// It owns no state: it shows `progress` and reports drags as fractions of the track through
+/// `onScrub`, then `onScrubEnd` when the finger lifts, so the caller decides when to seek.
+///
+/// VoiceOver reads it as one adjustable element: the elapsed and remaining times as its value,
+/// with swipe up and down calling `onIncrement` and `onDecrement` (the caller's jump forward and
+/// back).
+public struct PlayerScrubber: View {
+    private let progress: Double
+    private let elapsed: Double
+    private let remaining: Double
+    private let onScrub: (Double) -> Void
+    private let onScrubEnd: () -> Void
+    private let onIncrement: () -> Void
+    private let onDecrement: () -> Void
+    @State private var isDragging = false
+    @ScaledMetric(relativeTo: .caption) private var trackHeight: CGFloat = 6
+    @ScaledMetric(relativeTo: .caption) private var thumbDiameter: CGFloat = 14
+    @Environment(\.locale) private var locale
+    @Environment(\.isEnabled) private var isEnabled
+
+    /// - Parameters:
+    ///   - progress: The fraction played, `0...1`.
+    ///   - elapsed: Seconds played, shown as a timestamp.
+    ///   - remaining: Seconds left, shown as a negative timestamp.
+    ///   - onScrub: Called with the fraction under the finger, `0...1`, while dragging.
+    ///   - onScrubEnd: Called once when a drag ends.
+    ///   - onIncrement: VoiceOver's increment (swipe up).
+    ///   - onDecrement: VoiceOver's decrement (swipe down).
+    public init(
+        progress: Double, elapsed: Double, remaining: Double, onScrub: @escaping (Double) -> Void,
+        onScrubEnd: @escaping () -> Void, onIncrement: @escaping () -> Void, onDecrement: @escaping () -> Void
+    ) {
+        self.progress = clampedProgress(progress)
+        self.elapsed = elapsed
+        self.remaining = remaining
+        self.onScrub = onScrub
+        self.onScrubEnd = onScrubEnd
+        self.onIncrement = onIncrement
+        self.onDecrement = onDecrement
+    }
+
+    /// The visible remaining time: the timestamp with a leading minus, like legacy.
+    nonisolated static func remainingText(_ seconds: Double) -> String {
+        "-" + DurationStyle.timestamp.string(seconds)
+    }
+
+    /// The VoiceOver value, for example "4 minutes, 5 seconds, 1 hour remaining".
+    nonisolated static func accessibilityValue(elapsed: Double, remaining: Double, locale: Locale) -> String {
+        [
+            DurationStyle.timestamp.accessibilityString(elapsed, locale: locale),
+            L10n.string("LabelTimeRemaining", DurationStyle.timestamp.accessibilityString(remaining, locale: locale)),
+        ]
+        .joined(separator: ", ")
+    }
+
+    /// The fraction of a track `width` points wide under `x`, clamped to `0...1`.
+    nonisolated static func fraction(atX x: CGFloat, width: CGFloat) -> Double {
+        guard width > 0, x.isFinite else { return 0 }
+        return Double(min(max(x / width, 0), 1))
+    }
+
+    /// Performs VoiceOver's adjustable action.
+    func adjust(_ direction: AccessibilityAdjustmentDirection) {
+        switch direction {
+        case .increment: onIncrement()
+        case .decrement: onDecrement()
+        @unknown default: break
+        }
+    }
+
+    public var body: some View {
+        VStack(spacing: 6) {
+            track
+            HStack {
+                Text(verbatim: DurationStyle.timestamp.string(elapsed, locale: locale))
+                Spacer(minLength: 8)
+                Text(verbatim: Self.remainingText(remaining))
+            }
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+        }
+        .accessibilityElement()
+        .accessibilityLabel(Text(verbatim: L10n.string("LabelProgress")))
+        .accessibilityValue(
+            Text(verbatim: Self.accessibilityValue(elapsed: elapsed, remaining: remaining, locale: locale))
+        )
+        .accessibilityAdjustableAction { adjust($0) }
+    }
+
+    private var track: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(ABSColor.track)
+                    .frame(height: trackHeight)
+                Capsule()
+                    .fill(isEnabled ? ABSColor.accent : Color.secondary)
+                    .frame(width: width * progress, height: trackHeight)
+                Circle()
+                    .fill(isEnabled ? ABSColor.accent : Color.secondary)
+                    .frame(width: thumbDiameter, height: thumbDiameter)
+                    .scaleEffect(isDragging ? 1.4 : 1)
+                    .offset(x: width * progress - thumbDiameter / 2)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(.rect)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        isDragging = true
+                        onScrub(Self.fraction(atX: value.location.x, width: width))
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                        onScrubEnd()
+                    }
+            )
+        }
+        .frame(height: thumbDiameter * 2)
+        .animation(.snappy, value: isDragging)
+    }
+}
+
+#Preview {
+    PlayerScrubber(
+        progress: 0.35, elapsed: 245, remaining: 3_600, onScrub: { _ in }, onScrubEnd: {}, onIncrement: {},
+        onDecrement: {}
+    )
+    .padding()
+}
