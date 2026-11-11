@@ -101,7 +101,8 @@ struct PlaybackCoordinatorPositionTests {
         #expect(coordinator.currentTime == 1500)
         #expect(
             h.events.events == [
-                .itemChanged(h.key("A")), .sessionStarted(sessionID: "A-1", key: h.key("A")), .loaded(time: 1500),
+                .itemChanged(h.key("A")), .sessionStarted(sessionID: "A-1", key: h.key("A")),
+                .paused(time: 1500), .loaded(time: 1500),
             ])
         let saved = try #require(h.lastPlayed.record)
         #expect(saved.position == 1500)
