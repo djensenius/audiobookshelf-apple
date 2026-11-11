@@ -15,12 +15,14 @@ struct ItemDetailContent: View {
     /// different places, so a size class change mid-start keeps it.
     @State private var isStarting = false
     @State private var playFailure: ItemDetailPlayFailure?
+    @State private var goneState = ItemDetailGoneState()
 
     var body: some View {
-        let refreshFailure = ItemDetailRefreshFailure(model: model)
+        let snapshot = ItemDetailGoneState.Snapshot(model: model)
+        let isGone = goneState.isGone(snapshot)
+        let refreshFailure = ItemDetailRefreshFailure(model: model, isGone: isGone)
         let actions = ItemDetailActions(
-            model: model, isGone: refreshFailure?.isGone == true, isStarting: $isStarting,
-            playFailure: $playFailure)
+            model: model, isGone: isGone, isStarting: $isStarting, playFailure: $playFailure)
         ScrollView {
             VStack(alignment: .leading, spacing: ABSSpacing.large) {
                 if let refreshFailure {
@@ -59,6 +61,7 @@ struct ItemDetailContent: View {
         }
         .refreshable { await model.load() }
         .absBackground()
+        .onChange(of: snapshot, initial: true) { _, snapshot in goneState.update(snapshot) }
         .alert(
             Text(verbatim: L10n.string("MessagePlaybackStartFailed")),
             isPresented: Binding {
@@ -180,7 +183,7 @@ private struct ItemDetailHeader: View {
 /// exist. A failed start shows an alert through `playFailure`.
 private struct ItemDetailActions: View {
     let model: ItemDetailModel
-    /// A reload answered 404.
+    /// A reload answered 404 and none has succeeded since (``ItemDetailGoneState``).
     let isGone: Bool
     @Binding var isStarting: Bool
     @Binding var playFailure: ItemDetailPlayFailure?
