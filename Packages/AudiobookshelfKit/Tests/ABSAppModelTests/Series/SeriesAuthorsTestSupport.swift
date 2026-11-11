@@ -40,12 +40,27 @@ struct SeriesAuthorsRequest: Sendable, Equatable {
 
 enum SeriesAuthorsFixtures {
     /// A book in the series `seriesID` (if any) at `sequence`, listed with that series as context.
-    static func book(_ id: String, seriesID: String? = nil, sequence: String? = nil) -> LibraryItem {
+    static func book(
+        _ id: String, seriesID: String? = nil, sequence: String? = nil, isMissing: Bool = false, numTracks: Int = 1,
+        coverPath: String? = nil
+    ) -> LibraryItem {
         let series = seriesID.map { Series(id: $0, name: "Series \($0)", sequence: sequence) }
         let metadata = BookMetadata(title: "Title \(id)", series: series.map { [$0] })
         return LibraryItem(
+            id: id, libraryId: "lib", isMissing: isMissing, mediaType: .book,
+            media: .book(Book(id: "book-\(id)", metadata: metadata, coverPath: coverPath, numTracks: numTracks)),
+            series: series)
+    }
+
+    /// A book with `metadataSeries` in its metadata and `context` as its list context series.
+    static func book(_ id: String, metadataSeries: [Series], context: Series?) -> LibraryItem {
+        LibraryItem(
             id: id, libraryId: "lib", mediaType: .book,
-            media: .book(Book(id: "book-\(id)", metadata: metadata, numTracks: 1)), series: series)
+            media: .book(
+                Book(
+                    id: "book-\(id)", metadata: BookMetadata(title: "Title \(id)", series: metadataSeries), numTracks: 1
+                )),
+            series: context)
     }
 
     /// A collapsed sub-series standing in for its first book `firstItemID`.

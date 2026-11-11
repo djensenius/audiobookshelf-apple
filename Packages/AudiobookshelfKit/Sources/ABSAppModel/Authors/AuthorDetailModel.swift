@@ -24,7 +24,10 @@ public struct AuthorDetail: Sendable, Hashable, Identifiable {
 /// - Loading the author keeps the last one while reloading and after a failed reload. When loads
 ///   overlap, only the last one started is applied. A 404 (``APIError/notFound``) drops the
 ///   author and ``phase`` becomes ``Phase/notFound`` for the view to pop.
-/// - ``books`` is an ``ItemListModel`` and pages, refreshes and drops stale pages on its own.
+/// - ``books`` is an ``ItemListModel`` and pages, refreshes and drops stale pages on its own. It
+///   loads from ``libraryID``, which the caller must set to the author's library: the books
+///   start loading before the author (and its `libraryId`) arrives.
+/// - ``books`` keeps its items on 404, so views must not show them in ``Phase/notFound``.
 ///
 /// A model belongs to one author, library, client and account: views recreate it per author ID
 /// and under the session's `.id(identity)` (ADR 0004), so a server or user switch never reuses it.
@@ -54,7 +57,7 @@ public final class AuthorDetailModel {
     public private(set) var isLoading = false
     /// The error of the last author load, cleared by the next successful one.
     public private(set) var error: (any Error)?
-    /// The last load answered 404.
+    /// A load answered 404 and no load has succeeded since.
     public private(set) var isNotFound = false
 
     @ObservationIgnored private let service: any SeriesAuthorsService
@@ -85,18 +88,20 @@ public final class AuthorDetailModel {
 
     public var hasLoaded: Bool { detail != nil }
 
-    /// Loads the author unless loaded, and the first page of books unless it loaded or is loading.
-    /// Views call it each time they appear, so a load cancelled before it finished runs again.
+    /// Loads the author unless loaded, and the first page of books unless it loaded, side by
+    /// side; returns when both are done. A first page that failed is retried. Views call it each
+    /// time they appear, so a load cancelled before it finished runs again.
     public func loadIfNeeded() async {
-        if books.items.isEmpty, !books.reachedEnd { books.loadNextPage() }
-        guard !hasLoaded else { return }
-        await load()
+        let booksLoad = books.items.isEmpty && !books.reachedEnd ? books.loadNextPage() : nil
+        if !hasLoaded { await load() }
+        await booksLoad?.value
     }
 
-    /// Reloads the author and the books, for example on pull to refresh.
+    /// Reloads the author and the books' first page, for example on pull to refresh.
     public func refresh() async {
-        books.refresh()
+        let booksLoad = books.refresh()
         await load()
+        await booksLoad?.value
     }
 
     /// Loads the author. A response to an older call that arrives after a newer one started is

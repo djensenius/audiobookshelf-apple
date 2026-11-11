@@ -95,7 +95,6 @@ private typealias F = SeriesAuthorsFixtures
         #expect(model.phase == .idle)
 
         await model.loadIfNeeded()
-        await model.books.loadNextPage()?.value
 
         #expect(model.phase == .loaded)
         let detail = try #require(model.detail)
@@ -166,6 +165,69 @@ private typealias F = SeriesAuthorsFixtures
         await model.load()
         #expect(model.phase == .notFound)
         #expect(model.detail == nil)
+
+        // A later non-404 failure doesn't hide that the author is gone.
+        failure.value = .timedOut
+        await model.load()
+        #expect(model.phase == .notFound)
+        #expect(model.error as? APIError == .timedOut)
+    }
+
+    @Test func cancelledLoadLeavesTheModelIdle() async {
+        let service = FakeSeriesAuthorsService(authorDetailHandler: { _ in throw CancellationError() })
+        let model = AuthorDetailModel(authorID: "a1", libraryID: "lib", service: service)
+
+        await model.load()
+
+        #expect(model.phase == .idle)
+        #expect(model.error == nil)
+        #expect(!model.isLoading)
+    }
+
+    @Test func refreshReloadsTheAuthorAndTheBooks() async {
+        let generation = Locked(0)
+        let service = FakeSeriesAuthorsService(
+            authorDetailHandler: { id in AuthorDetailResponse(author: Author(id: id, name: "v\(generation.value)")) },
+            booksHandler: { _, query in
+                PagedResults(
+                    results: [F.book("b\(generation.value)")], total: 1, limit: query.limit ?? 0, page: 0)
+            })
+        let model = AuthorDetailModel(authorID: "a1", libraryID: "lib", service: service)
+
+        await model.loadIfNeeded()
+        #expect(model.detail?.name == "v0")
+        #expect(model.books.items.map(\.id) == ["b0"])
+
+        generation.value = 1
+        await model.refresh()
+
+        #expect(model.detail?.name == "v1")
+        #expect(model.books.items.map(\.id) == ["b1"])
+    }
+
+    @Test func loadIfNeededLoadsBooksOnceAndRetriesAFailedFirstPage() async {
+        let requests = Locked(0)
+        let fail = Locked(true)
+        let service = FakeSeriesAuthorsService(
+            authorDetailHandler: { id in AuthorDetailResponse(author: Author(id: id, name: "A")) },
+            booksHandler: { _, query in
+                requests.value += 1
+                if fail.value { throw TestError.offline }
+                return PagedResults(results: [F.book("b1")], total: 1, limit: query.limit ?? 0, page: 0)
+            })
+        let model = AuthorDetailModel(authorID: "a1", libraryID: "lib", service: service)
+
+        await model.loadIfNeeded()
+        #expect(model.books.error is TestError)
+        #expect(requests.value == 1)
+
+        fail.value = false
+        await model.loadIfNeeded()
+        #expect(model.books.items.map(\.id) == ["b1"])
+        #expect(requests.value == 2)
+
+        await model.loadIfNeeded()
+        #expect(requests.value == 2)
     }
 
     @Test func failsWithoutAnEarlierLoad() async {
