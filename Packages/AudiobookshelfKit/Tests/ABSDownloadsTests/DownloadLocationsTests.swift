@@ -22,6 +22,32 @@ import Testing
         }
     }
 
+    @Test func prepareCreatesDirectoriesExcludedFromBackup() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        let locations = DownloadLocations(root: root)
+
+        try locations.prepare()
+        let file = try locations.fileURL(forRelativePath: "li_1/1.mp3")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("kept".utf8).write(to: file)
+        // Running it again changes nothing.
+        try locations.prepare()
+
+        for directory in [locations.downloadsRoot, locations.resumeDataRoot] {
+            // A fresh URL, so no cached values are read.
+            let values = try URL(filePath: directory.path(percentEncoded: false))
+                .resourceValues(forKeys: [.isDirectoryKey, .isExcludedFromBackupKey])
+            #expect(values.isDirectory == true)
+            #expect(values.isExcludedFromBackup == true)
+            #if os(iOS)
+                let attributes = try FileManager.default.attributesOfItem(atPath: directory.path(percentEncoded: false))
+                #expect(
+                    attributes[.protectionKey] as? FileProtectionType == .completeUntilFirstUserAuthentication)
+            #endif
+        }
+        #expect(try Data(contentsOf: file) == Data("kept".utf8))
+    }
+
     @Test func moveReplacesExistingFile() throws {
         defer { try? FileManager.default.removeItem(at: root) }
         let destination = try DownloadLocations(root: root).fileURL(forRelativePath: "li_1/1.mp3")
