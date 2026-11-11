@@ -666,6 +666,66 @@ struct BridgeHarness {
         #expect(Array(session.snapshots.suffix(3)) == [firstStall, resumed, secondStall])
     }
 
+    /// AVPlayer usually waits for data on a stream's first play: once the engine has activated its
+    /// audio session, that is published as buffering (rate 0, play requested), not paused.
+    @Test func firstPlayBufferingIsPublishedOnceTheAudioSessionIsActive() async throws {
+        let b = try BridgeHarness()
+        b.h.engine.startsBuffering = true
+        await b.coordinator.play(itemID: "a")
+        let session = try b.session
+
+        #expect(b.h.engine.isAudioSessionActive)
+        #expect(!b.coordinator.isPlaying)
+        #expect(b.coordinator.isPlaybackRequested)
+        #expect(session.snapshot == b.snapshot(.buffering, at: 0))
+        await b.controller.activationTask?.value
+        #expect(session.applicationPrimaryRequests == 1)
+
+        b.h.engine.state = .playing
+        await yieldUntil { session.snapshot == b.snapshot(.playing(rate: 1), at: 0) }
+        #expect(session.applicationPrimaryRequests == 1)
+    }
+
+    /// Before the engine activates its audio session (the catch-up seek in flight), neither playing
+    /// nor buffering is published, also after an earlier item played and was stopped.
+    @Test(arguments: [false, true])
+    func catchUpSeekBeforeActivationPublishesNothingPlaying(afterStop: Bool) async throws {
+        let b = try BridgeHarness()
+        b.h.engine.startsBuffering = true
+        if afterStop {
+            await b.coordinator.play(itemID: "b")
+            #expect(b.h.engine.isAudioSessionActive)
+            b.coordinator.stop()
+            #expect(!b.h.engine.isAudioSessionActive)
+        }
+        let (play, gate) = await b.playHeld("a")
+        try await b.controller.perform(.skipForward(30))
+        let seekGate = Gate()
+        b.h.engine.seekGates = [seekGate]
+        gate.open()
+        await yieldUntil { b.h.engine.seeks == [30] }
+        let session = try b.session
+        let requestsBefore = session.applicationPrimaryRequests
+
+        // Loaded with the catch-up seek in flight and play requested; the engine waits to play.
+        b.h.engine.state = .loading
+        #expect(b.coordinator.isBuffering)
+        #expect(b.coordinator.isPlaybackRequested)
+        #expect(!b.coordinator.isAudioSessionActive)
+        b.bridge.refresh()
+        #expect(!b.wasShownPlaying(session))
+        #expect(session.snapshot == b.snapshot(.paused, at: 30))
+        #expect(session.applicationPrimaryRequests == requestsBefore)
+
+        // Once the seek lands the engine activates and starts, still waiting for data: buffering.
+        seekGate.open()
+        await play.value
+        #expect(b.h.engine.isAudioSessionActive)
+        #expect(session.snapshot == b.snapshot(.buffering, at: 30))
+        await b.controller.activationTask?.value
+        #expect(session.applicationPrimaryRequests == requestsBefore + 1)
+    }
+
     @Test func aFailedLoadAndARestartKeepTheMetadata() async throws {
         let b = try BridgeHarness()
         b.h.engine.loadError = .emptyTimeline

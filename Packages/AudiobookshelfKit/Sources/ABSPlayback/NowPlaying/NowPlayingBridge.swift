@@ -60,9 +60,6 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
     private var observerToken: PlaybackObserverToken?
     /// The last display metadata seen, for one item.
     private var metadata: (key: MediaKey, value: Metadata)?
-    /// The session the engine was last seen playing, so its audio session is active (the engine
-    /// activates it just before it plays, and defers that while a load or seek is in flight).
-    private var playedSessionID: String?
     private(set) var isInvalidated = false
 
     /// - Parameters:
@@ -135,17 +132,14 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
         if let key, let fresh = Self.metadata(of: coordinator, key: key, includeRestored: metadata == nil) {
             metadata = (key, fresh)
         }
-        if coordinator.isPlaying { playedSessionID = coordinator.session?.id }
-        let hasPlayed = playedSessionID != nil && playedSessionID == coordinator.session?.id
         let current = key.flatMap { metadata?.key == $0 ? metadata?.value : nil }
-        let state = key.map {
-            Self.state(of: coordinator, key: $0, metadata: current ?? Metadata(), hasPlayed: hasPlayed)
-        }
+        let state = key.map { Self.state(of: coordinator, key: $0, metadata: current ?? Metadata()) }
         covers.set(state?.artworkKey, cover: current?.cover)
         controller.update(state)
     }
 
-    /// Observes settings, rate, play state, pending seeks and unloaded position without events.
+    /// Observes settings, rate, play state, audio session activation, pending seeks and unloaded
+    /// position without events.
     /// The loaded clock follows coordinator events, avoiding observation work for every tick.
     private func trackSettingsAndRate() {
         guard !isInvalidated else { return }
@@ -153,6 +147,7 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
             _ = coordinator?.rate
             _ = coordinator?.isPlaying
             _ = coordinator?.isBuffering
+            _ = coordinator?.isAudioSessionActive
             _ = coordinator?.pendingSeekTarget
             if let coordinator, coordinator.phase != .loaded { _ = coordinator.currentTime }
             return readSettings()
@@ -211,12 +206,11 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
 
     /// Published play state: playing while the coordinator plays, and also while loaded media stalls
     /// with play requested (published as buffering, elapsed time held), so the system offers pause
-    /// for a stalled stream. Never before the engine has played in this session (`hasPlayed`; while
-    /// starting, or loaded with a seek in flight): the first playing state activates the Now Playing
+    /// for a stalled stream, including a stream's first buffering. Never before the engine has
+    /// activated its audio session (``PlaybackCoordinator/isAudioSessionActive``; while starting, or
+    /// loaded with the catch-up seek in flight): the first playing state activates the Now Playing
     /// session, and the engine's audio session must be active first (ADR 0006).
-    static func state(
-        of coordinator: PlaybackCoordinator, key: MediaKey, metadata: Metadata, hasPlayed: Bool
-    ) -> NowPlayingState {
+    static func state(of coordinator: PlaybackCoordinator, key: MediaKey, metadata: Metadata) -> NowPlayingState {
         var chapter: NowPlayingState.Chapter?
         if let timeline = coordinator.timeline, let index = coordinator.chapterIndex {
             let current = timeline.chapters[index]
@@ -225,7 +219,7 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
                 range: TimelineRange(start: current.start, end: current.end))
         }
         let stalled =
-            !coordinator.isPlaying && coordinator.phase == .loaded && hasPlayed
+            !coordinator.isPlaying && coordinator.isAudioSessionActive
             && coordinator.isBuffering && coordinator.isPlaybackRequested
         return NowPlayingState(
             key: key, title: metadata.title, author: metadata.author, narrator: metadata.narrator,

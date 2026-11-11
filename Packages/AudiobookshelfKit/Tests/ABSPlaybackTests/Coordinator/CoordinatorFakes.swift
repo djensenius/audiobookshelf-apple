@@ -53,6 +53,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     var volume: Float = 1
     var isPlaybackRequested = false
     var pendingSeekTarget: Double?
+    var isAudioSessionActive = false
     var timeline: PlaybackTimeline?
     var onEvent: (@MainActor (AudioEngineEvent) -> Void)?
 
@@ -78,6 +79,9 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     var failingPlays = 0
     /// How many plays are silently refused while a prior engine failure remains sticky.
     var silentlyRefusingPlays = 0
+    /// Starts the player buffering rather than playing, as a stream waiting for its first data does
+    /// (`waitingToPlayAtSpecifiedRate`).
+    var startsBuffering = false
     private var generation = 0
     private var seekGeneration = 0
 
@@ -102,7 +106,13 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
             return
         }
         currentTime = source.timeline.clamp(time)
-        state = isPlaybackRequested ? .playing : .paused
+        if isPlaybackRequested { startPlayer() } else { state = .paused }
+    }
+
+    /// As the real engine does: activates the audio session, then starts the player.
+    private func startPlayer() {
+        isAudioSessionActive = true
+        state = startsBuffering ? .buffering : .playing
     }
 
     /// As the real engine does, defers playing (shown as buffering) while a seek is in flight.
@@ -118,11 +128,12 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
             failingPlays -= 1
             isPlaybackRequested = false
             state = .paused
+            isAudioSessionActive = false
             onEvent?(.failed(.audioSessionActivationFailed(description: "Session activation failed")))
             return
         }
         isPlaybackRequested = true
-        state = pendingSeekTarget == nil ? .playing : .buffering
+        if pendingSeekTarget == nil { startPlayer() } else { state = .buffering }
     }
 
     func pause() {
@@ -135,6 +146,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         generation += 1
         stopCount += 1
         isPlaybackRequested = false
+        isAudioSessionActive = false
         timeline = nil
         currentTime = 0
         pendingSeekTarget = nil
@@ -155,7 +167,9 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         if result == .completed {
             pendingSeekTarget = nil
             currentTime = time
-            if state == .ended || state == .buffering { state = isPlaybackRequested ? .playing : .paused }
+            if state == .ended || state == .buffering {
+                if isPlaybackRequested { startPlayer() } else { state = .paused }
+            }
         } else {
             state = isPlaybackRequested ? .buffering : .paused
         }
@@ -168,7 +182,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         guard let target = pendingSeekTarget else { return }
         pendingSeekTarget = nil
         currentTime = target
-        state = isPlaybackRequested ? .playing : .paused
+        if isPlaybackRequested { startPlayer() } else { state = .paused }
         onEvent?(.tick(target))
     }
 

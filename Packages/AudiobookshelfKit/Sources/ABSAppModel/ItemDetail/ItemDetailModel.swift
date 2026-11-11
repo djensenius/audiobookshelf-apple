@@ -226,7 +226,7 @@ public final class ItemDetailModel {
     public var isReadEnabled: Bool { false }
 
     /// Placeholder for the Download button (legacy `index.vue:451-454`, `613-694`): `false`
-    /// until downloads exist, so the view hides the button.
+    /// until downloads exist, so the view shows the button disabled.
     public var isDownloadAvailable: Bool { false }
 
     /// Placeholder hook for the Download button; does nothing until downloads exist.
