@@ -9,16 +9,27 @@ import Foundation
 /// - Podcast episode files: `<folder>/episodes/<episodeID>/<filename>`.
 /// - Cover: `<folder>/cover.jpg`.
 ///
-/// IDs are escaped losslessly, so different IDs always get different folders. Filenames come
-/// from the server and are cleaned (see ``sanitisedFilename(_:suffix:)``). Names that clash in
-/// one folder, such as `01.mp3` from two disc folders, get ` (2)`, ` (3)` and so on before the
-/// extension, ignoring case because the Mac's default volume does. Every path is checked with
-/// ``DownloadLocations/fileURL(forRelativePath:)``.
+/// IDs are escaped losslessly and case-safely, so different IDs always get different folders,
+/// even on a case-insensitive volume. Filenames come from the server and are cleaned (see
+/// ``sanitisedFilename(_:suffix:)``). Names that clash in one folder, such as `01.mp3` from two
+/// disc folders, get ` (2)`, ` (3)` and so on before the extension. Clashes are found with
+/// case folding (`Straße` and `STRASSE` clash), because the Mac's default volume ignores case.
+/// Every path is checked with ``DownloadLocations/fileURL(forRelativePath:)``.
+///
+/// Clashes are only found among names this value knows: plan all of an item's new files
+/// through one value, in the server's stable order, and pass the paths of files already
+/// stored for the item to ``init(connectionID:libraryItemID:locations:reserving:)`` so a new
+/// file never takes an existing file's path.
+///
+/// Each component is at most ``maxComponentBytes``, but the whole path isn't capped (`PATH_MAX`
+/// is 1024 bytes); real connection, item and episode IDs are short, so it stays well under.
 public struct DownloadLayout: Sendable {
     /// Why a path can't be built.
     public enum LayoutError: Error, Equatable {
         /// An ID is empty, or too long for one path component once escaped.
         case invalidIdentifier(String)
+        /// A path to reserve isn't a file this type would place in the item's folder.
+        case unrelatedPath(String)
     }
 
     /// The most UTF-8 bytes in one path component (the APFS limit).
@@ -31,16 +42,52 @@ public struct DownloadLayout: Sendable {
     /// The item folder, `<connectionID>/<libraryItemID>`, without a trailing slash.
     public let folder: String
     private let locations: DownloadLocations
-    /// Lowercased names already given out, by the folder they are in.
+    /// The ``collisionKey(_:)`` of each name already given out, by the folder it is in.
     private var usedNames: [String: Set<String>]
 
+    /// A layout for an item with no files stored yet.
+    ///
     /// - Throws: ``LayoutError/invalidIdentifier(_:)`` if `libraryItemID` is empty or too long.
     public init(connectionID: UUID, libraryItemID: String, locations: DownloadLocations) throws {
+        try self.init(
+            connectionID: connectionID, libraryItemID: libraryItemID, locations: locations, reserving: [String]())
+    }
+
+    /// A layout for an item that already has files stored at `existingPaths`, which are paths
+    /// this type returned before for the same connection and item. New files never get one of
+    /// those paths, or one that clashes with it.
+    ///
+    /// - Throws: ``LayoutError/invalidIdentifier(_:)`` if `libraryItemID` is empty or too long,
+    ///   or ``LayoutError/unrelatedPath(_:)`` if a path isn't a book file, episode file or cover
+    ///   directly in this item's folder layout.
+    public init(
+        connectionID: UUID, libraryItemID: String, locations: DownloadLocations,
+        reserving existingPaths: some Sequence<String>
+    ) throws {
         folder = "\(connectionID.uuidString)/\(try Self.escapedIdentifier(libraryItemID))"
         self.locations = locations
         // The cover and the episodes folder share the item folder with book files.
-        usedNames = [folder: [Self.coverFilename, Self.episodesFolder]]
+        usedNames = [folder: [Self.collisionKey(Self.coverFilename), Self.collisionKey(Self.episodesFolder)]]
         _ = try locations.fileURL(forRelativePath: folder)
+        for path in existingPaths {
+            try reserveExisting(path)
+        }
+    }
+
+    private mutating func reserveExisting(_ path: String) throws {
+        _ = try locations.fileURL(forRelativePath: path)
+        guard path.hasPrefix(folder + "/") else { throw LayoutError.unrelatedPath(path) }
+        let components = path.dropFirst(folder.count + 1).split(separator: "/", omittingEmptySubsequences: false)
+        let directory: String
+        switch components.count {
+        case 1:
+            directory = folder
+        case 3 where components[0] == Self.episodesFolder:
+            directory = "\(folder)/\(Self.episodesFolder)/\(components[1])"
+        default:
+            throw LayoutError.unrelatedPath(path)
+        }
+        usedNames[directory, default: []].insert(Self.collisionKey(String(components[components.count - 1])))
     }
 
     /// The cover's path, `<folder>/cover.jpg`.
@@ -67,12 +114,12 @@ public struct DownloadLayout: Sendable {
         var used = usedNames[directory, default: []]
         var candidate = name
         var number = 2
-        while used.contains(candidate.lowercased()) {
+        while used.contains(Self.collisionKey(candidate)) {
             candidate = Self.sanitisedFilename(name, suffix: " (\(number))")
             number += 1
         }
         let path = try checked("\(directory)/\(candidate)")
-        used.insert(candidate.lowercased())
+        used.insert(Self.collisionKey(candidate))
         usedNames[directory] = used
         return path
     }
@@ -84,8 +131,15 @@ public struct DownloadLayout: Sendable {
 
     // MARK: - Names
 
-    /// `filename` as one safe path component: `/`, `\`, `:` and control characters become `_`,
-    /// leading dots are dropped (so it is never `.`, `..` or hidden), and it is shortened to
+    /// The form in which two names clash on a case-insensitive volume. Canonically equivalent
+    /// strings (NFC and NFD) are already equal as Swift strings.
+    static func collisionKey(_ name: String) -> String {
+        name.folding(options: .caseInsensitive, locale: nil)
+    }
+
+    /// `filename` as one safe path component: `/`, `\`, `:`, control and format characters
+    /// (such as U+202E RIGHT-TO-LEFT OVERRIDE, U+200B and U+FEFF) and line and paragraph
+    /// separators become `_` (zero-width joiners and non-joiners are kept), leading dots are dropped (so it is never `.`, `..` or hidden), and it is shortened to
     /// ``maxComponentBytes`` UTF-8 bytes, keeping the extension and never splitting a
     /// character. An empty result becomes `file`.
     ///
@@ -94,7 +148,12 @@ public struct DownloadLayout: Sendable {
     public static func sanitisedFilename(_ filename: String, suffix: String = "") -> String {
         let scalars = filename.unicodeScalars.map { scalar -> Unicode.Scalar in
             let unsafe = scalar == "/" || scalar == "\\" || scalar == ":"
-            return unsafe || scalar.properties.generalCategory == .control ? "_" : scalar
+            switch scalar.properties.generalCategory {
+            // Zero-width (non-)joiners are format characters too, but emoji and scripts need them.
+            case .format where scalar == "\u{200C}" || scalar == "\u{200D}": return scalar
+            case .control, .format, .lineSeparator, .paragraphSeparator: return "_"
+            default: return unsafe ? "_" : scalar
+            }
         }
         var cleaned = String(String.UnicodeScalarView(scalars))
         while cleaned.hasPrefix(".") { cleaned.removeFirst() }
@@ -115,8 +174,9 @@ public struct DownloadLayout: Sendable {
         return stem + tail
     }
 
-    /// `id` escaped into one path component without losing information: anything but ASCII
-    /// letters, digits, `-`, `_` and a non-leading `.` becomes `%XX`.
+    /// `id` escaped into one path component without losing information, even on a
+    /// case-insensitive volume: anything but lowercase ASCII letters, digits, `-`, `_` and a
+    /// non-leading `.` becomes `%XX` (uppercase hex), so `ABC` and `abc` differ.
     static func escapedIdentifier(_ id: String) throws -> String {
         var escaped = id.addingPercentEncoding(withAllowedCharacters: identifierCharacters) ?? ""
         if escaped.hasPrefix(".") { escaped = "%2E" + escaped.dropFirst() }
@@ -125,5 +185,5 @@ public struct DownloadLayout: Sendable {
     }
 
     private static let identifierCharacters = CharacterSet(
-        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+        charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-_.")
 }
