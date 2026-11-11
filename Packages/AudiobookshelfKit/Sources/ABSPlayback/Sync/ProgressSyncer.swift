@@ -39,6 +39,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   Each pending row is fetched once before sending. Unusable or rejected progress defers that
 ///   row; a thrown lookup stops the pass. This protects observed server values, not another
 ///   device's write between GET and PATCH (the server offers no conditional write here).
+///   After settlements, outstanding PATCH acknowledgements get one confirmation lookup per key,
+///   even on clean-only drains. Unresolved obligations remain for a later drain, without a resend.
 @MainActor
 public final class ProgressSyncer {
     /// Seconds between reports while playing (legacy `TIME_BETWEEN_SESSION_SYNC_IN_SECONDS`).
@@ -149,8 +151,8 @@ public final class ProgressSyncer {
         await drainPendingProgress()
     }
 
-    /// PATCHes the connection's progress rows marked `needsServerSync`; returns when done. Call on
-    /// launch and when the network comes back.
+    /// PATCHes the connection's dirty rows and confirms outstanding ACKs, including clean rows;
+    /// returns when done. Call on launch and when the network comes back.
     public func drainPendingProgress() async {
         enqueue { [weak self] in await self?.drain() }
         await waitForIdle()
@@ -465,11 +467,12 @@ public final class ProgressSyncer {
             logger.error("Reading pending progress failed: \(String(describing: error), privacy: .public)")
             return
         }
+        var attemptedConfirmations: [MediaKey: UUID] = [:]
         for row in rows {
             await waitForPendingWrites()
             guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
             do {
-                guard try await fetchPendingProgress(for: row.key) else { continue }
+                guard try await fetchProgress(for: row.key, attempted: &attemptedConfirmations) else { continue }
             } catch {
                 logger.error("Fetching pending progress failed: \(String(describing: error), privacy: .public)")
                 return
@@ -517,13 +520,37 @@ public final class ProgressSyncer {
                 guard await settle(patch, error: nil) else { return }
             }
         }
+        // Snapshot keys once, not once per group ACK. A new ACK after a pre-drain GET is a
+        // distinct obligation, but a rejected GET must not immediately retry the same ACK.
+        let confirmations = await store.needsConfirmationFetch
+            .filter { $0.serverConnectionID == service.serverConnectionID }
+            .sorted { $0.rawValue < $1.rawValue }
+        for key in confirmations {
+            await waitForPendingWrites()
+            guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
+            do {
+                _ = try await fetchProgress(for: key, attempted: &attemptedConfirmations, confirmationOnly: true)
+            } catch {
+                logger.error("Confirming progress failed: \(String(describing: error), privacy: .public)")
+                return
+            }
+        }
     }
 
-    /// At most one lookup per row/pass, outside the group-send loop. `false` defers this row,
-    /// including when the request completed but canonical intake rejected the captured value.
-    private func fetchPendingProgress(for key: MediaKey) async throws -> Bool {
-        let capturedAt = await store.captureGeneration()
+    /// Shared canonical intake for pre-drain and confirmation. A successful merge is not a
+    /// confirmation receipt: the store alone owns and releases the acknowledgement obligation.
+    private func fetchProgress(
+        for key: MediaKey, attempted: inout [MediaKey: UUID], confirmationOnly: Bool = false
+    ) async throws -> Bool {
+        let capture = await store.captureProgressFetch(for: key)
         guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return false }
+        if confirmationOnly {
+            guard let acknowledgement = capture.acknowledgement, attempted[key] != acknowledgement else {
+                return false
+            }
+        }
+        if let acknowledgement = capture.acknowledgement { attempted[key] = acknowledgement }
+        let capturedAt = capture.generation
         let progress = try await service.fetchProgress(itemID: key.libraryItemId, episodeID: key.episodeId)
         await waitForPendingWrites()
         guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return false }
