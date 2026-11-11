@@ -3,11 +3,14 @@ import ABSCore
 import Foundation
 import Observation
 
-/// A loaded author: name and image (``summary``) and bio.
+/// A loaded author: name and image (``summary``), bio and library.
 public struct AuthorDetail: Sendable, Hashable, Identifiable {
     public let summary: AuthorSummary
     /// The author's description; `nil` when blank.
     public let bio: String?
+    /// The library the author belongs to, when the server sent it. Their books are only in this
+    /// library, which can differ from the one the screen was opened in.
+    public let libraryID: String?
 
     public var id: String { summary.id }
     public var name: String { summary.name }
@@ -15,6 +18,7 @@ public struct AuthorDetail: Sendable, Hashable, Identifiable {
     public init(author: Author) {
         summary = AuthorSummary(author: author)
         bio = author.description.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        libraryID = author.libraryId
     }
 }
 
@@ -26,7 +30,8 @@ public struct AuthorDetail: Sendable, Hashable, Identifiable {
 ///   author and ``phase`` becomes ``Phase/notFound`` for the view to pop.
 /// - ``books`` is an ``ItemListModel`` and pages, refreshes and drops stale pages on its own. It
 ///   loads from ``libraryID``, which the caller must set to the author's library: the books
-///   start loading before the author (and its `libraryId`) arrives.
+///   start loading before the author (and its `libraryId`) arrives. When the loaded
+///   ``AuthorDetail/libraryID`` differs, recreate the model for that library.
 /// - ``books`` keeps its items on 404, so views must not show them in ``Phase/notFound``.
 ///
 /// A model belongs to one author, library, client and account: views recreate it per author ID

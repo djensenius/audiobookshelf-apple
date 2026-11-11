@@ -82,7 +82,9 @@ private typealias F = SeriesAuthorsFixtures
         let service = FakeSeriesAuthorsService(
             authorDetailHandler: { id in
                 AuthorDetailResponse(
-                    author: Author(id: id, name: "Asimov", description: "  Wrote a lot.  ", imagePath: "/a.jpg"))
+                    author: Author(
+                        id: id, name: "Asimov", description: "  Wrote a lot.  ", imagePath: "/a.jpg", libraryId: "lib1")
+                )
             },
             booksHandler: { libraryID, query in
                 requests.value.append(SeriesAuthorsRequest(libraryID: libraryID, query: query))
@@ -101,6 +103,7 @@ private typealias F = SeriesAuthorsFixtures
         #expect(detail.name == "Asimov")
         #expect(detail.summary.hasImage)
         #expect(detail.bio == "  Wrote a lot.  ")
+        #expect(detail.libraryID == "lib1")
         #expect(model.books.items.map(\.id) == ["b1", "b2"])
         #expect(model.books.items.first?.title == "Title b1")
 
@@ -122,6 +125,7 @@ private typealias F = SeriesAuthorsFixtures
         let model = AuthorDetailModel(authorID: "a1", libraryID: "lib", service: service)
         await model.load()
         #expect(model.detail?.bio == nil)
+        #expect(model.detail?.libraryID == nil)
         #expect(model.detail?.summary.hasImage == false)
     }
 

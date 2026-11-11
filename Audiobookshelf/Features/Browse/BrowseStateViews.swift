@@ -99,13 +99,14 @@ private struct BrowseMessageView: View {
     }
 }
 
-/// An inline "couldn't load" row with Retry, for a failure while content is on screen.
+/// An inline "couldn't load" row with Retry, for a failure while content is on screen. Retry
+/// goes under the message at accessibility text sizes.
 struct BrowseFailureRow: View {
     let messageKey: String
     let retry: () -> Void
 
     var body: some View {
-        HStack(spacing: ABSSpacing.medium) {
+        AdaptiveStack(spacing: ABSSpacing.medium) {
             Label {
                 Text(verbatim: L10n.string(messageKey))
             } icon: {
@@ -114,9 +115,11 @@ struct BrowseFailureRow: View {
                     .accessibilityHidden(true)
             }
             .font(.subheadline)
-            Spacer(minLength: ABSSpacing.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
             Button(action: retry) {
                 Text(verbatim: L10n.string("ButtonRetry"))
+                    .frame(minHeight: 44)
+                    .contentShape(.rect)
             }
             .buttonStyle(.borderless)
         }
@@ -144,7 +147,8 @@ struct BrowsePagingFooter: View {
 
 /// Item cards in a grid that open their screen and perform their context-menu actions through
 /// the environment, with an alert when an action fails. `badge` puts a label (a sequence) on a
-/// card's cover; it is hidden from VoiceOver, which reads the series from the card's label.
+/// card's cover; it is hidden from VoiceOver, which reads the series from the card's label
+/// (``SeriesPresentation/card(for:in:)``).
 struct BrowseItemGrid<Element: Identifiable>: View {
     let elements: [Element]
     let item: (Element) -> ItemSummary
@@ -207,7 +211,7 @@ extension View {
                 ToolbarItem(placement: .primaryAction) {
                     Button(action: refresh) {
                         Label {
-                            Text(verbatim: L10n.string("ButtonBrowseRefresh"))
+                            Text(verbatim: L10n.string("ButtonRefresh"))
                         } icon: {
                             Image(systemName: "arrow.clockwise")
                         }

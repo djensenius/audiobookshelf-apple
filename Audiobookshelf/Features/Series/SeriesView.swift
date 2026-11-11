@@ -25,12 +25,8 @@ struct SeriesView: View {
         }
         .navigationTitle(Text(verbatim: L10n.string(AppTab.series.titleKey)))
         .task(id: key) {
-            guard let key, let store else {
-                host = nil
-                return
-            }
-            if host?.key != key {
-                host = BrowseModelHost(key: key, store: store) { SeriesPresentation.makeList(key: key, services: $0) }
+            host = .updated(host, for: key, store: store) { key, services, _ in
+                SeriesPresentation.makeList(key: key, services: services)
             }
             if let model = host?.model, model.items.isEmpty, !model.reachedEnd {
                 await model.loadNextPage()?.value
@@ -44,12 +40,18 @@ struct SeriesListContent: View {
     let model: SeriesListModel
     @Environment(Router.self) private var router: Router?
     @Environment(\.serverID) private var serverID
+    /// The last user refresh failed and nothing loaded since.
+    @State private var refreshFailed = false
 
     var body: some View {
         let messages = SeriesPresentation.listMessages
         BrowseStateView(state: .resolve(list: model), messages: messages, retry: { retry() }) { failed in
+            let placement = BrowsePresentation.failurePlacement(failed: failed, refreshFailed: refreshFailed)
             ScrollView(.vertical) {
                 VStack(spacing: ABSSpacing.large) {
+                    if placement == .top {
+                        BrowseFailureRow(messageKey: messages.failed, retry: { Task { await refresh() } })
+                    }
                     ItemGrid(elements: model.items) { series in
                         SeriesCard(series: series, serverID: serverID) {
                             BrowsePresentation.open(.series(id: series.id), in: router)
@@ -57,13 +59,21 @@ struct SeriesListContent: View {
                         .onAppear { model.itemAppeared(id: series.id) }
                     }
                     BrowsePagingFooter(
-                        isLoading: model.isLoading, failed: failed, messageKey: messages.failed, retry: { retry() })
+                        isLoading: model.isLoading, failed: placement == .footer, messageKey: messages.failed,
+                        retry: { retry() })
                 }
                 .padding(.vertical, ABSSpacing.large)
             }
         }
-        .refreshable { await model.refresh()?.value }
-        .browseRefreshCommand(isDisabled: model.isLoading) { model.refresh() }
+        .refreshable { await refresh() }
+        .browseRefreshCommand(isDisabled: model.isLoading) { Task { await refresh() } }
+        .onChange(of: model.error == nil) { _, cleared in
+            if cleared { refreshFailed = false }
+        }
+    }
+
+    private func refresh() async {
+        refreshFailed = await BrowsePresentation.refresh(model)
     }
 
     private func retry() {

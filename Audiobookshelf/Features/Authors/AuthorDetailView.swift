@@ -4,19 +4,23 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
-/// One author: photo, name, bio (collapsed when long) and their books in this library, paged
-/// through the `authors.<id>` filter.
+/// One author: photo, name, bio (collapsed when long) and their books in the author's library,
+/// paged through the `authors.<id>` filter.
 ///
-/// Builds one ``AuthorDetailModel`` per store, account and library from `makeServices()`.
+/// Builds one ``AuthorDetailModel`` per store, account and library from `makeServices()`; an
+/// author of another library than the selected one gets a model for their library.
 struct AuthorDetailView: View {
     let authorID: String
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
     @State private var host: BrowseModelHost<AuthorDetailModel>?
+    /// The key for the author's library once they loaded from another one.
+    @State private var authorLibrary: BrowseModelKey?
 
     var body: some View {
         let libraryID = router?.libraryID
-        let key = BrowseModelKey(store: store, libraryID: libraryID, entityID: authorID)
+        let key = AuthorsPresentation.key(
+            BrowseModelKey(store: store, libraryID: libraryID, entityID: authorID), authorLibrary: authorLibrary)
         Group {
             if let host, let model = host.model(for: key) {
                 AuthorDetailContent(model: model)
@@ -28,16 +32,13 @@ struct AuthorDetailView: View {
             }
         }
         .task(id: key) {
-            guard let key, let store else {
-                host = nil
-                return
-            }
-            if host?.key != key {
-                host = BrowseModelHost(key: key, store: store) {
-                    AuthorsPresentation.makeDetail(authorID: authorID, key: key, services: $0)
-                }
+            host = .updated(host, for: key, store: store) { key, services, _ in
+                AuthorsPresentation.makeDetail(authorID: authorID, key: key, services: services)
             }
             await host?.model.loadIfNeeded()
+            if let host, let next = AuthorsPresentation.authorLibraryKey(after: host) {
+                authorLibrary = next
+            }
         }
     }
 }
@@ -58,8 +59,8 @@ struct AuthorDetailContent: View {
                         if failed {
                             BrowseFailureRow(messageKey: messages.failed, retry: { Task { await model.load() } })
                         }
-                        AuthorDetailHeader(detail: detail, bookCount: model.books.total)
-                        AuthorBooksSection(books: model.books)
+                        AuthorDetailHeader(detail: detail, bookCount: AuthorsPresentation.bookCount(of: model))
+                        AuthorBooksSection(state: AuthorsPresentation.booksState(of: model), books: model.books)
                     }
                     .padding(.vertical, ABSSpacing.large)
                 }
@@ -76,7 +77,7 @@ struct AuthorDetailContent: View {
 /// The photo, name, book count and bio.
 private struct AuthorDetailHeader: View {
     let detail: AuthorDetail
-    let bookCount: Int?
+    let bookCount: String?
     @Environment(\.serverID) private var serverID
     @ScaledMetric(relativeTo: .title2) private var imageWidth: CGFloat = 120
 
@@ -92,8 +93,8 @@ private struct AuthorDetailHeader: View {
                         .font(.title2.bold())
                         .foregroundStyle(ABSColor.foreground)
                         .accessibilityAddTraits(.isHeader)
-                    if let count = AuthorsPresentation.bookCount(total: bookCount, author: detail.summary) {
-                        Text(verbatim: count)
+                    if let bookCount {
+                        Text(verbatim: bookCount)
                             .font(.subheadline)
                             .foregroundStyle(ABSColor.mutedForeground)
                     }
@@ -109,11 +110,12 @@ private struct AuthorDetailHeader: View {
 
 /// The author's books: a spinner, a failure with Retry, "No items found", or the paged grid.
 private struct AuthorBooksSection: View {
+    let state: BrowseScreenState
     let books: ItemListModel<LibraryQuery, ItemSummary>
 
     var body: some View {
         let failedMessage = AuthorsPresentation.booksFailedMessage
-        switch BrowseScreenState.resolve(list: books) {
+        switch state {
         case .loading:
             ProgressView()
                 .frame(maxWidth: .infinity)

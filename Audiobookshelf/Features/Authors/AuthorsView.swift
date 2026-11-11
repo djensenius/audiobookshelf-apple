@@ -24,14 +24,8 @@ struct AuthorsView: View {
         }
         .navigationTitle(Text(verbatim: L10n.string(AppTab.authors.titleKey)))
         .task(id: key) {
-            guard let key, let store else {
-                host = nil
-                return
-            }
-            if host?.key != key {
-                host = BrowseModelHost(key: key, store: store) {
-                    AuthorsModel(libraryID: key.libraryID, service: $0)
-                }
+            host = .updated(host, for: key, store: store) { key, services, _ in
+                AuthorsModel(libraryID: key.libraryID, service: services)
             }
             await host?.model.loadIfNeeded()
         }

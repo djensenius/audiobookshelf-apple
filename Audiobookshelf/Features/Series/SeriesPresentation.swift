@@ -38,6 +38,25 @@ enum SeriesPresentation {
         return "#\(sequence)"
     }
 
+    /// The card of a book in the series `seriesName`. VoiceOver reads the cover's sequence badge
+    /// from the label's series part, which becomes this series and number ("Barsoom, book 2"):
+    /// the book's own series text may name another series, and a collapsed sub-series has none.
+    static func card(for book: SeriesBook, in seriesName: String) -> ItemSummary {
+        let item = book.summary
+        let sequence = book.sequence?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seriesText =
+            if let sequence, !sequence.isEmpty {
+                L10n.string("LabelSeriesBookNumber", seriesName, sequence)
+            } else {
+                seriesName
+            }
+        return ItemSummary(
+            id: item.id, itemID: item.itemID, episodeID: item.episodeID, seriesID: item.seriesID, kind: item.kind,
+            title: item.title, subtitle: item.subtitle, seriesText: seriesText, duration: item.duration,
+            bookCount: item.bookCount, cover: item.cover, isExplicit: item.isExplicit, isAbridged: item.isAbridged,
+            isMissing: item.isMissing, hasAudio: item.hasAudio)
+    }
+
     /// Where Continue Series goes: the details of the model's continue book, which offer Play.
     static func continueRoute(for book: SeriesBook) -> Route {
         .item(id: book.summary.itemID)

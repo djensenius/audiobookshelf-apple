@@ -15,19 +15,22 @@ private struct Failure: Error {}
 private final class FakeSeriesAuthorsClient: LibraryService, SeriesAuthorsService {
     let failsLibraries: Bool
     let fails = Mutex(false)
+    /// The library of the author and the books; the others have none of them.
+    let libraryID: String
     /// The books a series or author request returns, in server order.
     let books: [LibraryItem]
     let seriesRequests = Mutex<[(libraryID: String, query: LibraryQuery)]>([])
     let bookRequests = Mutex<[(libraryID: String, query: LibraryQuery)]>([])
 
     init(
-        failsLibraries: Bool = false,
+        failsLibraries: Bool = false, libraryID: String = "lib_a",
         books: [LibraryItem] = [
             barsoom(SampleLibrary.princessOfMars, "1"), barsoom(SampleLibrary.godsOfMars, "2"),
             barsoom(SampleLibrary.warlordOfMars, "3"),
         ]
     ) {
         self.failsLibraries = failsLibraries
+        self.libraryID = libraryID
         self.books = books
     }
 
@@ -62,12 +65,13 @@ private final class FakeSeriesAuthorsClient: LibraryService, SeriesAuthorsServic
         try check()
         guard id == "aut_burroughs" else { throw APIError.notFound }
         return AuthorDetailResponse(
-            author: Author(id: id, name: "Edgar Rice Burroughs", libraryId: "lib_a", numBooks: 3))
+            author: Author(id: id, name: "Edgar Rice Burroughs", libraryId: libraryID, numBooks: 3))
     }
 
     func filteredBooksPage(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
         bookRequests.withLock { $0.append((libraryID, query)) }
         try check()
+        let books = libraryID == self.libraryID ? books : []
         return PagedResults(results: books, total: books.count, limit: query.limit ?? 0, page: query.page ?? 0)
     }
 
@@ -85,6 +89,8 @@ private func barsoom(_ item: LibraryItem, _ sequence: String) -> LibraryItem {
 
 private let account = LibraryConnectionKey(
     connectionID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA") ?? UUID(), userID: "user-1")
+private let otherAccount = LibraryConnectionKey(
+    connectionID: UUID(uuidString: "00000000-0000-0000-0000-0000000000BB") ?? UUID(), userID: "user-2")
 
 /// A store connected to `client` with settings in a throwaway defaults suite, so a test never
 /// touches the app's.
@@ -241,6 +247,53 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
             #expect(signedOut == nil)
         }
     }
+
+    @Test func updatedKeepsTheHostForItsKeyAndReplacesItOtherwise() async throws {
+        try await withStore { store in
+            let makeAuthors = { (key: BrowseModelKey, services: LibraryStoreServices, _: ProgressCache) in
+                AuthorsModel(libraryID: key.libraryID, service: services)
+            }
+            let key = try #require(BrowseModelKey(store: store, libraryID: "lib_a"))
+            let host = try #require(BrowseModelHost.updated(nil, for: key, store: store, make: makeAuthors))
+            #expect(host.key == key)
+            #expect(host.model.libraryID == "lib_a")
+
+            let same = BrowseModelHost.updated(host, for: key, store: store, make: makeAuthors)
+            #expect(same?.model === host.model)
+
+            let otherLibrary = BrowseModelKey(store: store, libraryID: "lib_b")
+            let replaced = try #require(
+                BrowseModelHost.updated(host, for: otherLibrary, store: store, make: makeAuthors))
+            #expect(replaced.model !== host.model)
+            #expect(replaced.key == otherLibrary)
+            #expect(replaced.model.libraryID == "lib_b")
+
+            #expect(BrowseModelHost.updated(host, for: nil, store: store, make: makeAuthors) == nil)
+            #expect(BrowseModelHost.updated(host, for: key, store: nil, make: makeAuthors) == nil)
+        }
+    }
+
+    @Test func storeReconnectedAsAnotherAccountGetsAnotherModel() async throws {
+        try await withStore { store in
+            let makeAuthors = { (key: BrowseModelKey, services: LibraryStoreServices, _: ProgressCache) in
+                AuthorsModel(libraryID: key.libraryID, service: services)
+            }
+            let key = try #require(BrowseModelKey(store: store, libraryID: "lib_a"))
+            let host = try #require(BrowseModelHost.updated(nil, for: key, store: store, make: makeAuthors))
+
+            await store.connect(client: FakeSeriesAuthorsClient(), connectionKey: otherAccount)
+            let newKey = try #require(BrowseModelKey(store: store, libraryID: "lib_a"))
+            #expect(newKey != key)
+            #expect(newKey.connection == otherAccount)
+            #expect(host.model(for: newKey) == nil)
+            // The store's services are the other account's, so a model for the old key isn't built.
+            let stale = BrowseModelHost(key: key, store: store) { makeAuthors(key, $0, store.progress) }
+            #expect(stale == nil)
+            let replaced = BrowseModelHost.updated(host, for: newKey, store: store, make: makeAuthors)
+            #expect(replaced?.key == newKey)
+            #expect(replaced?.model !== host.model)
+        }
+    }
 }
 
 @MainActor
@@ -314,7 +367,7 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         played.error = Failure()
         #expect(
             await BrowsePresentation.perform(.play, on: book("li_1"), actions: actions, play: play)
-                == "MessageBrowsePlayFailed")
+                == "MessagePlaybackStartFailed")
         played.error = CancellationError()
         #expect(await BrowsePresentation.perform(.play, on: book("li_1"), actions: actions, play: play) == nil)
         // No player (previews): nothing happens.
@@ -332,6 +385,28 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         #expect(actions.calls.isEmpty)
     }
 
+    @Test func failedRefreshShowsAboveTheItemsAndAFailedPageAfterThem() async throws {
+        #expect(BrowsePresentation.failurePlacement(failed: false, refreshFailed: false) == nil)
+        #expect(BrowsePresentation.failurePlacement(failed: false, refreshFailed: true) == nil)
+        #expect(BrowsePresentation.failurePlacement(failed: true, refreshFailed: true) == .top)
+        #expect(BrowsePresentation.failurePlacement(failed: true, refreshFailed: false) == .footer)
+
+        let client = FakeSeriesAuthorsClient()
+        try await withStore(client) { store in
+            let (key, services) = try keyAndServices(store)
+            let list = SeriesPresentation.makeList(key: key, services: services)
+            await list.loadNextPage()?.value
+            client.fails.withLock { $0 = true }
+            #expect(await BrowsePresentation.refresh(list))
+            #expect(BrowseScreenState.resolve(list: list) == .loaded(failed: true))
+            #expect(list.items.count == SampleLibrary.series.count)
+
+            client.fails.withLock { $0 = false }
+            #expect(await BrowsePresentation.refresh(list) == false)
+            #expect(BrowseScreenState.resolve(list: list) == .loaded(failed: false))
+        }
+    }
+
     @Test func everyMessageKeyIsInTheCatalog() {
         let messages = [
             SeriesPresentation.listMessages, SeriesPresentation.detailMessages, AuthorsPresentation.listMessages,
@@ -341,7 +416,7 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         let keys =
             messages.flatMap { [$0.failed, $0.empty, $0.notFound] }
             + actions.compactMap { BrowsePresentation.failureMessageKey(for: $0) }
-            + [AuthorsPresentation.booksFailedMessage, "ButtonBrowseRefresh"]
+            + [AuthorsPresentation.booksFailedMessage, "ButtonRefresh", "LabelSeriesBookNumber"]
         for key in keys {
             #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
         }
@@ -373,6 +448,30 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         #expect(SeriesPresentation.sequenceBadge("") == nil)
         #expect(SeriesPresentation.sequenceBadge("  ") == nil)
         #expect(SeriesPresentation.sequenceBadge(nil) == nil)
+    }
+
+    @Test func cardsReadThisSeriesAndNumber() {
+        let summary = ItemSummary(
+            id: "li_2", itemID: "li_2", kind: .book, title: "The Gods of Mars", subtitle: "Edgar Rice Burroughs",
+            seriesText: "Other Series #9", duration: 60, isExplicit: true, isAbridged: true)
+        let card = SeriesPresentation.card(for: SeriesBook(summary: summary, sequence: " 2 "), in: "Barsoom")
+        #expect(card.seriesText == L10n.string("LabelSeriesBookNumber", "Barsoom", "2"))
+        #expect(card.seriesText == "Barsoom, book 2")
+        #expect(
+            card
+                == ItemSummary(
+                    id: "li_2", itemID: "li_2", kind: .book, title: "The Gods of Mars",
+                    subtitle: "Edgar Rice Burroughs", seriesText: "Barsoom, book 2", duration: 60, isExplicit: true,
+                    isAbridged: true))
+
+        // A collapsed sub-series, or a book without a number, reads the series alone.
+        let collapsed = ItemSummary(id: "ser_2", itemID: "li_3", seriesID: "ser_2", kind: .series, title: "Early")
+        #expect(
+            SeriesPresentation.card(for: SeriesBook(summary: collapsed, sequence: nil), in: "Barsoom").seriesText
+                == "Barsoom")
+        #expect(
+            SeriesPresentation.card(for: SeriesBook(summary: summary, sequence: " "), in: "Barsoom").seriesText
+                == "Barsoom")
     }
 
     @Test func booksKeepTheServersSequenceOrder() async throws {
@@ -483,6 +582,47 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
             client.fails.withLock { $0 = true }
             await model.load()
             #expect(AuthorsPresentation.state(of: model) == .loaded(failed: true))
+        }
+    }
+
+    @Test func authorOfAnotherLibraryLoadsBooksFromTheirLibrary() async throws {
+        let client = FakeSeriesAuthorsClient(libraryID: "lib_b")
+        try await withStore(client) { store in
+            try await withStore { otherStore in
+                let make = { (key: BrowseModelKey, services: LibraryStoreServices, _: ProgressCache) in
+                    AuthorsPresentation.makeDetail(authorID: "aut_burroughs", key: key, services: services)
+                }
+                // Opened in the selected library, lib_a, which has none of the author's books.
+                let selected = BrowseModelKey(store: store, libraryID: "lib_a", entityID: "aut_burroughs")
+                let first = try #require(BrowseModelHost.updated(nil, for: selected, store: store, make: make))
+                await first.model.loadIfNeeded()
+                #expect(first.model.books.total == 0)
+                #expect(AuthorsPresentation.otherLibraryID(of: first.model) == "lib_b")
+                #expect(AuthorsPresentation.booksState(of: first.model) == .loading)
+                // The author's own count, not lib_a's 0.
+                #expect(AuthorsPresentation.bookCount(of: first.model) == L10n.string("SharedBookCount", "3"))
+
+                let authorLibrary = try #require(AuthorsPresentation.authorLibraryKey(after: first))
+                let key = try #require(AuthorsPresentation.key(selected, authorLibrary: authorLibrary))
+                #expect(key.libraryID == "lib_b")
+                let second = try #require(BrowseModelHost.updated(first, for: key, store: store, make: make))
+                #expect(second.model !== first.model)
+                await second.model.loadIfNeeded()
+                #expect(client.bookRequests.withLock { $0.last?.libraryID } == "lib_b")
+                #expect(second.model.books.items.count == 3)
+                #expect(AuthorsPresentation.otherLibraryID(of: second.model) == nil)
+                #expect(AuthorsPresentation.authorLibraryKey(after: second) == nil)
+                #expect(AuthorsPresentation.booksState(of: second.model) == .loaded(failed: false))
+                #expect(AuthorsPresentation.bookCount(of: second.model) == L10n.string("SharedBookCount", "3"))
+
+                // Selecting another library keeps the author's; another author or store doesn't.
+                let anotherLibrary = BrowseModelKey(store: store, libraryID: "lib_c", entityID: "aut_burroughs")
+                #expect(AuthorsPresentation.key(anotherLibrary, authorLibrary: authorLibrary) == authorLibrary)
+                let otherAuthor = BrowseModelKey(store: store, libraryID: "lib_a", entityID: "aut_other")
+                #expect(AuthorsPresentation.key(otherAuthor, authorLibrary: authorLibrary) == otherAuthor)
+                let other = BrowseModelKey(store: otherStore, libraryID: "lib_a", entityID: "aut_burroughs")
+                #expect(AuthorsPresentation.key(other, authorLibrary: authorLibrary) == other)
+            }
         }
     }
 

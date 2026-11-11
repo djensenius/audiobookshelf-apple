@@ -27,15 +27,8 @@ struct SeriesDetailView: View {
             }
         }
         .task(id: key) {
-            guard let key, let store else {
-                host = nil
-                return
-            }
-            if host?.key != key {
-                host = BrowseModelHost(key: key, store: store) {
-                    SeriesDetailModel(
-                        seriesID: seriesID, libraryID: key.libraryID, service: $0, cache: store.progress)
-                }
+            host = .updated(host, for: key, store: store) { key, services, progress in
+                SeriesDetailModel(seriesID: seriesID, libraryID: key.libraryID, service: services, cache: progress)
             }
             await host?.model.loadIfNeeded()
         }
@@ -63,7 +56,7 @@ struct SeriesDetailContent: View {
                                 .padding(.horizontal, ABSSpacing.large)
                         } else {
                             BrowseItemGrid(
-                                elements: detail.books, item: \.summary,
+                                elements: detail.books, item: { SeriesPresentation.card(for: $0, in: detail.name) },
                                 badge: { SeriesPresentation.sequenceBadge($0.sequence) })
                         }
                     }

@@ -61,7 +61,7 @@ enum BrowseScreenState: Hashable {
 struct BrowseModelKey: Hashable {
     let store: ObjectIdentifier
     let connection: LibraryConnectionKey
-    let libraryID: String
+    private(set) var libraryID: String
     /// The series or author of a detail screen.
     let entityID: String?
 
@@ -74,6 +74,13 @@ struct BrowseModelKey: Hashable {
         self.libraryID = libraryID
         self.entityID = entityID
     }
+
+    /// This key in the library `libraryID` of the same store and account.
+    func inLibrary(_ libraryID: String) -> Self {
+        var key = self
+        key.libraryID = libraryID
+        return key
+    }
 }
 
 /// A screen's model with the key it was built for, kept in `@State`.
@@ -84,13 +91,27 @@ struct BrowseModelHost<Model: AnyObject> {
     /// every body.
     let progressReader: ItemProgressReader
 
-    /// Builds the model from the store's services; `nil` while the store serves no account.
+    /// Builds the model from the store's services; `nil` while the store serves no account or
+    /// serves another account than `key`'s.
     @MainActor
     init?(key: BrowseModelKey, store: LibraryStore, make: (LibraryStoreServices) -> Model) {
-        guard let services = store.makeServices() else { return nil }
+        guard let services = store.makeServices(), services.connectionKey == key.connection else { return nil }
         self.key = key
         model = make(services)
         progressReader = BrowsePresentation.progressReader(store.progress)
+    }
+
+    /// The host a screen's task keeps for `key`: `host` itself when it was built for `key`, so
+    /// the model and what it loaded survive, else a new one; `nil` without a key or a store.
+    /// `make` gets the key, the store's services and its progress.
+    @MainActor
+    static func updated(
+        _ host: Self?, for key: BrowseModelKey?, store: LibraryStore?,
+        make: (BrowseModelKey, LibraryStoreServices, ProgressCache) -> Model
+    ) -> Self? {
+        guard let key, let store else { return nil }
+        if let host, host.key == key { return host }
+        return Self(key: key, store: store) { make(key, $0, store.progress) }
     }
 
     /// The model, unless it was built for another key (the view's task hasn't replaced it yet).
@@ -130,6 +151,28 @@ enum BrowsePresentation {
     @discardableResult
     static func retry<Query, Item>(_ list: ItemListModel<Query, Item>) -> Task<Void, Never>? {
         list.reachedEnd ? list.refresh() : list.loadNextPage()
+    }
+
+    /// Refreshes a paged list for the user (pull to refresh, Refresh) and returns whether it
+    /// failed, which keeps the old items on screen.
+    @MainActor
+    static func refresh<Query, Item>(_ list: ItemListModel<Query, Item>) async -> Bool {
+        await list.refresh()?.value
+        return list.error != nil
+    }
+
+    /// Where a loaded paged list shows its failure.
+    enum ListFailurePlacement: Hashable {
+        /// A user refresh failed: above the old items, with Retry refreshing again.
+        case top
+        /// The next page failed: after the items, with Retry loading it again.
+        case footer
+    }
+
+    /// Where a loaded paged list shows that its last load `failed`; `nil` when it didn't.
+    static func failurePlacement(failed: Bool, refreshFailed: Bool) -> ListFailurePlacement? {
+        guard failed else { return nil }
+        return refreshFailed ? .top : .footer
     }
 
     /// The progress item cards show, read from the store's cache.
@@ -172,10 +215,10 @@ enum BrowsePresentation {
     /// The key of the message shown when an action on an item fails.
     static func failureMessageKey(for kind: ItemActionKind) -> String? {
         switch kind {
-        case .play: "MessageBrowsePlayFailed"
+        case .play: "MessagePlaybackStartFailed"
         case .markFinished: "ToastItemMarkedAsFinishedFailed"
         case .markNotFinished: "ToastItemMarkedAsNotFinishedFailed"
-        case .hideFromContinueListening: "MessageBrowseHideFailed"
+        case .hideFromContinueListening: "MessageHideFromContinueListeningFailed"
         case .addToPlaylist, .share, .openDetails: nil
         }
     }
