@@ -1,0 +1,223 @@
+import ABSAppModel
+import ABSCore
+import ABSUI
+import SwiftUI
+
+/// The message keys and icon one screen shows for its states.
+struct BrowseMessages {
+    /// The first load failed.
+    let failed: String
+    /// Loaded with nothing to show.
+    let empty: String
+    /// The server answered 404.
+    var notFound = "MessageNoItemsFound"
+    let systemImage: String
+}
+
+/// A screen in one ``BrowseScreenState``: the shared signed-out, loading, error, not-found and
+/// empty states, or `loaded` with whether a later load failed. The error, not-found and empty
+/// states sit in a scroll view so pull to refresh reaches them.
+struct BrowseStateView<Loaded: View>: View {
+    let state: BrowseScreenState
+    let messages: BrowseMessages
+    let retry: () -> Void
+    @ViewBuilder let loaded: (_ failed: Bool) -> Loaded
+
+    var body: some View {
+        switch state {
+        case .signedOut:
+            BrowseMessageView(
+                title: L10n.string("MessageBookshelfEmpty"),
+                message: L10n.string("MessageAudiobookshelfServerNotConnected"), systemImage: "icloud.slash")
+        case .loading:
+            LoadingView()
+        case .failed:
+            BrowseScrollableState {
+                ErrorStateView(title: L10n.string(messages.failed), retry: retry)
+            }
+        case .notFound:
+            BrowseScrollableState {
+                BrowseMessageView(title: L10n.string(messages.notFound), systemImage: "questionmark.circle")
+            }
+        case .empty:
+            BrowseScrollableState {
+                BrowseMessageView(title: L10n.string(messages.empty), systemImage: messages.systemImage)
+            }
+        case .loaded(let failed):
+            loaded(failed)
+        }
+    }
+}
+
+/// A screen without its model: signed out, waiting for the account's libraries (Retry and pull
+/// to refresh reload them when they failed), or empty when none is selected.
+struct BrowsePlaceholder: View {
+    let libraryID: String?
+    let messages: BrowseMessages
+    @Environment(\.libraryStore) private var store
+
+    var body: some View {
+        BrowseStateView(
+            state: .placeholder(store: store, libraryID: libraryID), messages: messages,
+            retry: { Task { await store?.refresh() } }
+        ) { _ in
+            EmptyView()
+        }
+        .refreshable { await store?.refresh() }
+    }
+}
+
+/// A full-screen state centred in a vertical scroll view, so `.refreshable` reaches it.
+private struct BrowseScrollableState<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        ScrollView(.vertical) {
+            content.containerRelativeFrame([.horizontal, .vertical])
+        }
+    }
+}
+
+private struct BrowseMessageView: View {
+    let title: String
+    var message: String?
+    let systemImage: String
+
+    var body: some View {
+        ContentUnavailableView {
+            Label {
+                Text(verbatim: title)
+            } icon: {
+                Image(systemName: systemImage)
+                    .accessibilityHidden(true)
+            }
+        } description: {
+            if let message {
+                Text(verbatim: message)
+            }
+        }
+    }
+}
+
+/// An inline "couldn't load" row with Retry, for a failure while content is on screen.
+struct BrowseFailureRow: View {
+    let messageKey: String
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: ABSSpacing.medium) {
+            Label {
+                Text(verbatim: L10n.string(messageKey))
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(ABSColor.mutedForeground)
+                    .accessibilityHidden(true)
+            }
+            .font(.subheadline)
+            Spacer(minLength: ABSSpacing.small)
+            Button(action: retry) {
+                Text(verbatim: L10n.string("ButtonRetry"))
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, ABSSpacing.large)
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// A paged list's footer: a spinner while the next page loads, or a failure row with Retry.
+struct BrowsePagingFooter: View {
+    let isLoading: Bool
+    let failed: Bool
+    let messageKey: String
+    let retry: () -> Void
+
+    var body: some View {
+        if failed {
+            BrowseFailureRow(messageKey: messageKey, retry: retry)
+        } else if isLoading {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+/// Item cards in a grid that open their screen and perform their context-menu actions through
+/// the environment, with an alert when an action fails. `badge` puts a label (a sequence) on a
+/// card's cover; it is hidden from VoiceOver, which reads the series from the card's label.
+struct BrowseItemGrid<Element: Identifiable>: View {
+    let elements: [Element]
+    let item: (Element) -> ItemSummary
+    var badge: (Element) -> String? = { _ in nil }
+    var onAppear: (Element) -> Void = { _ in }
+    @Environment(Router.self) private var router: Router?
+    @Environment(\.serverID) private var serverID
+    @Environment(\.itemActions) private var itemActions
+    @Environment(\.playItem) private var playItem
+    /// The key of the message for the last failed action, kept while the alert is dismissed.
+    @State private var failureKey: String?
+    @State private var showsFailure = false
+
+    var body: some View {
+        ItemGrid(elements: elements) { element in
+            let summary = item(element)
+            ItemCard(item: summary, serverID: serverID) { perform($0, on: summary) }
+                .overlay(alignment: .topLeading) {
+                    if let badge = badge(element) {
+                        Text(verbatim: badge)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, ABSSpacing.xSmall)
+                            .background(.black.opacity(0.7), in: .rect(cornerRadius: ABSRadius.small))
+                            .padding(ABSSpacing.xSmall)
+                            .accessibilityHidden(true)
+                    }
+                }
+                .onAppear { onAppear(element) }
+        }
+        .alert(
+            Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
+            presenting: failureKey
+        ) { _ in
+            Button(L10n.string("ButtonOk")) {}
+        }
+    }
+
+    private func perform(_ kind: ItemActionKind, on item: ItemSummary) {
+        guard kind != .openDetails else {
+            BrowsePresentation.open(BrowsePresentation.route(for: item), in: router)
+            return
+        }
+        let actions = itemActions
+        let play = playItem
+        Task {
+            if let key = await BrowsePresentation.perform(kind, on: item, actions: actions, play: play) {
+                failureKey = key
+                showsFailure = true
+            }
+        }
+    }
+}
+
+extension View {
+    /// On macOS, a Refresh toolbar button (⌘R) for screens without pull to refresh.
+    func browseRefreshCommand(isDisabled: Bool, refresh: @escaping () -> Void) -> some View {
+        #if os(macOS)
+            toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button(action: refresh) {
+                        Label {
+                            Text(verbatim: L10n.string("ButtonBrowseRefresh"))
+                        } icon: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .disabled(isDisabled)
+                }
+            }
+        #else
+            self
+        #endif
+    }
+}

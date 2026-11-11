@@ -1,0 +1,526 @@
+import ABSAPI
+import ABSAppModel
+import ABSCore
+import ABSUI
+import Foundation
+import Synchronization
+import Testing
+
+@testable import Audiobookshelf
+
+private struct Failure: Error {}
+
+/// A library client that serves the sample series, authors and Barsoom books, records what the
+/// screens ask for, and fails the series and author requests while `fails` is set.
+private final class FakeSeriesAuthorsClient: LibraryService, SeriesAuthorsService {
+    let failsLibraries: Bool
+    let fails = Mutex(false)
+    /// The books a series or author request returns, in server order.
+    let books: [LibraryItem]
+    let seriesRequests = Mutex<[(libraryID: String, query: LibraryQuery)]>([])
+    let bookRequests = Mutex<[(libraryID: String, query: LibraryQuery)]>([])
+
+    init(
+        failsLibraries: Bool = false,
+        books: [LibraryItem] = [
+            barsoom(SampleLibrary.princessOfMars, "1"), barsoom(SampleLibrary.godsOfMars, "2"),
+            barsoom(SampleLibrary.warlordOfMars, "3"),
+        ]
+    ) {
+        self.failsLibraries = failsLibraries
+        self.books = books
+    }
+
+    func libraries() async throws -> [Library] {
+        if failsLibraries { throw Failure() }
+        return []
+    }
+
+    func library(id: String) async throws -> LibraryWithFilterData { throw Failure() }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Failure() }
+
+    func seriesPage(libraryID: String, query: LibraryQuery) async throws -> PagedResults<Series> {
+        seriesRequests.withLock { $0.append((libraryID, query)) }
+        try check()
+        let series = SampleLibrary.series
+        return PagedResults(results: series, total: series.count, limit: query.limit ?? 0, page: query.page ?? 0)
+    }
+
+    func authorList(libraryID: String) async throws -> [Author] {
+        try check()
+        return SampleLibrary.authors
+    }
+
+    func seriesDetail(id: String) async throws -> SeriesDetailResponse {
+        try check()
+        guard id == "ser_barsoom" else { throw APIError.notFound }
+        return SeriesDetailResponse(series: Series(id: id, name: "Barsoom", libraryId: "lib_a"))
+    }
+
+    func authorDetail(id: String) async throws -> AuthorDetailResponse {
+        try check()
+        guard id == "aut_burroughs" else { throw APIError.notFound }
+        return AuthorDetailResponse(
+            author: Author(id: id, name: "Edgar Rice Burroughs", libraryId: "lib_a", numBooks: 3))
+    }
+
+    func filteredBooksPage(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
+        bookRequests.withLock { $0.append((libraryID, query)) }
+        try check()
+        return PagedResults(results: books, total: books.count, limit: query.limit ?? 0, page: query.page ?? 0)
+    }
+
+    private func check() throws {
+        if fails.withLock({ $0 }) { throw Failure() }
+    }
+}
+
+/// `item` as the series-filtered list sends it: with the series and the item's sequence.
+private func barsoom(_ item: LibraryItem, _ sequence: String) -> LibraryItem {
+    LibraryItem(
+        id: item.id, libraryId: item.libraryId, isMissing: item.isMissing, mediaType: item.mediaType,
+        media: item.media, series: Series(id: "ser_barsoom", name: "Barsoom", sequence: sequence))
+}
+
+private let account = LibraryConnectionKey(
+    connectionID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA") ?? UUID(), userID: "user-1")
+
+/// A store connected to `client` with settings in a throwaway defaults suite, so a test never
+/// touches the app's.
+@MainActor
+private func withStore(
+    _ client: FakeSeriesAuthorsClient = FakeSeriesAuthorsClient(), _ body: (LibraryStore) async throws -> Void
+) async throws {
+    let suiteName = "SeriesAuthorsPresentationTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let store = LibraryStore(settings: AppSettings(defaults: defaults))
+    await store.connect(client: client, connectionKey: account)
+    try await body(store)
+}
+
+/// The services and key a screen builds its model from.
+@MainActor
+private func keyAndServices(
+    _ store: LibraryStore, libraryID: String = "lib_a", entityID: String? = nil
+) throws -> (key: BrowseModelKey, services: LibraryStoreServices) {
+    let key = try #require(BrowseModelKey(store: store, libraryID: libraryID, entityID: entityID))
+    return (key, try #require(store.makeServices()))
+}
+
+private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil, seriesID: String? = nil)
+    -> ItemSummary
+{
+    ItemSummary(
+        id: id, itemID: id, episodeID: episodeID, seriesID: seriesID, kind: kind, title: "Title \(id)",
+        duration: 60)
+}
+
+@MainActor
+@Suite struct BrowseScreenStateTests {
+    private typealias Inputs = BrowseScreenState.Inputs
+
+    @Test func resolvesEveryCombination() {
+        // Before the first load finishes: loading, or Retry once it failed.
+        #expect(BrowseScreenState.resolve(Inputs()) == .loading)
+        #expect(BrowseScreenState.resolve(Inputs(isLoading: true)) == .loading)
+        #expect(BrowseScreenState.resolve(Inputs(hasError: true)) == .failed)
+        #expect(BrowseScreenState.resolve(Inputs(isLoading: true, hasError: true)) == .loading)
+        // Loaded.
+        #expect(BrowseScreenState.resolve(Inputs(hasLoaded: true)) == .empty)
+        #expect(BrowseScreenState.resolve(Inputs(hasLoaded: true, hasError: true)) == .failed)
+        #expect(BrowseScreenState.resolve(Inputs(hasLoaded: true, hasContent: true)) == .loaded(failed: false))
+        #expect(
+            BrowseScreenState.resolve(Inputs(hasLoaded: true, hasContent: true, isLoading: true))
+                == .loaded(failed: false))
+        #expect(
+            BrowseScreenState.resolve(Inputs(hasLoaded: true, hasContent: true, hasError: true))
+                == .loaded(failed: true))
+        // A 404 wins over anything loaded before.
+        #expect(BrowseScreenState.resolve(Inputs(isNotFound: true)) == .notFound)
+        #expect(
+            BrowseScreenState.resolve(Inputs(hasLoaded: true, hasContent: true, hasError: true, isNotFound: true))
+                == .notFound)
+    }
+
+    @Test func pagedListGoesFromLoadingToLoadedAndKeepsItsItemsWhenAPageFails() async throws {
+        let client = FakeSeriesAuthorsClient()
+        try await withStore(client) { store in
+            let (key, services) = try keyAndServices(store)
+            let list = SeriesPresentation.makeList(key: key, services: services)
+            #expect(BrowseScreenState.resolve(list: list) == .loading)
+
+            client.fails.withLock { $0 = true }
+            await list.loadNextPage()?.value
+            #expect(BrowseScreenState.resolve(list: list) == .failed)
+
+            client.fails.withLock { $0 = false }
+            await BrowsePresentation.retry(list)?.value
+            #expect(BrowseScreenState.resolve(list: list) == .loaded(failed: false))
+            #expect(list.reachedEnd)
+
+            // At the end, Retry refreshes: the next page would load nothing and keep the error.
+            client.fails.withLock { $0 = true }
+            await list.refresh()?.value
+            #expect(BrowseScreenState.resolve(list: list) == .loaded(failed: true))
+            #expect(list.loadNextPage() == nil)
+            let requests = client.seriesRequests.withLock { $0.count }
+            client.fails.withLock { $0 = false }
+            await BrowsePresentation.retry(list)?.value
+            #expect(client.seriesRequests.withLock { $0.count } == requests + 1)
+            #expect(BrowseScreenState.resolve(list: list) == .loaded(failed: false))
+        }
+    }
+
+    @Test func pagedListThatLoadsNothingIsEmpty() async throws {
+        try await withStore(FakeSeriesAuthorsClient(books: [])) { store in
+            let (key, services) = try keyAndServices(store, entityID: "aut_burroughs")
+            let model = AuthorsPresentation.makeDetail(authorID: "aut_burroughs", key: key, services: services)
+            await model.loadIfNeeded()
+            #expect(AuthorsPresentation.state(of: model) == .loaded(failed: false))
+            #expect(BrowseScreenState.resolve(list: model.books) == .empty)
+        }
+    }
+
+    @Test func placeholderIsSignedOutWithoutAnAccount() async throws {
+        #expect(BrowseScreenState.placeholder(store: nil, libraryID: "lib_a") == .signedOut)
+        try await withStore { store in
+            store.clear()
+            #expect(BrowseScreenState.placeholder(store: store, libraryID: "lib_a") == .signedOut)
+        }
+    }
+
+    @Test func placeholderWaitsForALibrary() async throws {
+        try await withStore { store in
+            #expect(BrowseScreenState.placeholder(store: store, libraryID: "lib_a") == .loading)
+            #expect(BrowseScreenState.placeholder(store: store, libraryID: nil) == .empty)
+        }
+        try await withStore(FakeSeriesAuthorsClient(failsLibraries: true)) { store in
+            #expect(BrowseScreenState.placeholder(store: store, libraryID: nil) == .failed)
+        }
+    }
+}
+
+@MainActor
+@Suite struct BrowseModelKeyTests {
+    @Test func keyNeedsAStoreAnAccountAndALibrary() async throws {
+        #expect(BrowseModelKey(store: nil, libraryID: "lib_a") == nil)
+        try await withStore { store in
+            #expect(BrowseModelKey(store: store, libraryID: nil) == nil)
+            #expect(BrowseModelKey(store: store, libraryID: "lib_a") != nil)
+            store.clear()
+            #expect(BrowseModelKey(store: store, libraryID: "lib_a") == nil)
+        }
+    }
+
+    @Test func anotherLibraryEntityOrStoreGetsAnotherKey() async throws {
+        try await withStore { store in
+            try await withStore { other in
+                let key = BrowseModelKey(store: store, libraryID: "lib_a", entityID: "ser_1")
+                #expect(key == BrowseModelKey(store: store, libraryID: "lib_a", entityID: "ser_1"))
+                #expect(key != BrowseModelKey(store: store, libraryID: "lib_b", entityID: "ser_1"))
+                #expect(key != BrowseModelKey(store: store, libraryID: "lib_a", entityID: "ser_2"))
+                #expect(key != BrowseModelKey(store: other, libraryID: "lib_a", entityID: "ser_1"))
+            }
+        }
+    }
+
+    @Test func hostServesItsModelOnlyForItsKey() async throws {
+        try await withStore { store in
+            let key = try #require(BrowseModelKey(store: store, libraryID: "lib_a"))
+            let make = { (services: LibraryStoreServices) in AuthorsModel(libraryID: "lib_a", service: services) }
+            let host = try #require(BrowseModelHost(key: key, store: store, make: make))
+            #expect(host.model(for: key) === host.model)
+            #expect(host.model(for: BrowseModelKey(store: store, libraryID: "lib_b")) == nil)
+            #expect(host.model(for: nil) == nil)
+
+            // Signed out: no services, so no model.
+            store.clear()
+            let signedOut = BrowseModelHost(key: key, store: store, make: make)
+            #expect(signedOut == nil)
+        }
+    }
+}
+
+@MainActor
+@Suite struct BrowsePresentationTests {
+    @Test func openPushesOnTheSelectedTabOnce() {
+        let router = Router()
+        router.selectedTab = .series
+        BrowsePresentation.open(.series(id: "ser_1"), in: router)
+        BrowsePresentation.open(.series(id: "ser_1"), in: router)
+        #expect(router[path: .series] == [.series(id: "ser_1")])
+
+        BrowsePresentation.open(.item(id: "li_1"), in: router)
+        #expect(router[path: .series] == [.series(id: "ser_1"), .item(id: "li_1")])
+
+        // Compact width shows the sections inside Library.
+        router.selectedTab = .library
+        BrowsePresentation.open(.author(id: "aut_1"), in: router)
+        #expect(router[path: .library] == [.author(id: "aut_1")])
+        #expect(router[path: .series] == [.series(id: "ser_1"), .item(id: "li_1")])
+
+        BrowsePresentation.open(.author(id: "aut_1"), in: nil)
+    }
+
+    @Test func cardsOpenTheirItemEpisodeOrSeries() {
+        #expect(BrowsePresentation.route(for: book("li_1")) == .item(id: "li_1"))
+        #expect(
+            BrowsePresentation.route(for: book("li_2", kind: .episode, episodeID: "ep_1"))
+                == .episode(itemID: "li_2", episodeID: "ep_1"))
+        #expect(BrowsePresentation.route(for: book("li_3", kind: .series, seriesID: "ser_1")) == .series(id: "ser_1"))
+        #expect(BrowsePresentation.route(for: book("li_4", kind: .series)) == .item(id: "li_4"))
+    }
+
+    @Test func progressActionsTargetTheItemAndReportFailures() async {
+        let actions = RecordingItemActions()
+        let episode = book("li_pod", kind: .episode, episodeID: "ep_1")
+        #expect(await BrowsePresentation.perform(.markFinished, on: episode, actions: actions, play: nil) == nil)
+        #expect(
+            await BrowsePresentation.perform(.markNotFinished, on: book("li_1"), actions: actions, play: nil) == nil)
+        #expect(
+            await BrowsePresentation.perform(.hideFromContinueListening, on: book("li_2"), actions: actions, play: nil)
+                == nil)
+        #expect(actions.calls.map { $0.0 } == [.markFinished, .markNotFinished, .hideFromContinueListening])
+        #expect(
+            actions.calls.map { $0.1 } == [
+                ItemActionTarget(libraryItemID: "li_pod", episodeID: "ep_1", duration: 60),
+                ItemActionTarget(libraryItemID: "li_1", duration: 60),
+                ItemActionTarget(libraryItemID: "li_2", duration: 60),
+            ])
+
+        actions.error = Failure()
+        for kind in [ItemActionKind.markFinished, .markNotFinished, .hideFromContinueListening] {
+            let key = await BrowsePresentation.perform(kind, on: book("li_1"), actions: actions, play: nil)
+            #expect(key == BrowsePresentation.failureMessageKey(for: kind))
+            #expect(key != nil)
+        }
+        actions.error = CancellationError()
+        #expect(await BrowsePresentation.perform(.markFinished, on: book("li_1"), actions: actions, play: nil) == nil)
+    }
+
+    @Test func playPlaysTheItemOrEpisode() async {
+        let played = PlayedItems()
+        let play = PlayItemAction { itemID, episodeID, _ in
+            played.items.append(Played(itemID: itemID, episodeID: episodeID))
+            if let error = played.error { throw error }
+        }
+        let actions = RecordingItemActions()
+        let episode = book("li_pod", kind: .episode, episodeID: "ep_1")
+        #expect(await BrowsePresentation.perform(.play, on: episode, actions: actions, play: play) == nil)
+        #expect(played.items == [Played(itemID: "li_pod", episodeID: "ep_1")])
+
+        played.error = Failure()
+        #expect(
+            await BrowsePresentation.perform(.play, on: book("li_1"), actions: actions, play: play)
+                == "MessageBrowsePlayFailed")
+        played.error = CancellationError()
+        #expect(await BrowsePresentation.perform(.play, on: book("li_1"), actions: actions, play: play) == nil)
+        // No player (previews): nothing happens.
+        #expect(await BrowsePresentation.perform(.play, on: book("li_1"), actions: actions, play: nil) == nil)
+        #expect(actions.calls.isEmpty)
+    }
+
+    @Test func actionsThatArentWiredUpDoNothing() async {
+        let actions = RecordingItemActions()
+        actions.error = Failure()
+        for kind in [ItemActionKind.share, .addToPlaylist, .openDetails] {
+            #expect(await BrowsePresentation.perform(kind, on: book("li_1"), actions: actions, play: nil) == nil)
+            #expect(BrowsePresentation.failureMessageKey(for: kind) == nil)
+        }
+        #expect(actions.calls.isEmpty)
+    }
+
+    @Test func everyMessageKeyIsInTheCatalog() {
+        let messages = [
+            SeriesPresentation.listMessages, SeriesPresentation.detailMessages, AuthorsPresentation.listMessages,
+            AuthorsPresentation.detailMessages,
+        ]
+        let actions: [ItemActionKind] = [.play, .markFinished, .markNotFinished, .hideFromContinueListening]
+        let keys =
+            messages.flatMap { [$0.failed, $0.empty, $0.notFound] }
+            + actions.compactMap { BrowsePresentation.failureMessageKey(for: $0) }
+            + [AuthorsPresentation.booksFailedMessage, "ButtonBrowseRefresh"]
+        for key in keys {
+            #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
+        }
+    }
+}
+
+@MainActor
+@Suite struct SeriesPresentationTests {
+    @Test func seriesListAsksForOnePageByName() async throws {
+        let client = FakeSeriesAuthorsClient()
+        try await withStore(client) { store in
+            let (key, services) = try keyAndServices(store)
+            let list = SeriesPresentation.makeList(key: key, services: services)
+            await list.loadNextPage()?.value
+            #expect(list.items.map(\.name) == SampleLibrary.series.map(\.name))
+            let request = try #require(client.seriesRequests.withLock { $0.first })
+            #expect(request.libraryID == "lib_a")
+            #expect(
+                request.query.queryItems == [
+                    URLQueryItem(name: "sort", value: "name"), URLQueryItem(name: "desc", value: "0"),
+                    URLQueryItem(name: "limit", value: "20"), URLQueryItem(name: "page", value: "0"),
+                ])
+        }
+    }
+
+    @Test func sequenceBadgeShowsTheSequence() {
+        #expect(SeriesPresentation.sequenceBadge("1") == "#1")
+        #expect(SeriesPresentation.sequenceBadge(" 2.5 ") == "#2.5")
+        #expect(SeriesPresentation.sequenceBadge("") == nil)
+        #expect(SeriesPresentation.sequenceBadge("  ") == nil)
+        #expect(SeriesPresentation.sequenceBadge(nil) == nil)
+    }
+
+    @Test func booksKeepTheServersSequenceOrder() async throws {
+        // The server sorts a series filter by sequence; the screen must not sort again.
+        let books = [
+            barsoom(SampleLibrary.godsOfMars, "2"), barsoom(SampleLibrary.princessOfMars, "1"),
+            barsoom(SampleLibrary.warlordOfMars, "3"),
+        ]
+        let client = FakeSeriesAuthorsClient(books: books)
+        try await withStore(client) { store in
+            let (_, services) = try keyAndServices(store, entityID: "ser_barsoom")
+            let model = SeriesDetailModel(
+                seriesID: "ser_barsoom", libraryID: "lib_a", service: services, cache: store.progress)
+            await model.loadIfNeeded()
+            #expect(SeriesPresentation.state(of: model) == .loaded(failed: false))
+            let badges = model.detail?.books.map { SeriesPresentation.sequenceBadge($0.sequence) }
+            #expect(badges == ["#2", "#1", "#3"])
+            let query = try #require(client.bookRequests.withLock { $0.first?.query })
+            #expect(query.sort == nil)
+            #expect(query.filter == .series(id: "ser_barsoom"))
+        }
+    }
+
+    @Test func continueSeriesOpensTheFirstUnfinishedBook() async throws {
+        try await withStore { store in
+            let (_, services) = try keyAndServices(store, entityID: "ser_barsoom")
+            let model = SeriesDetailModel(
+                seriesID: "ser_barsoom", libraryID: "lib_a", service: services, cache: store.progress)
+            await model.loadIfNeeded()
+            store.progress.apply(
+                MediaProgress(
+                    id: "mp_1", libraryItemId: SampleLibrary.princessOfMars.id, progress: 1, isFinished: true))
+
+            let next = try #require(model.continueBook)
+            #expect(SeriesPresentation.continueRoute(for: next) == .item(id: SampleLibrary.godsOfMars.id))
+            #expect(
+                SeriesPresentation.continueAccessibilityLabel(for: next)
+                    == "\(L10n.string("LabelContinueSeries")), The Gods of Mars")
+        }
+    }
+
+    @Test func detailStatesFollowTheModel() async throws {
+        let client = FakeSeriesAuthorsClient()
+        try await withStore(client) { store in
+            let (_, services) = try keyAndServices(store)
+            let missing = SeriesDetailModel(
+                seriesID: "ser_gone", libraryID: "lib_a", service: services, cache: store.progress)
+            #expect(SeriesPresentation.state(of: missing) == .loading)
+            await missing.loadIfNeeded()
+            #expect(SeriesPresentation.state(of: missing) == .notFound)
+
+            let series = SeriesDetailModel(
+                seriesID: "ser_barsoom", libraryID: "lib_a", service: services, cache: store.progress)
+            client.fails.withLock { $0 = true }
+            await series.loadIfNeeded()
+            #expect(SeriesPresentation.state(of: series) == .failed)
+            client.fails.withLock { $0 = false }
+            await series.loadIfNeeded()
+            client.fails.withLock { $0 = true }
+            await series.load()
+            #expect(SeriesPresentation.state(of: series) == .loaded(failed: true))
+        }
+    }
+}
+
+@MainActor
+@Suite struct AuthorsPresentationTests {
+    @Test func authorBooksUseTheAuthorsFilterByTitle() async throws {
+        let client = FakeSeriesAuthorsClient()
+        try await withStore(client) { store in
+            let (key, services) = try keyAndServices(store, entityID: "aut_burroughs")
+            let model = AuthorsPresentation.makeDetail(authorID: "aut_burroughs", key: key, services: services)
+            await model.loadIfNeeded()
+            #expect(AuthorsPresentation.state(of: model) == .loaded(failed: false))
+            #expect(BrowseScreenState.resolve(list: model.books) == .loaded(failed: false))
+
+            let request = try #require(client.bookRequests.withLock { $0.first })
+            #expect(request.libraryID == "lib_a")
+            let filter = try #require(request.query.queryItems.first { $0.name == "filter" }?.value)
+            #expect(filter == LibraryFilter.authors(id: "aut_burroughs").queryValue)
+            #expect(filter.hasPrefix("authors."))
+            #expect(request.query.sort == "media.metadata.title")
+            #expect(!request.query.descending)
+        }
+    }
+
+    @Test func missingAuthorIsNotFound() async throws {
+        try await withStore { store in
+            let (key, services) = try keyAndServices(store, entityID: "aut_gone")
+            let model = AuthorsPresentation.makeDetail(authorID: "aut_gone", key: key, services: services)
+            await model.loadIfNeeded()
+            #expect(AuthorsPresentation.state(of: model) == .notFound)
+        }
+    }
+
+    @Test func authorsListStates() async throws {
+        let client = FakeSeriesAuthorsClient()
+        try await withStore(client) { store in
+            let (_, services) = try keyAndServices(store)
+            let model = AuthorsModel(libraryID: "lib_a", service: services)
+            #expect(AuthorsPresentation.state(of: model) == .loading)
+            client.fails.withLock { $0 = true }
+            await model.loadIfNeeded()
+            #expect(AuthorsPresentation.state(of: model) == .failed)
+            client.fails.withLock { $0 = false }
+            await model.loadIfNeeded()
+            #expect(AuthorsPresentation.state(of: model) == .loaded(failed: false))
+            client.fails.withLock { $0 = true }
+            await model.load()
+            #expect(AuthorsPresentation.state(of: model) == .loaded(failed: true))
+        }
+    }
+
+    @Test func bookCountPrefersTheLibrarysTotal() {
+        let author = AuthorSummary(id: "aut_1", name: "Author", bookCount: 3)
+        #expect(AuthorsPresentation.bookCount(total: 5, author: author) == L10n.string("SharedBookCount", "5"))
+        #expect(AuthorsPresentation.bookCount(total: nil, author: author) == L10n.string("SharedBookCount", "3"))
+        #expect(AuthorsPresentation.bookCount(total: nil, author: AuthorSummary(id: "aut_2", name: "Author")) == nil)
+        #expect(AuthorsPresentation.bookCount(total: 0, author: author)?.contains("0") == true)
+    }
+}
+
+/// Records the progress actions a screen sends, and throws `error` when set.
+@MainActor
+private final class RecordingItemActions: ItemActionPerforming {
+    var calls: [(ItemActionKind, ItemActionTarget)] = []
+    var error: (any Error)?
+
+    func markFinished(_ target: ItemActionTarget) async throws { try record(.markFinished, target) }
+    func markNotFinished(_ target: ItemActionTarget) async throws { try record(.markNotFinished, target) }
+    func hideFromContinueListening(_ target: ItemActionTarget) async throws {
+        try record(.hideFromContinueListening, target)
+    }
+
+    private func record(_ kind: ItemActionKind, _ target: ItemActionTarget) throws {
+        calls.append((kind, target))
+        if let error { throw error }
+    }
+}
+
+private struct Played: Hashable {
+    let itemID: String
+    let episodeID: String?
+}
+
+/// What a test's player was asked to play; it throws `error` when set.
+@MainActor
+private final class PlayedItems {
+    var items: [Played] = []
+    var error: (any Error)?
+}
