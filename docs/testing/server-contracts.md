@@ -90,7 +90,7 @@ Behaviour that holds on both, and that fixtures did not capture:
 - `POST /login` returns the refresh token only in a cookie unless `x-return-tokens: true` is sent.
   `POST /logout` revokes the cookie's refresh token before the `x-refresh-token` header's.
 - `POST /api/items/:id/play` closes the user's other sessions on the same `deviceId`, even for
-  another item. A different device is left open.
+  another item. A different device is left open. See the bounded session model below.
 - A session sync's `timeListened` is a delta. An update that leaves less than 10 s finishes the
   item, but the PATCH that creates the row never does.
 - `isFinished` in a PATCH makes the server ignore `progress`; `isFinished: false` on a finished
@@ -98,6 +98,60 @@ Behaviour that holds on both, and that fixtures did not capture:
 - An ebook-only PATCH on a new row creates `duration` 0 and `currentTime` 0, and a location
   without `ebookProgress` keeps the stored `ebookProgress`.
 - An uploaded local session older than the stored progress is kept, with `progressSynced` false.
+
+### Sequential session evidence and the reconciliation test model (#275)
+
+`PlaybackSessionContractTests` adds sequential pagination, zero-listening and stale-position
+contracts and checks stored totals after the existing cross-item takeover. On both official
+pins above (2.26.0 / 2.37.2), the observed results were identical:
+
+- Twelve positive-listening sessions, each synced and then closed without another report,
+  produce `total=12`, `numPages=2`, `itemsPerPage=10`; pages 0/1 contain 10/2 records.
+  The oldest session is absent from page 0 but present on page 1 with its applied delta and
+  position intact. The first request omits pagination query parameters to verify the default.
+- Cross-item takeover retains the old session's 3 seconds listened / position 10.
+  Another device's session remains open. Ordinary close with a report retains accumulated
+  listening time (the existing lifecycle contract checks 7.5 seconds / position 20).
+- Zero-listening sync moves canonical position to 8, but takeover does not store that session.
+  Zero-listening close moves position to 9, removes the open session, and also stores no row:
+  the item's page is empty with total/numPages 0 and itemsPerPage 10.
+- Sequential positions 20 → 5 → 4 (sync, stale sync, stale final close) leave position 4
+  and accumulated listening time 6. Online reports contain no client edit timestamp.
+
+Source grounding is `advplyr/audiobookshelf` at
+`264ae928a9c1af620487488110eec816b14e23ec` and
+`edb1f7efc92ecacdef51aafb4d9d5054ce10604f`:
+`server/managers/PlaybackSessionManager.js` lines 313–319 select takeover by user/device,
+373–448 apply reports, close and omit zero-listening storage;
+`server/objects/PlaybackSession.js` lines 237–248 / 238–249 add listening time and date
+nonzero deltas. `server/routers/ApiRouter.js` lines 522–525 / 530–533 sort stored records by
+descending `updatedAt`; `server/controllers/MeController.js` lines 65–92 / 185–218 slice
+pages and report metadata. A source-only difference is the newer route's library-access
+check; these unrestricted-user contracts do not characterize permission failures.
+
+`ABSPlaybackTests/Sync/ReconciliationSessionModel.swift` is opt-in through the existing
+`StubSessionService` and `StubProgressSyncService` `sessionClient` seams. A shared actor owns
+starts, reports, closes, open-session lookup, stored pages and canonical audio progress,
+scoped by user/item/episode; takeover is scoped by user/device. The fixture clock supplies
+dates, and positive-listening syncs update stored records while still open. Requests can
+independently wait before entry, application and response, with explicit arrival/stage signals.
+An applied request with a lost response differs from an unapplied failure. Held reads snapshot
+at application, not entry or response. Cancellation does not release the application gate.
+The production coordinator/syncer integration uses this same ledger, not separate report totals.
+
+Limits: application/storage is atomic in this small model; the actual `syncSession` calls
+`saveSession` without awaiting it. Sequential live observations do **not** establish a database
+visibility barrier, late-processing fence or universal exactly-once/no-loss guarantee. Equal-date
+ordering is unspecified on the server (the model has a deterministic fixture tie-break).
+The model uses fixed 3600-second media and does not simulate auto-finish, ebook intent, PATCH
+semantics, permissions, local uploads, transport admission races or asynchronous database writes.
+PATCHes and legacy recording accessors remain recording-only; tests using this model inspect
+`fetchProgress`, `openSession` and `listeningSessions`. Unconfigured fake defaults are unchanged.
+
+Neither first-page absence, `/sync` success nor durable audio-report evidence proves delivery
+of listening time. No production recovery, resend, backoff, close-routing or history policy
+changes here. The original #171/#158/#195/#53 work and `lateCompletingSyncIsCountedOnce`
+acceptance remain open; the old suite is not imported or declared satisfied.
 
 ## Add a contract
 

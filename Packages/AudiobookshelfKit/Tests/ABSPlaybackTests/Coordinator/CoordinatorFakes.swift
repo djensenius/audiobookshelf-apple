@@ -192,6 +192,8 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
 /// start that reaches it takes over every other open session, and a close removes its own.
 final class StubSessionService: PlaybackSessionService {
     struct State {
+        /// Opt-in shared server; legacy gates/overrides remain for unconfigured tests only.
+        var sessionClient: SessionModelClient?
         var progress: [String: MediaProgress] = [:]
         var progressError: APIError?
         var serverTime: [String: Double] = [:]
@@ -237,6 +239,13 @@ final class StubSessionService: PlaybackSessionService {
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
         // As the API client's request does, a start for a cancelled caller sends nothing and throws.
         try Task.checkCancellation()
+        if let client = state.withLock({ $0.sessionClient }) {
+            state.withLock {
+                $0.starts.append(itemID)
+                $0.log.append("start \(itemID)")
+            }
+            return try await client.model.start(client, itemID: itemID, episodeID: episodeID)
+        }
         let (gate, error, time, id, updatedAt, metadata) = state.withLock { state in
             state.starts.append(itemID)
             state.log.append("start \(itemID)")
@@ -271,7 +280,10 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
-        try state.withLock { state in
+        if let client = state.withLock({ $0.sessionClient }) {
+            return try await client.model.fetchProgress(client, itemID: itemID, episodeID: episodeID)
+        }
+        return try state.withLock { state in
             if let error = state.progressError { throw error }
             return state.progress[itemID]
         }
@@ -304,11 +316,30 @@ final class StubSessionService: PlaybackSessionService {
         }
         await gate?.wait()
         if Task.isCancelled { state.withLock { $0.canceledCloses.append(id) } }
+        if let client = state.withLock({ $0.sessionClient }) {
+            try await client.model.close(client, id: id, report: report)
+            state.withLock { $0.log.append("close \(id) done") }
+            return
+        }
         state.withLock { state in
             state.openSessions.removeAll { $0 == id }
             state.log.append("close \(id) done")
         }
         if let error { throw error }
+    }
+
+    /// Model-only lookup seams; unlike the legacy recording arrays these share server state.
+    func openSession(id: String) async throws -> PlaybackSession {
+        guard let client = state.withLock({ $0.sessionClient }) else { preconditionFailure("Configure sessionClient") }
+        return try await client.model.lookup(client, id: id)
+    }
+
+    func listeningSessions(
+        itemID: String, episodeID: String? = nil, page: Int = 0, itemsPerPage: Int = 10
+    ) async throws -> ListeningSessionsPage {
+        guard let client = state.withLock({ $0.sessionClient }) else { preconditionFailure("Configure sessionClient") }
+        return try await client.model.records(
+            client, itemID: itemID, episodeID: episodeID, page: page, itemsPerPage: itemsPerPage)
     }
 }
 
