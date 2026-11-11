@@ -1,0 +1,175 @@
+import ABSAppModel
+import ABSCore
+import ABSUI
+import SwiftUI
+
+/// The top of the podcast screen (legacy `index.vue` with a podcast): the cover, the title with
+/// its Explicit badge, Next Episode, the metadata and the description. Compact width stacks
+/// them; regular width puts the cover and Next Episode beside the rest.
+struct PodcastDetailHeader: View {
+    let model: PodcastDetailModel
+    /// Next Episode can start: there is a player, the podcast is still on the server, and no
+    /// other episode is starting.
+    let canPlay: Bool
+    /// Next Episode is starting.
+    let isStarting: Bool
+    let playNext: () -> Void
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.locale) private var locale
+
+    var body: some View {
+        if horizontalSizeClass == .compact {
+            VStack(alignment: .leading, spacing: ABSSpacing.large) {
+                cover
+                    .frame(maxWidth: 240)
+                    .frame(maxWidth: .infinity)
+                title
+                nextEpisode
+                details
+            }
+        } else {
+            HStack(alignment: .top, spacing: ABSSpacing.xLarge) {
+                VStack(alignment: .leading, spacing: ABSSpacing.large) {
+                    cover
+                    nextEpisode
+                }
+                .frame(width: 240)
+                VStack(alignment: .leading, spacing: ABSSpacing.large) {
+                    title
+                    details
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var cover: some View {
+        PodcastDetailCover(summary: model.summary, title: model.title, author: model.author)
+    }
+
+    private var title: some View {
+        HStack(alignment: .firstTextBaseline, spacing: ABSSpacing.xSmall) {
+            Text(verbatim: model.title)
+                .font(.title2.bold())
+                .accessibilityAddTraits(.isHeader)
+            if model.isExplicit { ExplicitBadge() }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Shown while the podcast can play (legacy `showPlay`); disabled without a player.
+    @ViewBuilder private var nextEpisode: some View {
+        if model.nextEpisode != nil {
+            Button(action: playNext) {
+                Label {
+                    Text(verbatim: L10n.string("ButtonNextEpisode"))
+                } icon: {
+                    if isStarting {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "play.fill")
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(!canPlay)
+        }
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: ABSSpacing.large) {
+            PodcastDetailMetadata(rows: PodcastDetailPresentation.metadataRows(for: model, locale: locale))
+            if let description = model.descriptionHTML {
+                VStack(alignment: .leading, spacing: ABSSpacing.small) {
+                    Text(verbatim: L10n.string("LabelDescription"))
+                        .font(.headline)
+                        .accessibilityAddTraits(.isHeader)
+                    ExpandableText(html: description)
+                }
+            }
+        }
+    }
+}
+
+/// The square cover through the environment's image pipeline; hidden from VoiceOver, since the
+/// title speaks for it.
+private struct PodcastDetailCover: View {
+    let summary: ItemSummary?
+    let title: String
+    let author: String?
+    @Environment(\.serverID) private var serverID
+
+    var body: some View {
+        CoverView(
+            key: serverID.flatMap { summary?.coverKey(serverID: $0, bucket: .medium) }, title: title,
+            author: author, shape: .square, accessibility: .hidden)
+    }
+}
+
+/// The metadata rows: labels beside their values, or above them at accessibility text sizes.
+/// Laid out like the book screen's metadata, which only takes a book's details.
+private struct PodcastDetailMetadata: View {
+    let rows: [ItemDetailMetadataRow]
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: ABSSpacing.medium) {
+                ForEach(rows) { row in
+                    VStack(alignment: .leading, spacing: ABSSpacing.xxSmall) {
+                        label(row)
+                        values(row)
+                    }
+                }
+            }
+        } else {
+            Grid(alignment: .topLeading, horizontalSpacing: ABSSpacing.large, verticalSpacing: ABSSpacing.small) {
+                ForEach(rows) { row in
+                    GridRow {
+                        label(row)
+                        values(row)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hidden from VoiceOver: ``values(_:)`` speaks it with each value.
+    private func label(_ row: ItemDetailMetadataRow) -> some View {
+        Text(verbatim: L10n.string(row.labelKey))
+            .font(.subheadline)
+            .foregroundStyle(ABSColor.mutedForeground)
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder private func values(_ row: ItemDetailMetadataRow) -> some View {
+        let label = Text(verbatim: L10n.string(row.labelKey))
+        let layout = ItemDetailFlowLayout(spacing: ABSSpacing.small) {
+            ForEach(Array(row.values.enumerated()), id: \.offset) { _, value in
+                switch value {
+                case .text(let text, let spoken):
+                    Text(verbatim: text)
+                        .accessibilityLabel(Text(verbatim: spoken ?? text))
+                case .link(let name, let route):
+                    NavigationLink(value: route) {
+                        Text(verbatim: name)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityValue(label)
+                }
+            }
+        }
+        .font(.subheadline)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        if let spoken = row.spokenText {
+            layout
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
+                .accessibilityValue(Text(verbatim: spoken))
+        } else {
+            layout
+        }
+    }
+}
