@@ -119,6 +119,11 @@ public protocol AudioEngineProtocol: AnyObject, Observable {
     var isPlaybackRequested: Bool { get }
     /// Target of the latest seek until a seek to it completes.
     var pendingSeekTarget: Double? { get }
+    /// Whether the engine has activated its audio session to play: set once activation succeeds,
+    /// just before the player starts (after any load or seek in flight), and cleared by ``stop()``
+    /// or a failed activation. A pause keeps it. With no audio session (macOS) it follows the same
+    /// points.
+    var isAudioSessionActive: Bool { get }
     var timeline: PlaybackTimeline? { get }
     var onEvent: (@MainActor (AudioEngineEvent) -> Void)? { get set }
 
