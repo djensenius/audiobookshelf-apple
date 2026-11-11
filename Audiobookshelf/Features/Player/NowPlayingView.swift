@@ -122,7 +122,11 @@ private struct NowPlayingScrubber: View {
         PlayerScrubber(
             progress: model.progress, elapsed: model.elapsed, remaining: model.remainingAtRate,
             onScrub: { model.scrub(to: $0, owner: owner) },
-            onScrubEnd: { Task { await model.endScrub(owner: owner) } },
+            onScrubEnd: {
+                // Finish now, so disappearing before the seek task runs can't cancel it.
+                guard let seek = model.finishScrub(owner: owner) else { return }
+                Task { await model.commitScrub(seek) }
+            },
             onIncrement: { Task { await model.jumpForward() } },
             onDecrement: { Task { await model.jumpBackward() } }
         )
@@ -184,4 +188,9 @@ private struct PlaybackSpeedMenu: View {
 
 #Preview("Playing") {
     NowPlayingView(model: .preview(at: 9_500, playing: true))
+}
+
+#Preview("Accessibility size") {
+    NowPlayingView(model: .preview(at: 9_500, playing: true))
+        .dynamicTypeSize(.accessibility3)
 }

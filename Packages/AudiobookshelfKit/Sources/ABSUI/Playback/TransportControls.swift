@@ -93,22 +93,45 @@ public struct TransportControls: View {
     }
 
     public var body: some View {
-        HStack(spacing: style == .full ? 0 : 4) {
+        Group {
             switch style {
             case .full:
-                chapterButton(.previousChapter)
-                Spacer(minLength: 4)
-                jumpButton(forward: false)
-                Spacer(minLength: 4)
-                playPauseButton
-                Spacer(minLength: 4)
-                jumpButton(forward: true)
-                Spacer(minLength: 4)
-                chapterButton(.nextChapter)
+                // One row when it fits; otherwise (accessibility text sizes on a narrow screen) the
+                // jumps and play/pause, with the chapter buttons on a second row, so every action
+                // stays reachable.
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 0) {
+                        chapterButton(.previousChapter)
+                        Spacer(minLength: 4)
+                        jumpButton(forward: false)
+                        Spacer(minLength: 4)
+                        playPauseButton
+                        Spacer(minLength: 4)
+                        jumpButton(forward: true)
+                        Spacer(minLength: 4)
+                        chapterButton(.nextChapter)
+                    }
+                    VStack(spacing: 8) {
+                        HStack(spacing: 4) {
+                            jumpButton(forward: false)
+                            Spacer(minLength: 4)
+                            playPauseButton
+                            Spacer(minLength: 4)
+                            jumpButton(forward: true)
+                        }
+                        HStack(spacing: 4) {
+                            chapterButton(.previousChapter)
+                            Spacer(minLength: 4)
+                            chapterButton(.nextChapter)
+                        }
+                    }
+                }
             case .compact:
-                jumpButton(forward: false)
-                playPauseButton
-                jumpButton(forward: true)
+                HStack(spacing: 4) {
+                    jumpButton(forward: false)
+                    playPauseButton
+                    jumpButton(forward: true)
+                }
             case .playPauseOnly:
                 playPauseButton
             }
@@ -209,4 +232,14 @@ public struct TransportControls: View {
     ) { _ in }
     .padding()
     .environment(\.layoutDirection, .rightToLeft)
+}
+
+#Preview("Accessibility size, narrow") {
+    TransportControls(
+        style: .full, showsPause: true, jumpBackwardSeconds: 10, jumpForwardSeconds: 300, hasPreviousChapter: true,
+        hasNextChapter: true
+    ) { _ in }
+    .frame(width: 320)
+    .padding()
+    .dynamicTypeSize(.accessibility3)
 }

@@ -641,6 +641,33 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    /// A view finishes its scrub synchronously when the gesture ends and seeks later; its
+    /// disappearing in between doesn't cancel the finished scrub, so the seek isn't lost.
+    @Test func aFinishedScrubSurvivesItsViewDisappearingBeforeTheSeek() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.scrub(to: 0.5, owner: owner)
+            let seek = try #require(model.finishScrub(owner: owner))
+            model.cancelScrub(owner: owner)  // The view disappears before the seek task runs.
+            await model.commitScrub(seek)
+            #expect(playback.calls == [.seek(200)])
+        }
+    }
+
+    /// A finished scrub's seek is dropped if the item changes before it runs.
+    @Test func aFinishedScrubDoesNotSeekAnotherItem() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.scrub(to: 0.5, owner: owner)
+            let seek = try #require(model.finishScrub(owner: owner))
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            await model.commitScrub(seek)
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
     // MARK: Errors
 
     @Test(arguments: [

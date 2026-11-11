@@ -41,7 +41,9 @@ public enum PlayerErrorMessage: Sendable, Hashable {
 ///   media seconds; ``remainingAtRate`` is the wall-clock time left.
 /// - **Scrubbing.** Between ``beginScrub(owner:)`` and ``endScrub(owner:)`` the times and progress
 ///   show the scrub position over the range fixed when it began, ignoring playback ticks;
-///   ``endScrub(owner:)`` seeks once, and only if the position moved. A change of item cancels the
+///   ``endScrub(owner:)`` seeks once, and only if the position moved. A view splits it into
+///   ``finishScrub(owner:)``, synchronously when its gesture ends, and ``commitScrub(_:)`` in a
+///   task, so its disappearing in between can't cancel the seek. A change of item cancels the
 ///   scrub, and the rest of that gesture is ignored until its ``endScrub(owner:)`` or a new
 ///   ``beginScrub(owner:)``; the same item loading (a new session, the restored record cleared)
 ///   doesn't cancel it. No scrub begins while an item is starting, before its resume position is
@@ -83,6 +85,13 @@ public final class PlayerViewModel {
         private let id = UUID()
 
         public init() {}
+    }
+
+    /// The seek a finished scrub needs; see ``finishScrub(owner:)``.
+    public struct ScrubSeek: Sendable, Hashable {
+        fileprivate let key: MediaKey?
+        /// The media time to seek to.
+        public let time: Double
     }
 
     private struct Scrub {
@@ -296,15 +305,32 @@ public final class PlayerViewModel {
         scrubState = scrub
     }
 
-    /// Ends `owner`'s scrub and seeks to its position, once. A scrub that never moved, or that a
-    /// change of item cancelled, ends without seeking: seeking an unloaded item would replace its
-    /// resume position. Does nothing to another owner's scrub. Makes `owner` eligible again.
+    /// Ends `owner`'s scrub and seeks to its position, once: ``finishScrub(owner:)`` then
+    /// ``commitScrub(_:)``.
     public func endScrub(owner: ScrubOwner) async {
+        guard let seek = finishScrub(owner: owner) else { return }
+        await commitScrub(seek)
+    }
+
+    /// Ends `owner`'s scrub now and returns the seek it needs, for ``commitScrub(_:)``.
+    ///
+    /// A view whose gesture ends calls this synchronously, before scheduling the seek, so a
+    /// ``cancelScrub(owner:)`` from its disappearing in between finds nothing to cancel and the
+    /// seek isn't lost. A scrub that never moved, or that a change of item cancelled, returns `nil`:
+    /// seeking an unloaded item would replace its resume position. Does nothing to another owner's
+    /// scrub. Makes `owner` eligible again.
+    public func finishScrub(owner: ScrubOwner) -> ScrubSeek? {
         ineligibleScrubOwners.remove(owner)
         let scrub = activeScrub
         if scrubState?.owner == owner { scrubState = nil }
-        guard let scrub, scrub.owner == owner, scrub.moved else { return }
-        await playback.seek(to: scrub.time)
+        guard let scrub, scrub.owner == owner, scrub.moved else { return nil }
+        return ScrubSeek(key: scrub.key, time: scrub.time)
+    }
+
+    /// Seeks to a finished scrub's position, unless the item changed since it finished.
+    public func commitScrub(_ seek: ScrubSeek) async {
+        guard seek.key == playback.mediaKey else { return }
+        await playback.seek(to: seek.time)
     }
 
     /// Drops `owner`'s scrub without seeking, for a scrubber that goes away mid-drag. Does nothing

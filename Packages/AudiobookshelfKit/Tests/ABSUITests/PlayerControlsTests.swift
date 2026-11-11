@@ -104,6 +104,26 @@ private final class Recorder {
         #expect(TransportControls.jumpCaption(seconds: 20, locale: locale) == "20s")
     }
 
+    /// Too narrow for one row (as at accessibility text sizes on an iPhone), the full controls wrap
+    /// into two rows instead of clipping: taller, and no wider than offered.
+    @MainActor @Test func fullControlsWrapWhenTooNarrow() throws {
+        let wide = try renderedSize(width: 400)
+        let narrow = try renderedSize(width: 160)
+        #expect(narrow.height > wide.height)
+        #expect(narrow.width <= 160)
+    }
+
+    @MainActor private func renderedSize(width: CGFloat) throws -> CGSize {
+        let controls = TransportControls(
+            style: .full, showsPause: false, jumpBackwardSeconds: 10, jumpForwardSeconds: 30, hasPreviousChapter: true,
+            hasNextChapter: true
+        ) { _ in }
+        let renderer = ImageRenderer(content: controls.frame(width: width).environment(\.locale, locale))
+        renderer.scale = 1
+        let image = try #require(renderer.cgImage)
+        return CGSize(width: image.width, height: image.height)
+    }
+
     @Test func playPauseLabelFollowsTheIntent() {
         #expect(TransportControls.playPauseLabel(showsPause: true) == "Pause")
         #expect(TransportControls.playPauseLabel(showsPause: false) == "Play")

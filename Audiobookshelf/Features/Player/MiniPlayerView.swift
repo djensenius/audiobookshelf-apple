@@ -7,7 +7,8 @@ import SwiftUI
 /// open the full player, with play/pause, the jumps and a close button that stops playback.
 ///
 /// On iOS it is the tab view's bottom accessory; when the tab bar collapses it to the inline
-/// placement only play/pause stays. On macOS it is a bar under the content.
+/// placement only play/pause stays. At accessibility text sizes the cover, author and jumps go, so
+/// the title, play/pause and close keep fitting. On macOS it is a bar under the content.
 struct MiniPlayerView: View {
     let model: PlayerViewModel
     let router: Router
@@ -15,34 +16,55 @@ struct MiniPlayerView: View {
     #if os(iOS)
         @Environment(\.tabViewBottomAccessoryPlacement) private var placement
     #endif
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var coverHeight: CGFloat = 40
 
-    private var isInline: Bool {
+    /// What the mini player shows for its placement and text size.
+    enum Layout: Equatable {
+        /// Cover, title and author, jumps and play/pause, close.
+        case regular
+        /// At accessibility text sizes: title, play/pause and close.
+        case accessibility
+        /// The inline accessory: title and play/pause.
+        case inline
+
+        static func pick(isInline: Bool, isAccessibilitySize: Bool) -> Layout {
+            if isInline { return .inline }
+            return isAccessibilitySize ? .accessibility : .regular
+        }
+
+        var transportStyle: TransportControls.Style { self == .regular ? .compact : .playPauseOnly }
+        var showsCoverAndAuthor: Bool { self == .regular }
+        var showsCloseAndProgress: Bool { self != .inline }
+    }
+
+    private var layout: Layout {
         #if os(iOS)
-            placement == .inline
+            let isInline = placement == .inline
         #else
-            false
+            let isInline = false
         #endif
+        return .pick(isInline: isInline, isAccessibilitySize: dynamicTypeSize.isAccessibilitySize)
     }
 
     var body: some View {
         HStack(spacing: 8) {
             openButton
             TransportControls(
-                style: isInline ? .playPauseOnly : .compact, showsPause: model.showsPause,
+                style: layout.transportStyle, showsPause: model.showsPause,
                 isBuffering: model.isBuffering, jumpBackwardSeconds: model.jumpBackwardSeconds,
                 jumpForwardSeconds: model.jumpForwardSeconds, haptic: settings?.hapticFeedback ?? .off
             ) { action in
                 Task { await model.perform(action) }
             }
-            if !isInline {
+            if layout.showsCloseAndProgress {
                 closeButton
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
         .overlay(alignment: .bottom) {
-            if !isInline {
+            if layout.showsCloseAndProgress {
                 MiniPlayerProgress(model: model)
             }
         }
@@ -53,7 +75,7 @@ struct MiniPlayerView: View {
             router.isFullPlayerPresented = true
         } label: {
             HStack(spacing: 10) {
-                if !isInline {
+                if layout.showsCoverAndAuthor {
                     CoverView(
                         key: model.coverKey, title: model.title, author: model.author, shape: model.coverShape,
                         accessibility: .hidden
@@ -64,7 +86,7 @@ struct MiniPlayerView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(verbatim: model.title)
                         .font(.subheadline.weight(.semibold))
-                    if !isInline, !model.author.isEmpty {
+                    if layout.showsCoverAndAuthor, !model.author.isEmpty {
                         Text(verbatim: model.author)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -152,4 +174,10 @@ extension PlayerViewModel {
 #Preview("Buffering") {
     MiniPlayerView(model: .preview(playing: true, buffering: true), router: Router())
         .frame(maxWidth: 420)
+}
+
+#Preview("Accessibility size") {
+    MiniPlayerView(model: .preview(playing: true), router: Router())
+        .frame(maxWidth: 375)
+        .dynamicTypeSize(.accessibility3)
 }
