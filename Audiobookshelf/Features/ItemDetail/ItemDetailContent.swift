@@ -4,8 +4,9 @@ import ABSUI
 import SwiftUI
 
 /// The loaded book: cover, title, actions, progress, metadata and description (legacy
-/// `index.vue`). Compact width stacks everything; regular width puts the cover, actions and
-/// progress beside the title, metadata and description.
+/// `index.vue`). Compact width, or any width too narrow for two columns (``ItemDetailLayout``),
+/// stacks everything; otherwise the cover, actions and progress sit beside the title, metadata
+/// and description.
 struct ItemDetailContent: View {
     let model: ItemDetailModel
     let details: ItemDetailModel.Details
@@ -16,6 +17,8 @@ struct ItemDetailContent: View {
     @State private var isStarting = false
     @State private var playFailure: ItemDetailPlayFailure?
     @State private var goneState = ItemDetailGoneState()
+    /// The scroll view's width, which doesn't depend on the layout chosen from it.
+    @State private var width: CGFloat?
 
     var body: some View {
         let snapshot = ItemDetailGoneState.Snapshot(model: model)
@@ -30,7 +33,7 @@ struct ItemDetailContent: View {
                         Task { await model.load() }
                     }
                 }
-                if horizontalSizeClass == .compact {
+                if ItemDetailLayout.usesStackedLayout(width: width, sizeClass: horizontalSizeClass) {
                     cover(maxWidth: 240)
                         .frame(maxWidth: .infinity)
                     ItemDetailHeader(details: details)
@@ -39,13 +42,13 @@ struct ItemDetailContent: View {
                     ItemDetailMetadata(details: details)
                     description
                 } else {
-                    HStack(alignment: .top, spacing: ABSSpacing.xLarge) {
+                    HStack(alignment: .top, spacing: ItemDetailLayout.columnSpacing) {
                         VStack(alignment: .leading, spacing: ABSSpacing.large) {
-                            cover(maxWidth: 300)
+                            cover(maxWidth: ItemDetailLayout.sideColumnWidth)
                             actions
                             ItemDetailProgress(model: model)
                         }
-                        .frame(width: 300)
+                        .frame(width: ItemDetailLayout.sideColumnWidth)
                         VStack(alignment: .leading, spacing: ABSSpacing.large) {
                             ItemDetailHeader(details: details)
                             ItemDetailMetadata(details: details)
@@ -55,9 +58,14 @@ struct ItemDetailContent: View {
                     }
                 }
             }
-            .padding(ABSSpacing.large)
+            .padding(ItemDetailLayout.padding)
             .frame(maxWidth: 1_000)
             .frame(maxWidth: .infinity)
+        }
+        .onGeometryChange(for: CGFloat.self) {
+            $0.size.width
+        } action: {
+            width = $0
         }
         .refreshable { await model.load() }
         .absBackground()

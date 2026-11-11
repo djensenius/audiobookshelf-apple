@@ -3,6 +3,7 @@ import ABSAppModel
 import ABSCore
 import ABSUI
 import Foundation
+import SwiftUI
 import Testing
 
 @testable import Audiobookshelf
@@ -48,6 +49,30 @@ import Testing
         for button in [ItemDetailModel.PlayButton.play, .resume, .playAgain] {
             #expect(!ItemDetailPlayPresentation(button: button, isMissing: false, canPlay: false).isEnabled)
         }
+    }
+
+    // MARK: Layout
+
+    @Test func twoColumnsNeedRoomForTheTextColumn() {
+        #expect(ItemDetailLayout.twoColumnMinimumWidth == 676)
+    }
+
+    @Test func macOSStacksWhenTheWindowIsNarrow() {
+        // macOS has no size class.
+        #expect(ItemDetailLayout.usesStackedLayout(width: 400, sizeClass: nil))
+        #expect(ItemDetailLayout.usesStackedLayout(width: 675, sizeClass: nil))
+        #expect(!ItemDetailLayout.usesStackedLayout(width: 676, sizeClass: nil))
+        #expect(!ItemDetailLayout.usesStackedLayout(width: 1_200, sizeClass: nil))
+        #expect(!ItemDetailLayout.usesStackedLayout(width: nil, sizeClass: nil))
+    }
+
+    @Test func iOSCompactAlwaysStacksAndRegularStacksOnlyWhenNarrow() {
+        for width in [nil, 320, 1_024] as [CGFloat?] {
+            #expect(ItemDetailLayout.usesStackedLayout(width: width, sizeClass: .compact))
+        }
+        #expect(!ItemDetailLayout.usesStackedLayout(width: nil, sizeClass: .regular))
+        #expect(!ItemDetailLayout.usesStackedLayout(width: 834, sizeClass: .regular))
+        #expect(ItemDetailLayout.usesStackedLayout(width: 500, sizeClass: .regular))
     }
 
     // MARK: Progress
