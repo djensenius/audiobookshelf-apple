@@ -66,3 +66,9 @@ when an account or connection is removed (like `lastLibraryIDs`); only `resetAll
 `AppSettings.recentSearches` (`settings_recentSearches`) is native-only and has no Settings control
 either. It stores each library's recent searches (Search tab) as a JSON array of strings under the
 same `serverID|userID|libraryID` key. `resetAll()` clears it; removing a server doesn't yet (#317).
+
+`AppSettings.podcastEpisodeListPreferences` (`settings_podcastEpisodeListPreferences`) has no
+Settings control either. It stores the podcast episode list's filter, sort and direction as one
+small JSON string (`EpisodeListPreferences`), shared by every podcast and account as legacy's
+`podcastEpisodesFilterBy`, `podcastEpisodesOrderBy` and `podcastEpisodesOrderDesc` were. Until the
+user picks a direction, each podcast lists newest first when episodic and oldest first otherwise.

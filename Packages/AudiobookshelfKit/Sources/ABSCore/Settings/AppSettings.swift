@@ -70,6 +70,9 @@ public final class AppSettings {
         /// A `[String: String]` dictionary from ``AppSettings/libraryViewPreferencesKey(serverID:userID:libraryID:)``
         /// to the library's recent searches as a JSON array of strings, most recent first.
         case recentSearches = "settings_recentSearches"
+        /// The podcast episode list's filter and sort as a small JSON string (encoded by
+        /// `EpisodeListPreferences`), shared by every podcast and account as in legacy.
+        case podcastEpisodeListPreferences = "settings_podcastEpisodeListPreferences"
     }
 
     /// Default values, for `@AppStorage` declarations that need one.
@@ -209,6 +212,18 @@ public final class AppSettings {
     /// interpreting them. Removing a server doesn't clear its entries yet (#317).
     public private(set) var recentSearches: [String: String] = [:] {
         didSet { persist(.recentSearches, recentSearches) }
+    }
+
+    /// The podcast episode list's filter and sort as a JSON string, uninterpreted here; `nil`
+    /// removes it, so the defaults apply.
+    public var podcastEpisodeListPreferences: String? {
+        didSet {
+            if let podcastEpisodeListPreferences {
+                persist(.podcastEpisodeListPreferences, podcastEpisodeListPreferences)
+            } else if !isReloading {
+                defaults.removeObject(forKey: Key.podcastEpisodeListPreferences.rawValue)
+            }
+        }
     }
 
     @ObservationIgnored private var isReloading = false
@@ -417,6 +432,7 @@ public final class AppSettings {
         update(\.lastLibraryIDs, snapshot.lastLibraryIDs)
         update(\.libraryViewPreferences, snapshot.libraryViewPreferences)
         update(\.recentSearches, snapshot.recentSearches)
+        update(\.podcastEpisodeListPreferences, snapshot.podcastEpisodeListPreferences)
     }
 
     private func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppSettings, Value>, _ value: Value) {
@@ -459,6 +475,7 @@ extension AppSettings {
         public let lastLibraryIDs: [String: String]
         public let libraryViewPreferences: [String: String]
         public let recentSearches: [String: String]
+        public let podcastEpisodeListPreferences: String?
 
         init(defaults: UserDefaults) {
             let store = Reader(defaults: defaults)
@@ -495,6 +512,7 @@ extension AppSettings {
             lastLibraryIDs = store.stringDictionary(.lastLibraryIDs)
             libraryViewPreferences = store.stringDictionary(.libraryViewPreferences)
             recentSearches = store.stringDictionary(.recentSearches)
+            podcastEpisodeListPreferences = store.optionalString(.podcastEpisodeListPreferences)
         }
 
         public func lastLibraryID(serverID: String, userID: String) -> String? {
@@ -545,6 +563,11 @@ private struct Reader {
     func string(_ key: AppSettings.Key, _ fallback: String, where isValid: (String) -> Bool) -> String {
         guard let value = defaults.object(forKey: key.rawValue) as? String, isValid(value) else { return fallback }
         return value
+    }
+
+    /// The stored string, or `nil` when there is none or it isn't a string.
+    func optionalString(_ key: AppSettings.Key) -> String? {
+        defaults.object(forKey: key.rawValue) as? String
     }
 
     func enumValue<Value: RawRepresentable>(_ key: AppSettings.Key, _ fallback: Value) -> Value
