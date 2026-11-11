@@ -49,10 +49,6 @@ struct NowPlayingView: View {
                 PlayerActionsBar(model: model)
             }
         }
-        // A scrub whose drag never reported its end (the cover closed mid-drag) mustn't stay on.
-        .onDisappear {
-            Task { await model.endScrub() }
-        }
     }
 
     private var cover: some View {
@@ -114,17 +110,50 @@ private struct NowPlayingTitles: View {
 }
 
 /// The scrubber, redrawn on every playback tick. Swipe up and down jump by the skip intervals.
+///
+/// If it disappears mid-drag (the cover closed, so the drag never reported its end), it ends the
+/// scrub, but only one this view started: the view model is shared by every window, and another
+/// window may be scrubbing.
 private struct NowPlayingScrubber: View {
     let model: PlayerViewModel
+    @State private var ownership = ScrubOwnership()
 
     var body: some View {
         PlayerScrubber(
             progress: model.progress, elapsed: model.elapsed, remaining: model.remainingAtRate,
-            onScrub: { model.scrub(to: $0) },
-            onScrubEnd: { Task { await model.endScrub() } },
+            onScrub: {
+                ownership.scrubbed()
+                model.scrub(to: $0)
+            },
+            onScrubEnd: {
+                ownership.ended()
+                Task { await model.endScrub() }
+            },
             onIncrement: { Task { await model.jumpForward() } },
             onDecrement: { Task { await model.jumpBackward() } }
         )
+        .onDisappear {
+            if ownership.disappeared() { Task { await model.endScrub() } }
+        }
+    }
+}
+
+/// Whether one scrubber view has a drag in progress, so it ends only its own scrub when it
+/// disappears.
+struct ScrubOwnership: Equatable {
+    private(set) var isScrubbing = false
+
+    /// The view's drag moved the scrub.
+    mutating func scrubbed() { isScrubbing = true }
+
+    /// The view's drag ended and ended the scrub itself.
+    mutating func ended() { isScrubbing = false }
+
+    /// The view disappeared; returns whether it must end the scrub, because its drag was in
+    /// progress.
+    mutating func disappeared() -> Bool {
+        defer { isScrubbing = false }
+        return isScrubbing
     }
 }
 

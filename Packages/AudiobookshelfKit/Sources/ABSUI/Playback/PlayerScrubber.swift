@@ -94,6 +94,10 @@ public struct PlayerScrubber: View {
             .monospacedDigit()
             .foregroundStyle(.secondary)
         }
+        // Media playback progress isn't mirrored in right-to-left languages (Human Interface
+        // Guidelines, Right to left): time runs left to right, so the track, the drag and the
+        // elapsed/remaining labels keep that direction. VoiceOver's adjustable action is unaffected.
+        .environment(\.layoutDirection, .leftToRight)
         .accessibilityElement()
         .accessibilityLabel(Text(verbatim: L10n.string("LabelProgress")))
         .accessibilityValue(
@@ -144,4 +148,14 @@ public struct PlayerScrubber: View {
         onDecrement: {}
     )
     .padding()
+}
+
+#Preview("Right to left") {
+    PlayerScrubber(
+        progress: 0.35, elapsed: 245, remaining: 3_600, onScrub: { _ in }, onScrubEnd: {}, onIncrement: {},
+        onDecrement: {}
+    )
+    .padding()
+    .environment(\.layoutDirection, .rightToLeft)
+    .environment(\.locale, Locale(identifier: "ar"))
 }

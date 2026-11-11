@@ -41,7 +41,7 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// placeholder until #60.
 ///
 /// Without a session the full player closes (on macOS, the flag resets for #183's window), also
-/// when it was opened with none. A queue auto-advance that passes through `.idle` would close it
+/// when it is opened with none. A queue auto-advance that passes through `.idle` would close it
 /// too (#60).
 struct PlayerSlot: ViewModifier {
     @Bindable var router: Router
@@ -49,9 +49,19 @@ struct PlayerSlot: ViewModifier {
 
     func body(content: Content) -> some View {
         hosting(content)
-            .onChange(of: player.hasSession, initial: true) { _, hasSession in
-                if !hasSession { router.isFullPlayerPresented = false }
+            .onChange(
+                of: Self.presentsWithoutSession(
+                    isPresented: router.isFullPlayerPresented, hasSession: player.hasSession),
+                initial: true
+            ) { _, stale in
+                if stale { router.isFullPlayerPresented = false }
             }
+    }
+
+    /// Whether the full player is presented with nothing to play, so it must close: the session
+    /// ended while it was open, or it was opened without one.
+    nonisolated static func presentsWithoutSession(isPresented: Bool, hasSession: Bool) -> Bool {
+        isPresented && !hasSession
     }
 
     @ViewBuilder private func hosting(_ content: Content) -> some View {

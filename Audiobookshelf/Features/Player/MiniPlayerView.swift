@@ -89,7 +89,7 @@ struct MiniPlayerView: View {
             } icon: {
                 Image(systemName: "xmark")
                     .font(.body.weight(.semibold))
-                    .frame(minWidth: 32, minHeight: 44)
+                    .frame(minWidth: 44, minHeight: 44)
                     .contentShape(.rect)
             }
             .labelStyle(.iconOnly)
