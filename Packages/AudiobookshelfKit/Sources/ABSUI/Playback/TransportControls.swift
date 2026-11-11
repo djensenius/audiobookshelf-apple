@@ -101,6 +101,10 @@ public struct TransportControls: View {
                 playPauseButton
             }
         }
+        // Like the scrubber, media playback controls aren't mirrored in right-to-left languages
+        // (Human Interface Guidelines, Right to left): back stays on the left and forward on the
+        // right, matching the time direction.
+        .environment(\.layoutDirection, .leftToRight)
         .buttonStyle(.borderless)
         .absHaptic(haptic, trigger: taps)
     }
@@ -175,4 +179,13 @@ public struct TransportControls: View {
         }
     }
     .padding()
+}
+
+#Preview("Right to left") {
+    TransportControls(
+        style: .full, showsPause: true, jumpBackwardSeconds: 10, jumpForwardSeconds: 30, hasPreviousChapter: true,
+        hasNextChapter: true
+    ) { _ in }
+    .padding()
+    .environment(\.layoutDirection, .rightToLeft)
 }

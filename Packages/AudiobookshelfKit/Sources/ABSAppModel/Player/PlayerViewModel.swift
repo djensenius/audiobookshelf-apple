@@ -51,8 +51,9 @@ public enum PlayerErrorMessage: Sendable, Hashable {
 ///   begin, move, end or cancel a scrub: their calls are ignored (the first drag wins), so two
 ///   windows dragging at once can't move or commit each other's position. A scrubber that goes
 ///   away must ``cancelScrub(owner:)``, or its scrub would block the others.
-/// - **Ineligible gestures.** A gesture that was rejected (another owner was scrubbing) or
-///   cancelled (an item change or ``close()``) stays ineligible: its later ``scrub(to:owner:)``
+/// - **Ineligible gestures.** A gesture that was rejected (another owner was scrubbing, or no
+///   scrub could start: no item, an item starting, an empty range) or cancelled (an item change or
+///   ``close()``) stays ineligible: its later ``scrub(to:owner:)``
 ///   calls are ignored, even once nothing else is scrubbing, so it never scrubs, or on release
 ///   seeks, an item it didn't start on. Each owner's gesture is tracked separately, so one
 ///   window's new gesture doesn't make another's eligible again. An owner becomes eligible only
@@ -246,32 +247,36 @@ public final class PlayerViewModel {
     }
 
     /// Starts a fresh gesture for `owner`, making it eligible again, and scrubs over the range shown
-    /// now, replacing its own scrub if any. While another owner is scrubbing the gesture is rejected
-    /// and stays ineligible until it ends. Does nothing else without an item, while it is starting
-    /// (a seek would replace the resume position still being resolved), or with an empty range (an
+    /// now, replacing its own scrub if any. The gesture is rejected, and stays ineligible until it
+    /// ends, while another owner is scrubbing, without an item, while the item is starting (a seek
+    /// would replace the resume position still being resolved), or with an empty range (an
     /// unloaded item of unknown duration).
     public func beginScrub(owner: ScrubOwner) {
         ineligibleScrubOwners.remove(owner)
         startScrub(owner: owner)
     }
 
-    /// Starts `owner`'s scrub without changing its eligibility; see ``beginScrub(owner:)``.
+    /// Starts `owner`'s scrub, or marks its gesture ineligible if it can't; see
+    /// ``beginScrub(owner:)``.
     private func startScrub(owner: ScrubOwner) {
-        if let current = activeScrub, current.owner != owner {
+        let othersScrub = activeScrub.map { $0.owner != owner } ?? false
+        guard !othersScrub, hasSession, playback.phase != .starting else {
             ineligibleScrubOwners.insert(owner)
             return
         }
-        guard hasSession, playback.phase != .starting else { return }
         let (range, time) = shownPosition
-        guard range.duration > 0 else { return }
+        guard range.duration > 0 else {
+            ineligibleScrubOwners.insert(owner)
+            return
+        }
         scrubState = Scrub(
             owner: owner, key: playback.mediaKey, range: range,
             time: range.time(forElapsed: range.elapsed(at: time)))
     }
 
     /// Moves `owner`'s scrub position to `fraction` (`0...1`) of the shown range, beginning a scrub
-    /// if none is in progress, unless this gesture is ineligible: another owner was scrubbing, or an
-    /// item change cancelled its scrub. Rejecting a move makes the gesture ineligible.
+    /// if none is in progress, unless this gesture is ineligible: another owner was scrubbing, no
+    /// scrub could start, or an item change cancelled its scrub. Rejecting a move makes the gesture ineligible.
     ///
     /// A fraction within a tiny tolerance (1e-9) of the shown ``progress`` isn't a move, so
     /// passing back the value read (a thumb that didn't move) never seeks. Fractions are compared,

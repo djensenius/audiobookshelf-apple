@@ -612,6 +612,35 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    /// A drag that began where no scrub could start (an item still starting, or one of unknown
+    /// duration) stays ineligible: if another item loads before it ends, its next move doesn't
+    /// scrub, or on release seek, that item.
+    @Test func aGestureThatCouldNotStartStaysIneligible() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.start(FakePlaybackControl.bookSession(), at: 0)
+            model.scrub(to: 0.5, owner: owner)  // Starting: no scrub.
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            model.scrub(to: 0.9, owner: owner)
+            #expect(model.elapsed == 10)
+            await model.endScrub(owner: owner)
+            #expect(playback.calls.isEmpty)
+
+            playback.restore(restoredRecord(duration: nil))
+            model.scrub(to: 0.5, owner: owner)  // Unknown duration: no scrub.
+            playback.load(FakePlaybackControl.bookSession(item: "li_third"), at: 20)
+            model.scrub(to: 0.9, owner: owner)
+            #expect(model.elapsed == 20)
+            await model.endScrub(owner: owner)
+            #expect(playback.calls.isEmpty)
+
+            // The next gesture scrubs normally.
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
+            #expect(playback.calls == [.seek(200)])
+        }
+    }
+
     // MARK: Errors
 
     @Test(arguments: [
