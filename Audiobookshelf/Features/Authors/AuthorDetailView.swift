@@ -68,7 +68,7 @@ struct AuthorDetailContent: View {
         }
         .navigationTitle(Text(verbatim: model.detail?.name ?? L10n.string("LabelAuthor")))
         .refreshable { await model.refresh() }
-        .browseRefreshCommand(isDisabled: model.isLoading || model.books.isLoading) {
+        .refreshCommand(.pushed(.author(id: model.authorID)), isDisabled: model.isLoading || model.books.isLoading) {
             Task { await model.refresh() }
         }
     }

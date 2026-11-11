@@ -66,7 +66,7 @@ struct SeriesListContent: View {
             }
         }
         .refreshable { await refresh() }
-        .browseRefreshCommand(isDisabled: model.isLoading) { Task { await refresh() } }
+        .refreshCommand(.root(.series), isDisabled: model.isLoading) { Task { await refresh() } }
         .onChange(of: model.error == nil) { _, cleared in
             if cleared { refreshFailed = false }
         }

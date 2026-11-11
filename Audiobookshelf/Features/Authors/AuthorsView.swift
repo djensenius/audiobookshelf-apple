@@ -57,7 +57,7 @@ struct AuthorsContent: View {
             }
         }
         .refreshable { await model.load() }
-        .browseRefreshCommand(isDisabled: model.isLoading) { reload() }
+        .refreshCommand(.root(.authors), isDisabled: model.isLoading) { reload() }
     }
 
     private func reload() {

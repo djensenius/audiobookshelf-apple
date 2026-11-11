@@ -280,11 +280,11 @@ private let account = LibraryConnectionKey(
         let book = ItemSummary(item: SampleLibrary.frankenstein)
         let progress = ItemProgress(fraction: 0.4)
         let withPlayer = ItemAction.available(
-            for: book, progress: progress, context: HomePresentation.actionContext(canPlay: true)
+            for: book, progress: progress, context: ItemCardActions.actionContext(canPlay: true)
         )
         .map(\.kind)
         let withoutPlayer = ItemAction.available(
-            for: book, progress: progress, context: HomePresentation.actionContext(canPlay: false)
+            for: book, progress: progress, context: ItemCardActions.actionContext(canPlay: false)
         )
         .map(\.kind)
 
@@ -296,10 +296,10 @@ private let account = LibraryConnectionKey(
         let actions = RecordingItemActions()
         let episode = ItemSummary(item: SampleLibrary.episodeItems[0])
 
-        #expect(await HomePresentation.perform(.markFinished, on: episode, actions: actions, play: nil) == nil)
-        #expect(await HomePresentation.perform(.markNotFinished, on: episode, actions: actions, play: nil) == nil)
+        #expect(await ItemCardActions.perform(.markFinished, on: episode, actions: actions, play: nil) == nil)
+        #expect(await ItemCardActions.perform(.markNotFinished, on: episode, actions: actions, play: nil) == nil)
         #expect(
-            await HomePresentation.perform(.hideFromContinueListening, on: episode, actions: actions, play: nil) == nil)
+            await ItemCardActions.perform(.hideFromContinueListening, on: episode, actions: actions, play: nil) == nil)
 
         #expect(actions.calls.map(\.0) == [.markFinished, .markNotFinished, .hideFromContinueListening])
         let target = ItemActionTarget(
@@ -313,13 +313,13 @@ private let account = LibraryConnectionKey(
         let book = ItemSummary(item: SampleLibrary.frankenstein)
 
         #expect(
-            await HomePresentation.perform(.markFinished, on: book, actions: actions, play: nil)
+            await ItemCardActions.perform(.markFinished, on: book, actions: actions, play: nil)
                 == "ToastItemMarkedAsFinishedFailed")
         #expect(
-            await HomePresentation.perform(.markNotFinished, on: book, actions: actions, play: nil)
+            await ItemCardActions.perform(.markNotFinished, on: book, actions: actions, play: nil)
                 == "ToastItemMarkedAsNotFinishedFailed")
         #expect(
-            await HomePresentation.perform(.hideFromContinueListening, on: book, actions: actions, play: nil)
+            await ItemCardActions.perform(.hideFromContinueListening, on: book, actions: actions, play: nil)
                 == "MessageHideFromContinueListeningFailed")
     }
 
@@ -330,10 +330,10 @@ private let account = LibraryConnectionKey(
         let play = PlayItemAction { itemID, episodeID, _ in played.items.append((itemID, episodeID)) }
         let failing = PlayItemAction { _, _, _ in throw RecordingItemActions.Failure() }
 
-        #expect(await HomePresentation.perform(.play, on: episode, actions: actions, play: nil) == nil)
-        #expect(await HomePresentation.perform(.play, on: episode, actions: actions, play: play) == nil)
+        #expect(await ItemCardActions.perform(.play, on: episode, actions: actions, play: nil) == nil)
+        #expect(await ItemCardActions.perform(.play, on: episode, actions: actions, play: play) == nil)
         #expect(
-            await HomePresentation.perform(.play, on: episode, actions: actions, play: failing)
+            await ItemCardActions.perform(.play, on: episode, actions: actions, play: failing)
                 == "MessagePlaybackStartFailed")
 
         #expect(played.items.count == 1)

@@ -317,72 +317,43 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         BrowsePresentation.open(.author(id: "aut_1"), in: nil)
     }
 
-    @Test func cardsOpenTheirItemEpisodeOrSeries() {
-        #expect(BrowsePresentation.route(for: book("li_1")) == .item(id: "li_1"))
-        #expect(
-            BrowsePresentation.route(for: book("li_2", kind: .episode, episodeID: "ep_1"))
-                == .episode(itemID: "li_2", episodeID: "ep_1"))
-        #expect(BrowsePresentation.route(for: book("li_3", kind: .series, seriesID: "ser_1")) == .series(id: "ser_1"))
-        #expect(BrowsePresentation.route(for: book("li_4", kind: .series)) == .item(id: "li_4"))
-    }
-
-    @Test func progressActionsTargetTheItemAndReportFailures() async {
+    @Test func cancelledOrUnofferedCardActionsReportNothing() async {
+        // HomePresentationTests cover the routes and the actions themselves (`ItemCardActions`).
+        #expect(ItemCardActions.route(for: book("li_4", kind: .series)) == .item(id: "li_4"))
         let actions = RecordingItemActions()
-        let episode = book("li_pod", kind: .episode, episodeID: "ep_1")
-        #expect(await BrowsePresentation.perform(.markFinished, on: episode, actions: actions, play: nil) == nil)
-        #expect(
-            await BrowsePresentation.perform(.markNotFinished, on: book("li_1"), actions: actions, play: nil) == nil)
-        #expect(
-            await BrowsePresentation.perform(.hideFromContinueListening, on: book("li_2"), actions: actions, play: nil)
-                == nil)
-        #expect(actions.calls.map { $0.0 } == [.markFinished, .markNotFinished, .hideFromContinueListening])
-        #expect(
-            actions.calls.map { $0.1 } == [
-                ItemActionTarget(libraryItemID: "li_pod", episodeID: "ep_1", duration: 60),
-                ItemActionTarget(libraryItemID: "li_1", duration: 60),
-                ItemActionTarget(libraryItemID: "li_2", duration: 60),
-            ])
-
-        actions.error = Failure()
-        for kind in [ItemActionKind.markFinished, .markNotFinished, .hideFromContinueListening] {
-            let key = await BrowsePresentation.perform(kind, on: book("li_1"), actions: actions, play: nil)
-            #expect(key == BrowsePresentation.failureMessageKey(for: kind))
-            #expect(key != nil)
-        }
         actions.error = CancellationError()
-        #expect(await BrowsePresentation.perform(.markFinished, on: book("li_1"), actions: actions, play: nil) == nil)
-    }
+        #expect(await ItemCardActions.perform(.markFinished, on: book("li_1"), actions: actions, play: nil) == nil)
+        let play = PlayItemAction { _, _, _ in throw CancellationError() }
+        #expect(await ItemCardActions.perform(.play, on: book("li_1"), actions: actions, play: play) == nil)
 
-    @Test func playPlaysTheItemOrEpisode() async {
-        let played = PlayedItems()
-        let play = PlayItemAction { itemID, episodeID, _ in
-            played.items.append(Played(itemID: itemID, episodeID: episodeID))
-            if let error = played.error { throw error }
-        }
-        let actions = RecordingItemActions()
-        let episode = book("li_pod", kind: .episode, episodeID: "ep_1")
-        #expect(await BrowsePresentation.perform(.play, on: episode, actions: actions, play: play) == nil)
-        #expect(played.items == [Played(itemID: "li_pod", episodeID: "ep_1")])
-
-        played.error = Failure()
-        #expect(
-            await BrowsePresentation.perform(.play, on: book("li_1"), actions: actions, play: play)
-                == "MessagePlaybackStartFailed")
-        played.error = CancellationError()
-        #expect(await BrowsePresentation.perform(.play, on: book("li_1"), actions: actions, play: play) == nil)
-        // No player (previews): nothing happens.
-        #expect(await BrowsePresentation.perform(.play, on: book("li_1"), actions: actions, play: nil) == nil)
-        #expect(actions.calls.isEmpty)
-    }
-
-    @Test func actionsThatArentWiredUpDoNothing() async {
-        let actions = RecordingItemActions()
         actions.error = Failure()
         for kind in [ItemActionKind.share, .addToPlaylist, .openDetails] {
-            #expect(await BrowsePresentation.perform(kind, on: book("li_1"), actions: actions, play: nil) == nil)
-            #expect(BrowsePresentation.failureMessageKey(for: kind) == nil)
+            #expect(await ItemCardActions.perform(kind, on: book("li_1"), actions: actions, play: play) == nil)
+            #expect(ItemCardActions.failureMessageKey(for: kind) == nil)
         }
-        #expect(actions.calls.isEmpty)
+        #expect(actions.calls.map { $0.0 } == [.markFinished])
+    }
+
+    @Test func onlyTheFrontmostScreenHasTheRefreshCommand() {
+        let router = Router()
+        let screens: [RefreshCommandPlacement] = [
+            .root(.home), .root(.series), .root(.authors), .pushed(.series(id: "ser_1")),
+            .pushed(.author(id: "aut_1")),
+        ]
+        let frontmost = { screens.filter { $0.isFrontmost(in: router) } }
+        #expect(frontmost() == [.root(.home)])
+        // Home opened a series, then its author.
+        router[path: .home] = [.series(id: "ser_1")]
+        #expect(frontmost() == [.pushed(.series(id: "ser_1"))])
+        router[path: .home].append(.author(id: "aut_1"))
+        #expect(frontmost() == [.pushed(.author(id: "aut_1"))])
+        router.selectedTab = .series
+        #expect(frontmost() == [.root(.series)])
+        // Compact width: the Library tab shows the Authors section as its root.
+        router.selectedTab = .library
+        router.librarySection = .authors
+        #expect(frontmost() == [.root(.authors)])
+        #expect(RefreshCommandPlacement.root(.home).isFrontmost(in: nil))
     }
 
     @Test func failedRefreshShowsAboveTheItemsAndAFailedPageAfterThem() async throws {
@@ -415,7 +386,7 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         let actions: [ItemActionKind] = [.play, .markFinished, .markNotFinished, .hideFromContinueListening]
         let keys =
             messages.flatMap { [$0.failed, $0.empty, $0.notFound] }
-            + actions.compactMap { BrowsePresentation.failureMessageKey(for: $0) }
+            + actions.compactMap { ItemCardActions.failureMessageKey(for: $0) }
             + [AuthorsPresentation.booksFailedMessage, "ButtonRefresh", "LabelSeriesBookNumber"]
         for key in keys {
             #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
@@ -651,16 +622,4 @@ private final class RecordingItemActions: ItemActionPerforming {
         calls.append((kind, target))
         if let error { throw error }
     }
-}
-
-private struct Played: Hashable {
-    let itemID: String
-    let episodeID: String?
-}
-
-/// What a test's player was asked to play; it throws `error` when set.
-@MainActor
-private final class PlayedItems {
-    var items: [Played] = []
-    var error: (any Error)?
 }

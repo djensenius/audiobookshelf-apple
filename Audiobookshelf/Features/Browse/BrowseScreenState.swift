@@ -120,7 +120,7 @@ struct BrowseModelHost<Model: AnyObject> {
     }
 }
 
-/// Navigation, paging and card actions shared by the series and author screens.
+/// Navigation and paging shared by the series and author screens.
 enum BrowsePresentation {
     /// Pushes `route` on the selected tab's path (the stack showing the screen) unless it is
     /// already on top, so a double tap opens one screen.
@@ -130,19 +130,6 @@ enum BrowsePresentation {
         let tab = router.selectedTab
         guard router[path: tab].last != route else { return }
         router[path: tab].append(route)
-    }
-
-    /// The screen an item card opens: its episode, its collapsed series, or the item.
-    static func route(for item: ItemSummary) -> Route {
-        switch item.kind {
-        case .episode:
-            if let episodeID = item.episodeID { return .episode(itemID: item.itemID, episodeID: episodeID) }
-        case .series:
-            if let seriesID = item.seriesID { return .series(id: seriesID) }
-        case .book, .podcast:
-            break
-        }
-        return .item(id: item.itemID)
     }
 
     /// Retries a paged list: the next page, or a refresh when the list had reached its end (a
@@ -180,46 +167,6 @@ enum BrowsePresentation {
     static func progressReader(_ cache: ProgressCache) -> ItemProgressReader {
         ItemProgressReader { itemID, episodeID in
             cache.progress(libraryItemID: itemID, episodeID: episodeID).map(ItemProgress.init)
-        }
-    }
-
-    /// Performs a context-menu action on `item`: Play through `play`, the progress actions
-    /// through `actions`. Opening is navigation and isn't handled here; neither are sharing and
-    /// playlists, which aren't wired up yet.
-    ///
-    /// - Returns: The key of the message to show when the action failed; `nil` when it succeeded,
-    ///   was cancelled or did nothing.
-    @MainActor
-    static func perform(
-        _ kind: ItemActionKind, on item: ItemSummary, actions: any ItemActionPerforming, play: PlayItemAction?
-    ) async -> String? {
-        let target = ItemActionTarget(libraryItemID: item.itemID, episodeID: item.episodeID, duration: item.duration)
-        do {
-            switch kind {
-            case .play:
-                guard let play else { return nil }
-                try await play(itemID: item.itemID, episodeID: item.episodeID)
-            case .markFinished: try await actions.markFinished(target)
-            case .markNotFinished: try await actions.markNotFinished(target)
-            case .hideFromContinueListening: try await actions.hideFromContinueListening(target)
-            case .addToPlaylist, .share, .openDetails: return nil
-            }
-            return nil
-        } catch is CancellationError {
-            return nil
-        } catch {
-            return failureMessageKey(for: kind)
-        }
-    }
-
-    /// The key of the message shown when an action on an item fails.
-    static func failureMessageKey(for kind: ItemActionKind) -> String? {
-        switch kind {
-        case .play: "MessagePlaybackStartFailed"
-        case .markFinished: "ToastItemMarkedAsFinishedFailed"
-        case .markNotFinished: "ToastItemMarkedAsNotFinishedFailed"
-        case .hideFromContinueListening: "MessageHideFromContinueListeningFailed"
-        case .addToPlaylist, .share, .openDetails: nil
         }
     }
 }

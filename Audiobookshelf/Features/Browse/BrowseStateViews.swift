@@ -146,7 +146,7 @@ struct BrowsePagingFooter: View {
 }
 
 /// Item cards in a grid that open their screen and perform their context-menu actions through
-/// the environment, with an alert when an action fails. `badge` puts a label (a sequence) on a
+/// the environment (``ItemCardActions``), with an alert when an action fails. `badge` puts a label (a sequence) on a
 /// card's cover; it is hidden from VoiceOver, which reads the series from the card's label
 /// (``SeriesPresentation/card(for:in:)``).
 struct BrowseItemGrid<Element: Identifiable>: View {
@@ -165,19 +165,21 @@ struct BrowseItemGrid<Element: Identifiable>: View {
     var body: some View {
         ItemGrid(elements: elements) { element in
             let summary = item(element)
-            ItemCard(item: summary, serverID: serverID) { perform($0, on: summary) }
-                .overlay(alignment: .topLeading) {
-                    if let badge = badge(element) {
-                        Text(verbatim: badge)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, ABSSpacing.xSmall)
-                            .background(.black.opacity(0.7), in: .rect(cornerRadius: ABSRadius.small))
-                            .padding(ABSSpacing.xSmall)
-                            .accessibilityHidden(true)
-                    }
+            ItemCard(
+                item: summary, serverID: serverID, context: ItemCardActions.actionContext(canPlay: playItem != nil)
+            ) { perform($0, on: summary) }
+            .overlay(alignment: .topLeading) {
+                if let badge = badge(element) {
+                    Text(verbatim: badge)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, ABSSpacing.xSmall)
+                        .background(.black.opacity(0.7), in: .rect(cornerRadius: ABSRadius.small))
+                        .padding(ABSSpacing.xSmall)
+                        .accessibilityHidden(true)
                 }
-                .onAppear { onAppear(element) }
+            }
+            .onAppear { onAppear(element) }
         }
         .alert(
             Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
@@ -189,39 +191,16 @@ struct BrowseItemGrid<Element: Identifiable>: View {
 
     private func perform(_ kind: ItemActionKind, on item: ItemSummary) {
         guard kind != .openDetails else {
-            BrowsePresentation.open(BrowsePresentation.route(for: item), in: router)
+            BrowsePresentation.open(ItemCardActions.route(for: item), in: router)
             return
         }
         let actions = itemActions
         let play = playItem
         Task {
-            if let key = await BrowsePresentation.perform(kind, on: item, actions: actions, play: play) {
+            if let key = await ItemCardActions.perform(kind, on: item, actions: actions, play: play) {
                 failureKey = key
                 showsFailure = true
             }
         }
-    }
-}
-
-extension View {
-    /// On macOS, a Refresh toolbar button (⌘R) for screens without pull to refresh.
-    func browseRefreshCommand(isDisabled: Bool, refresh: @escaping () -> Void) -> some View {
-        #if os(macOS)
-            toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button(action: refresh) {
-                        Label {
-                            Text(verbatim: L10n.string("ButtonRefresh"))
-                        } icon: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                    }
-                    .keyboardShortcut("r", modifiers: .command)
-                    .disabled(isDisabled)
-                }
-            }
-        #else
-            self
-        #endif
     }
 }

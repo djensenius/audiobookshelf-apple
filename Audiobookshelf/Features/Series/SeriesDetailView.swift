@@ -66,7 +66,7 @@ struct SeriesDetailContent: View {
         }
         .navigationTitle(Text(verbatim: model.detail?.name ?? L10n.string("LabelSeries")))
         .refreshable { await model.load() }
-        .browseRefreshCommand(isDisabled: model.isLoading) { reload() }
+        .refreshCommand(.pushed(.series(id: model.seriesID)), isDisabled: model.isLoading) { reload() }
     }
 
     private func reload() {
