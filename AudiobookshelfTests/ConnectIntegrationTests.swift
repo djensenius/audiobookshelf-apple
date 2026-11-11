@@ -30,16 +30,29 @@ final class ConnectTestKeychain: KeychainStoring {
     }
 }
 
-/// Answers for `*.connect-ui.test` hosts. Two host prefixes change how the server authorizes a
-/// saved session (`/api/authorize`): `offline-` answers like a proxy refusing it (403), and
-/// `hold-` waits until ``release(_:)``.
+/// Answers for `*.connect-ui.test` hosts. Host prefixes change some answers: `offline-` refuses
+/// the authorization of a saved session (`/api/authorize`) like a proxy (403), `hold-` holds it
+/// until ``release(_:)``, and `oidc-` returns an end-session `redirect_url` from `/logout`.
 final class ConnectTestProtocol: URLProtocol {
     static let requests = Mutex<[String: [URLRequest]]>([:])
     private static let held = Mutex<(responses: [String: [HeldResponse]], released: Set<String>)>(([:], []))
+    static let endSessionURL = URL(string: "https://idp.example.com/logout?state=test-state")!
 
+    /// A held answer. URLSession expects the client calls on the run loop that started loading,
+    /// so ``send()`` schedules them there.
     private struct HeldResponse: @unchecked Sendable {
-        let send: () -> Void
+        let request: ObjectIdentifier
+        let runLoop: CFRunLoop
+        let answer: () -> Void
+
+        func send() {
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue, answer)
+            CFRunLoopWakeUp(runLoop)
+        }
     }
+
+    /// Set once URLSession stops this load; a held answer then sends nothing.
+    private let isStopped = Mutex(false)
 
     /// Answers the held requests to `host`, and from now on its requests at once.
     static func release(_ host: String) {
@@ -74,6 +87,8 @@ final class ConnectTestProtocol: URLProtocol {
         case "/api/authorize" where host.hasPrefix("offline-"):
             status = 403
             json = "{}"
+        case "/logout" where host.hasPrefix("oidc-"):
+            json = #"{"redirect_url":"\#(Self.endSessionURL.absoluteString)"}"#
         case "/status":
             json = #"{"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"authMethods":["local","openid"]}"#
         case "/auth/openid":
@@ -91,7 +106,8 @@ final class ConnectTestProtocol: URLProtocol {
         }
         let response = HTTPURLResponse(
             url: url, statusCode: status, httpVersion: nil, headerFields: headers)!
-        let send = HeldResponse { [self] in
+        let answer = { [self] in
+            guard !isStopped.withLock({ $0 }) else { return }
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: Data(json.utf8))
             client?.urlProtocolDidFinishLoading(self)
@@ -99,13 +115,19 @@ final class ConnectTestProtocol: URLProtocol {
         let holds = url.path() == "/api/authorize" && host.hasPrefix("hold-")
         let isHeld = Self.held.withLock { state in
             guard holds, !state.released.contains(host) else { return false }
-            state.responses[host, default: []].append(send)
+            let held = HeldResponse(request: ObjectIdentifier(self), runLoop: CFRunLoopGetCurrent(), answer: answer)
+            state.responses[host, default: []].append(held)
             return true
         }
-        if !isHeld { send.send() }
+        if !isHeld { answer() }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        isStopped.withLock { $0 = true }
+        guard let host = request.url?.host() else { return }
+        let id = ObjectIdentifier(self)
+        Self.held.withLock { $0.responses[host]?.removeAll { $0.request == id } }
+    }
 
     static func configuration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.absConnection()

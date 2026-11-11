@@ -29,12 +29,13 @@ struct AccountView: View {
                 }
                 if let lifecycle {
                     Button(role: .destructive) {
-                        isSigningOut = true
-                        AccountActions(lifecycle: lifecycle).signOut { openURL($0) }
+                        if AccountActions(lifecycle: lifecycle).signOut(openURL: { openURL($0) }) != nil {
+                            isSigningOut = true
+                        }
                     } label: {
                         label("ButtonLogout", systemImage: "rectangle.portrait.and.arrow.right")
                     }
-                    .disabled(isSigningOut)
+                    .disabled(isSigningOut || !lifecycle.acceptsAccountChanges)
                 }
             }
             Section {
@@ -76,6 +77,7 @@ struct ServersView: View {
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @State private var switchingTo: UUID?
+    @State private var switchFailed = false
 
     var body: some View {
         Form {
@@ -87,7 +89,10 @@ struct ServersView: View {
                     } label: {
                         row(server, isActive: isActive)
                     }
-                    .disabled(isActive || switchingTo != nil || server.signedOutAt != nil || lifecycle == nil)
+                    .disabled(
+                        isActive || switchingTo != nil || server.signedOutAt != nil
+                            || lifecycle?.acceptsAccountChanges != true
+                    )
                     .accessibilityAddTraits(isActive ? .isSelected : [])
                 }
             } footer: {
@@ -96,15 +101,21 @@ struct ServersView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(Text(verbatim: L10n.string("HeaderServers")))
+        .switchServerFailedAlert(isPresented: $switchFailed)
     }
 
     private func switchServer(to id: UUID) {
-        guard let lifecycle else { return }
+        // Two quick taps on different rows must not queue two switches.
+        guard switchingTo == nil, let lifecycle,
+            let task = AccountActions(lifecycle: lifecycle).switchAccount(to: id)
+        else { return }
         switchingTo = id
-        let task = AccountActions(lifecycle: lifecycle).switchAccount(to: id)
         // On success the shell is replaced; on failure this screen stays, so let it retry.
         Task {
-            if await !task.value { switchingTo = nil }
+            if await !task.value {
+                switchingTo = nil
+                switchFailed = true
+            }
         }
     }
 

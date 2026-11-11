@@ -105,6 +105,7 @@
   "MessageStatsRefreshFailed": "Couldn't refresh your stats. Showing the last ones loaded.",
   "MessageStoreUnavailable": "Couldn't open the app's data.",
   "MessageStoreUnavailableHelp": "Quit and reopen Audiobookshelf. If this keeps happening, make sure your device has free storage space.",
+  "MessageSwitchServerFailed": "Couldn't switch servers. Check that the server is reachable, then try again.",
   "MessageSwitchServerForLink": "This link is for {0} on {1}. Switch to that server to open it?",
   "SharedBookCount": "{0} books",
   "SharedHideFromContinueListening": "Hide from Continue Listening",

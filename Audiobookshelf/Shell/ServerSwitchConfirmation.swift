@@ -36,26 +36,26 @@ struct ServerSwitchConfirmation {
 
     /// Switches to the server of `link`, the pending link the user confirmed, then hands the
     /// link to `reopen`. The link is cleared from the router first, whichever order SwiftUI
-    /// runs the dialog's action and its dismissal in. The switch runs in its own task, so the
-    /// old host going away doesn't cancel it; a failed switch is logged and drops the link.
-    /// - Returns: The switch's task, or `nil` when the server is unknown.
+    /// runs the dialog's action and its dismissal in. The switch runs in its own task
+    /// (``AccountActions/switchAccount(to:)``), so the old host going away doesn't cancel it; a
+    /// failed switch drops the link.
+    /// - Returns: A task whose value is whether the switch succeeded, or `nil` when the server is
+    ///   unknown or the session isn't ready (then nothing changes).
     @discardableResult
     func confirm(
         _ link: DeepLink, in router: Router, reopen: @escaping @MainActor (DeepLink) -> Void
-    ) -> Task<Void, Never>? {
+    ) -> Task<Bool, Never>? {
+        guard lifecycle.acceptsAccountChanges else { return nil }
         if router.pendingServerSwitch == link { router.pendingServerSwitch = nil }
         guard let connection = connection(for: link) else {
             Log.ui.notice("Dropped a link for a server that isn't saved")
             return nil
         }
-        return Task { [lifecycle] in
-            do {
-                try await lifecycle.switchAccount(to: connection.id)
-                reopen(link)
-            } catch {
-                Log.ui.error(
-                    "Couldn't switch servers for a link: \(String(describing: type(of: error)), privacy: .public)")
-            }
+        guard let switching = AccountActions(lifecycle: lifecycle).switchAccount(to: connection.id) else { return nil }
+        return Task {
+            let switched = await switching.value
+            if switched { reopen(link) }
+            return switched
         }
     }
 }
@@ -67,6 +67,7 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
     let reopen: @MainActor (DeepLink) -> Void
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @Environment(AccountManager.self) private var accounts: AccountManager?
+    @State private var switchFailed = false
 
     func body(content: Content) -> some View {
         if let lifecycle {
@@ -87,10 +88,14 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
                     presenting: target
                 ) { target in
                     Button {
-                        confirmation.confirm(target.link, in: router, reopen: reopen)
+                        let switching = confirmation.confirm(target.link, in: router, reopen: reopen)
+                        Task {
+                            if let switching, await !switching.value { switchFailed = true }
+                        }
                     } label: {
                         Text(verbatim: L10n.string("ButtonSwitchServer"))
                     }
+                    .disabled(!lifecycle.acceptsAccountChanges)
                     Button(role: .cancel) {
                         confirmation.cancel(router)
                     } label: {
@@ -101,8 +106,22 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
                         verbatim: L10n.string(
                             "MessageSwitchServerForLink", target.connection.username, target.connection.address))
                 }
+                .switchServerFailedAlert(isPresented: $switchFailed)
         } else {
             content
+        }
+    }
+}
+
+extension View {
+    /// Tells the user a server switch failed. A failed switch leaves the account where it was, so
+    /// the same shell, and this alert, stays on screen.
+    func switchServerFailedAlert(isPresented: Binding<Bool>) -> some View {
+        alert(Text(verbatim: L10n.string("MessageSwitchServerFailed")), isPresented: isPresented) {
+            Button(role: .cancel) {
+            } label: {
+                Text(verbatim: L10n.string("ButtonOk"))
+            }
         }
     }
 }

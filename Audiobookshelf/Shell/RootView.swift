@@ -46,6 +46,8 @@ struct RootView: View {
             .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
     }
 
+    /// One link waits at a time: the last one received wins, including a link reopened after a
+    /// confirmed server switch.
     private func receive(_ link: DeepLink) {
         pendingLink = PendingLink(link, arrivingAt: lifecycle.gate, epoch: lifecycle.linkEpoch)
     }
