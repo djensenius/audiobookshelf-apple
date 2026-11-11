@@ -20,8 +20,7 @@ enum SeriesPresentation {
         .series(service: services, libraryID: key.libraryID, connectionKey: key.connection)
     }
 
-    /// The detail screen's state. The header shows once the series loaded, so loaded is never
-    /// empty; a series without books says so under the header.
+    /// The detail screen's state; loaded is never empty, as the header shows and a series without books says so.
     @MainActor
     static func state(of model: SeriesDetailModel) -> BrowseScreenState {
         .resolve(
@@ -38,10 +37,9 @@ enum SeriesPresentation {
         return "#\(sequence)"
     }
 
-    /// The card of a book in the series `seriesName`. VoiceOver reads the cover's sequence badge
-    /// from the label's series part, which becomes this series and sequence as the badge shows it
-    /// ("Barsoom, #2"): the book's own series text may name another series, and a collapsed
-    /// sub-series has none.
+    /// The card of a book in the series `seriesName`. VoiceOver reads the cover's sequence badge from the label's
+    /// series part, set to this series and sequence as the badge shows it ("Barsoom, #2"): the book's own series
+    /// text may name another series, and a collapsed sub-series has none.
     static func card(for book: SeriesBook, in seriesName: String) -> ItemSummary {
         let item = book.summary
         let sequence = book.sequence?.trimmingCharacters(in: .whitespacesAndNewlines)

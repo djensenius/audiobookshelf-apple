@@ -56,8 +56,7 @@ enum AuthorsPresentation {
         return model.error != nil || model.books.error != nil
     }
 
-    /// Where the author screen shows a failure: above the author when the author or a user
-    /// refresh failed (Retry refreshes both), after the books when only their paging failed.
+    /// Where a failure shows: above the author when it or a user refresh failed, after the books when only paging did.
     @MainActor
     static func failurePlacement(of model: AuthorDetailModel, refreshFailed: Bool)
         -> BrowsePresentation.ListFailurePlacement?

@@ -2,9 +2,8 @@ import ABSAppModel
 import ABSCore
 import Foundation
 
-/// What an item card does on the library screens (Home, series, authors): the screen it opens
-/// and its context-menu actions. App code rather than ABSUI, which can't see `Route` or the
-/// actions' types.
+/// What an item card does on the library screens (Home, series, authors): the screen it opens and its context-menu
+/// actions. App code rather than ABSUI, which can't see `Route` or the actions' types.
 enum ItemCardActions {
     /// The screen an item card opens: its episode, its collapsed series, or the item.
     static func route(for item: ItemSummary) -> Route {
@@ -24,12 +23,10 @@ enum ItemCardActions {
         ItemActionContext(canEditPlaylists: false, canPlay: canPlay, canShare: false)
     }
 
-    /// Performs a context-menu action on `item`: Play through `play`, the progress actions
-    /// through `actions`. Opening is navigation and isn't handled here; neither are actions the
-    /// cards don't offer.
+    /// Performs a context-menu action on `item`: Play through `play`, the progress actions through `actions`.
+    /// Opening is navigation and isn't handled here; neither are actions the cards don't offer.
     ///
-    /// - Returns: The key of the message to show when the action failed; `nil` when it succeeded,
-    ///   was cancelled or did nothing.
+    /// - Returns: The failure message's key; `nil` when the action succeeded, was cancelled or did nothing.
     @MainActor
     static func perform(
         _ kind: ItemActionKind, on item: ItemSummary, actions: any ItemActionPerforming, play: PlayItemAction?

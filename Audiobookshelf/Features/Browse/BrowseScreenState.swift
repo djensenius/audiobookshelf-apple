@@ -120,8 +120,7 @@ enum BrowsePresentation {
         router[path: tab].append(route)
     }
 
-    /// Retries a paged list: the next page, or a refresh when the list had reached its end (a
-    /// failed refresh rolls back to the end, where the next page loads nothing).
+    /// Retries a paged list: the next page, or a refresh at its end (where a failed refresh rolls back to).
     @MainActor
     @discardableResult
     static func retry<Query, Item>(_ list: ItemListModel<Query, Item>) -> Task<Void, Never>? {

@@ -3,11 +3,9 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
-/// The Series section of a book library (legacy `pages/bookshelf/series/index.vue`): the
-/// router's library's series by name, a page at a time.
-///
-/// Builds one ``SeriesListModel`` per store, account and library from `makeServices()`, so a
-/// library switch or another account never shows the previous list.
+/// The Series section of a book library (legacy `pages/bookshelf/series/index.vue`): the router's library's series
+/// by name, a page at a time. Builds one ``SeriesListModel`` per store, account and library from `makeServices()`,
+/// so a library switch or another account never shows the previous list.
 struct SeriesView: View {
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?

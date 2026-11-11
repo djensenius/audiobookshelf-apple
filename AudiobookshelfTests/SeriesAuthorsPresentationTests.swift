@@ -92,8 +92,7 @@ private let account = LibraryConnectionKey(
 private let otherAccount = LibraryConnectionKey(
     connectionID: UUID(uuidString: "00000000-0000-0000-0000-0000000000BB") ?? UUID(), userID: "user-2")
 
-/// A store connected to `client` with settings in a throwaway defaults suite, so a test never
-/// touches the app's.
+/// A store connected to `client` with settings in a throwaway defaults suite, so a test never touches the app's.
 @MainActor
 private func withStore(
     _ client: FakeSeriesAuthorsClient = FakeSeriesAuthorsClient(), _ body: (LibraryStore) async throws -> Void

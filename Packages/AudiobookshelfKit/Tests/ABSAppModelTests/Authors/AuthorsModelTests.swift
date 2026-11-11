@@ -266,4 +266,30 @@ private typealias F = SeriesAuthorsFixtures
         #expect(model.books.total == 3)
         #expect(cancelled.value == ["lib_a"])
     }
+
+    @Test func countsBooksRefreshesWhateverTheAuthorDoes() async {
+        let failAuthor = Locked(false)
+        let failBooks = Locked(false)
+        let service = FakeSeriesAuthorsService(
+            authorDetailHandler: { id in
+                if failAuthor.value { throw TestError.offline }
+                return AuthorDetailResponse(author: Author(id: id, name: "A"))
+            },
+            booksHandler: { _, _ in
+                if failBooks.value { throw TestError.offline }
+                return F.page([F.book("b1")])
+            })
+        let model = AuthorDetailModel(authorID: "a1", libraryID: "lib", service: service)
+        await model.loadIfNeeded()
+        #expect(model.booksRefreshes == 0)
+
+        failAuthor.value = true
+        await model.refresh()
+        #expect(model.error is TestError)
+        #expect(model.booksRefreshes == 1)
+
+        failBooks.value = true
+        await model.refresh()
+        #expect(model.booksRefreshes == 1)
+    }
 }

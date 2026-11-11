@@ -8,8 +8,7 @@ public struct AuthorDetail: Sendable, Hashable, Identifiable {
     public let summary: AuthorSummary
     /// The author's description; `nil` when blank.
     public let bio: String?
-    /// The library the author belongs to, when the server sent it. Their books are only in this
-    /// library, which can differ from the one the screen was opened in.
+    /// The author's library, when sent: their books are only there, maybe not where the screen was opened.
     public let libraryID: String?
 
     public var id: String { summary.id }
@@ -29,10 +28,8 @@ public struct AuthorDetail: Sendable, Hashable, Identifiable {
 ///   overlap, only the last one started is applied. A 404 (``APIError/notFound``) drops the
 ///   author and ``phase`` becomes ``Phase/notFound`` for the view to pop.
 /// - ``books`` is an ``ItemListModel`` and pages, refreshes and drops stale pages on its own. It
-///   starts in ``libraryID``, because the books start loading before the author (and its
-///   `libraryId`) arrives. When the loaded ``AuthorDetail/libraryID`` differs, ``books`` is
-///   replaced with a list for the author's library, whose first page loads; the old list is
-///   released, which cancels its page in flight.
+///   starts in ``libraryID``, as the books load before the author's `libraryId` arrives; when the loaded
+///   ``AuthorDetail/libraryID`` differs, it's replaced by a list there (releasing the old one cancels its page).
 /// - ``books`` keeps its items on 404, so views must not show them in ``Phase/notFound``.
 ///
 /// A model belongs to one author, client and account: views recreate it per author ID and under
@@ -66,6 +63,8 @@ public final class AuthorDetailModel {
     public private(set) var error: (any Error)?
     /// A load answered 404 and no load has succeeded since.
     public private(set) var isNotFound = false
+    /// ``refresh()`` calls whose books loaded, whatever the author's result; views re-check visible cards on each.
+    public private(set) var booksRefreshes = 0
 
     @ObservationIgnored private let service: any SeriesAuthorsService
     @ObservationIgnored private var sequence = 0
@@ -112,11 +111,11 @@ public final class AuthorDetailModel {
         let booksLoad = books.refresh()
         await load()
         await booksLoad?.value
+        if books.error == nil { booksRefreshes += 1 }
     }
 
-    /// Loads the author; when they belong to another library than ``books``, moves the books there
-    /// and loads their first page. A response to an older call that arrives after a newer one
-    /// started is dropped.
+    /// Loads the author; when they're in another library than ``books``, moves the books there and loads their
+    /// first page. A response to an older call that arrives after a newer one started is dropped.
     public func load() async {
         sequence += 1
         let sequence = sequence

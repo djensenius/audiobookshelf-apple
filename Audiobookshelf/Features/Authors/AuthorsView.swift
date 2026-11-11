@@ -3,10 +3,8 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
-/// The Authors section of a book library (legacy `pages/bookshelf/authors.vue`): the router's
-/// library's authors with their photos and book counts, in server order.
-///
-/// Builds one ``AuthorsModel`` per store, account and library from `makeServices()`.
+/// The Authors section of a book library (legacy `pages/bookshelf/authors.vue`): the router's library's authors
+/// with photos and book counts, in server order. Builds one ``AuthorsModel`` per store, account and library.
 struct AuthorsView: View {
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?

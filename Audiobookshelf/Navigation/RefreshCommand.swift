@@ -11,8 +11,7 @@ enum RefreshCommandPlacement: Hashable {
     /// A screen pushed for the route.
     case pushed(Route)
 
-    /// Whether the screen is visible and on top of the selected tab's stack; without a router
-    /// (previews), whether it is visible.
+    /// Whether the screen is visible and tops the selected tab's stack; without a router (previews), if visible.
     @MainActor
     func isFrontmost(in router: Router?, isVisible: Bool) -> Bool {
         guard isVisible else { return false }
@@ -30,8 +29,7 @@ enum RefreshCommandPlacement: Hashable {
 }
 
 extension View {
-    /// On macOS, a Refresh toolbar button (⌘R) while the screen at `placement` is frontmost, for
-    /// screens without pull to refresh.
+    /// On macOS (no pull to refresh), a Refresh toolbar button (⌘R) while the screen at `placement` is frontmost.
     func refreshCommand(
         _ placement: RefreshCommandPlacement, isDisabled: Bool, refresh: @escaping () -> Void
     ) -> some View {

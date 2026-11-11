@@ -14,9 +14,8 @@ struct BrowseMessages {
     let systemImage: String
 }
 
-/// A screen in one ``BrowseScreenState``: the shared signed-out, loading, error, not-found and
-/// empty states, or `loaded` with whether a later load failed. The error, not-found and empty
-/// states sit in a scroll view so pull to refresh reaches them.
+/// A screen in one ``BrowseScreenState``: the shared signed-out, loading, error, not-found and empty states, or
+/// `loaded` with whether a later load failed. The error, not-found and empty states scroll for pull to refresh.
 struct BrowseStateView<Loaded: View>: View {
     let state: BrowseScreenState
     let messages: BrowseMessages
@@ -145,17 +144,15 @@ struct BrowsePagingFooter: View {
     }
 }
 
-/// Item cards in a grid that open their screen and perform their context-menu actions through
-/// the environment (``ItemCardActions``), with an alert when an action fails. `badge` puts a
-/// label (a sequence) on a card's cover; it is hidden from VoiceOver, which reads the series from
-/// the card's label (``SeriesPresentation/card(for:in:)``).
+/// Item cards in a grid that open their screen and perform their context-menu actions through the environment
+/// (``ItemCardActions``), with an alert when an action fails. `badge` puts a label (a sequence) on a card's cover;
+/// VoiceOver skips it and reads the series from the card's label (``SeriesPresentation/card(for:in:)``).
 struct BrowseItemGrid<Element: Identifiable>: View {
     let elements: [Element]
     let item: (Element) -> ItemSummary
     var badge: (Element) -> String? = { _ in nil }
     var onAppear: (Element) -> Void = { _ in }
-    /// Cards call `onAppear` again when this changes, as after a refresh: the cards it kept don't
-    /// appear again, so a first page that fits on screen would otherwise never load the next.
+    /// Cards call `onAppear` again when this changes, as cards a refresh kept don't appear again to page on.
     var appearanceID = 0
     @Environment(Router.self) private var router: Router?
     @Environment(\.serverID) private var serverID

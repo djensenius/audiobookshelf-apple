@@ -3,10 +3,8 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
-/// One series (legacy `pages/bookshelf/series/_id.vue`): its description, Continue Series and
-/// its books in the server's sequence order, each with its progress.
-///
-/// Builds one ``SeriesDetailModel`` per store, account and library from `makeServices()`.
+/// One series (legacy `pages/bookshelf/series/_id.vue`): its description, Continue Series and its books in the
+/// server's sequence order with their progress. Builds one ``SeriesDetailModel`` per store, account and library.
 struct SeriesDetailView: View {
     let seriesID: String
     @Environment(\.libraryStore) private var store
