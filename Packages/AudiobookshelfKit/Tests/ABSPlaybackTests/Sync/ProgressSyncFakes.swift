@@ -64,11 +64,15 @@ final class StubProgressSyncService: ProgressSyncService {
     /// The existing recording fixture starts with no canonical rows; explicit ServerSync
     /// fixtures populate this same map. No production fallback or synthetic dated zero is used.
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
-        if let client = state.withLock({ $0.sessionClient }) {
-            return try await client.model.fetchProgress(client, itemID: itemID, episodeID: episodeID)
-        }
         let key = MediaKey(
             serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
+        if let client = state.withLock({ $0.sessionClient }) {
+            state.withLock {
+                $0.fetches.append(key)
+                $0.log.append("get \(itemID)")
+            }
+            return try await client.model.fetchProgress(client, itemID: itemID, episodeID: episodeID)
+        }
         let (progress, gate, error, started) = state.withLock { state in
             state.fetches.append(key)
             state.log.append("get \(itemID)")

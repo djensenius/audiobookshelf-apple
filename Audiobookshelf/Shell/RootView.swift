@@ -15,6 +15,7 @@ import SwiftUI
 struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
+    let accounts: AccountManager?
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var pendingLink: PendingLink?
@@ -58,7 +59,11 @@ struct RootView: View {
         case .loading, .signingOut:
             LoadingView()
         case .connect:
-            SignedOutPlaceholder()
+            if let accounts {
+                ConnectFlowView(accounts: accounts)
+            } else {
+                SignedOutPlaceholder()
+            }
         case .shell(let identity, let opensLinks):
             // A switch keeps the old shell on screen until the next session has started, so a
             // sign-in presented from it isn't torn down. It is the same case as a ready session,
@@ -89,11 +94,12 @@ extension SessionScenePhase {
 }
 
 #Preview("Signed out") {
-    RootView(lifecycle: SessionLifecycle(source: SignedOutAccountSource()), player: PlaceholderPlayerState())
+    RootView(
+        lifecycle: SessionLifecycle(source: SignedOutAccountSource()), player: PlaceholderPlayerState(), accounts: nil)
 }
 
 #Preview("Store unavailable") {
     RootView(
         lifecycle: SessionLifecycle(storeUnavailable: CocoaError(.fileWriteOutOfSpace)),
-        player: PlaceholderPlayerState())
+        player: PlaceholderPlayerState(), accounts: nil)
 }

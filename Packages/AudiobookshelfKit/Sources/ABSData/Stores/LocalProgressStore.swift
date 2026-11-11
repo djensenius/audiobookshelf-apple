@@ -33,7 +33,8 @@ public struct ProgressGeneration: Sendable, Hashable, Comparable {
     public static func < (lhs: ProgressGeneration, rhs: ProgressGeneration) -> Bool { lhs.value < rhs.value }
 }
 
-/// One start's pre-GET provenance. Retain only for the lifetime of that start.
+/// Pre-GET provenance for one start or active-session baseline GET (#279/#281). Retain only for
+/// the lifetime of that request.
 /// The issuing store alone can consume it; deletion invalidates it even if the key becomes
 /// absent again. No persistent tombstone or per-key lifetime history is needed.
 public final class PlaybackStartProgressCapture: Sendable {
@@ -165,7 +166,8 @@ public enum SessionUploadResult: Sendable, Equatable {
         (captureGeneration(), awaitingFetch[key.rawValue]?.acknowledgement)
     }
 
-    /// Capture before the start's existing GET. A failed lookup is not evidence of absence.
+    /// Capture before a start or active-session baseline GET (#279/#281). A failed lookup is not
+    /// evidence of absence.
     public func captureStartProgress(for key: MediaKey) throws -> PlaybackStartProgressCapture {
         startCaptures = startCaptures.filter { $0.value.value != nil }
         let row = try fetchRow(key)
@@ -175,8 +177,9 @@ public enum SessionUploadResult: Sendable, Equatable {
         return capture
     }
 
-    /// Narrow, one-shot canonical start intake. Validation, provenance and mutation are atomic
-    /// on this actor. Ordinary server intake still ignores unknown rows.
+    /// Narrow, one-shot canonical intake for a start or active-session baseline GET (#279/#281).
+    /// Validation, provenance and mutation are atomic on this actor. Ordinary server intake still
+    /// ignores unknown rows.
     @discardableResult
     public func applyStartProgress(_ progress: MediaProgress, captured: PlaybackStartProgressCapture) throws -> Bool {
         guard startCaptures[captured.id]?.value === captured else { return false }
