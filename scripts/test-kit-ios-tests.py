@@ -53,7 +53,9 @@ if tool == "xcodebuild":
     result = Path(args[args.index("-resultBundlePath") + 1])
     assert not result.exists(), "stale result bundle"
     result.mkdir()
-    (root / "xcode.pid").write_text(str(os.getpid()))
+    marker = root / "xcode.pid.tmp"
+    marker.write_text(str(os.getpid()))
+    marker.replace(root / "xcode.pid")
     if faults.get("hang"):
         time.sleep(60)
     print("** TEST SUCCEEDED **")  # Never sufficient evidence.
@@ -364,6 +366,56 @@ class RunnerTests(unittest.TestCase):
 
     def test_command_deadline_kills_and_reaps_sigterm_ignoring_child(self):
         self.assert_command_deadline(ignore_term=True)
+
+    def test_pid_marker_is_published_after_contents_are_complete(self):
+        self.prepare()
+        # Execute the actual fake producer, gating its real file open after
+        # creation but before write_text writes. The gate covers both the old
+        # direct marker and the temporary sibling, without relying on sleeps.
+        gate = r'''
+import os, runpy, signal, sys
+from pathlib import Path
+signal.alarm(12)  # Outer safety net, not the synchronization mechanism.
+real_open = Path.open
+def gated_open(path, *args, **kwargs):
+    handle = real_open(path, *args, **kwargs)
+    mode = kwargs.get("mode", args[0] if args else "r")
+    if "w" in mode and path.parent == Path(os.environ["CASE_ROOT"]) and path.name.startswith("xcode.pid"):
+        print("marker-opened", flush=True)
+        if sys.stdin.readline() != "publish\n":
+            handle.close()
+            raise RuntimeError("publication gate closed without release")
+    return handle
+Path.open = gated_open
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+        process = subprocess.Popen(
+            [sys.executable, "-c", gate, str(self.root / "bin/xcodebuild"),
+             "test", "-resultBundlePath", str(self.root / "Tests.xcresult")],
+            env=self.env, cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0], "producer did not reach open gate")
+            self.assertEqual(process.stdout.readline(), "marker-opened\n")
+            marker = self.root / "xcode.pid"
+            visible = marker.exists()
+            contents = marker.read_text() if visible else None
+            print(f"Publication gate: marker-visible={visible} contents={contents!r}", flush=True)
+            self.assertFalse(visible, "PID readiness marker is visible before contents are written")
+            stdout, stderr = process.communicate(input="publish\n", timeout=5)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+            # Use the owned Popen PID, never a PID parsed from an unready marker.
+            self.assertEqual(marker.read_text(), str(process.pid))
+            print(f"Publication complete: marker matches owned PID {process.pid}", flush=True)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=2)
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(process.pid, os.WNOHANG)
+            print(f"Publication producer reaped: owned PID {process.pid}", flush=True)
 
     def test_signal_stops_only_owned_cli_and_retains_result(self):
         self.faults["hang"] = True
