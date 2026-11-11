@@ -125,6 +125,18 @@ enum SearchFilterRaw {
             try members(value.authors.map(\.name), names(ledger.token, "Author"))
             try members(value.series.map(\.id), ledger.series.map(\.id))
             try members(value.series.map(\.name), names(ledger.token, "Series"))
+            for author in value.authors {
+                guard author.name == ledger.authors.first(where: { $0.id == author.id })?.name else {
+                    throw SearchContractFixture.Failure(
+                        description: "Filter author name does not match ledger ID \(author.id)")
+                }
+            }
+            for series in value.series {
+                guard series.name == ledger.series.first(where: { $0.id == series.id })?.name else {
+                    throw SearchContractFixture.Failure(
+                        description: "Filter series name does not match ledger ID \(series.id)")
+                }
+            }
             try members(value.narrators, names(ledger.token, "Narrator"))
             try members(value.genres, names(ledger.token, "Genre"))
             try members(value.tags, names(ledger.token, "Tag"))
@@ -171,5 +183,90 @@ enum SearchFilterRaw {
         try members(filenames, expected)
         #expect(try SearchRaw.integer(raw, "size") == total)
         #expect(try SearchRaw.integer(SearchRaw.dictionary(raw["media"]), "size") == audioSize)
+    }
+}
+
+extension SearchContractGateTests {
+    @Test(
+        "synthetic filter responses reject swapped ID/name associations on both endpoints",
+        arguments: ["authors", "series"], ["2.26.0", "2.37.2"])
+    func filterIdentityNamesCannotBeSwapped(group: String, version: String) throws {
+        // Independent synthetic ledger, not captured server evidence or a response-derived oracle.
+        let token = "search0123456789abcdef"
+        let authors = ["Shared", "Unique"].map { Author(id: "author-\($0)", name: "\(token) \($0) Author") }
+        let series = ["Shared", "Unique"].map { Series(id: "series-\($0)", name: "\(token) \($0) Series") }
+        func names(_ kind: String, unique: Bool = true) -> [String] {
+            ["\(token) Shared \(kind)"] + (unique ? ["\(token) Unique \(kind)"] : [])
+        }
+        let books = (0..<2).map { offset in
+            let unique = offset == 0
+            let metadata = BookMetadata(
+                title: "\(token) Book \(offset + 1)",
+                authors: unique ? authors : Array(authors.prefix(1)),
+                narrators: names("Narrator", unique: unique),
+                series: unique ? series : Array(series.prefix(1)),
+                genres: names("Genre", unique: unique), publishedYear: unique ? "1984" : "2007",
+                publisher: unique ? "First Publisher" : "Second Publisher", language: unique ? "en" : "fr")
+            return LibraryItem(
+                id: "book-\(offset)", libraryId: "books", mediaType: .book,
+                media: .book(
+                    Book(id: "media-\(offset)", metadata: metadata, tags: names("Tag", unique: unique))))
+        }
+        let podcast = LibraryItem(
+            id: "podcast", libraryId: "podcasts", mediaType: .podcast,
+            media: .podcast(
+                Podcast(
+                    id: "podcast-media",
+                    metadata: PodcastMetadata(
+                        title: "\(token) Podcast", genres: ["\(token) Podcast Genre"], language: "de"),
+                    tags: ["\(token) Podcast Tag"])))
+        let ledger = SearchLedger(
+            bookLibrary: "books", podcastLibrary: "podcasts", books: books, podcast: podcast,
+            authors: authors, series: series, token: token)
+        let loadedAt = 1_700_000_000_000
+        let folder = "/synthetic/books"
+        var filters: [String: Any] = [
+            // Deliberately different from ledger order: pairing, not position, must determine identity.
+            "authors": authors.reversed().map { ["id": $0.id, "name": $0.name] },
+            "series": series.reversed().map { ["id": $0.id, "name": $0.name] },
+            "narrators": names("Narrator"), "genres": names("Genre"), "tags": names("Tag"),
+            "languages": ["en", "fr"], "publishers": ["First Publisher", "Second Publisher"],
+            "publishedDecades": ["1980", "2000"], "bookCount": 0, "authorCount": 0,
+            "seriesCount": 0, "podcastCount": 0, "numIssues": 0, "loadedAt": loadedAt,
+        ]
+        func checkPair(_ filters: [String: Any]) throws -> LibraryWithFilterData {
+            var wrapper: [String: Any] = [
+                "library": [
+                    "id": "books", "name": "\(token) book", "mediaType": "book",
+                    "folders": [["id": "folder", "libraryId": "books", "fullPath": folder]],
+                    "lastScanVersion": version, "lastScan": loadedAt + 1,
+                ],
+                "filterdata": filters, "issues": 0, "numUserPlaylists": 0,
+            ]
+            if version == "2.26.0" { wrapper["customMetadataProviders"] = [] as [String] }
+            return try SearchFilterRaw.positivePair(
+                wrapper: JSONSerialization.data(withJSONObject: wrapper),
+                dedicated: JSONSerialization.data(withJSONObject: filters),
+                ledger: ledger, podcast: false, version: version, folder: folder)
+        }
+        // Valid reordered rows must pass the complete live helper before the negative mutation.
+        _ = try checkPair(filters)
+        let original = try #require(filters[group] as? [[String: String]])
+        try #require(original.count == 2)
+        var swapped = original
+        swapped[0]["name"] = original[1]["name"]
+        swapped[1]["name"] = original[0]["name"]
+        #expect(swapped.map { $0["id"] } == original.map { $0["id"] })
+        try SearchFilterRaw.members(
+            swapped.map { try #require($0["name"]) }, original.map { try #require($0["name"]) })
+        filters[group] = swapped
+        // Both HTTP forms carry the same mutation, so equality and separate sets still pass.
+        // Without the pairing guards above this records "expected error was not thrown".
+        let error = #expect(throws: SearchContractFixture.Failure.self) {
+            try checkPair(filters)
+        }
+        let kind = group == "authors" ? "author" : "series"
+        let id = try #require(original[0]["id"])
+        #expect(error?.description == "Filter \(kind) name does not match ledger ID \(id)")
     }
 }
