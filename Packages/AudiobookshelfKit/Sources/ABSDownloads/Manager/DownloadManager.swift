@@ -364,7 +364,8 @@ public actor DownloadManager {
             let kept = files.reduce(Int64(0)) {
                 Self.adding($0, $1.state == .completed || $1.hasResumeData ? max($1.bytesWritten, 0) : 0)
             }
-            let reported = Int64(Self.reportedSize(of: item, episodeID: record.key.episodeId) ?? 0)
+            // Clamped first: a negative size from the server would underflow the subtraction.
+            let reported = max(Int64(Self.reportedSize(of: item, episodeID: record.key.episodeId) ?? 0), 0)
             required = max(required, max(reported - kept, 0))
         }
         required = Self.adding(required, Self.storageHeadroom)

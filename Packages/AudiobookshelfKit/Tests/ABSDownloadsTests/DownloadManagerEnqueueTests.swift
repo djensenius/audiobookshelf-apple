@@ -483,6 +483,35 @@ import Testing
                 == .alreadyQueued(recordID))
     }
 
+    /// A negative reported size counts as nothing, even with bytes kept on disk to subtract.
+    @Test func aNegativeReportedSizeCountsAsZero() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let base = LibraryItemFixtures.book(
+            files: [
+                LibraryItemFixtures.BookFile(ino: "101", path: "/audiobooks/Dune/01.mp3", size: 1_000),
+                LibraryItemFixtures.BookFile(ino: "102", path: "/audiobooks/Dune/02.mp3", size: 0),
+            ], ebook: nil)
+        let item = LibraryItem(
+            id: base.id, libraryId: base.libraryId, updatedAt: base.updatedAt, mediaType: .book, media: base.media,
+            size: .min)
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let completed = try #require(try await fixture.store.record(id: recordID)?.parts.first)
+        try await fixture.store.completePart(partID: completed.id, finalBytes: 1_000)
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        fixture.capacity.set(DownloadManager.storageHeadroom)
+
+        let result = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+
+        #expect(result == .alreadyQueued(recordID))
+    }
+
     @Test func planErrorsAreMapped() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()
