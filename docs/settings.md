@@ -62,3 +62,9 @@ These legacy settings are not ported:
 no Settings control. It stores each library's sort, filter, grid or list view mode and collapse
 series as a small JSON string under the key `serverID|userID|libraryID`. Nothing removes an entry
 when an account or connection is removed (like `lastLibraryIDs`); only `resetAll()` clears it.
+
+`AppSettings.podcastEpisodeListPreferences` (`settings_podcastEpisodeListPreferences`) has no
+Settings control either. It stores the podcast episode list's filter, sort and direction as one
+small JSON string (`EpisodeListPreferences`), shared by every podcast and account as legacy's
+`podcastEpisodesFilterBy`, `podcastEpisodesOrderBy` and `podcastEpisodesOrderDesc` were. Until the
+user picks a direction, each podcast lists newest first when episodic and oldest first otherwise.
