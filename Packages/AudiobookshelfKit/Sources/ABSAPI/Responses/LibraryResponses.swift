@@ -42,9 +42,10 @@ public struct LibraryWithFilterData: Decodable, Sendable, Hashable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         library = try container.decode(Library.self, forKey: .library)
-        filterData = try container.decodeIfPresent(LibraryFilterData.self, forKey: .filterdata) ?? LibraryFilterData()
-        issues = try container.decodeIfPresent(Int.self, forKey: .issues) ?? 0
-        numUserPlaylists = try container.decodeIfPresent(Int.self, forKey: .numUserPlaylists) ?? 0
+        filterData =
+            (try? container.decodeIfPresent(LibraryFilterData.self, forKey: .filterdata)) ?? LibraryFilterData()
+        issues = try container.decodeLenientIntIfPresent(forKey: .issues) ?? 0
+        numUserPlaylists = try container.decodeLenientIntIfPresent(forKey: .numUserPlaylists) ?? 0
     }
 }
 
@@ -93,8 +94,8 @@ public struct LibraryFilterData: Decodable, Sendable, Hashable {
         languages = try container.decodeLossyArrayIfPresent(String.self, forKey: .languages) ?? []
         publishers = try container.decodeLossyArrayIfPresent(String.self, forKey: .publishers) ?? []
         publishedDecades = try container.decodeLossyArrayIfPresent(String.self, forKey: .publishedDecades) ?? []
-        numIssues = try container.decodeIfPresent(Int.self, forKey: .numIssues) ?? 0
-        loadedAt = try container.decodeIfPresent(Int.self, forKey: .loadedAt)
+        numIssues = try container.decodeLenientIntIfPresent(forKey: .numIssues) ?? 0
+        loadedAt = try container.decodeLenientIntIfPresent(forKey: .loadedAt)
     }
 }
 
