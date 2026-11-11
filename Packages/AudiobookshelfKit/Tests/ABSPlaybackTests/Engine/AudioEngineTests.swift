@@ -450,10 +450,16 @@ struct AudioEngineTests {
         let session = FakeAudioSession()
         let engine = makeEngine(session: session)
         try await engine.load(fixture.source, at: 1)
+        #expect(!engine.isAudioSessionActive)
         engine.play()
+        #expect(engine.isAudioSessionActive)
+        // A pause keeps the audio session active.
+        engine.pause()
+        #expect(engine.isAudioSessionActive)
 
         engine.stop()
 
+        #expect(!engine.isAudioSessionActive)
         #expect(engine.state == .idle)
         #expect(engine.timeline == nil)
         #expect(engine.currentTrackIndex == nil)
@@ -923,6 +929,7 @@ struct AudioEngineTests {
 
         engine.play()
 
+        #expect(!engine.isAudioSessionActive)
         #expect(engine.player.rate == 0)
         #expect(engine.isPlaybackRequested == false)
         #expect(engine.state == .paused)
@@ -960,10 +967,13 @@ struct AudioEngineTests {
         #expect(engine.player.rate == 0)
         #expect(session.activations == activations)
 
+        #expect(!engine.isAudioSessionActive)
+
         // The next play() activates again.
         session.activationError = nil
         engine.play()
         #expect(session.activations == activations + 1)
+        #expect(engine.isAudioSessionActive)
         #expect(engine.isPlaybackRequested)
         #expect(await eventually { engine.state == .playing })
     }
