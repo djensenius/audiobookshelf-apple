@@ -21,9 +21,10 @@ struct ItemDetailTables: View {
             if !model.chapters.isEmpty {
                 ItemDetailTableSection(titleKey: "HeaderChapters", count: model.chapters.count) {
                     ItemDetailTableHeader(keys: ["LabelTitle", "LabelStart", "LabelDuration"])
-                    ForEach(Array(model.chapters.enumerated()), id: \.element.id) { offset, chapter in
+                    // Row IDs are positions, since the server's IDs may repeat.
+                    ForEach(model.chapters) { chapter in
                         let presentation = ItemDetailChapterPresentation(
-                            chapter: chapter, position: offset + 1, bookTitle: bookTitle, locale: locale)
+                            chapter: chapter, position: chapter.id + 1, bookTitle: bookTitle, locale: locale)
                         ItemDetailChapterRow(presentation: presentation, isEnabled: canPlayChapters) {
                             selectChapter(chapter, presentation)
                         }
@@ -36,7 +37,8 @@ struct ItemDetailTables: View {
                     ForEach(model.tracks) { track in
                         ItemDetailTableRow(
                             title: track.name ?? L10n.string("LabelUnknown"),
-                            values: [DurationStyle.timestamp.string(track.duration, locale: locale)])
+                            values: [DurationStyle.timestamp.string(track.duration, locale: locale)],
+                            spokenValues: [DurationStyle.timestamp.accessibilityString(track.duration, locale: locale)])
                     }
                 }
             }
@@ -85,37 +87,77 @@ private struct ItemDetailTableSection<Content: View>: View {
     }
 }
 
-/// The column titles; VoiceOver reads each row's own label instead.
+/// The column titles; VoiceOver reads each row's own label instead. Left out at accessibility
+/// text sizes, where rows stack their values under the title.
 private struct ItemDetailTableHeader: View {
     /// `L10n` keys; the first is the leading column.
     let keys: [String]
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
-        ItemDetailTableRow(title: L10n.string(keys[0]), values: keys.dropFirst().map { L10n.string($0) })
+        if !dynamicTypeSize.isAccessibilitySize {
+            ItemDetailTableColumns(values: keys.dropFirst().map { L10n.string($0) }) {
+                Text(verbatim: L10n.string(keys[0]))
+            }
             .font(.caption.weight(.semibold))
             .foregroundStyle(ABSColor.mutedForeground)
             .accessibilityHidden(true)
+        }
     }
 }
 
-/// A row: the leading text, then fixed-width values.
+/// The leading content, then the values in columns that scale with the text size. At
+/// accessibility sizes the values go under the leading content instead.
+private struct ItemDetailTableColumns<Leading: View>: View {
+    let values: [String]
+    var underlinesFirstValue = false
+    @ViewBuilder let leading: Leading
+    @ScaledMetric(relativeTo: .subheadline) private var columnWidth: CGFloat = 64
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    var body: some View {
+        let isStacked = dynamicTypeSize.isAccessibilitySize
+        let layout =
+            isStacked
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: ABSSpacing.xxSmall))
+            : AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: ABSSpacing.small))
+        layout {
+            leading
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(alignment: .firstTextBaseline, spacing: ABSSpacing.small) {
+                ForEach(Array(values.enumerated()), id: \.offset) { offset, value in
+                    Text(verbatim: value)
+                        .underline(underlinesFirstValue && offset == 0)
+                        .monospacedDigit()
+                        .frame(minWidth: isStacked ? nil : columnWidth, alignment: isStacked ? .leading : .trailing)
+                }
+            }
+        }
+        .padding(.vertical, ABSSpacing.xSmall)
+    }
+}
+
+/// A row of text. VoiceOver reads the title and `spokenValues` when given, else the visible
+/// text.
 private struct ItemDetailTableRow: View {
     let title: String
     let values: [String]
+    /// The values as VoiceOver should say them, such as durations in full.
+    var spokenValues: [String]?
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: ABSSpacing.small) {
+        let row = ItemDetailTableColumns(values: values) {
             Text(verbatim: title)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            ForEach(Array(values.enumerated()), id: \.offset) { _, value in
-                Text(verbatim: value)
-                    .monospacedDigit()
-                    .frame(minWidth: 64, alignment: .trailing)
-            }
         }
         .font(.subheadline)
-        .padding(.vertical, ABSSpacing.xSmall)
-        .accessibilityElement(children: .combine)
+        if let spokenValues {
+            row
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(verbatim: title))
+                .accessibilityValue(Text(verbatim: spokenValues.joined(separator: ", ")))
+        } else {
+            row.accessibilityElement(children: .combine)
+        }
     }
 }
 
@@ -127,18 +169,12 @@ private struct ItemDetailChapterRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .firstTextBaseline, spacing: ABSSpacing.small) {
+            ItemDetailTableColumns(
+                values: [presentation.startText, presentation.durationText], underlinesFirstValue: isEnabled
+            ) {
                 Text(verbatim: presentation.title)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Text(verbatim: presentation.startText)
-                    .underline(isEnabled)
-                    .frame(minWidth: 64, alignment: .trailing)
-                Text(verbatim: presentation.durationText)
-                    .frame(minWidth: 64, alignment: .trailing)
             }
-            .monospacedDigit()
             .font(.subheadline)
-            .padding(.vertical, ABSSpacing.xSmall)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -156,7 +192,9 @@ private struct ItemDetailEbookFileRow: View {
 
     var body: some View {
         let name = file.filename.isEmpty ? L10n.string("LabelUnknown") : file.filename
-        HStack(alignment: .firstTextBaseline, spacing: ABSSpacing.small) {
+        ItemDetailTableColumns(
+            values: [file.size.map { Int64($0).formatted(.byteCount(style: .file).locale(locale)) } ?? ""]
+        ) {
             HStack(alignment: .firstTextBaseline, spacing: ABSSpacing.xSmall) {
                 Text(verbatim: name)
                 if file.isPrimary {
@@ -165,13 +203,8 @@ private struct ItemDetailEbookFileRow: View {
                         .accessibilityLabel(Text(verbatim: L10n.string("LabelItemDetailPrimaryEbook")))
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            Text(verbatim: file.size.map { Int64($0).formatted(.byteCount(style: .file).locale(locale)) } ?? "")
-                .monospacedDigit()
-                .frame(minWidth: 64, alignment: .trailing)
         }
         .font(.subheadline)
-        .padding(.vertical, ABSSpacing.xSmall)
         .accessibilityElement(children: .combine)
     }
 }

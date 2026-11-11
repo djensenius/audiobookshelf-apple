@@ -283,7 +283,8 @@ import Testing
 
     @Test func chapterTimestampsUnderAndOverOneHour() {
         let short = ItemDetailChapterPresentation(
-            chapter: .init(id: 1, title: "Intro", start: 245.9, duration: 59), position: 1, bookTitle: "Book",
+            chapter: .init(id: 1, chapterID: 1, title: "Intro", start: 245.9, duration: 59), position: 1,
+            bookTitle: "Book",
             locale: locale)
         #expect(short.title == "Intro")
         #expect(short.startText == "4:05")
@@ -291,7 +292,8 @@ import Testing
         #expect(short.accessibilityLabel == "Intro, starts at 4 minutes, 5 seconds, duration 59 seconds")
 
         let long = ItemDetailChapterPresentation(
-            chapter: .init(id: 2, title: "Late", start: 3_723, duration: 3_600), position: 2, bookTitle: "Book",
+            chapter: .init(id: 2, chapterID: 2, title: "Late", start: 3_723, duration: 3_600), position: 2,
+            bookTitle: "Book",
             locale: locale)
         #expect(long.startText == "1:02:03")
         #expect(long.durationText == "1:00:00")
@@ -300,7 +302,7 @@ import Testing
 
     @Test func untitledChapterUsesNumber() async throws {
         let blank = ItemDetailChapterPresentation(
-            chapter: .init(id: 7, title: " \n", start: 0, duration: 10), position: 5, bookTitle: "Book",
+            chapter: .init(id: 7, chapterID: 7, title: " \n", start: 0, duration: 10), position: 5, bookTitle: "Book",
             locale: locale)
         #expect(blank.title == "Chapter 5")
         #expect(blank.accessibilityLabel.hasPrefix("Chapter 5, "))

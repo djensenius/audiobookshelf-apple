@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSCore
 import Foundation
 
@@ -8,7 +9,11 @@ extension ItemDetailModel {
     /// ``duration`` of at least `0`; ``ItemDetailModel/startTime(for:)`` clamps any row before
     /// playing it.
     public struct ChapterRow: Sendable, Hashable, Identifiable {
+        /// The row's 0-based position in ``ItemDetailModel/chapters``. The server's chapter IDs
+        /// may repeat, so they can't identify rows.
         public let id: Int
+        /// The server's ``Chapter/id``.
+        public let chapterID: Int
         /// The server's title; may be empty, and the view then numbers the chapter.
         public let title: String
         /// Seconds from the start of the book.
@@ -16,8 +21,9 @@ extension ItemDetailModel {
         /// Seconds; `max(0, end - start)`, as legacy (`ChaptersTable.vue:26`).
         public let duration: TimeInterval
 
-        public init(id: Int, title: String, start: TimeInterval, duration: TimeInterval) {
+        public init(id: Int, chapterID: Int, title: String, start: TimeInterval, duration: TimeInterval) {
             self.id = id
+            self.chapterID = chapterID
             self.title = title
             self.start = start
             self.duration = duration
@@ -26,8 +32,11 @@ extension ItemDetailModel {
 
     /// An audio track.
     public struct TrackRow: Sendable, Hashable, Identifiable {
+        /// The row's 0-based position in ``ItemDetailModel/tracks``. ``AudioTrack/id`` repeats
+        /// when tracks have neither an index nor a start offset, so it can't identify rows.
+        public let id: Int
         /// ``AudioTrack/id``.
-        public let id: String
+        public let trackID: String
         /// 1-based; `nil` when the server didn't send one.
         public let index: Int?
         /// The file name, else the track title; `nil` (shown as Unknown) when both are blank, as
@@ -55,6 +64,18 @@ extension ItemDetailModel {
     /// `playItem` action and no start in progress.
     public var canPlayChapters: Bool { hasAudio }
 
+    /// Where to start playing `chapter` once the user confirms it, or `nil` when that's no longer
+    /// right because the item changed while they were asked: it can't play chapters anymore
+    /// (``canPlayChapters``), the server says it's gone (a 404, kept while retrying), or the
+    /// chapter at that position isn't the same anymore. The view also checks its own state
+    /// (a `playItem` action, no start in progress).
+    public func chapterToPlay(confirming chapter: ChapterRow) -> TimeInterval? {
+        guard canPlayChapters, (error as? APIError) != .notFound,
+            chapters.indices.contains(chapter.id), chapters[chapter.id] == chapter
+        else { return nil }
+        return startTime(for: chapter)
+    }
+
     /// Where to start playing `chapter`: its start, `0` when negative or not finite, and before
     /// the end of the book when its duration is known.
     public func startTime(for chapter: ChapterRow) -> TimeInterval {
@@ -69,31 +90,32 @@ extension ItemDetailModel {
 
     /// Sorted by start; chapters with the same start keep the server's order.
     static func chapterRows(book: Book) -> [ChapterRow] {
-        let rows = (book.chapters ?? []).map { chapter in
-            let start = nonNegative(chapter.start)
-            return ChapterRow(
-                id: chapter.id, title: chapter.title, start: start, duration: nonNegative(chapter.end - start))
+        let sorted = (book.chapters ?? []).enumerated()
+            .map { (chapter: $0.element, start: nonNegative($0.element.start), offset: $0.offset) }
+            .sorted { ($0.start, $0.offset) < ($1.start, $1.offset) }
+        return sorted.enumerated().map { position, entry in
+            ChapterRow(
+                id: position, chapterID: entry.chapter.id, title: entry.chapter.title, start: entry.start,
+                duration: nonNegative(entry.chapter.end - entry.start))
         }
-        return rows.enumerated()
-            .sorted { ($0.element.start, $0.offset) < ($1.element.start, $1.offset) }
-            .map(\.element)
     }
 
     /// Sorted by index; tracks without one follow, in the server's order.
     static func trackRows(book: Book) -> [TrackRow] {
-        let rows = (book.tracks ?? []).map { track in
+        let sorted = (book.tracks ?? []).enumerated()
+            .sorted { ($0.element.index ?? .max, $0.offset) < ($1.element.index ?? .max, $1.offset) }
+            .map(\.element)
+        return sorted.enumerated().map { position, track in
             TrackRow(
-                id: track.id, index: track.index,
+                id: position, trackID: track.id, index: track.index,
                 name: nonBlank(track.metadata?.filename) ?? nonBlank(track.title),
                 duration: nonNegative(track.duration))
         }
-        return rows.enumerated()
-            .sorted { ($0.element.index ?? .max, $0.offset) < ($1.element.index ?? .max, $1.offset) }
-            .map(\.element)
     }
 
     /// The item's library files of type `ebook`, in the server's order.
     static func ebookFileRows(item: LibraryItem, book: Book) -> [EbookFileRow] {
+        // Per #341 the primary is the book's `ebookFile`, unlike legacy's `!isSupplementary`.
         let primary = book.ebookFile?.ino
         return (item.libraryFiles ?? []).filter { $0.fileType == "ebook" }.map { file in
             EbookFileRow(

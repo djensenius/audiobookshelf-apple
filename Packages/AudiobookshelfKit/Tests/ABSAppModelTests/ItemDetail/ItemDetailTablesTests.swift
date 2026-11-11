@@ -48,10 +48,27 @@ private func loadedModel(_ item: LibraryItem) async -> ItemDetailModel {
             ]))
 
         // Equal starts keep the server's order.
-        #expect(model.chapters.map(\.id) == [0, 3, 4, 1, 2])
+        #expect(model.chapters.map(\.chapterID) == [0, 3, 4, 1, 2])
+        #expect(model.chapters.map(\.id) == [0, 1, 2, 3, 4])
         #expect(model.chapters.map(\.start) == [0, 0, 0, 120, 300])
         #expect(model.chapters.map(\.duration) == [120, 10, 50, 0, 300])
-        #expect(model.chapters.first { $0.id == 2 }?.title == "Two")
+        #expect(model.chapters.first { $0.chapterID == 2 }?.title == "Two")
+    }
+
+    @Test func duplicateChapterAndTrackIDsStayDistinctRows() async {
+        let model = await loadedModel(
+            makeBook(
+                chapters: [
+                    Chapter(id: 1, start: 0, end: 10, title: "Same"), Chapter(id: 1, start: 0, end: 10, title: "Same"),
+                ],
+                tracks: [AudioTrack(duration: 5, title: "a.mp3"), AudioTrack(duration: 5, title: "a.mp3")]))
+
+        #expect(model.chapters.map(\.chapterID) == [1, 1])
+        #expect(model.chapters.map(\.id) == [0, 1])
+        #expect(model.chapters[0] != model.chapters[1])
+        #expect(model.tracks.map(\.trackID) == ["0-0.0", "0-0.0"])
+        #expect(model.tracks.map(\.id) == [0, 1])
+        #expect(model.tracks[0] != model.tracks[1])
     }
 
     @Test func chaptersEmptyForPodcastAndMissingChapters() async {
@@ -80,7 +97,7 @@ private func loadedModel(_ item: LibraryItem) async -> ItemDetailModel {
 
         #expect(model.tracks.map(\.name) == ["01.mp3", "Title 2", "Title 3", nil])
         #expect(model.tracks.map(\.duration) == [10, 20, 30, 0])
-        #expect(model.tracks.map(\.id) == ["1-0.0", "2-0.0", "3-0.0", "4-0.0"])
+        #expect(model.tracks.map(\.trackID) == ["1-0.0", "2-0.0", "3-0.0", "4-0.0"])
     }
 
     @Test func tracksSortedByIndexKeepingNilIndexOrder() async {
@@ -140,7 +157,7 @@ private func loadedModel(_ item: LibraryItem) async -> ItemDetailModel {
     @Test func startTimeClampsNegativeAndNonFinite() async {
         let model = await loadedModel(makeBook(duration: 1000))
         func start(_ seconds: Double) -> TimeInterval {
-            model.startTime(for: .init(id: 0, title: "", start: seconds, duration: 10))
+            model.startTime(for: .init(id: 0, chapterID: 0, title: "", start: seconds, duration: 10))
         }
 
         #expect(start(-5) == 0)
@@ -156,8 +173,8 @@ private func loadedModel(_ item: LibraryItem) async -> ItemDetailModel {
 
         // Without a known duration only the lower bound applies.
         let noDuration = await loadedModel(makeBook(duration: nil))
-        #expect(noDuration.startTime(for: .init(id: 0, title: "", start: 5000, duration: 0)) == 5000)
-        #expect(noDuration.startTime(for: .init(id: 0, title: "", start: -1, duration: 0)) == 0)
+        #expect(noDuration.startTime(for: .init(id: 0, chapterID: 0, title: "", start: 5000, duration: 0)) == 5000)
+        #expect(noDuration.startTime(for: .init(id: 0, chapterID: 0, title: "", start: -1, duration: 0)) == 0)
     }
 
     @Test func canPlayChaptersFalseWhenMissingOrNoTracks() async {
@@ -171,6 +188,88 @@ private func loadedModel(_ item: LibraryItem) async -> ItemDetailModel {
         #expect(!unloaded.canPlayChapters)
         await unloaded.load()
         #expect(!unloaded.canPlayChapters)
+    }
+
+    @Test func chapterToPlayWhenStillTheSameChapter() async throws {
+        let model = await loadedModel(
+            makeBook(chapters: [
+                Chapter(id: 0, start: 0, end: 100, title: "One"), Chapter(id: 1, start: 100, end: 200, title: "Two"),
+            ]))
+        let second = try #require(model.chapters.last)
+        #expect(model.chapterToPlay(confirming: second) == 100)
+    }
+
+    @Test func chapterToPlayIsNilWhenTheChapterChanged() async throws {
+        let version = Locked(0)
+        let model = ItemDetailModel(
+            itemID: "li-1",
+            service: FakeItemDetailService { _ in
+                switch version.value {
+                case 0:
+                    makeBook(chapters: [
+                        Chapter(id: 0, start: 0, end: 100, title: "One"),
+                        Chapter(id: 1, start: 100, end: 200, title: "Two"),
+                    ])
+                case 1:
+                    makeBook(chapters: [
+                        Chapter(id: 0, start: 0, end: 100, title: "One"),
+                        Chapter(id: 1, start: 150, end: 200, title: "Two"),
+                    ])
+                default:
+                    makeBook(chapters: [Chapter(id: 0, start: 0, end: 100, title: "One")])
+                }
+            }, cache: ProgressCache())
+        await model.load()
+        let second = try #require(model.chapters.last)
+        let first = try #require(model.chapters.first)
+
+        // Same position and ID, new start.
+        version.value = 1
+        await model.load()
+        #expect(model.chapterToPlay(confirming: second) == nil)
+        #expect(model.chapterToPlay(confirming: first) == 0)
+
+        // Removed.
+        version.value = 2
+        await model.load()
+        #expect(model.chapterToPlay(confirming: second) == nil)
+    }
+
+    @Test func chapterToPlayIsNilWhenGoneOrWithoutAudio() async throws {
+        let chapters = [Chapter(id: 0, start: 0, end: 100, title: "One")]
+        let failure = Locked<(any Error & Sendable)?>(nil)
+        let tracks = Locked<[AudioTrack]?>(nil)
+        let model = ItemDetailModel(
+            itemID: "li-1",
+            service: FakeItemDetailService { _ in
+                if let error = failure.value { throw error }
+                return makeBook(chapters: chapters, tracks: tracks.value)
+            }, cache: ProgressCache())
+        await model.load()
+        let chapter = try #require(model.chapters.first)
+        #expect(model.chapterToPlay(confirming: chapter) == 0)
+
+        // A reload that fails some other way keeps it playable.
+        failure.value = TestError.offline
+        await model.load()
+        #expect(model.chapterToPlay(confirming: chapter) == 0)
+
+        failure.value = APIError.notFound
+        await model.load()
+        #expect(model.chapters == [chapter])
+        #expect(model.chapterToPlay(confirming: chapter) == nil)
+
+        failure.value = nil
+        await model.load()
+        #expect(model.chapterToPlay(confirming: chapter) == 0)
+
+        tracks.value = []
+        await model.load()
+        #expect(model.chapters == [chapter])
+        #expect(model.chapterToPlay(confirming: chapter) == nil)
+
+        let missing = await loadedModel(makeBook(chapters: chapters, isMissing: true))
+        #expect(missing.chapterToPlay(confirming: chapter) == nil)
     }
 
     @Test func reloadReplacesRows() async {

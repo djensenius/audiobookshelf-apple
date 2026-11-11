@@ -87,6 +87,11 @@ struct ItemDetailContent: View {
         .refreshable { await model.load() }
         .absBackground()
         .onChange(of: snapshot, initial: true) { _, snapshot in goneState.update(snapshot) }
+        // Drop a confirmation the item no longer matches.
+        .onChange(of: model.chapters) { pendingChapter = nil }
+        .onChange(of: isGone) { _, isGone in
+            if isGone { pendingChapter = nil }
+        }
         .alert(
             Text(verbatim: L10n.string("MessagePlaybackStartFailed")),
             isPresented: Binding {
@@ -99,17 +104,21 @@ struct ItemDetailContent: View {
         } message: { failure in
             Text(verbatim: failure.message)
         }
-        .confirmationDialog(
+        // A centred alert, as legacy `Dialog.confirm`; a confirmation dialog would be a popover
+        // anchored to the whole scroll view on iPad.
+        .alert(
             Text(verbatim: pendingChapter?.message ?? ""),
             isPresented: Binding {
                 pendingChapter != nil
             } set: {
                 if !$0 { pendingChapter = nil }
             },
-            titleVisibility: .visible, presenting: pendingChapter
+            presenting: pendingChapter
         ) { pending in
             Button {
-                play(startTime: model.startTime(for: pending.chapter))
+                // The item may have changed while the alert was up.
+                guard canPlay, let startTime = model.chapterToPlay(confirming: pending.chapter) else { return }
+                play(startTime: startTime)
             } label: {
                 Text(verbatim: L10n.string("ButtonPlay"))
             }
