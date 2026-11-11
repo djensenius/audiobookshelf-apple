@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""Bounded fake-CLI regressions; no Apple commands, installs or simulator actions.
+
+Runs the real launcher/helper in an owned temporary repository. Fixtures use the
+installed xcresulttool 0.5.0 schema; real Swift Testing output remains a separate
+simulator validation gate. Included in mise lint:repo on Linux and macOS.
+"""
+
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import select
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parent.parent
+RUNNER = runpy.run_path(str(ROOT / "scripts/test-kit-ios.py"))
+METHODS = [
+    "aDetectorStopsItsOwnUpdates()",
+    "stoppingAnEarlierDetectorLeavesTheLaterOneRunning()",
+    "releasingAnEarlierDetectorLeavesTheLaterOneRunning()",
+    "releasingARunningDetectorStopsItsUpdates()",
+]
+FIRST = "11111111-1111-1111-1111-111111111111"
+SECOND = "22222222-2222-2222-2222-222222222222"
+OLDER = "33333333-3333-3333-3333-333333333333"
+TOO_OLD = "44444444-4444-4444-4444-444444444444"
+UNAVAILABLE = "55555555-5555-5555-5555-555555555555"
+IPAD = "66666666-6666-6666-6666-666666666666"
+PHONE_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPhone-17"
+PAD_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPad-Pro"
+
+FAKE_CLI = r'''
+import json, os, sys, time
+from pathlib import Path
+root = Path(os.environ["CASE_ROOT"])
+args = sys.argv[1:]
+tool = Path(sys.argv[0]).name
+with (root / "calls.jsonl").open("a") as out:
+    out.write(json.dumps({"tool": tool, "args": args, "cwd": os.getcwd(),
+                          "developerDir": os.environ.get("DEVELOPER_DIR")}) + "\n")
+faults = json.loads((root / "faults.json").read_text())
+if tool == "xcodebuild":
+    result = Path(args[args.index("-resultBundlePath") + 1])
+    assert not result.exists(), "stale result bundle"
+    result.mkdir()
+    (root / "xcode.pid").write_text(str(os.getpid()))
+    if faults.get("hang"):
+        time.sleep(60)
+    print("** TEST SUCCEEDED **")  # Never sufficient evidence.
+    sys.exit(faults.get("xcode", 0))
+assert tool == "xcrun"
+if args == ["simctl", "list", "-j", "devices", "available"]:
+    kind = "devices"
+elif args == ["simctl", "list", "-j", "runtimes"]:
+    kind = "runtimes"
+elif args[:3] == ["xcresulttool", "get", "test-results"]:
+    kind = args[3]
+    assert kind in ("summary", "tests")
+    assert args[4:6] == ["--schema-version", "0.5.0"]
+    assert args[6] == "--path" and Path(args[7]).is_dir()
+    assert args[8:] == ["--compact"]
+else:
+    raise AssertionError(args)  # Reject any simulator mutation or unexpected CLI.
+if faults.get(kind):
+    sys.exit(faults[kind])
+print((root / (kind + ".json")).read_text())
+'''
+
+
+def runtime(version):
+    return {
+        "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-" + version.replace(".", "-"),
+        "version": version, "isAvailable": True,
+        "supportedDeviceTypes": [
+            {"identifier": PHONE_TYPE, "productFamily": "iPhone"},
+            {"identifier": PAD_TYPE, "productFamily": "iPad"},
+        ],
+    }
+
+
+def device(udid, *, available=True, kind=PHONE_TYPE, state="Shutdown"):
+    return {"udid": udid, "isAvailable": available, "deviceTypeIdentifier": kind,
+            "state": state, "name": "Duplicate or renamed device"}
+
+
+class RunnerTests(unittest.TestCase):
+    def setUp(self):
+        parent = ROOT / ".build/kit-ios-regressions"
+        parent.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix="case.", dir=parent)
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        for name in ("test-kit-ios.sh", "test-kit-ios.py"):
+            shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+        self.package = self.root / "Packages/AudiobookshelfKit"
+        self.package.mkdir(parents=True)
+        shutil.copyfile(ROOT / "Packages/AudiobookshelfKit/Package.swift", self.package / "Package.swift")
+        binaries = self.root / "bin"
+        binaries.mkdir()
+        for name in ("xcrun", "xcodebuild"):
+            path = binaries / name
+            path.write_text(f"#!{sys.executable}\n" + FAKE_CLI)
+            path.chmod(0o700)
+        self.env = dict(os.environ, CASE_ROOT=str(self.root))
+        for key in ("IOS_SIMULATOR_ID", "DEVELOPER_DIR"):
+            self.env.pop(key, None)
+        self.env["PATH"] = str(binaries) + os.pathsep + self.env["PATH"]
+        newest, older, too_old = runtime("27.2"), runtime("27.0"), runtime("26.5")
+        self.runtimes = {"runtimes": [too_old, newest, older]}
+        self.devices = {"devices": {
+            newest["identifier"]: [
+                device(SECOND), device(FIRST), device(UNAVAILABLE, available=False),
+                device(IPAD, kind=PAD_TYPE),
+            ],
+            older["identifier"]: [device(OLDER, state="Booted")],
+            too_old["identifier"]: [device(TOO_OLD)],
+        }}
+        self.summary = {
+            "result": "Passed", "totalTestCount": 4, "passedTests": 4,
+            "failedTests": 0, "skippedTests": 0, "expectedFailures": 0, "testFailures": [],
+        }
+        self.cases = [
+            {"nodeType": "Test Case", "name": name, "result": "Passed"}
+            for name in METHODS
+        ]
+        self.suite = {"nodeType": "Test Suite", "name": "ShakeDetectorTests", "children": self.cases}
+        self.bundle = {"nodeType": "Unit test bundle", "name": "ABSPlaybackTests", "children": [self.suite]}
+        self.tests = {"devices": [{"deviceId": FIRST}], "testNodes": [
+            {"nodeType": "Test Plan", "name": "AudiobookshelfKit", "children": [self.bundle]},
+        ]}
+        self.faults = {}
+
+    def prepare(self):
+        for name in ("devices", "runtimes", "summary", "tests", "faults"):
+            (self.root / f"{name}.json").write_text(json.dumps(getattr(self, name)))
+
+    def calls(self):
+        return [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
+
+    def run_case(self, expected=0, prepare=True):
+        if prepare:
+            self.prepare()
+        result = subprocess.run(
+            ["/bin/bash", str(self.root / "scripts/test-kit-ios.sh")],
+            env=self.env, cwd=self.root, capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        return result
+
+    def test_default_command_and_four_method_evidence(self):
+        result = self.run_case()
+        self.assertIn("Verified 4/4", result.stdout)
+        for name in METHODS:
+            self.assertIn(f"Verified Passed: ABSPlaybackTests/ShakeDetectorTests/{name}", result.stdout)
+        call = next(call for call in self.calls() if call["tool"] == "xcodebuild")
+        args = call["args"]
+        self.assertEqual(call["cwd"], str(self.package))
+        self.assertEqual(call["developerDir"], "/Applications/Xcode.app/Contents/Developer")
+        work = next((self.root / ".build/kit-ios").iterdir())
+        self.assertEqual(args, [
+            "test", "-scheme", "AudiobookshelfKit",
+            "-destination", f"platform=iOS Simulator,id={FIRST}", "-destination-timeout", "60",
+            "-only-testing:ABSPlaybackTests/ShakeDetectorTests",
+            "-derivedDataPath", str(work / "DerivedData"), "-resultBundlePath", str(work / "Tests.xcresult"),
+            "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
+            "-jobs", "2", "-test-timeouts-enabled", "YES", "-maximum-test-execution-time-allowance", "60",
+            "CODE_SIGNING_ALLOWED=NO",
+        ])
+        self.assertEqual(json.loads((work / "tests.json").read_text()), self.tests)
+        self.assertEqual(json.loads((work / "summary.json").read_text()), self.summary)
+        self.run_case()  # A second invocation cannot reuse a stale result.
+        self.assertEqual(len(list((self.root / ".build/kit-ios").iterdir())), 2)
+
+    def test_explicit_destination_and_ci_toolchain(self):
+        self.env.update(IOS_SIMULATOR_ID=OLDER, DEVELOPER_DIR="/Applications/Xcode_27.2.app/Contents/Developer")
+        self.tests["devices"] = [{"deviceId": OLDER}]
+        self.run_case()
+        call = next(call for call in self.calls() if call["tool"] == "xcodebuild")
+        self.assertIn(f"platform=iOS Simulator,id={OLDER}", call["args"])
+        self.assertEqual(call["developerDir"], self.env["DEVELOPER_DIR"])
+
+    def test_invalid_explicit_destinations_never_fall_back(self):
+        for udid in ("", "missing", TOO_OLD, UNAVAILABLE, IPAD):
+            with self.subTest(udid=udid):
+                self.env["IOS_SIMULATOR_ID"] = udid
+                self.assertIn("no fallback", self.run_case(expected=1).stderr)
+        self.assertTrue(all(call["tool"] != "xcodebuild" for call in self.calls()))
+
+    def test_no_compatible_destination(self):
+        self.runtimes["runtimes"] = [runtime("26.5")]
+        self.assertIn("No available iPhone", self.run_case(expected=1).stderr)
+        self.assertEqual(len(self.calls()), 2)
+
+    def test_selection_is_order_independent_and_prefers_booted_on_same_runtime(self):
+        select = RUNNER["select_destination"]
+        for devices in self.devices["devices"].values():
+            devices.reverse()
+        self.runtimes["runtimes"].reverse()
+        self.assertEqual(select(self.devices, self.runtimes, (27, 0, 0), None), FIRST)
+        # Select a known device rather than depending on fixture array order.
+        for item in self.devices["devices"][runtime("27.2")["identifier"]]:
+            item["state"] = "Booted" if item["udid"] == SECOND else "Shutdown"
+        self.assertEqual(select(self.devices, self.runtimes, (27, 0, 0), None), SECOND)
+        self.runtimes["runtimes"][1]["isAvailable"] = False
+        self.assertEqual(select(self.devices, self.runtimes, (27, 0, 0), None), OLDER)
+
+    def test_empty_xctest_summary_is_not_success(self):
+        self.summary.update(totalTestCount=0, passedTests=0)
+        self.assertIn("summary totalTestCount", self.run_case(expected=1).stderr)
+
+    def test_missing_empty_duplicate_or_wrong_methods_fail(self):
+        for cases in ([], self.cases[:-1], [self.cases[0]] * 4,
+                      [*self.cases[:3], {"nodeType": "Test Case", "name": "unrelated()", "result": "Passed"}]):
+            with self.subTest(cases=cases):
+                self.suite["children"] = cases
+                self.run_case(expected=1)
+
+    def test_skipped_failed_unknown_or_missing_case_result_fails(self):
+        for status in ("Skipped", "Failed", "Expected Failure", "unknown", None):
+            with self.subTest(status=status):
+                self.cases[0]["result"] = status
+                self.run_case(expected=1)
+        self.cases[0].pop("result")
+        self.run_case(expected=1)
+
+    def test_summary_failures_fail_even_with_passing_tree(self):
+        for field in ("failedTests", "skippedTests", "expectedFailures"):
+            with self.subTest(field=field):
+                self.summary[field] = 1
+                self.run_case(expected=1)
+                self.summary[field] = 0
+        self.summary["result"] = "Failed"
+        self.run_case(expected=1)
+
+    def test_wrong_bundle_suite_or_device_fails(self):
+        self.bundle["name"] = "OtherTests"
+        self.run_case(expected=1)
+        self.bundle["name"] = "ABSPlaybackTests.xctest"
+        self.suite["name"] = "OtherSuite"
+        self.run_case(expected=1)
+        self.suite["name"] = "ShakeDetectorTests"
+        self.tests["devices"] = [{"deviceId": SECOND}]
+        self.run_case(expected=1)
+        self.tests["devices"] = [{"deviceId": FIRST}]
+        self.run_case()
+
+    def test_empty_tree_and_failed_child_run_fail(self):
+        self.cases[0]["children"] = [{"nodeType": "Test Case Run", "name": "Run 1", "result": "Failed"}]
+        self.run_case(expected=1)
+        self.tests["testNodes"] = []
+        self.run_case(expected=1)
+
+    def test_command_exit_codes_and_retained_failed_evidence(self):
+        for kind, code in (("xcode", 65), ("summary", 37), ("tests", 38), ("devices", 39), ("runtimes", 40)):
+            with self.subTest(kind=kind):
+                self.faults = {kind: code}
+                self.run_case(expected=code)
+        self.assertEqual(len(list((self.root / ".build/kit-ios").glob("run.*/Tests.xcresult"))), 3)
+
+    def test_malformed_json_fails_closed(self):
+        for kind in ("devices", "runtimes", "summary", "tests"):
+            with self.subTest(kind=kind):
+                self.prepare()
+                (self.root / f"{kind}.json").write_text("not JSON")
+                self.run_case(expected=1, prepare=False)
+
+    def test_allowlist_matches_the_guarded_swift_suite(self):
+        source = (ROOT / "Packages/AudiobookshelfKit/Tests/ABSPlaybackTests/SleepTimer/ShakeDetectorTests.swift").read_text()
+        self.assertEqual(set(re.findall(r"@Test func (\w+\(\))", source)), set(METHODS))
+        self.assertEqual(RUNNER["METHODS"], set(METHODS))
+
+    def assert_command_deadline(self, ignore_term):
+        # Handshake after installing the disposition: no startup sleep races.
+        # The alarm is only an outer safety net if the runner loses its deadline.
+        args = [sys.executable, "-c", (
+            "import signal\n"
+            f"signal.signal(signal.SIGTERM, signal.{'SIG_IGN' if ignore_term else 'SIG_DFL'})\n"
+            "signal.alarm(12)\n"
+            "print('ready', flush=True)\n"
+            "while True: signal.pause()\n"
+        )]
+        real_popen = subprocess.Popen
+        children, deadline_errors, cleanup_errors = [], [], []
+
+        def ready_child(*popen_args, **kwargs):
+            process = real_popen(*popen_args, **kwargs)
+            children.append(process)
+            self.assertTrue(select.select([process.stdout], [], [], 5)[0], "child readiness timed out")
+            self.assertEqual(process.stdout.readline(), "ready\n")
+            real_communicate, real_wait = process.communicate, process.wait
+
+            def communicate(*, timeout):
+                try:
+                    return real_communicate(timeout=timeout)
+                except subprocess.TimeoutExpired as error:
+                    deadline_errors.append(error)
+                    raise
+
+            def wait(*, timeout):
+                try:
+                    return real_wait(timeout=timeout)
+                except subprocess.TimeoutExpired as error:
+                    cleanup_errors.append(error)
+                    raise
+
+            # Spies delegate to real subprocess operations, including the
+            # unchanged five-second cleanup grace period and real SIGKILL.
+            process.communicate = mock.Mock(side_effect=communicate)
+            process.wait = mock.Mock(side_effect=wait)
+            process.terminate = mock.Mock(wraps=process.terminate)
+            process.kill = mock.Mock(wraps=process.kill)
+            return process
+
+        started = time.monotonic()
+        try:
+            with mock.patch.object(subprocess, "Popen", side_effect=ready_child):
+                with self.assertRaises(subprocess.TimeoutExpired) as failure:
+                    RUNNER["command"](args, capture=True, timeout=0.1)
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 10, "runner cleanup exceeded the bounded completion window")
+            self.assertEqual(len(children), 1)
+            process = children[0]
+            self.assertEqual(len(deadline_errors), 1)
+            self.assertIs(failure.exception, deadline_errors[0], "cleanup replaced the original failure")
+            self.assertEqual(failure.exception.cmd, args)
+            self.assertEqual(failure.exception.timeout, 0.1)
+            process.communicate.assert_called_once_with(timeout=0.1)
+            process.terminate.assert_called_once_with()
+            self.assertEqual([error.timeout for error in cleanup_errors], [5] if ignore_term else [])
+            self.assertEqual(process.wait.call_args_list, [mock.call(timeout=5)] * (2 if ignore_term else 1))
+            if ignore_term:
+                process.kill.assert_called_once_with()
+            else:
+                process.kill.assert_not_called()
+            self.assertEqual(process.returncode, -signal.SIGKILL if ignore_term else -signal.SIGTERM)
+            # waitpid, unlike kill(pid, 0), proves our direct child was reaped.
+            with self.assertRaises(ChildProcessError):
+                os.waitpid(process.pid, os.WNOHANG)
+            print(f"Deadline proof: pid={process.pid} timeout=0.1s propagated; "
+                  f"terminate=1 cleanup-timeouts={len(cleanup_errors)} kill={process.kill.call_count} "
+                  f"returncode={process.returncode} reaped=True elapsed={elapsed:.3f}s", flush=True)
+        finally:
+            # Exact owned Popen objects only; also bounds a broken-runner failure.
+            for process in children:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=2)
+                process.stdout.close()
+
+    def test_command_deadline_terminates_and_reaps_owned_child(self):
+        self.assert_command_deadline(ignore_term=False)
+
+    def test_command_deadline_kills_and_reaps_sigterm_ignoring_child(self):
+        self.assert_command_deadline(ignore_term=True)
+
+    def test_signal_stops_only_owned_cli_and_retains_result(self):
+        self.faults["hang"] = True
+        self.prepare()
+        process = subprocess.Popen(
+            ["/bin/bash", str(self.root / "scripts/test-kit-ios.sh")],
+            env=self.env, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        child = None
+        try:
+            deadline = time.monotonic() + 5
+            marker = self.root / "xcode.pid"
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(marker.exists(), "fake xcodebuild did not start")
+            child = int(marker.read_text())
+            process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=8)
+            self.assertEqual(process.returncode, 143, stdout + stderr)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child, 0)
+            child = None
+            self.assertEqual(len(list((self.root / ".build/kit-ios").glob("run.*/Tests.xcresult"))), 1)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=2)
+            if child is not None:
+                try:
+                    os.kill(child, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -20,9 +20,9 @@
         }
     }
 
-    /// CI tests the package on macOS only, where this suite is compiled out; `build:ios` compiles the detector but
-    /// runs no tests. To run it, use `xcodebuild test` in `Packages/AudiobookshelfKit` with the `AudiobookshelfKit`
-    /// scheme, an iOS Simulator `-destination` and `-only-testing:ABSPlaybackTests/ShakeDetectorTests`.
+    /// `mise run test:kit:ios` runs this suite in PR CI and verifies all four methods in the result bundle.
+    /// Host `test:kit` compiles it out; the package scheme (not the app scheme) runs it on an available iPhone.
+    /// The stub motion manager needs neither a physical accelerometer nor an iPhone Duo.
     @MainActor
     struct ShakeDetectorTests {
         private let manager = StubMotionManager()
