@@ -82,6 +82,8 @@ public final class ProgressSyncer {
     private var persistenceTail: Task<Void, Never>?
     /// Test seam: hold local persistence independently of transport.
     var beforePositionPersistence: (@MainActor () async -> Void)?
+    /// Test seam at the capture-to-evidence boundary; no transport has been issued here.
+    var beforeSessionAudioPreparation: (@MainActor () async -> Void)?
     private var pendingPositions: [MediaKey: Position] = [:]
     private var positionRevision: UInt64 = 0
     private var positionReceipts: [MediaKey: [(revision: UInt64, receipt: PlaybackCloseResult<Void>)]] = [:]
@@ -304,6 +306,7 @@ public final class ProgressSyncer {
     private func sendSync(sessionID: String) async {
         await waitForPendingWrites()
         if queuedSyncSessionID == sessionID { queuedSyncSessionID = nil }
+        guard await settleSessionAudioOutcomes() else { return }
         guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty,
             let session = current, session.sessionID == sessionID,
             let position = session.position
@@ -315,11 +318,36 @@ public final class ProgressSyncer {
         else {
             return
         }
-        current?.listened = 0
+        let evidence: SessionAudioSend
+        do {
+            await beforeSessionAudioPreparation?()
+            guard
+                let prepared = try await store.prepareSessionAudio(
+                    for: session.key, token: position.token,
+                    audio: .init(
+                        currentTime: report.currentTime, duration: report.duration,
+                        progress: report.duration > 0 ? min(report.currentTime / report.duration, 1) : 0),
+                    sessionID: sessionID)
+            else { return }
+            evidence = prepared
+        } catch {
+            logger.error("Preparing session audio evidence failed: \(String(describing: error), privacy: .public)")
+            return
+        }
+        // Preparation suspends. An ended scope may settle local evidence, never issue a request.
+        guard !isDetached, !isTransportQuiesced, current?.sessionID == sessionID else {
+            await settleSessionAudio(evidence, outcome: .notDelivered)
+            return
+        }
+        // Ticks during the evidence save belong to the next report, not this captured delta.
+        current?.listened -= listened
+        let outcome: SessionAudioOutcome
         do {
             try await service.syncSession(id: sessionID, report: report)
+            outcome = .succeeded
         } catch {
             if Self.neverReachedServer(error) {
+                outcome = .notDelivered
                 if current?.sessionID == sessionID {
                     current?.listened += listened
                 } else if listened > 0 {
@@ -328,14 +356,40 @@ public final class ProgressSyncer {
                         "Dropped \(listened, privacy: .public) s of listening time: the session closed before it could be resent"
                     )
                 }
-            } else if listened > 0 {
-                logger.info(
-                    "Dropped \(listened, privacy: .public) s of listening time after an ambiguous sync failure (\(Self.caseName(error), privacy: .public))"
-                )
+            } else {
+                outcome = .ambiguous
+                if listened > 0 {
+                    logger.info(
+                        "Dropped \(listened, privacy: .public) s of listening time after an ambiguous sync failure (\(Self.caseName(error), privacy: .public))"
+                    )
+                }
             }
+            await settleSessionAudio(evidence, outcome: outcome)
             return
         }
+        guard await settleSessionAudio(evidence, outcome: outcome) else { return }
         await drain()
+    }
+
+    @discardableResult
+    private func settleSessionAudio(_ send: SessionAudioSend, outcome: SessionAudioOutcome) async -> Bool {
+        do {
+            try await store.settleSessionAudio(send, outcome: outcome)
+            return true
+        } catch {
+            logger.error("Saving session audio outcome failed: \(String(describing: error), privacy: .public)")
+            return false
+        }
+    }
+
+    private func settleSessionAudioOutcomes() async -> Bool {
+        do {
+            try await store.retrySessionAudioSettlements(for: service.serverConnectionID)
+            return true
+        } catch {
+            logger.error("Retrying session audio outcome failed: \(String(describing: error), privacy: .public)")
+            return false
+        }
     }
 
     @discardableResult
@@ -391,6 +445,7 @@ public final class ProgressSyncer {
     // MARK: Durable queue
 
     private func drain() async {
+        guard await settleSessionAudioOutcomes() else { return }
         guard !isDetached, !isTransportQuiesced else { return }
         queuePersistence()
         await waitForPendingWrites()
