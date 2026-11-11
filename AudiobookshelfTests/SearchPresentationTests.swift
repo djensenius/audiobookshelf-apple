@@ -87,6 +87,12 @@ private let allResults = SearchResultGroups(
         #expect(SearchPresentation.subtitle(of: try row(.tags)) == nil)
     }
 
+    @Test func oneBookIsSingular() {
+        #expect(SearchPresentation.bookCount(1, locale: english) == "1 book")
+        #expect(SearchPresentation.bookCount(2, locale: english) == "2 books")
+        #expect(SearchPresentation.bookCount(0, locale: english) == "0 books")
+    }
+
     @Test func voiceOverSpeaksTitleAuthorAndKind() throws {
         #expect(
             SearchPresentation.accessibilityLabel(of: try row(.books), in: .books, locale: english)
@@ -155,12 +161,20 @@ private let allResults = SearchResultGroups(
         #expect(SearchScreenState.resolve(Inputs(query: "  ", hasError: true, hasResults: true)) == .idle)
     }
 
-    @Test func aQueryWithoutResultsIsSearchingUntilItsSearchFinishes() {
-        // Waiting for the debounce.
-        #expect(SearchScreenState.resolve(Inputs(query: "dune")) == .searching)
-        #expect(SearchScreenState.resolve(Inputs(query: "dune", searchedQuery: "dun")) == .searching)
+    @Test func theSpinnerShowsOnlyWhileARequestRuns() {
         #expect(SearchScreenState.resolve(Inputs(query: "dune", isSearching: true)) == .searching)
         #expect(SearchScreenState.resolve(Inputs(query: " dune ", searchedQuery: "dune")) == .noResults)
+    }
+
+    @Test func duringTheDebounceTheScreenKeepsWhatItShowed() {
+        // Nothing searched yet: the recent searches stay.
+        #expect(SearchScreenState.resolve(Inputs(query: "dune")) == .idle)
+        // An earlier search found nothing: its message stays.
+        #expect(SearchScreenState.resolve(Inputs(query: "dune", searchedQuery: "dun")) == .noResults)
+        // An earlier search found something: its results stay, without a spinner.
+        #expect(
+            SearchScreenState.resolve(Inputs(query: "dune", searchedQuery: "dun", hasResults: true))
+                == .results(isSearching: false, failed: false))
     }
 
     @Test func aFailureShowsRetryOrKeepsTheResults() {
@@ -174,39 +188,52 @@ private let allResults = SearchResultGroups(
                 == .results(isSearching: true, failed: false))
     }
 
-    @Test func aTypedQueryIsSearchingOnTheModel() {
-        let model = SearchModel(service: EmptySearchService(), libraryID: "lib")
+    @Test func aTypedQueryWaitingForTheDebounceKeepsTheRecentSearches() {
+        let model = SearchModel(service: EmptySearchService(), libraryID: "lib", debounce: .seconds(60))
         #expect(SearchScreenState.resolve(model) == .idle)
         model.setQuery("dune")
-        #expect(SearchScreenState.resolve(model) == .searching)
+        #expect(SearchScreenState.resolve(model) == .idle)
     }
 }
 
 @MainActor
 @Suite struct SearchRecentsStoreTests {
-    private func withStore(_ body: (SearchRecentsStore, UserDefaults) throws -> Void) throws {
+    private func withStore(_ body: (SearchRecentsStore, AppSettings) throws -> Void) throws {
         let suiteName = "SearchRecentsStoreTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        try body(SearchRecentsStore(defaults: defaults), defaults)
+        let settings = AppSettings(defaults: defaults)
+        try body(SearchRecentsStore(settings: settings), settings)
     }
 
     @Test func recentSearchesAreKeptPerAccountAndLibrary() throws {
         try withStore { store, _ in
             let other = LibraryConnectionKey(connectionID: account.connectionID, userID: "user-2")
-            store.setRecentSearches(["Dune"], connectionKey: account, libraryID: "books")
+            store.setRecentSearches(["Dune", "Emma \"Austen\""], connectionKey: account, libraryID: "books")
             store.setRecentSearches(["Serial"], connectionKey: account, libraryID: "podcasts")
-            #expect(store.recentSearches(connectionKey: account, libraryID: "books") == ["Dune"])
+            #expect(store.recentSearches(connectionKey: account, libraryID: "books") == ["Dune", "Emma \"Austen\""])
             #expect(store.recentSearches(connectionKey: account, libraryID: "podcasts") == ["Serial"])
             #expect(store.recentSearches(connectionKey: other, libraryID: "books").isEmpty)
         }
     }
 
-    @Test func clearingTheLastLibraryRemovesTheDefaultsEntry() throws {
-        try withStore { store, defaults in
+    @Test func clearingRemovesTheLibrarysEntryAndResetAllRemovesEverything() throws {
+        try withStore { store, settings in
             store.setRecentSearches(["Dune"], connectionKey: account, libraryID: "books")
+            store.setRecentSearches(["Serial"], connectionKey: account, libraryID: "podcasts")
             store.setRecentSearches([], connectionKey: account, libraryID: "books")
-            #expect(defaults.object(forKey: SearchRecentsStore.defaultsKey) == nil)
+            #expect(settings.recentSearches.count == 1)
+
+            settings.resetAll()
+            #expect(store.recentSearches(connectionKey: account, libraryID: "podcasts").isEmpty)
+        }
+    }
+
+    @Test func unreadableJSONIsNoRecentSearches() throws {
+        try withStore { store, settings in
+            settings.setRecentSearchesJSON(
+                "{", serverID: account.serverID, userID: account.userID, libraryID: "books")
+            #expect(store.recentSearches(connectionKey: account, libraryID: "books").isEmpty)
         }
     }
 
@@ -229,6 +256,100 @@ private let allResults = SearchResultGroups(
             model.clearRecentSearches()
             #expect(store.recentSearches(connectionKey: account, libraryID: "books").isEmpty)
         }
+    }
+}
+
+/// Stands in for a `LibraryStore` in session keys.
+private final class StoreToken {}
+
+@MainActor
+@Suite struct SearchSessionTests {
+    private let store = StoreToken()
+
+    private func key(_ libraryID: String, account: LibraryConnectionKey = account, store: StoreToken? = nil)
+        -> SearchSession.Key
+    {
+        SearchSession.Key(
+            store: ObjectIdentifier(store ?? self.store), connectionKey: account, libraryID: libraryID)
+    }
+
+    private func makeModel(_ key: SearchSession.Key) -> SearchModel? {
+        SearchModel(service: EmptySearchService(), libraryID: key.libraryID, debounce: .seconds(60))
+    }
+
+    @Test func aLinkArrivingWithoutAModelWaitsInTheRouter() throws {
+        let router = Router()
+        router.pendingSearchQuery = "dune"
+        var session = SearchSession()
+        session.runPendingQuery(from: router)
+        #expect(router.pendingSearchQuery == "dune")
+
+        session.adopt(key("books"), makeModel: makeModel)
+        session.runPendingQuery(from: router)
+        let model = try #require(session.model)
+        #expect(model.query == "dune")
+        #expect(model.recentSearches == ["dune"])
+        #expect(router.pendingSearchQuery == nil)
+    }
+
+    @Test func theQuerySurvivesALibraryOnlyRebuild() throws {
+        var session = SearchSession()
+        session.adopt(key("books"), makeModel: makeModel)
+        let books = try #require(session.model)
+        books.setQuery("dune")
+
+        let replaced = session.adopt(key("podcasts"), makeModel: makeModel)
+        #expect(replaced)
+        let podcasts = try #require(session.model)
+        #expect(podcasts !== books)
+        #expect(podcasts.libraryID == "podcasts")
+        #expect(podcasts.query == "dune")
+        // Searched at once, not after the debounce.
+        #expect(podcasts.recentSearches == ["dune"])
+    }
+
+    @Test func aDeepLinkedQueryInTheOldLibrarySurvivesTheSwitch() throws {
+        let router = Router()
+        var session = SearchSession()
+        session.adopt(key("books"), makeModel: makeModel)
+        router.pendingSearchQuery = "serial"
+        session.runPendingQuery(from: router)
+
+        session.adopt(key("podcasts"), makeModel: makeModel)
+        #expect(try #require(session.model).query == "serial")
+    }
+
+    @Test func anUnchangedKeyKeepsTheModel() throws {
+        var session = SearchSession()
+        session.adopt(key("books"), makeModel: makeModel)
+        let model = try #require(session.model)
+        let replaced = session.adopt(key("books"), makeModel: makeModel)
+        #expect(!replaced)
+        #expect(session.model === model)
+    }
+
+    @Test func anotherAccountOrStoreStartsEmpty() throws {
+        var session = SearchSession()
+        session.adopt(key("books"), makeModel: makeModel)
+        try #require(session.model).setQuery("dune")
+        let otherAccount = LibraryConnectionKey(connectionID: account.connectionID, userID: "user-2")
+        session.adopt(key("books", account: otherAccount), makeModel: makeModel)
+        #expect(try #require(session.model).query.isEmpty)
+
+        try #require(session.model).setQuery("dune")
+        let otherStore = StoreToken()
+        session.adopt(key("books", account: otherAccount, store: otherStore), makeModel: makeModel)
+        #expect(try #require(session.model).query.isEmpty)
+    }
+
+    @Test func withoutAServiceTheSessionIsUnavailable() {
+        var session = SearchSession()
+        #expect(!session.isUnavailable)
+        session.adopt(key("books")) { _ in nil }
+        #expect(session.model == nil)
+        #expect(session.isUnavailable)
+        session.adopt(nil, makeModel: makeModel)
+        #expect(!session.isUnavailable)
     }
 }
 

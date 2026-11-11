@@ -6,73 +6,55 @@ import SwiftUI
 /// The Search tab (legacy `pages/search.vue`): searches the router's current library as the user
 /// types, in sections of books, podcasts, episodes, series, authors, narrators and tags.
 ///
-/// The model belongs to one account and library (ADR 0004): it is built with the account's
-/// ``SearchService`` (from ``SearchServiceSource``) and rebuilt when the store, its account or the
-/// router's library changes. Its recent searches are kept per account and library in the
-/// settings' defaults. Signed out, or without a service, the screen shows the signed-out state.
+/// The model belongs to one account and library (ADR 0004): ``SearchSession`` makes it with the
+/// account's ``SearchService`` (from ``SearchServiceSource``) and replaces it when the store, its
+/// account or the router's library changes, keeping the query across a library switch. Its recent
+/// searches are kept per account and library in `AppSettings`. Signed out, or without a service,
+/// the screen shows the signed-out state.
 struct SearchView: View {
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
     @Environment(AppSettings.self) private var settings: AppSettings?
-    @State private var host: SearchHost?
-    /// The store's account has no ``SearchService``.
-    @State private var isUnavailable = false
+    @State private var session = SearchSession()
 
-    private var key: SearchHost.Key? {
+    private var key: SearchSession.Key? {
         guard let store, let connectionKey = store.connectionKey, let libraryID = router?.libraryID else { return nil }
-        return SearchHost.Key(store: ObjectIdentifier(store), connectionKey: connectionKey, libraryID: libraryID)
+        return SearchSession.Key(store: ObjectIdentifier(store), connectionKey: connectionKey, libraryID: libraryID)
     }
 
     var body: some View {
         Group {
-            if let host, host.key == key {
-                SearchScreen(model: host.model)
+            if let model = session.model, session.key == key {
+                SearchScreen(model: model)
             } else {
                 SearchContent(
                     state: .placeholder(
-                        canSearch: store?.connectionKey != nil && !isUnavailable, libraryID: router?.libraryID))
+                        canSearch: store?.connectionKey != nil && !(session.key == key && session.isUnavailable),
+                        libraryID: router?.libraryID))
             }
         }
         .navigationTitle(Text(verbatim: L10n.string("ButtonSearch")))
         .task(id: key) {
-            guard let key, let store else {
-                host = nil
-                isUnavailable = false
-                return
-            }
-            guard host?.key != key else { return }
-            guard let service = SearchServiceSource.service(from: store) else {
-                host = nil
-                isUnavailable = true
-                return
-            }
-            isUnavailable = false
-            let recents = settings.map { SearchRecentsStore(defaults: $0.defaults) }
-            host = SearchHost(
-                key: key,
-                model: SearchModel(
-                    service: service, libraryID: key.libraryID,
-                    recentSearches: recents?.recentSearches(connectionKey: key.connectionKey, libraryID: key.libraryID)
-                        ?? [],
-                    persistRecents: recents?.persist(connectionKey: key.connectionKey, libraryID: key.libraryID)))
+            session.adopt(key) { makeModel(for: $0) }
+            session.runPendingQuery(from: router)
+        }
+        .onChange(of: router?.pendingSearchQuery) {
+            session.runPendingQuery(from: router)
         }
     }
-}
 
-/// The model for one store, account and library.
-private struct SearchHost {
-    struct Key: Hashable {
-        let store: ObjectIdentifier
-        let connectionKey: LibraryConnectionKey
-        let libraryID: String
+    private func makeModel(for key: SearchSession.Key) -> SearchModel? {
+        guard let store, let service = SearchServiceSource.service(from: store) else { return nil }
+        let recents = settings.map { SearchRecentsStore(settings: $0) }
+        return SearchModel(
+            service: service, libraryID: key.libraryID,
+            recentSearches: recents?.recentSearches(connectionKey: key.connectionKey, libraryID: key.libraryID) ?? [],
+            persistRecents: recents?.persist(connectionKey: key.connectionKey, libraryID: key.libraryID))
     }
-
-    let key: Key
-    let model: SearchModel
 }
 
-/// Search while signed in with a library: the search field bound to the model, Cmd+F to focus
-/// it on a Mac, and a `search?q=` link's query.
+/// Search while signed in with a library: the search field bound to the model, focused when the
+/// router asks (Cmd+F, ``SearchCommands``).
 private struct SearchScreen: View {
     let model: SearchModel
     @Environment(Router.self) private var router: Router?
@@ -90,27 +72,16 @@ private struct SearchScreen: View {
         )
         .searchFocused($isSearchFocused)
         .onSubmit(of: .search) { model.submit() }
-        #if os(macOS)
-            .background {
-                // Cmd+F focuses the search field. Invisible: the field is already in the toolbar.
-                Button {
-                    isSearchFocused = true
-                } label: {
-                    Text(verbatim: L10n.string("ButtonSearch"))
-                }
-                .keyboardShortcut("f", modifiers: .command)
-                .opacity(0)
-                .accessibilityHidden(true)
-            }
-        #endif
-        .onChange(of: router?.pendingSearchQuery, initial: true) { _, query in
-            guard let query else { return }
-            router?.pendingSearchQuery = nil
-            search(query)
+        // Also on appear: the request usually selected this tab, so it predates the screen.
+        .onChange(of: router?.isSearchFocusRequested, initial: true) { _, isRequested in
+            guard isRequested == true else { return }
+            router?.clearSearchFocusRequest()
+            // After this update, so a field that is just being built takes the focus.
+            Task { isSearchFocused = true }
         }
     }
 
-    /// Searches for `query` at once, as from a recent search or a link.
+    /// Searches for `query` at once, as from a recent search.
     private func search(_ query: String) {
         model.setQuery(query)
         model.submit()
@@ -148,7 +119,7 @@ struct SearchContent: View {
         case .noResults:
             SearchMessageView(title: L10n.string("MessageNoItemsFound"), systemImage: "magnifyingglass")
         case .failed:
-            ErrorStateView(title: L10n.string("MessageSearchFailed"), retry: retry)
+            ErrorStateView(title: L10n.string("MessageSearchLibraryFailed"), retry: retry)
         case .results(let isSearching, let failed):
             SearchResultsView(
                 sections: sections, isSearching: isSearching, failed: failed, open: open, retry: retry)
@@ -181,13 +152,13 @@ private struct SearchRecentsView: View {
                 }
             } header: {
                 HStack {
-                    Text(verbatim: L10n.string("HeaderRecentSearches"))
+                    Text(verbatim: L10n.string("HeaderSearchRecents"))
                     Spacer()
                     Button(action: clear) {
-                        Text(verbatim: L10n.string("ButtonClear"))
+                        Text(verbatim: L10n.string("ButtonSearchClearRecents"))
                     }
                     .buttonStyle(.borderless)
-                    .accessibilityLabel(Text(verbatim: L10n.string("ButtonClearRecentSearches")))
+                    .accessibilityLabel(Text(verbatim: L10n.string("LabelSearchClearRecentsAccessibility")))
                 }
             }
         }

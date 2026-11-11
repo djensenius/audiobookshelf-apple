@@ -62,3 +62,7 @@ These legacy settings are not ported:
 no Settings control. It stores each library's sort, filter, grid or list view mode and collapse
 series as a small JSON string under the key `serverID|userID|libraryID`. Nothing removes an entry
 when an account or connection is removed (like `lastLibraryIDs`); only `resetAll()` clears it.
+
+`AppSettings.recentSearches` (`settings_recentSearches`) is native-only and has no Settings control
+either. It stores each library's recent searches (Search tab) as a JSON array of strings under the
+same `serverID|userID|libraryID` key. `resetAll()` clears it; removing a server doesn't yet (#317).

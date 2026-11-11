@@ -107,7 +107,7 @@ private struct SearchFailedRow: View {
     var body: some View {
         HStack(spacing: ABSSpacing.medium) {
             Label {
-                Text(verbatim: L10n.string("MessageSearchFailed"))
+                Text(verbatim: L10n.string("MessageSearchLibraryFailed"))
             } icon: {
                 Image(systemName: "exclamationmark.triangle")
                     .foregroundStyle(ABSColor.mutedForeground)

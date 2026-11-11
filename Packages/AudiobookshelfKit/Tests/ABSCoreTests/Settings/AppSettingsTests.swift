@@ -119,6 +119,28 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
         }
     }
 
+    @Test func recentSearchesAreStoredPerAccountAndLibraryAndResetWithEverything() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            let settings = AppSettings(defaults: defaults)
+            settings.setRecentSearchesJSON("[\"Dune\"]", serverID: "s", userID: "u", libraryID: "lib-1")
+            settings.setRecentSearchesJSON("[\"Emma\"]", serverID: "s", userID: "u", libraryID: "lib-2")
+
+            let reloaded = AppSettings(defaults: defaults)
+            #expect(reloaded.recentSearchesJSON(serverID: "s", userID: "u", libraryID: "lib-1") == "[\"Dune\"]")
+            #expect(reloaded.recentSearchesJSON(serverID: "s", userID: "other", libraryID: "lib-1") == nil)
+            #expect(AppSettings.snapshot(from: defaults).recentSearches.count == 2)
+
+            // Another library's entry, written by another instance, survives a write.
+            reloaded.setRecentSearchesJSON(nil, serverID: "s", userID: "u", libraryID: "lib-1")
+            #expect(settings.recentSearchesJSON(serverID: "s", userID: "u", libraryID: "lib-2") == "[\"Emma\"]")
+            #expect(reloaded.recentSearchesJSON(serverID: "s", userID: "u", libraryID: "lib-1") == nil)
+
+            settings.resetAll()
+            #expect(settings.recentSearches.isEmpty)
+            #expect(defaults.persistentDomain(forName: suiteName)?.isEmpty ?? true)
+        }
+    }
+
     @Test func valuesRoundTripAsPropertyListTypes() async throws {
         try await withIsolatedDefaults { defaults, _ in
             let settings = AppSettings(defaults: defaults)

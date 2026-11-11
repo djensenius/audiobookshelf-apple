@@ -11,11 +11,13 @@ enum SearchScreenState: Equatable {
     case noLibrary
     /// The model for the current account and library is about to be created.
     case loading
-    /// Nothing typed: the recent searches, or a prompt when there are none.
+    /// Nothing typed, or typed text still waiting for the debounce before any search: the recent
+    /// searches, or a prompt when there are none.
     case idle
-    /// A search for the typed text is waiting for the debounce or running, with nothing to show.
+    /// A search is running, with nothing to show.
     case searching
-    /// The search for the typed text finished without results.
+    /// The last search finished without results. Also kept while newer text waits for the
+    /// debounce, so the screen doesn't flash.
     case noResults
     /// The search failed with nothing to show; Retry searches again.
     case failed
@@ -40,7 +42,8 @@ enum SearchScreenState: Equatable {
         if inputs.hasResults { return .results(isSearching: inputs.isSearching, failed: inputs.hasError) }
         if inputs.isSearching { return .searching }
         if inputs.hasError { return .failed }
-        return inputs.searchedQuery == term ? .noResults : .searching
+        // Until a request starts, keep what the last search showed.
+        return inputs.searchedQuery == nil ? .idle : .noResults
     }
 
     /// The state of `model`.
@@ -78,7 +81,7 @@ enum SearchPresentation {
     /// The key of the singular name of a section's rows, which VoiceOver speaks after the row.
     static func kindKey(of kind: SearchSectionKind) -> String {
         switch kind {
-        case .books: "LabelBook"
+        case .books: "LabelSearchResultBook"
         case .podcasts: "LabelPodcast"
         case .episodes: "LabelEpisode"
         case .series: "LabelSeries"
@@ -133,40 +136,36 @@ enum SearchPresentation {
         router[path: .search].append(route)
     }
 
-    private static func bookCount(_ count: Int, locale: Locale?) -> String {
-        L10n.string("SharedBookCount", count.formatted(), locale: locale)
+    /// "1 book" or "3 books". The catalog has no plural variations, so one is its own key.
+    static func bookCount(_ count: Int, locale: Locale? = nil) -> String {
+        count == 1
+            ? L10n.string("LabelSearchOneBook", locale: locale)
+            : L10n.string("SharedBookCount", count.formatted(.number.locale(locale ?? .current)), locale: locale)
     }
 }
 
-/// The recent searches of each account and library, in the settings' defaults (the App Group
-/// store in the app). ``SearchModel`` saves them through ``persist(connectionKey:libraryID:)``.
+/// The recent searches of each account and library, stored by `AppSettings` as JSON arrays of
+/// strings. ``SearchModel`` saves them through ``persist(connectionKey:libraryID:)``.
 @MainActor
 struct SearchRecentsStore {
-    /// A `[String: [String]]` dictionary from ``key(connectionKey:libraryID:)`` to the recent
-    /// searches, most recent first.
-    static let defaultsKey = "search_recentSearches"
-
-    let defaults: UserDefaults
-
-    /// The account and library, like `AppSettings`' per-library view preferences.
-    static func key(connectionKey: LibraryConnectionKey, libraryID: String) -> String {
-        "\(AppSettings.accountKey(serverID: connectionKey.serverID, userID: connectionKey.userID))|\(libraryID)"
-    }
+    let settings: AppSettings
 
     func recentSearches(connectionKey: LibraryConnectionKey, libraryID: String) -> [String] {
-        stored()[Self.key(connectionKey: connectionKey, libraryID: libraryID)] ?? []
+        guard
+            let json = settings.recentSearchesJSON(
+                serverID: connectionKey.serverID, userID: connectionKey.userID, libraryID: libraryID),
+            let recents = try? JSONDecoder().decode([String].self, from: Data(json.utf8))
+        else { return [] }
+        return recents
     }
 
     /// Saves `recentSearches`; an empty list removes the library's entry.
     func setRecentSearches(_ recentSearches: [String], connectionKey: LibraryConnectionKey, libraryID: String) {
-        var stored = stored()
-        stored[Self.key(connectionKey: connectionKey, libraryID: libraryID)] =
-            recentSearches.isEmpty ? nil : recentSearches
-        if stored.isEmpty {
-            defaults.removeObject(forKey: Self.defaultsKey)
-        } else {
-            defaults.set(stored, forKey: Self.defaultsKey)
-        }
+        let json =
+            recentSearches.isEmpty
+            ? nil : (try? JSONEncoder().encode(recentSearches)).map { String(decoding: $0, as: UTF8.self) }
+        settings.setRecentSearchesJSON(
+            json, serverID: connectionKey.serverID, userID: connectionKey.userID, libraryID: libraryID)
     }
 
     /// The closure a library's ``SearchModel`` saves its recent searches with.
@@ -174,10 +173,6 @@ struct SearchRecentsStore {
         { recentSearches in
             setRecentSearches(recentSearches, connectionKey: connectionKey, libraryID: libraryID)
         }
-    }
-
-    private func stored() -> [String: [String]] {
-        (defaults.dictionary(forKey: Self.defaultsKey) ?? [:]).compactMapValues { $0 as? [String] }
     }
 }
 

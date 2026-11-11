@@ -67,6 +67,9 @@ public final class AppSettings {
         /// A `[String: String]` dictionary from ``AppSettings/libraryViewPreferencesKey(serverID:userID:libraryID:)``
         /// to the library's view preferences as a small JSON string (encoded by `LibraryViewPreferences`).
         case libraryViewPreferences = "settings_libraryViewPreferences"
+        /// A `[String: String]` dictionary from ``AppSettings/libraryViewPreferencesKey(serverID:userID:libraryID:)``
+        /// to the library's recent searches as a JSON array of strings, most recent first.
+        case recentSearches = "settings_recentSearches"
     }
 
     /// Default values, for `@AppStorage` declarations that need one.
@@ -201,6 +204,13 @@ public final class AppSettings {
         didSet { persist(.libraryViewPreferences, libraryViewPreferences) }
     }
 
+    /// Recent searches per account and library, as JSON strings; see
+    /// ``recentSearchesJSON(serverID:userID:libraryID:)``. The settings store the strings without
+    /// interpreting them. Removing a server doesn't clear its entries yet (#317).
+    public private(set) var recentSearches: [String: String] = [:] {
+        didSet { persist(.recentSearches, recentSearches) }
+    }
+
     @ObservationIgnored private var isReloading = false
     @ObservationIgnored private var observer: DefaultsObserver?
 
@@ -273,6 +283,23 @@ public final class AppSettings {
         var stored = Reader(defaults: defaults).stringDictionary(.libraryViewPreferences)
         stored[Self.libraryViewPreferencesKey(serverID: serverID, userID: userID, libraryID: libraryID)] = json
         libraryViewPreferences = stored
+    }
+
+    // MARK: Recent searches
+
+    /// A library's recent searches as a JSON array of strings, keyed like the view preferences.
+    public func recentSearchesJSON(serverID: String, userID: String, libraryID: String) -> String? {
+        recentSearches[Self.libraryViewPreferencesKey(serverID: serverID, userID: userID, libraryID: libraryID)]
+    }
+
+    /// Saves a library's recent searches; `nil` removes them. Like
+    /// ``setLibraryViewPreferencesJSON(_:serverID:userID:libraryID:)`` it changes the dictionary
+    /// currently in the store, so another library's entry isn't overwritten. Two windows searching
+    /// the same library each save their whole list: the last writer wins for that library.
+    public func setRecentSearchesJSON(_ json: String?, serverID: String, userID: String, libraryID: String) {
+        var stored = Reader(defaults: defaults).stringDictionary(.recentSearches)
+        stored[Self.libraryViewPreferencesKey(serverID: serverID, userID: userID, libraryID: libraryID)] = json
+        recentSearches = stored
     }
 
     // MARK: Store selection
@@ -389,6 +416,7 @@ public final class AppSettings {
         update(\.chapterTrack, snapshot.chapterTrack)
         update(\.lastLibraryIDs, snapshot.lastLibraryIDs)
         update(\.libraryViewPreferences, snapshot.libraryViewPreferences)
+        update(\.recentSearches, snapshot.recentSearches)
     }
 
     private func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppSettings, Value>, _ value: Value) {
@@ -430,6 +458,7 @@ extension AppSettings {
         public let chapterTrack: Bool
         public let lastLibraryIDs: [String: String]
         public let libraryViewPreferences: [String: String]
+        public let recentSearches: [String: String]
 
         init(defaults: UserDefaults) {
             let store = Reader(defaults: defaults)
@@ -465,6 +494,7 @@ extension AppSettings {
             chapterTrack = store.bool(.chapterTrack, Default.chapterTrack)
             lastLibraryIDs = store.stringDictionary(.lastLibraryIDs)
             libraryViewPreferences = store.stringDictionary(.libraryViewPreferences)
+            recentSearches = store.stringDictionary(.recentSearches)
         }
 
         public func lastLibraryID(serverID: String, userID: String) -> String? {

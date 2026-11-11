@@ -17,6 +17,28 @@ private func routerInBookLibrary() -> Router {
 @Suite struct RouterTests {
     // MARK: Paths
 
+    @Test func searchFocusRequestSelectsSearchAtItsRootUntilHandled() {
+        let router = routerInBookLibrary()
+        router[path: .search] = [.item(id: "li_1")]
+        router[path: .home] = [.stats]
+        #expect(!router.isSearchFocusRequested)
+
+        router.requestSearchFocus()
+        #expect(router.selectedTab == .search)
+        #expect(router[path: .search].isEmpty)
+        #expect(router[path: .home] == [.stats])
+        #expect(router.libraryID == "books")
+        #expect(router.isSearchFocusRequested)
+
+        router.clearSearchFocusRequest()
+        #expect(!router.isSearchFocusRequested)
+
+        // An identity change drops a request nobody handled.
+        router.requestSearchFocus()
+        router.resetForIdentityChange(serverID: "server-2", userID: "user-1")
+        #expect(!router.isSearchFocusRequested)
+    }
+
     @Test func pathSubscriptDefaultsToEmptyAndDropsEmptyPaths() {
         let router = Router()
         #expect(router[path: .home] == [])
