@@ -67,6 +67,9 @@ public final class AppSettings {
         /// A `[String: String]` dictionary from ``AppSettings/libraryViewPreferencesKey(serverID:userID:libraryID:)``
         /// to the library's view preferences as a small JSON string (encoded by `LibraryViewPreferences`).
         case libraryViewPreferences = "settings_libraryViewPreferences"
+        /// A `[String: String]` dictionary from ``AppSettings/libraryViewPreferencesKey(serverID:userID:libraryID:)``
+        /// to the library's recent searches as a JSON array of strings, most recent first.
+        case recentSearches = "settings_recentSearches"
         /// The podcast episode list's filter and sort as a small JSON string (encoded by
         /// `EpisodeListPreferences`), shared by every podcast and account as in legacy.
         case podcastEpisodeListPreferences = "settings_podcastEpisodeListPreferences"
@@ -204,6 +207,13 @@ public final class AppSettings {
         didSet { persist(.libraryViewPreferences, libraryViewPreferences) }
     }
 
+    /// Recent searches per account and library, as JSON strings; see
+    /// ``recentSearchesJSON(serverID:userID:libraryID:)``. The settings store the strings without
+    /// interpreting them. Removing a server doesn't clear its entries yet (#317).
+    public private(set) var recentSearches: [String: String] = [:] {
+        didSet { persist(.recentSearches, recentSearches) }
+    }
+
     /// The podcast episode list's filter and sort as a JSON string, uninterpreted here; `nil`
     /// removes it, so the defaults apply.
     public var podcastEpisodeListPreferences: String? {
@@ -288,6 +298,23 @@ public final class AppSettings {
         var stored = Reader(defaults: defaults).stringDictionary(.libraryViewPreferences)
         stored[Self.libraryViewPreferencesKey(serverID: serverID, userID: userID, libraryID: libraryID)] = json
         libraryViewPreferences = stored
+    }
+
+    // MARK: Recent searches
+
+    /// A library's recent searches as a JSON array of strings, keyed like the view preferences.
+    public func recentSearchesJSON(serverID: String, userID: String, libraryID: String) -> String? {
+        recentSearches[Self.libraryViewPreferencesKey(serverID: serverID, userID: userID, libraryID: libraryID)]
+    }
+
+    /// Saves a library's recent searches; `nil` removes them. Like
+    /// ``setLibraryViewPreferencesJSON(_:serverID:userID:libraryID:)`` it changes the dictionary
+    /// currently in the store, so another library's entry isn't overwritten. Two windows searching
+    /// the same library each save their whole list: the last writer wins for that library.
+    public func setRecentSearchesJSON(_ json: String?, serverID: String, userID: String, libraryID: String) {
+        var stored = Reader(defaults: defaults).stringDictionary(.recentSearches)
+        stored[Self.libraryViewPreferencesKey(serverID: serverID, userID: userID, libraryID: libraryID)] = json
+        recentSearches = stored
     }
 
     // MARK: Store selection
@@ -404,6 +431,7 @@ public final class AppSettings {
         update(\.chapterTrack, snapshot.chapterTrack)
         update(\.lastLibraryIDs, snapshot.lastLibraryIDs)
         update(\.libraryViewPreferences, snapshot.libraryViewPreferences)
+        update(\.recentSearches, snapshot.recentSearches)
         update(\.podcastEpisodeListPreferences, snapshot.podcastEpisodeListPreferences)
     }
 
@@ -446,6 +474,7 @@ extension AppSettings {
         public let chapterTrack: Bool
         public let lastLibraryIDs: [String: String]
         public let libraryViewPreferences: [String: String]
+        public let recentSearches: [String: String]
         public let podcastEpisodeListPreferences: String?
 
         init(defaults: UserDefaults) {
@@ -482,6 +511,7 @@ extension AppSettings {
             chapterTrack = store.bool(.chapterTrack, Default.chapterTrack)
             lastLibraryIDs = store.stringDictionary(.lastLibraryIDs)
             libraryViewPreferences = store.stringDictionary(.libraryViewPreferences)
+            recentSearches = store.stringDictionary(.recentSearches)
             podcastEpisodeListPreferences = store.optionalString(.podcastEpisodeListPreferences)
         }
 

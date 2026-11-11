@@ -86,6 +86,23 @@ import Testing
         #expect(clock.sleeperCount == 0)
     }
 
+    @Test func searchNowSearchesAtOnceWithoutRecording() async throws {
+        let saved = Locked<[[String]]>([])
+        let model = SearchModel(
+            service: FakeSearchService { _ in try bookResults("li1") }, libraryID: "lib", clock: clock
+        ) { saved.value.append($0) }
+        var sleeps = clock.sleeps.makeAsyncIterator()
+
+        model.setQuery("one")
+        _ = await sleeps.next()
+        model.searchNow()
+        #expect(clock.sleeperCount == 0)
+        await model.searchTask?.value
+        #expect(model.searchedQuery == "one")
+        #expect(model.recentSearches.isEmpty)
+        #expect(saved.value.isEmpty)
+    }
+
     @Test func settingTheSameQueryKeepsTheRunningSearch() async throws {
         let model = makeModel()
         var calls = gate.calls.makeAsyncIterator()
@@ -259,6 +276,27 @@ import Testing
         model.clearRecentSearches()
         #expect(model.recentSearches.isEmpty)
         #expect(saved.value.last == [])
+    }
+
+    @Test func withLoadRecentsTheSavedListIsTheOnlyCopy() async throws {
+        let stored = Locked<[String]>(["Dune", "dune", " "])
+        func makeSharedModel() -> SearchModel {
+            SearchModel(
+                service: FakeSearchService { _ in LibrarySearchResults() }, libraryID: "lib", clock: clock,
+                persistRecents: { stored.value = $0 }, loadRecents: { stored.value })
+        }
+        let first = makeSharedModel()
+        let second = makeSharedModel()
+        #expect(first.recentSearches == ["Dune"])
+
+        first.clearRecentSearches()
+        #expect(second.recentSearches.isEmpty)
+
+        second.setQuery("Emma")
+        second.submit()
+        await second.searchTask?.value
+        #expect(stored.value == ["Emma"])
+        #expect(first.recentSearches == ["Emma"])
     }
 
     @Test func savedRecentSearchesAreCapped() {
