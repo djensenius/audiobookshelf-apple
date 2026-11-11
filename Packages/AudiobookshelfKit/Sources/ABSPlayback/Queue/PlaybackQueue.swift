@@ -66,8 +66,8 @@ public protocol PlaybackQueueReading: AnyObject, Observable {
 }
 
 /// The user's play queue for one server connection, saved on every change. Each media is queued
-/// at most once: queueing it again moves it. This core does not start playback or dequeue on
-/// playback events; callers explicitly mutate the queue.
+/// at most once: queueing it again moves it. The queue itself does not start playback or dequeue
+/// on playback events; ``PlaybackQueueAdvancer`` does, and other callers mutate it explicitly.
 @MainActor
 @Observable
 public final class PlaybackQueue: PlaybackQueueReading {
@@ -75,6 +75,8 @@ public final class PlaybackQueue: PlaybackQueueReading {
     public private(set) var items: [QueueItem]
 
     @ObservationIgnored private let store: any PlaybackQueueStoring
+    /// Called after every change; the attached ``PlaybackQueueAdvancer`` recomputes the next item.
+    @ObservationIgnored var onItemsChange: (@MainActor () -> Void)?
 
     /// Loads the connection's saved queue from `store`.
     public init(serverConnectionID: UUID, store: any PlaybackQueueStoring) {
@@ -139,5 +141,6 @@ public final class PlaybackQueue: PlaybackQueueReading {
         guard updated != items else { return }
         items = updated
         store.save(updated, serverConnectionID: serverConnectionID)
+        onItemsChange?()
     }
 }

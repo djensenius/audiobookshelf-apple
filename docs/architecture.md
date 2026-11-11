@@ -107,9 +107,29 @@ mutation would write the removed key back. Queue UI and other features mutate
 through that owned instance, never the store directly; only connection removal
 calls `removeQueue`, after dropping the instance.
 
-This core has no app wiring, playback end hook, auto-advance, episode lookup,
-account-removal composition, or queue UI. It makes no progress-sync or
-exactly-once delivery guarantee.
+`PlaybackQueueAdvancer` adds auto-advance. When an item ends, it plays the first
+queued item. If the queue is empty and the item was a podcast episode, it plays
+the podcast's next unfinished episode instead, chosen with the legacy order and
+read through `PodcastEpisodeSource`, which uses the item plus `GET /api/me`.
+If every other episode is finished, playback stays at the end.
+
+The next item is prepared before the current one ends: the streaming decision,
+the server progress and the local progress capture are fetched ahead. This
+happens when an item loads, once more in its last 30 s, and again when the queue
+changes or the owner reports a progress or connection change; each preparation
+replaces the one in flight. After `.ended`, only the bounded wait for
+closes, `/play` and loading the stream are left. The coordinator holds an
+injected `BackgroundActivity` around that work; `NoBackgroundActivity` is the
+default.
+
+Any user action, or a pause from an `.ended` observer such as the sleep timer,
+cancels the advance. A blocked streaming decision keeps the item queued and never
+consents on the user's behalf. The coordinator and the advancer hold each other
+weakly, so the owner must retain the advancer.
+
+App wiring (the advancer, `UIApplication.beginBackgroundTask`, progress and
+connection hooks), account-removal composition and queue UI are not built yet.
+The queue makes no progress-sync or exactly-once delivery guarantee.
 
 ## App target layout
 
