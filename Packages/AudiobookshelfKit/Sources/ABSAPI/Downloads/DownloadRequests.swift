@@ -24,8 +24,18 @@ public enum DownloadRequests {
         "/api/items/\(pathSegment(itemID))/file/\(pathSegment(ino))/download"
     }
 
+    /// The token-free API path and query of an item's offline cover, a 1200 px JPEG
+    /// (ADR 0005), which a cover download part stores as its `serverPath`. `updatedAt` is the
+    /// item's `updatedAt` in milliseconds, so a changed cover is a different request.
+    public static func coverPath(itemID: String, updatedAt: Int) -> String {
+        "/api/items/\(pathSegment(itemID))/cover?width=1200&format=jpeg&ts=\(updatedAt)"
+    }
+
     /// A background `GET` request for `path` on the configured server, with
     /// `Authorization: Bearer <accessToken>`. Cookies are never sent or stored.
+    ///
+    /// `path` may end in a `?query` (as ``coverPath(itemID:updatedAt:)`` does). The query is
+    /// split off and sent as the URL's query, with `+` encoded as `%2B`, not as part of the path.
     ///
     /// - Throws: ``DownloadRequestError/customHeadersRequireRedirectCheck`` if the connection
     ///   has custom headers, or ``APIError/invalidURL`` if the server address and `path`
@@ -34,7 +44,14 @@ public enum DownloadRequests {
         path: String, configuration: APIClientConfiguration, accessToken: String
     ) throws -> URLRequest {
         guard configuration.customHeaders.isEmpty else { throw DownloadRequestError.customHeadersRequireRedirectCheck }
-        var request = URLRequest(url: try APIClient.url(base: configuration.baseURL, path: path, query: []))
+        let parts = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+        var query: [URLQueryItem] = []
+        if parts.count == 2 {
+            guard let components = URLComponents(string: "?" + parts[1]) else { throw APIError.invalidURL }
+            query = components.queryItems ?? []
+        }
+        var request = URLRequest(
+            url: try APIClient.url(base: configuration.baseURL, path: String(parts.first ?? ""), query: query))
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")

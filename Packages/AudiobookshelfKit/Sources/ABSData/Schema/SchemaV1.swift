@@ -356,7 +356,8 @@ public enum SchemaV1: VersionedSchema {
         public var record: DownloadRecord?
         /// A ``DownloadPartKind`` raw value.
         public var kind: String
-        /// The API path to fetch, without host or token.
+        /// The API path to fetch, without host or token. It may end in a `?query` (a cover's
+        /// `width`, `format` and `ts`), never a credential.
         public var serverPath: String
         public var filename: String
         public var mimeType: String

@@ -527,9 +527,12 @@ static, unauthenticated remote images (none are planned).
     ([0006](0006-now-playing.md)).
 - **Offline covers:**
   - `ABSDownloads` downloads the cover with
-    `width=1200&format=jpeg&ts=…`. Like other image requests, it sends the
-    user-configured custom headers but not the Audiobookshelf bearer token, and
-    it applies the same redirect policy.
+    `width=1200&format=jpeg&ts=…` (`DownloadRequests.coverPath`). Unlike other
+    image requests, it is a background download
+    ([0007](0007-streaming.md)): it keeps the Audiobookshelf bearer header,
+    which only ever goes to the same origin because off-origin redirects are
+    refused. Like every download, it is refused for connections with custom
+    headers until #145.
   - It stores the result as `cover.jpg` in the item's download folder, which is
     not a cache directory. It records the relative path and
     `LocalLibraryItem.coverUpdatedAt` in ABSData, which is what
