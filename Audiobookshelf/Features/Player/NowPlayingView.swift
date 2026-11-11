@@ -7,12 +7,14 @@ import SwiftUI
 /// author and chapter, the scrubber with its chapter-track toggle, the transport controls, a
 /// speed menu and the AirPlay picker, with ``PlayerActionsBar`` in the bottom toolbar.
 ///
-/// iOS presents it as a full-screen cover on every size (ADR 0004); it dismisses itself when
-/// playback closes.
+/// iOS presents it as a full-screen cover on every size (ADR 0004); ``PlayerSlot`` closes it
+/// when playback closes.
+///
+/// Everything that follows the playback time (the scrubber, the titles' chapter and the transport's
+/// next-chapter state) lives in child views, so a playback tick doesn't re-render the cover, the
+/// menus or the AirPlay picker.
 struct NowPlayingView: View {
     let model: PlayerViewModel
-    @Environment(AppSettings.self) private var settings: AppSettings?
-    @Environment(Router.self) private var router: Router?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
@@ -20,22 +22,9 @@ struct NowPlayingView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     cover
-                    titles
-                    PlayerScrubber(
-                        progress: model.progress, elapsed: model.elapsed, remaining: model.remainingAtRate,
-                        onScrub: { model.scrub(to: $0) },
-                        onScrubEnd: { Task { await model.endScrub() } },
-                        onIncrement: { Task { await model.jumpForward() } },
-                        onDecrement: { Task { await model.jumpBackward() } }
-                    )
-                    TransportControls(
-                        style: .full, showsPause: model.showsPause, isBuffering: model.isBuffering,
-                        jumpBackwardSeconds: model.jumpBackwardSeconds, jumpForwardSeconds: model.jumpForwardSeconds,
-                        hasPreviousChapter: model.hasPreviousChapter, hasNextChapter: model.hasNextChapter,
-                        haptic: settings?.hapticFeedback ?? .off
-                    ) { action in
-                        Task { await model.perform(action) }
-                    }
+                    NowPlayingTitles(model: model)
+                    NowPlayingScrubber(model: model)
+                    NowPlayingTransport(model: model)
                     secondaryControls
                 }
                 .padding(.horizontal, 24)
@@ -60,42 +49,21 @@ struct NowPlayingView: View {
                 PlayerActionsBar(model: model)
             }
         }
-        .onChange(of: model.hasSession) { _, hasSession in
-            if !hasSession { dismiss() }
+        // A scrub whose drag never reported its end (the cover closed mid-drag) mustn't stay on.
+        .onDisappear {
+            Task { await model.endScrub() }
         }
-    }
-
-    /// The current library's cover shape, as the legacy player used the library's aspect ratio.
-    private var coverShape: CoverShape {
-        router?.libraryKind == .podcast ? .square : .book
     }
 
     private var cover: some View {
-        CoverView(key: model.coverKey, title: model.title, author: model.author, shape: coverShape)
-            .clipShape(.rect(cornerRadius: 8))
-            .shadow(radius: 8, y: 4)
-            .containerRelativeFrame(.vertical) { height, _ in height * 0.45 }
-            .accessibilityHidden(true)
-    }
-
-    private var titles: some View {
-        VStack(spacing: 4) {
-            if let chapter = model.chapterTitle {
-                Text(verbatim: chapter)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            Text(verbatim: model.title)
-                .font(.title2.weight(.bold))
-                .accessibilityAddTraits(.isHeader)
-            if !model.author.isEmpty {
-                Text(verbatim: model.author)
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .multilineTextAlignment(.center)
-        .lineLimit(3)
+        CoverView(
+            key: model.coverKey, title: model.title, author: model.author,
+            shape: model.isPodcastEpisode ? .square : .book
+        )
+        .clipShape(.rect(cornerRadius: 8))
+        .shadow(radius: 8, y: 4)
+        .containerRelativeFrame(.vertical) { height, _ in height * 0.45 }
+        .accessibilityHidden(true)
     }
 
     private var secondaryControls: some View {
@@ -117,6 +85,63 @@ struct NowPlayingView: View {
                 .frame(width: 44, height: 44)
         }
         .buttonStyle(.borderless)
+    }
+}
+
+/// The chapter, title and author. Its own view: the chapter title can follow the playback time.
+private struct NowPlayingTitles: View {
+    let model: PlayerViewModel
+
+    var body: some View {
+        VStack(spacing: 4) {
+            if let chapter = model.chapterTitle {
+                Text(verbatim: chapter)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Text(verbatim: model.title)
+                .font(.title2.weight(.bold))
+                .accessibilityAddTraits(.isHeader)
+            if !model.author.isEmpty {
+                Text(verbatim: model.author)
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .lineLimit(3)
+    }
+}
+
+/// The scrubber, redrawn on every playback tick. Swipe up and down jump by the skip intervals.
+private struct NowPlayingScrubber: View {
+    let model: PlayerViewModel
+
+    var body: some View {
+        PlayerScrubber(
+            progress: model.progress, elapsed: model.elapsed, remaining: model.remainingAtRate,
+            onScrub: { model.scrub(to: $0) },
+            onScrubEnd: { Task { await model.endScrub() } },
+            onIncrement: { Task { await model.jumpForward() } },
+            onDecrement: { Task { await model.jumpBackward() } }
+        )
+    }
+}
+
+/// The transport controls. Their own view: the next-chapter state reads the playback time.
+private struct NowPlayingTransport: View {
+    let model: PlayerViewModel
+    @Environment(AppSettings.self) private var settings: AppSettings?
+
+    var body: some View {
+        TransportControls(
+            style: .full, showsPause: model.showsPause, isBuffering: model.isBuffering,
+            jumpBackwardSeconds: model.jumpBackwardSeconds, jumpForwardSeconds: model.jumpForwardSeconds,
+            hasPreviousChapter: model.hasPreviousChapter, hasNextChapter: model.hasNextChapter,
+            haptic: settings?.hapticFeedback ?? .off
+        ) { action in
+            Task { await model.perform(action) }
+        }
     }
 }
 

@@ -75,6 +75,11 @@ public struct TransportControls: View {
         L10n.string(showsPause ? "ButtonPause" : "ButtonPlay")
     }
 
+    /// The play/pause button's VoiceOver value: "Loading..." while buffering, else empty.
+    nonisolated static func playPauseAccessibilityValue(isBuffering: Bool) -> String {
+        isBuffering ? L10n.string("MessageLoading") : ""
+    }
+
     public var body: some View {
         HStack(spacing: style == .full ? 0 : 4) {
             switch style {
@@ -124,7 +129,7 @@ public struct TransportControls: View {
             .contentShape(.rect)
         }
         .accessibilityLabel(Text(verbatim: Self.playPauseLabel(showsPause: showsPause)))
-        .accessibilityValue(Text(verbatim: isBuffering ? L10n.string("MessageLoading") : ""))
+        .accessibilityValue(Text(verbatim: Self.playPauseAccessibilityValue(isBuffering: isBuffering)))
     }
 
     private func jumpButton(forward: Bool) -> some View {

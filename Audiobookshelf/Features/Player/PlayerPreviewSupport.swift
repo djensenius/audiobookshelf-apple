@@ -93,11 +93,14 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
 }
 
 extension PlayerViewModel {
-    /// A view model over ``PreviewPlaybackControl``, with settings in a throwaway defaults suite.
+    /// A view model over ``PreviewPlaybackControl``, with default settings in the previews' own
+    /// defaults suite, cleared each time so changes made in one preview don't carry over.
     static func preview(
         loaded: Bool = true, at time: Double = 4_000, playing: Bool = false, buffering: Bool = false
     ) -> PlayerViewModel {
-        let defaults = UserDefaults(suiteName: "PlayerPreview") ?? .standard
+        let suiteName = "PlayerPreview"
+        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
+        defaults.removePersistentDomain(forName: suiteName)
         return PlayerViewModel(
             playback: PreviewPlaybackControl(loaded: loaded, at: time, playing: playing, buffering: buffering),
             settings: AppSettings(defaults: defaults))

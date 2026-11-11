@@ -74,7 +74,10 @@ struct MiniPlayerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(verbatim: L10n.string("LabelMiniPlayerAccessibility", model.title)))
-        .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
+        #if os(iOS)
+            // TODO(#183): the hint on macOS too, once the Now Playing window opens.
+            .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
+        #endif
     }
 
     private var closeButton: some View {

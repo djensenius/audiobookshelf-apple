@@ -4,7 +4,10 @@ import SwiftUI
 /// under its leading end and the remaining time under its trailing end.
 ///
 /// It owns no state: it shows `progress` and reports drags as fractions of the track through
-/// `onScrub`, then `onScrubEnd` when the finger lifts, so the caller decides when to seek.
+/// `onScrub`, then `onScrubEnd` when the drag ends, so the caller decides when to seek. A drag
+/// the system cancels (a scroll view taking the pan, Control Center, a call, the app going to the
+/// background) ends it too: the dragging flag is gesture state, which resets on cancellation, and
+/// its reset calls `onScrubEnd`, which is why that isn't driven by `onEnded` (skipped on cancel).
 ///
 /// VoiceOver reads it as one adjustable element: the elapsed and remaining times as its value,
 /// with swipe up and down calling `onIncrement` and `onDecrement` (the caller's jump forward and
@@ -17,7 +20,7 @@ public struct PlayerScrubber: View {
     private let onScrubEnd: () -> Void
     private let onIncrement: () -> Void
     private let onDecrement: () -> Void
-    @State private var isDragging = false
+    @GestureState private var isDragging = false
     @ScaledMetric(relativeTo: .caption) private var trackHeight: CGFloat = 6
     @ScaledMetric(relativeTo: .caption) private var thumbDiameter: CGFloat = 14
     @Environment(\.locale) private var locale
@@ -28,7 +31,7 @@ public struct PlayerScrubber: View {
     ///   - elapsed: Seconds played, shown as a timestamp.
     ///   - remaining: Seconds left, shown as a negative timestamp.
     ///   - onScrub: Called with the fraction under the finger, `0...1`, while dragging.
-    ///   - onScrubEnd: Called once when a drag ends.
+    ///   - onScrubEnd: Called once when a drag ends or is cancelled.
     ///   - onIncrement: VoiceOver's increment (swipe up).
     ///   - onDecrement: VoiceOver's decrement (swipe down).
     public init(
@@ -45,8 +48,8 @@ public struct PlayerScrubber: View {
     }
 
     /// The visible remaining time: the timestamp with a leading minus, like legacy.
-    nonisolated static func remainingText(_ seconds: Double) -> String {
-        "-" + DurationStyle.timestamp.string(seconds)
+    nonisolated static func remainingText(_ seconds: Double, locale: Locale) -> String {
+        "-" + DurationStyle.timestamp.string(seconds, locale: locale)
     }
 
     /// The VoiceOver value, for example "4 minutes, 5 seconds, 1 hour remaining".
@@ -64,7 +67,13 @@ public struct PlayerScrubber: View {
         return Double(min(max(x / width, 0), 1))
     }
 
-    /// Performs VoiceOver's adjustable action.
+    /// Reacts to the dragging flag changing: a drag that stops, by ending or by being cancelled,
+    /// ends the scrub. Starting needs nothing: the first `onScrub` begins it.
+    func draggingChanged(from wasDragging: Bool, to isDragging: Bool) {
+        if wasDragging, !isDragging { onScrubEnd() }
+    }
+
+    /// Performs VoiceOver's adjustable action: up and down jump by the caller's skip intervals.
     func adjust(_ direction: AccessibilityAdjustmentDirection) {
         switch direction {
         case .increment: onIncrement()
@@ -79,7 +88,7 @@ public struct PlayerScrubber: View {
             HStack {
                 Text(verbatim: DurationStyle.timestamp.string(elapsed, locale: locale))
                 Spacer(minLength: 8)
-                Text(verbatim: Self.remainingText(remaining))
+                Text(verbatim: Self.remainingText(remaining, locale: locale))
             }
             .font(.caption)
             .monospacedDigit()
@@ -113,18 +122,19 @@ public struct PlayerScrubber: View {
             .contentShape(.rect)
             .gesture(
                 DragGesture(minimumDistance: 0)
+                    .updating($isDragging) { _, dragging, _ in dragging = true }
                     .onChanged { value in
-                        isDragging = true
                         onScrub(Self.fraction(atX: value.location.x, width: width))
-                    }
-                    .onEnded { _ in
-                        isDragging = false
-                        onScrubEnd()
                     }
             )
         }
-        .frame(height: thumbDiameter * 2)
+        // At least a 44-point touch target, growing with the thumb at large text sizes.
+        .frame(height: max(44, thumbDiameter * 2))
+        .contentShape(.rect)
         .animation(.snappy, value: isDragging)
+        .onChange(of: isDragging) { wasDragging, dragging in
+            draggingChanged(from: wasDragging, to: dragging)
+        }
     }
 }
 

@@ -59,6 +59,21 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    @Test func onlyAnEpisodeIsAPodcastEpisode() async throws {
+        try await withPlayer { model, playback, _, _ in
+            #expect(!model.isPodcastEpisode)
+            playback.load(FakePlaybackControl.bookSession())
+            #expect(!model.isPodcastEpisode)
+            playback.load(
+                PlaybackSession(
+                    id: "sess_pod", libraryItemId: "li_pod", episodeId: "ep_1", mediaType: .podcast,
+                    mediaMetadata: .podcast(PodcastMetadata(title: "The Show")), displayTitle: "Episode 1",
+                    duration: 60,
+                    audioTracks: [AudioTrack(index: 1, startOffset: 0, duration: 60, mimeType: "audio/mpeg")]))
+            #expect(model.isPodcastEpisode)
+        }
+    }
+
     @Test func restoredOnlyShowsTheRecordOverTheWholeItem() async throws {
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = true

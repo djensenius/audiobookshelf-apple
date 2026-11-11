@@ -125,6 +125,10 @@ public final class PlayerViewModel {
         return PlayerDisplayInfo.nonEmpty(playback.chapter?.title)
     }
 
+    /// Whether the current item is a podcast episode, so its cover is square; podcasts play only
+    /// episodes, and books have no episode ID. `false` without an item.
+    public var isPodcastEpisode: Bool { playback.mediaKey?.episodeId != nil }
+
     /// The item's cover; `nil` when it has none.
     public var coverKey: ImageKey? { display?.coverKey }
 

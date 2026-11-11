@@ -39,11 +39,22 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// The mini and full players are ``MiniPlayerView`` and ``NowPlayingView`` when `player` is a
 /// ``PlayerViewModel``, else placeholders; #183 replaces the downcast. The queue inspector is a
 /// placeholder until #60.
+///
+/// Without a session the full player closes (on macOS, the flag resets for #183's window), also
+/// when it was opened with none. A queue auto-advance that passes through `.idle` would close it
+/// too (#60).
 struct PlayerSlot: ViewModifier {
     @Bindable var router: Router
     let player: any PlayerSlotState
 
     func body(content: Content) -> some View {
+        hosting(content)
+            .onChange(of: player.hasSession, initial: true) { _, hasSession in
+                if !hasSession { router.isFullPlayerPresented = false }
+            }
+    }
+
+    @ViewBuilder private func hosting(_ content: Content) -> some View {
         #if os(iOS)
             content
                 .tabViewBottomAccessory(isEnabled: player.hasSession) {
