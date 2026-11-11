@@ -36,7 +36,8 @@ public struct ItemActionTarget: Sendable, Hashable {
 
 /// Does nothing; the default for an environment value.
 public struct NoOpItemActions: ItemActionPerforming {
-    public init() {}
+    /// Nonisolated, so it can be an environment key's default value.
+    nonisolated public init() {}
     public func markFinished(_ target: ItemActionTarget) async throws {}
     public func markNotFinished(_ target: ItemActionTarget) async throws {}
     public func hideFromContinueListening(_ target: ItemActionTarget) async throws {}
