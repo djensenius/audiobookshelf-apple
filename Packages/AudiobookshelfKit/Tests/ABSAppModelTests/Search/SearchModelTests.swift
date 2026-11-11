@@ -7,7 +7,7 @@ import Testing
 
 @MainActor
 @Suite struct SearchModelTests {
-    let clock = SearchTestClock()
+    let clock = ManualClock()
     let gate = GatedCalls<SearchRequest, LibrarySearchResults>()
 
     func makeModel(recentSearches: [String] = [], limit: Int? = nil) -> SearchModel {
@@ -25,7 +25,7 @@ import Testing
         model.setQuery("  one ")
         #expect(await sleeps.next() == .milliseconds(300))
         clock.advance(by: .milliseconds(299))
-        #expect(clock.pendingSleeps == 1)
+        #expect(clock.sleeperCount == 1)
         #expect(!model.isSearching)
 
         clock.advance(by: .milliseconds(1))
@@ -55,9 +55,10 @@ import Testing
         model.setQuery("on")
         await first.value
         #expect(await sleeps.next() == .milliseconds(300))
-        // The first deadline passes without a request.
+        // The first deadline passes without a request: only the restarted debounce is waiting.
         clock.advance(by: .milliseconds(100))
-        #expect(clock.pendingSleeps == 1)
+        #expect(clock.sleeperCount == 1)
+        #expect(!model.isSearching)
 
         clock.advance(by: .milliseconds(200))
         let call = try #require(await calls.next())
@@ -75,14 +76,52 @@ import Testing
         model.setQuery("one")
         _ = await sleeps.next()
         model.submit()
-        #expect(clock.pendingSleeps == 0)
+        #expect(clock.sleeperCount == 0)
 
         let call = try #require(await calls.next())
         #expect(call.request.query == "one")
         call.reply.resume(returning: try bookResults("li1"))
         await model.searchTask?.value
         #expect(model.searchedQuery == "one")
-        #expect(clock.pendingSleeps == 0)
+        #expect(clock.sleeperCount == 0)
+    }
+
+    @Test func settingTheSameQueryKeepsTheRunningSearch() async throws {
+        let model = makeModel()
+        var calls = gate.calls.makeAsyncIterator()
+
+        model.setQuery("one")
+        model.submit()
+        let running = try #require(model.searchTask)
+        model.setQuery("one")
+        #expect(model.searchTask == running)
+        #expect(!running.isCancelled)
+        #expect(clock.sleeperCount == 0)
+
+        try #require(await calls.next()).reply.resume(returning: try bookResults("li1"))
+        await running.value
+        #expect(model.searchedQuery == "one")
+    }
+
+    @Test func aDiscardedModelCancelsItsSearch() async throws {
+        let requests = Locked(0)
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        var model: SearchModel? = SearchModel(
+            service: FakeSearchService { _ in
+                requests.value += 1
+                return LibrarySearchResults()
+            }, libraryID: "lib", clock: clock)
+
+        model?.setQuery("x")
+        _ = await sleeps.next()
+        let task = try #require(model?.searchTask)
+        model = nil
+        #expect(task.isCancelled)
+        #expect(clock.sleeperCount == 0)
+
+        clock.advance(by: .milliseconds(300))
+        await task.value
+        #expect(requests.value == 0)
     }
 
     @Test func aStaleResponseIsDropped() async throws {
@@ -151,7 +190,7 @@ import Testing
 
         model.setQuery(" \n ")
         #expect(model.searchTask == nil)
-        #expect(clock.pendingSleeps == 0)
+        #expect(clock.sleeperCount == 0)
         #expect(model.results.isEmpty)
         #expect(model.searchedQuery == nil)
         #expect(!model.isSearching)

@@ -67,9 +67,15 @@ public final class SearchModel {
         self.recentSearches = Array(recents.prefix(Self.maxRecentSearches))
     }
 
+    isolated deinit {
+        searchTask?.cancel()
+    }
+
     /// Sets the query as the user types and searches once it hasn't changed for ``debounce``.
-    /// A blank query clears the results at once, without a request.
+    /// A blank query clears the results at once, without a request. Setting the same text again
+    /// does nothing, so a binding that re-sets it doesn't cancel the running search.
     public func setQuery(_ text: String) {
+        guard text != query else { return }
         query = text
         search(after: debounce)
     }
@@ -108,7 +114,8 @@ public final class SearchModel {
             if let delay {
                 do { try await clock.sleep(for: delay) } catch { return }
             }
-            guard !Task.isCancelled else { return }
+            // The model may be gone (its deinit cancels this task) or a newer search started.
+            guard self != nil, !Task.isCancelled else { return }
             self?.isSearching = true
             let result: Result<LibrarySearchResults, any Error>
             do {
