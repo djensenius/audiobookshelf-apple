@@ -5,11 +5,25 @@ import SwiftUI
 
 /// Sample items and progress for the item detail previews.
 enum ItemDetailPreviewData {
-    static let book: ABSCore.LibraryItem = {
+    static let book = makeBook()
+
+    /// ``book`` with ten long tags, to check the metadata wraps at narrow widths.
+    static let longTags = makeBook(tags: [
+        "Interplanetary Romance", "Planetary Adventure Fiction", "Sword and Planet", "Early Twentieth Century",
+        "Pulp Magazine Serials", "Public Domain Classics", "Science Fantasy", "Lost Civilizations",
+        "Swashbuckling Heroes", "A Very Long Tag Without Any Natural Place To Break It Up",
+    ])
+
+    /// A Princess of Mars, with rich metadata; the parameters vary it for previews and tests.
+    static func makeBook(
+        authors: [Author] = [Author(id: "aut_burroughs", name: "Edgar Rice Burroughs")],
+        narrators: [String] = ["Grover Gardner", "Stefan Rudnicki"],
+        tags: [String] = ["Public Domain", "Pulp"],
+        duration: Double = 32_760,
+        size: Int = 412_000_000
+    ) -> ABSCore.LibraryItem {
         let metadata = BookMetadata(
-            title: "A Princess of Mars", subtitle: "Barsoom, Book 1",
-            authors: [Author(id: "aut_burroughs", name: "Edgar Rice Burroughs")],
-            narrators: ["Grover Gardner", "Stefan Rudnicki"],
+            title: "A Princess of Mars", subtitle: "Barsoom, Book 1", authors: authors, narrators: narrators,
             series: [Series(id: "ser_barsoom", name: "Barsoom", sequence: "1")],
             genres: ["Science Fiction", "Adventure", "Classics"], publishedYear: "1917",
             publisher: "A. C. McClurg",
@@ -22,12 +36,12 @@ enum ItemDetailPreviewData {
             language: "English", explicit: true, abridged: true)
         let book = Book(
             id: "book_li_barsoom_1", libraryItemId: "li_barsoom_1", metadata: metadata,
-            coverPath: "/metadata/items/li_barsoom_1/cover.jpg", tags: ["Public Domain", "Pulp"],
-            tracks: [AudioTrack(index: 1, duration: 32_760)], duration: 32_760, numTracks: 1)
+            coverPath: "/metadata/items/li_barsoom_1/cover.jpg", tags: tags,
+            tracks: [AudioTrack(index: 1, duration: duration)], duration: duration, numTracks: 1)
         return ABSCore.LibraryItem(
             id: "li_barsoom_1", libraryId: SampleLibrary.libraryID, updatedAt: 14, mediaType: .book,
-            media: .book(book), size: 412_000_000)
-    }()
+            media: .book(book), size: size)
+    }
 
     /// An ebook with no audio tracks.
     static let ebookOnly = ABSCore.LibraryItem(

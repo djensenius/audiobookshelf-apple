@@ -70,3 +70,30 @@ enum ItemDetailLoadError {
         (error as? APIError) == .notFound
     }
 }
+
+/// The banner over a retained item whose reload failed.
+struct ItemDetailRefreshFailure: Equatable {
+    /// The `L10n` key of the banner's message.
+    let messageKey: String
+    /// The reload answered 404, so the item is gone from the server and can't be played.
+    let isGone: Bool
+
+    /// `nil` unless the model's last reload failed.
+    @MainActor init?(model: ItemDetailModel) {
+        guard model.refreshFailed else { return nil }
+        isGone = ItemDetailLoadError.isNotFound(model.error)
+        messageKey = isGone ? "MessageItemDetailNotFound" : "MessageItemDetailRefreshFailed"
+    }
+}
+
+/// A Play that failed to start, for the alert.
+struct ItemDetailPlayFailure: Equatable {
+    /// The error's description, shown under the alert's title.
+    let message: String
+
+    /// `nil` for a cancellation, which isn't a failure to tell anyone about.
+    init?(error: any Error) {
+        guard !(error is CancellationError) else { return nil }
+        message = error.localizedDescription
+    }
+}

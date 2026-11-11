@@ -11,18 +11,28 @@ struct ItemDetailContent: View {
     let details: ItemDetailModel.Details
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var showsFullscreenCover = false
+    /// Here rather than in ``ItemDetailActions``, which compact and regular width build in
+    /// different places, so a size class change mid-start keeps it.
+    @State private var isStarting = false
+    @State private var playFailure: ItemDetailPlayFailure?
 
     var body: some View {
+        let refreshFailure = ItemDetailRefreshFailure(model: model)
+        let actions = ItemDetailActions(
+            model: model, isGone: refreshFailure?.isGone == true, isStarting: $isStarting,
+            playFailure: $playFailure)
         ScrollView {
             VStack(alignment: .leading, spacing: ABSSpacing.large) {
-                if model.refreshFailed {
-                    ItemDetailRefreshFailedBanner { Task { await model.load() } }
+                if let refreshFailure {
+                    ItemDetailRefreshFailedBanner(messageKey: refreshFailure.messageKey) {
+                        Task { await model.load() }
+                    }
                 }
                 if horizontalSizeClass == .compact {
                     cover(maxWidth: 240)
                         .frame(maxWidth: .infinity)
                     ItemDetailHeader(details: details)
-                    ItemDetailActions(model: model)
+                    actions
                     ItemDetailProgress(model: model)
                     ItemDetailMetadata(details: details)
                     description
@@ -30,7 +40,7 @@ struct ItemDetailContent: View {
                     HStack(alignment: .top, spacing: ABSSpacing.xLarge) {
                         VStack(alignment: .leading, spacing: ABSSpacing.large) {
                             cover(maxWidth: 300)
-                            ItemDetailActions(model: model)
+                            actions
                             ItemDetailProgress(model: model)
                         }
                         .frame(width: 300)
@@ -49,6 +59,18 @@ struct ItemDetailContent: View {
         }
         .refreshable { await model.load() }
         .absBackground()
+        .alert(
+            Text(verbatim: L10n.string("MessageItemDetailPlayFailed")),
+            isPresented: Binding {
+                playFailure != nil
+            } set: {
+                if !$0 { playFailure = nil }
+            },
+            presenting: playFailure
+        ) { _ in
+        } message: { failure in
+            Text(verbatim: failure.message)
+        }
         #if os(iOS)
             .fullScreenCover(isPresented: $showsFullscreenCover) { fullscreenCover }
         #else
@@ -153,16 +175,21 @@ private struct ItemDetailHeader: View {
 /// Play (or Resume, Play again, Missing), Read and Download.
 ///
 /// Play goes through the environment's `playItem`, which is `nil` while signed out (and until
-/// the shell provides it), so the button is disabled then. Read stays disabled until the ebook
-/// readers exist, and Download until downloads exist.
+/// the shell provides it), so the button is disabled then, and while the item is gone from the
+/// server. Read stays disabled until the ebook readers exist, and Download until downloads
+/// exist. A failed start shows an alert through `playFailure`.
 private struct ItemDetailActions: View {
     let model: ItemDetailModel
+    /// A reload answered 404.
+    let isGone: Bool
+    @Binding var isStarting: Bool
+    @Binding var playFailure: ItemDetailPlayFailure?
     @Environment(\.playItem) private var playItem
-    @State private var isStarting = false
 
     var body: some View {
         let play = ItemDetailPlayPresentation(
-            button: model.playButton, isMissing: model.isMissing, canPlay: playItem != nil && !isStarting)
+            button: model.playButton, isMissing: model.isMissing,
+            canPlay: playItem != nil && !isStarting && !isGone)
         HStack(spacing: ABSSpacing.small) {
             Button(action: start) {
                 Label {
@@ -217,10 +244,10 @@ private struct ItemDetailActions: View {
             do {
                 try await playItem(itemID: itemID, startTime: startTime)
             } catch {
-                // The player owns the error UI (#183); there's nothing to show here.
+                guard let failure = ItemDetailPlayFailure(error: error) else { return }
                 Log.playback.error(
-                    "Couldn't play \(itemID, privacy: .private(mask: .hash)): \(error.localizedDescription, privacy: .private)"
-                )
+                    "Couldn't play \(itemID, privacy: .private(mask: .hash)): \(failure.message, privacy: .private)")
+                playFailure = failure
             }
         }
     }
@@ -261,14 +288,16 @@ private struct ItemDetailProgress: View {
     }
 }
 
-/// Shown above the retained item when a reload fails.
+/// Shown above the retained item when a reload fails or finds the item gone.
 private struct ItemDetailRefreshFailedBanner: View {
+    /// `MessageItemDetailRefreshFailed`, or `MessageItemDetailNotFound` when the item is gone.
+    let messageKey: String
     let retry: () -> Void
 
     var body: some View {
         HStack(spacing: ABSSpacing.medium) {
             Label {
-                Text(verbatim: L10n.string("MessageItemDetailRefreshFailed"))
+                Text(verbatim: L10n.string(messageKey))
             } icon: {
                 Image(systemName: "exclamationmark.triangle")
                     .foregroundStyle(ABSColor.mutedForeground)

@@ -18,6 +18,17 @@ struct ItemDetailMetadataRow: Identifiable, Equatable {
 
     var id: String { labelKey }
 
+    /// What VoiceOver reads after the label when every value is text; `nil` when the row has
+    /// links, which each speak for themselves.
+    var spokenText: String? {
+        var spoken: [String] = []
+        for value in values {
+            guard case .text(let text, let alternative) = value else { return nil }
+            spoken.append(alternative ?? text)
+        }
+        return spoken.joined(separator: ", ")
+    }
+
     /// The rows for `details`, in legacy order; rows without a value are left out. Narrators,
     /// genres and tags open the library filtered by them; authors and series open their pages.
     static func rows(for details: ItemDetailModel.Details, locale: Locale) -> [ItemDetailMetadataRow] {
@@ -66,24 +77,23 @@ struct ItemDetailMetadata: View {
                         label(row)
                         values(row)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel(Text(verbatim: L10n.string(row.labelKey)))
                 }
             }
         } else {
             Grid(alignment: .topLeading, horizontalSpacing: ABSSpacing.large, verticalSpacing: ABSSpacing.small) {
                 ForEach(rows) { row in
+                    // Modifiers go on the cells: on a `GridRow` they'd make it one cell.
                     GridRow {
                         label(row)
                         values(row)
                     }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel(Text(verbatim: L10n.string(row.labelKey)))
                 }
             }
         }
     }
 
+    /// Hidden from VoiceOver: ``values(_:)`` speaks it with each value, since VoiceOver often
+    /// skips a container's label.
     private func label(_ row: ItemDetailMetadataRow) -> some View {
         Text(verbatim: L10n.string(row.labelKey))
             .font(.subheadline)
@@ -91,8 +101,9 @@ struct ItemDetailMetadata: View {
             .accessibilityHidden(true)
     }
 
-    private func values(_ row: ItemDetailMetadataRow) -> some View {
-        ItemDetailFlowLayout(spacing: ABSSpacing.small) {
+    @ViewBuilder private func values(_ row: ItemDetailMetadataRow) -> some View {
+        let label = Text(verbatim: L10n.string(row.labelKey))
+        let layout = ItemDetailFlowLayout(spacing: ABSSpacing.small) {
             // By position: a book can list the same name twice.
             ForEach(Array(row.values.enumerated()), id: \.offset) { _, value in
                 switch value {
@@ -104,10 +115,22 @@ struct ItemDetailMetadata: View {
                         Text(verbatim: name)
                     }
                     .buttonStyle(.borderless)
+                    // "Grover Gardner, Narrators, link".
+                    .accessibilityValue(label)
                 }
             }
         }
         .font(.subheadline)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        if let spoken = row.spokenText {
+            // One element: "Duration, 9 hours 6 minutes".
+            layout
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
+                .accessibilityValue(Text(verbatim: spoken))
+        } else {
+            layout
+        }
     }
 }
 
