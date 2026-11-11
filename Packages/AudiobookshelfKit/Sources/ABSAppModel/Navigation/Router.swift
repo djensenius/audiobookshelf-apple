@@ -52,6 +52,11 @@ public final class Router {
     /// UI that asks (S6) clears it, and must keep its own copy to reopen after the switch,
     /// because ``resetForIdentityChange(serverID:userID:)`` clears it too.
     public var pendingServerSwitch: DeepLink?
+    /// Search should focus its field (Cmd+F, ``requestSearchFocus()``), until the Search screen
+    /// does and calls ``clearSearchFocusRequest()``. A flag rather than a counter, so a Search
+    /// screen that appears after the request (the tab was just selected) can tell it is unhandled.
+    /// Never stored in a ``Snapshot``.
+    public private(set) var isSearchFocusRequested = false
     /// One typed path per tab. Bind stacks through ``subscript(path:)``.
     public private(set) var paths: [AppTab: [Route]] = [:]
 
@@ -106,6 +111,21 @@ public final class Router {
     /// Sets ``pendingLibraryID``; nothing else changes until the scene resolves it.
     public func requestLibrary(id: String) {
         pendingLibraryID = id
+    }
+
+    /// Asks for the search field (Cmd+F): selects Search at its root, where the field is, and
+    /// sets ``isSearchFocusRequested`` so the Search screen focuses it, even if it is already shown.
+    /// Like ``open(_:)``, it dismisses the full player, which would cover the field.
+    public func requestSearchFocus() {
+        isFullPlayerPresented = false
+        selectedTab = .search
+        self[path: .search] = []
+        isSearchFocusRequested = true
+    }
+
+    /// Drops ``isSearchFocusRequested`` once the Search screen has focused its field.
+    public func clearSearchFocusRequest() {
+        isSearchFocusRequested = false
     }
 
     /// Shows library `id` in this scene.
@@ -170,6 +190,7 @@ public final class Router {
     func resetNavigation() {
         clearPendingPlayLink()
         pendingSearchQuery = nil
+        isSearchFocusRequested = false
         selectedTab = .home
         libraryID = nil
         libraryKind = nil
