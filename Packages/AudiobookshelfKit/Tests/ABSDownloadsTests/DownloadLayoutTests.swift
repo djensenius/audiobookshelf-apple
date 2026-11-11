@@ -77,6 +77,9 @@ import Testing
         "00000000-0000-0000-0000-0000000000B2/li_1/01.mp3", "00000000-0000-0000-0000-0000000000A1/li_10/01.mp3",
         "00000000-0000-0000-0000-0000000000A1/li_1", "00000000-0000-0000-0000-0000000000A1/li_1/a/01.mp3",
         "00000000-0000-0000-0000-0000000000A1/li_1/episodes/ep_1/x/01.mp3",
+        // A `/` followed by a combining mark still separates components.
+        "00000000-0000-0000-0000-0000000000A1/li_1/a/\u{0301}01.mp3",
+        "00000000-0000-0000-0000-0000000000A1/li_1/\u{0301}x/01.mp3",
     ])
     func refusesToReserveUnrelatedPaths(path: String) {
         #expect(throws: DownloadLayout.LayoutError.unrelatedPath(path)) {
@@ -99,6 +102,8 @@ import Testing
         (".", "file"),
         ("", "file"),
         (".hidden.mp3", "hidden.mp3"),
+        (".\u{0301}hidden.mp3", "\u{0301}hidden.mp3"),
+        ("..\u{0301}.\u{0301}", "\u{0301}.\u{0301}"),
         ("a/b\\c:d.mp3", "a_b_c_d.mp3"),
         ("bell\u{07}\u{0}\nname\u{7F}.mp3", "bell___name_.mp3"),
         ("Café.m4b", "Café.m4b"),
@@ -153,6 +158,12 @@ import Testing
             #expect(component.hasSuffix(" (2).mp3"))
             #expect(component.dropLast(8).allSatisfy { String($0) == unit })
         }
+        // A collision number never pushes a full-length name over the limit.
+        let full = String(repeating: "x", count: 251) + ".mp3"
+        let numbered = DownloadLayout.numberedFilename(full, number: 1000)
+        #expect(numbered.utf8.count == 255)
+        #expect(numbered.hasSuffix("x (1000).mp3"))
+        #expect(!numbered.unicodeScalars.contains("/"))
         // An over-long "extension" stays part of the shortened stem.
         let noExtension = "a." + String(repeating: "b", count: 300)
         #expect(DownloadLayout.sanitisedFilename(noExtension).utf8.count == 255)

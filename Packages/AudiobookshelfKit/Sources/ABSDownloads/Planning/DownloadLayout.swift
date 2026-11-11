@@ -11,7 +11,7 @@ import Foundation
 ///
 /// IDs are escaped losslessly and case-safely, so different IDs always get different folders,
 /// even on a case-insensitive volume. Filenames come from the server and are cleaned (see
-/// ``sanitisedFilename(_:suffix:)``). Names that clash in one folder, such as `01.mp3` from two
+/// ``sanitisedFilename(_:)``). Names that clash in one folder, such as `01.mp3` from two
 /// disc folders, get ` (2)`, ` (3)` and so on before the extension. Clashes are found with
 /// case folding (`Straße` and `STRASSE` clash), because the Mac's default volume ignores case.
 /// Every path is checked with ``DownloadLocations/fileURL(forRelativePath:)``.
@@ -76,8 +76,12 @@ public struct DownloadLayout: Sendable {
 
     private mutating func reserveExisting(_ path: String) throws {
         _ = try locations.fileURL(forRelativePath: path)
-        guard path.hasPrefix(folder + "/") else { throw LayoutError.unrelatedPath(path) }
-        let components = path.dropFirst(folder.count + 1).split(separator: "/", omittingEmptySubsequences: false)
+        // Split on scalars, not Characters: a `/` followed by a combining mark is still a separator.
+        let prefix = (folder + "/").unicodeScalars
+        guard path.unicodeScalars.starts(with: prefix) else { throw LayoutError.unrelatedPath(path) }
+        let components = path.unicodeScalars.dropFirst(prefix.count)
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .map { String(String.UnicodeScalarView($0)) }
         let directory: String
         switch components.count {
         case 1:
@@ -87,7 +91,7 @@ public struct DownloadLayout: Sendable {
         default:
             throw LayoutError.unrelatedPath(path)
         }
-        usedNames[directory, default: []].insert(Self.collisionKey(String(components[components.count - 1])))
+        usedNames[directory, default: []].insert(Self.collisionKey(components[components.count - 1]))
     }
 
     /// The cover's path, `<folder>/cover.jpg`.
@@ -115,7 +119,7 @@ public struct DownloadLayout: Sendable {
         var candidate = name
         var number = 2
         while used.contains(Self.collisionKey(candidate)) {
-            candidate = Self.sanitisedFilename(name, suffix: " (\(number))")
+            candidate = Self.numberedFilename(name, number: number)
             number += 1
         }
         let path = try checked("\(directory)/\(candidate)")
@@ -139,14 +143,22 @@ public struct DownloadLayout: Sendable {
 
     /// `filename` as one safe path component: `/`, `\`, `:`, control and format characters
     /// (such as U+202E RIGHT-TO-LEFT OVERRIDE, U+200B and U+FEFF) and line and paragraph
-    /// separators become `_` (zero-width joiners and non-joiners are kept), leading dots are dropped (so it is never `.`, `..` or hidden), and it is shortened to
-    /// ``maxComponentBytes`` UTF-8 bytes, keeping the extension and never splitting a
-    /// character. An empty result becomes `file`.
-    ///
-    /// - Parameter suffix: text put before the extension, such as ` (2)`; the stem is shortened
-    ///   to make room for it.
-    public static func sanitisedFilename(_ filename: String, suffix: String = "") -> String {
-        let scalars = filename.unicodeScalars.map { scalar -> Unicode.Scalar in
+    /// separators become `_` (zero-width joiners and non-joiners are kept), leading dots are
+    /// dropped (so it is never `.`, `..` or hidden, even when a combining mark follows the dot),
+    /// and it is shortened to ``maxComponentBytes`` UTF-8 bytes, keeping the extension and never
+    /// splitting a character. An empty result becomes `file`.
+    public static func sanitisedFilename(_ filename: String) -> String {
+        sanitised(filename, suffix: "")
+    }
+
+    /// The sanitised `name` with ` (number)` before its extension, shortened to fit.
+    static func numberedFilename(_ name: String, number: Int) -> String {
+        sanitised(name, suffix: " (\(number))")
+    }
+
+    /// `suffix` is only ever ` (n)`, short and safe; the stem is shortened to make room for it.
+    private static func sanitised(_ filename: String, suffix: String) -> String {
+        var scalars = filename.unicodeScalars.map { scalar -> Unicode.Scalar in
             let unsafe = scalar == "/" || scalar == "\\" || scalar == ":"
             switch scalar.properties.generalCategory {
             // Zero-width (non-)joiners are format characters too, but emoji and scripts need them.
@@ -155,8 +167,9 @@ public struct DownloadLayout: Sendable {
             default: return unsafe ? "_" : scalar
             }
         }
+        // Scalars, not Characters: `.` plus a combining mark is one Character but still hides a file.
+        scalars.removeFirst(scalars.prefix { $0 == "." }.count)
         var cleaned = String(String.UnicodeScalarView(scalars))
-        while cleaned.hasPrefix(".") { cleaned.removeFirst() }
         if cleaned.isEmpty { cleaned = "file" }
 
         var stem = cleaned
