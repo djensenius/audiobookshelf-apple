@@ -37,6 +37,8 @@ public final class NoBackgroundActivity: BackgroundActivity {
 /// the end only `/play` and loading the stream remain.
 struct PreparedNextItem: Sendable {
     let key: MediaKey
+    /// Waited for ahead, so the network monitor knows the path by the end; the advance itself
+    /// checks ``StreamingPolicyChecking/currentStreamingDecision()`` instead.
     let decision: NetworkDecision
     /// The server progress, fetched as a start does (`GET /api/me/progress/…`).
     let serverProgress: Result<MediaProgress?, any Error>

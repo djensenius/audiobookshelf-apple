@@ -121,8 +121,8 @@ connection change; each preparation replaces the one in flight. A resume re-arms
 the near-end refreshes (refreshing at once inside them), and so does a seek out
 of them. After `.ended`, only the bounded wait for closes, `/play` and loading
 the stream are left. Fetches happen after `.ended` only when no preparation
-younger than 10 minutes is ready. The streaming decision is checked once more,
-synchronously, for the path known at the end. The coordinator holds an injected
+younger than 10 minutes is ready. Only the streaming decision for the path and
+setting known at the end counts, checked synchronously. The coordinator holds an injected
 `BackgroundActivity` around that work; `NoBackgroundActivity` is the default.
 
 Any user action, or a pause from an `.ended` observer such as the sleep timer,
@@ -130,7 +130,7 @@ cancels the advance before its start. Once the start has begun it is an ordinary
 play: a pause loads the next item paused, and a detach leaves it to finish. A
 blocked streaming decision keeps the item queued and never consents on the
 user's behalf. A queued item removed during the close wait gets no `/play` and
-is left unloaded. The coordinator and the advancer hold each other weakly, so
+is left unloaded (#338). The coordinator and the advancer hold each other weakly, so
 the owner must retain the advancer.
 
 App wiring (the advancer, `UIApplication.beginBackgroundTask`, progress and

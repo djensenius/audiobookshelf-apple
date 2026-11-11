@@ -126,7 +126,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
 
     func prepareNext(after key: MediaKey) async -> PreparedNextItem? {
         guard key == current else { return nil }
-        if preparedNext(after: key) == nil, task == nil { recompute() }
+        // A preparation too old to use means its listing is as old: fetch that again too.
+        if preparedNext(after: key) == nil, task == nil { recompute(refetchListing: prepared != nil) }
         while preparedNext(after: key) == nil, let running = task {
             await running.value
             if task == running { break }

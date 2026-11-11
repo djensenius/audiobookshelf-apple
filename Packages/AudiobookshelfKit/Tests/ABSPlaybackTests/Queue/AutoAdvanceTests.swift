@@ -219,32 +219,31 @@ struct AutoAdvanceTests {
     func blockedAdvanceKeepsItemQueued(_ decision: NetworkDecision) async {
         a.enqueue("B")
         await a.play("A")
-        a.h.policy.decision = decision
-        a.advancer.connectionDidChange()
-        await a.advancer.waitForPreparation()
-
-        await a.finish()
-
-        #expect(a.service.starts == ["A"])
-        #expect(a.queue.items.map(\.libraryItemID) == ["B"])
-        #expect(coordinator.error?.isStreamingBlocked(for: a.key("B")) == true)
-        #expect(a.activity.active == 0)
-    }
-
-    /// H1: the prepared decision is stale; the path known at the end must allow it too.
-    @Test func currentPolicyIsCheckedAtTheEnd() async {
-        a.enqueue("B")
-        await a.play("A")
         let checks = a.h.policy.checks
-        a.h.policy.currentDecision = .askUser(.cellular)
+        a.h.policy.currentDecision = decision
 
         await a.finish()
 
         #expect(a.h.policy.checks == checks)
         #expect(a.service.starts == ["A"])
         #expect(a.queue.items.map(\.libraryItemID) == ["B"])
-        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: a.key("B")))
+        #expect(coordinator.error?.isStreamingBlocked(for: a.key("B")) == true)
         #expect(a.activity.active == 0)
+    }
+
+    /// The prepared decision is stale: prepared on cellular ("ask"), allowed now (Wi-Fi joined).
+    @Test func preparedAskUserAdvancesWhenNowAllowed() async {
+        a.enqueue("B")
+        await a.play("A")
+        a.h.policy.decision = .askUser(.cellular)
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.h.policy.currentDecision = .allowed
+
+        await a.finish()
+
+        #expect(coordinator.mediaKey == a.key("B"))
+        #expect(coordinator.error == nil)
     }
 
     /// L3: B left the queue while the ended session's close was in flight: no `/play` for it.

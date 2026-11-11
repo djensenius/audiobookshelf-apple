@@ -78,19 +78,23 @@ struct AutoAdvancePreparationTests {
         #expect(a.h.engine.loads.last?.time == 2400)
     }
 
-    /// A preparation older than ``PlaybackQueueAdvancer/maximumPreparationAge`` is redone at the end.
+    /// A preparation older than ``PlaybackQueueAdvancer/maximumPreparationAge`` is redone at the
+    /// end, listing included: e2 was finished elsewhere meanwhile.
     @Test(arguments: [599.0, 601.0])
     func oldPreparationIsRedoneAtTheEnd(age: TimeInterval) async {
-        a.enqueue("B")
-        await a.play("A")
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
         a.h.clock.advance(by: age)
-        a.setFetchedProgress("B", time: 2400)
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e2"])
+        a.setFetchedProgress("P", time: 2400)
         let before = a.fetches
 
         let atLoad = await a.finish()
 
         let isStale = age > PlaybackQueueAdvancer.maximumPreparationAge
         #expect(atLoad?.progress == before.progress + (isStale ? 1 : 0))
+        #expect(atLoad?.listings == before.listings + (isStale ? 1 : 0))
+        #expect(a.coordinator.mediaKey == a.key("P", episode: isStale ? "e3" : "e2"))
         #expect(a.h.engine.loads.last?.time == (isStale ? 2400 : 0))
         #expect(a.activity.active == 0)
     }
@@ -101,10 +105,10 @@ struct AutoAdvancePreparationTests {
         await a.play("A")
         let gate = Gate()
         a.h.policy.gate = gate
-        a.h.policy.decision = .denied(.cellular)
+        a.setFetchedProgress("B", time: 1000)
         a.advancer.connectionDidChange()
         await yieldUntil { a.h.policy.checks == 3 }
-        a.h.policy.decision = .allowed
+        a.setFetchedProgress("B", time: 2000)
         a.advancer.connectionDidChange()
         await a.advancer.waitForPreparation()
 
@@ -113,7 +117,7 @@ struct AutoAdvancePreparationTests {
         await a.finish()
 
         #expect(a.coordinator.mediaKey == a.key("B"))
-        #expect(a.coordinator.error == nil)
+        #expect(a.h.engine.loads.last?.time == 2000)
     }
 
     @Test func queueChangesPrepareTheNewHeadOnly() async {

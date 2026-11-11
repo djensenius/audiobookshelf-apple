@@ -894,14 +894,12 @@ public final class PlaybackCoordinator {
         guard let next, !Task.isCancelled, nextItemProvider === provider,
             isAdvancing(after: key, generation: ended, intent: intent)
         else { return }
-        // The prepared decision may be stale: the path known now must allow it too (no waiting).
-        for decision in [policy.currentStreamingDecision(), next.decision] {
-            switch decision {
-            case .allowed: continue
-            // Nobody can agree to a metered network at the lock screen; the item stays queued.
-            case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: next.key))
-            case .denied(let reason): return block(.streamingNotAllowed(reason, key: next.key))
-            }
+        // The path and setting now decide, not the prepared (possibly stale) decision; no waiting.
+        switch policy.currentStreamingDecision() {
+        case .allowed: break
+        // Nobody can agree to a metered network at the lock screen; the item stays queued.
+        case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: next.key))
+        case .denied(let reason): return block(.streamingNotAllowed(reason, key: next.key))
         }
         await start(key: next.key, startTime: nil, prepared: next)
     }
@@ -1100,7 +1098,7 @@ public final class PlaybackCoordinator {
         await waitForCloses()
         guard self.generation == generation else { return nil }
         // The next item changed during the wait (removed from the queue): no `/play`; the start
-        // ends as a cancelled one, with the item unloaded.
+        // ends as a cancelled one, with the item unloaded (#338).
         if let prepared, nextItemProvider?.isStillNext(prepared.key) == false { throw CancellationError() }
         let sessions = self.sessions
         let progressStore = self.progressStore
