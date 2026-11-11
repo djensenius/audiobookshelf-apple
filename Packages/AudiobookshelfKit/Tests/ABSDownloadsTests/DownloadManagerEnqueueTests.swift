@@ -306,6 +306,84 @@ import Testing
         #expect(result == .started(record.id))
     }
 
+    /// Server sizes too big to add up need `Int64.max`, which never fits, instead of trapping.
+    @Test func hugeSizesSaturateTheRequirement() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book(
+            files: [
+                LibraryItemFixtures.BookFile(ino: "101", path: "/audiobooks/Dune/01.mp3", size: .max),
+                LibraryItemFixtures.BookFile(ino: "102", path: "/audiobooks/Dune/02.mp3", size: 1),
+            ], ebook: nil)
+        fixture.capacity.set(1_000_000)
+
+        await #expect(throws: DownloadManagerError.insufficientStorage(required: .max, available: 1_000_000)) {
+            try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+        }
+    }
+
+    /// Resuming a paused record needs its remaining bytes plus the headroom, like a new one.
+    @Test func aStoppedRecordNeedsTheSpaceToResume() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let first = try #require(try await fixture.store.record(id: recordID)?.parts.first)
+        try await fixture.store.completePart(partID: first.id, finalBytes: first.expectedBytes)
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        let required = Self.bookBytes - first.expectedBytes + DownloadManager.storageHeadroom
+        fixture.capacity.set(required - 1)
+
+        await #expect(throws: DownloadManagerError.insufficientStorage(required: required, available: required - 1)) {
+            try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+        }
+        #expect(await fixture.engine.resumed.isEmpty)
+        #expect(try await fixture.store.record(id: recordID)?.state == .paused)
+    }
+
+    /// A cover another episode's record has fetched, while that record failed, is carried into
+    /// the next episode's record as a completed part, so its local item gets the cover.
+    @Test func aFetchedCoverOfAFailedRecordIsCarried() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.podcast()
+        guard
+            case .started(let firstID) = try await manager.enqueue(
+                item: item, episodeID: "ep_1", connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let cover = try #require(try await fixture.store.record(id: firstID)?.parts.first { $0.kind == .cover })
+        let file = try fixture.locations.fileURL(forRelativePath: cover.destinationRelativePath)
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("cover".utf8).write(to: file)
+        try await fixture.store.completePart(partID: cover.id, finalBytes: 5)
+        try await fixture.store.setState(.failed, forRecord: firstID)
+
+        _ = try await manager.enqueue(item: item, episodeID: "ep_2", connectionID: fixture.connectionID)
+
+        var second = try #require(try await fixture.store.record(key: fixture.key(item, episodeID: "ep_2")))
+        let carried = try #require(second.parts.first { $0.kind == .cover })
+        #expect(carried.id != cover.id)
+        #expect(carried.state == .completed)
+        #expect(carried.destinationRelativePath == cover.destinationRelativePath)
+        #expect(carried.bytesWritten == 5)
+        // Finalising the episode attaches the carried cover.
+        for index in second.parts.indices where second.parts[index].kind == .audio {
+            second.parts[index].state = .completed
+            second.parts[index].bytesWritten = second.parts[index].expectedBytes
+        }
+        let local = try await fixture.localItems.upsertFromDownload(second)
+        #expect(local.coverRelativePath == cover.destinationRelativePath)
+    }
+
     @Test func planErrorsAreMapped() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()
@@ -398,6 +476,67 @@ import Testing
         #expect(
             await events.next { _ in true }
                 == .completed(recordID: recordID, itemID: itemID, key: fixture.key(item)))
+    }
+
+    /// Expected lengths too big to add up as `Int64` still make a progress fraction.
+    @Test func hugeExpectedLengthsDontOverflowProgress() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        try await manager.start()
+        let item = LibraryItemFixtures.book(ebook: nil)
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let parts = try #require(try await fixture.store.record(id: recordID)).parts
+        let events = await manager.events()
+        let huge: Int64 = 1 << 62
+        let partProgress = parts.prefix(3).map {
+            DownloadProgress(partID: $0.id, recordID: recordID, bytesWritten: 1_000, expectedBytes: huge)
+        }
+
+        fixture.engine.progressContinuation.yield(partProgress[0])
+        _ = await events.nextProgress()
+        _ = await fixture.clock.started.first { _ in true }
+        fixture.engine.progressContinuation.yield(partProgress[1])
+        fixture.engine.progressContinuation.yield(partProgress[2])
+        _ = await fixture.checkpoints.first { $0 == .progressHandled(partProgress[2]) }
+        fixture.clock.fire()
+
+        #expect(
+            await events.nextProgress()
+                == .progress(recordID: recordID, fraction: 3_000 / (3 * Double(huge)), bytes: 3_000))
+    }
+
+    /// Progress of a part handled after its completion was read is stale: the stored final
+    /// size is kept.
+    @Test func progressAfterAPartCompletedIsIgnored() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        try await manager.start()
+        let item = LibraryItemFixtures.book(ebook: nil)
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let parts = try #require(try await fixture.store.record(id: recordID)).parts
+        let events = await manager.events()
+        try await fixture.store.completePart(partID: parts[0].id, finalBytes: 1_000)
+        fixture.engine.updateContinuation.yield(.partCompleted(partID: parts[0].id, recordID: recordID))
+        _ = await events.next { if case .recordChanged = $0 { true } else { false } }
+
+        fixture.engine.progressContinuation.yield(
+            DownloadProgress(partID: parts[0].id, recordID: recordID, bytesWritten: 500, expectedBytes: 900))
+        fixture.engine.progressContinuation.yield(
+            DownloadProgress(partID: parts[1].id, recordID: recordID, bytesWritten: 200, expectedBytes: 2_000))
+
+        #expect(await events.nextProgress() == .progress(recordID: recordID, fraction: 0.2, bytes: 1_200))
     }
 
     /// A failure the engine retries changes the record but isn't reported as a failure.
