@@ -26,19 +26,29 @@ import SwiftUI
 /// The gate must not switch away on
 /// ``AccountState/restoring``, which resuming a saved server passes through. Removing the view
 /// cancels the flow, but a resume it started isn't stopped and can still make that account
-/// active. Showing this flow while already signed in requires a lifecycle-managed account
-/// change; that account-page integration is separate.
+/// active.
+///
+/// While signed in (adding a server from the server list), pass the `lifecycle`: each sign-in is
+/// then a lifecycle-managed account change, which keeps the other accounts' sessions. The flow
+/// starts at a new server's address, and `onCancel` adds a Cancel button where there's no Back.
 struct ConnectFlowView: View {
     @State private var model: ConnectViewModel
     private let onFinish: () -> Void
+    private let onCancel: (() -> Void)?
 
-    init(accounts: AccountManager, onFinish: @escaping () -> Void = {}) {
-        _model = State(initialValue: ConnectViewModel(accounts: accounts))
+    init(
+        accounts: AccountManager, lifecycle: SessionLifecycle? = nil, onCancel: (() -> Void)? = nil,
+        onFinish: @escaping () -> Void = {}
+    ) {
+        let model = ConnectViewModel(accounts: accounts, lifecycle: lifecycle)
+        if lifecycle != nil { model.addServer() }
+        _model = State(initialValue: model)
         self.onFinish = onFinish
+        self.onCancel = onCancel
     }
 
     var body: some View {
-        ConnectFlowStack(model: model, onFinish: onFinish)
+        ConnectFlowStack(model: model, onFinish: onFinish, onCancel: onCancel)
     }
 }
 
@@ -46,6 +56,7 @@ struct ConnectFlowView: View {
 struct ConnectFlowStack: View {
     let model: ConnectViewModel
     var onFinish: () -> Void = {}
+    var onCancel: (() -> Void)?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -60,6 +71,12 @@ struct ConnectFlowStack: View {
                                 model.goBack()
                             } label: {
                                 Text(verbatim: L10n.string(model.isBusy ? "ButtonCancel" : "ButtonBack"))
+                            }
+                        }
+                    } else if let onCancel, !model.isBusy {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button(action: onCancel) {
+                                Text(verbatim: L10n.string("ButtonCancel"))
                             }
                         }
                     }

@@ -47,13 +47,20 @@ public protocol ConnectBackend {
 
 /// The app's ``ConnectBackend``: validates with ``ServerValidator`` and signs in through
 /// ``AccountManager``, which saves the session and the custom headers.
+///
+/// With a `lifecycle`, the flow runs while signed in (adding a server from the Account tab): a
+/// sign-in or resume is an account change (``SessionLifecycle/performAccountChange(_:)``), so the
+/// running session ends first, and the other accounts keep their sessions; a removal goes
+/// through ``SessionLifecycle/removeAccount(_:)``.
 struct AccountConnectBackend: ConnectBackend {
     let accounts: AccountManager
     private let validator: ServerValidator
+    private let lifecycle: SessionLifecycle?
 
-    init(accounts: AccountManager, validator: ServerValidator = ServerValidator()) {
+    init(accounts: AccountManager, validator: ServerValidator = ServerValidator(), lifecycle: SessionLifecycle? = nil) {
         self.accounts = accounts
         self.validator = validator
+        self.lifecycle = lifecycle
     }
 
     var connections: [ServerConnectionDTO] { accounts.connections }
@@ -63,16 +70,20 @@ struct AccountConnectBackend: ConnectBackend {
     }
 
     func signIn(to server: ConnectServer, username: String, password: String) async throws {
-        try await accounts.connect(local: Self.validated(server), username: username, password: password)
+        let server = try Self.validated(server)
+        try await changingAccount {
+            try await accounts.connect(local: server, username: username, password: password)
+        }
     }
 
     func signIn(openIDTo server: ConnectServer, authenticator: any WebAuthenticator) async throws {
-        try await accounts.connect(oidc: Self.validated(server), authenticator: authenticator)
+        let server = try Self.validated(server)
+        try await changingAccount { try await accounts.connect(oidc: server, authenticator: authenticator) }
     }
 
     func resume(_ id: UUID) async throws -> Bool {
         do {
-            try await accounts.switch(to: id)
+            try await changingAccount { try await accounts.switch(to: id) }
         } catch AccountError.notSignedIn {
             return false
         }
@@ -88,7 +99,19 @@ struct AccountConnectBackend: ConnectBackend {
 
     func remove(_ id: UUID) async throws {
         // An OpenID end-session URL isn't opened from the connect screen.
-        _ = try await accounts.remove(id)
+        if let lifecycle {
+            _ = try await lifecycle.removeAccount(id)
+        } else {
+            _ = try await accounts.remove(id)
+        }
+    }
+
+    private func changingAccount(_ body: @MainActor () async throws -> Void) async throws {
+        if let lifecycle {
+            try await lifecycle.performAccountChange(body)
+        } else {
+            try await body()
+        }
     }
 
     private static func validated(_ server: ConnectServer) throws -> ValidatedServer {

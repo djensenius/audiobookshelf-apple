@@ -431,6 +431,23 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
+    @Test func accountChangesChosenFromAnAccountThatHasGoneDoNothing() async throws {
+        let harness = Harness()
+        try await harness.started()
+        // A sign-out and a second switch, chosen from A (say, in another window) before the switch
+        // to B ended it. Each checks at its turn in the queue, so running them in order is the same.
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID, from: identityA)
+        let url = await harness.lifecycle.signOut(of: identityA)
+        try await harness.lifecycle.switchAccount(to: identityA.connectionID, from: identityA)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        #expect(url == nil)
+        #expect(harness.log.count(of: "accounts.switch(b)") == 1)
+        #expect(harness.log.count(of: "accounts.switch(a)") == 0)
+        #expect(harness.log.count(of: "accounts.logout") == 0)
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
     @Test func switchToTheActiveConnectionDoesNothing() async throws {
         let harness = Harness()
         try await harness.started()

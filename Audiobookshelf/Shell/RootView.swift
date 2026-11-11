@@ -23,6 +23,10 @@ struct RootView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var pendingLink: PendingLink?
+    /// How many links have arrived, so a link reopened after a switch can't replace a newer one.
+    @State private var receivedLinks = 0
+    /// Set when a switch ends signed out; the old shell, which would have said so, is gone.
+    @State private var switchSignedOut = false
 
     var body: some View {
         content
@@ -30,6 +34,15 @@ struct RootView: View {
             .environment(accounts)
             .environment(\.serverID, SceneContent(lifecycle.gate).serverID)
             .task { await lifecycle.start() }
+            .onChange(of: lifecycle.gate) { old, new in
+                if old.signsOutSwitch(to: new) { switchSignedOut = true }
+            }
+            .alert(Text(verbatim: L10n.string("MessageSwitchServerSignedOut")), isPresented: $switchSignedOut) {
+                Button(role: .cancel) {
+                } label: {
+                    Text(verbatim: L10n.string("ButtonOk"))
+                }
+            }
             .onChange(of: scenePhase) { _, phase in
                 Task { await lifecycle.handle(scenePhase: SessionScenePhase(phase)) }
             }
@@ -48,9 +61,10 @@ struct RootView: View {
             .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
     }
 
-    /// One link waits at a time: the last one received wins, including a link reopened after a
-    /// confirmed server switch.
+    /// One link waits at a time: the last one received wins. A link reopened after a confirmed
+    /// server switch counts as received when it was confirmed (``LinkReopener``).
     private func receive(_ link: DeepLink) {
+        receivedLinks += 1
         pendingLink = PendingLink(link, arrivingAt: lifecycle.gate, epoch: lifecycle.linkEpoch)
     }
 
@@ -81,7 +95,7 @@ struct RootView: View {
             // the link carries the new account's epoch and reaches the new host.
             SceneRouterHost(
                 identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil),
-                reopen: { receive($0) }
+                reopen: LinkReopener(receivedLinks: { receivedLinks }, receive: { receive($0) })
             )
             .id(identity)
         case .storeUnavailable:

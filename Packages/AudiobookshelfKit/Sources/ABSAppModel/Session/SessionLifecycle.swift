@@ -183,14 +183,21 @@ public final class SessionLifecycle {
 
     /// Flushes and ends the session, then signs out. Does nothing when already signed out.
     /// From inside a transition, use ``requestSignOut(of:)`` instead.
+    /// - Parameter identity: The account the user chose to sign out of, when the request comes
+    ///   from its screen. When the sign-out's turn comes, it does nothing unless that account's
+    ///   session is still running, so a sign-out queued behind a switch (say, from another
+    ///   window) can't sign out the account switched to.
     /// - Returns: An OpenID end-session URL to open, if the server returned one.
     @discardableResult
-    public func signOut() async -> URL? {
+    public func signOut(of identity: SessionIdentity? = nil) async -> URL? {
         if rejectReentrant("signOut()") {
             if let context = session?.context ?? beginning { requestSignOut(of: context) }
             return nil
         }
-        return await serialized { await self.performSignOut() }
+        return await serialized {
+            guard await self.isStillRunning(identity) else { return nil }
+            return await self.performSignOut()
+        }
     }
 
     /// Queues a sign-out of the session `context` describes, after the transitions already
@@ -220,10 +227,16 @@ public final class SessionLifecycle {
     /// Flushes and ends the session, shows ``AuthGate/switching(from:)``, then switches to
     /// another saved connection and starts its session. If the switch fails and the account
     /// stays on the old connection, its session starts again.
-    public func switchAccount(to connectionID: UUID) async throws {
+    ///
+    /// Returning doesn't mean `connectionID` is active: the server can reject its saved session
+    /// or its version, which signs out (``AuthGate/connect``). Check ``gate``.
+    /// - Parameter identity: The account the switch was chosen from, when the request comes from
+    ///   its screen. When the switch's turn comes, it does nothing unless that account's session
+    ///   is still running, so of two switches chosen from the same account, only the first runs.
+    public func switchAccount(to connectionID: UUID, from identity: SessionIdentity? = nil) async throws {
         if rejectReentrant("switchAccount(to:)") { return }
         let result: Result<Void, any Error> = await serialized {
-            await self.endStaleSession()
+            guard await self.isStillRunning(identity) else { return .success(()) }
             if self.session?.context.identity.connectionID == connectionID { return .success(()) }
             await self.endForAccountChange()
             let result: Result<Void, any Error>
@@ -320,6 +333,17 @@ public final class SessionLifecycle {
         let url = await source.logout()
         await reconcile()
         return url
+    }
+
+    /// Whether the session of `identity`, the account a sign-out or switch was chosen from, is
+    /// still the one running, ending a session the source has left first. `nil` matches any.
+    private func isStillRunning(_ identity: SessionIdentity?) async -> Bool {
+        await endStaleSession()
+        guard let identity, session?.context.identity != identity else { return true }
+        Log.auth.info("Ignored an account change chosen from an account that is no longer signed in")
+        // Follows the source, in case the stale session just ended.
+        await reconcile()
+        return false
     }
 
     private func finishAccountChange() async {

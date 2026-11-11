@@ -122,6 +122,7 @@ import Testing
     @Test(arguments: [
         "ButtonSwitchServer", "HeaderBrowse", "HeaderOpenLinkOnAnotherServer", "LabelMiniPlayerAccessibility",
         "LabelMiniPlayerHint", "MessageStoreUnavailable", "MessageStoreUnavailableHelp", "MessageSwitchServerForLink",
+        "MessageSwitchServerSignedOut",
     ])
     func shellStringsResolve(key: String) {
         #expect(L10n.string(key) != key)

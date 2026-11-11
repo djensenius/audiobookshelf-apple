@@ -16,7 +16,7 @@ struct SceneRouterHost: View {
     @Binding var pendingLink: DeepLink?
     /// Hands a link back to the root, which holds it for the next account's host; used after a
     /// confirmed server switch (``ServerSwitchConfirmation``).
-    let reopen: @MainActor (DeepLink) -> Void
+    let reopen: LinkReopener
 
     @State private var navigation: SceneNavigation
     @SceneStorage private var snapshot: Data?
@@ -25,7 +25,7 @@ struct SceneRouterHost: View {
 
     init(
         identity: SessionIdentity, player: any PlayerSlotState, pendingLink: Binding<DeepLink?>,
-        reopen: @escaping @MainActor (DeepLink) -> Void = { _ in }
+        reopen: LinkReopener = LinkReopener()
     ) {
         self.player = player
         _pendingLink = pendingLink

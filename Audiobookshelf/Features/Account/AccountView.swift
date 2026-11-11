@@ -72,12 +72,14 @@ struct AccountView: View {
 }
 
 /// The saved server connections (`Route.servers`): selecting another one switches to it through
-/// the session lifecycle. A server is added from the connect screen, after signing out.
+/// the session lifecycle. Adding a server signs in to it with the connect flow in a sheet, as an
+/// account change, so the account signed in now keeps its session to switch back to.
 struct ServersView: View {
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @State private var switchingTo: UUID?
     @State private var switchFailed = false
+    @State private var isAddingServer = false
 
     var body: some View {
         Form {
@@ -95,13 +97,31 @@ struct ServersView: View {
                     )
                     .accessibilityAddTraits(isActive ? .isSelected : [])
                 }
-            } footer: {
-                Text(verbatim: L10n.string("MessageAddServerAfterLogout"))
+            }
+            Section {
+                Button {
+                    isAddingServer = true
+                } label: {
+                    Label {
+                        Text(verbatim: L10n.string("ButtonAddNewServer"))
+                    } icon: {
+                        Image(systemName: "plus")
+                    }
+                }
+                .disabled(switchingTo != nil || lifecycle?.acceptsAccountChanges != true)
             }
         }
         .formStyle(.grouped)
         .navigationTitle(Text(verbatim: L10n.string("HeaderServers")))
         .switchServerFailedAlert(isPresented: $switchFailed)
+        .sheet(isPresented: $isAddingServer) {
+            if let accounts, let lifecycle {
+                // Signing in replaces the shell, and this sheet with it.
+                ConnectFlowView(
+                    accounts: accounts, lifecycle: lifecycle, onCancel: { isAddingServer = false },
+                    onFinish: { isAddingServer = false })
+            }
+        }
     }
 
     private func switchServer(to id: UUID) {

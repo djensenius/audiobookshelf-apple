@@ -118,12 +118,17 @@ public final class ConnectViewModel {
         phase = backend.connections.isEmpty ? .address : .servers
     }
 
-    /// The app's flow: validates with `validator` and signs in through `accounts`.
+    /// The app's flow: validates with `validator` and signs in through `accounts`. Pass the
+    /// `lifecycle` to run it while signed in, so a sign-in ends the running session first and
+    /// keeps the other accounts' sessions.
     public convenience init(
         accounts: AccountManager, validator: ServerValidator = ServerValidator(),
-        localNetwork: any LocalNetworkAccessChecking = SystemLocalNetworkAccess()
+        localNetwork: any LocalNetworkAccessChecking = SystemLocalNetworkAccess(),
+        lifecycle: SessionLifecycle? = nil
     ) {
-        self.init(backend: AccountConnectBackend(accounts: accounts, validator: validator), localNetwork: localNetwork)
+        self.init(
+            backend: AccountConnectBackend(accounts: accounts, validator: validator, lifecycle: lifecycle),
+            localNetwork: localNetwork)
     }
 
     // MARK: - State

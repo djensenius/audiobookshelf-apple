@@ -4,6 +4,29 @@ import ABSData
 import ABSUI
 import SwiftUI
 
+/// Hands a link back to the root (`RootView`) after a confirmed server switch. The root counts
+/// the links it receives, so a link that arrived while the switch ran wins over the one handed
+/// back: the root keeps one link, the last received.
+@MainActor
+struct LinkReopener {
+    /// How many links the root has received.
+    var receivedLinks: @MainActor () -> Int = { 0 }
+    var receive: @MainActor (DeepLink) -> Void = { _ in }
+
+    /// Notes the links received so far; the returned closure hands its link to the root only if
+    /// none arrived since.
+    func reopenUnlessSuperseded() -> @MainActor (DeepLink) -> Void {
+        let received = receivedLinks()
+        return { [self] link in
+            guard receivedLinks() == received else {
+                Log.ui.notice("Dropped a link a newer link replaced during a server switch")
+                return
+            }
+            receive(link)
+        }
+    }
+}
+
 /// What the scene does with a link for another saved server (``Router/pendingServerSwitch``):
 /// drop it when the server isn't saved, or switch to it and reopen the link once confirmed.
 ///
@@ -38,13 +61,11 @@ struct ServerSwitchConfirmation {
     /// link to `reopen`. The link is cleared from the router first, whichever order SwiftUI
     /// runs the dialog's action and its dismissal in. The switch runs in its own task
     /// (``AccountActions/switchAccount(to:)``), so the old host going away doesn't cancel it; a
-    /// failed switch drops the link.
+    /// failed switch drops the link, as does a newer link arriving meanwhile.
     /// - Returns: A task whose value is whether the switch succeeded, or `nil` when the server is
     ///   unknown or the session isn't ready (then nothing changes).
     @discardableResult
-    func confirm(
-        _ link: DeepLink, in router: Router, reopen: @escaping @MainActor (DeepLink) -> Void
-    ) -> Task<Bool, Never>? {
+    func confirm(_ link: DeepLink, in router: Router, reopen: LinkReopener) -> Task<Bool, Never>? {
         guard lifecycle.acceptsAccountChanges else { return nil }
         if router.pendingServerSwitch == link { router.pendingServerSwitch = nil }
         guard let connection = connection(for: link) else {
@@ -52,6 +73,7 @@ struct ServerSwitchConfirmation {
             return nil
         }
         guard let switching = AccountActions(lifecycle: lifecycle).switchAccount(to: connection.id) else { return nil }
+        let reopen = reopen.reopenUnlessSuperseded()
         return Task {
             let switched = await switching.value
             if switched { reopen(link) }
@@ -64,7 +86,7 @@ struct ServerSwitchConfirmation {
 /// the environment (`RootView` puts them there).
 struct ServerSwitchConfirmationModifier: ViewModifier {
     let router: Router
-    let reopen: @MainActor (DeepLink) -> Void
+    let reopen: LinkReopener
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var switchFailed = false
