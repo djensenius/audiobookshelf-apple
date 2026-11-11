@@ -567,6 +567,51 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    /// A drag rejected because another window was scrubbing stays rejected: once an item change
+    /// cancels the other window's scrub, its next move doesn't scrub, or on release seek, the new item.
+    @Test func aRejectedGestureStaysIneligibleAfterAnItemChange() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            let windowA = PlayerViewModel.ScrubOwner()
+            let windowB = PlayerViewModel.ScrubOwner()
+            model.scrub(to: 0.5, owner: windowA)
+            model.scrub(to: 0.9, owner: windowB)  // Rejected: A is scrubbing.
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            model.scrub(to: 0.2, owner: windowB)  // Nothing is scrubbing now, but B's drag continues.
+            #expect(model.elapsed == 10)
+            await model.endScrub(owner: windowB)
+            await model.endScrub(owner: windowA)
+            #expect(playback.calls.isEmpty)
+            // B's next drag scrubs normally.
+            model.scrub(to: 0.5, owner: windowB)
+            await model.endScrub(owner: windowB)
+            #expect(playback.calls == [.seek(200)])
+        }
+    }
+
+    /// Each window's cancellation is kept: a second item change, cancelling another window's
+    /// scrub, doesn't make the first window's continuing drag scrub a third item.
+    @Test func cancelledGesturesStayIneligibleAcrossItemChanges() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            let windowA = PlayerViewModel.ScrubOwner()
+            let windowB = PlayerViewModel.ScrubOwner()
+            model.scrub(to: 0.5, owner: windowA)
+            playback.load(FakePlaybackControl.bookSession(item: "li_second"), at: 10)  // Cancels A.
+            model.scrub(to: 0.25, owner: windowB)
+            #expect(model.elapsed == 100)
+            playback.load(FakePlaybackControl.bookSession(item: "li_third"), at: 20)  // Cancels B.
+            model.scrub(to: 0.9, owner: windowA)
+            model.scrub(to: 0.75, owner: windowB)
+            #expect(model.elapsed == 20)
+            await model.endScrub(owner: windowA)
+            await model.endScrub(owner: windowB)
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
     // MARK: Errors
 
     @Test(arguments: [

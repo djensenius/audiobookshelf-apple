@@ -116,6 +116,9 @@ private struct MiniPlayerProgress: View {
         }
         .frame(height: 2)
         .padding(.horizontal, 12)
+        // Playback progress runs left to right in every language, like the full player's scrubber
+        // (HIG: don't flip media playback controls or progress for right-to-left languages).
+        .environment(\.layoutDirection, .leftToRight)
         .accessibilityHidden(true)
     }
 }

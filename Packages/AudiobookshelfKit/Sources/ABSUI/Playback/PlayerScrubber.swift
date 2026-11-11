@@ -52,11 +52,14 @@ public struct PlayerScrubber: View {
         "-" + DurationStyle.timestamp.string(seconds, locale: locale)
     }
 
-    /// The VoiceOver value, for example "4 minutes, 5 seconds, 1 hour remaining".
+    /// The VoiceOver value, for example "4 minutes, 5 seconds, 1 hour remaining", all in `locale`'s
+    /// language.
     nonisolated static func accessibilityValue(elapsed: Double, remaining: Double, locale: Locale) -> String {
         [
             DurationStyle.timestamp.accessibilityString(elapsed, locale: locale),
-            L10n.string("LabelTimeRemaining", DurationStyle.timestamp.accessibilityString(remaining, locale: locale)),
+            L10n.string(
+                "LabelTimeRemaining", DurationStyle.timestamp.accessibilityString(remaining, locale: locale),
+                locale: locale),
         ]
         .joined(separator: ", ")
     }

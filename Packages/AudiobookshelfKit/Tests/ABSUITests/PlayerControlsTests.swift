@@ -23,6 +23,15 @@ import Testing
         #expect(start == "0 seconds, 1 minute, 5 seconds remaining")
     }
 
+    /// The "remaining" text is in the same language as the durations, not the app's language.
+    @Test func accessibilityValueUsesTheLocalesLanguage() {
+        let german = Locale(identifier: "de_DE")
+        let value = PlayerScrubber.accessibilityValue(elapsed: 245, remaining: 3_600, locale: german)
+        let remaining = DurationStyle.timestamp.accessibilityString(3_600, locale: german)
+        #expect(value.hasSuffix(", \(remaining) verbleibend"))
+        #expect(!value.contains("remaining"))
+    }
+
     @Test func dragsMapToClampedFractions() {
         #expect(PlayerScrubber.fraction(atX: 50, width: 200) == 0.25)
         #expect(PlayerScrubber.fraction(atX: -10, width: 200) == 0)

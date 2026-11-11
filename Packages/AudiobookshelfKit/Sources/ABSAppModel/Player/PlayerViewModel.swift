@@ -51,6 +51,14 @@ public enum PlayerErrorMessage: Sendable, Hashable {
 ///   begin, move, end or cancel a scrub: their calls are ignored (the first drag wins), so two
 ///   windows dragging at once can't move or commit each other's position. A scrubber that goes
 ///   away must ``cancelScrub(owner:)``, or its scrub would block the others.
+/// - **Ineligible gestures.** A gesture that was rejected (another owner was scrubbing) or
+///   cancelled (an item change or ``close()``) stays ineligible: its later ``scrub(to:owner:)``
+///   calls are ignored, even once nothing else is scrubbing, so it never scrubs, or on release
+///   seeks, an item it didn't start on. Each owner's gesture is tracked separately, so one
+///   window's new gesture doesn't make another's eligible again. An owner becomes eligible only
+///   when its gesture ends (``endScrub(owner:)``), its view goes away (``cancelScrub(owner:)``) or
+///   it explicitly begins a fresh gesture (``beginScrub(owner:)``). A ``scrub(to:owner:)`` never
+///   counts as a fresh gesture: it may continue the drag that was rejected or cancelled.
 /// - **Presentation.** Whether the full player or an inspector is shown is per scene, on `Router`
 ///   (ADR 0004), not here.
 @MainActor
@@ -64,9 +72,9 @@ public final class PlayerViewModel {
     /// read, and synchronously just before each item, session or record change, so it holds a
     /// session's text even if no view read it.
     @ObservationIgnored private var retainedDisplay: PlayerDisplayInfo?
-    /// The owner whose scrub an item change cancelled: its further ``scrub(to:owner:)`` calls, from
-    /// the same gesture, must not begin a scrub on the new item.
-    @ObservationIgnored private var cancelledScrubOwner: ScrubOwner?
+    /// The owners whose current gesture was rejected or cancelled: their further
+    /// ``scrub(to:owner:)`` calls, from the same gesture, must not begin a scrub.
+    @ObservationIgnored private var ineligibleScrubOwners: Set<ScrubOwner> = []
 
     /// Identifies one scrubber (one view's gesture), so scrubbers in different windows can't move
     /// or end each other's scrub. Make one per scrubber and keep it for the view's lifetime.
@@ -237,13 +245,22 @@ public final class PlayerViewModel {
         await playback.seek(to: start)
     }
 
-    /// Starts `owner` scrubbing over the range shown now, replacing its own scrub if any. Does
-    /// nothing while another owner is scrubbing, without an item, while it is starting (a seek would
-    /// replace the resume position still being resolved), or with an empty range (an unloaded item
-    /// of unknown duration).
+    /// Starts a fresh gesture for `owner`, making it eligible again, and scrubs over the range shown
+    /// now, replacing its own scrub if any. While another owner is scrubbing the gesture is rejected
+    /// and stays ineligible until it ends. Does nothing else without an item, while it is starting
+    /// (a seek would replace the resume position still being resolved), or with an empty range (an
+    /// unloaded item of unknown duration).
     public func beginScrub(owner: ScrubOwner) {
-        if cancelledScrubOwner == owner { cancelledScrubOwner = nil }
-        if let current = activeScrub, current.owner != owner { return }
+        ineligibleScrubOwners.remove(owner)
+        startScrub(owner: owner)
+    }
+
+    /// Starts `owner`'s scrub without changing its eligibility; see ``beginScrub(owner:)``.
+    private func startScrub(owner: ScrubOwner) {
+        if let current = activeScrub, current.owner != owner {
+            ineligibleScrubOwners.insert(owner)
+            return
+        }
         guard hasSession, playback.phase != .starting else { return }
         let (range, time) = shownPosition
         guard range.duration > 0 else { return }
@@ -253,16 +270,20 @@ public final class PlayerViewModel {
     }
 
     /// Moves `owner`'s scrub position to `fraction` (`0...1`) of the shown range, beginning a scrub
-    /// if none is in progress, unless an item change cancelled this gesture's scrub or another owner
-    /// is scrubbing.
+    /// if none is in progress, unless this gesture is ineligible: another owner was scrubbing, or an
+    /// item change cancelled its scrub. Rejecting a move makes the gesture ineligible.
     ///
     /// A fraction within a tiny tolerance (1e-9) of the shown ``progress`` isn't a move, so
     /// passing back the value read (a thumb that didn't move) never seeks. Fractions are compared,
     /// not seconds: converting a fraction back to seconds doesn't round-trip exactly.
     public func scrub(to fraction: Double, owner: ScrubOwner) {
-        guard cancelledScrubOwner != owner else { return }
-        if activeScrub == nil { beginScrub(owner: owner) }
-        guard var scrub = activeScrub, scrub.owner == owner else { return }
+        guard !ineligibleScrubOwners.contains(owner) else { return }
+        if activeScrub == nil { startScrub(owner: owner) }
+        guard var scrub = activeScrub else { return }
+        guard scrub.owner == owner else {
+            ineligibleScrubOwners.insert(owner)
+            return
+        }
         let fraction = fraction.isNaN ? 0 : min(max(fraction, 0), 1)
         guard abs(fraction - scrub.range.fraction(at: scrub.time)) > Self.scrubFractionTolerance else { return }
         scrub.time = scrub.range.time(forElapsed: fraction * scrub.range.duration)
@@ -272,9 +293,9 @@ public final class PlayerViewModel {
 
     /// Ends `owner`'s scrub and seeks to its position, once. A scrub that never moved, or that a
     /// change of item cancelled, ends without seeking: seeking an unloaded item would replace its
-    /// resume position. Does nothing to another owner's scrub.
+    /// resume position. Does nothing to another owner's scrub. Makes `owner` eligible again.
     public func endScrub(owner: ScrubOwner) async {
-        if cancelledScrubOwner == owner { cancelledScrubOwner = nil }
+        ineligibleScrubOwners.remove(owner)
         let scrub = activeScrub
         if scrubState?.owner == owner { scrubState = nil }
         guard let scrub, scrub.owner == owner, scrub.moved else { return }
@@ -282,9 +303,9 @@ public final class PlayerViewModel {
     }
 
     /// Drops `owner`'s scrub without seeking, for a scrubber that goes away mid-drag. Does nothing
-    /// to another owner's scrub.
+    /// to another owner's scrub. Makes `owner` eligible again.
     public func cancelScrub(owner: ScrubOwner) {
-        if cancelledScrubOwner == owner { cancelledScrubOwner = nil }
+        ineligibleScrubOwners.remove(owner)
         if scrubState?.owner == owner { scrubState = nil }
     }
 
@@ -304,7 +325,7 @@ public final class PlayerViewModel {
     public func close() {
         if let scrub = scrubState {
             scrubState = nil
-            cancelledScrubOwner = scrub.owner
+            ineligibleScrubOwners.insert(scrub.owner)
         }
         playback.stop(reason: .user)
     }
@@ -364,7 +385,7 @@ public final class PlayerViewModel {
                 guard let self else { return }
                 if let scrub = self.scrubState {
                     self.scrubState = nil
-                    self.cancelledScrubOwner = scrub.owner
+                    self.ineligibleScrubOwners.insert(scrub.owner)
                 }
                 self.trackItem()
             }
