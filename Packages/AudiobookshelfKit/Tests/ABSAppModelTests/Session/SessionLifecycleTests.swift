@@ -448,6 +448,19 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
+    @Test func aSwitchChosenFromAnAccountThatExpiredStillRuns() async throws {
+        let harness = Harness()
+        try await harness.started()
+        // A expires while the switch it was chosen from waits for its turn.
+        harness.source.phase = .signedOut
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID, from: identityA)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        #expect(harness.log.count(of: "accounts.switch(b)") == 1)
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
     @Test func switchToTheActiveConnectionDoesNothing() async throws {
         let harness = Harness()
         try await harness.started()

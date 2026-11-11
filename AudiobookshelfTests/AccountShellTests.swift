@@ -65,9 +65,7 @@ private final class Recorder: SessionParticipant {
     private func signIn(
         _ accounts: AccountManager, to host: String, openID: Bool = false, lifecycle: SessionLifecycle? = nil
     ) async throws -> SessionIdentity {
-        let model = ConnectViewModel(
-            accounts: accounts, validator: ServerValidator(sessionConfiguration: ConnectTestProtocol.configuration),
-            localNetwork: PreviewLocalNetworkAccess(), lifecycle: lifecycle)
+        let model = connectModel(accounts, lifecycle: lifecycle)
         model.addServer()
         model.address = "https://\(host)"
         await model.submitAddress()
@@ -83,6 +81,12 @@ private final class Recorder: SessionParticipant {
         try #require(model.phase == .done)
         let saved = try #require(accounts.activeConnection)
         return SessionIdentity(connectionID: saved.id, userID: saved.userId)
+    }
+
+    private func connectModel(_ accounts: AccountManager, lifecycle: SessionLifecycle? = nil) -> ConnectViewModel {
+        ConnectViewModel(
+            accounts: accounts, validator: ServerValidator(sessionConfiguration: ConnectTestProtocol.configuration),
+            localNetwork: PreviewLocalNetworkAccess(), lifecycle: lifecycle)
     }
 
     /// A relaunch: new accounts over the same store and Keychain.
@@ -180,7 +184,7 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.events == [.start(identity)])
 
         let lifecycle = environment.lifecycle
-        await try #require(
+        try await #require(
             AccountActions(lifecycle: lifecycle).signOut { recorder.opened.append(($0, lifecycle.gate)) }
         )
         .value
@@ -202,7 +206,7 @@ private final class Recorder: SessionParticipant {
         let identity = try await signIn(try #require(environment.accounts), to: host, openID: true)
         await waitFor(.ready(identity, isOffline: false), in: lifecycle)
 
-        await try #require(
+        try await #require(
             AccountActions(lifecycle: lifecycle).signOut { recorder.opened.append(($0, lifecycle.gate)) }
         )
         .value
@@ -252,7 +256,7 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.events.last == .start(b))
         let before = recorder.events.count
 
-        let switched = await try #require(
+        let switched = try await #require(
             AccountActions(lifecycle: environment.lifecycle).switchAccount(to: a.connectionID)
         ).value
 
@@ -261,8 +265,9 @@ private final class Recorder: SessionParticipant {
         #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
     }
 
-    /// Two windows can both take the ready gate before either change starts; the second
-    /// change, chosen from the account the first one left, does nothing.
+    /// Two windows can both take the ready gate before either change starts; the changes after
+    /// the first, chosen from the account it left, do nothing. Each checks at its turn in the
+    /// lifecycle's queue, so running them in order is the same as queueing them together.
     @Test func changesChosenTogetherRunOnlyTheFirst() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -271,17 +276,17 @@ private final class Recorder: SessionParticipant {
         defer { cleanUp(hosts) }
         let before = recorder.events.count
         let actions = AccountActions(lifecycle: lifecycle)
+        // What every window read from the gate when the user chose.
+        let chosenFrom = try #require(lifecycle.gate.identity)
 
-        let switching = try #require(actions.switchAccount(to: a.connectionID))
-        let signingOut = try #require(actions.signOut { recorder.opened.append(($0, lifecycle.gate)) })
-        let switchingBack = try #require(actions.switchAccount(to: b.connectionID))
+        #expect(await actions.switchAccount(to: a.connectionID, from: chosenFrom))
+        await actions.signOut(from: chosenFrom) { recorder.opened.append(($0, lifecycle.gate)) }
+        #expect(await !actions.switchAccount(to: b.connectionID, from: chosenFrom))
 
-        #expect(await switching.value)
-        await signingOut.value
-        #expect(await !switchingBack.value)
         #expect(lifecycle.gate == .ready(a, isOffline: false))
         #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
         #expect(environment.accounts?.state.user != nil)
+        #expect(recorder.opened.isEmpty)
     }
 
     /// The server can reject the saved session's server version (or the session) when switching
@@ -329,8 +334,83 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
         #expect(recorder.events == [.start(a), .flush, .end(.switch), .start(b)])
         #expect(accounts.connections.first { $0.id == a.connectionID }?.signedOutAt == nil)
-        #expect(await try #require(AccountActions(lifecycle: lifecycle).switchAccount(to: a.connectionID)).value)
+        #expect(try await #require(AccountActions(lifecycle: lifecycle).switchAccount(to: a.connectionID)).value)
         #expect(lifecycle.gate == .ready(a, isOffline: false))
+    }
+
+    /// In the add-server sheet, the active server is already signed in and a signed-out one
+    /// needs the login step; neither ends the running session.
+    @Test func resumingTheActiveOrASignedOutServerInTheSheetKeepsTheSession() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let accounts = try #require(environment.accounts)
+        let recorder = Recorder()
+        lifecycle.register(recorder, stage: .connect)
+        await lifecycle.start()
+        let hosts = [Self.host(), Self.host()]
+        defer { cleanUp(hosts) }
+        let a = try await signIn(accounts, to: hosts[0])
+        await waitFor(.ready(a, isOffline: false), in: lifecycle)
+        await lifecycle.signOut()
+        let b = try await signIn(accounts, to: hosts[1])
+        await waitFor(.ready(b, isOffline: false), in: lifecycle)
+        let before = recorder.events.count
+        let active = try #require(accounts.connections.first { $0.id == b.connectionID })
+        let signedOut = try #require(accounts.connections.first { $0.id == a.connectionID })
+
+        let resuming = connectModel(accounts, lifecycle: lifecycle)
+        await resuming.select(active)
+        #expect(resuming.phase == .done)
+        let signingIn = connectModel(accounts, lifecycle: lifecycle)
+        await signingIn.select(signedOut)
+        #expect(signingIn.phase == .login)
+
+        #expect(recorder.events.count == before)
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
+    }
+
+    /// Pins today's behaviour: the account change starts before the server checks the password,
+    /// so a wrong one ends the running session, which starts again. A follow-up signs in first.
+    @Test func aWrongPasswordInTheSheetRestartsTheSession() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let accounts = try #require(environment.accounts)
+        let recorder = Recorder()
+        lifecycle.register(recorder, stage: .connect)
+        await lifecycle.start()
+        let hosts = [Self.host(), Self.host("bad-")]
+        defer { cleanUp(hosts) }
+        let a = try await signIn(accounts, to: hosts[0])
+        await waitFor(.ready(a, isOffline: false), in: lifecycle)
+        let before = recorder.events.count
+
+        let model = connectModel(accounts, lifecycle: lifecycle)
+        model.startAddingServer()
+        model.address = "https://\(hosts[1])"
+        await model.submitAddress()
+        model.username = "reader"
+        await model.signIn()
+
+        #expect(model.phase == .login && model.failure != nil)
+        #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
+        #expect(lifecycle.gate == .ready(a, isOffline: false))
+    }
+
+    @Test func removingAnotherServerInTheSheetKeepsTheSession() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let recorder = Recorder()
+        let (a, b, hosts) = try await twoServers(environment, recorder: recorder)
+        defer { cleanUp(hosts) }
+        let accounts = try #require(environment.accounts)
+        let before = recorder.events.count
+
+        await connectModel(accounts, lifecycle: lifecycle)
+            .remove(try #require(accounts.connections.first { $0.id == a.connectionID }))
+
+        #expect(!accounts.connections.contains { $0.id == a.connectionID })
+        #expect(recorder.events.count == before)
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
     // MARK: Server switch for a link

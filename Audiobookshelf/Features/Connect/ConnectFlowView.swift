@@ -41,7 +41,7 @@ struct ConnectFlowView: View {
         onFinish: @escaping () -> Void = {}
     ) {
         let model = ConnectViewModel(accounts: accounts, lifecycle: lifecycle)
-        if lifecycle != nil { model.addServer() }
+        if lifecycle != nil { model.startAddingServer() }
         _model = State(initialValue: model)
         self.onFinish = onFinish
         self.onCancel = onCancel

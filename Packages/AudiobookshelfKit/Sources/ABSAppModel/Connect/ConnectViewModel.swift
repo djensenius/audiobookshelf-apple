@@ -100,6 +100,8 @@ public final class ConnectViewModel {
         case select(ServerConnectionDTO)
     }
 
+    /// Set by ``startAddingServer()``: the flow has no saved servers step to go back to.
+    @ObservationIgnored private var addsServerOnly = false
     @ObservationIgnored private let backend: any ConnectBackend
     @ObservationIgnored private let localNetwork: any LocalNetworkAccessChecking
     /// Bumped by every action, so the result of one the user has left is dropped.
@@ -145,7 +147,7 @@ public final class ConnectViewModel {
     /// Whether ``goBack()`` does anything. While busy, it cancels.
     public var canGoBack: Bool {
         switch phase {
-        case .address: !savedServers.isEmpty
+        case .address: !savedServers.isEmpty && !addsServerOnly
         case .validating, .login: true
         case .signingIn(.savedSession): !isResumingSession
         case .servers, .signingIn, .done: false
@@ -191,6 +193,14 @@ public final class ConnectViewModel {
         username = ""
         password = ""
         phase = .address
+    }
+
+    /// Starts at a new server's address with no way back to the saved servers, for adding a
+    /// server while signed in, where the saved servers are listed elsewhere. The first step then
+    /// offers the presenter's Cancel instead of Back.
+    public func startAddingServer() {
+        addsServerOnly = true
+        addServer()
     }
 
     public func goBack() {

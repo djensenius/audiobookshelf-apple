@@ -195,7 +195,7 @@ public final class SessionLifecycle {
             return nil
         }
         return await serialized {
-            guard await self.isStillRunning(identity) else { return nil }
+            guard await self.isStillRunning(identity, strictly: true) else { return nil }
             return await self.performSignOut()
         }
     }
@@ -231,12 +231,13 @@ public final class SessionLifecycle {
     /// Returning doesn't mean `connectionID` is active: the server can reject its saved session
     /// or its version, which signs out (``AuthGate/connect``). Check ``gate``.
     /// - Parameter identity: The account the switch was chosen from, when the request comes from
-    ///   its screen. When the switch's turn comes, it does nothing unless that account's session
-    ///   is still running, so of two switches chosen from the same account, only the first runs.
+    ///   its screen. When the switch's turn comes, it does nothing if another account's session
+    ///   is running, so of two switches chosen from the same account, only the first runs. If
+    ///   no session is running (it expired meanwhile), the switch still runs.
     public func switchAccount(to connectionID: UUID, from identity: SessionIdentity? = nil) async throws {
         if rejectReentrant("switchAccount(to:)") { return }
         let result: Result<Void, any Error> = await serialized {
-            guard await self.isStillRunning(identity) else { return .success(()) }
+            guard await self.isStillRunning(identity, strictly: false) else { return .success(()) }
             if self.session?.context.identity.connectionID == connectionID { return .success(()) }
             await self.endForAccountChange()
             let result: Result<Void, any Error>
@@ -337,9 +338,13 @@ public final class SessionLifecycle {
 
     /// Whether the session of `identity`, the account a sign-out or switch was chosen from, is
     /// still the one running, ending a session the source has left first. `nil` matches any.
-    private func isStillRunning(_ identity: SessionIdentity?) async -> Bool {
+    /// Unless `strictly`, no running session matches too: a switch from an account that has
+    /// expired still goes where the user chose.
+    private func isStillRunning(_ identity: SessionIdentity?, strictly: Bool) async -> Bool {
         await endStaleSession()
-        guard let identity, session?.context.identity != identity else { return true }
+        guard let identity else { return true }
+        let running = session?.context.identity
+        if running == identity || (running == nil && !strictly) { return true }
         Log.auth.info("Ignored an account change chosen from an account that is no longer signed in")
         // Follows the source, in case the stale session just ended.
         await reconcile()

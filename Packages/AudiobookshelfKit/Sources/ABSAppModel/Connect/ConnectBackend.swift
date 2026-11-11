@@ -27,7 +27,7 @@ public struct ConnectServer: Sendable {
 }
 
 /// What ``ConnectViewModel`` needs from ``ServerValidator`` and ``AccountManager``. The app uses
-/// ``ConnectViewModel/init(accounts:validator:localNetwork:)``; tests and previews use fakes.
+/// ``ConnectViewModel/init(accounts:validator:localNetwork:lifecycle:)``; tests and previews use fakes.
 @MainActor
 public protocol ConnectBackend {
     /// Saved connections, most recently used first.
@@ -51,7 +51,14 @@ public protocol ConnectBackend {
 /// With a `lifecycle`, the flow runs while signed in (adding a server from the Account tab): a
 /// sign-in or resume is an account change (``SessionLifecycle/performAccountChange(_:)``), so the
 /// running session ends first, and the other accounts keep their sessions; a removal goes
-/// through ``SessionLifecycle/removeAccount(_:)``.
+/// through ``SessionLifecycle/removeAccount(_:)``. Resuming the active connection changes
+/// nothing, and a signed-out one goes straight to the login step, so neither ends the running
+/// session.
+///
+/// The account change starts before the server checks the credentials, so a wrong password or
+/// a cancelled OpenID sign-in still ends the running session (and its playback), which then
+/// starts again. Checking first needs `AccountManager` to sign in before it activates; that is
+/// a follow-up.
 struct AccountConnectBackend: ConnectBackend {
     let accounts: AccountManager
     private let validator: ServerValidator
@@ -82,6 +89,10 @@ struct AccountConnectBackend: ConnectBackend {
     }
 
     func resume(_ id: UUID) async throws -> Bool {
+        if lifecycle != nil {
+            if id == accounts.activeConnection?.id { return true }
+            if accounts.connections.first(where: { $0.id == id })?.signedOutAt != nil { return false }
+        }
         do {
             try await changingAccount { try await accounts.switch(to: id) }
         } catch AccountError.notSignedIn {

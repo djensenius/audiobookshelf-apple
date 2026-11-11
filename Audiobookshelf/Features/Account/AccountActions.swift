@@ -21,9 +21,12 @@ struct AccountActions {
     @discardableResult
     func signOut(openURL: @escaping @MainActor (URL) -> Void) -> Task<Void, Never>? {
         guard let identity = lifecycle.gate.identity else { return nil }
-        return Task { [lifecycle] in
-            if let endSession = await lifecycle.signOut(of: identity) { openURL(endSession) }
-        }
+        return Task { await signOut(from: identity, openURL: openURL) }
+    }
+
+    /// The sign-out, chosen while `identity` was signed in.
+    func signOut(from identity: SessionIdentity, openURL: @MainActor (URL) -> Void) async {
+        if let endSession = await lifecycle.signOut(of: identity) { openURL(endSession) }
     }
 
     /// Switches to another saved connection.
@@ -33,19 +36,23 @@ struct AccountActions {
     @discardableResult
     func switchAccount(to connectionID: UUID) -> Task<Bool, Never>? {
         guard let identity = lifecycle.gate.identity else { return nil }
-        return Task { [lifecycle] in
-            do {
-                try await lifecycle.switchAccount(to: connectionID, from: identity)
-            } catch {
-                Log.ui.error("Couldn't switch servers: \(String(describing: type(of: error)), privacy: .public)")
-                return false
-            }
-            guard lifecycle.gate.identity?.connectionID == connectionID else {
-                Log.ui.notice("A server switch didn't reach the server's session")
-                return false
-            }
-            return true
+        return Task { await switchAccount(to: connectionID, from: identity) }
+    }
+
+    /// The switch, chosen while `identity` was signed in.
+    /// - Returns: Whether that connection's session is ready.
+    func switchAccount(to connectionID: UUID, from identity: SessionIdentity) async -> Bool {
+        do {
+            try await lifecycle.switchAccount(to: connectionID, from: identity)
+        } catch {
+            Log.ui.error("Couldn't switch servers: \(String(describing: type(of: error)), privacy: .public)")
+            return false
         }
+        guard lifecycle.gate.identity?.connectionID == connectionID else {
+            Log.ui.notice("A server switch didn't reach the server's session")
+            return false
+        }
+        return true
     }
 }
 

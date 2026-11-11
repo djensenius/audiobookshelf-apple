@@ -32,8 +32,8 @@ final class ConnectTestKeychain: KeychainStoring {
 
 /// Answers for `*.connect-ui.test` hosts. Host prefixes change some answers: `offline-` refuses
 /// the authorization of a saved session (`/api/authorize`) like a proxy (403), `hold-` holds it
-/// until ``release(_:)``, `old-` answers it with an unsupported server version, and `oidc-`
-/// returns an end-session `redirect_url` from `/logout`.
+/// until ``release(_:)``, `old-` answers it with an unsupported server version, `bad-` refuses
+/// every password (`/login`, 401), and `oidc-` returns an end-session `redirect_url` from `/logout`.
 final class ConnectTestProtocol: URLProtocol {
     static let requests = Mutex<[String: [URLRequest]]>([:])
     private static let held = Mutex<(responses: [String: [HeldResponse]], released: Set<String>)>(([:], []))
@@ -93,6 +93,9 @@ final class ConnectTestProtocol: URLProtocol {
                 {"user":{"id":"user-1","username":"reader","type":"admin","token":null},
                 "serverSettings":{"version":"1.0.0"}}
                 """
+        case "/login" where host.hasPrefix("bad-"):
+            status = 401
+            json = "{}"
         case "/logout" where host.hasPrefix("oidc-"):
             json = #"{"redirect_url":"\#(Self.endSessionURL.absoluteString)"}"#
         case "/status":
