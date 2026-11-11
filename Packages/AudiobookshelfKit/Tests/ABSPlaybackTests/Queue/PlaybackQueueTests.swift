@@ -1,7 +1,7 @@
-import ABSCore
 import ABSData
 import Foundation
 import Observation
+import Synchronization
 import Testing
 
 @testable import ABSPlayback
@@ -73,6 +73,21 @@ struct PlaybackQueueTests {
         #expect(queue.items.count == 4)
     }
 
+    @Test func requeueingAnEpisodeMovesItAndUpdatesMetadata() {
+        let queue = PlaybackQueue(serverConnectionID: connection, store: store)
+        queue.addToEnd(queueItem("P", episode: "e1"))
+        queue.addToEnd(queueItem("P", episode: "e2"))
+        queue.addToEnd(queueItem("B"))
+        let updated = QueueItem(
+            libraryItemID: "P", episodeID: "e2", title: "Updated", subtitle: "Podcast",
+            coverPath: "/new.jpg", duration: 300)
+        queue.playNext(updated)
+        #expect(queue.items == [updated, queueItem("P", episode: "e1"), queueItem("B")])
+        queue.addToEnd(updated)
+        #expect(queue.items == [queueItem("P", episode: "e1"), queueItem("B"), updated])
+        #expect(store.saved[connection] == queue.items)
+    }
+
     @Test func removeByIDKeyAndOffsets() {
         let queue = PlaybackQueue(serverConnectionID: connection, store: store)
         for id in ["A", "B", "C", "D"] { queue.addToEnd(queueItem(id)) }
@@ -93,6 +108,9 @@ struct PlaybackQueueTests {
         (IndexSet([1, 3]), 1, ["A", "B", "D", "C"]),
         (IndexSet([1]), 1, ["A", "B", "C", "D"]),
         (IndexSet([2]), 99, ["A", "B", "D", "C"]),
+        (IndexSet([2]), -5, ["C", "A", "B", "D"]),
+        (IndexSet([1, 7]), 4, ["A", "C", "D", "B"]),
+        (IndexSet(), 99, ["A", "B", "C", "D"]),
         (IndexSet([7]), 0, ["A", "B", "C", "D"]),
     ])
     func moveMatchesOnMove(source: IndexSet, destination: Int, expected: [String]) {
@@ -106,7 +124,12 @@ struct PlaybackQueueTests {
         let queue = PlaybackQueue(serverConnectionID: connection, store: store)
         queue.addToEnd(queueItem("A"))
         queue.addToEnd(queueItem("A"))
+        queue.playNext(queueItem("A"))
         queue.remove(id: queueItem("Z").id)
+        queue.remove(MediaKey(serverConnectionID: UUID(), libraryItemId: "A"))
+        queue.remove(atOffsets: [7])
+        queue.remove(atOffsets: [])
+        queue.move(fromOffsets: [7], toOffset: -1)
         queue.move(fromOffsets: [0], toOffset: 0)
         #expect(store.saves == 1)
         queue.clear()
@@ -181,6 +204,22 @@ struct PlaybackQueueTests {
         #expect(items[0].id == queueItem("A").id)
     }
 
+    @Test func emptyEpisodeIDsDeduplicateAndRemoveAsBooks() throws {
+        let queue = PlaybackQueue(serverConnectionID: connection, store: store)
+        queue.addToEnd(queueItem("A"))
+        queue.addToEnd(queueItem("B"))
+        let emptyEpisode = queueItem("A", episode: "")
+        #expect(emptyEpisode.episodeID == nil)
+        queue.playNext(emptyEpisode)
+        #expect(queue.items == [queueItem("A"), queueItem("B")])
+        let decoded = try JSONDecoder().decode(
+            QueueItem.self, from: Data(#"{"libraryItemID":"A","episodeID":"","title":"Title A"}"#.utf8))
+        queue.addToEnd(decoded)
+        #expect(queue.items == [queueItem("B"), queueItem("A")])
+        queue.remove(MediaKey(serverConnectionID: connection, libraryItemId: "A", episodeId: ""))
+        #expect(queue.items == [queueItem("B")])
+    }
+
     @Test func unreadableSavedQueueLoadsEmpty() throws {
         let scratch = try ScratchDefaults()
         scratch.defaults.set(Data("not json".utf8), forKey: "playback_queue_\(connection.uuidString)")
@@ -189,64 +228,48 @@ struct PlaybackQueueTests {
         #expect(queue.items.isEmpty)
     }
 
-    @Test func readersObserveChanges() async {
+    @Test func corruptQueueDoesNotAffectAnotherConnection() throws {
+        let scratch = try ScratchDefaults()
+        let store = UserDefaultsPlaybackQueueStore(defaults: scratch.defaults)
+        let other = UUID()
+        store.save([queueItem("B")], serverConnectionID: other)
+        let corrupt = Data(#"[{"libraryItemID":"A"}]"#.utf8)
+        let key = "playback_queue_\(connection.uuidString)"
+        scratch.defaults.set(corrupt, forKey: key)
+        let queue = PlaybackQueue(serverConnectionID: connection, store: store)
+        #expect(queue.items.isEmpty)
+        // Loading is a safe fallback, not a destructive repair.
+        #expect(scratch.defaults.data(forKey: key) == corrupt)
+        queue.addToEnd(queueItem("A"))
+        #expect(store.load(serverConnectionID: connection) == [queueItem("A")])
+        #expect(store.load(serverConnectionID: other) == [queueItem("B")])
+    }
+
+    @Test func readersObserveChangesButNotNoOps() {
         let queue = PlaybackQueue(serverConnectionID: connection, store: store)
         let reader: any PlaybackQueueReading = queue
-        let changed = Gate()
+        let changes = Mutex(0)
         withObservationTracking {
             _ = reader.items
         } onChange: {
-            changed.open()
+            changes.withLock { $0 += 1 }
+        }
+        queue.clear()
+        queue.remove(id: queueItem("A").id)
+        #expect(changes.withLock { $0 } == 0)
+        queue.addToEnd(queueItem("A"))
+        #expect(changes.withLock { $0 } == 1)
+        #expect(reader.items == [queueItem("A")])
+        withObservationTracking {
+            _ = reader.items
+        } onChange: {
+            changes.withLock { $0 += 1 }
         }
         queue.addToEnd(queueItem("A"))
-        await changed.wait()
-        #expect(reader.items == [queueItem("A")])
-    }
-}
-
-struct PodcastEpisodeListingTests {
-    private func episode(_ id: String, published: Int?) -> PodcastEpisode {
-        PodcastEpisode(id: id, publishedAt: published)
-    }
-
-    private var episodes: [PodcastEpisode] {
-        [
-            episode("e2", published: 2000), episode("undated", published: nil), episode("e1", published: 1000),
-            episode("e3", published: 3000), episode("e2b", published: 2000),
-        ]
-    }
-
-    @Test func serialPlaysOldestFirstAndEpisodicNewestFirst() {
-        let serial = PodcastEpisodeListing(isSerial: true, episodes: episodes, finishedEpisodeIDs: [])
-        #expect(serial.playOrder.map(\.id) == ["e1", "e2", "e2b", "e3", "undated"])
-        let episodic = PodcastEpisodeListing(isSerial: false, episodes: episodes, finishedEpisodeIDs: [])
-        #expect(episodic.playOrder.map(\.id) == ["undated", "e3", "e2", "e2b", "e1"])
-    }
-
-    @Test func nextUnfinishedSkipsFinishedAndTheEndedEpisode() {
-        let listing = PodcastEpisodeListing(isSerial: true, episodes: episodes, finishedEpisodeIDs: ["e1", "e2b"])
-        #expect(listing.nextUnfinished(after: "e2")?.id == "e3")
-        #expect(listing.nextUnfinished(after: "e3")?.id == "e2")
-        let allDone = PodcastEpisodeListing(
-            isSerial: true, episodes: episodes, finishedEpisodeIDs: ["e1", "e2", "e2b", "undated"])
-        #expect(allDone.nextUnfinished(after: "e3") == nil)
-    }
-
-    @Test func listingFromItemAndUserProgress() throws {
-        let json = """
-            {"id": "li-1", "libraryId": "lib", "mediaType": "podcast", "isMissing": false, "isInvalid": false,
-             "media": {"id": "pod", "metadata": {"title": "Pod", "type": "serial"},
-                       "episodes": [{"id": "e1", "publishedAt": 1}, {"id": "e2", "publishedAt": 2}]}}
-            """
-        let item = try JSONDecoder().decode(LibraryItem.self, from: Data(json.utf8))
-        let progress = [
-            MediaProgress(id: "1", libraryItemId: "li-1", episodeId: "e1", isFinished: true),
-            MediaProgress(id: "2", libraryItemId: "li-1", episodeId: "e2", isFinished: false),
-            MediaProgress(id: "3", libraryItemId: "other", episodeId: "e2", isFinished: true),
-        ]
-        let listing = PodcastEpisodeListing(item: item, progress: progress)
-        #expect(listing.isSerial)
-        #expect(listing.episodes.map(\.id) == ["e1", "e2"])
-        #expect(listing.finishedEpisodeIDs == ["e1"])
+        queue.move(fromOffsets: [0], toOffset: 1)
+        #expect(changes.withLock { $0 } == 1)
+        queue.clear()
+        #expect(changes.withLock { $0 } == 2)
+        #expect(reader.items.isEmpty)
     }
 }

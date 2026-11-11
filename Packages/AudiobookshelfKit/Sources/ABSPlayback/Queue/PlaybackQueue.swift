@@ -2,8 +2,7 @@ import ABSData
 import Foundation
 import Observation
 
-/// A book or podcast episode waiting in the queue, with what the queue UI and CarPlay's Up Next
-/// show for it.
+/// A book or podcast episode waiting in the queue, with display metadata for queue readers.
 public struct QueueItem: Sendable, Hashable, Codable, Identifiable {
     public var libraryItemID: String
     public var episodeID: String?
@@ -65,8 +64,8 @@ public protocol PlaybackQueueReading: AnyObject, Observable {
 }
 
 /// The user's play queue for one server connection, saved on every change. Each media is queued
-/// at most once: queueing it again moves it. ``PlaybackQueueAdvancer`` plays from it when an item
-/// ends, and removes an item once it becomes the current one.
+/// at most once: queueing it again moves it. This core does not start playback or dequeue on
+/// playback events; callers explicitly mutate the queue.
 @MainActor
 @Observable
 public final class PlaybackQueue: PlaybackQueueReading {

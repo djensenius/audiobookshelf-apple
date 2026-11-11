@@ -66,7 +66,7 @@ models in a view).
 | `ABSAPI` | HTTP client, authentication (local and OIDC), endpoints, custom headers, API DTOs, image request building | `ABSCore` |
 | `ABSRealtime` | Socket.IO client over `URLSessionWebSocketTask` | `ABSCore`, `ABSAPI` |
 | `ABSData` | SwiftData schema, `@ModelActor` stores, and `<Model>DTO` types for persisted models | `ABSCore` |
-| `ABSPlayback` | Playback engine, `PlaybackCoordinator`, progress sync, play queue and next-episode auto-advance (`ABSPlayback/Queue/`), sleep timer, Now Playing adapter (`ABSPlayback/NowPlaying/`) | `ABSCore`, `ABSAPI`, `ABSData` |
+| `ABSPlayback` | Playback engine, `PlaybackCoordinator`, progress sync, connection-scoped queue core (`ABSPlayback/Queue/`), sleep timer, Now Playing adapter (`ABSPlayback/NowPlaying/`) | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSDownloads` | Background `URLSession` downloads | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSUI` | Design system, shared components, covers, localized strings | `ABSCore` |
 | `ABSAppModel` | Account and library state, routing (`Router`, `Route`, `DeepLink`, `AppTab` in `ABSAppModel/Navigation/`), feature view models, realtime bridge, `DownloadedCoverLookup` implementation | everything above except `ABSUI` |
@@ -88,6 +88,19 @@ Rules:
   match the table above. Changing the table needs an ADR.
 - Built-in frameworks come first. Any SPM dependency must be justified in the PR;
   ZIPFoundation (for CBZ) is the only one approved so far.
+
+### Playback queue core
+
+`PlaybackQueue` is a main-actor observable ordered queue for one connection UUID.
+Readers use `PlaybackQueueReading`; explicit mutations persist only actual changes.
+Re-enqueueing media moves it rather than duplicating it. `UserDefaultsPlaybackQueueStore`
+stores ordered JSON under connection-specific keys in the App Group by default;
+tests inject a store or an isolated UserDefaults suite. Empty queues remove their
+key, and unreadable saved JSON loads as an empty queue.
+
+This core has no app wiring, playback end hook, auto-advance, episode lookup,
+account-removal composition, or queue UI. It makes no progress-sync or
+exactly-once delivery guarantee.
 
 ## App target layout
 
