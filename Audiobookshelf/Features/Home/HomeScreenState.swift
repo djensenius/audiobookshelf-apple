@@ -5,29 +5,104 @@ import Foundation
 
 /// What Home shows, decided from the environment and its ``HomeModel`` without SwiftUI.
 enum HomeScreenState: Equatable {
-    /// No library data: nobody is signed in.
+    /// No library data: nobody is signed in, or the store was cleared.
     case signedOut
-    /// The first load of the current library is running or about to start.
+    /// The libraries or the first load of the current library are loading or about to.
     case loading
-    /// The first load failed, or a reload failed with nothing to show.
+    /// Loading the libraries list failed before a library was selected; Retry refreshes the store.
+    case librariesFailed
+    /// The first load failed, or a reload failed with nothing to show; Retry reloads the shelves.
     case failed
-    /// No library is selected, or the library has no shelves.
+    /// The libraries loaded but none is selected, or the library has no shelves.
     case empty
     /// The sections; `refreshFailed` when the last reload failed and older shelves are shown.
     case shelves(refreshFailed: Bool)
 
-    /// - Parameters:
-    ///   - hasStore: Whether the environment has a `LibraryStore` (signed in).
-    ///   - libraryID: The router's current library.
-    ///   - isEmpty: Whether ``HomeModel/sections`` is empty.
+    /// What ``resolve(_:)`` decides from.
+    struct Inputs: Equatable {
+        /// The environment has a `LibraryStore` that serves an account (its `connectionKey` is set).
+        var isSignedIn = true
+        /// The store's libraries request succeeded once for this account.
+        var librariesLoaded = true
+        var librariesLoading = false
+        /// The store's last libraries request failed.
+        var librariesFailed = false
+        /// The router's current library.
+        var libraryID: String? = "lib"
+        /// The model has loaded shelves for ``libraryID`` (not for an earlier library).
+        var hasLoaded = false
+        var isLoading = false
+        /// The model's last load of ``libraryID`` failed.
+        var hasError = false
+        /// The model has no sections.
+        var isEmpty = true
+    }
+
+    static func resolve(_ inputs: Inputs) -> HomeScreenState {
+        guard inputs.isSignedIn else { return .signedOut }
+        guard inputs.libraryID != nil else {
+            // The shell selects a library once the libraries have loaded.
+            if inputs.librariesFailed, !inputs.librariesLoading { return .librariesFailed }
+            return inputs.librariesLoaded ? .empty : .loading
+        }
+        guard inputs.hasLoaded else { return inputs.hasError && !inputs.isLoading ? .failed : .loading }
+        if inputs.isEmpty { return inputs.hasError ? .failed : .empty }
+        return .shelves(refreshFailed: inputs.hasError)
+    }
+
+    /// The state for `store` and `model` while the router shows `libraryID`.
+    ///
+    /// Until `model` adopts a new `libraryID` (in the view's task), its shelves, loaded flag and
+    /// error belong to the previous library, so they count as not loaded yet.
+    ///
+    /// - Parameter sections: `model.sections`, read once by the caller.
+    @MainActor
     static func resolve(
-        hasStore: Bool, libraryID: String?, hasLoaded: Bool, isLoading: Bool, hasError: Bool, isEmpty: Bool
+        store: LibraryStore?, model: HomeModel?, libraryID: String?, sections: [HomeSection]
     ) -> HomeScreenState {
-        guard hasStore else { return .signedOut }
-        guard libraryID != nil else { return .empty }
-        guard hasLoaded else { return hasError && !isLoading ? .failed : .loading }
-        if isEmpty { return hasError ? .failed : .empty }
-        return .shelves(refreshFailed: hasError)
+        guard let store, let model else { return .signedOut }
+        let isCurrent = model.libraryID == libraryID
+        return resolve(
+            Inputs(
+                isSignedIn: store.connectionKey != nil, librariesLoaded: store.hasLoaded,
+                librariesLoading: store.isLoading, librariesFailed: store.error != nil, libraryID: libraryID,
+                hasLoaded: isCurrent && model.hasLoaded, isLoading: isCurrent && model.isLoading,
+                hasError: isCurrent && model.error != nil, isEmpty: !isCurrent || sections.isEmpty))
+    }
+}
+
+/// When Home reloads shelves it already has: on appear and when the scene becomes active, once
+/// they are older than ``maxAge``, like the legacy page refetching on every visit.
+struct HomeRefreshSchedule {
+    /// What to do with the current library's shelves.
+    enum Request: Equatable {
+        /// Load the shelves the model doesn't have yet.
+        case load
+        /// Reload the shelves the model has.
+        case refresh
+    }
+
+    /// How old shelves may get before they are reloaded on appear.
+    static let maxAge: TimeInterval = 5 * 60
+
+    /// The library whose shelves last loaded successfully, and when.
+    private(set) var loaded: (libraryID: String, date: Date)?
+
+    /// The request to make for `libraryID` at `now`; `nil` when the shelves are fresh.
+    ///
+    /// - Parameters:
+    ///   - hasLoaded: The model has shelves for `libraryID`.
+    ///   - force: The user asked to refresh (pull to refresh, the Refresh command).
+    func request(libraryID: String, hasLoaded: Bool, now: Date, force: Bool = false) -> Request? {
+        guard hasLoaded else { return .load }
+        if force { return .refresh }
+        guard let loaded, loaded.libraryID == libraryID else { return .refresh }
+        return now.timeIntervalSince(loaded.date) >= Self.maxAge ? .refresh : nil
+    }
+
+    /// Records a successful load or refresh of `libraryID`.
+    mutating func markLoaded(libraryID: String, at date: Date) {
+        loaded = (libraryID, date)
     }
 }
 

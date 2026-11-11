@@ -92,37 +92,39 @@ private struct HomeRefreshFailedRow: View {
     }
 }
 
-/// Fixture sections and progress for previews.
-enum HomePreviewData {
-    static let sections = HomeSection.sections(from: SampleLibrary.shelves) { _, _ in nil }
+#if DEBUG
+    /// Fixture sections and progress for previews.
+    enum HomePreviewData {
+        static let sections = HomeSection.sections(from: SampleLibrary.shelves) { _, _ in nil }
 
-    static let progressReader = ItemProgressReader { itemID, episodeID in
-        SampleLibrary.progress[MediaProgress.key(libraryItemID: itemID, episodeID: episodeID)]
+        static let progressReader = ItemProgressReader { itemID, episodeID in
+            SampleLibrary.progress[MediaProgress.key(libraryItemID: itemID, episodeID: episodeID)]
+        }
     }
-}
 
-#Preview("Shelves") {
-    NavigationStack {
-        HomeShelvesView(
-            sections: HomePreviewData.sections, context: HomePresentation.actionContext(canPlay: true),
-            open: { _ in }, perform: { _, _ in }, retry: {}
-        )
-        .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
+    #Preview("Shelves") {
+        NavigationStack {
+            HomeShelvesView(
+                sections: HomePreviewData.sections, context: HomePresentation.actionContext(canPlay: true),
+                open: { _ in }, perform: { _, _ in }, retry: {}
+            )
+            .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
+        }
+        .environment(\.serverID, UUID())
+        .environment(\.itemProgressReader, HomePreviewData.progressReader)
+        .absBackground()
     }
-    .environment(\.serverID, UUID())
-    .environment(\.itemProgressReader, HomePreviewData.progressReader)
-    .absBackground()
-}
 
-#Preview("Shelves, refresh failed, largest text") {
-    NavigationStack {
-        HomeShelvesView(
-            sections: HomePreviewData.sections, refreshFailed: true,
-            context: HomePresentation.actionContext(canPlay: false), open: { _ in }, perform: { _, _ in },
-            retry: {}
-        )
+    #Preview("Shelves, refresh failed, largest text") {
+        NavigationStack {
+            HomeShelvesView(
+                sections: HomePreviewData.sections, refreshFailed: true,
+                context: HomePresentation.actionContext(canPlay: false), open: { _ in }, perform: { _, _ in },
+                retry: {}
+            )
+        }
+        .environment(\.itemProgressReader, HomePreviewData.progressReader)
+        .environment(\.dynamicTypeSize, .accessibility3)
+        .absBackground()
     }
-    .environment(\.itemProgressReader, HomePreviewData.progressReader)
-    .environment(\.dynamicTypeSize, .accessibility3)
-    .absBackground()
-}
+#endif

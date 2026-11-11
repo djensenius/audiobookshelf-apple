@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import Foundation
@@ -31,40 +32,152 @@ private final class PlayedItems {
     var items: [(String, String?)] = []
 }
 
+/// Serves shelves (or fails) per library; the libraries list succeeds unless `failsLibraries`.
+private struct FakeLibraryService: LibraryService {
+    struct Failure: Error {}
+
+    var failsLibraries = false
+    var failingShelves: Set<String> = []
+
+    func libraries() async throws -> [Library] {
+        if failsLibraries { throw Failure() }
+        return []
+    }
+
+    func library(id: String) async throws -> LibraryWithFilterData { throw Failure() }
+
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] {
+        if failingShelves.contains(libraryID) { throw Failure() }
+        return SampleLibrary.shelves
+    }
+
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Failure() }
+}
+
+private let account = LibraryConnectionKey(
+    connectionID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA") ?? UUID(), userID: "user-1")
+
 @MainActor
 @Suite struct HomeScreenStateTests {
-    private func resolve(
-        hasStore: Bool = true, libraryID: String? = "lib_1", hasLoaded: Bool = false, isLoading: Bool = false,
-        hasError: Bool = false, isEmpty: Bool = true
-    ) -> HomeScreenState {
-        HomeScreenState.resolve(
-            hasStore: hasStore, libraryID: libraryID, hasLoaded: hasLoaded, isLoading: isLoading, hasError: hasError,
-            isEmpty: isEmpty)
+    private typealias Inputs = HomeScreenState.Inputs
+
+    /// Settings in a throwaway defaults suite, so a test never touches the app's.
+    private func withStore(
+        _ service: FakeLibraryService, _ body: (LibraryStore) async throws -> Void
+    ) async throws {
+        let suiteName = "HomeScreenStateTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LibraryStore(settings: AppSettings(defaults: defaults))
+        await store.connect(client: service, connectionKey: account)
+        try await body(store)
     }
 
-    @Test func withoutAStoreHomeIsSignedOut() {
-        #expect(resolve(hasStore: false, hasLoaded: true, isEmpty: false) == .signedOut)
+    @Test func withoutAStoreOrAccountHomeIsSignedOut() {
+        #expect(HomeScreenState.resolve(store: nil, model: nil, libraryID: "lib", sections: []) == .signedOut)
+        #expect(HomeScreenState.resolve(Inputs(isSignedIn: false, hasLoaded: true, isEmpty: false)) == .signedOut)
     }
 
-    @Test func withoutALibraryHomeIsEmpty() {
-        #expect(resolve(libraryID: nil) == .empty)
+    @Test func aClearedStoreIsSignedOutNotLoading() async throws {
+        try await withStore(FakeLibraryService()) { store in
+            let model = HomeModel(store: store, libraryID: "lib")
+            await model.load()
+            store.clear()
+            #expect(HomeScreenState.resolve(store: store, model: model, libraryID: "lib", sections: []) == .signedOut)
+        }
+    }
+
+    @Test func withoutALibraryHomeWaitsForTheLibraries() {
+        #expect(HomeScreenState.resolve(Inputs(librariesLoaded: false, libraryID: nil)) == .loading)
+        #expect(
+            HomeScreenState.resolve(Inputs(librariesLoaded: false, librariesLoading: true, libraryID: nil))
+                == .loading)
+        #expect(
+            HomeScreenState.resolve(
+                Inputs(librariesLoaded: false, librariesLoading: true, librariesFailed: true, libraryID: nil))
+                == .loading)
+        #expect(HomeScreenState.resolve(Inputs(librariesLoaded: true, libraryID: nil)) == .empty)
+    }
+
+    @Test func aFailedLibrariesRequestOffersRetry() async throws {
+        try await withStore(FakeLibraryService(failsLibraries: true)) { store in
+            let model = HomeModel(store: store)
+            #expect(!store.hasLoaded && store.error != nil)
+            #expect(
+                HomeScreenState.resolve(store: store, model: model, libraryID: nil, sections: []) == .librariesFailed)
+        }
     }
 
     @Test func firstLoadShowsLoadingThenItsError() {
-        #expect(resolve() == .loading)
-        #expect(resolve(isLoading: true) == .loading)
-        #expect(resolve(isLoading: true, hasError: true) == .loading)
-        #expect(resolve(hasError: true) == .failed)
+        #expect(HomeScreenState.resolve(Inputs()) == .loading)
+        #expect(HomeScreenState.resolve(Inputs(isLoading: true)) == .loading)
+        #expect(HomeScreenState.resolve(Inputs(isLoading: true, hasError: true)) == .loading)
+        #expect(HomeScreenState.resolve(Inputs(hasError: true)) == .failed)
     }
 
     @Test func loadedShelvesStayWhenAReloadFails() {
-        #expect(resolve(hasLoaded: true, isEmpty: false) == .shelves(refreshFailed: false))
-        #expect(resolve(hasLoaded: true, hasError: true, isEmpty: false) == .shelves(refreshFailed: true))
+        #expect(HomeScreenState.resolve(Inputs(hasLoaded: true, isEmpty: false)) == .shelves(refreshFailed: false))
+        #expect(
+            HomeScreenState.resolve(Inputs(hasLoaded: true, hasError: true, isEmpty: false))
+                == .shelves(refreshFailed: true))
     }
 
     @Test func loadedWithoutSectionsIsEmptyUnlessTheReloadFailed() {
-        #expect(resolve(hasLoaded: true) == .empty)
-        #expect(resolve(hasLoaded: true, hasError: true) == .failed)
+        #expect(HomeScreenState.resolve(Inputs(hasLoaded: true)) == .empty)
+        #expect(HomeScreenState.resolve(Inputs(hasLoaded: true, hasError: true)) == .failed)
+    }
+
+    @Test func aLibrarySwitchHidesTheOldShelvesUntilTheModelAdoptsIt() async throws {
+        try await withStore(FakeLibraryService()) { store in
+            let model = HomeModel(store: store, libraryID: "a")
+            await model.load()
+            let sections = model.sections
+            #expect(!sections.isEmpty)
+            #expect(
+                HomeScreenState.resolve(store: store, model: model, libraryID: "a", sections: sections)
+                    == .shelves(refreshFailed: false))
+
+            // The router moved to "b"; the view's task hasn't run yet.
+            #expect(HomeScreenState.resolve(store: store, model: model, libraryID: "b", sections: sections) == .loading)
+        }
+    }
+
+    @Test func theOldLibrarysErrorDoesNotFailTheNewOne() async throws {
+        try await withStore(FakeLibraryService(failingShelves: ["a"])) { store in
+            let model = HomeModel(store: store, libraryID: "a")
+            await model.load()
+            #expect(model.error != nil)
+            #expect(HomeScreenState.resolve(store: store, model: model, libraryID: "a", sections: []) == .failed)
+            #expect(HomeScreenState.resolve(store: store, model: model, libraryID: "b", sections: []) == .loading)
+        }
+    }
+}
+
+@Suite struct HomeRefreshScheduleTests {
+    private let start = Date(timeIntervalSince1970: 1_000_000)
+
+    @Test func loadsWhatIsntLoadedYet() {
+        let schedule = HomeRefreshSchedule()
+        #expect(schedule.request(libraryID: "a", hasLoaded: false, now: start) == .load)
+        #expect(schedule.request(libraryID: "a", hasLoaded: false, now: start, force: true) == .load)
+    }
+
+    @Test func refreshesOnlyStaleShelvesUnlessForced() {
+        var schedule = HomeRefreshSchedule()
+        schedule.markLoaded(libraryID: "a", at: start)
+        let fresh = start.addingTimeInterval(HomeRefreshSchedule.maxAge - 1)
+        let stale = start.addingTimeInterval(HomeRefreshSchedule.maxAge)
+
+        #expect(schedule.request(libraryID: "a", hasLoaded: true, now: fresh) == nil)
+        #expect(schedule.request(libraryID: "a", hasLoaded: true, now: fresh, force: true) == .refresh)
+        #expect(schedule.request(libraryID: "a", hasLoaded: true, now: stale) == .refresh)
+    }
+
+    @Test func shelvesOfAnotherLibraryOrNeverMarkedAreStale() {
+        var schedule = HomeRefreshSchedule()
+        #expect(schedule.request(libraryID: "a", hasLoaded: true, now: start) == .refresh)
+        schedule.markLoaded(libraryID: "a", at: start)
+        #expect(schedule.request(libraryID: "b", hasLoaded: true, now: start) == .refresh)
     }
 }
 
@@ -141,10 +254,11 @@ private final class PlayedItems {
         let episode = ItemSummary(item: SampleLibrary.episodeItems[0])
 
         #expect(await HomePresentation.perform(.markFinished, on: episode, actions: actions, play: nil) == nil)
+        #expect(await HomePresentation.perform(.markNotFinished, on: episode, actions: actions, play: nil) == nil)
         #expect(
             await HomePresentation.perform(.hideFromContinueListening, on: episode, actions: actions, play: nil) == nil)
 
-        #expect(actions.calls.map(\.0) == [.markFinished, .hideFromContinueListening])
+        #expect(actions.calls.map(\.0) == [.markFinished, .markNotFinished, .hideFromContinueListening])
         let target = ItemActionTarget(
             libraryItemID: episode.itemID, episodeID: episode.episodeID, duration: episode.duration)
         #expect(actions.calls.allSatisfy { $0.1 == target })
@@ -158,6 +272,9 @@ private final class PlayedItems {
         #expect(
             await HomePresentation.perform(.markFinished, on: book, actions: actions, play: nil)
                 == "ToastItemMarkedAsFinishedFailed")
+        #expect(
+            await HomePresentation.perform(.markNotFinished, on: book, actions: actions, play: nil)
+                == "ToastItemMarkedAsNotFinishedFailed")
         #expect(
             await HomePresentation.perform(.hideFromContinueListening, on: book, actions: actions, play: nil)
                 == "MessageHideFromContinueListeningFailed")

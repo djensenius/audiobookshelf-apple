@@ -34,60 +34,106 @@ private struct HomeModelIdentity: Hashable {
     let connection: LibraryConnectionKey?
 }
 
-/// Home while signed in: owns the ``HomeModel``, loads the router's library, and performs the
-/// card actions through the environment.
+/// Home while signed in: owns the ``HomeModel``, loads the router's library, reloads shelves
+/// that have gone stale, and performs the card actions through the environment.
 private struct HomeScreen: View {
     let store: LibraryStore
     @State private var model: HomeModel
-    /// The key of the message for the last failed action, shown as an alert.
+    @State private var schedule = HomeRefreshSchedule()
+    /// Built once, so the cards don't all re-render on every body.
+    @State private var progressReader: ItemProgressReader
+    /// The key of the message for the last failed action, kept while the alert is dismissed.
     @State private var failureKey: String?
+    @State private var showsFailure = false
     @Environment(Router.self) private var router: Router?
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
+    @Environment(\.scenePhase) private var scenePhase
 
     init(store: LibraryStore) {
         self.store = store
         _model = State(initialValue: HomeModel(store: store))
+        let progress = store.progress
+        _progressReader = State(
+            initialValue: ItemProgressReader { itemID, episodeID in
+                progress.progress(libraryItemID: itemID, episodeID: episodeID).map(ItemProgress.init)
+            })
     }
 
     var body: some View {
         let libraryID = router?.libraryID
         // `sections` is rebuilt on every read: read it once.
         let sections = model.sections
-        // Until the task below adopts a new library, the model still shows the old one.
-        let isCurrent = model.libraryID == libraryID
-        let state = HomeScreenState.resolve(
-            hasStore: true, libraryID: libraryID, hasLoaded: isCurrent && model.hasLoaded,
-            isLoading: model.isLoading, hasError: isCurrent && model.error != nil, isEmpty: sections.isEmpty)
+        let state = HomeScreenState.resolve(store: store, model: model, libraryID: libraryID, sections: sections)
         HomeContent(
             state: state, sections: sections, context: HomePresentation.actionContext(canPlay: playItem != nil),
-            open: { navigate(to: $0) }, perform: { perform($0, on: $1) }, retry: { Task { await model.refresh() } }
+            open: { navigate(to: $0) }, perform: { perform($0, on: $1) }, retry: { Task { await refresh() } }
         )
+        // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
         .environment(\.itemProgressReader, progressReader)
-        .refreshable { await model.refresh() }
+        .refreshable { await refresh() }
         .task(id: libraryID) {
             model.libraryID = libraryID
-            await model.load()
+            await update()
         }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { Task { await update() } }
+        }
+        #if os(macOS)
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await refresh() }
+                    } label: {
+                        Label {
+                            Text(verbatim: L10n.string("ButtonRefresh"))
+                        } icon: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .disabled(store.isLoading || model.isLoading)
+                }
+            }
+        #endif
         .alert(
-            Text(verbatim: failureKey.map { L10n.string($0) } ?? ""),
-            isPresented: Binding(get: { failureKey != nil }, set: { if !$0 { failureKey = nil } })
-        ) {
-            Button(L10n.string("ButtonOk")) { failureKey = nil }
+            Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
+            presenting: failureKey
+        ) { _ in
+            Button(L10n.string("ButtonOk")) {}
         }
     }
 
-    /// The store's progress, which the action menus and progress bars read.
-    private var progressReader: ItemProgressReader {
-        let progress = store.progress
-        return ItemProgressReader { itemID, episodeID in
-            progress.progress(libraryItemID: itemID, episodeID: episodeID).map(ItemProgress.init)
+    /// Loads the shelves if needed, or reloads them when `force` or stale.
+    private func update(force: Bool = false) async {
+        guard let libraryID = model.libraryID,
+            let request = schedule.request(
+                libraryID: libraryID, hasLoaded: model.hasLoaded, now: .now, force: force)
+        else { return }
+        switch request {
+        case .load: await model.load()
+        case .refresh: await model.refresh()
+        }
+        if model.libraryID == libraryID, model.hasLoaded, model.error == nil {
+            schedule.markLoaded(libraryID: libraryID, at: .now)
         }
     }
 
-    /// Pushes `route` on the Home tab's stack, the stack this screen is the root of.
+    /// Pull to refresh, the Refresh command and Retry: the libraries while none is selected,
+    /// otherwise the shelves.
+    private func refresh() async {
+        if model.libraryID == nil {
+            await store.refresh()
+        } else {
+            await update(force: true)
+        }
+    }
+
+    /// Pushes `route` on the Home tab's stack, the stack this screen is the root of, unless it is
+    /// already on top (a double tap).
     private func navigate(to route: Route) {
-        router?[path: .home].append(route)
+        guard let router, router[path: .home].last != route else { return }
+        router[path: .home].append(route)
     }
 
     private func perform(_ kind: ItemActionKind, on item: ItemSummary) {
@@ -96,6 +142,7 @@ private struct HomeScreen: View {
         Task {
             if let key = await HomePresentation.perform(kind, on: item, actions: actions, play: play) {
                 failureKey = key
+                showsFailure = true
             }
         }
     }
@@ -118,7 +165,7 @@ struct HomeContent: View {
                 message: L10n.string("MessageAudiobookshelfServerNotConnected"), systemImage: "icloud.slash")
         case .loading:
             LoadingView()
-        case .failed:
+        case .failed, .librariesFailed:
             ErrorStateView(title: L10n.string("MessageHomeLoadFailed"), retry: retry)
         case .empty:
             HomeMessageView(
@@ -165,19 +212,21 @@ private struct HomeMessageView: View {
     }
 }
 
-#Preview("Loaded") {
-    NavigationStack {
-        HomeContent(
-            state: .shelves(refreshFailed: false), sections: HomePreviewData.sections,
-            context: HomePresentation.actionContext(canPlay: true), open: { _ in }, perform: { _, _ in },
-            retry: {}
-        )
-        .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
+#if DEBUG
+    #Preview("Loaded") {
+        NavigationStack {
+            HomeContent(
+                state: .shelves(refreshFailed: false), sections: HomePreviewData.sections,
+                context: HomePresentation.actionContext(canPlay: true), open: { _ in }, perform: { _, _ in },
+                retry: {}
+            )
+            .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
+        }
+        .environment(\.serverID, UUID())
+        .environment(\.itemProgressReader, HomePreviewData.progressReader)
+        .absBackground()
     }
-    .environment(\.serverID, UUID())
-    .environment(\.itemProgressReader, HomePreviewData.progressReader)
-    .absBackground()
-}
+#endif
 
 #Preview("Empty") {
     NavigationStack {
