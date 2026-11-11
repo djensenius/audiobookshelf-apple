@@ -15,42 +15,42 @@ private struct FakeItemDetailService: ItemDetailService {
 
 private func makeBook(
     id: String = "li-1", title: String = "The Book", duration: Double? = 1000, trackCount: Int = 2,
-    ebook: EbookFormat? = nil, isMissing: Bool = false
+    ebookFile: EbookFile? = nil, ebookFormat: EbookFormat? = nil, isMissing: Bool = false, isInvalid: Bool = false
 ) -> LibraryItem {
     let tracks = (0..<trackCount).map { index in
         AudioTrack(index: index + 1, duration: (duration ?? 0) / Double(max(trackCount, 1)))
     }
     let metadata = BookMetadata(
         title: title, subtitle: "A Subtitle",
-        authors: [Author(id: "au-1", name: "Ann"), Author(id: "au-2", name: "Bo")],
+        authors: [Author(id: "au-1", name: "Ann"), Author(id: "au-x", name: " "), Author(id: "au-2", name: "Bo")],
         narrators: ["Nora", ""],
         series: [Series(id: "se-1", name: "Saga", sequence: "2"), Series(id: "se-2", name: "Arc")],
         genres: ["Fantasy"], publishedYear: "2020", publisher: "Pub House", description: "<p>Hi</p>", language: " ",
         explicit: true, abridged: false)
     let book = Book(
         id: "book-\(id)", libraryItemId: id, metadata: metadata, tags: ["Tag"],
-        ebookFile: ebook.map { EbookFile(ino: "eb-1", ebookFormat: $0) }, tracks: tracks, duration: duration, size: 50)
+        ebookFile: ebookFile, tracks: tracks, duration: duration, size: 50, ebookFormat: ebookFormat)
     return LibraryItem(
-        id: id, libraryId: "lib", isMissing: isMissing, mediaType: .book, media: .book(book), size: 123)
+        id: id, libraryId: "lib", isMissing: isMissing, isInvalid: isInvalid, mediaType: .book, media: .book(book),
+        size: 123)
 }
 
 private func progress(
-    _ itemID: String = "li-1", episode: String? = nil, duration: Double = 1000, progress: Double = 0,
+    _ itemID: String = "li-1", duration: Double = 1000, progress: Double = 0,
     currentTime: Double = 0, isFinished: Bool = false, ebookProgress: Double? = nil, finishedAt: Int? = nil,
     lastUpdate: Int = 1
 ) -> MediaProgress {
     MediaProgress(
-        id: "p-\(itemID)-\(episode ?? "")", libraryItemId: itemID, episodeId: episode, duration: duration,
+        id: "p-\(itemID)", libraryItemId: itemID, duration: duration,
         progress: progress, currentTime: currentTime, isFinished: isFinished, ebookProgress: ebookProgress,
         lastUpdate: lastUpdate, finishedAt: finishedAt)
 }
 
 @MainActor
 private func loadedModel(
-    _ item: LibraryItem = makeBook(), cache: ProgressCache = ProgressCache(), episodeID: String? = nil
+    _ item: LibraryItem = makeBook(), cache: ProgressCache = ProgressCache()
 ) async -> ItemDetailModel {
-    let model = ItemDetailModel(
-        itemID: item.id, episodeID: episodeID, service: FakeItemDetailService { _ in item }, cache: cache)
+    let model = ItemDetailModel(itemID: item.id, service: FakeItemDetailService { _ in item }, cache: cache)
     await model.load()
     return model
 }
@@ -133,6 +133,56 @@ private func loadedModel(
         #expect(!model.refreshFailed)
     }
 
+    @Test func aCancelledReloadKeepsTheItemWithoutAnError() async {
+        let cancels = Locked(false)
+        let model = ItemDetailModel(
+            itemID: "li-1",
+            service: FakeItemDetailService { id in
+                if cancels.value { throw CancellationError() }
+                return makeBook(id: id)
+            }, cache: ProgressCache())
+        await model.load()
+
+        cancels.value = true
+        await model.load()
+        #expect(model.error == nil)
+        #expect(model.item?.id == "li-1")
+        #expect(!model.isLoading)
+        #expect(!model.refreshFailed)
+    }
+
+    @Test func aRetryIsLoadingAndNotRefreshFailed() async throws {
+        let gate = GatedCalls<String, LibraryItem>()
+        var calls = gate.calls.makeAsyncIterator()
+        let model = ItemDetailModel(
+            itemID: "li-1", service: FakeItemDetailService { id in try await gate.call(id) }, cache: ProgressCache())
+
+        let first = Task { await model.load() }
+        let firstCall = try #require(await calls.next())
+        #expect(model.isLoading)
+        #expect(!model.hasLoaded)
+        firstCall.reply.resume(returning: makeBook())
+        await first.value
+
+        let failing = Task { await model.load() }
+        try #require(await calls.next()).reply.resume(throwing: TestError.offline)
+        await failing.value
+        #expect(model.refreshFailed)
+
+        // While the retry runs, the old error is still set but the page shows loading.
+        let retry = Task { await model.load() }
+        let retryCall = try #require(await calls.next())
+        #expect(model.isLoading)
+        #expect(model.error is TestError)
+        #expect(!model.refreshFailed)
+        #expect(model.item?.id == "li-1")
+
+        retryCall.reply.resume(returning: makeBook())
+        await retry.value
+        #expect(!model.isLoading)
+        #expect(model.error == nil)
+    }
+
     @Test func aLateResponseToAnOlderLoadIsDropped() async throws {
         let gate = GatedCalls<String, LibraryItem>()
         var calls = gate.calls.makeAsyncIterator()
@@ -171,15 +221,23 @@ private func loadedModel(
         let cache = ProgressCache()
         let model = await loadedModel(cache: cache)
         #expect(model.playButton == .play)
+        #expect(model.playStartTime == nil)
 
         cache.apply(progress(progress: 0, lastUpdate: 1))
         #expect(model.playButton == .play)
 
+        // A position without progress isn't started, for the button and the time left alike.
+        cache.apply(progress(progress: 0, currentTime: 30, lastUpdate: 2))
+        #expect(model.playButton == .play)
+        #expect(model.timeRemaining == nil)
+
         cache.apply(progress(progress: 0.4, currentTime: 400, lastUpdate: 2))
         #expect(model.playButton == .resume)
+        #expect(model.playStartTime == nil)
 
         cache.apply(progress(progress: 1, currentTime: 1000, isFinished: true, lastUpdate: 3))
         #expect(model.playButton == .playAgain)
+        #expect(model.playStartTime == 0)
 
         // Ebook-only progress doesn't resume audio.
         cache.apply(progress(progress: 0, ebookProgress: 0.5, lastUpdate: 4))
@@ -191,9 +249,16 @@ private func loadedModel(
         let cache = ProgressCache()
         cache.apply(progress(progress: 0.4, currentTime: 400))
         #expect(await loadedModel(makeBook(trackCount: 0), cache: cache).playButton == .unavailable)
-        #expect(await loadedModel(makeBook(duration: 0), cache: cache).playButton == .unavailable)
+        #expect(await loadedModel(makeBook(trackCount: 0), cache: cache).playStartTime == nil)
         #expect(await loadedModel(makeBook(isMissing: true), cache: cache).playButton == .unavailable)
         #expect(await loadedModel(makeBook(isMissing: true), cache: cache).isMissing)
+        #expect(await loadedModel(makeBook(isInvalid: true), cache: cache).playButton == .unavailable)
+
+        // Tracks make a book playable even when the server reports no duration (legacy showPlay).
+        let zeroDuration = await loadedModel(makeBook(duration: 0), cache: cache)
+        #expect(zeroDuration.hasAudio)
+        #expect(zeroDuration.playButton == .resume)
+        #expect(zeroDuration.details?.duration == nil)
 
         let podcast = LibraryItem(
             id: "li-1", libraryId: "lib", mediaType: .podcast,
@@ -232,11 +297,35 @@ private func loadedModel(
         #expect(model.finishedAt == Date(timeIntervalSince1970: 1_700_000_000))
     }
 
+    @Test func aFinishedItemShowsFullProgress() async {
+        // Deliberately unlike legacy, which showed the raw progress: finished reads as 100%, as on cells.
+        let cache = ProgressCache()
+        cache.apply(progress(progress: 0.97, currentTime: 970, isFinished: true))
+        let model = await loadedModel(cache: cache)
+        #expect(model.progressFraction == 1)
+        #expect(model.playButton == .playAgain)
+    }
+
     @Test func readNeedsAnEbookAndStaysDisabled() async {
-        let withEbook = await loadedModel(makeBook(ebook: .epub))
+        let withEbook = await loadedModel(makeBook(ebookFile: EbookFile(ino: "eb-1", ebookFormat: .epub)))
         #expect(withEbook.hasEbook)
         #expect(withEbook.ebookFormat == .epub)
         #expect(!withEbook.isReadEnabled)
+
+        // An ebook file without a format is still an ebook.
+        let unknownFormat = await loadedModel(makeBook(ebookFile: EbookFile(ino: "eb-1")))
+        #expect(unknownFormat.hasEbook)
+        #expect(unknownFormat.ebookFormat == nil)
+        #expect(!unknownFormat.isReadEnabled)
+
+        // A minified book only carries the format.
+        let minified = await loadedModel(makeBook(ebookFormat: .pdf))
+        #expect(minified.hasEbook)
+        #expect(minified.ebookFormat == .pdf)
+
+        let both = await loadedModel(
+            makeBook(ebookFile: EbookFile(ino: "eb-1", ebookFormat: .epub), ebookFormat: .pdf))
+        #expect(both.ebookFormat == .epub)
 
         let without = await loadedModel(makeBook())
         #expect(!without.hasEbook)
@@ -261,24 +350,5 @@ private func loadedModel(
         cache.apply(progress(progress: 0.5, currentTime: 500))
         #expect(changed.value)
         #expect(model.playButton == .resume)
-    }
-
-    @Test func anEpisodeModelReadsTheEpisodesKey() async {
-        let cache = ProgressCache()
-        let model = await loadedModel(cache: cache, episodeID: "ep-1")
-        let changed = Locked(false)
-        withObservationTracking {
-            _ = model.progressFraction
-        } onChange: {
-            changed.value = true
-        }
-
-        cache.apply(progress(progress: 0.5))
-        #expect(!changed.value)
-        #expect(model.progressFraction == 0)
-
-        cache.apply(progress(episode: "ep-1", progress: 0.5))
-        #expect(changed.value)
-        #expect(model.progressFraction == 0.5)
     }
 }

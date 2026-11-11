@@ -7,14 +7,17 @@ import Observation
 /// legacy `pages/item/_id/index.vue`; the view (#293) only lays it out.
 ///
 /// - Loading keeps the last item while reloading and after a failed reload, like ``StatsModel``.
-///   When loads overlap, only the last one started is applied.
+///   When loads overlap, only the last one started is applied. During a retry ``error`` still
+///   holds the previous failure, so views check ``isLoading`` before ``error``.
 /// - Progress is read from the cache on every access, so a view reading ``progressFraction``,
-///   ``timeRemaining`` or ``playButton`` invalidates when that item's (or episode's) cache entry
-///   changes, and not for other items.
+///   ``timeRemaining`` or ``playButton`` invalidates when this item's cache entry changes, and
+///   not for other items.
 /// - Podcasts are out of scope: the view routes on ``mediaType`` to `PodcastDetailView` (#68).
+///   Episodes have their own route (`Route.episode(itemID:episodeID:)`) and model.
 ///
-/// A model belongs to one item, client and account; views recreate it when any changes (for
-/// example `.task(id:)` on the item ID).
+/// A model belongs to one item, client and account: it holds the signed-in account's client and
+/// that account's ``ProgressCache``. Views recreate it per item ID and under the session's
+/// `.id(identity)` (ADR 0004), so a server or user switch never reuses it.
 @MainActor
 @Observable
 public final class ItemDetailModel {
@@ -23,12 +26,12 @@ public final class ItemDetailModel {
     public enum PlayButton: Sendable, Hashable {
         /// Not started.
         case play
-        /// Some audio progress, not finished.
+        /// Audio progress above 0, not finished.
         case resume
-        /// Finished; playing starts over.
+        /// Finished; playing starts over from ``ItemDetailModel/playStartTime`` (0).
         case playAgain
-        /// Nothing to play: the item has no audio tracks or no duration, is missing or invalid
-        /// on the server, or isn't a book. The view shows a disabled Play.
+        /// Nothing to play: the item has no audio tracks, is missing or invalid on the server,
+        /// or isn't a book. The view shows a disabled Play.
         case unavailable
     }
 
@@ -60,7 +63,8 @@ public final class ItemDetailModel {
         /// `publishedYear`.
         public let year: String?
         public let language: String?
-        /// The HTML description, as the server sends it.
+        /// The description as the server sends it: HTML, to be rendered with ABSUI's
+        /// `HTMLText` (or a component built on it), not shown as plain text.
         public let description: String?
         /// Seconds; `nil` unless positive.
         public let duration: TimeInterval?
@@ -71,8 +75,6 @@ public final class ItemDetailModel {
     }
 
     public let itemID: String
-    /// The episode whose progress is read; `nil` for a book.
-    public let episodeID: String?
 
     /// The last loaded item; kept while reloading and after a failed reload.
     public private(set) var item: LibraryItem?
@@ -86,9 +88,8 @@ public final class ItemDetailModel {
     @ObservationIgnored private let cache: ProgressCache
     @ObservationIgnored private var sequence = 0
 
-    public init(itemID: String, episodeID: String? = nil, service: any ItemDetailService, cache: ProgressCache) {
+    public init(itemID: String, service: any ItemDetailService, cache: ProgressCache) {
         self.itemID = itemID
-        self.episodeID = episodeID
         self.service = service
         self.cache = cache
     }
@@ -148,7 +149,15 @@ public final class ItemDetailModel {
 
     /// The user's progress from the cache. Reading it registers observation of this key only.
     public var progress: MediaProgress? {
-        cache.progress(libraryItemID: itemID, episodeID: episodeID)
+        cache.progress(libraryItemID: itemID)
+    }
+
+    /// The user has listened: audio progress above 0 and not finished. Legacy gates the time
+    /// left on the same audio progress (`index.vue:74-76`, `388-395`); a `currentTime` without
+    /// progress doesn't count. Drives both ``timeRemaining`` and ``PlayButton/resume``.
+    private var hasStartedListening: Bool {
+        guard let progress else { return false }
+        return !progress.isFinished && progress.progress > 0
     }
 
     /// `0...1`: the audio progress, or the ebook progress when there's no audio progress
@@ -171,7 +180,7 @@ public final class ItemDetailModel {
     /// (`index.vue:74-76`): the progress's duration, else the media's, minus the current time
     /// (`index.vue:383-387`), never negative. `nil` otherwise.
     public var timeRemaining: TimeInterval? {
-        guard let progress, !progress.isFinished, progress.progress > 0 else { return nil }
+        guard hasStartedListening, let progress else { return nil }
         let duration = progress.duration > 0 ? progress.duration : (details?.duration ?? 0)
         let remaining = duration - progress.currentTime
         guard remaining.isFinite else { return nil }
@@ -183,17 +192,23 @@ public final class ItemDetailModel {
     /// The primary button for the current item and progress.
     public var playButton: PlayButton {
         guard hasAudio else { return .unavailable }
-        guard let progress else { return .play }
-        if progress.isFinished { return .playAgain }
-        if progress.progress > 0 || progress.currentTime > 0 { return .resume }
+        if isFinished { return .playAgain }
+        if hasStartedListening { return .resume }
         return .play
     }
 
-    /// The book has audio it can play: not missing or invalid, with tracks and a positive
-    /// duration (`index.vue:445-447`).
+    /// Where playback starts, for the view to pass as the start time of `PlayItemAction`
+    /// (#289): `0` for ``PlayButton/playAgain``, so a finished book starts over; `nil` otherwise,
+    /// so playback resumes from the server's position.
+    public var playStartTime: TimeInterval? {
+        playButton == .playAgain ? 0 : nil
+    }
+
+    /// The book has audio it can play, as legacy `showPlay` (`index.vue:445-447`): not missing or
+    /// invalid, with at least one track (``ItemSummary/hasAudio``). The duration doesn't matter.
     public var hasAudio: Bool {
         guard let item, !item.isMissing, !item.isInvalid, item.book != nil, let summary else { return false }
-        return summary.hasAudio && details?.duration != nil
+        return summary.hasAudio
     }
 
     /// The book has an ebook, so the view shows Read (`index.vue:448-450`).
@@ -223,13 +238,13 @@ public final class ItemDetailModel {
         return Details(
             title: metadata.title,
             subtitle: nonEmpty(metadata.subtitle),
-            authors: metadata.authors ?? [],
-            narrators: (metadata.narrators ?? []).filter { !$0.isEmpty },
+            authors: (metadata.authors ?? []).filter { nonEmpty($0.name) != nil },
+            narrators: (metadata.narrators ?? []).filter { nonEmpty($0) != nil },
             series: (metadata.series ?? []).map {
                 SeriesEntry(id: $0.id, name: $0.name, sequence: nonEmpty($0.sequence))
             },
-            genres: (metadata.genres ?? []).filter { !$0.isEmpty },
-            tags: (book.tags ?? []).filter { !$0.isEmpty },
+            genres: (metadata.genres ?? []).filter { nonEmpty($0) != nil },
+            tags: (book.tags ?? []).filter { nonEmpty($0) != nil },
             publisher: nonEmpty(metadata.publisher),
             year: nonEmpty(metadata.publishedYear),
             language: nonEmpty(metadata.language),
