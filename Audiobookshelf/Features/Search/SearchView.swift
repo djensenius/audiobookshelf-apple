@@ -58,7 +58,7 @@ private struct SearchScreen: View {
         SearchContent(
             state: SearchScreenState.resolve(model), sections: model.results.sections,
             recentSearches: model.recentSearches, open: { SearchPresentation.open($0, in: router) },
-            search: { search($0) }, clearRecentSearches: { model.clearRecentSearches() }, retry: { model.submit() }
+            search: { search($0) }, clearRecentSearches: { model.clearRecentSearches() }, retry: { model.searchNow() }
         )
         .searchable(
             text: Binding(get: { model.query }, set: { model.setQuery($0) }),

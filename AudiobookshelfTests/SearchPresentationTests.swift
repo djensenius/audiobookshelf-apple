@@ -284,7 +284,7 @@ private final class StoreToken {}
         #expect(router.pendingSearchQuery == nil)
     }
 
-    @Test func theQuerySurvivesALibraryOnlyRebuild() throws {
+    @Test func theQuerySurvivesALibraryOnlyRebuild() async throws {
         var session = SearchSession()
         session.adopt(key("books"), makeModel: makeModel)
         let books = try #require(session.model)
@@ -296,8 +296,10 @@ private final class StoreToken {}
         #expect(podcasts !== books)
         #expect(podcasts.libraryID == "podcasts")
         #expect(podcasts.query == "dune")
-        // Searched at once, not after the debounce.
-        #expect(podcasts.recentSearches == ["dune"])
+        // Searched at once, not after the debounce, and not recorded: the user didn't submit it.
+        for _ in 0..<1_000 where podcasts.searchedQuery == nil { await Task.yield() }
+        #expect(podcasts.searchedQuery == "dune")
+        #expect(podcasts.recentSearches.isEmpty)
     }
 
     @Test func aDeepLinkedQueryInTheOldLibrarySurvivesTheSwitch() throws {
@@ -342,6 +344,83 @@ private final class StoreToken {}
         #expect(session.isUnavailable)
         session.adopt(nil, makeModel: makeModel)
         #expect(!session.isUnavailable)
+    }
+}
+
+/// A window's search session switching libraries after the history was cleared elsewhere.
+@MainActor
+@Suite struct SearchLibraryRoundTripTests {
+    private func withSession(
+        _ body: (
+            _ session: inout SearchSession, _ keys: (books: SearchSession.Key, podcasts: SearchSession.Key),
+            _ store: LibraryStore, _ settings: AppSettings
+        ) async throws -> Void
+    ) async throws {
+        let suiteName = "SearchLibraryRoundTripTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(defaults: defaults)
+        let store = LibraryStore(settings: settings)
+        await store.connect(client: SearchingLibraryService(), connectionKey: account)
+        func key(_ libraryID: String) -> SearchSession.Key {
+            SearchSession.Key(store: ObjectIdentifier(store), connectionKey: account, libraryID: libraryID)
+        }
+        var session = SearchSession()
+        session.adopt(key("books")) { SearchSession.makeModel(for: $0, store: store, settings: settings) }
+        let model = try #require(session.model)
+        model.setQuery("dune")
+        model.submit()
+        #expect(model.recentSearches == ["dune"])
+        try await body(&session, (key("books"), key("podcasts")), store, settings)
+    }
+
+    private func recents(_ settings: AppSettings, _ libraryID: String) -> [String] {
+        SearchRecentsStore(settings: settings).recentSearches(connectionKey: account, libraryID: libraryID)
+    }
+
+    /// Books → podcasts → books, as the window's library picker does.
+    private func roundTrip(
+        _ session: inout SearchSession, _ keys: (books: SearchSession.Key, podcasts: SearchSession.Key),
+        store: LibraryStore, settings: AppSettings
+    ) async throws {
+        for key in [keys.podcasts, keys.books] {
+            session.adopt(key) { SearchSession.makeModel(for: $0, store: store, settings: settings) }
+            let model = try #require(session.model)
+            #expect(model.query == "dune")
+            for _ in 0..<1_000 where model.searchedQuery == nil { await Task.yield() }
+            #expect(model.searchedQuery == "dune")
+        }
+    }
+
+    @Test func aClearInAnotherWindowSurvivesALibraryRoundTrip() async throws {
+        try await withSession { session, keys, store, settings in
+            let otherWindow = try #require(SearchSession.makeModel(for: keys.books, store: store, settings: settings))
+            otherWindow.clearRecentSearches()
+
+            try await roundTrip(&session, keys, store: store, settings: settings)
+            #expect(recents(settings, "books").isEmpty)
+            #expect(recents(settings, "podcasts").isEmpty)
+            #expect(try #require(session.model).recentSearches.isEmpty)
+        }
+    }
+
+    @Test func resetAllSurvivesALibraryRoundTrip() async throws {
+        try await withSession { session, keys, store, settings in
+            settings.resetAll()
+
+            try await roundTrip(&session, keys, store: store, settings: settings)
+            #expect(settings.recentSearches.isEmpty)
+        }
+    }
+
+    @Test func anExplicitSubmitAfterTheRoundTripStillRecords() async throws {
+        try await withSession { session, keys, store, settings in
+            settings.resetAll()
+            try await roundTrip(&session, keys, store: store, settings: settings)
+
+            try #require(session.model).submit()
+            #expect(recents(settings, "books") == ["dune"])
+        }
     }
 }
 

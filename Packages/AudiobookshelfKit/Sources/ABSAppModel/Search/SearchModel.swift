@@ -92,8 +92,14 @@ public final class SearchModel {
         search(after: debounce)
     }
 
+    /// Searches for the current query at once, without remembering it as a recent search: for a
+    /// search the user didn't submit, such as a query carried to another library or a retry.
+    public func searchNow() {
+        search(after: nil)
+    }
+
     /// Searches for the current query at once, for example on Return, and remembers it as a
-    /// recent search.
+    /// recent search. Only explicit submissions should record one.
     public func submit() {
         let previous = recentSearches
         var recents = previous

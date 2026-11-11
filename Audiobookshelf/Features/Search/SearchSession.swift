@@ -42,8 +42,10 @@ struct SearchSession {
         if let model, let key, let previousKey = previous.key, previousKey.isSameAccount(as: key),
             let query = previous.query, !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
+            // Searches without recording: the user didn't submit it here, and its term may have
+            // been cleared from the recent searches since.
             model.setQuery(query)
-            model.submit()
+            model.searchNow()
         }
         return true
     }
