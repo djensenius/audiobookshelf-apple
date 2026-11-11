@@ -39,13 +39,16 @@ public actor DownloadManager {
     private struct TrackedRecord {
         var key: MediaKey
         var parts: [UUID: (written: Int64, expected: Int64)]
+        /// Parts whose stored size is final: progress read after their completion is stale.
+        var completed: Set<UUID> = []
 
-        var bytes: Int64 { parts.values.reduce(0) { $0 + $1.written } }
+        var bytes: Int64 { parts.values.reduce(0) { DownloadManager.adding($0, max($1.written, 0)) } }
 
         var fraction: Double {
-            let expected = parts.values.reduce(Int64(0)) { $0 + max($1.expected, 0) }
+            // Server-reported lengths can be anything: sum them as `Double` so they can't overflow.
+            let expected = parts.values.reduce(0.0) { $0 + Double(max($1.expected, 0)) }
             guard expected > 0 else { return 0 }
-            return min(1, Double(bytes) / Double(expected))
+            return min(1, Double(bytes) / expected)
         }
     }
 
@@ -247,7 +250,7 @@ public actor DownloadManager {
         let key = MediaKey(serverConnectionID: connectionID, libraryItemId: item.id, episodeId: episodeID)
         var existing = try await read { try await self.store.record(key: key) }
         if let record = existing, !replacingExisting {
-            if let result = try await keep(record) { return result }
+            if let result = try await keep(record, item: item) { return result }
             // The record was finalised or deleted meanwhile: plan as if it never existed.
             existing = nil
         }
@@ -257,13 +260,22 @@ public actor DownloadManager {
         if !replacingExisting, let localItem, Self.hasDownloaded(key, in: localItem) {
             return .alreadyDownloaded(localItem.id)
         }
-        let coverPath = try await existingCoverPath(for: key, localItem: localItem)
-        let plan: DownloadRecordDTO
+        let cover = try await existingCover(for: key, localItem: localItem)
+        var plan: DownloadRecordDTO
         do {
             plan = try planner.plan(
-                item: item, episodeID: episodeID, connectionID: connectionID, existingCoverPath: coverPath)
+                item: item, episodeID: episodeID, connectionID: connectionID, existingCoverPath: cover.pendingPath)
         } catch {
             throw DownloadManagerError(error)
+        }
+        if let shared = cover.completed, let index = plan.parts.firstIndex(where: { $0.kind == .cover }) {
+            // The cover is on disk, held by another record that may never complete: this record
+            // carries it as a completed part, so its local item gets the cover without a fetch.
+            plan.parts[index].destinationRelativePath = shared.destinationRelativePath
+            plan.parts[index].filename = shared.filename
+            plan.parts[index].expectedBytes = shared.expectedBytes
+            plan.parts[index].bytesWritten = shared.bytesWritten
+            plan.parts[index].state = .completed
         }
         try await checkCapacity(for: plan, item: item)
 
@@ -312,12 +324,16 @@ public actor DownloadManager {
         return try await body()
     }
 
-    /// Keeps an existing record, resuming it when it is paused or failed; `nil` when the record
-    /// is gone by the time it is resumed.
-    private func keep(_ record: DownloadRecordDTO) async throws(DownloadManagerError) -> EnqueueResult? {
+    /// Keeps an existing record, resuming it when it is paused or failed and its remaining bytes
+    /// fit; `nil` when the record is gone by the time it is resumed.
+    private func keep(
+        _ record: DownloadRecordDTO, item: LibraryItem
+    ) async throws(DownloadManagerError) -> EnqueueResult? {
         if tracked[record.id] == nil { track(record) }
         switch record.state {
         case .paused, .failed:
+            // The disk may have filled since it was queued (it may have failed `outOfSpace`).
+            try await checkCapacity(for: record, item: item)
             guard try await read({ try await self.engine.resume(recordID: record.id) }) else {
                 forget(record.id)
                 return nil
@@ -337,36 +353,48 @@ public actor DownloadManager {
         return localItem.files.contains { $0.kind == .audio || $0.kind == .ebook }
     }
 
-    /// The item's cover that is stored or on its way: the local item's, or else a cover part
-    /// of another record of the same item, so two episodes queued together fetch it once. A
-    /// cover part counts only when it has completed or its record is queued or downloading: a
-    /// paused or failed record may never fetch it.
-    func existingCoverPath(
+    /// The item's cover that is stored or on its way, so two episodes queued together fetch it
+    /// once:
+    /// - `pendingPath`: the local item's cover, or a cover part another queued or downloading
+    ///   record of the item will fetch and attach. The plan gets no cover part.
+    /// - `completed`: a cover part another record of the item has already fetched, on disk.
+    ///   Its record may never complete (paused or failed), so the plan carries it instead.
+    /// A pending cover part of a paused or failed record counts for neither: the plan fetches
+    /// its own.
+    func existingCover(
         for key: MediaKey, localItem: LocalLibraryItemDTO?
-    ) async throws(DownloadManagerError) -> String? {
-        if let path = localItem?.coverRelativePath { return path }
+    ) async throws(DownloadManagerError) -> (pendingPath: String?, completed: DownloadPartDTO?) {
+        if let path = localItem?.coverRelativePath { return (path, nil) }
         let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
-        return
-            records
-            .lazy
-            .filter { $0.key.libraryItemId == key.libraryItemId && $0.key != key }
-            .compactMap { record in
-                record.parts.first {
-                    $0.kind == .cover
-                        && ($0.state == .completed || record.state == .queued || record.state == .downloading)
-                }?.destinationRelativePath
-            }
-            .first
+        let siblings = records.filter { $0.key.libraryItemId == key.libraryItemId && $0.key != key }
+        let covers = siblings.compactMap { record in
+            record.parts.first { $0.kind == .cover }.map { (record, $0) }
+        }
+        let locations = locations
+        let stored = covers.first { _, part in
+            part.state == .completed
+                && (try? locations.fileURL(forRelativePath: part.destinationRelativePath))
+                    .map { FileManager.default.fileExists(atPath: $0.path) } == true
+        }
+        if let stored { return (nil, stored.1) }
+        let pending = covers.first { record, part in
+            part.state != .completed && (record.state == .queued || record.state == .downloading)
+        }
+        return (pending?.1.destinationRelativePath, nil)
     }
 
     private func checkCapacity(for record: DownloadRecordDTO, item: LibraryItem) async throws(DownloadManagerError) {
         // A cover's size is never known in advance; the headroom covers it.
-        let files = record.parts.filter { $0.kind != .cover }
-        var required = files.reduce(Int64(0)) { $0 + max($1.expectedBytes - $1.bytesWritten, 0) }
+        // Completed parts need nothing more. Sizes come from the server, so the sums saturate
+        // at `Int64.max` (which never fits) instead of overflowing.
+        let files = record.parts.filter { $0.kind != .cover && $0.state != .completed }
+        var required = files.reduce(Int64(0)) {
+            Self.adding($0, max(max($1.expectedBytes, 0) - max($1.bytesWritten, 0), 0))
+        }
         if files.contains(where: { $0.expectedBytes <= 0 }) {
             required = max(required, Int64(Self.reportedSize(of: item, episodeID: record.key.episodeId) ?? 0))
         }
-        required += Self.storageHeadroom
+        required = Self.adding(required, Self.storageHeadroom)
         let available: Int64
         do {
             available = try await capacity.availableCapacity()
@@ -463,7 +491,9 @@ public actor DownloadManager {
 
     private func handle(_ progress: DownloadProgress) async {
         if tracked[progress.recordID] == nil { await refresh(progress.recordID, announce: false) }
-        if var record = tracked[progress.recordID] {
+        // The streams are read by separate tasks, so a part's last progress can arrive after its
+        // completion was read from the store; the stored size wins.
+        if var record = tracked[progress.recordID], !record.completed.contains(progress.partID) {
             record.parts[progress.partID] = (progress.bytesWritten, progress.expectedBytes)
             tracked[progress.recordID] = record
             publishProgress(of: progress.recordID)
@@ -515,7 +545,9 @@ public actor DownloadManager {
                     ?? part.expectedBytes
             )
         }
-        tracked[record.id] = TrackedRecord(key: record.key, parts: parts)
+        tracked[record.id] = TrackedRecord(
+            key: record.key, parts: parts,
+            completed: Set(record.parts.filter { $0.state == .completed }.map(\.id)))
     }
 
     /// Stops tracking a record; returns its key. A refresh that read the record before reads
@@ -565,6 +597,12 @@ public actor DownloadManager {
     }
 
     // MARK: - Helpers
+
+    /// `a + b` of non-negative values, or `Int64.max` when that overflows.
+    static func adding(_ a: Int64, _ b: Int64) -> Int64 {
+        let (sum, overflow) = a.addingReportingOverflow(b)
+        return overflow ? .max : sum
+    }
 
     /// Runs a store call, mapping its error.
     func read<T: Sendable>(_ body: () async throws -> T) async throws(DownloadManagerError) -> T {

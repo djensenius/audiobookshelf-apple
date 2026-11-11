@@ -143,7 +143,7 @@ extension DownloadManager {
     }
 
     /// Gives the item of `key` its cover again when `cover` was the only one stored or on its
-    /// way (``existingCoverPath(for:localItem:)``): the first podcast episode record of the item
+    /// way (``existingCover(for:localItem:)``): the first podcast episode record of the item
     /// without a cover part, queued or downloading ones first, gets a part like `cover`'s, saved
     /// completed when its file is still there and started otherwise. Queued episodes share one
     /// cover part, so without this the episodes left would complete without a cover. (A book
@@ -153,7 +153,8 @@ extension DownloadManager {
         let localItem = try await read {
             try await self.localItems.item(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
         }
-        guard try await existingCoverPath(for: itemKey, localItem: localItem) == nil else { return }
+        let existing = try await existingCover(for: itemKey, localItem: localItem)
+        guard existing.pendingPath == nil, existing.completed == nil else { return }
         let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
             .filter {
                 $0.key.libraryItemId == key.libraryItemId && $0.key.episodeId != nil
