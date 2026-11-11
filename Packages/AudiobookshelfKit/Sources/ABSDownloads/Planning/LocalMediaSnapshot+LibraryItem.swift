@@ -56,13 +56,15 @@ extension LocalMediaSnapshot {
 
 extension LocalMediaSnapshot.Metadata {
     /// Authors and narrators come from the full lists, or from the flattened `authorName` and
-    /// `narratorName` when an item carries only those.
+    /// `narratorName` when those lists are missing or empty.
     init(_ metadata: BookMetadata) {
+        let authors = metadata.authors?.map(\.name) ?? []
+        let narrators = metadata.narrators ?? []
         self.init(
             title: metadata.title,
             subtitle: metadata.subtitle,
-            authors: metadata.authors?.map(\.name) ?? Self.names(metadata.authorName),
-            narrators: metadata.narrators ?? Self.names(metadata.narratorName),
+            authors: authors.isEmpty ? Self.names(metadata.authorName) : authors,
+            narrators: narrators.isEmpty ? Self.names(metadata.narratorName) : narrators,
             series: (metadata.series ?? []).map { LocalMediaSnapshot.Series(name: $0.name, sequence: $0.sequence) },
             description: metadata.description,
             publishedYear: metadata.publishedYear,
@@ -78,9 +80,12 @@ extension LocalMediaSnapshot.Metadata {
             explicit: metadata.explicit ?? false)
     }
 
-    /// The names in a flattened, comma-separated list.
+    /// A flattened name list as one entry. The server joins names with `, `, so splitting would
+    /// break names such as `Smith, Jr.`; one entry still shows the same text, because
+    /// `LocalItemStore` joins the authors with `, ` again.
     private static func names(_ list: String?) -> [String] {
-        (list ?? "").split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard let list = list?.trimmingCharacters(in: .whitespaces), !list.isEmpty else { return [] }
+        return [list]
     }
 }
 

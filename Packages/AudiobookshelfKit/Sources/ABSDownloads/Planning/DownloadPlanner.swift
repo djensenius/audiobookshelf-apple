@@ -34,6 +34,12 @@ public enum DownloadPlanError: Error, Equatable, Sendable {
 /// folders) get numbered suffixes. The snapshot's ``LocalMediaSnapshot/coverUpdatedAt`` is the
 /// item's `updatedAt` when the plan downloads a cover, and `nil` otherwise, so a kept cover's
 /// timestamp isn't moved forward.
+///
+/// A plan never reserves the paths of files already stored for the item: each call starts a
+/// fresh ``DownloadLayout``. That is safe while a book download replaces the item's files
+/// (`LocalItemStore` matches files by path) and each episode has its own folder, but a caller
+/// that adds files next to stored ones must pass their paths to
+/// ``DownloadLayout/init(connectionID:libraryItemID:locations:reserving:)`` instead.
 public struct DownloadPlanner: Sendable {
     private let locations: DownloadLocations
 
@@ -45,13 +51,17 @@ public struct DownloadPlanner: Sendable {
     /// The download record for `item`, or for one of its episodes.
     ///
     /// `item` must be expanded (`ItemEndpoints.item(id:)` sends `expanded=1`), so books carry
-    /// `tracks` and `audioFiles`.
+    /// `tracks` and `audioFiles` and podcasts carry `episodes`; a minified item throws
+    /// ``DownloadPlanError/missingFileMetadata``.
     ///
     /// - Parameters:
     ///   - episodeID: the podcast episode to download; `nil` for a book.
     ///   - connectionID: the server connection the item belongs to.
-    ///   - existingCoverPath: the cover of the local item already downloaded, if any. A
-    ///     podcast episode only fetches the cover when this is `nil`; a book always fetches it.
+    ///   - existingCoverPath: the item's cover that is stored or already on its way: the local
+    ///     item's cover, or else the destination of a cover part in any other pending download
+    ///     record for the same item (two episodes queued together must not both fetch
+    ///     `cover.jpg`). A podcast episode only fetches the cover when this is `nil`; a book
+    ///     always fetches it.
     /// - Throws: a ``DownloadPlanError``.
     public func plan(
         item: LibraryItem, episodeID: String?, connectionID: UUID, existingCoverPath: String?
@@ -68,9 +78,9 @@ public struct DownloadPlanner: Sendable {
             return try planBook(item: item, book: book, connectionID: connectionID, layout: &layout)
         case .podcast(let podcast):
             guard let episodeID else { throw .episodeNotFound }
-            guard let episode = podcast.episodes?.first(where: { $0.id == episodeID }) else {
-                throw .episodeNotFound
-            }
+            // A minified podcast has no episode list to look in.
+            guard let episodes = podcast.episodes else { throw .missingFileMetadata }
+            guard let episode = episodes.first(where: { $0.id == episodeID }) else { throw .episodeNotFound }
             return try planEpisode(
                 item: item, podcast: podcast, episode: episode, connectionID: connectionID,
                 fetchCover: existingCoverPath == nil, layout: &layout)
@@ -86,8 +96,12 @@ public struct DownloadPlanner: Sendable {
     private func planBook(
         item: LibraryItem, book: Book, connectionID: UUID, layout: inout DownloadLayout
     ) throws(DownloadPlanError) -> DownloadRecordDTO {
-        // A full but unexpanded item has audio files but no tracks; don't plan only its ebook.
-        if book.tracks == nil, !(book.audioFiles ?? []).isEmpty { throw .missingFileMetadata }
+        // An unexpanded item has audio files (or, minified, only counts) but no tracks, and a
+        // minified one has only the ebook's format: don't plan a part of it, or nothing.
+        let hasUnlistedAudio =
+            !(book.audioFiles ?? []).isEmpty || (book.numTracks ?? 0) > 0 || (book.numAudioFiles ?? 0) > 0
+        if book.tracks == nil, hasUnlistedAudio { throw .missingFileMetadata }
+        if book.ebookFile == nil, book.ebookFormat != nil { throw .missingFileMetadata }
         let tracks = book.tracks ?? []
         guard !tracks.isEmpty || book.ebookFile != nil else { throw .noDownloadableMedia }
 
@@ -117,12 +131,12 @@ public struct DownloadPlanner: Sendable {
                     kind: .ebook,
                     serverPath: DownloadRequests.filePath(itemID: item.id, ino: ebook.ino),
                     filename: Self.lastComponent(of: destination),
-                    mimeType: ebook.ebookFormat?.mimeType ?? Self.fallbackMimeType,
+                    mimeType: Self.ebookMimeType(ebook),
                     serverIno: ebook.ino,
                     expectedBytes: Int64(ebook.metadata?.size ?? 0),
                     destinationRelativePath: destination))
         }
-        let cover = try coverPart(item: item, hasCover: book.coverPath != nil, layout: layout)
+        let cover = try coverPart(item: item, hasCover: book.coverPath?.isEmpty == false, layout: layout)
         if let cover { parts.append(cover) }
         return DownloadRecordDTO(
             key: MediaKey(serverConnectionID: connectionID, libraryItemId: item.id),
@@ -158,7 +172,8 @@ public struct DownloadPlanner: Sendable {
                 expectedBytes: Int64(track.metadata?.size ?? episode.audioFile?.metadata?.size ?? episode.size ?? 0),
                 destinationRelativePath: destination)
         ]
-        let cover = try coverPart(item: item, hasCover: fetchCover && podcast.coverPath != nil, layout: layout)
+        let cover = try coverPart(
+            item: item, hasCover: fetchCover && podcast.coverPath?.isEmpty == false, layout: layout)
         if let cover { parts.append(cover) }
         return DownloadRecordDTO(
             key: MediaKey(serverConnectionID: connectionID, libraryItemId: item.id, episodeId: episode.id),
@@ -196,6 +211,10 @@ public struct DownloadPlanner: Sendable {
         } catch DownloadLayout.LayoutError.invalidIdentifier(let id) {
             throw .invalidIdentifier(id)
         } catch {
+            // Unreachable today: escaped IDs and sanitised filenames always form a valid relative
+            // path, and nothing is reserved, so `unrelatedPath` and `PathError` can't occur. If
+            // they ever do, the server's file data couldn't be placed, which is closest to
+            // missing metadata.
             throw .missingFileMetadata
         }
     }
@@ -241,6 +260,14 @@ public struct DownloadPlanner: Sendable {
         let ino = String(components[index + 1])
         let decoded = ino.removingPercentEncoding ?? ino
         return decoded.isEmpty ? nil : decoded
+    }
+
+    /// The ebook's MIME type, from its format or else its extension.
+    static func ebookMimeType(_ ebook: EbookFile) -> String {
+        let fromExtension = ebook.metadata?.ext.flatMap {
+            EbookFormat(rawValue: String($0.drop { $0 == "." })).mimeType
+        }
+        return ebook.ebookFormat?.mimeType ?? fromExtension ?? fallbackMimeType
     }
 
     /// The ebook's server filename, or `ebook.<format>` as the legacy app named it.

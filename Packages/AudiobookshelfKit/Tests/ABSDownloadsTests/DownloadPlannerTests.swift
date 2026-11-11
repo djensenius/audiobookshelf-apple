@@ -67,6 +67,68 @@ import Testing
         #expect(again.parts.last?.kind == .cover)
     }
 
+    @Test func trackIndexComesFromTheServerNotThePosition() throws {
+        let record = try plan(
+            Fixtures.book(
+                files: [
+                    .init(ino: "1", path: "/audiobooks/Dune/a.mp3", size: 1, index: 2),
+                    .init(ino: "2", path: "/audiobooks/Dune/b.mp3", size: 2, index: 5),
+                    .init(ino: "3", path: "/audiobooks/Dune/c.mp3", size: 3, index: 9),
+                ], ebook: nil, coverPath: nil))
+
+        #expect(record.parts.map(\.trackIndex) == [2, 5, 9])
+        #expect(record.media.audioTracks.map(\.index) == [2, 5, 9])
+        for part in record.parts {
+            #expect(record.media.audioTracks.first { $0.ino == part.serverIno }?.index == part.trackIndex)
+        }
+    }
+
+    @Test func emptyCoverPathMeansNoCover() throws {
+        let book = try plan(Fixtures.book(coverPath: ""))
+        #expect(!book.parts.contains { $0.kind == .cover })
+        #expect(book.media.coverUpdatedAt == nil)
+        let episode = try plan(Fixtures.podcast(coverPath: ""), episodeID: "ep_1")
+        #expect(episode.parts.map(\.kind) == [.audio])
+    }
+
+    @Test func coverWithoutAnItemTimestampUsesZero() throws {
+        let record = try plan(Fixtures.book(updatedAt: nil))
+        #expect(record.parts.last?.serverPath == "/api/items/li_book/cover?width=1200&format=jpeg&ts=0")
+        #expect(record.media.coverUpdatedAt == nil)
+    }
+
+    @Test func audioMimeTypeFallsBackToTheAudioFileThenOctetStream() throws {
+        let record = try plan(
+            Fixtures.book(
+                files: [
+                    .init(
+                        ino: "1", path: "/audiobooks/Dune/a.m4b", size: 1, trackMimeType: nil, fileMimeType: "audio/mp4"
+                    ),
+                    .init(ino: "2", path: "/audiobooks/Dune/b.xyz", size: 2, trackMimeType: nil, fileMimeType: nil),
+                ], ebook: nil, coverPath: nil))
+        #expect(record.parts.map(\.mimeType) == ["audio/mp4", "application/octet-stream"])
+        #expect(record.media.audioTracks.map(\.mimeType) == ["audio/mp4", "application/octet-stream"])
+    }
+
+    @Test func ebookOfAnUnknownFormatGetsItsMimeTypeFromTheExtension() throws {
+        func ebookPart(_ filename: String, format: String) throws -> DownloadPartDTO {
+            let ebook = EbookFile(
+                ino: "201", metadata: Fixtures.fileMetadata(path: "/audiobooks/Dune/\(filename)", size: 9),
+                ebookFormat: .unknown(format))
+            return try #require(plan(Fixtures.book(files: [], ebook: ebook, coverPath: nil)).parts.first)
+        }
+        #expect(try ebookPart("Dune.azw", format: "azw").mimeType == "application/octet-stream")
+        #expect(try ebookPart("Dune.epub", format: "EPUB3").mimeType == "application/epub+zip")
+        let media = try plan(
+            Fixtures.book(
+                files: [],
+                ebook: EbookFile(
+                    ino: "201", metadata: Fixtures.fileMetadata(path: "/a/Dune.azw", size: 9),
+                    ebookFormat: .unknown("azw")))
+        ).media
+        #expect(media.ebookFile == .init(ino: "201", filename: "Dune.azw", format: "azw"))
+    }
+
     @Test func ebookOnlyBookGetsTheEbookAlone() throws {
         let record = try plan(Fixtures.book(files: [], coverPath: nil))
         #expect(record.parts.count == 1)
@@ -157,6 +219,30 @@ import Testing
         #expect(record.media.coverUpdatedAt == coverDate)
     }
 
+    @Test func episodeAudioFileInodeWinsOverTheContentURL() throws {
+        let record = try plan(Fixtures.podcast(), episodeID: "ep_2")
+        #expect(record.parts[0].serverIno == "302")
+        #expect(record.media.episodes.first?.track?.ino == "302")
+    }
+
+    @Test func episodeWithoutAnAudioFileUsesItsTrackAndEpisodeSize() throws {
+        let podcast = Fixtures.podcast(episodes: [Fixtures.episode(id: "ep_1", ino: "301", hasAudioFile: false)])
+        let record = try plan(podcast, episodeID: "ep_1")
+        let audio = try #require(record.parts.first)
+        #expect(audio.serverIno == "url-301")
+        #expect(audio.serverPath == "/api/items/li_pod/file/url-301/download")
+        #expect(audio.filename == "ep_1.mp3")
+        #expect(audio.expectedBytes == 4_321)
+        #expect(audio.mimeType == "audio/mpeg")
+        #expect(record.media.episodes.first?.track?.ino == "url-301")
+    }
+
+    @Test func podcastWithoutACoverGetsNoCoverPart() throws {
+        let record = try plan(Fixtures.podcast(coverPath: nil), episodeID: "ep_1", existingCoverPath: nil)
+        #expect(record.parts.map(\.kind) == [.audio])
+        #expect(record.media.coverUpdatedAt == nil)
+    }
+
     @Test func episodeKeepsAnExistingLocalCover() throws {
         let record = try plan(Fixtures.podcast(), episodeID: "ep_1", existingCoverPath: "\(podcastFolder)/cover.jpg")
 
@@ -217,9 +303,16 @@ import Testing
     @Test func bookSnapshotFallsBackToFlattenedNames() throws {
         let metadata = BookMetadata(title: "T", authorName: "A One, A Two", narratorName: "N One")
         let media = try plan(Fixtures.book(metadata: metadata)).media
-        #expect(media.metadata.authors == ["A One", "A Two"])
+        // One entry: the server joins names with `, `, so splitting could break `Smith, Jr.`.
+        #expect(media.metadata.authors == ["A One, A Two"])
         #expect(media.metadata.narrators == ["N One"])
         #expect(media.metadata.series.isEmpty)
+
+        let empty = BookMetadata(
+            title: "T", authors: [], narrators: [], authorName: "Sammy Davis, Jr.", narratorName: "N One")
+        let emptyMedia = try plan(Fixtures.book(metadata: empty)).media
+        #expect(emptyMedia.metadata.authors == ["Sammy Davis, Jr."])
+        #expect(emptyMedia.metadata.narrators == ["N One"])
     }
 
     // MARK: - Errors
@@ -256,6 +349,20 @@ import Testing
         #expect(throws: DownloadPlanError.missingFileMetadata) { try plan(nameless) }
     }
 
+    @Test func refusesMinifiedItems() {
+        let counts = LibraryItem(
+            id: "li_min", libraryId: "lib_1", mediaType: .book,
+            media: .book(Book(id: "b", metadata: Fixtures.bookMetadata, numTracks: 3, numAudioFiles: 3)))
+        #expect(throws: DownloadPlanError.missingFileMetadata) { try plan(counts) }
+        let ebookFormatOnly = LibraryItem(
+            id: "li_min", libraryId: "lib_1", mediaType: .book,
+            media: .book(Book(id: "b", metadata: Fixtures.bookMetadata, ebookFormat: .epub)))
+        #expect(throws: DownloadPlanError.missingFileMetadata) { try plan(ebookFormatOnly) }
+        #expect(throws: DownloadPlanError.missingFileMetadata) {
+            try plan(Fixtures.podcast(numEpisodes: 2), episodeID: "ep_1")
+        }
+    }
+
     @Test func refusesAnUnknownMediaType() {
         let item = LibraryItem(id: "li_video", libraryId: "lib_1", mediaType: .unknown("video"))
         #expect(throws: DownloadPlanError.unknownMediaType) { try plan(item) }
@@ -277,6 +384,7 @@ import Testing
             ("/s/local/abc/file/4%205", "4 5"),
             ("/api/items/li_1/file/", nil),
             ("/api/items/li_1/cover", nil),
+            ("https://host/base/api/items/x/file/7#frag", "7"),
         ] as [(String, String?)])
     func parsesTheInodeFromAContentURL(url: String, ino: String?) {
         #expect(DownloadPlanner.ino(fromContentURL: url) == ino)

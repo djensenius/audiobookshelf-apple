@@ -19,6 +19,10 @@ enum LibraryItemFixtures {
         var listed = true
         /// Whether the track carries file metadata.
         var trackHasMetadata = true
+        /// The track's index; `nil` uses its 1-based position.
+        var index: Int? = nil
+        var trackMimeType: String? = "audio/mpeg"
+        var fileMimeType: String? = "audio/mpeg"
 
         var filename: String { String(path.split(separator: "/").last ?? "") }
     }
@@ -30,21 +34,22 @@ enum LibraryItemFixtures {
         ebook: EbookFile? = epub,
         coverPath: String? = "/metadata/items/li_book/cover.jpg",
         chapters: [Chapter] = [Chapter(id: 0, start: 0, end: 600, title: "One")],
-        metadata: BookMetadata = bookMetadata
+        metadata: BookMetadata = bookMetadata,
+        updatedAt: Int? = LibraryItemFixtures.updatedAt
     ) -> LibraryItem {
         var offset = 0.0
         let tracks = files.enumerated().map { position, file in
             defer { offset += file.duration }
             return AudioTrack(
-                index: position + 1, startOffset: offset, duration: file.duration, title: file.title,
-                contentUrl: file.contentUrl ?? "/api/items/\(id)/file/\(file.ino)", mimeType: "audio/mpeg",
+                index: file.index ?? position + 1, startOffset: offset, duration: file.duration, title: file.title,
+                contentUrl: file.contentUrl ?? "/api/items/\(id)/file/\(file.ino)", mimeType: file.trackMimeType,
                 codec: "mp3",
                 metadata: file.trackHasMetadata ? fileMetadata(path: file.path, size: file.size) : nil)
         }
         let audioFiles = files.enumerated().filter(\.element.listed).map { position, file in
             AudioFile(
                 index: position + 1, ino: file.ino, metadata: fileMetadata(path: file.path, size: file.size),
-                duration: file.duration, mimeType: "audio/mpeg")
+                duration: file.duration, mimeType: file.fileMimeType)
         }
         let book = Book(
             id: "book_1", libraryItemId: id, metadata: metadata, coverPath: coverPath, audioFiles: audioFiles,
@@ -71,29 +76,38 @@ enum LibraryItemFixtures {
     static func podcast(
         id: String = "li_pod",
         episodes: [PodcastEpisode] = [episode(id: "ep_1", ino: "301"), episode(id: "ep_2", ino: "302")],
-        coverPath: String? = "/metadata/items/li_pod/cover.jpg"
+        coverPath: String? = "/metadata/items/li_pod/cover.jpg",
+        numEpisodes: Int? = nil
     ) -> LibraryItem {
         let podcast = Podcast(
             id: "pod_1", libraryItemId: id,
             metadata: PodcastMetadata(title: "The Show", author: "Host", description: "Talk.", explicit: true),
-            coverPath: coverPath, episodes: episodes)
+            coverPath: coverPath, episodes: numEpisodes == nil ? episodes : nil, numEpisodes: numEpisodes)
         return LibraryItem(
             id: id, libraryId: "lib_2", updatedAt: updatedAt, mediaType: .podcast, media: .podcast(podcast))
     }
 
-    static func episode(id: String, ino: String, hasTrack: Bool = true, itemID: String = "li_pod") -> PodcastEpisode {
+    /// The track's content URL names `url-<ino>`, a different inode from the audio file's, so
+    /// tests see which one the planner uses.
+    static func episode(
+        id: String, ino: String, hasTrack: Bool = true, hasAudioFile: Bool = true, itemID: String = "li_pod"
+    ) -> PodcastEpisode {
         let path = "/podcasts/The Show/\(id).mp3"
         let metadata = fileMetadata(path: path, size: 5_000)
+        // Without an audio file, the track's metadata has no size either, as on some servers.
+        let trackMetadata = hasAudioFile ? metadata : FileMetadata(filename: "\(id).mp3", path: path)
         return PodcastEpisode(
             id: id, libraryItemId: itemID, season: "1", episode: "2", title: "Episode \(id)",
             chapters: [Chapter(id: 0, start: 0, end: 900, title: "Intro")],
-            audioFile: AudioFile(ino: ino, metadata: metadata, duration: 900, mimeType: "audio/mpeg"),
+            audioFile: hasAudioFile
+                ? AudioFile(ino: ino, metadata: metadata, duration: 900, mimeType: "audio/mpeg") : nil,
             audioTrack: hasTrack
                 ? AudioTrack(
                     index: nil, startOffset: 0, duration: 900, title: "Episode \(id)",
-                    contentUrl: "/api/items/\(itemID)/file/\(ino)", mimeType: "audio/mpeg", metadata: metadata)
+                    contentUrl: "/api/items/\(itemID)/file/url-\(ino)", mimeType: "audio/mpeg",
+                    metadata: trackMetadata)
                 : nil,
-            publishedAt: 1_690_000_000_000, duration: 900, size: 5_000)
+            publishedAt: 1_690_000_000_000, duration: 900, size: 4_321)
     }
 
     static func fileMetadata(path: String, size: Int) -> FileMetadata {
