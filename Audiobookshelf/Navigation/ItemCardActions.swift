@@ -19,8 +19,7 @@ enum ItemCardActions {
         return .item(id: item.itemID)
     }
 
-    /// The actions a card offers: Play only while there is a player to call; no sharing or
-    /// playlists yet.
+    /// The actions a card offers: Play only while there is a player to call; no sharing or playlists yet.
     static func actionContext(canPlay: Bool) -> ItemActionContext {
         ItemActionContext(canEditPlaylists: false, canPlay: canPlay, canShare: false)
     }
