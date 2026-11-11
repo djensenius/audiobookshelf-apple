@@ -2,8 +2,8 @@ import ABSCore
 import Foundation
 
 /// `GET /api/me` reduced to the media of each progress row and whether it is finished. Rows
-/// without a usable item ID are skipped, and a missing or malformed `isFinished` reads as not
-/// finished; every other field of the user is ignored.
+/// without a usable item ID are skipped, a missing or malformed `isFinished` reads as not
+/// finished, and a `mediaProgress` that isn't a list throws; every other field is ignored.
 public struct UserFinishedMediaResponse: Decodable, Sendable, Hashable {
     public struct Entry: Decodable, Sendable, Hashable {
         public var libraryItemId: String
@@ -41,6 +41,7 @@ public struct UserFinishedMediaResponse: Decodable, Sendable, Hashable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        mediaProgress = (try? container.decodeLossyArrayIfPresent(Entry.self, forKey: .mediaProgress)) ?? []
+        // A malformed row is skipped, but a malformed list throws: unknown isn't "none finished".
+        mediaProgress = try container.decodeLossyArrayIfPresent(Entry.self, forKey: .mediaProgress) ?? []
     }
 }

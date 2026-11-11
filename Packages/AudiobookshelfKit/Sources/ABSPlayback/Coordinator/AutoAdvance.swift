@@ -51,4 +51,6 @@ protocol NextItemProvider: AnyObject {
     func preparedNext(after key: MediaKey) -> PreparedNextItem?
     /// Waits for (or starts) the preparation of the item to follow `key`; `nil` stays at the end.
     func prepareNext(after key: MediaKey) async -> PreparedNextItem?
+    /// Whether the advance to `key`, already underway, should still send `/play`.
+    func isStillNext(_ key: MediaKey) -> Bool
 }

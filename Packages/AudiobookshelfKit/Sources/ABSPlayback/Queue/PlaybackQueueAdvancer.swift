@@ -11,10 +11,13 @@ private let logger = Log.playback
 /// however it was started; restoring it at launch doesn't count.
 ///
 /// The next item is prepared before the end, so that after it only `/play` and loading the stream
-/// remain (iOS can suspend the app once audio stops): when an item loads, once more in its last
-/// ``nearEndWindow`` seconds, and again when the queue changes, when ``progressDidChange(for:)``
-/// concerns the next item or the current podcast, or on ``connectionDidChange()``. Each
-/// preparation replaces the one in flight.
+/// remain (iOS can suspend the app once audio stops): when an item loads; once on entering its
+/// last chapter and once in its last ``nearEndWindow`` seconds (re-armed by a resume, which
+/// refreshes at once inside them, and by a seek out of them); and again when the queue changes,
+/// when ``progressDidChange(for:)`` concerns the next item or the current podcast, or on
+/// ``connectionDidChange()``. Each preparation replaces the one in flight. Only when no
+/// preparation younger than ``maximumPreparationAge`` is ready at the end is anything fetched
+/// after it, under the coordinator's background activity.
 ///
 /// The coordinator holds the advancer weakly: the owner keeps it alive while attached.
 @MainActor
@@ -31,17 +34,34 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     private var listing: (podcastItemID: String, listing: PodcastEpisodeListing)?
     /// Episodes that ended while attached, whose finish may not have reached the server yet.
     private var endedEpisodes: Set<MediaKey> = []
-    private var refreshedNearEnd = false
+    private var preparedAt: TimeInterval = 0
+    /// Near-end refreshes done since the load, a resume or a seek out of them.
+    private var refreshed: Set<NearEndTrigger> = []
+    /// A pause happened, so the next start re-arms the near-end refreshes.
+    private var rearmOnStart = false
+    /// The queued item an advance is starting, until its session starts.
+    private var advancingFromQueue: MediaKey?
     private var revision = 0
     private var task: Task<Void, Never>?
+    private let uptime: @Sendable () -> TimeInterval
+
+    private enum NearEndTrigger { case finalChapter, window }
 
     /// The next item is prepared again once this close to the end, in seconds.
     public static let nearEndWindow: Double = 30
+    /// An older preparation is redone at the end, in seconds.
+    public static let maximumPreparationAge: TimeInterval = 600
 
-    /// - Parameter episodes: Where podcast episodes come from; `nil` turns off the podcast fallback.
-    public init(queue: PlaybackQueue, episodes: (any PodcastEpisodeSource)?) {
+    /// - Parameters:
+    ///   - episodes: Where podcast episodes come from; `nil` turns off the podcast fallback.
+    ///   - uptime: Monotonic seconds, for the age of a preparation.
+    public init(
+        queue: PlaybackQueue, episodes: (any PodcastEpisodeSource)?,
+        uptime: @escaping @Sendable () -> TimeInterval = ProgressSyncClock.live.uptime
+    ) {
         self.queue = queue
         self.episodes = episodes
+        self.uptime = uptime
     }
 
     /// Becomes `coordinator`'s next-item provider and follows its playback. Attach to one
@@ -70,13 +90,17 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         }
         self.coordinator = nil
         endedEpisodes = []
+        advancingFromQueue = nil
         reset()
     }
 
     /// Progress changed for `key` (synced, or from another device): prepares again when it is the
     /// next item, or an episode of the current podcast (finishing one changes which is next).
+    /// The current item's own progress changes nothing. An episode that ended here and changed
+    /// since is no longer assumed finished.
     public func progressDidChange(for key: MediaKey) {
-        guard let current, key.serverConnectionID == queue.serverConnectionID else { return }
+        guard let current, key != current, key.serverConnectionID == queue.serverConnectionID else { return }
+        endedEpisodes.remove(key)
         let samePodcast =
             current.episodeId != nil && key.episodeId != nil && key.libraryItemId == current.libraryItemId
         guard samePodcast || key == candidate?.key || key == firstQueued(after: current) else { return }
@@ -92,19 +116,27 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
 
     // MARK: NextItemProvider
 
+    /// `nil` too when the preparation is too old to trust (progress or the network may have changed).
     func preparedNext(after key: MediaKey) -> PreparedNextItem? {
-        guard key == current, let prepared, prepared.key == candidate?.key else { return nil }
+        guard key == current, let prepared, prepared.key == candidate?.key,
+            uptime() - preparedAt <= Self.maximumPreparationAge
+        else { return nil }
         return prepared
     }
 
     func prepareNext(after key: MediaKey) async -> PreparedNextItem? {
         guard key == current else { return nil }
-        if prepared == nil, task == nil { recompute() }
-        while prepared == nil, let running = task {
+        if preparedNext(after: key) == nil, task == nil { recompute() }
+        while preparedNext(after: key) == nil, let running = task {
             await running.value
             if task == running { break }
         }
         return preparedNext(after: key)
+    }
+
+    func isStillNext(_ key: MediaKey) -> Bool {
+        key != advancingFromQueue
+            || queue.items.contains { $0.key(serverConnectionID: queue.serverConnectionID) == key }
     }
 
     /// Waits for the preparation in flight (tests).
@@ -119,26 +151,54 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
 
     private func handle(_ event: PlaybackCoordinatorEvent) {
         switch event {
-        case .itemChanged:
+        case .itemChanged(let key):
+            let advancing = candidate?.isQueued == true && key == candidate?.key ? key : nil
             reset()
+            advancingFromQueue = advancing
         case .sessionStarted(_, let key):
+            advancingFromQueue = nil
             queue.remove(key)
         case .loaded:
             current = coordinator?.mediaKey
-            refreshedNearEnd = false
+            rearmOnStart = false
+            // Loading inside a trigger prepares anyway.
+            refreshed = nearEndTriggers(at: coordinator?.currentTime ?? 0)
             recompute(refetchListing: true)
+        case .playbackStarted:
+            guard rearmOnStart else { return }
+            rearmOnStart = false
+            refreshed = []
+            refreshIfNearEnd(at: coordinator?.currentTime ?? 0)
+        case .paused:
+            rearmOnStart = true
+        case .didSeek(let time):
+            refreshed.formIntersection(nearEndTriggers(at: time))
         case .tick(let time):
-            guard current != nil, !refreshedNearEnd, let duration = coordinator?.duration, duration > 0,
-                duration - time <= Self.nearEndWindow
-            else { return }
-            refreshedNearEnd = true
-            // The earlier preparation stays usable until this one replaces it.
-            recompute(refetchListing: true, keepPrepared: true)
+            refreshIfNearEnd(at: time)
         case .ended:
             if let current, current.episodeId != nil { endedEpisodes.insert(current) }
-        case .playbackStarted, .paused, .didSeek, .failed, .sessionWillClose:
+        case .failed, .sessionWillClose:
             break
         }
+    }
+
+    private func refreshIfNearEnd(at time: Double) {
+        guard current != nil else { return }
+        let due = nearEndTriggers(at: time).subtracting(refreshed)
+        guard !due.isEmpty else { return }
+        refreshed.formUnion(due)
+        // The earlier preparation stays usable until this one replaces it.
+        recompute(refetchListing: true, keepPrepared: true)
+    }
+
+    private func nearEndTriggers(at time: Double) -> Set<NearEndTrigger> {
+        guard let timeline = coordinator?.timeline, timeline.duration > 0 else { return [] }
+        var triggers: Set<NearEndTrigger> = []
+        if timeline.duration - time <= Self.nearEndWindow { triggers.insert(.window) }
+        if timeline.chapters.count > 1, timeline.currentChapterIndex(at: time) == timeline.chapters.count - 1 {
+            triggers.insert(.finalChapter)
+        }
+        return triggers
     }
 
     private func queueDidChange() {
@@ -159,7 +219,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         candidate = nil
         prepared = nil
         listing = nil
-        refreshedNearEnd = false
+        refreshed = []
+        rearmOnStart = false
     }
 
     // MARK: Preparing
@@ -199,6 +260,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         let item = await coordinator.prepareStart(for: next.key)
         guard self.revision == revision else { return }
         prepared = item
+        preparedAt = uptime()
     }
 
     /// Throws when the podcast's episodes can't be loaded.
@@ -211,7 +273,9 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             listing = cached.listing
         } else {
             try Task.checkCancellation()
-            listing = try await episodes.listing(podcastItemID: key.libraryItemId)
+            let ended = endedEpisodes.filter { $0.libraryItemId == key.libraryItemId }.compactMap(\.episodeId)
+            listing = try await episodes.listing(
+                podcastItemID: key.libraryItemId, excluding: Set(ended).union([episodeID]))
             guard self.revision == revision else { return nil }
             self.listing = (key.libraryItemId, listing)
         }

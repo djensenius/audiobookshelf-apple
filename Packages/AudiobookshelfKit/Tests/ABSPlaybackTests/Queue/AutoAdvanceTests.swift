@@ -56,6 +56,33 @@ struct AutoAdvanceTests {
         #expect(a.service.starts == ["A", "B", "C"])
     }
 
+    /// M4: the resume rule applies as to any play: finished media from the start, otherwise the
+    /// newest progress rewound by its age (2 min: 10 s).
+    @Test func advancedItemsStartWhereTheResumeRuleSays() async {
+        a.h.setServerProgress("B", time: 1200, updated: a.h.clock.ago(120))
+        a.h.setServerProgress("C", time: 3600, updated: a.h.clock.ago(120), finished: true)
+        a.enqueue("B", "C")
+        await a.play("A")
+
+        await a.finish()
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.h.engine.loads.map(\.time) == [0, 1190, 0])
+    }
+
+    /// M4: listening to B locally after it was prepared wins over the prepared server progress.
+    @Test func localProgressAfterPreparationWins() async throws {
+        a.h.setServerProgress("B", time: 300, updated: a.h.clock.ago(3600))
+        a.enqueue("B")
+        await a.play("A")
+        try await a.h.setLocalProgress("B", time: 900, updated: a.h.clock.now)
+
+        await a.finish()
+
+        #expect(a.h.engine.loads.last?.time == 900)
+    }
+
     @Test func advanceFallsBackToNextUnfinishedEpisodeSkippingFinished() async {
         a.episodes.set("P", episodes: ["e1", "e2", "e3", "e4"], finished: ["e1", "e3"])
         await a.play("P", episode: "e2")
@@ -77,6 +104,20 @@ struct AutoAdvanceTests {
         await a.finish()
 
         #expect(coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// L5: once an episode that ended here changes again (marked unfinished), it may be next.
+    @Test func episodeChangedAfterEndingHereIsNoLongerSkipped() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        await a.advancer.waitForPreparation()
+
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
     }
 
     @Test func advanceStaysAtEndWhenAllEpisodesFinished() async {
@@ -187,6 +228,40 @@ struct AutoAdvanceTests {
         #expect(a.service.starts == ["A"])
         #expect(a.queue.items.map(\.libraryItemID) == ["B"])
         #expect(coordinator.error?.isStreamingBlocked(for: a.key("B")) == true)
+        #expect(a.activity.active == 0)
+    }
+
+    /// H1: the prepared decision is stale; the path known at the end must allow it too.
+    @Test func currentPolicyIsCheckedAtTheEnd() async {
+        a.enqueue("B")
+        await a.play("A")
+        let checks = a.h.policy.checks
+        a.h.policy.currentDecision = .askUser(.cellular)
+
+        await a.finish()
+
+        #expect(a.h.policy.checks == checks)
+        #expect(a.service.starts == ["A"])
+        #expect(a.queue.items.map(\.libraryItemID) == ["B"])
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: a.key("B")))
+        #expect(a.activity.active == 0)
+    }
+
+    /// L3: B left the queue while the ended session's close was in flight: no `/play` for it.
+    @Test func itemRemovedDuringTheCloseWaitIsNotStarted() async {
+        a.enqueue("B")
+        await a.play("A")
+        let gate = Gate()
+        a.service.state.withLock { $0.closeGates["A-1"] = gate }
+        a.h.engine.finish()
+        await yieldUntil { a.service.closes == ["A-1"] }
+
+        a.queue.remove(a.key("B"))
+        gate.open()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(a.service.starts == ["A"])
+        #expect(coordinator.phase == .unloaded)
         #expect(a.activity.active == 0)
     }
 

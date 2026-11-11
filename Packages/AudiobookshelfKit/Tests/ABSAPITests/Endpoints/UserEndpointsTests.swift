@@ -34,4 +34,11 @@ import Testing
         let response = try JSONDecoder().decode(UserFinishedMediaResponse.self, from: Data(#"{"id":"u1"}"#.utf8))
         #expect(response.mediaProgress.isEmpty)
     }
+
+    /// L1: a list that isn't one throws, rather than reading as "nothing finished".
+    @Test func meWithMalformedProgressListThrows() {
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(UserFinishedMediaResponse.self, from: Data(#"{"mediaProgress":"oops"}"#.utf8))
+        }
+    }
 }

@@ -49,15 +49,16 @@ public struct PodcastEpisodeListing: Sendable, Hashable {
 
 /// Loads a podcast's ``PodcastEpisodeListing``; ``APIPodcastEpisodeSource`` is the live one.
 public protocol PodcastEpisodeSource: Sendable {
-    func listing(podcastItemID: String) async throws -> PodcastEpisodeListing
+    /// - Parameter excluding: Episodes that can't be next (the one ending, ones that ended here).
+    func listing(podcastItemID: String, excluding: Set<String>) async throws -> PodcastEpisodeListing
 }
 
 /// ``PodcastEpisodeSource`` over one connection's ``APIClient``: the expanded item and the
 /// user's finished flags from `GET /api/me`. An episode's finished change that hasn't synced yet
 /// (`finishedDirty` in local progress) overrides the server's. Local progress is read in
-/// ``PodcastEpisodeListing/playOrder`` only until two episodes are unfinished, so
+/// ``PodcastEpisodeListing/playOrder`` only up to the first unfinished episode not excluded, so
 /// `finishedEpisodeIDs` is exact for that prefix, which is all
-/// ``PodcastEpisodeListing/nextUnfinished(after:)`` reads, whichever episode is ending.
+/// ``PodcastEpisodeListing/nextUnfinished(after:)`` reads once the excluded ones count as finished.
 public struct APIPodcastEpisodeSource: PodcastEpisodeSource {
     private let serverConnectionID: UUID
     private let localProgress: (any LocalProgressReading)?
@@ -82,13 +83,12 @@ public struct APIPodcastEpisodeSource: PodcastEpisodeSource {
         self.fetchFinished = fetchFinished
     }
 
-    public func listing(podcastItemID: String) async throws -> PodcastEpisodeListing {
+    public func listing(podcastItemID: String, excluding: Set<String>) async throws -> PodcastEpisodeListing {
         async let item = fetchItem(podcastItemID)
         async let finished = fetchFinished()
         var listing = PodcastEpisodeListing(item: try await item, progress: try await finished.mediaProgress)
         guard let localProgress else { return listing }
-        var unfinished = 0
-        for episode in listing.playOrder where unfinished < 2 {
+        for episode in listing.playOrder {
             let key = MediaKey(
                 serverConnectionID: serverConnectionID, libraryItemId: podcastItemID, episodeId: episode.id)
             if let local = try? await localProgress.progress(for: key), local.finishedDirty {
@@ -98,7 +98,7 @@ public struct APIPodcastEpisodeSource: PodcastEpisodeSource {
                     listing.finishedEpisodeIDs.remove(episode.id)
                 }
             }
-            if !listing.finishedEpisodeIDs.contains(episode.id) { unfinished += 1 }
+            if !excluding.contains(episode.id), !listing.finishedEpisodeIDs.contains(episode.id) { break }
         }
         return listing
     }

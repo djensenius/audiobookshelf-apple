@@ -44,7 +44,7 @@ final class StubEpisodeSource: PodcastEpisodeSource {
 
     var fetches: Int { state.withLock { $0.fetches } }
 
-    func listing(podcastItemID: String) async throws -> PodcastEpisodeListing {
+    func listing(podcastItemID: String, excluding: Set<String>) async throws -> PodcastEpisodeListing {
         let gate = state.withLock {
             $0.fetches += 1
             defer { $0.gate = nil }
@@ -93,12 +93,23 @@ struct AdvanceHarness {
         h = try CoordinatorHarness(backgroundActivity: activity)
         activity.service = h.service
         queue = PlaybackQueue(serverConnectionID: h.connectionID, store: AdvanceQueueStore())
-        advancer = PlaybackQueueAdvancer(queue: queue, episodes: podcastFallback ? episodes : nil)
+        let clock = h.clock
+        advancer = PlaybackQueueAdvancer(
+            queue: queue, episodes: podcastFallback ? episodes : nil, uptime: { clock.now.timeIntervalSince1970 })
         advancer.attach(to: h.coordinator)
     }
 
     func key(_ itemID: String, episode: String? = nil) -> MediaKey {
         MediaKey(serverConnectionID: h.connectionID, libraryItemId: itemID, episodeId: episode)
+    }
+
+    /// Server progress from `GET /api/me/progress` only (not in `/play`'s session), updated now.
+    func setFetchedProgress(_ itemID: String, time: Double) {
+        let updated = Int(h.clock.now.timeIntervalSince1970 * 1000)
+        service.state.withLock {
+            $0.progress[itemID] = MediaProgress(
+                id: "p-\(itemID)", libraryItemId: itemID, duration: 3600, currentTime: time, lastUpdate: updated)
+        }
     }
 
     func enqueue(_ itemIDs: String...) {

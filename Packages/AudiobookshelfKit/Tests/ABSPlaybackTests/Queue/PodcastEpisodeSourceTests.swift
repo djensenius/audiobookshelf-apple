@@ -73,9 +73,32 @@ struct PodcastEpisodeSourceTests {
                 UserFinishedMediaResponse(mediaProgress: [.init(libraryItemId: "P", episodeId: "e2", isFinished: true)])
             })
 
-        let listing = try await source.listing(podcastItemID: "P")
+        let listing = try await source.listing(podcastItemID: "P", excluding: ["e3"])
 
         #expect(listing.finishedEpisodeIDs == ["e1"])
         #expect(listing.nextUnfinished(after: "e3")?.id == "e2")
+    }
+
+    /// L2: with e1 and e2 excluded (ended here, ending), e3's unsynced local finish is still read.
+    @Test func localFinishBehindExcludedEpisodesIsRead() async throws {
+        let connection = UUID()
+        let store = try LocalProgressStore(modelContainer: DataStack(location: .inMemory).container)
+        _ = try await store.recordEdit(
+            ProgressEdit(isFinished: true),
+            for: MediaKey(serverConnectionID: connection, libraryItemId: "P", episodeId: "e3"))
+        let item = LibraryItem(
+            id: "P", libraryId: "lib", mediaType: .podcast,
+            media: .podcast(
+                Podcast(
+                    id: "pod", metadata: PodcastMetadata(title: "Pod", type: "serial"),
+                    episodes: episodes([("e1", 1), ("e2", 2), ("e3", 3), ("e4", 4)]))))
+        let source = APIPodcastEpisodeSource(
+            serverConnectionID: connection, localProgress: store, fetchItem: { _ in item },
+            fetchFinished: { UserFinishedMediaResponse(mediaProgress: []) })
+
+        var listing = try await source.listing(podcastItemID: "P", excluding: ["e1", "e2"])
+        listing.finishedEpisodeIDs.insert("e1")
+
+        #expect(listing.nextUnfinished(after: "e2")?.id == "e4")
     }
 }

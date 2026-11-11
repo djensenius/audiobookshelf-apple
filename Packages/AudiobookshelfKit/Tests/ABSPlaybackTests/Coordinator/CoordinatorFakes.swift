@@ -366,9 +366,14 @@ final class StubStreamingPolicy: StreamingPolicyChecking {
     /// Holds the next check until opened; the decision is read when it returns.
     var gate: Gate?
     private(set) var checks = 0
+    /// Checks that returned, including gated ones.
+    private(set) var returns = 0
+    /// What ``currentStreamingDecision()`` says; `decision` when `nil`.
+    var currentDecision: NetworkDecision?
 
     func streamingDecision() async -> NetworkDecision {
         checks += 1
+        defer { returns += 1 }
         if let gate {
             self.gate = nil
             let decision = decision
@@ -377,6 +382,8 @@ final class StubStreamingPolicy: StreamingPolicyChecking {
         }
         return decision
     }
+
+    func currentStreamingDecision() -> NetworkDecision { currentDecision ?? decision }
 }
 
 @MainActor

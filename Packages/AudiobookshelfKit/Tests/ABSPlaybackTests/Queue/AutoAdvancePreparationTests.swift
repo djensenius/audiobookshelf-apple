@@ -5,8 +5,9 @@ import Testing
 
 @testable import ABSPlayback
 
-/// When the next item is prepared (#160): on load, once near the end, and when the queue, the next
-/// item's progress or the connection change.
+/// When the next item is prepared (#160): on load, once on entering the last chapter and once in the
+/// last seconds (re-armed by a resume or a seek away), and when the queue, the next item's progress
+/// or the connection change.
 @MainActor
 struct AutoAdvancePreparationTests {
     let a: AdvanceHarness
@@ -17,22 +18,102 @@ struct AutoAdvancePreparationTests {
 
     private var progressReads: [MediaKey] { a.service.state.withLock { $0.progressReads } }
 
-    @Test func preparesOnLoadedThenOnceNearTheEnd() async {
+    private func tick(_ time: Double) async {
+        a.h.engine.onEvent?(.tick(time))
+        await a.advancer.waitForPreparation()
+    }
+
+    /// The stub's last chapter starts at 1000 of 3600.
+    @Test func preparesOnLoadedThenOnceInTheLastChapterAndOnceInTheLastSeconds() async {
         a.enqueue("B")
         await a.play("A")
         #expect(progressReads == [a.key("A"), a.key("B")])
         #expect(a.h.policy.checks == 2)
 
-        a.h.engine.onEvent?(.tick(1000))
-        await a.advancer.waitForPreparation()
+        await tick(500)
         #expect(progressReads.count == 2)
+        await tick(1500)
+        await tick(2000)
+        #expect(progressReads.count == 3)
+        await tick(3580)
+        await tick(3590)
+        #expect(progressReads == [a.key("A"), a.key("B"), a.key("B"), a.key("B")])
+        #expect(a.h.policy.checks == 4)
+    }
 
-        a.h.engine.onEvent?(.tick(3580))
+    /// A seek out of the last chapter re-arms its refresh; one inside the window doesn't.
+    @Test func seekAwayRearmsTheNearEndRefresh() async {
+        a.enqueue("B")
+        await a.play("A")
+        _ = await a.coordinator.seek(to: 3580)
+        await tick(3580)
+        #expect(progressReads.count == 3)
+
+        _ = await a.coordinator.seek(to: 3585)
+        await tick(3590)
+        #expect(progressReads.count == 3)
+
+        _ = await a.coordinator.seek(to: 100)
+        await tick(1500)
+        #expect(progressReads.count == 4)
+    }
+
+    /// H1: refreshed near the end, then paused while B moved on elsewhere: resuming refreshes at
+    /// once, so B starts from its new progress.
+    @Test func resumeInsideTheWindowRefreshesAtOnce() async {
+        a.enqueue("B")
+        await a.play("A")
+        _ = await a.coordinator.seek(to: 3580)
+        await tick(3580)
+        a.coordinator.pause()
+        a.h.clock.advance(by: 300)
+        a.setFetchedProgress("B", time: 2400)
+
+        await a.coordinator.resume()
         await a.advancer.waitForPreparation()
-        a.h.engine.onEvent?(.tick(3590))
+        #expect(progressReads.count == 4)
+
+        let before = a.fetches
+        #expect(await a.finish() == before)
+        #expect(a.h.engine.loads.last?.time == 2400)
+    }
+
+    /// A preparation older than ``PlaybackQueueAdvancer/maximumPreparationAge`` is redone at the end.
+    @Test(arguments: [599.0, 601.0])
+    func oldPreparationIsRedoneAtTheEnd(age: TimeInterval) async {
+        a.enqueue("B")
+        await a.play("A")
+        a.h.clock.advance(by: age)
+        a.setFetchedProgress("B", time: 2400)
+        let before = a.fetches
+
+        let atLoad = await a.finish()
+
+        let isStale = age > PlaybackQueueAdvancer.maximumPreparationAge
+        #expect(atLoad?.progress == before.progress + (isStale ? 1 : 0))
+        #expect(a.h.engine.loads.last?.time == (isStale ? 2400 : 0))
+        #expect(a.activity.active == 0)
+    }
+
+    /// M4: a preparation that a newer one overtook is dropped when it finally returns.
+    @Test func overtakenPreparationIsDropped() async {
+        a.enqueue("B")
+        await a.play("A")
+        let gate = Gate()
+        a.h.policy.gate = gate
+        a.h.policy.decision = .denied(.cellular)
+        a.advancer.connectionDidChange()
+        await yieldUntil { a.h.policy.checks == 3 }
+        a.h.policy.decision = .allowed
+        a.advancer.connectionDidChange()
         await a.advancer.waitForPreparation()
-        #expect(progressReads == [a.key("A"), a.key("B"), a.key("B")])
-        #expect(a.h.policy.checks == 3)
+
+        gate.open()
+        await yieldUntil { a.h.policy.returns == 4 }
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("B"))
+        #expect(a.coordinator.error == nil)
     }
 
     @Test func queueChangesPrepareTheNewHeadOnly() async {
@@ -82,8 +163,9 @@ struct AutoAdvancePreparationTests {
         #expect(a.episodes.fetches == 2)
         #expect(progressReads.last == a.key("P", episode: "e3"))
 
-        // Unrelated progress changes nothing.
+        // Unrelated progress, or the current episode's own, changes nothing.
         a.advancer.progressDidChange(for: a.key("Other"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
         await a.advancer.waitForPreparation()
         #expect(a.episodes.fetches == 2)
 
