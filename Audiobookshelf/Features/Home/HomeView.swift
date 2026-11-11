@@ -184,8 +184,6 @@ struct HomeContent: View {
     }
 }
 
-/// A full-screen message. In a scroll view when `refreshable`, so pull to refresh still works
-/// when there's nothing to show.
 /// A full-screen state centred in a vertical scroll view, so `.refreshable` reaches it.
 private struct HomeScrollableState<Content: View>: View {
     @ViewBuilder let content: Content
@@ -197,6 +195,8 @@ private struct HomeScrollableState<Content: View>: View {
     }
 }
 
+/// A full-screen message. In a scroll view when `refreshable`, so pull to refresh still works
+/// when there's nothing to show.
 private struct HomeMessageView: View {
     let title: String
     var message: String?
