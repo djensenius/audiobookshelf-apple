@@ -26,9 +26,15 @@ public struct ItemAction: Sendable, Hashable, Identifiable {
 public struct ItemActionContext: Sendable, Hashable {
     /// Whether adding to a playlist is wired up and allowed for this user.
     public var canEditPlaylists: Bool
+    /// Whether playing is wired up, for example while the screen has no player to call.
+    public var canPlay: Bool
+    /// Whether sharing is wired up on this screen.
+    public var canShare: Bool
 
-    public init(canEditPlaylists: Bool = false) {
+    public init(canEditPlaylists: Bool = false, canPlay: Bool = true, canShare: Bool = true) {
         self.canEditPlaylists = canEditPlaylists
+        self.canPlay = canPlay
+        self.canShare = canShare
     }
 }
 
@@ -40,6 +46,7 @@ extension ItemAction {
     /// - A missing or invalid item or one without audio can't be played; a missing item can't be
     ///   changed or added to a playlist either, but can still be opened.
     /// - Hiding applies to items in progress that are not hidden already.
+    /// - Play and share are left out when the context says the screen can't perform them.
     public static func available(
         for item: ItemSummary, progress: ItemProgress?, context: ItemActionContext = ItemActionContext()
     ) -> [ItemAction] {
@@ -47,13 +54,13 @@ extension ItemAction {
         let present = !item.isMissing
         let finished = progress?.isFinished ?? false
         var kinds: [ItemActionKind] = []
-        if playable, present, item.hasAudio { kinds.append(.play) }
+        if playable, present, item.hasAudio, context.canPlay { kinds.append(.play) }
         if playable, present { kinds.append(finished ? .markNotFinished : .markFinished) }
         if playable, present, let progress, progress.isInProgress, !progress.isHiddenFromContinue {
             kinds.append(.hideFromContinueListening)
         }
         if playable, present, context.canEditPlaylists { kinds.append(.addToPlaylist) }
-        if item.kind != .series, present { kinds.append(.share) }
+        if item.kind != .series, present, context.canShare { kinds.append(.share) }
         kinds.append(.openDetails)
         return kinds.map(ItemAction.init)
     }

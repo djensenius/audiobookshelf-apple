@@ -74,11 +74,12 @@ public actor SocketClient {
     private var attempt = 0
 
     /// - Parameters:
+    ///   - transport: Defaults to a transport with this client's own session and cookie jar.
     ///   - clock: Times heartbeats and reconnect backoff.
     ///   - random: Returns a value in `0..<1` for backoff jitter.
     public init(
         configuration: RealtimeConfiguration,
-        transport: any WebSocketTransport = URLSessionWebSocketTransport(),
+        transport: any WebSocketTransport = URLSessionWebSocketTransport.isolated(),
         clock: any Clock<Duration> = ContinuousClock(),
         random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }
     ) throws(RealtimeError) {
@@ -111,12 +112,14 @@ public actor SocketClient {
     }
 
     /// Closes the socket and stops reconnecting.
-    public func disconnect() {
+    /// - Parameter sendingFarewell: Whether to tell the server with a `41` first. Pass `false`
+    ///   when nothing may be sent, for example after the session expired.
+    public func disconnect(sendingFarewell: Bool = true) {
         mode = .idle
         cancelReconnect()
         // All state changes happen before anything is awaited, so a `connect()` can't interleave
         // with a half-finished disconnect. The farewell `41` is sent off the actor.
-        let farewell = isConnected ? connection : nil
+        let farewell = sendingFarewell && isConnected ? connection : nil
         if farewell != nil { connection = nil }
         tearDown(reason: .clientRequested)
         if let farewell {

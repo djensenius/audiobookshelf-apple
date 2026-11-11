@@ -20,7 +20,8 @@ import Observation
 /// responses to requests made for an earlier account are dropped. Per-library models
 /// (``ItemListModel``, ``PersonalizedShelvesModel``) belong to one account: create them with
 /// ``makeItemList(libraryID:query:)`` and ``makeShelves(libraryID:)`` and recreate them when
-/// ``connectionKey`` changes (ADR 0004's `.id(identity)`).
+/// ``connectionKey`` changes (ADR 0004's `.id(identity)`). Other feature models take their
+/// service from ``makeServices()`` the same way.
 @MainActor
 @Observable
 public final class LibraryStore {
@@ -52,6 +53,8 @@ public final class LibraryStore {
     /// refresh empties it, so a response requested before the refresh can't bring back a removed
     /// library or an old name.
     @ObservationIgnored private var latestDetailRequests: [String: Int] = [:]
+    /// Services already logged as missing from the client, so each is logged once.
+    @ObservationIgnored private var loggedUnavailableServices: Set<String> = []
 
     public init(settings: AppSettings) {
         self.settings = settings
@@ -182,7 +185,7 @@ public final class LibraryStore {
     ) -> ItemListModel<LibraryQuery, LibraryItem>? {
         guard client != nil, let connectionKey else { return nil }
         return ItemListModel(
-            client: StoreClient(store: self, connectionKey: connectionKey), libraryID: libraryID, query: query,
+            client: LibraryStoreServices(store: self, connectionKey: connectionKey), libraryID: libraryID, query: query,
             connectionKey: connectionKey)
     }
 
@@ -195,16 +198,41 @@ public final class LibraryStore {
     public func makeShelves(libraryID: String) -> PersonalizedShelvesModel? {
         guard client != nil, let connectionKey else { return nil }
         return PersonalizedShelvesModel(
-            client: StoreClient(store: self, connectionKey: connectionKey), libraryID: libraryID,
+            client: LibraryStoreServices(store: self, connectionKey: connectionKey), libraryID: libraryID,
             connectionKey: connectionKey)
     }
 
-    /// The store's current client and ``clear()`` generation while it still serves
-    /// `connectionKey`.
-    fileprivate func client(
-        for connectionKey: LibraryConnectionKey
-    ) throws -> (client: any LibraryService, generation: Int) {
+    /// The services of the connected account for feature models, or `nil` when none is connected.
+    ///
+    /// Create a screen's model once per account (recreate it when ``connectionKey`` changes) and
+    /// pass ``progress`` as its `ProgressCache`:
+    ///
+    /// ```swift
+    /// guard let services = store.makeServices() else { return }
+    /// let model = ItemDetailModel(itemID: itemID, service: services, cache: store.progress)
+    /// ```
+    ///
+    /// Requests use the store's current ``client``, so reconnecting the same account with a new
+    /// client retargets the model; see ``LibraryStoreServices``.
+    public func makeServices() -> LibraryStoreServices? {
+        guard client != nil, let connectionKey else { return nil }
+        return LibraryStoreServices(store: self, connectionKey: connectionKey)
+    }
+
+    /// The store's current client as `Service` and ``clear()`` generation while it still serves
+    /// `connectionKey`. Throws ``LibraryStoreError/serviceUnavailable(_:)`` when the client isn't a
+    /// `Service`, logging it once per service.
+    fileprivate func client<Service>(
+        for connectionKey: LibraryConnectionKey, as service: Service.Type
+    ) throws -> (client: Service, generation: Int) {
         guard connectionKey == self.connectionKey, let client else { throw CancellationError() }
+        guard let client = client as? Service else {
+            let name = String(describing: service)
+            if loggedUnavailableServices.insert(name).inserted {
+                Log.api.error("The library client doesn't implement \(name, privacy: .public)")
+            }
+            throw LibraryStoreError.serviceUnavailable(name)
+        }
         return (client, generation)
     }
 
@@ -243,18 +271,39 @@ public final class LibraryStore {
     }
 }
 
-/// Forwards to the client a ``LibraryStore`` holds for one account when each request starts.
-/// A response or failure that arrives after the store was cleared or switched accounts throws
-/// `CancellationError`, so the model neither applies nor shows it.
-private struct StoreClient: LibraryService {
-    weak var store: LibraryStore?
-    let connectionKey: LibraryConnectionKey
+/// Thrown by ``LibraryStoreServices`` when the store's current client doesn't implement the
+/// requested service.
+public enum LibraryStoreError: Error, Equatable, Sendable {
+    /// The client doesn't conform to the named service protocol, for example `ItemDetailService`.
+    case serviceUnavailable(String)
+}
 
-    private func send<Response: Sendable>(
-        _ request: (any LibraryService) async throws -> Response
+/// The services of the account a ``LibraryStore`` serves, for feature models; create it with
+/// ``LibraryStore/makeServices()``.
+///
+/// Each request goes to the store's current client for the account when it starts, so
+/// reconnecting the same account with a new client (new tokens or server address) retargets it
+/// without recreating the models built on it. While the store is cleared or serves another
+/// account, requests throw `CancellationError`, and so do responses and failures of requests
+/// started before a ``LibraryStore/clear()``. When the current client doesn't implement the
+/// requested service, requests throw ``LibraryStoreError/serviceUnavailable(_:)``.
+public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchService, SeriesAuthorsService,
+    GroupsService
+{
+    private weak var store: LibraryStore?
+    /// The account the services belong to.
+    public let connectionKey: LibraryConnectionKey
+
+    fileprivate init(store: LibraryStore, connectionKey: LibraryConnectionKey) {
+        self.store = store
+        self.connectionKey = connectionKey
+    }
+
+    private func send<Service: Sendable, Response: Sendable>(
+        _ service: Service.Type, _ request: (Service) async throws -> Response
     ) async throws -> Response {
         guard let store else { throw CancellationError() }
-        let (client, generation) = try await store.client(for: connectionKey)
+        let (client, generation) = try await store.client(for: connectionKey, as: service)
         let response: Response
         do {
             response = try await request(client)
@@ -273,14 +322,71 @@ private struct StoreClient: LibraryService {
         try await store.checkServing(connectionKey, generation: generation)
     }
 
-    func libraries() async throws -> [Library] { try await send { try await $0.libraries() } }
-    func library(id: String) async throws -> LibraryWithFilterData {
-        try await send { try await $0.library(id: id) }
+    // MARK: LibraryService
+
+    public func libraries() async throws -> [Library] {
+        try await send((any LibraryService).self) { try await $0.libraries() }
     }
-    func personalizedShelves(libraryID: String) async throws -> [Shelf] {
-        try await send { try await $0.personalizedShelves(libraryID: libraryID) }
+    public func library(id: String) async throws -> LibraryWithFilterData {
+        try await send((any LibraryService).self) { try await $0.library(id: id) }
     }
-    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
-        try await send { try await $0.items(libraryID: libraryID, query: query) }
+    public func personalizedShelves(libraryID: String) async throws -> [Shelf] {
+        try await send((any LibraryService).self) { try await $0.personalizedShelves(libraryID: libraryID) }
+    }
+    public func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
+        try await send((any LibraryService).self) { try await $0.items(libraryID: libraryID, query: query) }
+    }
+
+    // MARK: ItemDetailService
+
+    public func item(id: String) async throws -> LibraryItem {
+        try await send((any ItemDetailService).self) { try await $0.item(id: id) }
+    }
+
+    // MARK: SearchService
+
+    public func searchLibrary(id: String, query: String, limit: Int?) async throws -> LibrarySearchResults {
+        try await send((any SearchService).self) { try await $0.searchLibrary(id: id, query: query, limit: limit) }
+    }
+
+    // MARK: SeriesAuthorsService
+
+    public func seriesPage(libraryID: String, query: LibraryQuery) async throws -> PagedResults<Series> {
+        try await send((any SeriesAuthorsService).self) { try await $0.seriesPage(libraryID: libraryID, query: query) }
+    }
+    public func authorList(libraryID: String) async throws -> [Author] {
+        try await send((any SeriesAuthorsService).self) { try await $0.authorList(libraryID: libraryID) }
+    }
+    public func seriesDetail(id: String) async throws -> SeriesDetailResponse {
+        try await send((any SeriesAuthorsService).self) { try await $0.seriesDetail(id: id) }
+    }
+    public func authorDetail(id: String) async throws -> AuthorDetailResponse {
+        try await send((any SeriesAuthorsService).self) { try await $0.authorDetail(id: id) }
+    }
+    public func filteredBooksPage(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
+        try await send((any SeriesAuthorsService).self) {
+            try await $0.filteredBooksPage(libraryID: libraryID, query: query)
+        }
+    }
+
+    // MARK: GroupsService
+
+    public func collectionsPage(libraryID: String, page: Int, limit: Int) async throws -> PagedResults<
+        LibraryCollection
+    > {
+        try await send((any GroupsService).self) {
+            try await $0.collectionsPage(libraryID: libraryID, page: page, limit: limit)
+        }
+    }
+    public func playlistsPage(libraryID: String, page: Int, limit: Int) async throws -> PagedResults<Playlist> {
+        try await send((any GroupsService).self) {
+            try await $0.playlistsPage(libraryID: libraryID, page: page, limit: limit)
+        }
+    }
+    public func collectionDetail(id: String) async throws -> LibraryCollection {
+        try await send((any GroupsService).self) { try await $0.collectionDetail(id: id) }
+    }
+    public func playlistDetail(id: String) async throws -> Playlist {
+        try await send((any GroupsService).self) { try await $0.playlistDetail(id: id) }
     }
 }
