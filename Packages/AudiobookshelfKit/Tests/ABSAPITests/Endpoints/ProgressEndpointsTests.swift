@@ -137,6 +137,17 @@ private let server = "https://abs.example/abs"
         #expect(progress == nil)
     }
 
+    @Test(arguments: ["null", "{}", ""])
+    func clientDoesNotTreatUnsupportedAbsenceBodiesAsNoProgress(body: String) async throws {
+        let stub = StubServer { _ in .json(body) }
+        do {
+            _ = try await makeClient(stub).mediaProgress(itemID: "li1")
+            Issue.record("Only the established 404 contract may become nil, not an unusable 200 body")
+        } catch APIError.decoding {
+            // These are unusable responses, not evidence that creating progress is safe.
+        }
+    }
+
     @Test func clientThrowsOtherErrors() async throws {
         let stub = StubServer { _ in .text("Forbidden", status: 403) }
         await #expect(throws: APIError.forbidden(message: "Forbidden")) {
