@@ -166,8 +166,8 @@ public enum EpisodeList {
     ) -> [PodcastEpisode] {
         episodes.enumerated()
             .sorted { lhs, rhs in
-                var order = compare(lhs.element, rhs.element, by: sort, locale: locale)
-                if descending { order = order.reversed }
+                let (first, second) = descending ? (rhs.element, lhs.element) : (lhs.element, rhs.element)
+                let order = compare(first, second, by: sort, locale: locale)
                 // The server's order breaks the remaining ties, whatever the direction.
                 return order == .orderedSame ? lhs.offset < rhs.offset : order == .orderedAscending
             }
@@ -198,8 +198,7 @@ public enum EpisodeList {
         switch key {
         case .publishedAt:
             // Missing (or 0, as legacy's `!aValue`) is the oldest.
-            let left = lhs.publishedAt ?? 0
-            let right = rhs.publishedAt ?? 0
+            let (left, right) = (lhs.publishedAt ?? 0, rhs.publishedAt ?? 0)
             return left == right ? .orderedSame : (left < right ? .orderedAscending : .orderedDescending)
         case .title:
             return compareText(lhs.title, rhs.title, locale: locale)
@@ -226,15 +225,5 @@ public enum EpisodeList {
         lhs.compare(
             rhs, options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive, .numeric], range: nil,
             locale: locale)
-    }
-}
-
-extension ComparisonResult {
-    fileprivate var reversed: ComparisonResult {
-        switch self {
-        case .orderedAscending: .orderedDescending
-        case .orderedDescending: .orderedAscending
-        case .orderedSame: .orderedSame
-        }
     }
 }

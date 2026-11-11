@@ -176,30 +176,34 @@ struct PodcastDetailScreen: View {
     }
 }
 
-/// "Episodes (12)" with the filter and sort menus (legacy `EpisodesTable.vue` header). Stacks
-/// the menus under the heading at accessibility text sizes.
+/// "Episodes (12)" with the filter and sort menus (legacy `EpisodesTable.vue` header): one row
+/// when it fits, else the menus under the heading, wrapping onto new lines as their labels do,
+/// so large text on a narrow screen doesn't overflow. Each menu's label is at least 44 points.
 private struct PodcastEpisodeListControls: View {
     @Bindable var model: PodcastDetailModel
     let count: Int
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.locale) private var locale
 
     var body: some View {
-        let layout =
-            dynamicTypeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: ABSSpacing.small))
-            : AnyLayout(HStackLayout(spacing: ABSSpacing.small))
-        layout {
-            Text(
-                verbatim: L10n.string(
-                    "HeaderPodcastDetailEpisodes", count.formatted(.number.locale(locale)), locale: locale)
-            )
-            .font(.title3.bold())
-            .accessibilityAddTraits(.isHeader)
-            if !dynamicTypeSize.isAccessibilitySize { Spacer(minLength: 0) }
+        let heading = Text(
+            verbatim: L10n.string(
+                "HeaderPodcastDetailEpisodes", count.formatted(.number.locale(locale)), locale: locale)
+        )
+        .font(.title3.bold())
+        .accessibilityAddTraits(.isHeader)
+        ViewThatFits(in: .horizontal) {
             HStack(spacing: ABSSpacing.small) {
+                heading
+                Spacer(minLength: 0)
                 filterMenu
                 sortMenu
+            }
+            VStack(alignment: .leading, spacing: ABSSpacing.small) {
+                heading
+                ItemDetailFlowLayout(spacing: ABSSpacing.small) {
+                    filterMenu
+                    sortMenu
+                }
             }
         }
         .buttonStyle(.bordered)
@@ -225,8 +229,8 @@ private struct PodcastEpisodeListControls: View {
                     systemName: model.filter == .all
                         ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
             }
+            .frame(minWidth: 44, minHeight: 44)
         }
-        .fixedSize()
         .accessibilityLabel(Text(verbatim: menuTitle))
         .accessibilityValue(Text(verbatim: title))
     }
@@ -259,8 +263,8 @@ private struct PodcastEpisodeListControls: View {
             } icon: {
                 Image(systemName: model.isDescending ? "arrow.down" : "arrow.up")
             }
+            .frame(minWidth: 44, minHeight: 44)
         }
-        .fixedSize()
         .accessibilityLabel(Text(verbatim: menuTitle))
         .accessibilityValue(Text(verbatim: [title, direction].joined(separator: ", ")))
     }
