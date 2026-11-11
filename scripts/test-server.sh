@@ -9,8 +9,9 @@
 #                     Docker (run as: mise exec node@20 -- scripts/test-server.sh)
 # ABS_SERVER_TIMEOUT  seconds to wait for startup and for the first scan (default 120)
 #
-# Everything lives in one temporary directory with a random root password; a trap removes it and
-# the server on success, failure and Ctrl-C. The server runs with RATE_LIMIT_AUTH_MAX=0: its
+# Everything lives in one temporary directory with a random root password; the trap verifies
+# server shutdown before deleting data, retaining it and failing if containment is uncertain.
+# The server runs with RATE_LIMIT_AUTH_MAX=0: its
 # default of 40 /login and /auth/refresh calls per 10 minutes would end the suite with 429s.
 # Runs on macOS /bin/bash 3.2.
 set -euo pipefail
@@ -24,6 +25,8 @@ username=root
 
 work=
 container=
+container_requested=0
+container_name=
 server_pid=
 server_log=
 base_url=
@@ -31,6 +34,14 @@ books_folder=
 podcasts_folder=
 password=
 token=
+search_contract=0
+search_only=0
+search_token=
+search_root=
+search_provenance=
+# Never inherit permission to run owned-search writes from an ad-hoc invocation.
+unset ABS_SEARCH_CONTRACT_MODE ABS_SEARCH_OWNERSHIP ABS_SEARCH_OWNED_URL ABS_SEARCH_BOOKS \
+  ABS_SEARCH_PODCASTS ABS_SEARCH_TOKEN ABS_SEARCH_PROVENANCE
 
 log() { printf '==> %s\n' "$*" >&2; }
 
@@ -43,27 +54,47 @@ require() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required: $2"
 }
 
+# shellcheck source=scripts/test-server-cleanup.sh
+source scripts/test-server-cleanup.sh
+
 show_server_log() {
   [[ -n "$container$server_log" ]] || return 0
   echo "--- last server log lines ---" >&2
   if [[ -n "$container" ]]; then
-    docker logs --tail 40 "$container" >&2 2>&1 || true
+    [[ "$container" =~ ^[0-9a-f]{64}$ ]] || return 0
+    bounded_command "$cleanup_command_timeout" docker logs --tail 40 "$container" || true
   else
-    tail -n 40 "$server_log" >&2 || true
+    bounded_command "$cleanup_command_timeout" tail -n 40 "$server_log" || true
   fi
+  printf '%s' "$bounded_output" >&2
 }
 
 cleanup() {
-  local status=$?
+  local status=$? contained=1
   trap '' INT TERM
   trap - EXIT
-  if ((status != 0 && status != 130 && status != 143)); then show_server_log; fi
-  if [[ -n "$container" ]]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
-  if [[ -n "$server_pid" ]]; then
-    kill "$server_pid" >/dev/null 2>&1 || true
-    wait "$server_pid" >/dev/null 2>&1 || true
+  if [[ -z "$container" && -n "$work" && -f "$work/container.id" ]]; then
+    IFS= read -r container <"$work/container.id" || true
   fi
-  if [[ -n "$work" ]]; then rm -rf "$work"; fi
+  if ((status != 0 && status != 130 && status != 143)); then show_server_log; fi
+  if [[ -n "$container" ]]; then
+    if ! stop_owned_docker; then contained=0; fi
+  elif ((container_requested)); then
+    log "Missing registered container ID for requested name=$container_name; shutdown cannot be verified"
+    contained=0
+  fi
+  if [[ -n "$server_pid" ]]; then
+    if ! stop_owned_node; then contained=0; fi
+  fi
+  if ((contained)); then
+    if [[ -n "$work" ]] && ! rm -rf "$work"; then
+      log "Could not remove stopped server's owned directory: $work"
+      if ((status == 0)); then status=1; fi
+    fi
+  else
+    log "CONTAINMENT UNVERIFIED: container ID=$container PID=$server_pid; retaining owned data: $work"
+    if ((status == 0)); then status=1; fi
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -78,6 +109,29 @@ case "$mode" in
     exit 64
     ;;
 esac
+if [[ "$mode" == test ]]; then
+  if (($# == 0)); then search_contract=1; fi
+  if [[ "${1:-}" == --search-contract ]]; then
+    (($# == 1)) || die "--search-contract runs only the owned search suite; do not combine it with Swift arguments"
+    search_contract=1
+    search_only=1
+    shift
+  fi
+fi
+
+expected_revision=
+expected_digest=
+if ((search_contract)); then
+  case "$version" in
+    2.26.0)
+      expected_revision=264ae928a9c1af620487488110eec816b14e23ec
+      expected_digest=sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5 ;;
+    2.37.2)
+      expected_revision=edb1f7efc92ecacdef51aafb4d9d5054ce10604f
+      expected_digest=sha256:b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa ;;
+    *) die "owned search requires a reviewed source pin for $version" ;;
+  esac
+fi
 
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "ABS_SERVER_VERSION must look like 2.26.0 (got '$version')"
 [[ "$timeout" =~ ^[0-9]+$ ]] || die "ABS_SERVER_TIMEOUT must be a number of seconds (got '$timeout')"
@@ -139,6 +193,32 @@ make_media() {
     -map 0:a -map_metadata 1 -map_chapters 1 -ac 1 -c:a aac -b:a 16k -f ipod "$single/Single File Tale.m4b"
 }
 
+make_search_media() {
+  search_token="search$(openssl rand -hex 8)"
+  local mp3=(-c:a libmp3lame -b:a 16k) number
+  # Not inside/equal to/a prefix variant of either seed root. Each file is generated independently.
+  mkdir -p "$work/search-fixtures/books/First" "$work/search-fixtures/books/Second" \
+    "$work/search-fixtures/casts/Owned Cast"
+  tone "$work/search-fixtures/books/First/First.mp3" 440 30 "${mp3[@]}" \
+    -metadata title="First" -metadata album="First" -metadata artist="$search_token Shared Author"
+  tone "$work/search-fixtures/books/Second/Second.mp3" 523 40 "${mp3[@]}" \
+    -metadata title="Second" -metadata album="Second" -metadata artist="$search_token Shared Author"
+  # Scan primes the filter cache before PATCHes. Seed the final tags/genres/narrators
+  # at scan time; retain Shared Author from ID3 and let PATCH add authors/series.
+  printf '{"tags":["%s Shared Tag","%s Unique Tag"],"genres":["%s Shared Genre","%s Unique Genre"],"narrators":["%s Shared Narrator","%s Unique Narrator"],"publisher":"First Publisher","language":"en","publishedYear":"1984"}\n' \
+    "$search_token" "$search_token" "$search_token" "$search_token" "$search_token" "$search_token" \
+    >"$work/search-fixtures/books/First/metadata.json"
+  printf '{"tags":["%s Shared Tag"],"genres":["%s Shared Genre"],"narrators":["%s Shared Narrator"],"publisher":"Second Publisher","language":"fr","publishedYear":"2007"}\n' \
+    "$search_token" "$search_token" "$search_token" >"$work/search-fixtures/books/Second/metadata.json"
+  printf '{"tags":["%s Podcast Tag"],"genres":["%s Podcast Genre"],"language":"de"}\n' \
+    "$search_token" "$search_token" >"$work/search-fixtures/casts/Owned Cast/metadata.json"
+  for number in 1 2; do
+    tone "$work/search-fixtures/casts/Owned Cast/$search_token Episode $number.mp3" 392 "$((20 * number))" \
+      "${mp3[@]}" -metadata title="$search_token Episode $number" \
+      -metadata album="Owned Cast" -metadata artist="Owned Cast" -metadata genre="$search_token Podcast Genre"
+  done
+}
+
 start_docker() {
   require docker "install Docker or OrbStack, or set ABS_SERVER_BACKEND=node"
   docker info >/dev/null 2>&1 || die "the Docker daemon is not running"
@@ -147,13 +227,29 @@ start_docker() {
     log "Pulling $image"
     docker pull --quiet "$image" >/dev/null || die "could not pull $image; is $version a published release?"
   fi
-  container="abs-contract-$(openssl rand -hex 4)"
-  log "Starting $image as $container"
-  docker run --detach --name "$container" --label abs-contract-test=1 \
+  local mounts=()
+  if ((search_contract)); then
+    local revision digests labels
+    revision=$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
+    digests=$(docker image inspect "$image" --format '{{json .RepoDigests}}')
+    labels=$(docker image inspect "$image" --format '{{json .Config.Labels}}')
+    [[ "$revision" == "$expected_revision" ]] || die "official image revision missing or mismatched: $revision"
+    [[ "$digests" == *"ghcr.io/advplyr/audiobookshelf@$expected_digest"* ]] || die "official image digest mismatch: $digests"
+    log "Verified official image: $digests $labels"
+    search_provenance="{\"backend\":\"docker\",\"digests\":$digests,\"labels\":$labels,\"revision\":\"$revision\"}"
+    mounts+=(--volume "$work/search-fixtures:/search-fixtures:rw")
+    search_root=/search-fixtures
+  fi
+  container_name="abs-contract-$(openssl rand -hex 4)"
+  container_requested=1
+  log "Starting $image as $container_name"
+  docker run --detach --name "$container_name" --cidfile "$work/container.id" --label abs-contract-test=1 \
     --user "$(id -u):$(id -g)" --publish 127.0.0.1::80 --env TZ=UTC --env RATE_LIMIT_AUTH_MAX=0 \
     --volume "$work/config:/config" --volume "$work/metadata:/metadata" \
     --volume "$work/audiobooks:/audiobooks" --volume "$work/podcasts:/podcasts" \
-    "$image" >/dev/null || die "could not start $image"
+    ${mounts[@]+"${mounts[@]}"} "$image" >/dev/null || die "could not start $image"
+  IFS= read -r container <"$work/container.id" || [[ -n "$container" ]]
+  [[ "$container" =~ ^[0-9a-f]{64}$ ]] || die "Docker did not register a full owned container ID"
   local mapping
   mapping=$(docker port "$container" 80/tcp)
   mapping=${mapping%%$'\n'*}
@@ -176,6 +272,15 @@ start_node() {
   log "Fetching Audiobookshelf v$version"
   git -c advice.detachedHead=false clone --quiet --depth 1 --branch "v$version" \
     https://github.com/advplyr/audiobookshelf.git "$work/server" || die "could not clone Audiobookshelf v$version"
+  if ((search_contract)); then
+    local revision
+    revision=$(git -C "$work/server" rev-parse HEAD)
+    [[ "$revision" == "$expected_revision" ]] || die "node checkout revision mismatch: $revision"
+    [[ -z "$(git -C "$work/server" status --porcelain)" ]] || die "node source checkout is not clean"
+    log "Verified node checkout: $revision (clean)"
+    search_provenance="{\"backend\":\"node\",\"revision\":\"$revision\",\"checkoutClean\":true}"
+    search_root="$work/search-fixtures"
+  fi
   log "Installing server dependencies"
   # `npm ci` rejects the lock file on macOS: it was written on Linux and has no entry for fsevents.
   # The cache lives in the work directory so a run leaves nothing in ~/.npm.
@@ -255,8 +360,14 @@ mkdir -p "$work/config" "$work/metadata"
 password=$(openssl rand -hex 16)
 log "Generating synthetic audio"
 make_media
+if ((search_contract)); then make_search_media; fi
 if [[ "$backend" == docker ]]; then start_docker; else start_node; fi
 wait_for_ping
+if ((search_contract)); then
+  status=$(api GET /status)
+  [[ "$(json_get serverVersion "$status")" == "$version" ]] || die "actual /status version mismatch: $status"
+  log "Verified actual /status: $status"
+fi
 log "Seeding Audiobookshelf $version at $base_url"
 seed_server
 
@@ -266,9 +377,22 @@ if [[ "$mode" == serve ]]; then
   while :; do sleep 1; done
 fi
 
-if (($# == 0)); then set -- --filter ABSServerContractTests; fi
 export ABS_TEST_SERVER_URL="$base_url" ABS_TEST_USERNAME="$username" ABS_TEST_PASSWORD="$password"
 export ABS_TEST_SERVER_VERSION="$version"
-log "Running the contract tests"
-swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm "$@"
+if ((search_contract)); then
+  if ((!search_only)); then
+    log "Ordinary pass: --filter ABSServerContractTests --skip SearchContractTests"
+    swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+      --filter ABSServerContractTests --skip SearchContractTests
+  fi
+  # Export only for the second process, after ordinary suites have finished successfully.
+  export ABS_SEARCH_CONTRACT_MODE=1 ABS_SEARCH_OWNERSHIP="$search_token" ABS_SEARCH_OWNED_URL="$base_url"
+  export ABS_SEARCH_BOOKS="$search_root/books" ABS_SEARCH_PODCASTS="$search_root/casts"
+  export ABS_SEARCH_TOKEN="$search_token" ABS_SEARCH_PROVENANCE="$search_provenance"
+  log "Owned search pass: --filter SearchContractTests"
+  swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter SearchContractTests
+else
+  log "Running the selected contract tests (owned search disabled)"
+  swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm "$@"
+fi
 log "Done in ${SECONDS}s"

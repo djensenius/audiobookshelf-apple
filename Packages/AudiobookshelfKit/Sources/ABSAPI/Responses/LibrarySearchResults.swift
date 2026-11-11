@@ -32,7 +32,8 @@ public struct LibrarySearchResults: Decodable, Sendable, Hashable {
         self.genres = genres
     }
 
-    /// A series and its books (minified, without authors or series).
+    /// A series and its nonexpanded books. Search members have empty author/series arrays
+    /// and no per-series sequence; they are not the minified item-list shape.
     public struct SeriesMatch: Decodable, Sendable, Hashable, Identifiable {
         public let series: Series
         public let books: [LibraryItem]

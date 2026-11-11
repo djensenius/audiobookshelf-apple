@@ -50,6 +50,7 @@ struct PlaybackCoordinatorPositionTests {
         coordinator.finalCloseReport = {
             closing.append($0)
             return PlaybackSyncReport(currentTime: $0.currentTime, timeListened: 0, duration: $0.duration)
+                .map { PlaybackCloseHandoff(report: $0, position: PlaybackCloseResult()) }
         }
         engine.interruptedLoads = 1
         await coordinator.play(itemID: "A", startTime: 1500)
@@ -100,7 +101,8 @@ struct PlaybackCoordinatorPositionTests {
         #expect(coordinator.currentTime == 1500)
         #expect(
             h.events.events == [
-                .itemChanged(h.key("A")), .sessionStarted(sessionID: "A-1", key: h.key("A")), .loaded(time: 1500),
+                .itemChanged(h.key("A")), .sessionStarted(sessionID: "A-1", key: h.key("A")),
+                .paused(time: 1500), .loaded(time: 1500),
             ])
         let saved = try #require(h.lastPlayed.record)
         #expect(saved.position == 1500)

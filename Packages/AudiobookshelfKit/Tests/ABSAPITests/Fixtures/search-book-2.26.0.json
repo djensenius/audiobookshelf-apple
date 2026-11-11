@@ -1,0 +1,798 @@
+{
+  "book": [
+    {
+      "libraryItem": {
+        "id": "item-book-2",
+        "ino": "65033",
+        "oldLibraryItemId": null,
+        "libraryId": "library-books",
+        "folderId": "folder-books",
+        "path": "/search-fixtures/books/Second",
+        "relPath": "Second",
+        "isFile": false,
+        "mtimeMs": 1794362580529,
+        "ctimeMs": 1794362580529,
+        "birthtimeMs": 0,
+        "addedAt": 1794362655140,
+        "updatedAt": 1794362655599,
+        "lastScan": 1794362655139,
+        "scanVersion": "2.26.0",
+        "isMissing": false,
+        "isInvalid": false,
+        "mediaType": "book",
+        "media": {
+          "id": "book-2",
+          "libraryItemId": "item-book-2",
+          "metadata": {
+            "title": "Search Fixture Book 2",
+            "subtitle": null,
+            "authors": [
+              {
+                "id": "author-shared",
+                "name": "Search Fixture Shared Author"
+              }
+            ],
+            "narrators": [
+              "Search Fixture Shared Narrator"
+            ],
+            "series": [
+              {
+                "id": "series-shared",
+                "name": "Search Fixture Shared Series",
+                "sequence": "2"
+              }
+            ],
+            "genres": [
+              "Search Fixture Shared Genre"
+            ],
+            "publishedYear": null,
+            "publishedDate": null,
+            "publisher": null,
+            "description": null,
+            "isbn": null,
+            "asin": null,
+            "language": null,
+            "explicit": false,
+            "abridged": false,
+            "titleIgnorePrefix": "Search Fixture Book 2",
+            "authorName": "Search Fixture Shared Author",
+            "authorNameLF": "Author, Search Fixture Shared",
+            "narratorName": "Search Fixture Shared Narrator",
+            "seriesName": "Search Fixture Shared Series #2",
+            "descriptionPlain": null
+          },
+          "coverPath": null,
+          "tags": [
+            "Search Fixture Shared Tag"
+          ],
+          "audioFiles": [
+            {
+              "index": 1,
+              "ino": "65034",
+              "metadata": {
+                "filename": "Second.mp3",
+                "ext": ".mp3",
+                "path": "/search-fixtures/books/Second/Second.mp3",
+                "relPath": "Second.mp3",
+                "size": 80516,
+                "mtimeMs": 1794362580587,
+                "ctimeMs": 1794362580587,
+                "birthtimeMs": 0
+              },
+              "addedAt": 1794362655139,
+              "updatedAt": 1794362655139,
+              "trackNumFromMeta": null,
+              "discNumFromMeta": null,
+              "trackNumFromFilename": null,
+              "discNumFromFilename": null,
+              "manuallyVerified": false,
+              "exclude": false,
+              "error": null,
+              "format": "MP2/3 (MPEG audio layer 2/3)",
+              "duration": 40.104,
+              "bitRate": 16000,
+              "language": null,
+              "codec": "mp3",
+              "timeBase": "1/14112000",
+              "channels": 1,
+              "channelLayout": "mono",
+              "chapters": [],
+              "embeddedCoverArt": null,
+              "metaTags": {
+                "tagAlbum": "Second",
+                "tagArtist": "Search Fixture Shared Author",
+                "tagTitle": "Second",
+                "tagEncoder": "Lavf63.1.102"
+              },
+              "mimeType": "audio/mpeg"
+            }
+          ],
+          "chapters": [],
+          "ebookFile": null,
+          "duration": 40.104,
+          "size": 80516,
+          "tracks": [
+            {
+              "index": 1,
+              "ino": "65034",
+              "metadata": {
+                "filename": "Second.mp3",
+                "ext": ".mp3",
+                "path": "/search-fixtures/books/Second/Second.mp3",
+                "relPath": "Second.mp3",
+                "size": 80516,
+                "mtimeMs": 1794362580587,
+                "ctimeMs": 1794362580587,
+                "birthtimeMs": 0
+              },
+              "addedAt": 1794362655139,
+              "updatedAt": 1794362655139,
+              "trackNumFromMeta": null,
+              "discNumFromMeta": null,
+              "trackNumFromFilename": null,
+              "discNumFromFilename": null,
+              "manuallyVerified": false,
+              "exclude": false,
+              "error": null,
+              "format": "MP2/3 (MPEG audio layer 2/3)",
+              "duration": 40.104,
+              "bitRate": 16000,
+              "language": null,
+              "codec": "mp3",
+              "timeBase": "1/14112000",
+              "channels": 1,
+              "channelLayout": "mono",
+              "chapters": [],
+              "embeddedCoverArt": null,
+              "metaTags": {
+                "tagAlbum": "Second",
+                "tagArtist": "Search Fixture Shared Author",
+                "tagTitle": "Second",
+                "tagEncoder": "Lavf63.1.102"
+              },
+              "mimeType": "audio/mpeg",
+              "title": "Second.mp3",
+              "startOffset": 0,
+              "contentUrl": "/api/items/item-book-2/file/65034"
+            }
+          ]
+        },
+        "libraryFiles": [
+          {
+            "ino": "65034",
+            "metadata": {
+              "filename": "Second.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/books/Second/Second.mp3",
+              "relPath": "Second.mp3",
+              "size": 80516,
+              "mtimeMs": 1794362580587,
+              "ctimeMs": 1794362580587,
+              "birthtimeMs": 0
+            },
+            "isSupplementary": null,
+            "addedAt": 1794362655006,
+            "updatedAt": 1794362655006,
+            "fileType": "audio"
+          }
+        ],
+        "size": 80516
+      }
+    },
+    {
+      "libraryItem": {
+        "id": "item-book-1",
+        "ino": "65035",
+        "oldLibraryItemId": null,
+        "libraryId": "library-books",
+        "folderId": "folder-books",
+        "path": "/search-fixtures/books/First",
+        "relPath": "First",
+        "isFile": false,
+        "mtimeMs": 1794362580454,
+        "ctimeMs": 1794362580454,
+        "birthtimeMs": 0,
+        "addedAt": 1794362655222,
+        "updatedAt": 1794362655578,
+        "lastScan": 1794362655220,
+        "scanVersion": "2.26.0",
+        "isMissing": false,
+        "isInvalid": false,
+        "mediaType": "book",
+        "media": {
+          "id": "book-1",
+          "libraryItemId": "item-book-1",
+          "metadata": {
+            "title": "Search Fixture Book 1",
+            "subtitle": null,
+            "authors": [
+              {
+                "id": "author-shared",
+                "name": "Search Fixture Shared Author"
+              },
+              {
+                "id": "author-unique",
+                "name": "Search Fixture Unique Author"
+              }
+            ],
+            "narrators": [
+              "Search Fixture Shared Narrator",
+              "Search Fixture Unique Narrator"
+            ],
+            "series": [
+              {
+                "id": "series-unique",
+                "name": "Search Fixture Unique Series",
+                "sequence": "7"
+              },
+              {
+                "id": "series-shared",
+                "name": "Search Fixture Shared Series",
+                "sequence": "1"
+              }
+            ],
+            "genres": [
+              "Search Fixture Shared Genre",
+              "Search Fixture Unique Genre"
+            ],
+            "publishedYear": null,
+            "publishedDate": null,
+            "publisher": null,
+            "description": null,
+            "isbn": null,
+            "asin": null,
+            "language": null,
+            "explicit": false,
+            "abridged": false,
+            "titleIgnorePrefix": "Search Fixture Book 1",
+            "authorName": "Search Fixture Shared Author, Search Fixture Unique Author",
+            "authorNameLF": "Author, Search Fixture Shared, Author, Search Fixture Unique",
+            "narratorName": "Search Fixture Shared Narrator, Search Fixture Unique Narrator",
+            "seriesName": "Search Fixture Unique Series #7, Search Fixture Shared Series #1",
+            "descriptionPlain": null
+          },
+          "coverPath": null,
+          "tags": [
+            "Search Fixture Shared Tag",
+            "Search Fixture Unique Tag"
+          ],
+          "audioFiles": [
+            {
+              "index": 1,
+              "ino": "65036",
+              "metadata": {
+                "filename": "First.mp3",
+                "ext": ".mp3",
+                "path": "/search-fixtures/books/First/First.mp3",
+                "relPath": "First.mp3",
+                "size": 60498,
+                "mtimeMs": 1794362580494,
+                "ctimeMs": 1794362580494,
+                "birthtimeMs": 0
+              },
+              "addedAt": 1794362655220,
+              "updatedAt": 1794362655220,
+              "trackNumFromMeta": null,
+              "discNumFromMeta": null,
+              "trackNumFromFilename": null,
+              "discNumFromFilename": null,
+              "manuallyVerified": false,
+              "exclude": false,
+              "error": null,
+              "format": "MP2/3 (MPEG audio layer 2/3)",
+              "duration": 30.096,
+              "bitRate": 16000,
+              "language": null,
+              "codec": "mp3",
+              "timeBase": "1/14112000",
+              "channels": 1,
+              "channelLayout": "mono",
+              "chapters": [],
+              "embeddedCoverArt": null,
+              "metaTags": {
+                "tagAlbum": "First",
+                "tagArtist": "Search Fixture Shared Author",
+                "tagTitle": "First",
+                "tagEncoder": "Lavf63.1.102"
+              },
+              "mimeType": "audio/mpeg"
+            }
+          ],
+          "chapters": [],
+          "ebookFile": null,
+          "duration": 30.096,
+          "size": 60498,
+          "tracks": [
+            {
+              "index": 1,
+              "ino": "65036",
+              "metadata": {
+                "filename": "First.mp3",
+                "ext": ".mp3",
+                "path": "/search-fixtures/books/First/First.mp3",
+                "relPath": "First.mp3",
+                "size": 60498,
+                "mtimeMs": 1794362580494,
+                "ctimeMs": 1794362580494,
+                "birthtimeMs": 0
+              },
+              "addedAt": 1794362655220,
+              "updatedAt": 1794362655220,
+              "trackNumFromMeta": null,
+              "discNumFromMeta": null,
+              "trackNumFromFilename": null,
+              "discNumFromFilename": null,
+              "manuallyVerified": false,
+              "exclude": false,
+              "error": null,
+              "format": "MP2/3 (MPEG audio layer 2/3)",
+              "duration": 30.096,
+              "bitRate": 16000,
+              "language": null,
+              "codec": "mp3",
+              "timeBase": "1/14112000",
+              "channels": 1,
+              "channelLayout": "mono",
+              "chapters": [],
+              "embeddedCoverArt": null,
+              "metaTags": {
+                "tagAlbum": "First",
+                "tagArtist": "Search Fixture Shared Author",
+                "tagTitle": "First",
+                "tagEncoder": "Lavf63.1.102"
+              },
+              "mimeType": "audio/mpeg",
+              "title": "First.mp3",
+              "startOffset": 0,
+              "contentUrl": "/api/items/item-book-1/file/65036"
+            }
+          ]
+        },
+        "libraryFiles": [
+          {
+            "ino": "65036",
+            "metadata": {
+              "filename": "First.mp3",
+              "ext": ".mp3",
+              "path": "/search-fixtures/books/First/First.mp3",
+              "relPath": "First.mp3",
+              "size": 60498,
+              "mtimeMs": 1794362580494,
+              "ctimeMs": 1794362580494,
+              "birthtimeMs": 0
+            },
+            "isSupplementary": null,
+            "addedAt": 1794362655007,
+            "updatedAt": 1794362655007,
+            "fileType": "audio"
+          }
+        ],
+        "size": 60498
+      }
+    }
+  ],
+  "narrators": [
+    {
+      "name": "Search Fixture Shared Narrator",
+      "numBooks": 2
+    },
+    {
+      "name": "Search Fixture Unique Narrator",
+      "numBooks": 1
+    }
+  ],
+  "tags": [
+    {
+      "name": "Search Fixture Shared Tag",
+      "numItems": 2
+    },
+    {
+      "name": "Search Fixture Unique Tag",
+      "numItems": 1
+    }
+  ],
+  "genres": [
+    {
+      "name": "Search Fixture Shared Genre",
+      "numItems": 2
+    },
+    {
+      "name": "Search Fixture Unique Genre",
+      "numItems": 1
+    }
+  ],
+  "series": [
+    {
+      "series": {
+        "id": "series-shared",
+        "name": "Search Fixture Shared Series",
+        "nameIgnorePrefix": "Search Fixture Shared Series",
+        "description": null,
+        "addedAt": 1794362655554,
+        "updatedAt": 1794362655554,
+        "libraryId": "library-books"
+      },
+      "books": [
+        {
+          "id": "item-book-1",
+          "ino": "65035",
+          "oldLibraryItemId": null,
+          "libraryId": "library-books",
+          "folderId": "folder-books",
+          "path": "/search-fixtures/books/First",
+          "relPath": "First",
+          "isFile": false,
+          "mtimeMs": 1794362580454,
+          "ctimeMs": 1794362580454,
+          "birthtimeMs": 0,
+          "addedAt": 1794362655222,
+          "updatedAt": 1794362655578,
+          "lastScan": 1794362655220,
+          "scanVersion": "2.26.0",
+          "isMissing": false,
+          "isInvalid": false,
+          "mediaType": "book",
+          "media": {
+            "id": "book-1",
+            "libraryItemId": "item-book-1",
+            "metadata": {
+              "title": "Search Fixture Book 1",
+              "subtitle": null,
+              "authors": [],
+              "narrators": [
+                "Search Fixture Shared Narrator",
+                "Search Fixture Unique Narrator"
+              ],
+              "series": [],
+              "genres": [
+                "Search Fixture Shared Genre",
+                "Search Fixture Unique Genre"
+              ],
+              "publishedYear": null,
+              "publishedDate": null,
+              "publisher": null,
+              "description": null,
+              "isbn": null,
+              "asin": null,
+              "language": null,
+              "explicit": false,
+              "abridged": false
+            },
+            "coverPath": null,
+            "tags": [
+              "Search Fixture Shared Tag",
+              "Search Fixture Unique Tag"
+            ],
+            "audioFiles": [
+              {
+                "index": 1,
+                "ino": "65036",
+                "metadata": {
+                  "filename": "First.mp3",
+                  "ext": ".mp3",
+                  "path": "/search-fixtures/books/First/First.mp3",
+                  "relPath": "First.mp3",
+                  "size": 60498,
+                  "mtimeMs": 1794362580494,
+                  "ctimeMs": 1794362580494,
+                  "birthtimeMs": 0
+                },
+                "addedAt": 1794362655220,
+                "updatedAt": 1794362655220,
+                "trackNumFromMeta": null,
+                "discNumFromMeta": null,
+                "trackNumFromFilename": null,
+                "discNumFromFilename": null,
+                "manuallyVerified": false,
+                "exclude": false,
+                "error": null,
+                "format": "MP2/3 (MPEG audio layer 2/3)",
+                "duration": 30.096,
+                "bitRate": 16000,
+                "language": null,
+                "codec": "mp3",
+                "timeBase": "1/14112000",
+                "channels": 1,
+                "channelLayout": "mono",
+                "chapters": [],
+                "embeddedCoverArt": null,
+                "metaTags": {
+                  "tagAlbum": "First",
+                  "tagArtist": "Search Fixture Shared Author",
+                  "tagTitle": "First",
+                  "tagEncoder": "Lavf63.1.102"
+                },
+                "mimeType": "audio/mpeg"
+              }
+            ],
+            "chapters": [],
+            "ebookFile": null
+          },
+          "libraryFiles": [
+            {
+              "ino": "65036",
+              "metadata": {
+                "filename": "First.mp3",
+                "ext": ".mp3",
+                "path": "/search-fixtures/books/First/First.mp3",
+                "relPath": "First.mp3",
+                "size": 60498,
+                "mtimeMs": 1794362580494,
+                "ctimeMs": 1794362580494,
+                "birthtimeMs": 0
+              },
+              "isSupplementary": null,
+              "addedAt": 1794362655007,
+              "updatedAt": 1794362655007,
+              "fileType": "audio"
+            }
+          ]
+        },
+        {
+          "id": "item-book-2",
+          "ino": "65033",
+          "oldLibraryItemId": null,
+          "libraryId": "library-books",
+          "folderId": "folder-books",
+          "path": "/search-fixtures/books/Second",
+          "relPath": "Second",
+          "isFile": false,
+          "mtimeMs": 1794362580529,
+          "ctimeMs": 1794362580529,
+          "birthtimeMs": 0,
+          "addedAt": 1794362655140,
+          "updatedAt": 1794362655599,
+          "lastScan": 1794362655139,
+          "scanVersion": "2.26.0",
+          "isMissing": false,
+          "isInvalid": false,
+          "mediaType": "book",
+          "media": {
+            "id": "book-2",
+            "libraryItemId": "item-book-2",
+            "metadata": {
+              "title": "Search Fixture Book 2",
+              "subtitle": null,
+              "authors": [],
+              "narrators": [
+                "Search Fixture Shared Narrator"
+              ],
+              "series": [],
+              "genres": [
+                "Search Fixture Shared Genre"
+              ],
+              "publishedYear": null,
+              "publishedDate": null,
+              "publisher": null,
+              "description": null,
+              "isbn": null,
+              "asin": null,
+              "language": null,
+              "explicit": false,
+              "abridged": false
+            },
+            "coverPath": null,
+            "tags": [
+              "Search Fixture Shared Tag"
+            ],
+            "audioFiles": [
+              {
+                "index": 1,
+                "ino": "65034",
+                "metadata": {
+                  "filename": "Second.mp3",
+                  "ext": ".mp3",
+                  "path": "/search-fixtures/books/Second/Second.mp3",
+                  "relPath": "Second.mp3",
+                  "size": 80516,
+                  "mtimeMs": 1794362580587,
+                  "ctimeMs": 1794362580587,
+                  "birthtimeMs": 0
+                },
+                "addedAt": 1794362655139,
+                "updatedAt": 1794362655139,
+                "trackNumFromMeta": null,
+                "discNumFromMeta": null,
+                "trackNumFromFilename": null,
+                "discNumFromFilename": null,
+                "manuallyVerified": false,
+                "exclude": false,
+                "error": null,
+                "format": "MP2/3 (MPEG audio layer 2/3)",
+                "duration": 40.104,
+                "bitRate": 16000,
+                "language": null,
+                "codec": "mp3",
+                "timeBase": "1/14112000",
+                "channels": 1,
+                "channelLayout": "mono",
+                "chapters": [],
+                "embeddedCoverArt": null,
+                "metaTags": {
+                  "tagAlbum": "Second",
+                  "tagArtist": "Search Fixture Shared Author",
+                  "tagTitle": "Second",
+                  "tagEncoder": "Lavf63.1.102"
+                },
+                "mimeType": "audio/mpeg"
+              }
+            ],
+            "chapters": [],
+            "ebookFile": null
+          },
+          "libraryFiles": [
+            {
+              "ino": "65034",
+              "metadata": {
+                "filename": "Second.mp3",
+                "ext": ".mp3",
+                "path": "/search-fixtures/books/Second/Second.mp3",
+                "relPath": "Second.mp3",
+                "size": 80516,
+                "mtimeMs": 1794362580587,
+                "ctimeMs": 1794362580587,
+                "birthtimeMs": 0
+              },
+              "isSupplementary": null,
+              "addedAt": 1794362655006,
+              "updatedAt": 1794362655006,
+              "fileType": "audio"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "series": {
+        "id": "series-unique",
+        "name": "Search Fixture Unique Series",
+        "nameIgnorePrefix": "Search Fixture Unique Series",
+        "description": null,
+        "addedAt": 1794362655562,
+        "updatedAt": 1794362655562,
+        "libraryId": "library-books"
+      },
+      "books": [
+        {
+          "id": "item-book-1",
+          "ino": "65035",
+          "oldLibraryItemId": null,
+          "libraryId": "library-books",
+          "folderId": "folder-books",
+          "path": "/search-fixtures/books/First",
+          "relPath": "First",
+          "isFile": false,
+          "mtimeMs": 1794362580454,
+          "ctimeMs": 1794362580454,
+          "birthtimeMs": 0,
+          "addedAt": 1794362655222,
+          "updatedAt": 1794362655578,
+          "lastScan": 1794362655220,
+          "scanVersion": "2.26.0",
+          "isMissing": false,
+          "isInvalid": false,
+          "mediaType": "book",
+          "media": {
+            "id": "book-1",
+            "libraryItemId": "item-book-1",
+            "metadata": {
+              "title": "Search Fixture Book 1",
+              "subtitle": null,
+              "authors": [],
+              "narrators": [
+                "Search Fixture Shared Narrator",
+                "Search Fixture Unique Narrator"
+              ],
+              "series": [],
+              "genres": [
+                "Search Fixture Shared Genre",
+                "Search Fixture Unique Genre"
+              ],
+              "publishedYear": null,
+              "publishedDate": null,
+              "publisher": null,
+              "description": null,
+              "isbn": null,
+              "asin": null,
+              "language": null,
+              "explicit": false,
+              "abridged": false
+            },
+            "coverPath": null,
+            "tags": [
+              "Search Fixture Shared Tag",
+              "Search Fixture Unique Tag"
+            ],
+            "audioFiles": [
+              {
+                "index": 1,
+                "ino": "65036",
+                "metadata": {
+                  "filename": "First.mp3",
+                  "ext": ".mp3",
+                  "path": "/search-fixtures/books/First/First.mp3",
+                  "relPath": "First.mp3",
+                  "size": 60498,
+                  "mtimeMs": 1794362580494,
+                  "ctimeMs": 1794362580494,
+                  "birthtimeMs": 0
+                },
+                "addedAt": 1794362655220,
+                "updatedAt": 1794362655220,
+                "trackNumFromMeta": null,
+                "discNumFromMeta": null,
+                "trackNumFromFilename": null,
+                "discNumFromFilename": null,
+                "manuallyVerified": false,
+                "exclude": false,
+                "error": null,
+                "format": "MP2/3 (MPEG audio layer 2/3)",
+                "duration": 30.096,
+                "bitRate": 16000,
+                "language": null,
+                "codec": "mp3",
+                "timeBase": "1/14112000",
+                "channels": 1,
+                "channelLayout": "mono",
+                "chapters": [],
+                "embeddedCoverArt": null,
+                "metaTags": {
+                  "tagAlbum": "First",
+                  "tagArtist": "Search Fixture Shared Author",
+                  "tagTitle": "First",
+                  "tagEncoder": "Lavf63.1.102"
+                },
+                "mimeType": "audio/mpeg"
+              }
+            ],
+            "chapters": [],
+            "ebookFile": null
+          },
+          "libraryFiles": [
+            {
+              "ino": "65036",
+              "metadata": {
+                "filename": "First.mp3",
+                "ext": ".mp3",
+                "path": "/search-fixtures/books/First/First.mp3",
+                "relPath": "First.mp3",
+                "size": 60498,
+                "mtimeMs": 1794362580494,
+                "ctimeMs": 1794362580494,
+                "birthtimeMs": 0
+              },
+              "isSupplementary": null,
+              "addedAt": 1794362655007,
+              "updatedAt": 1794362655007,
+              "fileType": "audio"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "authors": [
+    {
+      "id": "author-shared",
+      "asin": null,
+      "name": "Search Fixture Shared Author",
+      "description": null,
+      "imagePath": null,
+      "libraryId": "library-books",
+      "addedAt": 1794362655146,
+      "updatedAt": 1794362655146,
+      "numBooks": 2
+    },
+    {
+      "id": "author-unique",
+      "asin": null,
+      "name": "Search Fixture Unique Author",
+      "description": null,
+      "imagePath": null,
+      "libraryId": "library-books",
+      "addedAt": 1794362655569,
+      "updatedAt": 1794362655569,
+      "numBooks": 1
+    }
+  ]
+}

@@ -6,6 +6,10 @@ import Foundation
 /// the live implementation; tests use stubs.
 public protocol ProgressSyncService: Sendable {
     var serverConnectionID: UUID { get }
+    /// Canonical `GET /api/me/progress/:itemID[/:episodeID]`.
+    /// `nil` is authoritative absence, as documented by `APIClient.mediaProgress` for 404,
+    /// not an unusable response. Return undated progress as-is; other lookup failures throw.
+    func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress?
     /// `POST /api/session/:id/sync`. Must return only once the request's task has completed.
     func syncSession(id: String, report: PlaybackSyncReport) async throws
     /// `PATCH /api/me/progress/:itemID[/:episodeID]` with one field group.
@@ -24,6 +28,10 @@ public struct APIProgressSyncService: ProgressSyncService {
 
     public func syncSession(id: String, report: PlaybackSyncReport) async throws {
         _ = try await client.send(SessionEndpoints.sync(sessionID: id, report: report))
+    }
+
+    public func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
+        try await client.mediaProgress(itemID: itemID, episodeID: episodeID)
     }
 
     public func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {
@@ -61,10 +69,14 @@ public protocol PlaybackProgressSource: AnyObject {
     /// Confirmed engine sample, never a seek target; nil while waiting/seeking. Includes the
     /// final pre-stop sample during `finalCloseReport`, even though the engine is already stopped.
     var confirmedPlaybackTime: Double? { get }
+    /// The `loaded` event carries a newly chosen start/seek/jump, not automatic resume progress.
+    var loadedPositionIsExplicit: Bool { get }
     var duration: Double { get }
     var isPlaying: Bool { get }
     var chapterIndex: Int? { get }
-    var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackSyncReport?)? { get set }
+    var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)? { get set }
+    /// Synchronously suppresses sync/PATCH transport before account teardown can suspend.
+    var quiesceProgressTransport: (@MainActor () -> Void)? { get set }
     func addObserver(_ handler: @escaping @MainActor (PlaybackCoordinatorEvent) -> Void) -> PlaybackObserverToken
     func removeObserver(_ token: PlaybackObserverToken)
 }
