@@ -217,13 +217,18 @@ struct SyncHarness {
 }
 
 /// One path stream that tests feed by hand; the syncer opens it once.
-final class StubNetworkPathSource: NetworkPathSource {
+final class StubNetworkPathSource: NetworkPathSource, Sendable {
     private let stream: AsyncStream<NetworkPath>
     private let continuation: AsyncStream<NetworkPath>.Continuation
+    private let terminated = Mutex(false)
 
     init() {
         (stream, continuation) = AsyncStream.makeStream()
+        continuation.onTermination = { [weak self] _ in self?.terminated.withLock { $0 = true } }
     }
+
+    /// Whether the stream's consumer stopped (its task was cancelled).
+    var isTerminated: Bool { terminated.withLock { $0 } }
 
     func paths() -> AsyncStream<NetworkPath> { stream }
 

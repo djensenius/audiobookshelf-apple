@@ -28,15 +28,17 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   Final positions enter that queue synchronously in the close callback, even for clean or
 ///   missing rows. Their throwing receipts acknowledge only committed audio, not listening time.
 /// - **Failures.** The position stays in the durable retry queue. Listening time is carried into the next
-///   report only when the request clearly never reached the server (DNS, connect, TLS, auth);
-///   after an ambiguous failure it is dropped, so it is never counted twice.
+///   report only when the request clearly never reached the server (DNS, connect, TLS, auth) or
+///   was turned away before the session handler ran (408, 429). After an ambiguous failure,
+///   including a 5xx, it is dropped, so it is never counted twice.
 /// - **Server errors (#171).** A `/sync` answered with 5xx, 408 or 429 backs off that session's
 ///   reports for ``syncInterval`` doubled per consecutive failure, up to ``maxSyncBackoff``;
-///   ``flush()`` ignores the backoff. Positions are still saved meanwhile, and listening time
-///   waits for the next report instead of being dropped with each failure. A 404 means the
-///   server no longer has the session (ABS keeps open sessions in memory, so a restart drops
-///   them): the session sends no more `/sync`, and each later trigger drains the saved
-///   position through PATCH instead. Listening time after that 404 is not sent (follow-up).
+///   ``flush()`` ignores the backoff. Positions are still saved meanwhile, and a periodic report
+///   held back by the backoff falls due when it ends. Nothing wakes a paused session then (#337).
+///   A 404 means the server no longer has the session (ABS keeps open sessions in memory, so a
+///   restart drops them): the session sends no more `/sync`, and each later trigger drains the
+///   saved position through PATCH instead, until the server rejects the session's own row.
+///   Listening time from that 404 on is not sent (#337).
 /// - **Durable queue.** ``drainPendingProgress()`` PATCHes the connection's dirty rows, one group
 ///   per request from `LocalProgressStore.beginSend`, in its order (audio, finished, ebook). It
 ///   runs after every successful `/sync` and on ``flush()``; call it on reconnect and at launch.
@@ -89,6 +91,9 @@ public final class ProgressSyncer {
         var retryAt: TimeInterval?
         /// The server answered `/sync` with 404: triggers drain the position instead.
         var isAbandoned = false
+        /// A PATCH of this abandoned session's row was rejected for good (the item is likely
+        /// gone): its triggers only save the position, so they don't re-PATCH and log each time.
+        var isRowRejected = false
     }
 
     private weak var source: (any PlaybackProgressSource)?
@@ -370,12 +375,16 @@ public final class ProgressSyncer {
         current?.position = position
         let sessionID = session.sessionID
         let now = clock.uptime()
-        lastSyncAt = now
-        if session.isAbandoned {
-            requestDrain()
+        if !session.isAbandoned, !ignoringBackoff, let retryAt = session.retryAt, now < retryAt {
+            // The next periodic report falls due when the backoff ends, not an interval from now.
+            lastSyncAt = retryAt - Self.syncInterval
             return
         }
-        if !ignoringBackoff, let retryAt = session.retryAt, now < retryAt { return }
+        lastSyncAt = now
+        if session.isAbandoned {
+            if !session.isRowRejected { requestDrain() }
+            return
+        }
         guard queuedSyncSessionID != sessionID else { return }
         queuedSyncSessionID = sessionID
         enqueue { [weak self] in await self?.sendSync(sessionID: sessionID) }
@@ -430,7 +439,15 @@ public final class ProgressSyncer {
             }
         } catch {
             let abandoned = noteSyncFailure(error, sessionID: sessionID)
-            if Self.neverReachedServer(error) {
+            if case .notFound = error as? APIError {
+                // No session, so the server applied nothing; but there's no session to resend to.
+                outcome = .notDelivered
+                if listened > 0 {
+                    logger.info(
+                        "Dropped \(listened, privacy: .public) s of listening time: the server no longer has the session (#337)"
+                    )
+                }
+            } else if Self.neverReachedServer(error) || Self.wasTurnedAway(error) {
                 outcome = .notDelivered
                 if current?.sessionID == sessionID {
                     current?.listened += listened
@@ -625,6 +642,7 @@ public final class ProgressSyncer {
                         logger.error(
                             "The server rejected a progress PATCH for \(row.key.rawValue, privacy: .private(mask: .hash)) with status \(status, privacy: .public); not retrying it until the next edit"
                         )
+                        if current?.isAbandoned == true, current?.key == row.key { current?.isRowRejected = true }
                         guard await settle(patch, error: "rejected \(status)", rejected: true) else { return }
                         break
                     }
@@ -780,6 +798,12 @@ public final class ProgressSyncer {
         case .notAuthenticated, .sessionExpired, .unauthorized, .forbidden, .invalidURL, .encoding: true
         default: false
         }
+    }
+
+    /// A `/sync` the server turned away before its session handler ran (408 request timeout,
+    /// 429 rate limit), so its listening time can be sent again.
+    static func wasTurnedAway(_ error: any Error) -> Bool {
+        if case .http(let status, _) = error as? APIError { [408, 429].contains(status) } else { false }
     }
 
     /// Later PATCHes would fail the same way, so the drain stops.

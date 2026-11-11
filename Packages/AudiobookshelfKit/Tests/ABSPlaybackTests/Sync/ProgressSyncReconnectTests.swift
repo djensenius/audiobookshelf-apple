@@ -82,4 +82,32 @@ struct ProgressSyncReconnectTests {
         #expect(f.s.service.log.isEmpty)
         #expect(try await f.s.store.progress(for: f.s.h.key("a"))?.needsServerSync == true)
     }
+
+    @Test func quiesceStopsFollowingThePath() async throws {
+        var f = try Fixture()
+        #expect(await f.send(.offline) == false)
+        let task = try #require(f.s.syncer.pathTask)
+
+        f.s.syncer.quiesceTransport()
+
+        #expect(f.s.syncer.pathTask == nil)
+        try #require(task.isCancelled)
+        await task.value
+        #expect(f.paths.isTerminated)
+    }
+
+    @Test func releasingTheSyncerStopsFollowingThePath() async throws {
+        let paths = StubNetworkPathSource()
+        let s = try SyncHarness()
+        var syncer: ProgressSyncer? = ProgressSyncer(
+            source: s.coordinator, service: s.service, store: s.store, paths: paths)
+        let task = try #require(syncer?.pathTask)
+
+        syncer = nil
+
+        #expect(syncer == nil)
+        try #require(task.isCancelled)
+        await task.value
+        #expect(paths.isTerminated)
+    }
 }
