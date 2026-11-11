@@ -1,0 +1,124 @@
+{
+  "id": "author-fixture",
+  "asin": null,
+  "name": "Author Fixture",
+  "description": null,
+  "imagePath": null,
+  "libraryId": "library-fixture",
+  "addedAt": 1700000000000,
+  "updatedAt": 1700000000000,
+  "series": [
+    {
+      "id": "series-fixture",
+      "name": "Fixture Cycle",
+      "items": [
+        {
+          "id": "item-fixture",
+          "ino": "12345",
+          "oldLibraryItemId": null,
+          "libraryId": "library-fixture",
+          "folderId": "folder-fixture",
+          "path": "/synthetic/Author Tale",
+          "relPath": "Author Tale",
+          "isFile": false,
+          "mtimeMs": 1700000000000,
+          "ctimeMs": 1700000000000,
+          "birthtimeMs": 1700000000000,
+          "addedAt": 1700000000000,
+          "updatedAt": 1700000000000,
+          "isMissing": false,
+          "isInvalid": false,
+          "mediaType": "book",
+          "media": {
+            "id": "media-fixture",
+            "metadata": {
+              "title": "Author Tale",
+              "titleIgnorePrefix": "Author Tale",
+              "subtitle": null,
+              "authorName": "Author Fixture",
+              "authorNameLF": "Fixture, Author",
+              "narratorName": "",
+              "seriesName": "Fixture Cycle #2.5",
+              "genres": [],
+              "publishedYear": null,
+              "publishedDate": null,
+              "publisher": null,
+              "description": null,
+              "isbn": null,
+              "asin": null,
+              "language": null,
+              "explicit": false,
+              "abridged": false,
+              "series": {
+                "id": "series-fixture",
+                "name": "Fixture Cycle",
+                "nameIgnorePrefix": "Fixture Cycle",
+                "sequence": "2.5"
+              }
+            },
+            "coverPath": null,
+            "tags": [],
+            "numTracks": 1,
+            "numAudioFiles": 1,
+            "numChapters": 0,
+            "duration": 30,
+            "size": 60465
+          },
+          "numFiles": 1,
+          "size": 60465
+        }
+      ]
+    }
+  ],
+  "libraryItems": [
+    {
+      "id": "item-fixture",
+      "ino": "12345",
+      "oldLibraryItemId": null,
+      "libraryId": "library-fixture",
+      "folderId": "folder-fixture",
+      "path": "/synthetic/Author Tale",
+      "relPath": "Author Tale",
+      "isFile": false,
+      "mtimeMs": 1700000000000,
+      "ctimeMs": 1700000000000,
+      "birthtimeMs": 1700000000000,
+      "addedAt": 1700000000000,
+      "updatedAt": 1700000000000,
+      "isMissing": false,
+      "isInvalid": false,
+      "mediaType": "book",
+      "media": {
+        "id": "media-fixture",
+        "metadata": {
+          "title": "Author Tale",
+          "titleIgnorePrefix": "Author Tale",
+          "subtitle": null,
+          "authorName": "Author Fixture",
+          "authorNameLF": "Fixture, Author",
+          "narratorName": "",
+          "seriesName": "Fixture Cycle #2.5",
+          "genres": [],
+          "publishedYear": null,
+          "publishedDate": null,
+          "publisher": null,
+          "description": null,
+          "isbn": null,
+          "asin": null,
+          "language": null,
+          "explicit": false,
+          "abridged": false
+        },
+        "coverPath": null,
+        "tags": [],
+        "numTracks": 1,
+        "numAudioFiles": 1,
+        "numChapters": 0,
+        "duration": 30,
+        "size": 60465
+      },
+      "numFiles": 1,
+      "size": 60465
+    }
+  ]
+}

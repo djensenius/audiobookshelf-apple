@@ -2,6 +2,28 @@ import ABSCore
 import Foundation
 import OSLog
 import SwiftData
+import Synchronization
+
+/// Opaque in-process ordering for one writer/key's playback intent, reserved before suspension.
+/// Successive playback scopes must share the same LocalProgressStore; tokens are not persisted.
+public struct PlaybackPositionToken: Sendable, Equatable {
+    fileprivate let writer: UUID
+    fileprivate let key: MediaKey
+    fileprivate let sequence: UInt64
+}
+
+public enum PlaybackPositionCommitResult: Sendable, Equatable {
+    case committed
+    /// A strictly newer token already committed. This call made no write.
+    case supersededByCommittedPosition
+}
+
+public enum PlaybackPositionCommitError: Error, Sendable, Equatable {
+    case wrongWriter
+    case wrongKey
+    /// The latest committed token is single-use, even when passed the same audio again.
+    case tokenAlreadyCommitted
+}
 
 /// A point in `LocalProgressStore`'s edit history, captured when a progress fetch is issued or a
 /// socket progress event is received. Server values are dropped for rows edited or settled since.
@@ -18,6 +40,18 @@ public struct ProgressPatch: Sendable, Equatable {
     /// Identifies this send; settling a patch that is no longer the row's send in flight does
     /// nothing.
     public let token: UUID
+}
+
+/// Identity of one durably prepared online report. Never pass this to PATCH completion.
+public struct SessionAudioSend: Sendable, Equatable {
+    public let key: MediaKey
+    public let attemptID: UUID
+}
+
+public enum SessionAudioOutcome: Sendable, Equatable {
+    case succeeded
+    case notDelivered
+    case ambiguous
 }
 
 /// Where server progress came from (``LocalProgressStore/applyServerProgress(_:capturedAt:source:)``).
@@ -46,6 +80,17 @@ public enum SessionUploadResult: Sendable, Equatable {
 /// local edit or PATCH settlement. Every write is saved through ``commit(_:)``, which rolls the
 /// context back when it fails; in-memory bookkeeping changes only after a successful save.
 @ModelActor public actor LocalProgressStore: StoreActor {
+    private nonisolated let playbackWriterID = UUID()
+    private nonisolated let playbackSequence = Mutex<UInt64>(0)
+    /// One successful watermark per key, never pending reservations or a history of tokens.
+    private var committedPlaybackPositions:
+        [MediaKey: (sequence: UInt64, row: PersistentIdentifier, audio: ProgressSend.Audio)] = [:]
+    /// Writer-owned settlement survives syncer retirement. A failed save retains this precise
+    /// outcome; a process reopen instead retains the conservative prepared evidence on disk.
+    private var sessionAudioSends:
+        [UUID: (
+            key: MediaKey, row: PersistentIdentifier, values: ProgressSend, outcome: SessionAudioOutcome?
+        )] = [:]
     /// Pending sessions are discarded after this many counted upload failures.
     public static let maxUploadFailures = 5
     /// At most one failure per session is counted in this interval.
@@ -71,8 +116,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// acknowledgement, with the latest socket value received meanwhile and its capture.
     /// Rows whose latest send was an ebook one: their next send goes back to audio or finished.
     private var ebookSentLast: Set<String> = []
-    private var awaitingFetch: [String: (key: MediaKey, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] =
-        [:]
+    private var awaitingFetch:
+        [String: (key: MediaKey, acknowledgement: UUID, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] = [:]
 
     private static let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "persistence")
 
@@ -91,6 +136,46 @@ public enum SessionUploadResult: Sendable, Equatable {
         ProgressGeneration(value: generation)
     }
 
+    /// Coherent admission snapshot for a canonical GET. Only a committed, genuine PATCH ACK
+    /// creates this identity; edits, failed/obsolete settlements and duplicate outcomes do not.
+    public func captureProgressFetch(for key: MediaKey) -> (generation: ProgressGeneration, acknowledgement: UUID?) {
+        (captureGeneration(), awaitingFetch[key.rawValue]?.acknowledgement)
+    }
+
+    /// Tests an authoritative absent lookup without synthesizing a baseline or confirming a
+    /// PATCH. Dated values must still go through `applyServerProgress` and its merge rules.
+    public func hasChanged(_ key: MediaKey, since capturedAt: ProgressGeneration) -> Bool {
+        (rowGenerations[key.rawValue] ?? 0) > capturedAt.value
+    }
+
+    /// Reserves order synchronously at intent capture, not when a delayed write reaches the actor.
+    public nonisolated func reservePlaybackPosition(for key: MediaKey) -> PlaybackPositionToken {
+        let sequence = playbackSequence.withLock {
+            $0 += 1
+            return $0
+        }
+        return PlaybackPositionToken(writer: playbackWriterID, key: key, sequence: sequence)
+    }
+
+    /// Atomically checks playback order, commits through `recordEdit`, and advances the successful
+    /// watermark. No await separates those operations. Failed writes/reservations do not supersede
+    /// anything. Repeating the latest committed token throws; older tokens return superseded
+    /// without writing, irrespective of their payload. Generic `recordEdit` semantics are unchanged.
+    public func recordPlaybackPosition(
+        _ audio: ProgressEdit.Audio, for key: MediaKey, token: PlaybackPositionToken, now: Date
+    ) throws -> PlaybackPositionCommitResult {
+        guard token.writer == playbackWriterID else { throw PlaybackPositionCommitError.wrongWriter }
+        guard token.key == key else { throw PlaybackPositionCommitError.wrongKey }
+        if let committed = committedPlaybackPositions[key] {
+            if token.sequence < committed.sequence { return .supersededByCommittedPosition }
+            if token.sequence == committed.sequence { throw PlaybackPositionCommitError.tokenAlreadyCommitted }
+        }
+        try recordEdit(
+            ProgressEdit(audio: audio), for: key, serverProgress: nil, localLibraryItemID: nil,
+            now: now, playbackToken: token)
+        return .committed
+    }
+
     /// Records a local change, creating the row when needed.
     ///
     /// - Parameters:
@@ -105,6 +190,16 @@ public enum SessionUploadResult: Sendable, Equatable {
         serverProgress: ProgressBaseline? = nil,
         localLibraryItemID: UUID? = nil,
         now: Date = .now
+    ) throws -> LocalMediaProgressDTO {
+        try recordEdit(
+            edit, for: key, serverProgress: serverProgress, localLibraryItemID: localLibraryItemID,
+            now: now, playbackToken: nil)
+    }
+
+    @discardableResult
+    private func recordEdit(
+        _ edit: ProgressEdit, for key: MediaKey, serverProgress: ProgressBaseline?,
+        localLibraryItemID: UUID?, now: Date, playbackToken: PlaybackPositionToken?
     ) throws -> LocalMediaProgressDTO {
         let saved = try commit {
             let row: LocalMediaProgress
@@ -123,14 +218,89 @@ public enum SessionUploadResult: Sendable, Equatable {
                 )
                 modelContext.insert(row)
                 state = serverProgress.map(ProgressSyncState.init(seed:)) ?? ProgressSyncState(lastUpdate: now)
+                // Deleting/recreating the row does not stop an issued report. Preserve its
+                // evidence in the same commit as the replacement's first edit, before settlement.
+                for owned in sessionAudioSends.values where owned.key == key {
+                    state.recordSessionAudio(owned.values)
+                }
             }
             if let localLibraryItemID { row.localLibraryItemID = localLibraryItemID }
             state.apply(edit, now: now)
             state.write(to: row)
-            return LocalMediaProgressDTO(row)
+            return (LocalMediaProgressDTO(row), row)
+        }
+        if let playbackToken, let audio = saved.0.dirtyValues.audio {
+            committedPlaybackPositions[key] = (playbackToken.sequence, saved.1.persistentModelID, audio)
         }
         advance(key)
-        return saved
+        return saved.0
+    }
+
+    /// Uses the originating committed token and row, never the latest dirty group's values.
+    /// A superseded/deleted/generically edited capture is safely deferred without a transport.
+    public func prepareSessionAudio(
+        for key: MediaKey, token: PlaybackPositionToken, audio: ProgressEdit.Audio, sessionID: String
+    ) throws -> SessionAudioSend? {
+        guard token.writer == playbackWriterID else { throw PlaybackPositionCommitError.wrongWriter }
+        guard token.key == key else { throw PlaybackPositionCommitError.wrongKey }
+        try retrySessionAudioSettlements(for: key.serverConnectionID)
+        guard inFlight[key.rawValue] == nil, !sessionAudioSends.values.contains(where: { $0.key == key }),
+            let committed = committedPlaybackPositions[key], committed.sequence == token.sequence,
+            committed.audio.currentTime == audio.currentTime, committed.audio.duration == audio.duration,
+            committed.audio.progress == audio.progress
+        else { return nil }
+        let attemptID = UUID()
+        var send = ProgressSend(audio: committed.audio)
+        send.sessionAudio = .init(attemptID: attemptID, sessionID: sessionID)
+        let prepared = try commit {
+            guard let row = try fetchRow(key), row.persistentModelID == committed.row,
+                row.audioEditedAt == committed.audio.editedAt,
+                row.currentTime == audio.currentTime, row.duration == audio.duration
+            else { return false }
+            var state = ProgressSyncState(row)
+            state.recordSessionAudio(send)
+            state.write(to: row)
+            return true
+        }
+        guard prepared else { return nil }
+        sessionAudioSends[attemptID] = (key, committed.row, send, nil)
+        return SessionAudioSend(key: key, attemptID: attemptID)
+    }
+
+    /// Retains an exact local obligation before any lookup/save can fail. Success does not
+    /// fabricate a baseline, server time, PATCH acknowledgement or listening-time result.
+    public func settleSessionAudio(_ send: SessionAudioSend, outcome: SessionAudioOutcome) throws {
+        guard let owned = sessionAudioSends[send.attemptID], owned.key == send.key else { return }
+        if owned.outcome == nil { sessionAudioSends[send.attemptID]?.outcome = outcome }
+        try settleSessionAudio(send.attemptID)
+    }
+
+    /// Retry owned outcomes even after the transport scope retired, before any fresh transport.
+    public func retrySessionAudioSettlements(for connectionID: UUID) throws {
+        let attempts = sessionAudioSends.filter { $0.value.key.serverConnectionID == connectionID }
+        for (id, owned) in attempts where owned.outcome != nil {
+            try settleSessionAudio(id)
+        }
+    }
+
+    private func settleSessionAudio(_ id: UUID) throws {
+        guard let owned = sessionAudioSends[id], let outcome = owned.outcome else { return }
+        try commit {
+            guard let row = try fetchRow(owned.key) else { return }
+            var state = ProgressSyncState(row)
+            switch outcome {
+            case .notDelivered:
+                // Never remove another attempt with equal values, including on a recreated row.
+                state.rejectSessionAudio(id)
+            case .succeeded, .ambiguous:
+                var evidence = owned.values
+                evidence.sessionAudio?.outcome = outcome == .succeeded ? .succeeded : .ambiguous
+                state.recordSessionAudio(evidence)
+            }
+            state.write(to: row)
+        }
+        sessionAudioSends[id] = nil
+        advance(owned.key)
     }
 
     /// Merges server progress (from `/api/me`, an expanded item, `/api/me/progress/:id` or a
@@ -159,7 +329,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             for (key, server) in updates {
                 let raw = key.rawValue
                 guard let row = rows[raw] else { continue }
-                if let edited = rowGenerations[raw], edited > capturedAt.value { continue }
+                if hasChanged(key, since: capturedAt) { continue }
                 let takingTies = source == .fetch && capturedAt.value >= mergedAt[raw] ?? 0
                 guard let awaiting = awaitingFetch[raw] else {
                     if merge(server, into: row, takingTies: takingTies) { merged.insert(key) }
@@ -202,6 +372,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// ``completeSend(_:serverLastUpdate:)`` or ``failSend(_:error:)``, then call this again for
     /// the next group.
     public func beginSend(for key: MediaKey, now: Date = .now) throws -> ProgressPatch? {
+        try retrySessionAudioSettlements(for: key.serverConnectionID)
+        guard !sessionAudioSends.values.contains(where: { $0.key == key }) else { return nil }
         guard inFlight[key.rawValue] == nil else { return nil }
         let taken: (ProgressSend, PersistentIdentifier)? = try commit {
             guard let row = try fetchRow(key) else { return nil }
@@ -238,7 +410,9 @@ public enum SessionUploadResult: Sendable, Equatable {
             state.write(to: row)
             row.lastSyncError = nil
         }
-        if acknowledged, serverLastUpdate == nil { awaitingFetch[patch.key.rawValue] = (patch.key, nil) }
+        if acknowledged, serverLastUpdate == nil {
+            awaitingFetch[patch.key.rawValue] = (patch.key, patch.token, nil)
+        }
         return true
     }
 

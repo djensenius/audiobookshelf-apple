@@ -78,3 +78,66 @@ import Testing
         #expect(TimeFormatting.fullTimestamp(seconds) == expected)
     }
 }
+
+/// Listening totals become whole minutes in one clamped conversion: a finite server value such
+/// as 1e30 would trap `Int(_:)`, so it is bounded first.
+@Suite struct TimeFormattingWholeMinutesTests {
+    private static let bound = TimeFormatting.maxMinutes
+
+    @Test func boundIsTheDurationFormattersBound() {
+        #expect(TimeFormatting.maxSeconds == 1e15)
+        #expect(TimeFormatting.maxMinutes == 16_666_666_666_667)
+    }
+
+    /// Rounds half up, like the legacy page's `Math.round(seconds / 60)`.
+    @Test(
+        arguments: [
+            (0, 0), (0.4, 0), (29.9, 0), (30, 1), (59.9, 1), (60, 1), (89.9, 1), (90, 2), (3_599, 60), (3_600, 60),
+            (3_630, 61), (3_725, 62), (5_400.5, 90), (86_400, 1_440),
+        ] as [(TimeInterval, Int)])
+    func secondsRoundToTheNearestMinute(seconds: TimeInterval, expected: Int) {
+        #expect(TimeFormatting.wholeMinutes(seconds: seconds) == expected)
+    }
+
+    /// Non-finite values are no data, like `timestamp` and `DurationStyle.elapsed`.
+    @Test(arguments: [0, -0.0, -1, -1e30, -.greatestFiniteMagnitude, -.infinity, .infinity, .nan] as [TimeInterval])
+    func nonPositiveAndNonFiniteSecondsAreZero(seconds: TimeInterval) {
+        #expect(TimeFormatting.wholeMinutes(seconds: seconds) == 0)
+    }
+
+    @Test(arguments: [1e16, 1e30, .greatestFiniteMagnitude] as [TimeInterval])
+    func hugeSecondsClampToTheBound(seconds: TimeInterval) {
+        #expect(TimeFormatting.wholeMinutes(seconds: seconds) == Self.bound)
+    }
+
+    @Test func secondsAtAndJustOverTheBound() {
+        let limit = TimeFormatting.maxSeconds
+        #expect(TimeFormatting.wholeMinutes(seconds: limit - 60) == Self.bound - 1)
+        #expect(TimeFormatting.wholeMinutes(seconds: limit.nextDown) == Self.bound)
+        #expect(TimeFormatting.wholeMinutes(seconds: limit) == Self.bound)
+        #expect(TimeFormatting.wholeMinutes(seconds: limit.nextUp) == Self.bound)
+        #expect(TimeFormatting.wholeMinutes(seconds: limit * 2) == Self.bound)
+    }
+
+    @Test(
+        arguments: [
+            (0, 0), (0.4, 0), (0.5, 1), (22.5, 23), (60, 60), (-1, 0), (-1e30, 0), (-.infinity, 0), (.infinity, 0),
+            (.nan, 0),
+        ] as [(Double, Int)])
+    func minutesRoundToWholeNumbers(minutes: Double, expected: Int) {
+        #expect(TimeFormatting.wholeMinutes(minutes: minutes) == expected)
+    }
+
+    @Test(
+        arguments: [1e30, .greatestFiniteMagnitude, Double(Int.max), Double(TimeFormatting.maxMinutes) + 1] as [Double])
+    func hugeMinutesClampToTheBound(minutes: Double) {
+        #expect(TimeFormatting.wholeMinutes(minutes: minutes) == Self.bound)
+    }
+
+    @Test func minutesAtAndJustOverTheBound() {
+        let limit = Double(Self.bound)
+        #expect(TimeFormatting.wholeMinutes(minutes: limit - 1) == Self.bound - 1)
+        #expect(TimeFormatting.wholeMinutes(minutes: limit) == Self.bound)
+        #expect(TimeFormatting.wholeMinutes(minutes: limit.nextUp) == Self.bound)
+    }
+}

@@ -59,6 +59,87 @@ private let episodeMatch =
         #expect(response.issues == 0)
     }
 
+    @Test(arguments: [
+        ("issues", #""not-an-integer""#),
+        ("numUserPlaylists", "true"),
+        ("numIssues", "{}"),
+        ("loadedAt", "[]"),
+    ])
+    func malformedFilterMetadataPreservesSiblings(field: String, value: String) throws {
+        let issues = field == "issues" ? value : "2"
+        let playlists = field == "numUserPlaylists" ? value : "1"
+        let numIssues = field == "numIssues" ? value : "3"
+        let loadedAt = field == "loadedAt" ? value : "1700000000000"
+        let response = try decode(
+            LibraryWithFilterData.self,
+            #"""
+            {"library":{"id":"lib1","name":"Books","mediaType":"book"},
+             "issues":\#(issues),"numUserPlaylists":\#(playlists),
+             "filterdata":{"authors":[{"id":"aut1","name":"Ann"}],"series":[{"id":"ser1","name":"Saga"}],
+              "genres":["Fantasy"],"tags":["daily"],"numIssues":\#(numIssues),"loadedAt":\#(loadedAt)}}
+            """#)
+        #expect(response.library.id == "lib1")
+        #expect(response.issues == (field == "issues" ? 0 : 2))
+        #expect(response.numUserPlaylists == (field == "numUserPlaylists" ? 0 : 1))
+        #expect(response.filterData.numIssues == (field == "numIssues" ? 0 : 3))
+        #expect(response.filterData.loadedAt == (field == "loadedAt" ? nil : 1_700_000_000_000))
+        #expect(response.filterData.authors.map(\.name) == ["Ann"])
+        #expect(response.filterData.series.map(\.id) == ["ser1"])
+        #expect(response.filterData.genres == ["Fantasy"])
+        #expect(response.filterData.tags == ["daily"])
+    }
+
+    @Test func filterMetadataAcceptsNumericStrings() throws {
+        let response = try decode(
+            LibraryWithFilterData.self,
+            #"""
+            {"library":{"id":"lib1","name":"Books","mediaType":"book"},
+             "issues":"2","numUserPlaylists":"1",
+             "filterdata":{"genres":["Fantasy"],"numIssues":"3","loadedAt":"1700000000000"}}
+            """#)
+        #expect(response.library.id == "lib1")
+        #expect(response.issues == 2)
+        #expect(response.numUserPlaylists == 1)
+        #expect(response.filterData.numIssues == 3)
+        #expect(response.filterData.loadedAt == 1_700_000_000_000)
+        #expect(response.filterData.genres == ["Fantasy"])
+    }
+
+    @Test(arguments: [
+        "",
+        #""filterdata":null,"#,
+        #""filterdata":7,"#,
+        #""filterdata":[],"#,
+        #""filterdata":{"genres":7,"tags":["daily"]},"#,
+    ])
+    func unusableFilterDataDefaultsWholeObject(member: String) throws {
+        let response = try decode(
+            LibraryWithFilterData.self,
+            #"""
+            {\#(member)"library":{"id":"lib1","name":"Books","mediaType":"book"},
+             "issues":2,"numUserPlaylists":1}
+            """#)
+        #expect(response.library.id == "lib1")
+        #expect(response.issues == 2)
+        #expect(response.numUserPlaylists == 1)
+        #expect(response.filterData == LibraryFilterData())
+    }
+
+    @Test(arguments: [
+        "",
+        #""library":null,"#,
+        #""library":[],"#,
+        #""library":{"name":"Books","mediaType":"book"},"#,
+        #""library":{"id":7,"name":"Books","mediaType":"book"},"#,
+    ])
+    func filterMetadataDoesNotHideInvalidRequiredLibrary(member: String) throws {
+        #expect(throws: DecodingError.self) {
+            try decode(
+                LibraryWithFilterData.self,
+                #"{\#(member)"filterdata":7,"issues":"invalid","numUserPlaylists":1}"#)
+        }
+    }
+
     @Test func pagedResultsAcceptStringPagingAndSkipBadResults() throws {
         let page = try decode(
             PagedResults<LibraryItem>.self,
@@ -135,6 +216,30 @@ private let episodeMatch =
             RecentEpisodesPage.self, #"{"episodes":[{"id":"ep1","title":"Ep 1","podcast":{"id":"p1"}}],"limit":50}"#)
         #expect(page.episodes.map(\.id) == ["ep1"])
         #expect(page.episodes.first?.podcast == nil)
+        #expect(page.rawCount == 1)
+    }
+
+    @Test func recentEpisodesCountAnEntirelyMalformedFullPage() throws {
+        // Derived unit payload, not a server capture: a full wire page must not look exhausted.
+        let page = try decode(
+            RecentEpisodesPage.self, #"{"episodes":[{"title":"Missing ID"},7,null],"limit":"3","page":"2"}"#)
+        #expect(page.episodes.isEmpty)
+        #expect(page.rawCount == 3)
+        #expect(page.rawCount == page.limit)
+        #expect(page.page == 2)
+    }
+
+    @Test(arguments: [
+        #"{}"#,
+        #"{"episodes":null,"limit":null,"page":null}"#,
+        #"{"episodes":[],"limit":"not-an-integer","page":{}}"#,
+    ])
+    func recentEpisodesDefaultMissingNullAndInvalidPaging(json: String) throws {
+        let page = try decode(RecentEpisodesPage.self, json)
+        #expect(page.episodes.isEmpty)
+        #expect(page.rawCount == 0)
+        #expect(page.limit == 0)
+        #expect(page.page == 0)
     }
 
     @Test func bookSearchResults() throws {

@@ -93,6 +93,12 @@ private let server = "https://abs.example/abs"
         #expect(body["ebookProgress"] as? Double == 0.25)
     }
 
+    @Test func ebookWithoutLocationStillSendsProgress() throws {
+        let body = try json(.ebook(location: nil, progress: 0))
+        #expect(Set(body.keys) == ["ebookProgress"])
+        #expect(body["ebookProgress"] as? Double == 0)
+    }
+
     @Test func hideFromContinueListeningSendsOneKey() throws {
         let body = try json(.hideFromContinueListening(true))
         #expect(Set(body.keys) == ["hideFromContinueListening"])
@@ -129,6 +135,17 @@ private let server = "https://abs.example/abs"
         let stub = StubServer { _ in .text("Not Found", status: 404) }
         let progress = try await makeClient(stub).mediaProgress(itemID: "li1")
         #expect(progress == nil)
+    }
+
+    @Test(arguments: ["null", "{}", ""])
+    func clientDoesNotTreatUnsupportedAbsenceBodiesAsNoProgress(body: String) async throws {
+        let stub = StubServer { _ in .json(body) }
+        do {
+            _ = try await makeClient(stub).mediaProgress(itemID: "li1")
+            Issue.record("Only the established 404 contract may become nil, not an unusable 200 body")
+        } catch APIError.decoding {
+            // These are unusable responses, not evidence that creating progress is safe.
+        }
     }
 
     @Test func clientThrowsOtherErrors() async throws {

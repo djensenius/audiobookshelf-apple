@@ -11,7 +11,7 @@ depends = ["lint:repo", "lint:swift"]
 
 [tasks."lint:repo"]
 description = "Lint shell scripts and workflows (no Xcode needed)"
-depends = ["lint:shell", "lint:actions", "lint:nowplaying"]
+depends = ["lint:shell", "lint:actions", "lint:nowplaying", "test:kit:ios:runner"]
 
 [tasks."lint:shell"]
 description = "Lint shell scripts with ShellCheck"
@@ -83,6 +83,24 @@ run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .buil
 description = "Run slow AudiobookshelfKit tests (OSLogStore integration)"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}", ABS_SLOW_TESTS = "1" }
 run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter OSLogStoreIntegrationTests"
+
+[tasks."test:kit:ios"]
+description = "Run and verify the four iOS-only ShakeDetector package tests on an available iPhone"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "scripts/test-kit-ios.sh"
+
+[tasks."test:kit:ios:runner"]
+description = "Bounded fake-CLI regressions for the iOS package gate (no Xcode or simulator)"
+run = "python3 scripts/test-kit-ios-tests.py"
+
+[tasks."test:server"]
+description = "Run the opt-in contract tests against a real Audiobookshelf server (Docker; ABS_SERVER_VERSION picks the release)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "scripts/test-server.sh test"
+
+[tasks."server:run"]
+description = "Start a seeded Audiobookshelf server for manual use and print its URL and login"
+run = "scripts/test-server.sh serve"
 
 [tasks."test:app"]
 description = "Run app tests on macOS"

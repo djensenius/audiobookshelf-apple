@@ -26,6 +26,9 @@ public struct NowPlayingState: Sendable, Equatable {
     /// The current playback rate, also while paused (the rate playback resumes at).
     public var rate: Double
     public var isPlaying: Bool
+    /// Playback is requested but stalled (loading or buffering): published as buffering, with the
+    /// elapsed time held. Only meaningful with ``isPlaying``.
+    public var isBuffering: Bool
     /// Passed to the injected ``NowPlayingArtworkProvider``; `nil` when the item has no cover.
     /// Any stable string works (for example the cover's `ImageKey` description); changing it reloads
     /// the artwork.
@@ -50,7 +53,7 @@ public struct NowPlayingState: Sendable, Equatable {
     public init(
         key: MediaKey, title: String, author: String, narrator: String? = nil, releaseDate: Date? = nil,
         chapter: Chapter? = nil, duration: Double, elapsed: Double, rate: Double, isPlaying: Bool,
-        artworkKey: String? = nil
+        artworkKey: String? = nil, isBuffering: Bool = false
     ) {
         self.key = key
         self.title = title
@@ -62,6 +65,7 @@ public struct NowPlayingState: Sendable, Equatable {
         self.elapsed = elapsed
         self.rate = rate
         self.isPlaying = isPlaying
+        self.isBuffering = isBuffering
         self.artworkKey = artworkKey
     }
 
@@ -112,17 +116,18 @@ public struct NowPlayingSettings: Sendable, Equatable {
     }
 }
 
-/// The player that remote commands act on: `PlaybackCoordinator` (or an adapter it owns) once Now
-/// Playing is wired up. Times are global seconds.
+/// The player that remote commands act on: ``NowPlayingBridge``, which forwards them to
+/// `PlaybackCoordinator`. Times are global seconds. A handler throws
+/// ``NowPlayingCommandError/noPlayer`` when its player is gone.
 @MainActor
 public protocol NowPlayingCommandHandling: AnyObject {
-    func play() async
-    func pause() async
-    func togglePlayPause() async
-    func skipForward(by seconds: Double) async
-    func skipBackward(by seconds: Double) async
-    func seek(to time: Double) async
-    func setRate(_ rate: Double) async
+    func play() async throws
+    func pause() async throws
+    func togglePlayPause() async throws
+    func skipForward(by seconds: Double) async throws
+    func skipBackward(by seconds: Double) async throws
+    func seek(to time: Double) async throws
+    func setRate(_ rate: Double) async throws
 }
 
 /// Loads cover image data (JPEG, PNG, HEIC…) for ``NowPlayingState/artworkKey``; `nil` when there is

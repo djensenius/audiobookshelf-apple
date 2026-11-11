@@ -43,6 +43,52 @@ struct AudioEngineTests {
         #expect(engine.player.items().allSatisfy { $0.audioTimePitchAlgorithm == .timeDomain })
     }
 
+    @Test(arguments: [(5.0, -4.0), (1.0, 3.0), (2.0, 5.0)], [false, true])
+    func queuedJumpsResolveTheDisplayedTarget(sample: (start: Double, jump: Double), supersedingSeek: Bool) async throws
+    {
+        let fixture = try AudioFixture(trackCount: 2)
+        let engine = makeEngine()
+        let h = try CoordinatorHarness()
+        let session = PlaybackSession(
+            id: "a-1", libraryItemId: "a", mediaType: .book,
+            audioTracks: [
+                AudioTrack(index: 1, startOffset: 0, duration: 3),
+                AudioTrack(index: 2, startOffset: 6, duration: 3),
+            ])
+        let stream = try await h.service.resolveStream(for: session)
+        h.service.state.withLock {
+            $0.sessionOverride = session
+            $0.streamOverride = ResolvedStream(plan: stream.plan, urls: fixture.urls)
+        }
+        let coordinator = PlaybackCoordinator(
+            engine: engine, sessions: h.service, progressStore: h.progressStore, settings: h.settings,
+            policy: h.policy, lastPlayedStore: h.lastPlayed)
+        let held = HeldSeeks()
+        let seeker = engine.itemSeeker
+        engine.itemSeeker = held.wrap(seeker)
+        defer {
+            engine.stop()
+            held.release()
+        }
+        let play = Task { await coordinator.play(itemID: "a", startTime: supersedingSeek ? 0 : sample.start) }
+        try await waitUntil { held.isHolding }
+        coordinator.pause()  // Never start audio; only resolve and seek within the silent local files.
+        #expect(coordinator.phase == .starting)
+        if supersedingSeek { await coordinator.seek(to: sample.start) }
+        await coordinator.jump(by: sample.jump)
+        let shown = coordinator.currentTime
+        #expect(shown == sample.start + sample.jump)
+        let timeline = try #require(engine.timeline)
+        let resolved = try #require(timeline.position(at: shown).flatMap { timeline.time(at: $0) })
+        engine.itemSeeker = seeker
+        held.release()
+        await play.value
+        #expect(!engine.isPlaybackRequested && engine.player.rate == 0)
+        #expect(
+            coordinator.currentTime == resolved,
+            "Shown \(shown), resolver \(resolved), landed \(coordinator.currentTime)")
+    }
+
     @Test func loadRejectsInvalidSources() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()

@@ -1,0 +1,283 @@
+{
+  "id": "item-multifile",
+  "ino": "1000",
+  "oldLibraryItemId": null,
+  "libraryId": "library-books",
+  "folderId": "folder-books",
+  "path": "/audiobooks/Ada Fixture/The Synthetic Tale",
+  "relPath": "Ada Fixture/The Synthetic Tale",
+  "isFile": false,
+  "mtimeMs": 1794356808464,
+  "ctimeMs": 1794356808464,
+  "birthtimeMs": 0,
+  "addedAt": 1794356810959,
+  "updatedAt": 1794356810959,
+  "lastScan": 1794356810957,
+  "scanVersion": "2.26.0",
+  "isMissing": false,
+  "isInvalid": false,
+  "mediaType": "book",
+  "media": {
+    "id": "book-multifile",
+    "libraryItemId": "item-multifile",
+    "metadata": {
+      "title": "The Synthetic Tale",
+      "subtitle": null,
+      "authors": [
+        {
+          "id": "author-fixture",
+          "name": "Ada Fixture"
+        }
+      ],
+      "narrators": [],
+      "series": [],
+      "genres": [],
+      "publishedYear": null,
+      "publishedDate": null,
+      "publisher": null,
+      "description": null,
+      "isbn": null,
+      "asin": null,
+      "language": null,
+      "explicit": false,
+      "abridged": false,
+      "titleIgnorePrefix": "Synthetic Tale, The",
+      "authorName": "Ada Fixture",
+      "authorNameLF": "Fixture, Ada",
+      "narratorName": "",
+      "seriesName": "",
+      "descriptionPlain": null
+    },
+    "coverPath": null,
+    "tags": [],
+    "audioFiles": [
+      {
+        "index": 1,
+        "ino": "1001",
+        "metadata": {
+          "filename": "01 - Part One.mp3",
+          "ext": ".mp3",
+          "path": "/audiobooks/Ada Fixture/The Synthetic Tale/01 - Part One.mp3",
+          "relPath": "01 - Part One.mp3",
+          "size": 60504,
+          "mtimeMs": 1794356808428,
+          "ctimeMs": 1794356808428,
+          "birthtimeMs": 0
+        },
+        "addedAt": 1794356810953,
+        "updatedAt": 1794356810953,
+        "trackNumFromMeta": 1,
+        "discNumFromMeta": null,
+        "trackNumFromFilename": 1,
+        "discNumFromFilename": null,
+        "manuallyVerified": false,
+        "exclude": false,
+        "error": null,
+        "format": "MP2/3 (MPEG audio layer 2/3)",
+        "duration": 30.096,
+        "bitRate": 16000,
+        "language": null,
+        "codec": "mp3",
+        "timeBase": "1/14112000",
+        "channels": 1,
+        "channelLayout": "mono",
+        "chapters": [],
+        "embeddedCoverArt": null,
+        "metaTags": {
+          "tagAlbum": "The Synthetic Tale",
+          "tagArtist": "Ada Fixture",
+          "tagTitle": "Part One",
+          "tagTrack": "1/2",
+          "tagEncoder": "Lavf63.1.102"
+        },
+        "mimeType": "audio/mpeg"
+      },
+      {
+        "index": 2,
+        "ino": "1002",
+        "metadata": {
+          "filename": "02 - Part Two.mp3",
+          "ext": ".mp3",
+          "path": "/audiobooks/Ada Fixture/The Synthetic Tale/02 - Part Two.mp3",
+          "relPath": "02 - Part Two.mp3",
+          "size": 40488,
+          "mtimeMs": 1794356808494,
+          "ctimeMs": 1794356808494,
+          "birthtimeMs": 0
+        },
+        "addedAt": 1794356810954,
+        "updatedAt": 1794356810954,
+        "trackNumFromMeta": 2,
+        "discNumFromMeta": null,
+        "trackNumFromFilename": 2,
+        "discNumFromFilename": null,
+        "manuallyVerified": false,
+        "exclude": false,
+        "error": null,
+        "format": "MP2/3 (MPEG audio layer 2/3)",
+        "duration": 20.088,
+        "bitRate": 16000,
+        "language": null,
+        "codec": "mp3",
+        "timeBase": "1/14112000",
+        "channels": 1,
+        "channelLayout": "mono",
+        "chapters": [],
+        "embeddedCoverArt": null,
+        "metaTags": {
+          "tagAlbum": "The Synthetic Tale",
+          "tagArtist": "Ada Fixture",
+          "tagTitle": "Part Two",
+          "tagTrack": "2/2",
+          "tagEncoder": "Lavf63.1.102"
+        },
+        "mimeType": "audio/mpeg"
+      }
+    ],
+    "chapters": [
+      {
+        "id": 0,
+        "start": 0,
+        "end": 30.096,
+        "title": "Part One"
+      },
+      {
+        "id": 1,
+        "start": 30.096,
+        "end": 50.184,
+        "title": "Part Two"
+      }
+    ],
+    "ebookFile": null,
+    "duration": 50.184,
+    "size": 100992,
+    "tracks": [
+      {
+        "index": 1,
+        "ino": "1001",
+        "metadata": {
+          "filename": "01 - Part One.mp3",
+          "ext": ".mp3",
+          "path": "/audiobooks/Ada Fixture/The Synthetic Tale/01 - Part One.mp3",
+          "relPath": "01 - Part One.mp3",
+          "size": 60504,
+          "mtimeMs": 1794356808428,
+          "ctimeMs": 1794356808428,
+          "birthtimeMs": 0
+        },
+        "addedAt": 1794356810953,
+        "updatedAt": 1794356810953,
+        "trackNumFromMeta": 1,
+        "discNumFromMeta": null,
+        "trackNumFromFilename": 1,
+        "discNumFromFilename": null,
+        "manuallyVerified": false,
+        "exclude": false,
+        "error": null,
+        "format": "MP2/3 (MPEG audio layer 2/3)",
+        "duration": 30.096,
+        "bitRate": 16000,
+        "language": null,
+        "codec": "mp3",
+        "timeBase": "1/14112000",
+        "channels": 1,
+        "channelLayout": "mono",
+        "chapters": [],
+        "embeddedCoverArt": null,
+        "metaTags": {
+          "tagAlbum": "The Synthetic Tale",
+          "tagArtist": "Ada Fixture",
+          "tagTitle": "Part One",
+          "tagTrack": "1/2",
+          "tagEncoder": "Lavf63.1.102"
+        },
+        "mimeType": "audio/mpeg",
+        "title": "01 - Part One.mp3",
+        "startOffset": 0,
+        "contentUrl": "/api/items/item-multifile/file/1001"
+      },
+      {
+        "index": 2,
+        "ino": "1002",
+        "metadata": {
+          "filename": "02 - Part Two.mp3",
+          "ext": ".mp3",
+          "path": "/audiobooks/Ada Fixture/The Synthetic Tale/02 - Part Two.mp3",
+          "relPath": "02 - Part Two.mp3",
+          "size": 40488,
+          "mtimeMs": 1794356808494,
+          "ctimeMs": 1794356808494,
+          "birthtimeMs": 0
+        },
+        "addedAt": 1794356810954,
+        "updatedAt": 1794356810954,
+        "trackNumFromMeta": 2,
+        "discNumFromMeta": null,
+        "trackNumFromFilename": 2,
+        "discNumFromFilename": null,
+        "manuallyVerified": false,
+        "exclude": false,
+        "error": null,
+        "format": "MP2/3 (MPEG audio layer 2/3)",
+        "duration": 20.088,
+        "bitRate": 16000,
+        "language": null,
+        "codec": "mp3",
+        "timeBase": "1/14112000",
+        "channels": 1,
+        "channelLayout": "mono",
+        "chapters": [],
+        "embeddedCoverArt": null,
+        "metaTags": {
+          "tagAlbum": "The Synthetic Tale",
+          "tagArtist": "Ada Fixture",
+          "tagTitle": "Part Two",
+          "tagTrack": "2/2",
+          "tagEncoder": "Lavf63.1.102"
+        },
+        "mimeType": "audio/mpeg",
+        "title": "02 - Part Two.mp3",
+        "startOffset": 30.096,
+        "contentUrl": "/api/items/item-multifile/file/1002"
+      }
+    ]
+  },
+  "libraryFiles": [
+    {
+      "ino": "1001",
+      "metadata": {
+        "filename": "01 - Part One.mp3",
+        "ext": ".mp3",
+        "path": "/audiobooks/Ada Fixture/The Synthetic Tale/01 - Part One.mp3",
+        "relPath": "01 - Part One.mp3",
+        "size": 60504,
+        "mtimeMs": 1794356808428,
+        "ctimeMs": 1794356808428,
+        "birthtimeMs": 0
+      },
+      "isSupplementary": null,
+      "addedAt": 1794356810856,
+      "updatedAt": 1794356810856,
+      "fileType": "audio"
+    },
+    {
+      "ino": "1002",
+      "metadata": {
+        "filename": "02 - Part Two.mp3",
+        "ext": ".mp3",
+        "path": "/audiobooks/Ada Fixture/The Synthetic Tale/02 - Part Two.mp3",
+        "relPath": "02 - Part Two.mp3",
+        "size": 40488,
+        "mtimeMs": 1794356808494,
+        "ctimeMs": 1794356808494,
+        "birthtimeMs": 0
+      },
+      "isSupplementary": null,
+      "addedAt": 1794356810856,
+      "updatedAt": 1794356810856,
+      "fileType": "audio"
+    }
+  ],
+  "size": 100992,
+  "rssFeed": null
+}

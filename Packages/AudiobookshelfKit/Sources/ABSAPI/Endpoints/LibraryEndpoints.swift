@@ -22,7 +22,8 @@ public enum LibraryEndpoints {
         Endpoint(.get, "/api/libraries/\(pathSegment(libraryID))/personalized", query: minifiedQuery)
     }
 
-    /// `GET /api/libraries/:id/search?q=`. The server defaults `limit` to 12.
+    /// `GET /api/libraries/:id/search?q=`. The server defaults `limit` to 12 per result group,
+    /// not 12 across the combined response.
     public static func search(libraryID: String, query: String, limit: Int? = nil) -> Endpoint<LibrarySearchResults> {
         var items = [URLQueryItem(name: "q", value: query)]
         if let limit { items.append(URLQueryItem(name: "limit", value: String(limit))) }

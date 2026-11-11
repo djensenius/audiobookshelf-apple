@@ -1,0 +1,96 @@
+{
+  "id": "collection-fixture",
+  "libraryId": "library-books",
+  "name": "Captured collection",
+  "description": "Synthetic fixture",
+  "books": [
+    {
+      "id": "item-tale",
+      "libraryId": "library-books",
+      "scanVersion": "2.26.0",
+      "mediaType": "book",
+      "media": {
+        "id": "synthetic-6",
+        "libraryItemId": "item-tale",
+        "metadata": {
+          "title": "The Synthetic Tale",
+          "subtitle": null,
+          "authors": [{"id": "synthetic-7", "name": "Ada Fixture"}],
+          "narrators": [],
+          "series": [],
+          "genres": [],
+          "publishedYear": null,
+          "publishedDate": null,
+          "publisher": null,
+          "description": null,
+          "isbn": null,
+          "asin": null,
+          "language": null,
+          "explicit": false,
+          "abridged": false,
+          "titleIgnorePrefix": "Synthetic Tale, The",
+          "authorName": "Ada Fixture",
+          "authorNameLF": "Fixture, Ada",
+          "narratorName": "",
+          "seriesName": "",
+          "descriptionPlain": null
+        },
+        "chapters": [
+          {"id": 0, "start": 0, "end": 30.096, "title": "Part One"},
+          {"id": 1, "start": 30.096, "end": 50.184, "title": "Part Two"}
+        ],
+        "duration": 50.184,
+        "size": 100992,
+        "tracks": [
+          {"index": 1, "duration": 30.096, "mimeType": "audio/mpeg", "title": "01 - Part One.mp3", "startOffset": 0, "contentUrl": "/synthetic/track-1"},
+          {"index": 2, "duration": 20.088, "mimeType": "audio/mpeg", "title": "02 - Part Two.mp3", "startOffset": 30.096, "contentUrl": "/synthetic/track-2"}
+        ]
+      }
+    },
+    {
+      "id": "item-single",
+      "libraryId": "library-books",
+      "scanVersion": "2.26.0",
+      "mediaType": "book",
+      "media": {
+        "id": "synthetic-11",
+        "libraryItemId": "item-single",
+        "metadata": {
+          "title": "Single File Tale",
+          "subtitle": null,
+          "authors": [{"id": "synthetic-7", "name": "Ada Fixture"}],
+          "narrators": [],
+          "series": [],
+          "genres": [],
+          "publishedYear": null,
+          "publishedDate": null,
+          "publisher": null,
+          "description": null,
+          "isbn": null,
+          "asin": null,
+          "language": null,
+          "explicit": false,
+          "abridged": false,
+          "titleIgnorePrefix": "Single File Tale",
+          "authorName": "Ada Fixture",
+          "authorNameLF": "Fixture, Ada",
+          "narratorName": "",
+          "seriesName": "",
+          "descriptionPlain": null
+        },
+        "chapters": [
+          {"start": 0, "end": 10, "title": "Opening", "id": 0},
+          {"start": 10, "end": 25, "title": "Middle", "id": 1},
+          {"start": 25, "end": 40, "title": "Ending", "id": 2}
+        ],
+        "duration": 40,
+        "size": 84643,
+        "tracks": [
+          {"index": 1, "duration": 40, "mimeType": "audio/mp4", "title": "Single File Tale.m4b", "startOffset": 0, "contentUrl": "/synthetic/track-1"}
+        ]
+      }
+    }
+  ],
+  "lastUpdate": 1700000000000,
+  "createdAt": 1700000000000
+}

@@ -43,6 +43,14 @@ private let listSuffix = "minified=1&include=rssfeed,numEpisodesIncomplete"
         #expect(LibraryEndpoints.search(libraryID: "lib1", query: "x").query.map(\.name) == ["q"])
     }
 
+    @Test func searchPreservesWhitespaceZeroLimitAndEscapedLibraryID() throws {
+        let endpoint = LibraryEndpoints.search(libraryID: "a/b?", query: " x ", limit: 0)
+        #expect(endpoint.method == .get)
+        #expect(endpoint.requiresAuthentication)
+        #expect(
+            try url(endpoint) == "\(server)/api/libraries/a%2Fb%3F/search?q=%20x%20&limit=0")
+    }
+
     @Test(arguments: [
         ("a/b?c#d%e f", "a%2Fb%3Fc%23d%25e%20f"), (".", "%2E"), ("..", "%2E%2E"), ("ok-1_2.3~", "ok-1_2.3~"),
     ])
@@ -65,9 +73,16 @@ private let listSuffix = "minified=1&include=rssfeed,numEpisodesIncomplete"
     }
 
     @Test func recentEpisodes() throws {
+        let endpoint = LibraryEndpoints.recentEpisodes(libraryID: "lib1")
+        #expect(endpoint.method == .get)
+        #expect(endpoint.requiresAuthentication)
+        #expect(try url(endpoint) == "\(server)/api/libraries/lib1/recent-episodes?limit=50&page=0")
         #expect(
             try url(LibraryEndpoints.recentEpisodes(libraryID: "lib1", page: 3))
                 == "\(server)/api/libraries/lib1/recent-episodes?limit=50&page=3")
+        #expect(
+            try url(LibraryEndpoints.recentEpisodes(libraryID: "lib1", page: 1, limit: 1))
+                == "\(server)/api/libraries/lib1/recent-episodes?limit=1&page=1")
     }
 
     @Test func pagedItemsUseLegacyQueryOrder() throws {

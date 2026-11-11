@@ -1,8 +1,8 @@
 import Foundation
 
-/// The playback a ``SleepTimer`` controls. ``AudioEngineSleepTimerControl`` adapts an engine directly; the playback
-/// coordinator (#52) should conform itself instead, so that pauses and resumes go through its interruption
-/// handling and Now Playing updates.
+/// The playback a ``SleepTimer`` controls. ``PlaybackCoordinator`` conforms so pauses and resumes go through its
+/// interruption handling, events and Now Playing updates. ``AudioEngineSleepTimerControl`` is a direct-engine
+/// adapter that bypasses the coordinator.
 @MainActor
 public protocol SleepTimerPlaybackControl: AnyObject {
     /// Whether audio is playing; an end-of-chapter timer only expires in a paused state at the end of the media.
@@ -14,7 +14,10 @@ public protocol SleepTimerPlaybackControl: AnyObject {
     /// The loaded timeline; `nil` without media.
     var timeline: PlaybackTimeline? { get }
     /// Where a seek or load in flight (or an interrupted one, awaiting its retry) will land; `nil` when none. The timer
-    /// takes it as the position, so its rewinds yield to a user's seek and follow its own.
+    /// takes it as the position, so its rewinds yield to a user's seek and follow its own. ``seek(to:)`` must set it
+    /// before its first suspension, as ``AudioEngine`` does: the timer reads it as soon as it has started a seek. A
+    /// seek kept for its retry keeps the target it was asked for (to within 10 ms), which is how the timer tells it
+    /// from a user's seek that superseded it and landed nearby.
     var pendingSeekTarget: Double? { get }
     func pause()
     /// Resumes playback after a reset during the grace period.

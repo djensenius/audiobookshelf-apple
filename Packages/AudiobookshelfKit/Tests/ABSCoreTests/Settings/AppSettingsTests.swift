@@ -89,6 +89,36 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
         #expect(keys.allSatisfy { !$0.contains(".") && !$0.isEmpty })
     }
 
+    @Test func libraryViewPreferencesAreStoredPerAccountAndLibraryAndSurviveReload() async throws {
+        try await withIsolatedDefaults { defaults, _ in
+            let settings = AppSettings(defaults: defaults)
+            settings.setLibraryViewPreferencesJSON("{\"a\":1}", serverID: "s", userID: "u", libraryID: "lib-1")
+            settings.setLibraryViewPreferencesJSON("{\"b\":2}", serverID: "s", userID: "u", libraryID: "lib-2")
+            settings.setLibraryViewPreferencesJSON("{\"c\":3}", serverID: "s", userID: "other", libraryID: "lib-1")
+
+            let reloaded = AppSettings(defaults: defaults)
+            #expect(reloaded.libraryViewPreferencesJSON(serverID: "s", userID: "u", libraryID: "lib-1") == "{\"a\":1}")
+            #expect(reloaded.libraryViewPreferencesJSON(serverID: "s", userID: "u", libraryID: "lib-2") == "{\"b\":2}")
+            #expect(
+                AppSettings.snapshot(from: defaults).libraryViewPreferences
+                    == [
+                        AppSettings.libraryViewPreferencesKey(serverID: "s", userID: "u", libraryID: "lib-1"):
+                            "{\"a\":1}",
+                        AppSettings.libraryViewPreferencesKey(serverID: "s", userID: "u", libraryID: "lib-2"):
+                            "{\"b\":2}",
+                        AppSettings.libraryViewPreferencesKey(serverID: "s", userID: "other", libraryID: "lib-1"):
+                            "{\"c\":3}",
+                    ])
+
+            settings.setLibraryViewPreferencesJSON(nil, serverID: "s", userID: "u", libraryID: "lib-1")
+            #expect(settings.libraryViewPreferencesJSON(serverID: "s", userID: "u", libraryID: "lib-1") == nil)
+            #expect(settings.libraryViewPreferencesJSON(serverID: "s", userID: "u", libraryID: "lib-2") != nil)
+
+            defaults.set("not a dictionary", forKey: AppSettings.Key.libraryViewPreferences.rawValue)
+            #expect(AppSettings(defaults: defaults).libraryViewPreferences.isEmpty)
+        }
+    }
+
     @Test func valuesRoundTripAsPropertyListTypes() async throws {
         try await withIsolatedDefaults { defaults, _ in
             let settings = AppSettings(defaults: defaults)

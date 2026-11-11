@@ -12,6 +12,9 @@ public struct ProgressBaseline: Codable, Sendable, Hashable {
     public var isFinished: Bool
     public var finishedAt: Date?
     public var ebookLocation: String?
+    /// An unseeded PATCH omitted location: it is unknown until a server read, not known-null.
+    /// Optional for existing stored baselines, which keep their original known-value semantics.
+    public var ebookLocationIsUnknown: Bool?
     public var ebookProgress: Double?
     public var lastUpdate: Date
 
@@ -36,8 +39,9 @@ public struct ProgressBaseline: Codable, Sendable, Hashable {
     }
 }
 
-/// A progress PATCH whose outcome is unknown: the values of the groups it sent and each
-/// group's `<group>EditedAt` when the snapshot was taken. A `nil` group was not sent.
+/// Bounded progress-send evidence: normally a PATCH, or explicitly marked session audio.
+/// Carries the actual sent values and their originating `<group>EditedAt`. A nil group was
+/// not sent; session audio must never be treated as a PATCH acknowledgement.
 public struct ProgressSend: Codable, Sendable, Hashable {
     /// The most entries `LocalMediaProgress.unacknowledgedSends` keeps; when an older one is
     /// dropped, the `<group>HistoryTruncated` flag of each group it carried is set.
@@ -46,6 +50,27 @@ public struct ProgressSend: Codable, Sendable, Hashable {
     public var audio: Audio?
     public var finished: Finished?
     public var ebook: Ebook?
+    /// Present only for an actual online session report, never a progress PATCH. Optional for
+    /// legacy rows. Its audio edit is the originating committed edit, not a later equal value.
+    public var sessionAudio: SessionAudio?
+
+    public struct SessionAudio: Codable, Sendable, Hashable {
+        public let attemptID: UUID
+        public let sessionID: String
+        /// Nil means prepared/unknown. Neither success nor ambiguity is a PATCH acknowledgement.
+        public var outcome: Outcome?
+
+        public enum Outcome: String, Codable, Sendable {
+            case succeeded
+            case ambiguous
+        }
+
+        public init(attemptID: UUID, sessionID: String, outcome: Outcome? = nil) {
+            self.attemptID = attemptID
+            self.sessionID = sessionID
+            self.outcome = outcome
+        }
+    }
 
     public init(audio: Audio? = nil, finished: Finished? = nil, ebook: Ebook? = nil) {
         self.audio = audio
@@ -80,6 +105,7 @@ public struct ProgressSend: Codable, Sendable, Hashable {
     }
 
     public struct Ebook: Codable, Sendable, Hashable {
+        /// `nil` omits this field from PATCH, preserving the server's location; it does not clear it.
         public var ebookLocation: String?
         public var ebookProgress: Double?
         public var editedAt: Date

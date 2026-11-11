@@ -46,6 +46,9 @@ public enum SchemaV1: VersionedSchema {
         public var lastUsedAt: Date?
         public var isDisconnected: Bool
         public var disconnectedAt: Date?
+        /// Set when the user signs out, before the Keychain session is deleted, and cleared when a
+        /// sign-in saves a new one, so a session whose delete failed is never restored.
+        public var signedOutAt: Date?
 
         public init(
             id: UUID = UUID(),
@@ -69,6 +72,7 @@ public enum SchemaV1: VersionedSchema {
             self.lastUsedAt = lastUsedAt
             self.isDisconnected = isDisconnected
             self.disconnectedAt = disconnectedAt
+            signedOutAt = nil
         }
 
         public var authMethodValue: ServerAuthMethod? { ServerAuthMethod(rawValue: authMethod) }

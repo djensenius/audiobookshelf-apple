@@ -81,7 +81,10 @@ extension ProgressSend {
     }
 
     mutating func remove(_ group: ProgressGroups) {
-        if group.contains(.audio) { audio = nil }
+        if group.contains(.audio) {
+            audio = nil
+            sessionAudio = nil
+        }
         if group.contains(.finished) { finished = nil }
         if group.contains(.ebook) { ebook = nil }
     }
@@ -146,6 +149,9 @@ struct ProgressSyncState: Sendable, Equatable {
 
     /// Applies a local change: marks each changed group dirty and sets its edit time to `now`
     /// (or just after the group's previous edit time, if that isn't earlier).
+    /// Audio-only edits preserve the independent completion group, even when its edit is older:
+    /// moving the position does not imply a local unfinish. Server PATCH side effects are handled
+    /// by send/merge reconciliation (ADR 0003), not inferred here.
     mutating func apply(_ edit: ProgressEdit, now: Date) {
         if let audio = edit.audio {
             currentTime = audio.currentTime
@@ -201,7 +207,8 @@ struct ProgressSyncState: Sendable, Equatable {
         let chain = [ProgressGroups.audio, .finished].first { dirty.contains($0) }
         guard dirty.contains(.ebook) else { return chain }
         guard let chain else { return .ebook }
-        if !ebookSentLast, serverBaseline != nil, let last = unacknowledgedSends.last,
+        if !ebookSentLast, serverBaseline != nil,
+            let last = unacknowledgedSends.last(where: { $0.sessionAudio == nil }),
             !last.groups.contains(.ebook)
         {
             return .ebook
@@ -230,6 +237,23 @@ struct ProgressSyncState: Sendable, Equatable {
         return send
     }
 
+    /// Records only the actual report's audio. It neither selects dirty groups nor acknowledges
+    /// them. Attempts have distinct identities even when their audio values and edit are equal.
+    mutating func recordSessionAudio(_ send: ProgressSend) {
+        guard send.sessionAudio != nil, send.groups == .audio else { return }
+        unacknowledgedSends.removeAll { $0.sessionAudio?.attemptID == send.sessionAudio?.attemptID }
+        while unacknowledgedSends.count >= ProgressSend.historyLimit {
+            let dropped = unacknowledgedSends.removeFirst().groups
+            truncated.formUnion(dropped)
+            shieldSideEffects(of: dropped)
+        }
+        unacknowledgedSends.append(send)
+    }
+
+    mutating func rejectSessionAudio(_ attemptID: UUID) {
+        unacknowledgedSends.removeAll { $0.sessionAudio?.attemptID == attemptID }
+    }
+
     /// The PATCH carrying `send` succeeded: the server now holds the sent values, so they become
     /// the baseline, the sent groups' entries and truncation flags are cleared, and each sent
     /// group stops being dirty unless it was edited again while the request was in flight. Other
@@ -239,6 +263,8 @@ struct ProgressSyncState: Sendable, Equatable {
         // merged server values, or defaults when the server had none).
         let unseeded = serverBaseline == nil
         var baseline = serverBaseline ?? currentValues(lastUpdate: .distantPast)
+        // Synthesizing any baseline cannot establish an unobserved ebook location.
+        if unseeded { baseline.ebookLocationIsUnknown = true }
         if let audio = send.audio {
             baseline.currentTime = audio.currentTime
             baseline.progress = audio.progress
@@ -249,7 +275,9 @@ struct ProgressSyncState: Sendable, Equatable {
             baseline.finishedAt = finished.finishedAt
         }
         if let ebook = send.ebook {
-            baseline.ebookLocation = ebook.ebookLocation
+            // A nil location was omitted, not cleared. Never infer it from a newer local edit.
+            baseline.ebookLocation = ebook.ebookLocation ?? serverBaseline?.ebookLocation
+            baseline.ebookLocationIsUnknown = ebook.ebookLocation == nil ? baseline.ebookLocationIsUnknown : nil
             baseline.ebookProgress = ebook.ebookProgress
         }
         // Creating progress stores a missing `ebookProgress` as 0.
@@ -293,6 +321,11 @@ struct ProgressSyncState: Sendable, Equatable {
         shieldSideEffects(of: excluded)
         // An echo of our audio or finished PATCH may carry the server's side effect on the other
         // group, so shield that group before resolving it.
+        if unacknowledgedSends.contains(where: {
+            $0.sessionAudio != nil && Self.matches(server, $0, .audio)
+        }) {
+            shieldSideEffects(of: .audio)
+        }
         for group in ProgressGroups.each where !excluded.contains(group) && dirty.contains(group) {
             if unacknowledgedSends.contains(where: { Self.matches(server, $0, group) }) {
                 shieldSideEffects(of: group)
@@ -319,11 +352,21 @@ struct ProgressSyncState: Sendable, Equatable {
             return
         }
         // The server hasn't changed the group since we last saw it: keep the local edit.
-        if let baseline = serverBaseline, Self.matches(server, baseline, group) { return }
+        if serverUnchanged(group, in: server) { return }
         // The server value may be one of our dropped sends, or a side effect of our PATCH. Even
         // one matching a send we hold may be the echo of a dropped send with the same value, the
         // held one never delivered: only an acknowledgement (``acknowledge``) settles the group.
         if truncated.contains(group) { return }
+        // A session report is evidence of a possible own echo, not a PATCH acknowledgement.
+        // Keep it through response delivery and repeated fetch/socket echoes. Only an ordinary
+        // PATCH may clear this evidence/dirty audio; equal values do not identify a local edit.
+        if group == .audio,
+            unacknowledgedSends.contains(where: {
+                $0.sessionAudio != nil && Self.matches(server, $0, .audio)
+            })
+        {
+            return
+        }
         // The echo of one of our PATCHes whose response was lost. Only this group's evidence is
         // settled and pruned (from that entry and every older one); other groups keep theirs.
         if let index = unacknowledgedSends.lastIndex(where: { Self.matches(server, $0, group) }),
@@ -357,7 +400,7 @@ struct ProgressSyncState: Sendable, Equatable {
         markClean(group)
         // Our older sends of the group can no longer be the server's value; drop them so they
         // can't match another device's value later.
-        dropEvidence(group)
+        dropEvidence(group, keepingSessionAudio: true)
     }
 
     /// #53: the server applies an audio PATCH by un-finishing or auto-finishing, a finished PATCH
@@ -387,8 +430,9 @@ struct ProgressSyncState: Sendable, Equatable {
     }
 
     /// Removes `groups` from every unacknowledged entry, dropping entries left empty.
-    private mutating func dropEvidence(_ groups: ProgressGroups) {
+    private mutating func dropEvidence(_ groups: ProgressGroups, keepingSessionAudio: Bool = false) {
         for index in unacknowledgedSends.indices {
+            if keepingSessionAudio, unacknowledgedSends[index].sessionAudio != nil { continue }
             unacknowledgedSends[index].remove(groups)
         }
         unacknowledgedSends.removeAll { $0.groups.isEmpty }
@@ -402,6 +446,28 @@ struct ProgressSyncState: Sendable, Equatable {
         case .finished: finishedEditedAt
         default: ebookEditedAt
         }
+    }
+
+    /// When the group's current value was saved, to compare with progress from elsewhere. A dirty
+    /// group is dated by its edit time (`lastUpdate` if it has none). A clean group holds the
+    /// server's value, so it is dated by the later of its edit time (a merge keeps the old one) and
+    /// the baseline's `lastUpdate`, which is row-wide and so an upper bound. `nil` when nothing was
+    /// saved: no edit and no baseline, or, for audio, no edit and a baseline without audio (an
+    /// ebook-only server row, whose zero position is not a saved one).
+    func savedAt(_ group: ProgressGroups) -> Date? {
+        let edited = editedAt(group)
+        if dirty.contains(group) { return edited ?? lastUpdate }
+        if group == .audio, edited == nil {
+            guard let baseline = serverBaseline, baseline.duration > 0 || baseline.currentTime > 0 else { return nil }
+        }
+        return [edited, serverBaseline?.lastUpdate].compactMap { $0 }.max()
+    }
+
+    /// Whether `server` holds the group as the baseline does: nothing from elsewhere has changed it
+    /// since this row last saw the server, whatever `server.lastUpdate`, which is row-wide, says.
+    /// `false` without a baseline.
+    func serverUnchanged(_ group: ProgressGroups, in server: ProgressBaseline) -> Bool {
+        serverBaseline.map { Self.matches(server, $0, group) } ?? false
     }
 
     private mutating func take(_ groups: ProgressGroups, from server: ProgressBaseline) {
@@ -438,7 +504,9 @@ struct ProgressSyncState: Sendable, Equatable {
         case .finished:
             server.isFinished == other.isFinished && datesMatch(server.finishedAt, other.finishedAt)
         default:
-            ebookMatches(server, other.ebookLocation, other.ebookProgress)
+            ebookMatches(
+                server, other.ebookLocationIsUnknown == true ? server.ebookLocation : other.ebookLocation,
+                other.ebookProgress)
         }
     }
 
@@ -462,7 +530,8 @@ struct ProgressSyncState: Sendable, Equatable {
             return server.isFinished == finished.isFinished && datesMatch(server.finishedAt, finished.finishedAt)
         default:
             guard let ebook = send.ebook else { return false }
-            return ebookMatches(server, ebook.ebookLocation, ebook.ebookProgress)
+            // An omitted location imposes no constraint on the PATCH's echo.
+            return ebookMatches(server, ebook.ebookLocation ?? server.ebookLocation, ebook.ebookProgress)
         }
     }
 
@@ -526,6 +595,7 @@ extension ProgressBaseline {
             finishedAt = other.finishedAt
         default:
             ebookLocation = other.ebookLocation
+            ebookLocationIsUnknown = other.ebookLocationIsUnknown
             ebookProgress = other.ebookProgress
         }
     }

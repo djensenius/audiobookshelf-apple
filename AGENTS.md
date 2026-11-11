@@ -39,7 +39,8 @@ files, don't add targets without need):
 [the package README](Packages/AudiobookshelfKit/README.md).
 
 Each module has a `<Module>Tests` target. Package tests run with `swift test`
-(`mise run test:kit`); they cannot be added to the app scheme.
+(`mise run test:kit`); they cannot be added to the app scheme. `ABSServerContractTests`
+is skipped there unless a real server is configured (`mise run test:server`).
 
 Read [docs/architecture.md](docs/architecture.md) for the allowed module
 dependencies, the `Features/<Feature>/` layout, `AppEnvironment`, concurrency rules,
@@ -90,12 +91,28 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run build:kit:extension` | Build AudiobookshelfKit with `-application-extension` for the iOS Simulator (run by `build:ios`) |
 | `mise run test` | Package tests (`test:kit`), tool tests (`test:tools`), and macOS app tests (`test:app`, signed ad hoc) |
 | `mise run test:kit:slow` | Slow package tests tagged `.slow` (opt-in via `ABS_SLOW_TESTS=1`; CI runs them on pushes to `main`) |
+| `mise run test:kit:ios` | Four iOS-only `ShakeDetectorTests` via the package scheme; required in PR CI, separate from `test` (see below) |
+| `mise run test:kit:ios:runner` | Bounded fake-CLI/result regressions for the iOS gate; also run by `lint:repo`, without Xcode or a simulator |
+| `mise run test:server` / `server:run` | Opt-in `ABSServerContractTests` against a real Audiobookshelf server in Docker (`ABS_SERVER_VERSION` picks the release, default 2.26.0), or start the same seeded server for manual use; `test:kit` compiles the suite and skips it; see [docs/testing/server-contracts.md](docs/testing/server-contracts.md) |
 | `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer) |
 | `mise run strings` / `strings:check` | Generate or verify ABSUI's `Localizable.xcstrings` from `strings/*.json` and `Localization/native/`; see [docs/localization.md](docs/localization.md) |
 | `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
 
 Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing.
+
+`test:kit:ios` selects an available iPhone meeting the package's iOS minimum:
+newest runtime, then an already booted device, then device type and UDID.
+Set `IOS_SIMULATOR_ID=<udid>` to select a specific compatible available iPhone;
+an invalid or empty override fails without fallback. No iPhone Duo is required.
+It borrows the device without creating, erasing, deleting or shutting down any
+simulator, disables parallel test workers, and limits builds to two jobs.
+Separate worktrees do not isolate CoreSimulator; coordinate simulator use locally.
+Each run retains its own derived data, fresh `Tests.xcresult`, and extracted JSON
+under `.build/kit-ios/run.*`, including on failure. The gate requires all four
+named methods to pass in the result bundle, not just a successful build or an
+empty XCTest summary. This initial selection does **not** cover all iOS package
+tests, including the partial UIKit image-hosting and network-policy branches.
 
 ## Xcode project rules
 

@@ -11,8 +11,9 @@ import Observation
 /// - The chime plays once per run, ``chimeLeadTime`` seconds before the end. It waits while less is left (after a
 ///   short start, until an add or a slower rate lifts it), and a jump past that moment skips it.
 /// - For ``gracePeriod`` seconds after the timer pauses playback, ``reset()`` or playing the same item restarts it.
-/// - ``reset()`` restarts a running timer while audio plays. It is the entry point for a gesture such as shake to
-///   reset (#147).
+/// - ``reset()`` restarts a running timer while audio plays. The `shakeDetector` calls it for shake to reset, only
+///   while a reset can do something. Once paused in the background iOS likely suspends the app, so a shake during
+///   the grace period probably only works in the foreground (to be checked on a device).
 /// - An automatic timer starts when playback starts inside the ``AutoSleepPolicy`` window.
 ///
 /// The playback coordinator (#52) conforms to ``SleepTimerPlaybackControl`` and calls:
@@ -45,6 +46,9 @@ public final class SleepTimer {
     static let seekThreshold: TimeInterval = 2
     /// A seek this far back into the chapter before keeps an end-of-chapter goal (the AutoRewind maximum).
     static let maximumResumeRewind: TimeInterval = 30
+    /// How far the target the engine keeps for the timer's own seek may differ from the time asked for (it converts it
+    /// through the timeline); a seek of the user's nearer than this can't be told from it.
+    static let retainedSeekTolerance: TimeInterval = 0.01
 
     /// The running timer's mode; a duration includes added and subtracted time. `nil` when no timer runs.
     public private(set) var mode: SleepTimerMode?
@@ -55,8 +59,10 @@ public final class SleepTimer {
     /// Whether the timer recently paused playback and a reset or play would restart it.
     public private(set) var canRestart = false
     public var isRunning: Bool { mode != nil }
-    /// Takes effect at the next tick.
-    public var options: SleepTimerOptions
+    /// Takes effect at the next tick; changes to the shake sensitivity apply immediately.
+    public var options: SleepTimerOptions {
+        didSet { updateShakeDetection() }
+    }
 
     private enum Goal {
         case length(TimeInterval)
@@ -96,6 +102,7 @@ public final class SleepTimer {
 
     @ObservationIgnored private let control: any SleepTimerPlaybackControl
     @ObservationIgnored private let feedback: (any SleepTimerFeedback)?
+    @ObservationIgnored private let shakeDetector: (any ShakeDetecting)?
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let calendar: Calendar
     @ObservationIgnored private let tickInterval: Duration
@@ -111,7 +118,8 @@ public final class SleepTimer {
     /// Counts expiries, so an expiry's seek task only touches its own automatic rewind.
     @ObservationIgnored private var expiryID = 0
     /// The expiry's seek back to where the fade began, from where playback paused, until its task starts it or a
-    /// reset or play takes it over.
+    /// reset or play takes it over. A reset's `undo` can restore it with no task behind it; the next play or reset
+    /// then delivers the seek.
     @ObservationIgnored private var queuedFadeRewind: (from: Double, to: Double)?
     @ObservationIgnored private var itemID: String?
     /// Changes when a run begins or stops, or playback plays or pauses, so a reset's resume can tell it was overtaken.
@@ -125,16 +133,19 @@ public final class SleepTimer {
     @ObservationIgnored private var appliedVolume: Float = 1
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var graceTask: Task<Void, Never>?
+    @ObservationIgnored private var detectingSensitivity: ShakeSensitivity?
     /// Ticks so far, for tests.
     @ObservationIgnored private(set) var tickCount = 0
     var isTicking: Bool { tickTask != nil }
 
     /// - Parameters:
-    ///   - feedback: Plays the chime and the reset feedback; `nil` plays nothing.
+    ///   - feedback: Pass ``SystemSleepTimerFeedback`` for the chime and the reset feedback; `nil` plays nothing.
+    ///   - shakeDetector: Pass ``ShakeDetector`` on iOS; `nil` disables shake to reset.
     ///   - tickInterval: How often the countdown, fade and chime update; at least ``minimumTickInterval``.
     public init(
         control: any SleepTimerPlaybackControl,
         feedback: (any SleepTimerFeedback)? = nil,
+        shakeDetector: (any ShakeDetecting)? = nil,
         options: SleepTimerOptions = SleepTimerOptions(),
         clock: any Clock<Duration> = ContinuousClock(),
         calendar: Calendar = .autoupdatingCurrent,
@@ -142,6 +153,7 @@ public final class SleepTimer {
     ) {
         self.control = control
         self.feedback = feedback
+        self.shakeDetector = shakeDetector
         self.options = options
         self.clock = clock
         self.calendar = calendar
@@ -152,6 +164,7 @@ public final class SleepTimer {
     isolated deinit {
         tickTask?.cancel()
         graceTask?.cancel()
+        if detectingSensitivity != nil { shakeDetector?.stop() }
         // Torn down mid-fade, the volume would otherwise stay attenuated.
         if appliedVolume != 1 { control.setVolume(1) }
     }
@@ -253,7 +266,8 @@ public final class SleepTimer {
     /// period, or starts the automatic timer inside its window. Returns the seconds to rewind before playing,
     /// which are consumed: the automatic rewind, if playback is still (or a seek in flight puts it back) where the
     /// automatic timer paused it, plus the way back to where the fade began if the expiry's seek there hasn't started
-    /// (the play takes it over).
+    /// (the play takes it over). The two come as one value, which the coordinator must apply whole: if playback then
+    /// aborts (the audio session fails to start, say), the seek the expiry's task would have made is gone.
     public func playbackWillStart(at date: Date = .now) -> TimeInterval {
         runID += 1
         let rewind = takeRewind()
@@ -276,6 +290,7 @@ public final class SleepTimer {
         runID += 1
         endGrace()
         publish(remaining: remaining)
+        updateShakeDetection()
     }
 
     /// Call when another item loads (`nil` when none): an expired timer restarts, and its rewind applies, only on
@@ -289,6 +304,7 @@ public final class SleepTimer {
         queuedFadeRewind = nil
         endGrace()
         publish(remaining: remaining)
+        updateShakeDetection()
     }
 
     /// Call once a seek, chapter skip, rewind or item load lands at `time`. An end-of-chapter timer moves to the
@@ -342,6 +358,7 @@ public final class SleepTimer {
         lastTick = now()
         startTicking()
         update(Run(goal: goal, isAutomatic: isAutomatic, item: itemID), at: time)
+        updateShakeDetection()
         return true
     }
 
@@ -410,6 +427,7 @@ public final class SleepTimer {
         self.run = run
         applyVolume(fadeVolume(left))
         publish(remaining: max(left, 0))
+        updateShakeDetection()
     }
 
     /// Notes where a duration run's fade began, to rewind there after it expires; time added above the fade
@@ -438,8 +456,8 @@ public final class SleepTimer {
             return
         }
         // A play or reset during the seek takes the rewind from where the seek lands, and a manual start leaves it
-        // there. A failed seek leaves it where playback paused (so a seek that superseded it drops it), unless the
-        // engine keeps the seek to retry it (after a second interruption).
+        // there. A failed seek leaves it where playback paused (so a seek that superseded it drops it, however near
+        // the fade), unless the engine keeps this very seek to retry it (after a second interruption).
         pendingRewind = rewind.map { ($0, fadeStart) }
         let id = expiryID, item = itemID, pausedAt = control.currentTime
         queuedFadeRewind = (pausedAt, fadeStart)
@@ -447,7 +465,7 @@ public final class SleepTimer {
             guard self?.startsFadeRewind(of: id, item: item, from: pausedAt) == true else { return }
             let landed = await control.seek(to: fadeStart)
             guard let self, isCurrent(item) else { return }
-            let at = landed ?? (Self.isStill(control, at: fadeStart) ? fadeStart : pausedAt)
+            let at = landed ?? (Self.isRetaining(control, seekTo: fadeStart) ? fadeStart : pausedAt)
             if expiryID == id { pendingRewind?.at = at }
             if let landed { didSeek(to: landed) }
         }
@@ -520,6 +538,13 @@ public final class SleepTimer {
         abs(control.intendedTime - position) < 1
     }
 
+    /// Whether the engine is keeping the seek to `time` for its retry: its pending target is that time, not just near
+    /// it, as a seek of the user's that superseded it may be.
+    private static func isRetaining(_ control: any SleepTimerPlaybackControl, seekTo time: Double) -> Bool {
+        guard let target = control.pendingSeekTarget else { return false }
+        return abs(target - time) < retainedSeekTolerance
+    }
+
     /// Ends the run (not its grace period), restoring the volume.
     private func stopRun() {
         if run != nil { runID += 1 }
@@ -528,6 +553,7 @@ public final class SleepTimer {
         tickTask = nil
         applyVolume(1)
         publish(remaining: nil)
+        updateShakeDetection()
     }
 
     private func startTicking() {
@@ -551,6 +577,7 @@ public final class SleepTimer {
     private func graceDidEnd() {
         endGrace()
         publish(remaining: remaining)
+        updateShakeDetection()
     }
 
     private func endGrace() {
@@ -675,6 +702,18 @@ public final class SleepTimer {
         if isAutomatic != automatic { isAutomatic = automatic }
         let restartable = run == nil && expiredRun != nil
         if canRestart != restartable { canRestart = restartable }
+    }
+
+    private func updateShakeDetection() {
+        let isActive = (run != nil && control.isPlaying) || restartableRun != nil
+        let sensitivity = isActive ? options.shakeSensitivity : nil
+        guard let shakeDetector, sensitivity != detectingSensitivity else { return }
+        detectingSensitivity = sensitivity
+        if let sensitivity {
+            shakeDetector.start(sensitivity: sensitivity) { [weak self] in self?.reset() }
+        } else {
+            shakeDetector.stop()
+        }
     }
 
     // MARK: - Scheduling

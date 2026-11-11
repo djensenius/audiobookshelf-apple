@@ -96,6 +96,8 @@ Audiobookshelf/
 ├── AudiobookshelfApp.swift      # @main, scenes, environment injection
 ├── AppEnvironment.swift         # composition root (see below)
 ├── CarPlay/                     # CarPlaySceneDelegate and template builders
+├── Navigation/                  # RouteDestination: the one navigationDestination(for: Route.self)
+├── Shell/                       # a window scene's shell: RootView, SceneRouterHost, MainTabView, PlayerSlot
 └── Features/
     ├── Home/
     ├── Library/
@@ -179,7 +181,8 @@ Use Swift Testing (`import Testing`, `@Test`, `#expect`) everywhere.
   framework.
 - **HTTP.** Test `ABSAPI` with a `URLProtocol` subclass registered on an ephemeral
   `URLSessionConfiguration` (`protocolClasses`), which returns canned responses and
-  records requests. Never hit a real server in unit tests.
+  records requests. Never hit a real server in unit tests; the opt-in
+  [server contract tests](testing/server-contracts.md) are the one exception.
 - **Fixtures.** Store server JSON responses as files under the test target's
   `Fixtures/` folder and load them with `Bundle.module`. Trim real responses and
   remove personal data before committing.
