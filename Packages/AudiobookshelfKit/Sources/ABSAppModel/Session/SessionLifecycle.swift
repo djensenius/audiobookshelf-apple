@@ -85,7 +85,7 @@ public final class SessionLifecycle {
     @ObservationIgnored private var connectParticipants: [any SessionParticipant] = []
     @ObservationIgnored private var progressSources: [any SessionParticipant] = []
     @ObservationIgnored private var session: RunningSession?
-    /// How many ``performAccountChange(_:)`` calls are running. No session starts until the
+    /// How many ``performAccountChange(from:_:)`` calls are running. No session starts until the
     /// last one finishes; an expiry still ends one.
     @ObservationIgnored private var accountChanges = 0
     @ObservationIgnored private var lastSessionID: UInt64 = 0
@@ -239,11 +239,13 @@ public final class SessionLifecycle {
     /// - Parameter identity: The account the switch was chosen from, when the request comes from
     ///   its screen. When the switch's turn comes, it does nothing if another account's session
     ///   is running, so of two switches chosen from the same account, only the first runs. If
-    ///   no session is running (it expired meanwhile), the switch still runs.
+    ///   no session is running because it expired meanwhile, the switch still runs; if an
+    ///   account change (``performAccountChange(from:_:)``) ended it, the switch does nothing.
     public func switchAccount(to connectionID: UUID, from identity: SessionIdentity? = nil) async throws {
         if rejectReentrant("switchAccount(to:)") { return }
         let result: Result<Void, any Error> = await serialized {
-            guard await self.isStillRunning(identity, strictly: false) else { return .success(()) }
+            // A session an account change ended, while its sign-in runs, hasn't expired.
+            guard await self.isStillRunning(identity, strictly: self.accountChanges > 0) else { return .success(()) }
             if self.session?.context.identity.connectionID == connectionID { return .success(()) }
             await self.endForAccountChange()
             let result: Result<Void, any Error>

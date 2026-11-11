@@ -49,7 +49,7 @@ public protocol ConnectBackend {
 /// ``AccountManager``, which saves the session and the custom headers.
 ///
 /// With a `lifecycle`, the flow runs while signed in (adding a server from the Account tab): a
-/// sign-in or resume is an account change (``SessionLifecycle/performAccountChange(_:)``), so the
+/// sign-in or resume is an account change (``SessionLifecycle/performAccountChange(from:_:)``), so the
 /// running session ends first, and the other accounts keep their sessions; a removal goes
 /// through ``SessionLifecycle/removeAccount(_:)``. Resuming the active connection changes
 /// nothing, and a signed-out one goes straight to the login step, so neither ends the running
@@ -121,7 +121,8 @@ struct AccountConnectBackend: ConnectBackend {
         guard let lifecycle else { return try await body() }
         // Chosen from the account on screen, as the server list's actions are: refused unless that
         // session is ready, and again at its turn if another change (say, another window's switch)
-        // left it first. The sheet goes with the shell then, so there's nothing to report.
+        // left it first. The sheet's controls are disabled while the gate isn't ready, so this is a
+        // backstop, and a refusal ends the flow silently (as a cancel would).
         guard let identity = lifecycle.gate.identity, try await lifecycle.performAccountChange(from: identity, body)
         else { throw CancellationError() }
     }

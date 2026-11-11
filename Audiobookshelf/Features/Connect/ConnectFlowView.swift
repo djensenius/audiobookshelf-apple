@@ -33,6 +33,7 @@ import SwiftUI
 /// starts at a new server's address, and `onCancel` adds a Cancel button where there's no Back.
 struct ConnectFlowView: View {
     @State private var model: ConnectViewModel
+    private let lifecycle: SessionLifecycle?
     private let onFinish: () -> Void
     private let onCancel: (() -> Void)?
 
@@ -43,12 +44,17 @@ struct ConnectFlowView: View {
         let model = ConnectViewModel(accounts: accounts, lifecycle: lifecycle)
         if lifecycle != nil { model.startAddingServer() }
         _model = State(initialValue: model)
+        self.lifecycle = lifecycle
         self.onFinish = onFinish
         self.onCancel = onCancel
     }
 
     var body: some View {
-        ConnectFlowStack(model: model, onFinish: onFinish, onCancel: onCancel)
+        // While another window's account change runs, nothing here may start one; its own
+        // sign-in moves the gate off ready too, so that only counts when idle.
+        ConnectFlowStack(
+            model: model, onFinish: onFinish, onCancel: onCancel,
+            isEnabled: model.isBusy || lifecycle?.acceptsAccountChanges != false)
     }
 }
 
@@ -57,11 +63,14 @@ struct ConnectFlowStack: View {
     let model: ConnectViewModel
     var onFinish: () -> Void = {}
     var onCancel: (() -> Void)?
+    /// Whether the steps' controls take input; the toolbar's Back and Cancel always do.
+    var isEnabled = true
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
             content
+                .disabled(!isEnabled)
                 .navigationTitle(Text(verbatim: title))
                 .toolbar {
                     DiagnosticsToolbar()

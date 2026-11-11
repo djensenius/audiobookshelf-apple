@@ -603,6 +603,23 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.waitingLink(lifecycle) == newer)
     }
 
+    /// A failed switch drops the link it was confirmed for, but not a newer one: that waits as if
+    /// it had just arrived, in the account the switch stayed on.
+    @Test(arguments: [false, true])
+    func aFailedSwitchKeepsOnlyANewerLink(replaced: Bool) {
+        let identity = SessionIdentity(connectionID: UUID(), userID: "b")
+        let confirmed = DeepLink(.downloads, serverID: UUID().uuidString)
+        let newer = DeepLink(.item(id: "li_5", episodeID: nil), serverID: nil)
+        var links = SceneLinks()
+
+        links.beginSwitch(with: confirmed)
+        if replaced { links.receive(newer, gate: .switching(from: identity), epoch: 1) }
+        links.finishSwitch(succeeded: false, gate: .ready(identity, isOffline: false), epoch: 2)
+
+        #expect(!links.isSwitching)
+        #expect(links.link(atEpoch: 2) == (replaced ? newer : nil))
+    }
+
     @Test func aLinkForASignedOutServerIsDropped() async throws {
         let environment = try makeEnvironment()
         let accounts = try #require(environment.accounts)

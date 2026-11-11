@@ -23,8 +23,10 @@ struct RootView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var links = SceneLinks()
-    /// Why a switch ended signed out; the old shell, which would have said so, is gone.
+    /// Why a switch ended signed out; the old shell, which would have said so, is gone. Kept
+    /// after dismissal, so the alert's text doesn't blank while it animates out.
     @State private var switchSignedOutMessage: String?
+    @State private var showsSwitchSignedOut = false
 
     var body: some View {
         content
@@ -32,18 +34,16 @@ struct RootView: View {
             .environment(accounts)
             .environment(\.serverID, SceneContent(lifecycle.gate).serverID)
             .task { await lifecycle.start() }
-            // A count, not the gate: SwiftUI can coalesce the switch's gates.
+            // A count, not the gate: SwiftUI can coalesce the switch's gates. Every window shows it:
+            // the switch replaced every window's shell, not only the one it was chosen in.
             .onChange(of: lifecycle.signedOutSwitches) {
                 switchSignedOutMessage = accounts?.signedOutSwitchMessage ?? L10n.string("MessageSwitchServerSignedOut")
+                showsSwitchSignedOut = true
             }
             .alert(
-                Text(verbatim: switchSignedOutMessage ?? ""),
-                isPresented: Binding {
-                    switchSignedOutMessage != nil
-                } set: {
-                    if !$0 { switchSignedOutMessage = nil }
-                }
-            ) {
+                Text(verbatim: switchSignedOutMessage ?? ""), isPresented: $showsSwitchSignedOut,
+                presenting: switchSignedOutMessage
+            ) { _ in
                 Button(role: .cancel) {
                 } label: {
                     Text(verbatim: L10n.string("ButtonOk"))

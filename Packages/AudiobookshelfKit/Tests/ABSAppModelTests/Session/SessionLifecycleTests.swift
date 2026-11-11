@@ -463,6 +463,63 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.log.count(of: "sign-in") == 1)
     }
 
+    /// The sign-in is queued, while the gate was still ready, behind a switch already running.
+    @Test func aSignInQueuedBehindASwitchFromTheSameAccountDoesNothing() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let lifecycle = harness.lifecycle
+        let held = Gate()
+        harness.source.switchGate = held
+        let switching = Task { try await lifecycle.switchAccount(to: identityB.connectionID, from: identityA) }
+        #expect(await eventually { harness.log.entries.contains("accounts.switch(b)") })
+        var submitted = false
+        let change = Task {
+            submitted = true
+            // Queued before this task suspends.
+            return await lifecycle.performAccountChange(from: identityA) { harness.log.record("sign-in") }
+        }
+        #expect(await eventually { submitted })
+
+        held.open()
+        try await switching.value
+        #expect(await !change.value)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        #expect(harness.log.count(of: "sign-in") == 0)
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
+    /// Another window's add-server sheet ended A's session to sign in; a switch chosen from A
+    /// meanwhile doesn't take that for an expiry, so it doesn't overtake the sign-in.
+    @Test func aSwitchQueuedDuringASignInFromTheSameAccountDoesNothing() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let lifecycle = harness.lifecycle
+        let held = Gate()
+        var signingIn = false
+        var signedIn = false
+        let change = Task {
+            await lifecycle.performAccountChange(from: identityA) {
+                signingIn = true
+                await held.wait()
+                harness.source.phase = .active(identityB, isOffline: false)
+                signedIn = true
+            }
+        }
+        #expect(await eventually { signingIn })
+
+        try await lifecycle.switchAccount(to: identityB.connectionID, from: identityA)
+
+        #expect(!signedIn)
+        #expect(harness.log.count(of: "accounts.switch(b)") == 0)
+        #expect(harness.lifecycle.gate == .switching(from: identityA))
+        held.open()
+        #expect(await change.value)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+        #expect(harness.log.withoutFlushes == teardown("switch") + pipeline("b"))
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
     @Test func aSwitchThatEndsSignedOutIsCounted() async throws {
         let harness = Harness()
         try await harness.started()

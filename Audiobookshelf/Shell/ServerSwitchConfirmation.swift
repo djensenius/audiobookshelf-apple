@@ -9,16 +9,20 @@ import SwiftUI
 /// starting with the confirmed one, and any newer link replaces it, including one that arrives
 /// before the switch has changed the gate (which the outgoing account's epoch would drop). When
 /// the switch has finished, the slot's link waits with the new account's
-/// ``SessionLifecycle/linkEpoch``; a failed switch drops it.
+/// ``SessionLifecycle/linkEpoch``. A failed switch drops the confirmed link, but a newer one
+/// waits as if it had just arrived (a link for another server asks again).
 struct SceneLinks {
     private(set) var pending: PendingLink?
     /// The link to open after the confirmed switch, while it runs.
     private(set) var afterSwitch: DeepLink?
     private(set) var isSwitching = false
+    /// Whether a newer link replaced the confirmed one in ``afterSwitch``.
+    private var replacedConfirmed = false
 
     mutating func receive(_ link: DeepLink, gate: AuthGate, epoch: UInt64) {
         if isSwitching {
             afterSwitch = link
+            replacedConfirmed = true
         } else {
             pending = PendingLink(link, arrivingAt: gate, epoch: epoch)
         }
@@ -29,6 +33,7 @@ struct SceneLinks {
     mutating func beginSwitch(with link: DeepLink) {
         isSwitching = true
         afterSwitch = link
+        replacedConfirmed = false
         pending = nil
     }
 
@@ -37,7 +42,7 @@ struct SceneLinks {
         isSwitching = false
         defer { afterSwitch = nil }
         guard let link = afterSwitch else { return }
-        if succeeded {
+        if succeeded || replacedConfirmed {
             pending = PendingLink(link, arrivingAt: gate, epoch: epoch)
         } else {
             Log.ui.notice("Dropped a link: the server switch failed")

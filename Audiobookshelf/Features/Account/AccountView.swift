@@ -120,6 +120,8 @@ struct ServersView: View {
             guard let accounts else { return }
             var sessions: [UUID: Bool] = [:]
             for server in accounts.connections { sessions[server.id] = await accounts.hasSession(server.id) }
+            // A newer run, for newer connections, writes its own.
+            guard !Task.isCancelled else { return }
             hasSession = sessions
         }
         .sheet(isPresented: $isAddingServer) {
