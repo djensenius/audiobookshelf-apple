@@ -216,7 +216,9 @@ public final class RealtimeBridge: SessionParticipant {
                 RealtimeConfiguration(
                     serverAddress: configuration.baseURL, token: token, customHeaders: configuration.customHeaders))
         } catch {
-            Log.realtime.error("Couldn't create the socket: \(String(describing: error), privacy: .public)")
+            Log.realtime.error(
+                "Couldn't create the socket: \(Self.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
+            )
             connectionState = .idle
             return
         }
@@ -267,7 +269,9 @@ public final class RealtimeBridge: SessionParticipant {
         } catch let error where endsSession(error) || error is CancellationError {
             return nil
         } catch {
-            Log.realtime.notice("Couldn't refresh the socket's token: \(String(describing: error), privacy: .public)")
+            Log.realtime.notice(
+                "Couldn't refresh the socket's token: \(Self.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
+            )
             return nil
         }
     }
@@ -369,8 +373,24 @@ public final class RealtimeBridge: SessionParticipant {
             // Not recorded, so the next auth failure, network change or reconnect retries.
             if !(error is CancellationError) {
                 Log.realtime.error(
-                    "Couldn't refresh the socket's token: \(String(describing: error), privacy: .public)")
+                    "Couldn't refresh the socket's token: \(Self.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
+                )
             }
+        }
+    }
+
+    /// What may be logged publicly about `error`: its case and status code, never a message or
+    /// decoder text, which can quote the server's response (as `ServerValidatorError`'s
+    /// `diagnosticDescription` does).
+    static func logSummary(of error: any Error) -> String {
+        switch error as? APIError {
+        case .http(let status, _): "http(status: \(status))"
+        case .unauthorized: "unauthorized"
+        case .forbidden: "forbidden"
+        case .encoding: "encoding"
+        case .decoding: "decoding"
+        case let error?: String(describing: error)
+        case nil: String(describing: type(of: error))
         }
     }
 

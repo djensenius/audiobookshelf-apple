@@ -534,6 +534,16 @@ struct RealtimeBridgeTests {
         #expect(harness.cache.progress(libraryItemID: "book")?.currentTime == 30)
     }
 
+    @Test func logSummariesLeaveOutServerText() {
+        #expect(RealtimeBridge.logSummary(of: APIError.http(status: 502, message: "secret")) == "http(status: 502)")
+        #expect(RealtimeBridge.logSummary(of: APIError.forbidden(message: "secret")) == "forbidden")
+        #expect(RealtimeBridge.logSummary(of: APIError.unauthorized(message: "secret")) == "unauthorized")
+        #expect(RealtimeBridge.logSummary(of: APIError.decoding("secret")) == "decoding")
+        #expect(RealtimeBridge.logSummary(of: APIError.encoding("secret")) == "encoding")
+        #expect(RealtimeBridge.logSummary(of: APIError.timedOut) == "timedOut")
+        #expect(RealtimeBridge.logSummary(of: RealtimeError.invalidServerAddress) == "RealtimeError")
+    }
+
     @Test func updatesWithoutASessionFollowTheLegacyComparison() async throws {
         let harness = BridgeHarness()
         let socket = try await harness.start()
