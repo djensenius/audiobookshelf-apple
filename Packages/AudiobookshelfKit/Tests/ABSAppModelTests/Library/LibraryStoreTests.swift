@@ -329,6 +329,76 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
         }
     }
 
+    @Test func viewPreferencesAreSavedForTheConnectedAccountOnly() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let preferences = LibraryViewPreferences(sort: .title, descending: false, viewMode: .list)
+
+            // Without an account nothing is read or written.
+            store.saveViewPreferences(preferences, libraryID: "books", connectionKey: serverA)
+            #expect(settings.libraryViewPreferences.isEmpty)
+            #expect(store.viewPreferences(libraryID: "books") == nil)
+
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+            store.saveViewPreferences(preferences, libraryID: "books", connectionKey: serverA)
+            #expect(store.viewPreferences(libraryID: "books") == preferences)
+            #expect(settings.libraryViewPreferences(for: serverA, libraryID: "books") == preferences)
+            #expect(store.viewPreferences(libraryID: "pods") == nil)
+
+            // Another account has its own; after a logout nothing is written.
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverB)
+            #expect(store.viewPreferences(libraryID: "books") == nil)
+            store.clear()
+            store.saveViewPreferences(LibraryViewPreferences(sort: .size), libraryID: "books", connectionKey: serverB)
+            #expect(store.viewPreferences(libraryID: "books") == nil)
+            #expect(settings.libraryViewPreferences.count == 1)
+            #expect(settings.libraryViewPreferences(for: serverA, libraryID: "books") == preferences)
+        }
+    }
+
+    @Test func aSaveForAnAccountTheStoreNoLongerServesWritesNothing() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+            let saved = LibraryViewPreferences(sort: .title)
+            store.saveViewPreferences(saved, libraryID: "books", connectionKey: serverA)
+
+            // A model of account A saves after the store switched to B.
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverB)
+            store.saveViewPreferences(LibraryViewPreferences(sort: .size), libraryID: "books", connectionKey: serverA)
+            #expect(settings.libraryViewPreferences(for: serverB, libraryID: "books") == nil)
+            #expect(settings.libraryViewPreferences(for: serverA, libraryID: "books") == saved)
+            #expect(settings.libraryViewPreferences.count == 1)
+        }
+    }
+
+    @Test func aBrowseModelSavesThroughTheStoreWithoutItsPinnedFilter() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverA)
+            let key = try #require(store.connectionKey)
+            let genre = LibraryViewPreferences.Filter(group: .genres, value: "G")
+            store.saveViewPreferences(LibraryViewPreferences(filter: genre), libraryID: "books", connectionKey: key)
+
+            let model = LibraryBrowseModel(
+                client: FakeLibraryService(), libraryID: "books", mediaType: .book,
+                stored: store.viewPreferences(libraryID: "books"), pinnedFilter: .init(group: .narrators, value: "N"),
+                persist: { [weak store] id, preferences in
+                    store?.saveViewPreferences(preferences, libraryID: id, connectionKey: key)
+                },
+                map: { Slim(id: $0.id) })
+            await model.update { $0.viewMode = .list }?.value
+            let expected = LibraryViewPreferences(filter: genre, viewMode: .list)
+            #expect(store.viewPreferences(libraryID: "books") == expected)
+
+            // Left over after an account switch, the model writes into neither account.
+            await store.connect(client: service([makeLibrary("books")]), connectionKey: serverB)
+            await model.update { $0.selectSort(.size) }?.value
+            #expect(store.viewPreferences(libraryID: "books") == nil)
+            #expect(settings.libraryViewPreferences(for: serverA, libraryID: "books") == expected)
+        }
+    }
+
     @Test func loadDetailsStoresFilterDataByLibrary() async throws {
         try await withLibrarySettings { settings in
             let store = LibraryStore(settings: settings)

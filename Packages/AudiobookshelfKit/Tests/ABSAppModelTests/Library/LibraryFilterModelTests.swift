@@ -34,7 +34,7 @@ private func series(_ id: String, _ name: String) throws -> ABSCore.Series {
         #expect(choices.tags.map(\.name) == ["A", "b"])
         #expect(choices.narrators.map(\.name) == ["amy", "Zed"])
         #expect(choices.languages.map(\.name) == ["English", "fr"])
-        #expect(choices.series.map(\.id) == ["s2", "s10"])
+        #expect(choices.series.map(\.id) == [LibraryFilterModel.Choice.noSeries.id, "s2", "s10"])
         #expect(choices.authors.map(\.id) == ["a3", "a1", "a2"])
         #expect(choices.genres.map(\.id) == choices.genres.map(\.name))
         #expect(!model.isLoading && model.error == nil)
@@ -45,6 +45,27 @@ private func series(_ id: String, _ name: String) throws -> ABSCore.Series {
             LibraryFilterModel.ProgressState.allCases.map(\.rawValue) == [
                 "finished", "in-progress", "not-started", "not-finished",
             ])
+    }
+
+    @Test func noSeriesComesFirstAndEbookValuesAreOffered() async throws {
+        let data = LibraryFilterData(series: [try series("s1", "A")])
+        let service = FakeLibraryService(libraryHandler: { id in
+            detail(id, id == "empty" ? LibraryFilterData() : data)
+        })
+        let model = LibraryFilterModel(client: service)
+
+        await model.load(libraryID: "books")?.value
+        let noSeries = LibraryFilterModel.Choice.noSeries
+        #expect(model.choices?.series == [noSeries, LibraryFilterModel.Choice(id: "s1", name: "A")])
+        #expect(LibraryViewPreferences.Filter(group: .series, value: noSeries.id).libraryFilter == .noSeries)
+        // Legacy offers it even when the library has no series.
+        await model.load(libraryID: "empty")?.value
+        #expect(model.choices?.series == [noSeries])
+
+        #expect(LibraryFilterModel.EbookKind.allCases.map(\.rawValue) == ["ebook", "supplementary"])
+        #expect(
+            LibraryViewPreferences.Filter(group: .ebooks, value: LibraryFilterModel.EbookKind.supplementary.rawValue)
+                .libraryFilter == .ebooks("supplementary"))
     }
 
     @Test func loadsOncePerLibraryUntilReloaded() async throws {

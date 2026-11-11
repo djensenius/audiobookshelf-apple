@@ -5,6 +5,15 @@ import Testing
 @testable import ABSAPI
 @testable import ABSAppModel
 
+/// A value the group can filter by: progress and ebooks take only their fixed values.
+private func usableValue(for group: LibraryFilterGroup) -> String? {
+    switch group {
+    case .progress: "finished"
+    case .ebooks: "ebook"
+    default: group.needsValue ? "v" : nil
+    }
+}
+
 @Suite struct LibraryViewPreferencesTests {
     // MARK: Persistence
 
@@ -143,10 +152,27 @@ import Testing
 
     @Test func podcastLibrariesDropFilterGroupsTheyDoNotOffer() {
         for group in LibraryFilterGroup.allCases {
-            let stored = LibraryViewPreferences(filter: .init(group: group, value: group.needsValue ? "v" : nil))
+            let stored = LibraryViewPreferences(filter: .init(group: group, value: usableValue(for: group)))
             #expect((stored.resolved(for: .podcast).filter != nil) == LibraryFilterGroup.podcastGroups.contains(group))
             #expect(stored.resolved(for: .book).filter == stored.filter)
         }
+    }
+
+    @Test func filtersWithoutAUsableValueAreDropped() {
+        func survives(_ filter: LibraryViewPreferences.Filter) -> Bool {
+            LibraryViewPreferences(filter: filter).resolved(for: .book).filter == filter
+        }
+        #expect(!survives(.init(group: .narrators)))
+        #expect(!survives(.init(group: .genres, value: "")))
+        #expect(!survives(.init(group: .progress, value: "bogus")))
+        #expect(!survives(.init(group: .ebooks, value: "audio")))
+        for state in LibraryFilterModel.ProgressState.allCases {
+            #expect(survives(.init(group: .progress, value: state.rawValue)))
+        }
+        for kind in LibraryFilterModel.EbookKind.allCases {
+            #expect(survives(.init(group: .ebooks, value: kind.rawValue)))
+        }
+        #expect(survives(.init(group: .issues)))
     }
 
     @Test func unknownMediaTypesAreTreatedAsBooks() {
@@ -199,16 +225,18 @@ import Testing
             .authors: "authors.\(LibraryFilter.encode("Sci Fi/Fantasy"))",
             .narrators: "narrators.\(LibraryFilter.encode("Sci Fi/Fantasy"))",
             .languages: "languages.\(LibraryFilter.encode("Sci Fi/Fantasy"))",
-            .progress: "progress.\(LibraryFilter.encode("Sci Fi/Fantasy"))",
-            .ebooks: "ebooks.\(LibraryFilter.encode("Sci Fi/Fantasy"))",
+            .progress: "progress.\(LibraryFilter.encode("in-progress"))",
+            .ebooks: "ebooks.\(LibraryFilter.encode("supplementary"))",
             .issues: "issues",
             .feedOpen: "feed-open",
             .explicit: "explicit",
         ]
+        // Progress and ebooks take only their fixed values.
+        let values: [LibraryFilterGroup: String] = [.progress: "in-progress", .ebooks: "supplementary"]
         #expect(Set(expected.keys) == Set(LibraryFilterGroup.allCases))
         for (group, queryValue) in expected {
             let preferences = LibraryViewPreferences(
-                filter: .init(group: group, value: group.needsValue ? "Sci Fi/Fantasy" : nil))
+                filter: .init(group: group, value: group.needsValue ? values[group, default: "Sci Fi/Fantasy"] : nil))
             #expect(preferences.query(for: .book).filter?.queryValue == queryValue)
             let items = preferences.query(for: .book).queryItems
             #expect(items.first == URLQueryItem(name: "filter", value: queryValue))
