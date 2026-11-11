@@ -92,6 +92,9 @@ final class FakeTokenSource: RealtimeTokenSource {
     var refreshGate: Gate?
     /// When set, reading the token to connect with waits for it.
     var readGate: Gate?
+    /// When set, reading the token to connect with throws it, as `APIClient` does when the
+    /// session ended or the stored token expired and couldn't be refreshed.
+    var readError: (any Error)?
     /// The rejected token of each refresh.
     let refreshes = Recorder<String?>()
     /// How often the token to connect with was read.
@@ -107,6 +110,7 @@ final class FakeTokenSource: RealtimeTokenSource {
         guard let rejected else {
             reads.append(())
             await readGate?.wait()
+            if let readError { throw readError }
             guard let current else { throw APIError.notAuthenticated }
             return current
         }

@@ -208,9 +208,40 @@ struct RealtimeBridgeTests {
         await bridge.networkChanged()
         await socket.calls.wait(for: "updateToken(t2)")
         #expect(tokens.refreshes.values == ["t1", "t1"])
-        // The pass-through and the refresh run concurrently.
-        #expect(socket.calls.count(of: "networkChanged") == 1)
-        #expect(socket.calls.values.count == 3)
+        // The refreshed token reconnects the halted socket; no network change is passed on.
+        #expect(socket.calls.values == ["connect", "updateToken(t2)"])
+    }
+
+    @Test func explicitRecoveryRefreshesATokenTheServerReturnedUnchanged() async throws {
+        let harness = BridgeHarness()
+        let tokens = harness.defaultTokens
+        tokens.refreshResults = [.success("t1")]
+        let socket = try await harness.start()
+        let bridge = harness.bridge!
+        await harness.send(.authFailed(message: nil), on: socket)
+        await socket.calls.wait(for: "updateToken(t1)")
+        await harness.send(.authFailed(message: nil), on: socket)
+        await bridge.tokenTask?.value
+        #expect(tokens.refreshes.values == ["t1"])
+
+        // A network change refreshes the same token again and reconnects with it.
+        await bridge.networkChanged()
+        await socket.calls.wait { $0.filter { $0 == "updateToken(t1)" }.count == 2 }
+        #expect(tokens.refreshes.values == ["t1", "t1"])
+        #expect(!socket.calls.values.contains("networkChanged"))
+        // Rejected again: the automatic guard still holds.
+        await harness.send(.authFailed(message: nil), on: socket)
+        await bridge.tokenTask?.value
+        #expect(tokens.refreshes.values == ["t1", "t1"])
+
+        // So does a reconnect: it resends the token, and its rejection is refreshed again.
+        let client = try makeClient()
+        harness.tokenSources[ObjectIdentifier(client)] = tokens
+        await bridge.sessionDidReconnect(harness.context(client: client))
+        await socket.calls.wait { $0.filter { $0 == "updateToken(t1)" }.count == 3 }
+        await harness.send(.authFailed(message: nil), on: socket)
+        await socket.calls.wait { $0.filter { $0 == "updateToken(t1)" }.count == 4 }
+        #expect(tokens.refreshes.values == ["t1", "t1", "t1"])
     }
 
     @Test func reconnectAfterAFailedRefreshRefreshesTheSameTokenAgain() async throws {
@@ -269,6 +300,45 @@ struct RealtimeBridgeTests {
         #expect(socket.calls.values == ["connect", "updateToken(t5)"])
         #expect(bridge.readerTask != nil)
         #expect(bridge.connectionState == .connecting)
+    }
+
+    @Test func reconnectWithoutAUsableTokenClosesTheSocket() async throws {
+        let harness = BridgeHarness()
+        let socket = try await harness.start()
+        let bridge = harness.bridge!
+        await harness.send(.initialized(RealtimeSession(userId: "a", username: "alice")), on: socket)
+        #expect(bridge.connectionState == .connected)
+
+        let expired = FakeTokenSource(current: "t1")
+        expired.readError = APIError.sessionExpired
+        let client = try makeClient()
+        harness.tokenSources[ObjectIdentifier(client)] = expired
+        await bridge.sessionDidReconnect(harness.context(client: client))
+        let task = bridge.tokenTask
+        await task?.value
+
+        #expect(socket.calls.values == ["connect", "disconnect(noFarewell)"])
+        #expect(bridge.readerTask == nil)
+        #expect(bridge.connectionState == .idle)
+
+        // A later reconnect with a token opens a new socket.
+        let next = try makeClient()
+        harness.tokenSources[ObjectIdentifier(next)] = FakeTokenSource(current: "t9")
+        await bridge.sessionDidReconnect(harness.context(client: next))
+        await harness.sockets.wait(count: 2)
+        #expect(harness.sockets.values.map(\.configuration.token) == ["t1", "t9"])
+    }
+
+    @Test func aTokenThatExpiredAndCouldNotBeRefreshedOpensNoSocket() async throws {
+        let harness = BridgeHarness()
+        // APIClient returns a still-valid token itself after a transient failure; an error
+        // means the stored token can't be used.
+        harness.defaultTokens.readError = APIError.timedOut
+        await harness.bridge.sessionDidStart(harness.context(client: try makeClient()))
+        await harness.bridge.startTask?.value
+
+        #expect(harness.sockets.values.isEmpty)
+        #expect(harness.bridge.connectionState == .idle)
     }
 
     @Test func startWithoutATokenStaysIdleUntilAReconnect() async throws {
@@ -440,6 +510,28 @@ struct RealtimeBridgeTests {
         await harness.send(progressUpdate("book", currentTime: 30, lastUpdate: 100), on: socket)
 
         #expect(offers.values.map(\.progress.currentTime) == [30])
+    }
+
+    @Test func anEqualTimestampOffersOnlyTheCachedPosition() async throws {
+        let harness = BridgeHarness()
+        let socket = try await harness.start()
+        let bridge = harness.bridge!
+        let offers = Recorder<UserItemProgressUpdate>()
+        bridge.onRemoteProgress = { offers.append($0) }
+        bridge.playbackSnapshot = {
+            RealtimePlaybackSnapshot(
+                libraryItemID: "book", playbackSessionID: "local", isPlaying: false, currentTime: 10)
+        }
+        harness.cache.apply(MediaProgress(id: "p-book", libraryItemId: "book", currentTime: 30, lastUpdate: 100))
+
+        // As old as the cached progress but elsewhere: stale, so no offer.
+        await harness.send(progressUpdate("book", currentTime: 20, lastUpdate: 100), on: socket)
+        #expect(offers.values.isEmpty)
+        // As old and at the cached position (within a second): the same progress.
+        await harness.send(progressUpdate("book", currentTime: 30.4, lastUpdate: 100), on: socket)
+
+        #expect(offers.values.map(\.progress.currentTime) == [30.4])
+        #expect(harness.cache.progress(libraryItemID: "book")?.currentTime == 30)
     }
 
     @Test func updatesWithoutASessionFollowTheLegacyComparison() async throws {

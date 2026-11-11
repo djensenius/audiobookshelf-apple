@@ -52,8 +52,8 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 ///   device-clock time the server's can't be compared with), unless it changes the finished flag.
 /// - `auth_failed` refreshes the rejected token and reconnects with the new one: at most once per
 ///   token, and once until the socket authenticates again. After that, or after a failed
-///   refresh, the next ``networkChanged()`` or reconnect retries; an expired session stops the
-///   bridge.
+///   refresh, the next ``networkChanged()`` or reconnect retries, with any token. An expired
+///   session, or a reconnect without a usable token, closes the socket without a farewell.
 /// - `user_updated` goes to ``onUserUpdated`` for the session's user. It never seeds the cache:
 ///   its progress list isn't known to be complete.
 ///
@@ -71,8 +71,8 @@ public final class RealtimeBridge: SessionParticipant {
     @ObservationIgnored public var onUserUpdated: (@MainActor (User) -> Void)?
     /// Offers a jump to another session's position, as the legacy app did: the player has the
     /// item open and is paused, and the update comes from another playback session (whether or
-    /// not the cache took it). It must also not be older than the cached progress, and its
-    /// position must differ from the player's by at least a second.
+    /// not the cache took it). It must also not be older than the cached progress (if as old, at
+    /// its position), and its position must differ from the player's by at least a second.
     @ObservationIgnored public var onRemoteProgress: (@MainActor (UserItemProgressUpdate) -> Void)?
     /// What the player has open, or `nil` when nothing is.
     @ObservationIgnored public var playbackSnapshot: (@MainActor () -> RealtimePlaybackSnapshot?)?
@@ -137,11 +137,21 @@ public final class RealtimeBridge: SessionParticipant {
         self.client = client
         self.tokens = tokens
         refreshing = nil
+        // An explicit recovery point: every token may be refreshed again.
         refreshedSinceInitialized = false
+        refreshedTokens = []
         tokenTask?.cancel()
         tokenTask = Task { [weak self] in
             let token = await Self.usableToken(from: tokens)
-            guard let self, !Task.isCancelled, self.client === client, let token else { return }
+            guard let self, !Task.isCancelled, self.client === client else { return }
+            guard let token else {
+                // The session ended, or its token expired: the socket mustn't keep the old one.
+                Log.realtime.notice("No usable token after a reconnect; closing the socket")
+                let (socket, reader) = self.detach()
+                await reader?.value
+                await socket?.disconnect(sendingFarewell: false)
+                return
+            }
             guard token != self.token || self.connectionState != .connected else { return }
             self.token = token
             self.connectionState = .connecting
@@ -158,13 +168,16 @@ public final class RealtimeBridge: SessionParticipant {
         await socket?.disconnect(sendingFarewell: reason != .expired)
     }
 
-    /// Reconnects at once after a network change. While the socket's token is rejected, it also
-    /// retries the refresh, once per call.
+    /// Reconnects at once after a network change. While the socket's token is rejected (the
+    /// socket then ignores network changes), it instead refreshes the token again, once per call,
+    /// even one already refreshed, and reconnects with the result.
     public func networkChanged() async {
         if connectionState == .authFailed {
             refreshedSinceInitialized = false
+            refreshedTokens = []
             if refreshRejectedToken() {
                 Log.realtime.notice("Retrying the socket's token refresh after a network change")
+                return
             }
         }
         await socket?.networkChanged()
@@ -246,7 +259,8 @@ public final class RealtimeBridge: SessionParticipant {
     }
 
     /// The token to connect with, refreshed first if it is about to expire; `nil` when there is
-    /// none or the session ended.
+    /// none, the session ended, or it expired and couldn't be refreshed. (`APIClient` itself
+    /// returns the stored token after a transient refresh failure while it is still valid.)
     private static func usableToken(from tokens: any RealtimeTokenSource) async -> String? {
         do {
             return try await tokens.accessToken(replacing: nil)
@@ -254,7 +268,7 @@ public final class RealtimeBridge: SessionParticipant {
             return nil
         } catch {
             Log.realtime.notice("Couldn't refresh the socket's token: \(String(describing: error), privacy: .public)")
-            return await tokens.currentAccessToken()
+            return nil
         }
     }
 
@@ -384,14 +398,20 @@ public final class RealtimeBridge: SessionParticipant {
     /// The legacy app's rule (`layouts/default.vue`): the player has the item open and is paused,
     /// and the update comes from another playback session, whether or not the cache took it. In
     /// addition, the update must not be older than the cached progress (no jump backwards to a
-    /// stale event), and its position must differ from the player's by at least
+    /// stale event); one as old must match the cached position within ``positionTolerance`` (the
+    /// same progress, already fetched). Its position must differ from the player's by at least
     /// ``positionTolerance``, so an update that only changed the ebook location or the finished
     /// flag offers nothing.
     private static func offersJump(
         _ update: UserItemProgressUpdate, to snapshot: RealtimePlaybackSnapshot, cached: MediaProgress?
     ) -> Bool {
-        if let incoming = update.progress.lastUpdate, let cached = cached?.lastUpdate, incoming < cached {
-            return false
+        if let incoming = update.progress.lastUpdate, let cached, let cachedTime = cached.lastUpdate {
+            if incoming < cachedTime { return false }
+            if incoming == cachedTime,
+                abs(update.progress.currentTime - cached.currentTime) >= positionTolerance
+            {
+                return false
+            }
         }
         return !snapshot.isPlaying && update.sessionId != snapshot.playbackSessionID
             && abs(update.progress.currentTime - snapshot.currentTime) >= positionTolerance
