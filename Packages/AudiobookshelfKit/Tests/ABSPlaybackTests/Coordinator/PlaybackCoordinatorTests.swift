@@ -1,6 +1,8 @@
 import ABSCore
 import ABSData
 import Foundation
+import Observation
+import Synchronization
 import Testing
 
 @testable import ABSAPI
@@ -738,6 +740,32 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.phase == .idle)
         #expect(engine.loads.isEmpty)
         #expect(h.events.events.last == .itemChanged(nil))
+    }
+
+    /// Play intent while starting is only `playWhenLoaded`; a pause must still invalidate
+    /// observers of `isPlaybackRequested`, or a play/pause button keeps showing pause.
+    @Test func pauseWhileStartingInvalidatesPlayIntent() async {
+        let gate = Gate()
+        service.state.withLock { $0.startGates["A"] = gate }
+        let play = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { service.starts == ["A"] }
+        #expect(coordinator.phase == .starting)
+        #expect(coordinator.isPlaybackRequested)
+
+        let changes = Mutex(0)
+        withObservationTracking {
+            _ = coordinator.isPlaybackRequested
+        } onChange: {
+            changes.withLock { $0 += 1 }
+        }
+        coordinator.pause()
+        #expect(changes.withLock { $0 } == 1)
+        #expect(!coordinator.isPlaybackRequested)
+
+        gate.open()
+        await play.value
+        #expect(coordinator.phase == .loaded)
+        #expect(!coordinator.isPlaybackRequested)
     }
 
     @Test func pauseWhileStartingLoadsPaused() async {
