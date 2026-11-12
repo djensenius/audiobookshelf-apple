@@ -14,8 +14,14 @@ import Observation
 /// participant before ``SessionLifecycle/start()``, so build them here, in `init`.
 @MainActor
 final class AppEnvironment {
-    /// Built on first use, so a process that never asks for it opens no store.
-    static let shared = AppEnvironment()
+    /// Built on first use, so a process that never asks for it opens no store. A Debug build
+    /// launched with `-ABSFixtures` gets ``FixtureServer``'s in-memory environment instead.
+    static let shared: AppEnvironment = {
+        #if DEBUG
+            if FixtureServer.isEnabled { return FixtureServer.environment() }
+        #endif
+        return AppEnvironment()
+    }()
 
     let settings: AppSettings
     /// The on-device store, or `nil` when it couldn't be opened. ``lifecycle`` then shows
@@ -33,10 +39,12 @@ final class AppEnvironment {
     /// - Parameters:
     ///   - settings: The settings every scene shares.
     ///   - storeLocation: Where the store lives; tests and previews pass `.inMemory`.
+    ///   - covers: Where the cover pipeline fetches and caches covers.
     init(
         settings: AppSettings = AppSettings(), storeLocation: DataStack.Location = .appGroup,
         keychain: any KeychainStoring = KeychainStore(),
-        sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() }
+        sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
+        covers: CoverSource = .app
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
@@ -68,7 +76,7 @@ final class AppEnvironment {
 
         // Images (#182).
         let images = ImageServices(
-            accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup)
+            accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup, covers: covers)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
     }
