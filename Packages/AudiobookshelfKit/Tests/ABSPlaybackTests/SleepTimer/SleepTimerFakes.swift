@@ -44,9 +44,11 @@ final class FakePlaybackControl: SleepTimerPlaybackControl {
         isPlaying = false
     }
 
-    func play() {
+    @discardableResult
+    func play() -> Bool {
         plays += 1
         isPlaying = true
+        return true
     }
 
     func seek(to time: Double) async -> Double? {

@@ -323,4 +323,69 @@ import Testing
         #expect(try context.fetchCount(FetchDescriptor<LocalMediaProgress>()) == 1)
         #expect(try context.fetchCount(FetchDescriptor<ServerConnectionRecord>()) == 1)
     }
+
+    /// A cover-only download sets the item's cover and leaves its episodes and files alone;
+    /// without the item, it makes none.
+    @Test func coverOnlyDownloadOnlySetsTheCover() async throws {
+        let (store, _) = try makeStore()
+        let episode = LocalMediaSnapshot.Episode(id: "ep_1", title: "Episode 1")
+        let item = try await store.upsertFromDownload(episodeDownload(episode), now: now)
+        try #require(item.coverRelativePath == nil)
+        let coverDate = now.addingTimeInterval(-60)
+        let later = now.addingTimeInterval(5)
+        let itemKey = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_2")
+        let cover = DownloadRecordDTO(
+            key: itemKey, mediaType: .podcast, title: "The Podcast", relativeDirectory: "li_2",
+            media: LocalMediaSnapshot(metadata: .init(title: "Renamed"), coverUpdatedAt: coverDate),
+            parts: [part(.cover, "cover.jpg", directory: "li_2")])
+
+        let updated = try await store.upsertFromDownload(cover, now: later)
+
+        #expect(updated.id == item.id)
+        #expect(updated.coverRelativePath == "li_2/cover.jpg")
+        #expect(updated.coverUpdatedAt == coverDate)
+        #expect(updated.updatedAt == later)
+        #expect(updated.title == item.title)
+        #expect(updated.media == item.media)
+        #expect(updated.files == item.files)
+        // A cover the item has by then is kept.
+        var other = cover
+        other.parts = [part(.cover, "other.jpg", directory: "li_2")]
+        other.media.coverUpdatedAt = later
+        let kept = try await store.upsertFromDownload(other, now: later.addingTimeInterval(5))
+        #expect(kept.coverRelativePath == "li_2/cover.jpg")
+        #expect(kept.coverUpdatedAt == coverDate)
+        let orphan = DownloadRecordDTO(
+            key: MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_9"), mediaType: .podcast,
+            title: "Gone", relativeDirectory: "li_9", media: LocalMediaSnapshot(metadata: .init(title: "Gone")),
+            parts: [part(.cover, "cover.jpg", directory: "li_9")])
+        await #expect(throws: LocalItemStore.StoreError.itemNotFound) {
+            try await store.upsertFromDownload(orphan)
+        }
+        #expect(try await store.allItems().map(\.id) == [item.id])
+    }
+
+    /// A cover set only while the item has none: one a finalised download gave it meanwhile
+    /// is kept, with its date.
+    @Test func setCoverIfMissingKeepsAnExistingCover() async throws {
+        let (store, _) = try makeStore()
+        let episode = LocalMediaSnapshot.Episode(id: "ep_1", title: "Episode 1")
+        let item = try await store.upsertFromDownload(episodeDownload(episode), now: now)
+        let coverDate = now.addingTimeInterval(-60)
+        let later = now.addingTimeInterval(5)
+
+        #expect(
+            try await store.setCoverIfMissing(
+                itemID: item.id, relativePath: "li_2/cover.jpg", updatedAt: coverDate, now: later))
+        #expect(
+            try await store.setCoverIfMissing(
+                itemID: item.id, relativePath: "li_2/other.jpg", updatedAt: later, now: later.addingTimeInterval(5))
+                == false)
+
+        let kept = try #require(try await store.item(id: item.id))
+        #expect(kept.coverRelativePath == "li_2/cover.jpg")
+        #expect(kept.coverUpdatedAt == coverDate)
+        #expect(kept.updatedAt == later)
+        #expect(try await store.setCoverIfMissing(itemID: UUID(), relativePath: "x.jpg", updatedAt: nil) == false)
+    }
 }

@@ -83,6 +83,25 @@ struct BookmarkStoreTests {
         #expect(store.bookmarks(itemID: "item") == [bookmark("item", 30, "New", createdAt: 1_000)])
     }
 
+    @Test func addRejectsTheTimeOfAQueuedAdd() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        store.replaceAll(from: bookmarkUser([]))
+        var writes = service.writes.calls.makeAsyncIterator()
+
+        let first = Task { try await store.add(itemID: "item", time: 30, title: "A") }
+        let write = try #require(await writes.next())
+        // Queued behind the first, so it sees the first's optimistic entry.
+        let second = Task { try await store.add(itemID: "item", time: 30, title: "B") }
+        for _ in 0..<10 { await Task.yield() }
+        write.reply.resume(returning: nil)
+        _ = try await first.value
+
+        await #expect(throws: BookmarkStoreError.alreadyExists) { _ = try await second.value }
+        #expect(service.sentWrites == 1)
+        #expect(store.bookmarks(itemID: "item") == [bookmark("item", 30, "A")])
+    }
+
     @Test func renameFailureRestoresOldTitle() async throws {
         let service = FakeBookmarkService()
         let store = try await makeBookmarkStore(service)

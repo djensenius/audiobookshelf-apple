@@ -183,8 +183,9 @@ import Testing
         #expect(Self.paths(of: local).allSatisfy { exists($0, fixture) })
     }
 
-    /// Current behaviour: an episode the engine is finalising can't take a cover part, so a
-    /// cancelled episode's cover, with no other episode to go to, is removed.
+    /// An episode the engine is finalising can't take a cover part, so a cancelled episode's
+    /// cover, with no other episode or local item to go to, is removed; that episode's
+    /// completion fetches it again (`DownloadManagerCoverTests`).
     @Test func aRefusedHandOffRemovesTheCover() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()

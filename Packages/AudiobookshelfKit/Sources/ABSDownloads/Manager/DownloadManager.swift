@@ -41,6 +41,10 @@ public actor DownloadManager {
         var parts: [UUID: (written: Int64, expected: Int64)]
         /// Parts whose stored size is final: progress read after their completion is stale.
         var completed: Set<UUID> = []
+        /// Whether it only fetches the item's cover again (``DownloadRecordDTO/isCoverOnly``).
+        var isCoverOnly = false
+        /// The file such a record fetches.
+        var fetchedCover: String?
 
         var bytes: Int64 { parts.values.reduce(0) { DownloadManager.adding($0, max($1.written, 0)) } }
 
@@ -68,6 +72,9 @@ public actor DownloadManager {
     private let recordRead: (@Sendable (UUID) async -> Void)?
     /// Called by a clean-up between its two reads of the paths still in use.
     let usedPathsReading: (@Sendable () async -> Void)?
+    /// Called by a cover hand-off between its first read of the local item and its read of the
+    /// records.
+    let coverHandOffReading: (@Sendable () async -> Void)?
 
     /// Items with an enqueue, control, deletion or completion under way, by their item-level
     /// key (no episode). Each of these holds its item (``holdingItem(_:_:)``), so two calls for
@@ -90,6 +97,14 @@ public actor DownloadManager {
     /// How many times a record stopped being tracked (``forget(_:)``); a read of records that
     /// overlapped one is made again (``readSettled(_:)``).
     private var forgotten = 0
+    // Known limitation: a relaunch before the next episode completes loses a refused cover.
+    /// Covers of items to fetch again at the item's next episode completion
+    /// (``restoreCover(after:itemID:)``), by item-level key: one nothing took over while the
+    /// item had no local item (``handOffCover(_:of:)``) and episode records of it remained, or
+    /// one whose refetch failed for good (``dropFailedRefetch(_:)``). Dropped once used, or when
+    /// an episode completes into a deleted item and no record of the item is left. In memory
+    /// only.
+    var refusedCovers: [MediaKey: CoverSource] = [:]
 
     /// - Parameters:
     ///   - store: the same actor the engine uses.
@@ -124,7 +139,8 @@ public actor DownloadManager {
         subscriberRemoved: (@Sendable () -> Void)? = nil,
         trackingRecords: (@Sendable () async -> Void)? = nil,
         recordRead: (@Sendable (UUID) async -> Void)? = nil,
-        usedPathsReading: (@Sendable () async -> Void)? = nil
+        usedPathsReading: (@Sendable () async -> Void)? = nil,
+        coverHandOffReading: (@Sendable () async -> Void)? = nil
     ) {
         self.store = store
         self.localItems = localItems
@@ -140,6 +156,7 @@ public actor DownloadManager {
         self.trackingRecords = trackingRecords
         self.recordRead = recordRead
         self.usedPathsReading = usedPathsReading
+        self.coverHandOffReading = coverHandOffReading
     }
 
     deinit {
@@ -178,13 +195,20 @@ public actor DownloadManager {
                 },
             ]
             await trackingRecords?()
+            var records: [DownloadRecordDTO] = []
             do {
-                for record in try await readSettled({ try await self.store.allRecords() })
-                where tracked[record.id] == nil {
+                records = try await readSettled({ try await self.store.allRecords() })
+                for record in records where tracked[record.id] == nil {
                     track(record)
                 }
             } catch {
                 logError("Couldn't read downloads to track", error)
+            }
+            // A refetch whose failure was saved before the process ended: nothing resumes it.
+            // One too large stays dropped, as its update would have.
+            for record in records where record.isCoverOnly && record.state == .failed {
+                let tooLarge = record.parts.contains { DownloadEngine.failedAsTooLarge($0.lastError) }
+                await dropFailedRefetch(record.id, code: tooLarge ? .tooLarge : nil)
             }
         }
         try locations.prepare()
@@ -249,6 +273,8 @@ public actor DownloadManager {
         defer { endEnqueuing(itemKey) }
         let key = MediaKey(serverConnectionID: connectionID, libraryItemId: item.id, episodeId: episodeID)
         var existing = try await read { try await self.store.record(key: key) }
+        // A cover-only record (#326) shares a podcast's item-level key; it isn't this download.
+        if existing?.isCoverOnly == true { existing = nil }
         if let record = existing, !replacingExisting {
             if let result = try await keep(record, item: item) { return result }
             // The record was finalised or deleted meanwhile: plan as if it never existed.
@@ -363,14 +389,19 @@ public actor DownloadManager {
     ///   record of the item will fetch and attach. The plan gets no cover part.
     /// - `completed`: a cover part another record of the item has already fetched, on disk.
     ///   Its record may never complete (paused or failed), so the plan carries it instead.
+    /// - `completedUpdatedAt`: when that cover was updated, from its record's snapshot.
     /// A pending cover part of a paused or failed record counts for neither: the plan fetches
-    /// its own.
+    /// its own. A cover-only record of the item (whose key is the item's) counts too.
     func existingCover(
         for key: MediaKey, localItem: LocalLibraryItemDTO?
-    ) async throws(DownloadManagerError) -> (pendingPath: String?, completed: DownloadPartDTO?) {
-        if let path = localItem?.coverRelativePath { return (path, nil) }
+    ) async throws(DownloadManagerError) -> (
+        pendingPath: String?, completed: DownloadPartDTO?, completedUpdatedAt: Date?
+    ) {
+        if let path = localItem?.coverRelativePath { return (path, nil, nil) }
         let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
-        let siblings = records.filter { $0.key.libraryItemId == key.libraryItemId && $0.key != key }
+        let siblings = records.filter {
+            $0.key.libraryItemId == key.libraryItemId && ($0.key != key || $0.isCoverOnly)
+        }
         let covers = siblings.compactMap { record in
             record.parts.first { $0.kind == .cover }.map { (record, $0) }
         }
@@ -380,11 +411,11 @@ public actor DownloadManager {
                 && (try? locations.fileURL(forRelativePath: part.destinationRelativePath))
                     .map { FileManager.default.fileExists(atPath: $0.path) } == true
         }
-        if let stored { return (nil, stored.1) }
+        if let stored { return (nil, stored.1, stored.0.media.coverUpdatedAt) }
         let pending = covers.first { record, part in
             part.state != .completed && (record.state == .queued || record.state == .downloading)
         }
-        return (pending?.1.destinationRelativePath, nil)
+        return (pending?.1.destinationRelativePath, nil, nil)
     }
 
     private func checkCapacity(for record: DownloadRecordDTO, item: LibraryItem) async throws(DownloadManagerError) {
@@ -442,11 +473,16 @@ public actor DownloadManager {
         case .partFailed(_, let recordID, let code, let message, let willRetry):
             await refresh(recordID, announce: true)
             // A record cancelled meanwhile isn't tracked any more, and isn't reported again.
-            if !willRetry, tracked[recordID] != nil {
+            guard !willRetry, let record = tracked[recordID] else { break }
+            if record.isCoverOnly {
+                await dropFailedRefetch(recordID, code: code)
+            } else {
                 emit(.failed(recordID: recordID, code: code, message: message))
             }
         case .recordComplete(let recordID, let itemID):
             await complete(recordID, as: itemID)
+        case .recordDiscarded(let record):
+            await discard(record)
         case .sessionUnavailable(let code, _):
             Log.downloads.error("Downloads are waiting for the session: \(code.rawValue, privacy: .public)")
         case .recordStarted(let recordID):
@@ -458,12 +494,18 @@ public actor DownloadManager {
     /// holds the item, so this runs before or after a deletion of the item, never during it.
     /// Media deleted before this ran (the local item, or the episode, deleted while the engine
     /// finalised the record or after) is reported as
-    /// ``DownloadManagerEvent/recordRemoved(recordID:)`` and not linked.
+    /// ``DownloadManagerEvent/recordRemoved(recordID:)`` and not linked, as is a cover-only
+    /// record, which downloaded no media, and whose file is removed unless the item took it. An
+    /// episode completing into a local item without a cover may give it one
+    /// (``restoreCover(after:itemID:)``).
     private func complete(_ recordID: UUID, as itemID: UUID) async {
+        let isCoverOnly = tracked[recordID]?.isCoverOnly == true
+        let fetchedCover = tracked[recordID]?.fetchedCover
         var key = forget(recordID)
         if key == nil { key = await bookKey(ofLocalItem: itemID) }
         guard let key else {
-            Log.downloads.fault("A download completed that the manager didn't track")
+            // A podcast's record (an episode, or a cover-only one) can't be told from its item.
+            Log.downloads.fault("A download completed that the manager didn't track and isn't a book")
             return
         }
         await holdingItem(key) {
@@ -476,12 +518,18 @@ public actor DownloadManager {
                 logError("Couldn't read a downloaded item", error)
                 downloaded = true
             }
-            guard downloaded else {
+            guard downloaded, !isCoverOnly else {
                 reportRemoved(recordID)
+                // A refetched cover the item didn't take, as it had one by then, goes.
+                if let fetchedCover {
+                    await cleanUp(after: key, removing: [fetchedCover], folder: nil, cover: nil)
+                }
+                if !isCoverOnly, key.episodeId != nil { await dropRefusedCoverIfUnused(key) }
                 return
             }
             await linkProgress(key: key, itemID: itemID)
             emit(.completed(recordID: recordID, itemID: itemID, key: key))
+            if key.episodeId != nil { await restoreCover(after: key, itemID: itemID) }
         }
     }
 
@@ -565,7 +613,8 @@ public actor DownloadManager {
         }
         tracked[record.id] = TrackedRecord(
             key: record.key, parts: parts,
-            completed: Set(record.parts.filter { $0.state == .completed }.map(\.id)))
+            completed: Set(record.parts.filter { $0.state == .completed }.map(\.id)), isCoverOnly: record.isCoverOnly,
+            fetchedCover: record.isCoverOnly ? record.parts.first?.destinationRelativePath : nil)
     }
 
     /// Stops tracking a record; returns its key. A refresh that read the record before reads
