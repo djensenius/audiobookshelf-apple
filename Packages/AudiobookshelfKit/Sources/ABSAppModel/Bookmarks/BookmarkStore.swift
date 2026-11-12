@@ -86,6 +86,7 @@ public final class BookmarkStore: SessionParticipant {
     private var service: Service?
 
     @ObservationIgnored private let makeService: @MainActor (APIClient) -> Service
+    @ObservationIgnored private let isOffline: @MainActor () -> Bool
     /// Bumped by ``clear()`` and at the end of a session, so older writes and loads are dropped.
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var seedRequests = 0
@@ -93,14 +94,23 @@ public final class BookmarkStore: SessionParticipant {
     @ObservationIgnored private var loads = 0
     @ObservationIgnored private var pending: [Int: Pending] = [:]
     @ObservationIgnored private var tails: [String: Tail] = [:]
+    /// Every write not finished yet, including those queued behind a newer tail.
+    @ObservationIgnored private var writeTasks: [Int: Task<Result<AudioBookmark?, any Error>, Never>] = [:]
     @ObservationIgnored private var tickets = 0
     /// Increases with every finished write.
     @ObservationIgnored private var commitSerial = 0
     /// The ``commitSerial`` of the last finished write per key, until a load started after it.
     @ObservationIgnored private var committed: [Key: Int] = [:]
 
-    public init(makeService: @escaping @MainActor (APIClient) -> any BookmarkWriting & BookmarkReading = { $0 }) {
+    /// - Parameter isOffline: whether the session is offline right now. The lifecycle doesn't
+    ///   call participants when a session goes offline with the same client, so pass a reading
+    ///   of `SessionLifecycle.gate` (`.ready(_, isOffline: true)`).
+    public init(
+        makeService: @escaping @MainActor (APIClient) -> any BookmarkWriting & BookmarkReading = { $0 },
+        isOffline: @escaping @MainActor () -> Bool = { false }
+    ) {
         self.makeService = makeService
+        self.isOffline = isOffline
     }
 
     /// The item's bookmarks, by time.
@@ -109,7 +119,9 @@ public final class BookmarkStore: SessionParticipant {
     }
 
     /// Whether the session has a client and isn't offline.
-    public var isAvailable: Bool { service != nil }
+    public var isAvailable: Bool { service != nil && !isOffline() }
+
+    private var availableService: Service? { isAvailable ? service : nil }
 
     // MARK: Loading
 
@@ -118,13 +130,16 @@ public final class BookmarkStore: SessionParticipant {
     /// Throws ``BookmarkStoreError/unavailable`` without a usable connection, `CancellationError`
     /// when ``clear()`` or the end of the session dropped the response, or the request's error.
     public func refresh() async throws {
-        guard let service else { throw BookmarkStoreError.unavailable }
+        guard let service = availableService else { throw BookmarkStoreError.unavailable }
         let token = beginSeed()
         loads += 1
         isLoading = true
         defer {
-            loads -= 1
-            isLoading = loads > 0
+            // ``clear()`` reset the count, so a load from before it mustn't change it.
+            if token.generation == generation {
+                loads -= 1
+                isLoading = loads > 0
+            }
         }
         let bookmarks = try await service.allBookmarks()
         guard seed(bookmarks, token: token) || token.generation == generation else { throw CancellationError() }
@@ -141,6 +156,11 @@ public final class BookmarkStore: SessionParticipant {
         appliedSeedRequest = 0
         pending = [:]
         tails = [:]
+        // A write still running could otherwise be retried with the next session's tokens.
+        for task in writeTasks.values { task.cancel() }
+        writeTasks = [:]
+        loads = 0
+        if isLoading { isLoading = false }
         committed = [:]
         hasLoaded = false
         if !entries.isEmpty { entries = [:] }
@@ -175,7 +195,8 @@ public final class BookmarkStore: SessionParticipant {
             }
         }
         for ticket in pending.keys.sorted() {
-            guard var write = pending[ticket] else { continue }
+            // A superseded write stays superseded: its optimistic value isn't reapplied.
+            guard var write = pending[ticket], !write.isSuperseded else { continue }
             if Self.value(at: write.key, in: next) == write.before {
                 Self.set(write.optimistic, at: write.key, in: &next)
             } else {
@@ -216,7 +237,7 @@ public final class BookmarkStore: SessionParticipant {
 
     private func run(_ key: Key, _ write: Write) async throws -> AudioBookmark? {
         let session = generation
-        guard service != nil else { throw BookmarkStoreError.unavailable }
+        guard availableService != nil else { throw BookmarkStoreError.unavailable }
         let previous = tails[key.itemID]?.task
         tickets += 1
         let ticket = tickets
@@ -229,7 +250,9 @@ public final class BookmarkStore: SessionParticipant {
             }
         }
         tails[key.itemID] = Tail(ticket: ticket, task: task)
+        writeTasks[ticket] = task
         let result = await task.value
+        writeTasks[ticket] = nil
         // Tickets are never reused, so an older session's write can't remove a newer tail.
         if tails[key.itemID]?.ticket == ticket { tails[key.itemID] = nil }
         return try result.get()
@@ -237,7 +260,7 @@ public final class BookmarkStore: SessionParticipant {
 
     private func perform(_ key: Key, _ write: Write, ticket: Int, session: Int) async throws -> AudioBookmark? {
         guard session == generation else { throw CancellationError() }
-        guard let service else { throw BookmarkStoreError.unavailable }
+        guard let service = availableService else { throw BookmarkStoreError.unavailable }
         let before = value(at: key)
         let optimistic: AudioBookmark?
         switch write {

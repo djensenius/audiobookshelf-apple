@@ -23,10 +23,14 @@ enum BookmarkRequest: Sendable, Equatable {
 final class FakeBookmarkService: BookmarkWriting, BookmarkReading {
     let writes = GatedCalls<BookmarkRequest, AudioBookmark?>()
     let loads = GatedCalls<Int, [AudioBookmark]>()
-    private let counters = Mutex((inFlight: 0, peak: 0, loads: 0))
+    private let counters = Mutex((inFlight: 0, peak: 0, loads: 0, sent: 0, cancelled: 0))
 
     /// The most writes in flight at once.
     var peakWrites: Int { counters.withLock { $0.peak } }
+    /// Writes sent so far.
+    var sentWrites: Int { counters.withLock { $0.sent } }
+    /// Writes whose task was cancelled while in flight.
+    var cancelledWrites: Int { counters.withLock { $0.cancelled } }
 
     func createBookmark(itemID: String, time: Double, title: String) async throws -> AudioBookmark {
         let reply = try await write(.create(itemID: itemID, time: time, title: title))
@@ -54,10 +58,15 @@ final class FakeBookmarkService: BookmarkWriting, BookmarkReading {
     private func write(_ request: BookmarkRequest) async throws -> AudioBookmark? {
         counters.withLock {
             $0.inFlight += 1
+            $0.sent += 1
             $0.peak = max($0.peak, $0.inFlight)
         }
         defer { counters.withLock { $0.inFlight -= 1 } }
-        return try await writes.call(request)
+        return try await withTaskCancellationHandler {
+            try await writes.call(request)
+        } onCancel: {
+            counters.withLock { $0.cancelled += 1 }
+        }
     }
 }
 

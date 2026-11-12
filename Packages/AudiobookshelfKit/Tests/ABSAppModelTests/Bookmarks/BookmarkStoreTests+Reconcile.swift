@@ -227,6 +227,7 @@ extension BookmarkStoreTests {
         try #require(await writes.next()).reply.resume(returning: nil)
         try await rename.value
         #expect(store.bookmarks(itemID: "item") == [bookmark("item", 30, "Next")])
+        #expect(service.cancelledWrites == 0)
     }
 
     // MARK: Session changes
@@ -245,6 +246,96 @@ extension BookmarkStoreTests {
         await #expect(throws: CancellationError.self) { try await create.value }
         #expect(store.bookmarks(itemID: "item").isEmpty)
         #expect(!store.hasLoaded)
+    }
+
+    @Test func sessionEndCancelsEveryWriteInFlight() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        var writes = service.writes.calls.makeAsyncIterator()
+
+        let first = Task { try await store.create(itemID: "item", time: 1, title: "First") }
+        let write = try #require(await writes.next())
+        // Queued behind the first, so the first is no longer the item's tail.
+        let second = Task { try await store.create(itemID: "item", time: 2, title: "Second") }
+        for _ in 0..<10 { await Task.yield() }
+        await store.sessionWillEnd(.signOut)
+        #expect(service.cancelledWrites == 1)
+
+        write.reply.resume(throwing: CancellationError())
+        await #expect(throws: CancellationError.self) { try await first.value }
+        await #expect(throws: CancellationError.self) { try await second.value }
+        #expect(service.sentWrites == 1)
+    }
+
+    @Test func goingOfflineMakesTheStoreUnavailable() async throws {
+        let service = FakeBookmarkService()
+        let offline = Locked(false)
+        let store = BookmarkStore(makeService: { _ in service }, isOffline: { offline.value })
+        await store.sessionDidStart(bookmarkContext(client: try makeClient()))
+        #expect(store.isAvailable)
+
+        // Fails anything sent anyway, so a regression fails instead of waiting for a reply.
+        let drain = Task {
+            for await call in service.writes.calls { call.reply.resume(throwing: BookmarkTestError.rejected) }
+        }
+        let drainLoads = Task {
+            for await call in service.loads.calls { call.reply.resume(throwing: BookmarkTestError.rejected) }
+        }
+        defer {
+            drain.cancel()
+            drainLoads.cancel()
+        }
+
+        // The lifecycle doesn't notify participants when only the gate changes.
+        offline.value = true
+        #expect(!store.isAvailable)
+        await #expect(throws: BookmarkStoreError.unavailable) {
+            try await store.create(itemID: "item", time: 1, title: "Mark")
+        }
+        await #expect(throws: BookmarkStoreError.unavailable) { try await store.refresh() }
+        #expect(service.sentWrites == 0)
+        #expect(store.bookmarks(itemID: "item").isEmpty)
+    }
+
+    @Test func loadPendingAcrossClearDoesNotLeakLoadingState() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        var loads = service.loads.calls.makeAsyncIterator()
+
+        let old = Task { try await store.refresh() }
+        let oldLoad = try #require(await loads.next())
+        await store.sessionWillEnd(.switch)
+        await store.sessionDidStart(bookmarkContext(client: try makeClient()))
+        #expect(!store.isLoading)
+
+        let new = Task { try await store.refresh() }
+        let newLoad = try #require(await loads.next())
+        #expect(store.isLoading)
+        oldLoad.reply.resume(returning: [bookmark("item", 1)])
+        await #expect(throws: CancellationError.self) { try await old.value }
+        #expect(store.isLoading)
+
+        newLoad.reply.resume(returning: [])
+        try await new.value
+        #expect(!store.isLoading)
+    }
+
+    @Test func laterLoadDoesNotReapplySupersededWrite() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        let existing = bookmark("item", 30, "Old")
+        store.replaceAll(from: bookmarkUser([existing]))
+        var writes = service.writes.calls.makeAsyncIterator()
+
+        let rename = Task { try await store.rename(existing, to: "New") }
+        let write = try #require(await writes.next())
+        store.replaceAll(from: bookmarkUser([bookmark("item", 30, "Other device")]))
+        store.replaceAll(from: bookmarkUser([existing]))
+        #expect(store.bookmarks(itemID: "item") == [existing])
+
+        write.reply.resume(throwing: BookmarkTestError.rejected)
+        await #expect(throws: BookmarkTestError.rejected) { try await rename.value }
+        #expect(store.bookmarks(itemID: "item") == [existing])
     }
 
     @Test func newSessionWriteDoesNotWaitForOldSession() async throws {
