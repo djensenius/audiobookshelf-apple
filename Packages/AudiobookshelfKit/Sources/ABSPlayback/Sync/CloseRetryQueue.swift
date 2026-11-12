@@ -30,8 +30,8 @@ final class CloseRetryQueue {
     /// those begun since. Drains run one at a time, so one pass owns it; `nil` outside a pass.
     fileprivate(set) var passCaptures: Set<String>?
     fileprivate var captures: [UUID: Task<Void, Never>] = [:]
-    /// Test seam: every admission verdict, in order.
-    fileprivate(set) var verdicts: [(sessionID: String, verdict: DeferredReportAdmission)] = []
+    /// Test seam: hears each admission verdict, in order. Nothing keeps them otherwise.
+    var verdictGiven: (@MainActor (_ sessionID: String, _ verdict: DeferredReportAdmission) -> Void)?
     /// Captured closes kept to retry that the store couldn't save, their first save included:
     /// only this holds them, so each drain saves them first. At most ``unsavedLimit``, the oldest
     /// dropped first; dropped on detach, as no drain follows.
@@ -210,7 +210,7 @@ extension ProgressSyncer {
                 }
                 verdict = checked
             }
-            closeQueue.verdicts.append((close.sessionID, verdict))
+            closeQueue.verdictGiven?(close.sessionID, verdict)
             switch verdict {
             case .send:
                 break

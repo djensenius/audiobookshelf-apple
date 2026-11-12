@@ -15,6 +15,8 @@ struct CloseRetryFixture {
     let s: SyncHarness
     let model: ReconciliationSessionModel
     let client: SessionModelClient
+    /// The verdicts the syncer's close passes gave, in order.
+    let given = Box<[(sessionID: String, verdict: DeferredReportAdmission)]>([])
 
     init(
         progressStore: LocalProgressStore? = nil, connectionID: UUID = UUID(),
@@ -27,6 +29,7 @@ struct CloseRetryFixture {
         s.service.state.withLock { $0.sessionClient = client }
         s.h.sleep.elapsesImmediately = true
         (self.s, self.model, self.client) = (s, model, client)
+        s.syncer.closeQueue.verdictGiven = { [given] in given.value.append(($0, $1)) }
     }
 
     var key: MediaKey { s.h.key("a") }
@@ -86,7 +89,7 @@ struct CloseRetryFixture {
         }
     }
 
-    var verdicts: [DeferredReportAdmission] { s.syncer.closeQueue.verdicts.map(\.verdict) }
+    var verdicts: [DeferredReportAdmission] { given.value.map(\.verdict) }
 }
 
 /// #382's acceptance: a `/close` the server didn't acknowledge is kept across a relaunch and
@@ -417,7 +420,7 @@ struct CloseRetryTests {
 
         #expect(queue.passCaptures == nil)
         #expect(f.s.service.closes.map(\.id) == ["session-1"])
-        #expect(queue.verdicts.map(\.sessionID) == ["session-1"])
+        #expect(f.given.value.map(\.sessionID) == ["session-1"])
         let kept = try await f.queued()
         if outcome == .acknowledged {
             #expect(kept.isEmpty)
@@ -480,7 +483,7 @@ struct CloseRetryTests {
         await r.drainWhenDue()
 
         #expect(r.s.service.closes.map(\.id) == ["session-1"])
-        #expect(queue.verdicts.map(\.sessionID) == ["session-1", "session-2"])
+        #expect(r.given.value.map(\.sessionID) == ["session-1", "session-2"])
         #expect(r.verdicts == [.send, .skip(.closeChanged)])
         let kept = try await r.queued()
         if outcome == .acknowledged {
