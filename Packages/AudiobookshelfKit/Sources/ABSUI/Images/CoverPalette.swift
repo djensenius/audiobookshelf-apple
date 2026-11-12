@@ -35,34 +35,62 @@ public struct CoverColor: Sendable, Hashable {
 }
 
 /// Average cover colours, cached per ``ImageKey`` whatever its width bucket. Computed with
-/// `CIAreaAverage` on the 300-pixel bucket, a simple mean of the encoded values as in the
+/// `CIAreaAverage` on the 300-pixel bucket, a simple mean of the sRGB-encoded values as in the
 /// legacy app.
 public final class CoverPalette: Sendable {
-    private let colors = Mutex<[ImageKey: CoverColor]>([:])
+    private struct State {
+        var colors: [ImageKey: CoverColor] = [:]
+        /// Averages in progress, which concurrent callers for the same key share.
+        var loads: [ImageKey: Task<CoverColor?, Never>] = [:]
+    }
+
+    private let state = Mutex(State())
     private let load: @Sendable (ImageKey) async throws -> CGImage
+    private let capacity: Int
 
     public convenience init(pipeline: ImagePipeline) {
         self.init { key in try await pipeline.cgImage(for: key, size: CGSize(width: 64, height: 64)) }
     }
 
-    init(load: @escaping @Sendable (ImageKey) async throws -> CGImage) {
+    /// - Parameter capacity: the most colours kept; one is dropped to make room for another.
+    init(capacity: Int = 1_000, load: @escaping @Sendable (ImageKey) async throws -> CGImage) {
+        self.capacity = capacity
         self.load = load
     }
 
     /// The colour already computed for `key`, without loading anything, for a view's first frame.
     public func cachedColor(for key: ImageKey) -> CoverColor? {
-        colors.withLock { $0[key.with(bucket: .small)] }
+        state.withLock { $0.colors[key.with(bucket: .small)] }
     }
 
     /// The average colour of `key`'s cover, or ``CoverColor/fallback`` if it can't be loaded.
     /// The fallback isn't cached, so a later call tries again.
     public func color(for key: ImageKey) async -> CoverColor {
         let key = key.with(bucket: .small)
-        if let cached = colors.withLock({ $0[key] }) { return cached }
-        guard let image = try? await load(key), let color = Self.averageColor(of: image) else { return .fallback }
-        colors.withLock { $0[key] = color }
-        return color
+        let (cached, task) = state.withLock { state -> (CoverColor?, Task<CoverColor?, Never>?) in
+            if let color = state.colors[key] { return (color, nil) }
+            if let task = state.loads[key] { return (nil, task) }
+            let task = Task { [load] in (try? await load(key)).flatMap(Self.averageColor) }
+            state.loads[key] = task
+            return (nil, task)
+        }
+        guard let task else { return cached ?? .fallback }
+        let color = await task.value
+        state.withLock { state in
+            guard state.loads[key] == task else { return }
+            state.loads[key] = nil
+            guard let color else { return }
+            if state.colors.count >= capacity, state.colors[key] == nil {
+                state.colors.remove(at: state.colors.startIndex)
+            }
+            state.colors[key] = color
+        }
+        return color ?? .fallback
     }
+
+    private static let sRGB = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+    /// Thread-safe, and costly to create.
+    private static let context = CIContext(options: [.workingColorSpace: sRGB])
 
     static func averageColor(of image: CGImage) -> CoverColor? {
         let input = CIImage(cgImage: image)
@@ -70,12 +98,12 @@ public final class CoverPalette: Sendable {
         filter.inputImage = input
         filter.extent = input.extent
         guard let output = filter.outputImage else { return nil }
-        // No working colour space: the mean of the encoded sRGB values, not of linear light.
-        let context = CIContext(options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull()])
+        // An sRGB working space: other spaces such as Display P3 are converted, but the values
+        // stay encoded rather than linear light.
         var pixel = [UInt8](repeating: 0, count: 4)
         context.render(
             output, toBitmap: &pixel, rowBytes: 4, bounds: CGRect(x: 0, y: 0, width: 1, height: 1), format: .RGBA8,
-            colorSpace: nil)
+            colorSpace: sRGB)
         return CoverColor(red: Double(pixel[0]) / 255, green: Double(pixel[1]) / 255, blue: Double(pixel[2]) / 255)
     }
 }

@@ -480,14 +480,26 @@ static, unauthenticated remote images (none are planned).
       Each pass enumerates the folder and resets the size counter from what it
       finds, which also picks up files the OS purged. The folder is listed off
       the actor, so lookups and inserts aren't blocked meanwhile; files written
-      or touched during the listing are counted from their current state.
+      or touched during the listing are counted from their current state, and
+      a file whose modification date changed since the listing isn't evicted.
+      Hidden staging files (`.<uuid>.partial`) aren't counted; ones older than
+      10 minutes are left over from an interrupted write and are deleted.
+      Younger ones may belong to another process sharing the App Group, so
+      they are kept.
     - **During a session:** the store keeps its total size in bytes in memory.
       It is scanned at launch (`totalFileAllocatedSizeKey`) and updated on
       every write and delete. When a write pushes the total over the cap, the
-      store starts one eviction task at `.background` priority, unless one is
-      already running. The task deletes the oldest files until the total is at
-      most 90 % of the cap. This bounds a Mac app left in the foreground for
-      days.
+      store starts one eviction task at `.background` priority. The task
+      deletes the oldest files until the total is at most 90 % of the cap.
+      This bounds a Mac app left in the foreground for days.
+    - **One pass at a time:** the first scan, full passes and the background
+      eviction are all the same pass. A caller that asks for one while
+      another is running joins it instead of listing the folder again, so two
+      listings never evict from the same snapshot. A pass evicts only when
+      the total is over the cap.
+    - **Removing a server** doesn't wait for a running pass: it measures and
+      deletes the folder, and the pass drops that server's files from its
+      listing.
     - **Leases:** `CoverFileStore` is an actor. A lookup hit or an insert
       returns the file URL together with a lease (a per-file reference count)
       taken in the same actor call, so no eviction can run between the two.

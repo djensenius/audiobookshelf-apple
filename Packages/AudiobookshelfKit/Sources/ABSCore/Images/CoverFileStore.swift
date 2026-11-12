@@ -76,16 +76,21 @@ struct LeasedFile: Sendable {
 /// the cap.
 public actor CoverFileStore {
     public nonisolated let directory: URL
+    /// The standardized path of `directory`, the prefix of every lease key.
+    private nonisolated let root: String
     private let limit: Int
     private let now: @Sendable () -> Date
     private let leases = LeaseCounts()
     private var totalBytes = 0
     private var isScanned = false
     private var evictionTask: Task<Void, Never>?
-    /// The first scan, which concurrent callers share.
-    private var scanTask: Task<Void, Never>?
-    private var listingsInFlight = 0
-    /// Paths written, touched or retired while a listing ran, measured again once it's done.
+    /// The running pass (the first scan, a full pass or a background eviction), which later
+    /// callers join, so two passes never act on the same listing.
+    private var passTask: Task<Void, Never>?
+    /// Whether a pass is listing the folder off the actor, so writes and touches meanwhile must
+    /// be measured again once it's done.
+    private var isListing = false
+    /// Paths written, touched, retired or deleted while a listing ran.
     private var touchedDuringListing: Set<String> = []
     /// Bumped by ``removeServer(_:)``, so fetches started before it can't write.
     private var serverGenerations: [UUID: Int] = [:]
@@ -94,6 +99,8 @@ public actor CoverFileStore {
     private var nextVersion = 1
     /// The number of background evictions started, for tests.
     private(set) var evictionCount = 0
+    /// The number of folder listings, for tests.
+    private(set) var listingCount = 0
     /// Runs on the listing's thread once it has read the folder, for tests.
     private let listingHook: (@Sendable () -> Void)?
 
@@ -105,6 +112,7 @@ public actor CoverFileStore {
 
     init(directory: URL, limit: Int, now: @escaping @Sendable () -> Date, listingHook: (@Sendable () -> Void)?) {
         self.directory = directory
+        root = directory.standardizedFileURL.path
         self.limit = limit
         self.now = now
         self.listingHook = listingHook
@@ -133,13 +141,20 @@ public actor CoverFileStore {
     }
 
     /// Rescans the folder, resetting the size from what it finds (which picks up files the OS
-    /// purged), and evicts down to 90 % of the cap if it is over. Run at launch and when the app
-    /// enters the background.
+    /// purged), deletes staging files left over 10 minutes ago by an interrupted write, and
+    /// evicts down to 90 % of the cap if it is over. Run at launch and when the app enters the background.
     ///
-    /// The folder is listed off the actor, so lookups and inserts aren't blocked meanwhile.
+    /// The folder is listed off the actor, so lookups and inserts aren't blocked meanwhile. If a
+    /// pass is already running, this waits for it instead of starting another.
     // TODO(#143): call at launch and from a background maintenance task.
     public func fullPass() async {
-        await evict(toBytes: limit * 9 / 10, onlyOverLimit: true)
+        if let passTask { return await passTask.value }
+        let task = Task {
+            await self.runPass()
+            self.passTask = nil
+        }
+        passTask = task
+        await task.value
     }
 
     /// The file for `key` whatever its extension, leased, or `nil`.
@@ -148,7 +163,7 @@ public actor CoverFileStore {
         let folder = folder(for: key.serverID)
         for ext in Self.extensions {
             let url = folder.appending(path: "\(key.fileStem).\(ext)")
-            guard !leases.isPendingDeletion(Self.leaseKey(url)),
+            guard !leases.isPendingDeletion(leaseKey(url)),
                 let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentModificationDateKey]),
                 values.isRegularFile == true
             else { continue }
@@ -156,7 +171,7 @@ public actor CoverFileStore {
                 try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: url.path)
                 touch(url)
             }
-            return LeasedFile(url: url, lease: lease(url), version: versions[Self.leaseKey(url), default: 0])
+            return LeasedFile(url: url, lease: lease(url), version: versions[leaseKey(url), default: 0])
         }
         return nil
     }
@@ -191,20 +206,20 @@ public actor CoverFileStore {
             throw error
         }
         // A retired copy at the destination is replaced rather than deleted on release.
-        let wasRetired = leases.cancelDeletion(Self.leaseKey(destination))
+        let wasRetired = leases.cancelDeletion(leaseKey(destination))
         let replacedBytes = wasRetired ? 0 : Self.allocatedSize(destination)
         let addedBytes = Self.allocatedSize(staging)
         guard rename(staging.path, destination.path) == 0 else {
             let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             if rename(staging.path, file.path) != 0 { try? FileManager.default.removeItem(at: staging) }
-            if wasRetired { leases.deleteWhenUnleased(Self.leaseKey(destination)) }
+            if wasRetired { leases.deleteWhenUnleased(leaseKey(destination)) }
             throw error
         }
         try? FileManager.default.setAttributes([.modificationDate: now()], ofItemAtPath: destination.path)
         touch(destination)
         let version = nextVersion
         nextVersion += 1
-        versions[Self.leaseKey(destination)] = version
+        versions[leaseKey(destination)] = version
         let leased = LeasedFile(url: destination, lease: lease(destination), version: version)
         totalBytes += addedBytes - replacedBytes
         for other in Self.extensions where other != ext {
@@ -213,7 +228,7 @@ public actor CoverFileStore {
         if totalBytes > limit, evictionTask == nil {
             evictionCount += 1
             evictionTask = Task(priority: .background) {
-                await self.evict(toBytes: self.limit * 9 / 10, onlyOverLimit: false)
+                await self.fullPass()
                 self.evictionTask = nil
             }
         }
@@ -221,14 +236,14 @@ public actor CoverFileStore {
     }
 
     /// Deletes one server's files, for example when its connection is removed.
-    public func removeServer(_ serverID: UUID) async {
+    public func removeServer(_ serverID: UUID) {
         serverGenerations[serverID, default: 0] += 1
-        await scanIfNeeded()
         let folder = folder(for: serverID)
-        let removed = files(in: folder).reduce(0) { $0 + $1.size }
+        let removed = Self.listing(of: folder, root: root, leases: leases).files.reduce(0) { $0 + $1.size }
         try? FileManager.default.removeItem(at: folder)
-        totalBytes = max(0, totalBytes - removed)
-        let prefix = Self.leaseKey(folder) + "/"
+        // A pass listing the folder meanwhile drops these files itself, by their generation.
+        if isScanned { totalBytes = max(0, totalBytes - removed) }
+        let prefix = "\(root)/\(serverID.uuidString)/"
         versions = versions.filter { !$0.key.hasPrefix(prefix) }
     }
 
@@ -239,7 +254,7 @@ public actor CoverFileStore {
         guard
             url.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path
                 == directory.standardizedFileURL.path,
-            versions[Self.leaseKey(url), default: 0] == version
+            versions[leaseKey(url), default: 0] == version
         else { return }
         retire(url)
     }
@@ -250,32 +265,38 @@ public actor CoverFileStore {
     }
 
     func isLeased(_ url: URL) -> Bool {
-        leases.leasedPaths.contains(Self.leaseKey(url))
+        leases.leasedPaths.contains(leaseKey(url))
     }
 
     /// Resyncs the size with the folder, which the OS may have purged since the last pass, and
-    /// evicts down to `target`. With `onlyOverLimit`, evicts only if the folder is over the cap.
-    private func evict(toBytes target: Int, onlyOverLimit: Bool) async {
+    /// evicts down to 90 % of the cap if it is over. Only ``fullPass()`` runs it, one at a time.
+    private func runPass() async {
         let generations = serverGenerations
-        listingsInFlight += 1
-        var listing = await Self.listFiles(in: directory, leases: leases, hook: listingHook)
-        listingsInFlight -= 1
+        isListing = true
+        listingCount += 1
+        let listing = await Self.listFolder(directory, root: root, leases: leases, hook: listingHook)
+        isListing = false
         let touched = touchedDuringListing
-        if listingsInFlight == 0 { touchedDuringListing = [] }
+        touchedDuringListing = []
+        // This store stages and renames a write within one actor call, but another process
+        // sharing the App Group container could be mid-write, so only old ones are deleted.
+        for (url, modified) in listing.partials where now().timeIntervalSince(modified) > 600 {
+            try? FileManager.default.removeItem(at: url)
+        }
         // Servers removed while the folder was listed have no files left to count.
-        listing.removeAll { file in
+        var files = listing.files.filter { file in
             let server = UUID(uuidString: file.url.deletingLastPathComponent().lastPathComponent)
             let wasRemoved = server.map { serverGenerations[$0, default: 0] != generations[$0, default: 0] } ?? false
-            return wasRemoved || touched.contains(Self.leaseKey(file.url))
+            return !wasRemoved && !touched.contains(file.key)
         }
-        listing += touched.compactMap { Self.file(at: URL(filePath: $0), leases: leases) }
+        files += touched.compactMap { Self.file(at: URL(filePath: $0), root: root, leases: leases) }
         isScanned = true
-        totalBytes = listing.reduce(0) { $0 + $1.size }
-        guard !onlyOverLimit || totalBytes > limit else { return }
+        totalBytes = files.reduce(0) { $0 + $1.size }
+        guard totalBytes > limit else { return }
         // Read after the listing, so leases taken while it ran are kept.
         let leased = leases.leasedPaths
-        for file in listing.sorted(by: { $0.modified < $1.modified }) where totalBytes > target {
-            guard !leased.contains(Self.leaseKey(file.url)) else { continue }
+        for file in files.sorted(by: { $0.modified < $1.modified }) where totalBytes > limit * 9 / 10 {
+            guard !leased.contains(file.key) else { continue }
             remove(file)
         }
     }
@@ -283,42 +304,39 @@ public actor CoverFileStore {
     /// Deletes `url` now, or once its last lease is released. Lookups skip it meanwhile, and it
     /// no longer counts towards the cap.
     private func retire(_ url: URL) {
-        let path = Self.leaseKey(url)
+        let path = leaseKey(url)
         guard FileManager.default.fileExists(atPath: path), !leases.isPendingDeletion(path) else { return }
         touch(url)
         totalBytes = max(0, totalBytes - Self.allocatedSize(url))
         leases.deleteWhenUnleased(path)
     }
 
-    /// Deletes a listed file, unless it was replaced or retired since the listing.
+    /// Deletes a listed file, unless it was replaced or retired since the listing. A file that
+    /// is already gone stops counting too.
     private func remove(_ file: File) {
+        guard !leases.isPendingDeletion(file.key) else { return }
         var url = file.url
         url.removeAllCachedResourceValues()
-        guard
-            (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate == file.modified,
-            !leases.isPendingDeletion(Self.leaseKey(url))
-        else { return }
-        let size = Self.allocatedSize(url)
-        guard (try? FileManager.default.removeItem(at: url)) != nil else { return }
-        totalBytes = max(0, totalBytes - size)
-        versions[Self.leaseKey(url)] = nil
+        if let values = try? url.resourceValues(forKeys: [.contentModificationDateKey]) {
+            guard values.contentModificationDate == file.modified,
+                (try? FileManager.default.removeItem(at: url)) != nil
+            else { return }
+        }
+        totalBytes = max(0, totalBytes - file.size)
+        versions[file.key] = nil
+        if isListing { touchedDuringListing.insert(file.key) }
     }
 
     private func touch(_ url: URL) {
-        if listingsInFlight > 0 { touchedDuringListing.insert(Self.leaseKey(url)) }
+        if isListing { touchedDuringListing.insert(leaseKey(url)) }
     }
 
     private func lease(_ url: URL) -> FileLease {
-        leases.lease(Self.leaseKey(url))
+        leases.lease(leaseKey(url))
     }
 
     private func scanIfNeeded() async {
-        guard !isScanned else { return }
-        if let scanTask { return await scanTask.value }
-        let task = Task { await fullPass() }
-        scanTask = task
-        await task.value
-        scanTask = nil
+        if !isScanned { await fullPass() }
     }
 
     private func folder(for serverID: UUID) -> URL {
@@ -327,28 +345,46 @@ public actor CoverFileStore {
 
     private struct File: Sendable {
         var url: URL
+        var key: String
         var size: Int
         var modified: Date
     }
 
-    /// The files of the whole cache, listed off the actor.
+    /// The files under a folder, and the staging files of writes, which don't count.
+    private struct Listing: Sendable {
+        var files: [File] = []
+        var partials: [(url: URL, modified: Date)] = []
+    }
+
+    /// The whole cache, listed off the actor.
     @concurrent
-    private static func listFiles(in root: URL, leases: LeaseCounts, hook: (@Sendable () -> Void)?) async -> [File] {
-        let listing = files(in: root, leases: leases)
+    private static func listFolder(
+        _ folder: URL, root: String, leases: LeaseCounts, hook: (@Sendable () -> Void)?
+    ) async -> Listing {
+        let listing = listing(of: folder, root: root, leases: leases)
         hook?()
         return listing
     }
 
-    private func files(in root: URL) -> [File] {
-        Self.files(in: root, leases: leases)
-    }
-
     /// The cache files, without those retired and waiting for their lease to be released, which
-    /// ``retire(_:)`` has already taken out of `totalBytes`.
-    private static func files(in root: URL, leases: LeaseCounts) -> [File] {
-        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: fileKeys)
-        else { return [] }
-        return enumerator.compactMap { item in (item as? URL).flatMap { file(at: $0, leases: leases) } }
+    /// ``retire(_:)`` has already taken out of `totalBytes`, and without hidden files.
+    private static func listing(of folder: URL, root: String, leases: LeaseCounts) -> Listing {
+        var listing = Listing()
+        guard let enumerator = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: fileKeys)
+        else { return listing }
+        for case let url as URL in enumerator {
+            let name = url.lastPathComponent
+            if name.hasPrefix(".") {
+                if name.hasSuffix(".partial") {
+                    let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                        .contentModificationDate
+                    listing.partials.append((url, modified ?? .distantPast))
+                }
+            } else if let file = file(at: url, root: root, leases: leases) {
+                listing.files.append(file)
+            }
+        }
+        return listing
     }
 
     private static let fileKeys: [URLResourceKey] = [
@@ -356,17 +392,26 @@ public actor CoverFileStore {
     ]
 
     /// The cache file at `url`, or `nil` if it's missing or retired.
-    private static func file(at url: URL, leases: LeaseCounts) -> File? {
+    private static func file(at url: URL, root: String, leases: LeaseCounts) -> File? {
+        let key = leaseKey(url, root: root)
         guard let values = try? url.resourceValues(forKeys: Set(fileKeys)), values.isRegularFile == true,
-            !leases.isPendingDeletion(leaseKey(url))
+            !leases.isPendingDeletion(key)
         else { return nil }
         return File(
-            url: url, size: values.totalFileAllocatedSize ?? 0, modified: values.contentModificationDate ?? .distantPast
-        )
+            url: url, key: key, size: values.totalFileAllocatedSize ?? 0,
+            modified: values.contentModificationDate ?? .distantPast)
     }
 
-    private static func leaseKey(_ url: URL) -> String {
-        url.resolvingSymlinksInPath().path
+    private func leaseKey(_ url: URL) -> String {
+        Self.leaseKey(url, root: root)
+    }
+
+    /// A file's key in ``LeaseCounts``, also the path it deletes. Every cache file is at
+    /// `<serverID>/<name>` under the root, so the key is built from those two components and the
+    /// root, never from the file system: resolving symlinks gives a different path once a file is
+    /// deleted (`/private/var` versus `/var`), so keys taken before and after would differ.
+    private static func leaseKey(_ url: URL, root: String) -> String {
+        "\(root)/\(url.deletingLastPathComponent().lastPathComponent)/\(url.lastPathComponent)"
     }
 
     /// Measured fresh: a `URL` caches resource values, and its file may have been replaced since.

@@ -96,5 +96,10 @@ import Testing
 
         let cover = try #require(await covers.downloadedCover(for: key(serverID)))
         #expect(cover.updatedAt == nil)
+
+        // Too far out for an `Int` of milliseconds: no version, rather than a trap.
+        try await store.updateCover(
+            itemID: item.id, relativePath: "li_1/cover.jpg", updatedAt: Date(timeIntervalSince1970: 1e300))
+        #expect(try #require(await covers.downloadedCover(for: key(serverID))).updatedAt == nil)
     }
 }

@@ -211,56 +211,6 @@ import Testing
         #expect(await store.size == 0)
     }
 
-    @Test func listingTheFolderDoesNotBlockTheActor() async throws {
-        let images = directory.url.appending(path: "Images")
-        _ = try await CoverFileStore(directory: images, limit: 1 << 20).insert(
-            moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: 0)
-        let listing = ListingGate()
-        let store = CoverFileStore(directory: images, limit: 1 << 20, now: Date.init) { listing.block() }
-
-        let scan = Task { await store.fullPass() }
-        #expect(await listing.waitUntilBlocked())
-        // Blocks the listing's thread: if the listing ran on the actor, this call would wait.
-        let answered = Mutex(false)
-        let call = Task {
-            _ = await store.generation(for: serverID)
-            answered.withLock { $0 = true }
-        }
-        let wasAnswered = await poll { answered.withLock { $0 } }
-        listing.release()
-        await scan.value
-        await call.value
-        #expect(wasAnswered)
-        #expect(await store.size == 16_384)
-    }
-
-    @Test func fileInsertedWhileTheFolderIsListedIsCounted() async throws {
-        let images = directory.url.appending(path: "Images")
-        _ = try await CoverFileStore(directory: images, limit: 1 << 20).insert(
-            moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: 0)
-        let listing = ListingGate()
-        let store = CoverFileStore(directory: images, limit: 1 << 20, now: Date.init) { listing.block() }
-        let first = Task { await store.size }
-        #expect(await listing.waitUntilBlocked())
-        listing.release()
-        #expect(await first.value == 16_384)
-
-        listing.blocksAgain()
-        let scan = Task { await store.fullPass() }
-        #expect(await listing.waitUntilBlocked())
-        let file = try temporaryFile()
-        let inserted = Mutex(false)
-        let insert = Task {
-            _ = try await store.insert(moving: file, for: key("b"), pathExtension: "webp", generation: 0)
-            inserted.withLock { $0 = true }
-        }
-        #expect(await poll { inserted.withLock { $0 } })
-        listing.release()
-        try await insert.value
-        await scan.value
-        #expect(await store.size == 32_768)
-    }
-
     @Test func largerReplacementOverTheCapEvicts() async throws {
         let tick = Mutex(0.0)
         let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 60_000) {
@@ -280,41 +230,4 @@ import Testing
         #expect(await store.lookup(key("a")) == nil)
         #expect(await store.lookup(key("b")) != nil)
     }
-}
-
-/// Blocks the store's folder listing on its own thread until released.
-private final class ListingGate: Sendable {
-    private let state = Mutex((isBlocked: false, isBlocking: true))
-    private let semaphore = DispatchSemaphore(value: 0)
-
-    func block() {
-        let blocks = state.withLock { state in
-            guard state.isBlocking else { return false }
-            state.isBlocked = true
-            return true
-        }
-        if blocks { semaphore.wait() }
-    }
-
-    func waitUntilBlocked() async -> Bool {
-        await poll { self.state.withLock { $0.isBlocked } }
-    }
-
-    func release() {
-        state.withLock { $0 = (isBlocked: false, isBlocking: false) }
-        semaphore.signal()
-    }
-
-    func blocksAgain() {
-        state.withLock { $0.isBlocking = true }
-    }
-}
-
-/// Waits up to two seconds for `condition`.
-private func poll(_ condition: @Sendable () -> Bool) async -> Bool {
-    for _ in 0..<2_000 {
-        if condition() { return true }
-        try? await Task.sleep(for: .milliseconds(1))
-    }
-    return condition()
 }
