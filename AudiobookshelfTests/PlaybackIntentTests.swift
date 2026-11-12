@@ -80,6 +80,20 @@ import Testing
         }
     }
 
+    /// An intent can launch the app with no scene to start the lifecycle, so the player is still
+    /// unbound: each command waits for the handler's `ready`, which restores the saved item.
+    @Test func commandsWaitUntilTheAppIsReady() async throws {
+        let current = CurrentPlayback()
+        let restored = playback
+        restored.pause()
+        PlaybackIntentRouter.handler = PlaybackIntentHandler(
+            playback: current, settings: settings, ready: { current.bind(restored) })
+        defer { PlaybackIntentRouter.handler = nil }
+        // Unbound, `current` is idle and resuming would throw `nothingToResume`.
+        _ = try await ResumeListeningIntent().perform()
+        #expect(restored.isPlaybackRequested)
+    }
+
     @Test func jumpUsesTheGivenSecondsOrTheUsersInterval() async throws {
         try await withHandler {
             _ = try await JumpIntent(direction: .forward, seconds: 45).perform()

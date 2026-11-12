@@ -63,11 +63,13 @@ struct AppPlayback {
     }
 
     /// Hands the playback intents (widgets, controls, Shortcuts, Siri) to ``current``, so they
-    /// share the player with the app's UI and CarPlay. Once per process.
-    func registerIntents(settings: AppSettings) {
+    /// share the player with the app's UI and CarPlay. Once per process. Each command first awaits
+    /// `lifecycle.start()`: an intent can launch the app without a scene to start it.
+    func registerIntents(settings: AppSettings, lifecycle: SessionLifecycle) {
         PlaybackIntentRouter.handler = PlaybackIntentHandler(
             playback: current, settings: settings,
-            sleepTimer: { [weak participant] in participant?.sleepTimer })
+            sleepTimer: { [weak participant] in participant?.sleepTimer },
+            ready: { [weak lifecycle] in await lifecycle?.start() })
     }
 
     /// One account session's scope, over an engine of its own. The connection's last-played record
