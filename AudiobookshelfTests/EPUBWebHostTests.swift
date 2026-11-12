@@ -900,6 +900,49 @@ private final class ReaderPage {
         #expect(texts == ["", text, ""])
     }
 
+    /// What all a book's style sheets grow by is budgeted too, since the book keeps them until it
+    /// closes: past it, a sheet within its own budget is emptied all the same.
+    @Test(.timeLimit(.minutes(1)), arguments: [(3000, 2), (0, 5)])
+    func styleSheetsGrowingPastTheBooksBudgetAreEmptied(budget: Int, rewrittenSheets: Int) async throws {
+        let sheets = (0..<5).map { "s\($0).css" }
+        let manifest =
+            #"<item id="a" href="a.png" media-type="image/png"/>"#
+            + sheets.map { #"<item id="\#($0)" href="\#($0)" media-type="text/css"/>"# }.joined()
+        let text = Array(repeating: "a.png", count: 20).joined(separator: " ")
+        let extra =
+            [TinyEPUB.Entry(name: "OEBPS/a.png", body: Data(count: 16))]
+            + sheets.map { TinyEPUB.Entry(name: "OEBPS/\($0)", body: Data(text.utf8)) }
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(extra: extra, manifest: manifest) })
+        _ = try await page.controller.webView.evaluateJavaScript(
+            """
+            const ePub = window.ePub
+            window.ePub = function (data, options) { return (window.testBook = ePub(data, options)) }
+            const create = URL.createObjectURL
+            window.testBlobs = {}
+            URL.createObjectURL = function (blob) { const url = create(blob); window.testBlobs[url] = blob; return url }
+            window.absReaderSheetsRewriteBudget = \(budget)
+            1
+            """)
+        let opening = Task { try await page.open("sheets") }
+        defer { opening.cancel() }
+        while try await page.evaluate("window.testBook !== undefined") != "true" {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let texts = try await page.controller.webView.callAsyncJavaScript(
+            """
+            await window.testBook.opened
+            const resources = window.testBook.resources
+            return Promise.all(sheets.map(function (sheet) {
+              return window.testBlobs[resources.replacementUrls[resources.urls.indexOf(sheet)]].text()
+            }))
+            """, arguments: ["sheets": sheets], contentWorld: .page)
+
+        let rewritten = try #require(texts as? [String])
+        #expect(rewritten.filter { $0.contains("blob:") }.count == rewrittenSheets)
+        #expect(rewritten.filter(\.isEmpty).count == 5 - rewrittenSheets)
+    }
+
     /// A relocation is posted whenever any of its fields changes, not only its start.
     @Test(.timeLimit(.minutes(1))) func aRelocationWithANewEndIsPosted() async throws {
         let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
@@ -986,14 +1029,18 @@ private final class ReaderPage {
         #expect(page.last("locationsReady") == nil)
     }
 
-    /// Real epub.js builds a section's locations in one go, each repeating every ancestor's id. A
-    /// chapter whose would pass the limit is skipped before that, and progress goes by section; one
-    /// with an ordinary id still gets its locations.
-    @Test(.timeLimit(.minutes(1)), arguments: [20_000, 8])
-    func locationsRepeatingALongElementIDAreSkippedBeforeParsing(idLength: Int) async throws {
+    /// Real epub.js builds a section's locations in one go, each repeating every ancestor's id at
+    /// its start and end. A chapter whose would pass the limit is skipped before that, and progress
+    /// goes by section: text under a long id, or ranges each starting under one and ending in a
+    /// short sibling. One with an ordinary id still gets its locations.
+    @Test(.timeLimit(.minutes(1)), arguments: ["longID", "spanning", "ordinary"])
+    func locationsRepeatingALongElementIDAreSkippedBeforeParsing(chapter: String) async throws {
+        let lorem = String(repeating: "Lorem ipsum dolor sit amet. ", count: 100)
+        let long = String(repeating: "x", count: chapter == "ordinary" ? 8 : 2000)
         let body =
-            #"<div id="\#(String(repeating: "x", count: idLength))"><p>"#
-            + String(repeating: "Lorem ipsum dolor sit amet. ", count: 100) + "</p></div>"
+            chapter == "spanning"
+            ? String(repeating: #"<div id="\#(long)">a</div><p>\#(String(repeating: "y", count: 150))</p>"#, count: 60)
+            : #"<div id="\#(String(repeating: long, count: 10))"><p>\#(lorem)</p></div>"#
         let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(chapterBody: body) })
         _ = try await page.controller.webView.evaluateJavaScript(
             """
@@ -1025,7 +1072,7 @@ private final class ReaderPage {
 
         try await page.open("long-id")
 
-        if idLength > 1000 {
+        if chapter != "ordinary" {
             while page.last("relocated")?["progress"] as? Double != 0.5 {
                 try await Task.sleep(for: .milliseconds(20))
             }

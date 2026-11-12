@@ -15,8 +15,9 @@
   // names, extra fields and comments it decodes (a local name counts once per entry using it).
   const MAX_ENTRIES = 10000
   const MAX_METADATA_BYTES = 8 * 1024 * 1024
-  // How many characters swapping asset URLs for blob URLs may add to one section or style sheet;
-  // past it the resource is left unrewritten (a section) or emptied (a style sheet).
+  // How many characters swapping asset URLs for blob URLs may add to one section or style sheet,
+  // and to all a book's style sheets (which it keeps until it closes); past it the resource is left
+  // unrewritten (a section) or emptied (a style sheet).
   const MAX_REWRITE_GROWTH = 16 * 1024 * 1024
   // epub.js's locations take time and memory in proportion to the spine. A longer spine, or
   // generation running past the deadline, gets progress by section instead.
@@ -342,8 +343,8 @@
   // Every URL in `content` swapped for its replacement in one pass, longest first. epub.js swaps
   // each in turn over the whole text, so a later URL also matches inside the blob URLs an earlier
   // one put in, and the text grows exponentially with the assets a book lists. `null` once the
-  // swaps would add more than the rewrite budget.
-  function substituteOnce(content, urls, replacements) {
+  // swaps would add more than the rewrite budget, or `allowance` if less.
+  function substituteOnce(content, urls, replacements, allowance) {
     const swaps = new Map()
     urls.forEach(function (url, index) {
       if (url && replacements[index] && !swaps.has(url)) swaps.set(url, replacements[index])
@@ -358,7 +359,7 @@
       })
       .join('|')
     // Tests lower the budget.
-    const budget = Number(window.absReaderRewriteBudget) || MAX_REWRITE_GROWTH
+    const budget = Math.min(Number(window.absReaderRewriteBudget) || MAX_REWRITE_GROWTH, allowance ?? Infinity)
     const overBudget = new Error('Over the rewrite budget')
     let growth = 0
     try {
@@ -418,6 +419,8 @@
       const unpacked = unpack.call(this, packaging)
       const resources = this.resources
       const sheets = new Map()
+      // Tests lower what the book's style sheets may grow by in all.
+      let sheetsAllowance = Number(window.absReaderSheetsRewriteBudget) || MAX_REWRITE_GROWTH
       const replacements = function () {
         return resources.urls.map(function (href) {
           return sheets.get(href) || resources.settings.archive.urlCache[resources.settings.resolver(href)]
@@ -435,7 +438,8 @@
         if (!text) return Promise.resolve()
         return text.then(
           function (css) {
-            const replaced = substituteOnce(css, this.relativeTo(absolute), replacements())
+            const replaced = substituteOnce(css, this.relativeTo(absolute), replacements(), sheetsAllowance)
+            if (replaced !== null) sheetsAllowance -= replaced.length - css.length
             // Over the budget, an empty sheet: with none, `replacements()` would use the original.
             const body = replaced === null ? '' : replaced
             const sheet = keep(URL.createObjectURL(new Blob([body], { type: 'text/css' })))
@@ -671,8 +675,9 @@
   }
 
   // About how many characters epub.js's locations for a section's `contents` come to, at most: one
-  // range CFI per `every` characters of text, each holding the CFI base and, twice, the path to
-  // its text (every ancestor's step, with its id). One walk of the section, as epub.js's parse.
+  // range CFI per `every` characters of text, each holding the CFI base and the paths to its start
+  // and end text (every ancestor's step, with its id), each no longer than the section's longest.
+  // One walk of the section, as epub.js's parse.
   function projectedLocations(contents, cfiBase, every) {
     const doc = contents && contents.ownerDocument
     const body = doc && doc.getElementsByTagName('body')[0]
@@ -681,9 +686,9 @@
     const children = new Map()
     const base = String(cfiBase || '').length + 32
     const walker = doc.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT)
-    let size = 0
+    let ranges = 0
     let counter = 0
-    let last = 0
+    let longest = 0
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       const parent = paths.get(node.parentNode) || 0
       const index = (children.get(node.parentNode) || 0) + 1
@@ -691,14 +696,13 @@
       if (node.nodeType === Node.ELEMENT_NODE) {
         paths.set(node, parent + 1 + String(index * 2).length + (node.id ? node.id.length + 2 : 0))
       } else if (node.textContent.trim().length > 0) {
-        const emitted = Math.floor((counter + node.length) / every)
+        ranges += Math.floor((counter + node.length) / every)
         counter = (counter + node.length) % every
-        size += emitted * (base + 2 * (parent + 16))
-        last = parent
+        longest = Math.max(longest, parent)
       }
     }
     // The text after the last full one ends a final range.
-    return counter > 0 ? size + base + 2 * (last + 16) : size
+    return (ranges + (counter > 0 ? 1 : 0)) * (base + 2 * (longest + 16))
   }
 
   // Generates the book's locations within the limits, falling back to progress by section.
