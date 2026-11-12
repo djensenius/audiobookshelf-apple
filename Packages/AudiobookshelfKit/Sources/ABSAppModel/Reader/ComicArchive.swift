@@ -69,10 +69,11 @@ public actor ComicArchive {
         // Other entries only create folders, which decide the web client's order.
         let pagePaths = Self.pageOrder(all.map { $0.type == .file || $0.path.hasSuffix("/") ? $0.path : $0.path + "/" })
         guard !pagePaths.isEmpty else { throw .noPages }
-        let byPath = Dictionary(files.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+        // Byte-exact keys: `String` equality would merge canonically equivalent names.
+        let byPath = Dictionary(files.map { (Array($0.path.utf8), $0) }, uniquingKeysWith: { first, _ in first })
 
         self.archive = archive
-        self.entries = pagePaths.compactMap { byPath[$0] }
+        self.entries = pagePaths.compactMap { byPath[Array($0.utf8)] }
         self.pagePaths = pagePaths
         self.comicInfo = Self.comicInfoEntry(in: files).flatMap { Self.readComicInfo($0, from: archive) }
         self.cacheDirectory = cacheDirectory
@@ -195,9 +196,11 @@ extension ComicArchive {
     /// order, and `flattenFilesObject` walks them depth first. So a folder's contents stay
     /// together, at the position where the folder first appeared. JavaScript lists integer-like
     /// keys (folders named `1`, `2`, …) first, in numeric order. A repeated path keeps its first
-    /// position, and the first entry is kept.
+    /// position, and the first entry is kept. Names are compared byte for byte, as in JavaScript,
+    /// so canonically equivalent names (NFC and NFD) stay apart.
     static func webFileOrder(_ paths: [String]) -> [String] {
         let root = Folder()
+        defer { root.dismantle() }
         entries: for path in paths {
             var parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             let isFolder = parts.count > 1 && parts.last == ""
@@ -215,11 +218,11 @@ extension ComicArchive {
                 folder.setFile(named: name, path: path)
             }
         }
-        var files: [String] = []
-        root.flatten(into: &files)
-        return files
+        return root.flatten()
     }
 
+    /// A folder of the entry tree. A ZIP path can nest tens of thousands of folders, so the tree is
+    /// walked and freed without recursion.
     private final class Folder {
         enum Node {
             case file(path: String)
@@ -227,38 +230,58 @@ extension ComicArchive {
         }
 
         private var names: [String] = []
-        private var nodes: [String: Node] = [:]
+        private var nodes: [[UInt8]: Node] = [:]
 
         /// The folder `name`, created if new; `nil` if a file has that name.
         func folder(named name: String) -> Folder? {
-            switch nodes[name] {
+            let key = Array(name.utf8)
+            switch nodes[key] {
             case .folder(let folder): return folder
             case .file: return nil
             case nil:
                 let folder = Folder()
                 names.append(name)
-                nodes[name] = .folder(folder)
+                nodes[key] = .folder(folder)
                 return folder
             }
         }
 
         /// Like libarchive.js, a file replaces a folder of the same name in place.
         func setFile(named name: String, path: String) {
-            switch nodes[name] {
+            let key = Array(name.utf8)
+            switch nodes[key] {
             case .file: return
             case .folder: break
             case nil: names.append(name)
             }
-            nodes[name] = .file(path: path)
+            nodes[key] = .file(path: path)
         }
 
-        func flatten(into files: inout [String]) {
-            for name in Self.javaScriptKeyOrder(names) {
-                switch nodes[name] {
+        /// The files, depth first.
+        func flatten() -> [String] {
+            var files: [String] = []
+            var stack: [(folder: Folder, names: ArraySlice<String>)] = [(self, Self.javaScriptKeyOrder(names)[...])]
+            while let top = stack.indices.last {
+                guard let name = stack[top].names.popFirst() else {
+                    stack.removeLast()
+                    continue
+                }
+                switch stack[top].folder.nodes[Array(name.utf8)] {
                 case .file(let path): files.append(path)
-                case .folder(let folder) where !name.hasPrefix("_"): folder.flatten(into: &files)
+                case .folder(let folder) where !name.hasPrefix("_"):
+                    stack.append((folder, Self.javaScriptKeyOrder(folder.names)[...]))
                 case .folder, nil: break
                 }
+            }
+            return files
+        }
+
+        /// Empties the tree, so releasing it doesn't recurse through every level.
+        func dismantle() {
+            var pending = [self]
+            while let folder = pending.popLast() {
+                for case .folder(let child) in folder.nodes.values { pending.append(child) }
+                folder.nodes.removeAll()
             }
         }
 
@@ -274,11 +297,15 @@ extension ComicArchive {
     }
 
     private static func isPage(_ path: String) -> Bool {
+        !isSkipped(path) && pageExtensions.contains((path as NSString).pathExtension.lowercased())
+    }
+
+    /// Whether `path` is a dotfile, such as a macOS `._` resource fork, or is in a folder starting
+    /// with `_` or `.`, such as `__MACOSX`.
+    private static func isSkipped(_ path: String) -> Bool {
         let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard let name = components.last, !name.isEmpty, !name.hasPrefix("."),
-            !components.dropLast().contains(where: { $0.hasPrefix("_") || $0.hasPrefix(".") })
-        else { return false }
-        return pageExtensions.contains((String(name) as NSString).pathExtension.lowercased())
+        guard let name = components.last, !name.isEmpty, !name.hasPrefix(".") else { return true }
+        return components.dropLast().contains { $0.hasPrefix("_") || $0.hasPrefix(".") }
     }
 
     /// The last run of ASCII digits in the file name without its extension, without leading zeros
@@ -303,9 +330,10 @@ extension Character {
 
 extension ComicArchive {
     /// `ComicInfo.xml` in any folder and case; otherwise the first XML file, which is what the
-    /// legacy reader reads.
+    /// legacy reader reads. Files skipped as pages, such as `__MACOSX/._ComicInfo.xml`, aren't
+    /// metadata.
     private static func comicInfoEntry(in files: [Entry]) -> Entry? {
-        let xml = files.filter { ($0.path as NSString).pathExtension.lowercased() == "xml" }
+        let xml = files.filter { !isSkipped($0.path) && ($0.path as NSString).pathExtension.lowercased() == "xml" }
         return xml.first { ($0.path as NSString).lastPathComponent.lowercased() == "comicinfo.xml" } ?? xml.first
     }
 

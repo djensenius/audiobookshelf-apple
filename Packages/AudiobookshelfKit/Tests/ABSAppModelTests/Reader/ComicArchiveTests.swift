@@ -124,6 +124,19 @@ import Testing
         #expect(ComicArchive.pageOrder(["2.jpg", "1.jpg", "2.jpg"]) == ["1.jpg", "2.jpg"])
     }
 
+    @Test func canonicallyEquivalentNamesAreDifferentFolders() {
+        let order = ComicArchive.pageOrder(["caf\u{E9}/1.jpg", "x/1.jpg", "cafe\u{301}/01.jpg"])
+        // `String` equality is canonical, so compare the bytes.
+        #expect(
+            order.map { Array($0.utf8) } == ["caf\u{E9}/1.jpg", "x/1.jpg", "cafe\u{301}/01.jpg"].map { Array($0.utf8) })
+    }
+
+    @Test func deeplyNestedFoldersDoNotOverflowTheStack() {
+        let deep = String(repeating: "a/", count: 100_000)
+        let order = ComicArchive.pageOrder(["1.jpg", deep + "2.jpg", String(repeating: "b/", count: 100_000) + "x.txt"])
+        #expect(order == ["1.jpg", deep + "2.jpg"])
+    }
+
     // MARK: Opening
 
     @Test func aRepeatedEntryKeepsTheFirstOne() async throws {
@@ -134,6 +147,20 @@ import Testing
         #expect(comic.pagePaths == ["1.jpg", "2.jpg"])
         #expect(try Data(contentsOf: try await comic.page(1)) == Data("first".utf8))
         #expect(try Data(contentsOf: try await comic.page(2)) == Data("two".utf8))
+    }
+
+    @Test func canonicallyEquivalentEntriesAreDifferentPages() async throws {
+        let url = try makeZip([("caf\u{E9}1.jpg", Data("nfc".utf8)), ("cafe\u{301}1.jpg", Data("nfd".utf8))])
+        let comic = try ComicArchive(url: url, cacheDirectory: cache)
+        #expect(comic.pageCount == 2)
+        #expect(try Data(contentsOf: try await comic.page(1)) == Data("nfc".utf8))
+        #expect(try Data(contentsOf: try await comic.page(2)) == Data("nfd".utf8))
+    }
+
+    @Test func anArchiveWithDeeplyNestedFoldersOpens() throws {
+        let deep = String(repeating: "a/", count: 30_000) + "2.jpg"
+        let comic = try ComicArchive(url: try makeZip(pages("1.jpg", deep)), cacheDirectory: cache)
+        #expect(comic.pagePaths == ["1.jpg", deep])
     }
 
     @Test func opensAZipWithItsPagesInOrder() async throws {
@@ -336,6 +363,18 @@ import Testing
 
     @Test func anotherXMLFileIsReadWhenThereIsNoComicInfoFile() throws {
         let files = pages("1.jpg") + [("meta.xml", Data("<ComicInfo><Title>Other</Title></ComicInfo>".utf8))]
+        let comic = try ComicArchive(url: try makeZip(files), cacheDirectory: cache)
+        #expect(comic.comicInfo?.title == "Other")
+    }
+
+    @Test func resourceForksAndSkippedFoldersAreNotMetadata() throws {
+        let files =
+            pages("1.jpg") + [
+                ("__MACOSX/._meta.xml", Data([0, 5, 22, 7])),
+                ("_extras/meta.xml", Data("<ComicInfo><Title>Skipped</Title></ComicInfo>".utf8)),
+                (".meta.xml", Data("<ComicInfo><Title>Hidden</Title></ComicInfo>".utf8)),
+                ("meta.xml", Data("<ComicInfo><Title>Other</Title></ComicInfo>".utf8)),
+            ]
         let comic = try ComicArchive(url: try makeZip(files), cacheDirectory: cache)
         #expect(comic.comicInfo?.title == "Other")
     }
