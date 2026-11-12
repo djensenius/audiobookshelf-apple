@@ -40,14 +40,10 @@ enum ItemPresentation {
         L10n.plural("SharedBookCount", count: count, locale: locale)
     }
 
-    /// Title, subtitle, series, then "Explicit" and "Abridged" when set, as one VoiceOver label.
+    /// Title, subtitle (author or narrator, or a collapsed series' book count) and series, as one
+    /// VoiceOver label. Badges and progress are states, spoken in ``accessibilityValue(_:progress:locale:)``.
     static func accessibilityLabel(_ item: ItemSummary) -> String {
-        [
-            item.title, subtitle(item), item.seriesText,
-            item.isExplicit ? L10n.string("LabelExplicit") : nil,
-            item.isAbridged ? L10n.string("LabelAbridged") : nil,
-        ]
-        .compactMap(\.self).joined(separator: ", ")
+        [item.title, subtitle(item), item.seriesText].compactMap(\.self).joined(separator: ", ")
     }
 
     /// The row is one accessibility element, so include its spoken duration in the label.
@@ -67,15 +63,47 @@ enum ItemPresentation {
         return explicit ?? reader(itemID: item.itemID, episodeID: item.episodeID)
     }
 
-    /// "Finished", or "Progress, 42%", and "Missing" for a missing item; empty for none.
+    /// The cell's states, as its VoiceOver value: "Finished" or "Progress, 42%", then the badges
+    /// ("Explicit", "Abridged") and "Missing"; empty for none.
     static func accessibilityValue(_ item: ItemSummary, progress: ItemProgress?, locale: Locale) -> String {
         var parts: [String] = []
         let shown = CoverView.accessibilityValue(
             progress: progress?.isInProgress == true ? progress?.fraction : nil,
             isFinished: progress?.isFinished ?? false, locale: locale)
         if !shown.isEmpty { parts.append(shown) }
+        if item.isExplicit { parts.append(L10n.string("LabelExplicit")) }
+        if item.isAbridged { parts.append(L10n.string("LabelAbridged")) }
         if item.isMissing { parts.append(L10n.string("LabelMissing")) }
         return parts.joined(separator: ", ")
+    }
+
+    /// A series card's label: name and book count.
+    static func accessibilityLabel(_ series: SeriesSummary, locale: Locale? = nil) -> String {
+        "\(series.name), \(bookCount(series.bookCount, locale: locale))"
+    }
+
+    /// An author card's label: name and, when known, book count.
+    static func accessibilityLabel(_ author: AuthorSummary, locale: Locale? = nil) -> String {
+        [author.name, author.bookCount.map { bookCount($0, locale: locale) }].compactMap(\.self)
+            .joined(separator: ", ")
+    }
+
+    /// A shelf's "Show All" button names its shelf, so a list of buttons tells them apart.
+    static func showAllAccessibilityLabel(shelfTitle: String) -> String {
+        "\(L10n.string("LabelShowAll")), \(shelfTitle)"
+    }
+
+    /// A ``ProgressBadge``'s VoiceOver value: "Finished", "42%", or `nil` when it shows nothing.
+    static func progressBadgeValue(_ progress: ItemProgress?, locale: Locale) -> String? {
+        guard let progress else { return nil }
+        if progress.isFinished { return L10n.string("LabelFinished") }
+        return progress.isInProgress ? progressAccessibilityValue(progress.fraction, locale: locale) : nil
+    }
+
+    /// Whether a card adds a check to its finished cover: its green bar alone tells finished
+    /// from almost finished by colour.
+    static func showsFinishedCheck(_ progress: ItemProgress?, differentiateWithoutColor: Bool) -> Bool {
+        differentiateWithoutColor && progress?.isFinished == true
     }
 
     static func title(_ kind: ItemActionKind) -> String {
