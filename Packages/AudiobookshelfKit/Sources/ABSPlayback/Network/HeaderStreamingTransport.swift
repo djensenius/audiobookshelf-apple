@@ -226,6 +226,12 @@ final class HeaderResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URLSe
     /// The live session's configuration, for tests.
     var sessionConfiguration: URLSessionConfiguration? { queue.sync { session?.configuration } }
 
+    /// The task serving `request`, for tests. Must run on ``queue``.
+    func task(for request: any ResourceLoadingRequest) -> URLSessionTask? {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return tasks[ObjectIdentifier(request)]
+    }
+
     /// Registers a track's loader URL. The first one creates the session with its network access.
     func register(_ loaderURL: URL, track: Track) {
         queue.sync {
@@ -239,12 +245,14 @@ final class HeaderResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URLSe
         }
     }
 
-    /// Cancels every load and drops the session, which releases its strong reference to this
+    /// Finishes every load with `URLError(.cancelled)`, so callbacks already queued for their
+    /// tasks are ignored, then drops the session, which releases its strong reference to this
     /// delegate once the cancelled tasks complete. Later loads fail with `URLError(.cancelled)`.
     /// Must run on ``queue``.
     func invalidate() {
         dispatchPrecondition(condition: .onQueue(queue))
         isInvalidated = true
+        for task in Array(tasks.values) { end(task, error: URLError(.cancelled)) }
         session?.invalidateAndCancel()
         session = nil
     }
@@ -359,8 +367,9 @@ final class HeaderResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URLSe
         if let type = http.mimeType?.lowercased(), type.hasPrefix("text/") {
             return fail(HeaderStreamingError.unexpectedContentType(type))
         }
+        // A `206` must include the requested offset, even when the total is unknown.
         guard let (information, first, last) = Self.contentInformation(from: http, mimeType: load.track.mimeType),
-            first <= load.offset
+            first <= load.offset, http.statusCode != 206 || last.map({ load.offset <= $0 }) == true
         else { return fail(HeaderStreamingError.invalidRange) }
         // A `200` starts at byte 0; reading on to the offset would download everything before it.
         if http.statusCode == 200, load.offset > 0 { return fail(HeaderStreamingError.rangeNotHonored) }

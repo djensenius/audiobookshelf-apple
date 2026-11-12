@@ -180,13 +180,16 @@ struct HeaderStreamingTransportTests {
         }
     }
 
-    /// Reversed, overflowing or out-of-bounds ranges are refused rather than trusted.
+    /// Reversed, overflowing or out-of-bounds ranges, and ranges that miss the requested offset
+    /// (even with an unknown total), are refused rather than trusted.
     @Test(
         arguments: [
             (0, "bytes 0-9223372036854775807/*"),
             (0, "bytes 0-9/99999999999999999999"),
             (100, "bytes 100-149/50"),
             (100, "bytes 100-99/1000"),
+            (100, "bytes 0-99/*"),
+            (100, "bytes 0-99/1000"),
         ] as [(Int64, String)])
     func invalidContentRangeFails(offset: Int64, contentRange: String) async throws {
         let host = StreamStubProtocol.register(.init(body: Self.body, contentRange: contentRange))
@@ -316,6 +319,30 @@ struct HeaderStreamingTransportTests {
         #expect(StreamStubProtocol.requests(host).count == 1)
         try await eventually { weakLoader == nil }
         #expect(weakLoader == nil)
+    }
+
+    /// A final chunk and a clean completion already queued when the session is invalidated:
+    /// the load has finished cancelled, and neither is delivered.
+    @Test func callbacksQueuedDuringInvalidationAreIgnored() async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body, chunkSize: 100, holdsAfterFirstChunk: true))
+        let transport = transport()
+        let loader = transport.loader
+        let url = HeaderStreamingTransport.loaderURL(for: try #require(URL(string: "https://\(host)/t")))
+        loader.register(url, track: .init())
+        let request = RecordingLoadingRequest(range: RequestedRange(offset: 0, length: 200))
+        loader.queue.async { loader.start(request, loaderURL: url) }
+        try await eventually { !request.data.isEmpty }
+
+        let task = try #require(loader.queue.sync { loader.task(for: request) } as? URLSessionDataTask)
+        loader.queue.sync {
+            loader.invalidate()
+            loader.urlSession(.shared, dataTask: task, didReceive: Self.body.subdata(in: 100..<200))
+            loader.urlSession(.shared, task: task, didCompleteWithError: nil)
+        }
+
+        #expect(request.finishCount == 1)
+        #expect((request.error as? URLError)?.code == .cancelled)
+        #expect(request.data == Self.body.subdata(in: 0..<100))
     }
 
     @Test func cookiesAreNotSentAndTheSessionKeepsNoState() async throws {
