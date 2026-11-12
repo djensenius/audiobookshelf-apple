@@ -90,6 +90,16 @@ struct RootView: View {
         return participant
     }
 
+    /// The active connection's client while it serves `identity`'s account, for `\.statsService`;
+    /// `nil` otherwise. During a switch the outgoing shell stays up after `accounts` moved on, and
+    /// must not load the next account's stats.
+    static func statsService(_ accounts: AccountManager?, for identity: SessionIdentity) -> (any StatsService)? {
+        guard let accounts, let active = accounts.activeConnection,
+            active.id == identity.connectionID, active.userId == identity.userID
+        else { return nil }
+        return accounts.client
+    }
+
     /// One link waits at a time: the last one received wins, including over a confirmed server
     /// switch's link (``SceneLinks``).
     private func receive(_ link: DeepLink) {
@@ -138,7 +148,10 @@ struct RootView: View {
             .environment(
                 \.itemProgressReader,
                 servedStore(for: identity).map { BrowsePresentation.progressReader($0.progress) }
-                    ?? .none)
+                    ?? .none
+            )
+            // `AccountManager` is observable, so a sign-in, switch, reconnect or sign-out updates it.
+            .environment(\.statsService, Self.statsService(accounts, for: identity))
         case .storeUnavailable:
             ErrorStateView(
                 title: L10n.string("MessageStoreUnavailable"),
