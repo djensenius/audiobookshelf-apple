@@ -20,13 +20,15 @@ private func playlist(_ id: String, name: String? = nil, owner: String = identit
 }
 
 /// A collections list of library `lib` whose pages come from `server`, which the test changes; `requests` logs
-/// the pages asked for.
+/// the pages asked for, and a page fails while `fails` is true.
 @MainActor
 private func collectionList(
-    server: Locked<[LibraryCollection]>, requests: Locked<[Int]>, pageSize: Int = 20
+    server: Locked<[LibraryCollection]>, requests: Locked<[Int]>, pageSize: Int = 20,
+    fails: Locked<Bool> = Locked(false)
 ) async -> ItemListModel<String, GroupSummary> {
     let service = FakeGroupsService(collectionsHandler: { _, page, limit in
         requests.value.append(page)
+        if fails.value { throw TestError.offline }
         let all = server.value
         let rows = Array(all.dropFirst(page * limit).prefix(limit))
         return PagedResults(results: rows, total: all.count, limit: limit, page: page)
@@ -114,12 +116,61 @@ private func playlistList(_ playlists: [Playlist], requests: Locked<[Int]>) asyn
         #expect(requests.value == [0, 0])
     }
 
+    @Test func aFailedRemovalRefreshRetriesFromTheFirstPage() async throws {
+        let server = Locked((1...4).map { collection("c\($0)") })
+        let requests = Locked<[Int]>([])
+        let fails = Locked(false)
+        let list = await collectionList(server: server, requests: requests, pageSize: 2, fails: fails)
+
+        server.value.removeFirst()
+        fails.value = true
+        list.apply(.collection(.removed(id: "c1", libraryID: "lib")), kind: .collection)
+        await list.loadNextPage()?.value
+        #expect(list.error != nil)
+        #expect(list.items.map(\.id) == ["c2"])
+
+        // Retry: page 1 of the old offsets would return c4 and skip c3.
+        fails.value = false
+        await list.loadNextPage()?.value
+        #expect(list.items.map(\.id) == ["c2", "c3"])
+        await list.loadNextPage()?.value
+        #expect(list.items.map(\.id) == ["c2", "c3", "c4"])
+        #expect(list.reachedEnd)
+        #expect(requests.value == [0, 0, 0, 1])
+    }
+
+    @Test func eachSuccessfulRefreshAdvancesTheRevision() async throws {
+        let server = Locked((1...4).map { collection("c\($0)") })
+        let fails = Locked(false)
+        let list = await collectionList(server: server, requests: Locked([]), pageSize: 2, fails: fails)
+        #expect(list.refreshRevision == 0)
+
+        // An addition past the first page leaves its card IDs as they were; only the revision
+        // tells the cards to report appearing again.
+        server.value.append(collection("c5"))
+        list.apply(.collection(.added(collection("c5"), libraryID: "lib")), kind: .collection)
+        await list.loadNextPage()?.value
+        #expect(list.items.map(\.id) == ["c1", "c2"])
+        #expect(list.refreshRevision == 1)
+
+        // Neither a failed refresh nor a later page counts.
+        fails.value = true
+        await list.refresh()?.value
+        fails.value = false
+        await list.loadNextPage()?.value
+        #expect(list.refreshRevision == 1)
+
+        await list.refresh()?.value
+        #expect(list.refreshRevision == 2)
+    }
+
     @Test func changesToAnotherLibraryOrKindAreIgnored() async throws {
         let requests = Locked<[Int]>([])
         let list = await collectionList(server: Locked([collection("c1")]), requests: requests)
 
         list.apply(.collection(.added(collection("c2"), libraryID: "other")), kind: .collection)
         list.apply(.collection(.removed(id: "c1", libraryID: "other")), kind: .collection)
+        list.apply(.collection(.updated(collection("c1", name: "Other"), libraryID: "other")), kind: .collection)
         list.apply(.playlist(.removed(id: "c1", libraryID: "lib"), userID: identityA.userID), kind: .collection)
         list.apply(.author(.removed(id: "c1", libraryID: "lib")), kind: .collection)
         // A collection change reaching a playlists list.
@@ -210,6 +261,22 @@ private func playlistList(_ playlists: [Playlist], requests: Locked<[Int]>) asyn
 
         #expect(model.phase == .loaded)
         #expect(model.detail == loaded)
+    }
+
+    @Test func theSameIDInAnotherLibraryIsIgnored() async throws {
+        let collectionModel = await loadedCollection()
+        let loadedCollection = collectionModel.detail
+        collectionModel.apply(.collection(.updated(collection("c1", name: "Other"), libraryID: "other")))
+        collectionModel.apply(.collection(.removed(id: "c1", libraryID: "other")))
+        #expect(collectionModel.phase == .loaded)
+        #expect(collectionModel.detail == loadedCollection)
+
+        let playlistModel = await loadedPlaylist()
+        let loadedPlaylist = playlistModel.detail
+        playlistModel.apply(.playlist(.updated(playlist("p1", name: "Other"), libraryID: "other"), userID: "a"))
+        playlistModel.apply(.playlist(.removed(id: "p1", libraryID: "other"), userID: "a"))
+        #expect(playlistModel.phase == .loaded)
+        #expect(playlistModel.detail == loadedPlaylist)
     }
 
     @Test func aPlaylistFollowsOnlyItsOwnersChanges() async throws {

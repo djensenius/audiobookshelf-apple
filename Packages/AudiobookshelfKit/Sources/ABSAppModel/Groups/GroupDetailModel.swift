@@ -191,10 +191,13 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
         }
     }
 
-    /// Applies a change the server pushed to this group, once it has loaded. Other groups, kinds
-    /// and users' playlists are ignored.
+    /// Applies a change the server pushed to this group, once it has loaded. Other groups, kinds,
+    /// libraries and users' playlists are ignored: the store delivers every library's changes, and
+    /// a group ID alone doesn't say which library's group changed.
     public func apply(_ change: LibraryChange) {
-        guard detail != nil, let change = Kind.groupChange(change, userID: userID) else { return }
+        guard let loaded = detail, let change = Kind.groupChange(change, userID: userID),
+            change.libraryID == loaded.libraryID
+        else { return }
         switch change {
         case .added(let group, _), .updated(let group, _):
             guard group.id == groupID else { return }

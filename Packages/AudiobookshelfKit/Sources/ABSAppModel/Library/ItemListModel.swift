@@ -21,7 +21,9 @@ import Observation
 /// until the first new page replaces it. Each reset or refresh starts a new generation, and a
 /// response from an earlier generation is never applied. If the refresh's first page fails or is
 /// cancelled, the list rolls back to where it was before the refresh: scrolling continues with the
-/// old list's next page, and retrying the refresh means calling ``refresh()`` again.
+/// old list's next page, and retrying the refresh means calling ``refresh()`` again. A refresh
+/// started by ``removeItem(id:)`` can't roll back, as the removal moved the server's offsets: after
+/// a failure, the next page loads from the first page again and replaces the list.
 ///
 /// A model belongs to one client and account: views create it per account identity (with
 /// `LibraryStore.makeItemList(libraryID:query:)`) and recreate it when the store's
@@ -42,6 +44,10 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     public private(set) var error: (any Error)?
     /// Every page has been loaded.
     public private(set) var reachedEnd = false
+    /// Increases each time a refresh's first page replaces the list, including refreshes the
+    /// model starts itself. Views key per-row appearance tasks on it, so rows whose IDs didn't
+    /// change report appearing again and paging resumes.
+    public private(set) var refreshRevision = 0
 
     /// Items per page; ``setPaging(pageSize:prefetchThreshold:)`` changes it.
     public private(set) var pageSize: Int
@@ -78,6 +84,8 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
         var total: Int?
         var reachedEnd: Bool
         var emptyPagesInARow: Int
+        /// Whether a failed refresh may go back to this state; a removal since makes its offsets wrong.
+        var isRestorable = true
     }
 
     /// - Parameters:
@@ -225,7 +233,11 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
             indexByID[item.id] = index + later
         }
         total = total.map { max($0 - 1, 0) }
-        if !reachedEnd { refresh() }
+        if !reachedEnd {
+            refresh()
+            // The old offsets would skip a row now, even if this refresh fails.
+            refreshRollback?.isRestorable = false
+        }
         return true
     }
 
@@ -243,6 +255,7 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
                 refreshRollback = nil
                 appended = []
                 indexByID = [:]
+                refreshRevision += 1
             }
             var added = 0
             for item in page.results where indexByID[item.id] == nil {
@@ -267,7 +280,8 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
         case .failure(let error):
             // A failed or cancelled refresh keeps the items on screen, so it restores their
             // paging state: the next page continues the old list instead of appending page 0.
-            if let rollback = refreshRollback {
+            // Unless a removal moved the offsets: then it stays at page 0, still replacing.
+            if let rollback = refreshRollback, rollback.isRestorable {
                 refreshRollback = nil
                 nextPage = rollback.nextPage
                 // The kept pages are offsets of the old size; the newest requested size waits
