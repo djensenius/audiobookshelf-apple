@@ -24,7 +24,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   A report still queued for it is skipped, so it doesn't hold the close back.
 /// - **Positions first.** Each report trigger saves `LocalMediaProgress` with `needsServerSync`
 ///   before sending. Local writes have their own serial queue, so a held request doesn't block
-///   saving a newer seek or pause. Failed writes stay in memory for the next trigger or drain;
+///   saving a newer seek or pause. Failed writes stay in memory for the next trigger or drain,
+///   and schedule a drain after a backoff, so a paused session's position isn't left unsaved;
 ///   no report is sent while a position still needs saving.
 ///   Final positions enter that queue synchronously in the close callback, even for clean or
 ///   missing rows. Their throwing receipts acknowledge only committed audio, not listening time.
@@ -131,11 +132,15 @@ public final class ProgressSyncer {
     var beforeSessionAudioPreparation: (@MainActor () async -> Void)?
     /// Test seam: hold a prepared PATCH before its return is consumed by transport checks.
     var afterProgressSendPreparation: (@MainActor (ProgressPatch) async -> Void)?
+    /// Test seam: observes a drain ending, once any retry is scheduled.
+    var afterDrain: (@MainActor () -> Void)?
     /// Test seam before the active refresh's throwing provenance lookup.
     var beforeActiveProgressCapture: (@MainActor () async -> Void)?
     /// Test seam: observes admission without suspending between ownership validation and store submission.
     var activeProgressIntakeSubmitted: (@MainActor () -> Void)?
     private var pendingPositions: [MediaKey: Position] = [:]
+    /// The pending positions whose last save failed, as opposed to ones merely still queued.
+    private var failedPositions: [MediaKey: Position] = [:]
     private var positionRevision: UInt64 = 0
     private var positionReceipts: [MediaKey: [(revision: UInt64, receipt: PlaybackCloseResult<Void>)]] = [:]
     private var transportTasks: [UUID: Task<Void, Never>] = [:]
@@ -442,9 +447,13 @@ public final class ProgressSyncer {
             ignoringBackoff = queuedSyncIgnoresBackoff
         }
         guard await settleSessionAudioOutcomes() else { return }
-        guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty,
-            let session = current, session.sessionID == sessionID,
-            let position = session.position
+        guard !isDetached, !isTransportQuiesced else { return }
+        guard pendingPositions.isEmpty else {
+            // A paused session may never report again: the drain's retry saves and sends it.
+            if hasFailedPositionSave, drainWake == nil { scheduleDrainRetry() }
+            return
+        }
+        guard let session = current, session.sessionID == sessionID, let position = session.position
         else { return }
         // A failure answered while this report was queued may have abandoned or backed off the
         // session; its listening time stays for the next report.
@@ -650,8 +659,10 @@ public final class ProgressSyncer {
                         for: key, token: position.token, now: position.editedAt)
                     // A newer event may have arrived while the save ran.
                     if pendingPositions[key] == position { pendingPositions[key] = nil }
+                    failedPositions[key] = nil
                     finishReceipts(for: key, through: position.revision, result: .success(()))
                 } catch {
+                    failedPositions[key] = position
                     finishReceipts(for: key, through: position.revision, result: .failure(error))
                     logger.error("Saving pending progress failed: \(String(describing: error), privacy: .public)")
                 }
@@ -671,18 +682,30 @@ public final class ProgressSyncer {
     private func drain() async {
         drainOutcome = (false, false)
         await drainPass()
+        defer { afterDrain?() }
         guard !isDetached, !isTransportQuiesced else { return }
-        if drainOutcome.failed {
-            drainFailures += 1
-            drainWake?.cancel()
-            drainWake = scheduleWake(after: Self.syncBackoff(afterFailures: drainFailures)) { syncer in
-                syncer.drainWake = nil
-                syncer.requestDrain()
-            }
+        // A position whose save failed stopped the drain as surely as a failed request did.
+        if drainOutcome.failed || hasFailedPositionSave {
+            scheduleDrainRetry()
         } else if drainOutcome.completed {
             drainFailures = 0
             drainWake?.cancel()
             drainWake = nil
+        }
+    }
+
+    /// Whether a pending position is one whose save failed, not a newer one still being saved.
+    private var hasFailedPositionSave: Bool {
+        pendingPositions.contains { failedPositions[$0.key] == $0.value }
+    }
+
+    /// Drains again after a backoff, which grows with each failed drain.
+    private func scheduleDrainRetry() {
+        drainFailures += 1
+        drainWake?.cancel()
+        drainWake = scheduleWake(after: Self.syncBackoff(afterFailures: drainFailures)) { syncer in
+            syncer.drainWake = nil
+            syncer.requestDrain()
         }
     }
 

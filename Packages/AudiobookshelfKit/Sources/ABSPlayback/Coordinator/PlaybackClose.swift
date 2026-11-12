@@ -141,6 +141,8 @@ final class PlaybackCloseOperation {
     let wasLoaded: Bool
     let handoff: PlaybackCloseHandoff?
     let transport = PlaybackCloseResult<Bool>()
+    /// Resolved as `/close` is called, or once it won't be: the next `/play` waits for it.
+    let dispatched = PlaybackCloseResult<Void>()
     var task: Task<Void, Never>?
 
     init(sessionID: String, wasLoaded: Bool, handoff: PlaybackCloseHandoff?) {

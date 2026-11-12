@@ -1,9 +1,9 @@
 import ABSCore
-import ABSData
 import Foundation
 import Testing
 
 @testable import ABSAPI
+@testable import ABSData
 @testable import ABSPlayback
 
 /// A backed-off session reports when its backoff ends, and a drain that stopped on a failure
@@ -156,6 +156,76 @@ struct ProgressSyncWakeTests {
         #expect(s.service.patches.map(\.update) == Array(repeating: SyncHarness.audio(50), count: 3))
         #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
         #expect(s.syncer.drainWake == nil)
+    }
+
+    /// A paused position whose save failed is saved and sent by the drain's retry once storage
+    /// recovers, even when the retry's own save fails first; no tick or pause comes to help.
+    @Test func aPausedPositionWhoseSaveFailedIsSavedAndSentOnTheRetry() async throws {
+        let s = try SyncHarness()
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 5)
+        s.coordinator.pause()
+        await s.settle()
+        let patched = s.service.patches.map(\.update)
+        var failures = 2
+        s.syncer.beforePositionPersistence = {
+            guard failures > 0 else { return }
+            failures -= 1
+            await s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        }
+        _ = await s.coordinator.seek(to: 100)
+        await s.settle()
+        #expect(s.service.reports.count == 1 && s.service.patches.map(\.update) == patched)
+        #expect(try await s.store.progress(for: s.h.key("a"))?.currentTime != 100)
+
+        for _ in 0..<2 {
+            let wake = try #require(s.syncer.drainWake)
+            s.sleeper.fire()
+            await wake.value
+            await s.settle()
+        }
+
+        #expect(failures == 0)
+        #expect(s.sleeper.delays == [15, 30])
+        #expect(s.service.patches.map(\.update) == patched + [SyncHarness.audio(100)])
+        #expect(try await s.store.progress(for: s.h.key("a"))?.currentTime == 100)
+        #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
+        #expect(s.syncer.drainWake == nil)
+    }
+
+    /// A drain that stops for a newer position still being saved, not a failed save, schedules
+    /// no retry.
+    @Test func aPositionStillBeingSavedSchedulesNoRetry() async throws {
+        let s = try SyncHarness()
+        await s.coordinator.play(itemID: "a")
+        s.coordinator.pause()
+        await s.settle()
+        try await s.store.recordEdit(
+            ProgressEdit(audio: .init(currentTime: 50, duration: 3600, progress: 50 / 3600)), for: s.h.key("b"),
+            now: s.h.clock.now)
+        let patched = s.service.patches
+        let saving = Gate()
+        let persistence = Gate()
+        defer { persistence.open() }
+        s.syncer.afterProgressSendPreparation = { _ in
+            s.syncer.afterProgressSendPreparation = nil
+            s.syncer.beforePositionPersistence = {
+                saving.open()
+                await persistence.wait()
+            }
+            _ = await s.coordinator.seek(to: 100)
+        }
+        let drained = Gate()
+        s.syncer.afterDrain = { drained.open() }
+        let drain = Task { await s.syncer.drainPendingProgress() }
+        await saving.wait()
+        await drained.wait()
+
+        #expect(s.service.patches == patched)
+        #expect(s.syncer.drainWake == nil)
+        persistence.open()
+        await drain.value
+        #expect(s.sleeper.delays.isEmpty)
     }
 
     /// A drain with nothing failing schedules nothing.

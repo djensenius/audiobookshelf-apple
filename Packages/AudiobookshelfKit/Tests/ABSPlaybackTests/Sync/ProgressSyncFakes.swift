@@ -258,18 +258,24 @@ final class ManualSleeper: Sendable {
         let id = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
-                let cancelled = Task.isCancelled
-                let resume = state.withLock { state in
+                // Cancellation is read under the lock the cancel handler takes, so a cancel can't
+                // fall between the check and registering (the handler would find no waiter).
+                let resume: Bool?
+                resume = state.withLock { state in
                     state.delays.append(delay)
-                    guard !cancelled, state.credits == 0 else {
-                        if !cancelled { state.credits -= 1 }
+                    if Task.isCancelled { return false }
+                    guard state.credits == 0 else {
+                        state.credits -= 1
                         return true
                     }
                     state.waiting[id] = continuation
-                    return false
+                    return nil
                 }
-                guard resume else { return }
-                if cancelled { continuation.resume(throwing: CancellationError()) } else { continuation.resume() }
+                switch resume {
+                case true?: continuation.resume()
+                case false?: continuation.resume(throwing: CancellationError())
+                case nil: break
+                }
             }
         } onCancel: {
             state.withLock { $0.waiting.removeValue(forKey: id) }?.resume(throwing: CancellationError())

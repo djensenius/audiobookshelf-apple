@@ -142,6 +142,51 @@ struct ProgressSyncCloseOrderTests {
         #expect(s.service.reports.count == 1)
     }
 
+    /// Switching items with the old report stalled, the timers fired by hand: the next `/play`
+    /// starts no close wait of its own until the old `/close` has gone out, so that close's
+    /// timeout ending can't let `/play` overtake it. With `closeHeld`, the close then hangs too,
+    /// and `/play` waits for that close's own timeout.
+    @Test(arguments: [false, true])
+    func aStalledReportOnASwitchStillClosesTheOldSessionFirst(closeHeld: Bool) async throws {
+        let s = try SyncHarness()
+        let response = Gate()
+        let close = Gate()
+        defer {
+            response.open()
+            close.open()
+        }
+        s.service.state.withLock { $0.syncGates = [response] }
+        if closeHeld { s.h.service.state.withLock { $0.closeGates["a-1"] = close } }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 15, settling: false)
+        await s.service.waitForSyncs(1)
+        s.h.sleep.isManual = true
+
+        let switching = Task { await s.coordinator.play(itemID: "b") }
+        await yieldUntil { s.h.sleep.waitingCount == 1 }
+        for _ in 0..<100 { await Task.yield() }
+        // Only the old close's wait for its report: `/play`'s close wait hasn't started.
+        #expect(s.h.sleep.waitingCount == 1)
+        #expect(s.h.service.log == ["start a"])
+
+        s.h.sleep.fireOldest()
+        if closeHeld {
+            await yieldUntil { s.h.service.log == ["start a", "close a-1"] && s.h.sleep.waitingCount == 1 }
+            for _ in 0..<100 { await Task.yield() }
+            #expect(s.h.service.log == ["start a", "close a-1"])
+            s.h.sleep.fireOldest()
+            await switching.value
+            #expect(s.h.service.log == ["start a", "close a-1", "start b"])
+            #expect(s.h.sleep.durations == Array(repeating: PlaybackCoordinator.closeWaitTimeout, count: 2))
+        } else {
+            await switching.value
+            #expect(s.h.service.log == ["start a", "close a-1", "close a-1 done", "start b"])
+        }
+        response.open()
+        close.open()
+        await s.settle()
+    }
+
     /// A 404 answered while its session is closing, before the next session starts, neither
     /// abandons the next session nor drains.
     @Test func a404AnsweredDuringTheCloseLeavesTheNextSessionAlone() async throws {
