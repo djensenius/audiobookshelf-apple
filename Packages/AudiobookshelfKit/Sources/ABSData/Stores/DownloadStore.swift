@@ -102,26 +102,49 @@ import SwiftData
                     return existingPart
                 }
             } else {
-                model = DownloadRecord(
-                    id: record.id,
-                    key: record.key.rawValue,
-                    serverConnectionID: record.key.serverConnectionID,
-                    libraryItemId: record.key.libraryItemId,
-                    episodeId: record.key.episodeId,
-                    mediaType: record.mediaType,
-                    title: record.title,
-                    state: record.state,
-                    relativeDirectory: record.relativeDirectory,
-                    createdAt: now,
-                    media: record.media
-                )
-                modelContext.insert(model)
-                model.parts = record.parts.map { $0.makeModel() }
+                model = insertModel(record, now: now)
             }
             model.updatedAt = now
             return UpsertResult(
                 record: DownloadRecordDTO(model), removedParts: removed.sorted(by: DownloadPartDTO.precedes))
         }
+    }
+
+    /// Saves a new record unless its connection is signed out or disconnected, or a record with
+    /// its key or `id` exists. For downloads nobody asked for (a cover fetched again), which
+    /// mustn't replace a record or start after a sign-out. The checks and the insert are one
+    /// transaction of this context only: a sign-out or connection removal saved from another
+    /// context at the same time can still miss it (best effort); the `DownloadJanitor` purges
+    /// such an orphan with the connection's other records.
+    ///
+    /// - Returns: the saved record, or `nil` without writing.
+    /// - Throws: ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist, or
+    ///   ``StoreError/partIDConflict(_:)`` when a part's `id` is taken.
+    public func insertRecordIfSignedIn(_ record: DownloadRecordDTO, now: Date = .now) throws -> DownloadRecordDTO? {
+        try commit {
+            guard try fetchIsSignedIn(record.key.serverConnectionID),
+                try fetchRecord(key: record.key) == nil, try fetchRecord(id: record.id) == nil
+            else { return nil }
+            try checkPartIDs(record.parts.map(\.id), owner: nil)
+            let model = insertModel(record, now: now)
+            model.updatedAt = now
+            return DownloadRecordDTO(model)
+        }
+    }
+
+    /// Whether the connection is neither signed out nor disconnected.
+    /// - Throws: ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist.
+    public func isSignedIn(serverConnectionID: UUID) throws -> Bool {
+        try fetchIsSignedIn(serverConnectionID)
+    }
+
+    private func fetchIsSignedIn(_ connectionID: UUID) throws -> Bool {
+        var descriptor = FetchDescriptor<ServerConnectionRecord>(predicate: #Predicate { $0.id == connectionID })
+        descriptor.fetchLimit = 1
+        guard let connection = try modelContext.fetch(descriptor).first else {
+            throw StoreError.connectionNotFound(connectionID)
+        }
+        return !connection.isDisconnected && connection.signedOutAt == nil
     }
 
     public func record(id: UUID) throws -> DownloadRecordDTO? {
@@ -434,6 +457,26 @@ import SwiftData
     }
 
     // MARK: - Private
+
+    /// Inserts `record` as a new model with its parts, inside the caller's ``commit(_:)``.
+    private func insertModel(_ record: DownloadRecordDTO, now: Date) -> DownloadRecord {
+        let model = DownloadRecord(
+            id: record.id,
+            key: record.key.rawValue,
+            serverConnectionID: record.key.serverConnectionID,
+            libraryItemId: record.key.libraryItemId,
+            episodeId: record.key.episodeId,
+            mediaType: record.mediaType,
+            title: record.title,
+            state: record.state,
+            relativeDirectory: record.relativeDirectory,
+            createdAt: now,
+            media: record.media
+        )
+        modelContext.insert(model)
+        model.parts = record.parts.map { $0.makeModel() }
+        return model
+    }
 
     private func fetchRecords(_ descriptor: FetchDescriptor<DownloadRecord>) throws -> [DownloadRecordDTO] {
         var descriptor = descriptor

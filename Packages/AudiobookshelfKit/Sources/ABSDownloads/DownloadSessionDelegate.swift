@@ -21,6 +21,9 @@ enum DownloadTaskResult: Sendable, Equatable {
     /// 206, the `Content-Range` total; otherwise the planned size, or else the declared length.
     /// It is `0` when that isn't known.
     case sizeMismatch(expected: Int64, actual: Int64)
+    /// The body, or the length the server declared, is over the part's limit; the body was
+    /// discarded.
+    case tooLarge(limit: Int64)
     /// The body couldn't be moved to the destination.
     case moveFailed(String, isOutOfSpace: Bool)
     /// The transfer failed or was cancelled.
@@ -79,10 +82,11 @@ extension URLSessionTask {
 /// system deletes it when the callback returns) and forwards everything else, in order, to
 /// the engine through ``events``. It outlives sessions: a recreated session gets the same one.
 final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
-    /// Where a part's file goes, and its size when known.
+    /// Where a part's file goes, its size when known, and the most it may have.
     struct Target: Sendable {
         var destination: URL
         var expectedBytes: Int64
+        var maxBytes: Int64? = nil
     }
 
     let events: AsyncStream<DownloadSessionEvent>
@@ -145,7 +149,7 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
 
     /// Checks the response, then moves the file. A body that isn't the file (see
     /// ``classify(response:task:)``, empty, or the wrong size) never reaches the media
-    /// location.
+    /// location, nor does one over the target's `maxBytes`.
     ///
     /// The file must have the length the server declared, or for a 200 the planned size (the
     /// file changed since the download was planned, or the server compressed it). After a 206
@@ -160,6 +164,7 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
         let size = DownloadLocations.fileSize(at: location) ?? task.countOfBytesReceived
         guard size > 0 else { return .failed(DownloadTransferFailure(URLError(.zeroByteResource))) }
         let declared = Self.declaredLength(of: task.response)
+        if let limit = target.maxBytes, size > limit || (declared ?? 0) > limit { return .tooLarge(limit: limit) }
         let planned = target.expectedBytes > 0 ? target.expectedBytes : nil
         if (task.response as? HTTPURLResponse)?.statusCode == 206 {
             guard size == declared else { return .sizeMismatch(expected: declared ?? 0, actual: size) }

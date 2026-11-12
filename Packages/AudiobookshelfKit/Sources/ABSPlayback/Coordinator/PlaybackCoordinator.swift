@@ -1312,12 +1312,16 @@ extension PlaybackCoordinator: SleepTimerPlaybackControl {
     public var pendingSeekTarget: Double? { phase == .loaded ? engine.pendingSeekTarget : nil }
 
     /// Resumes loaded media after the timer's grace-period rewind. The timer already prepared the
-    /// resume: do not call `willResume` again or seek (including AutoRewind).
-    public func play() {
-        guard !isRetired, phase == .loaded, !engine.isPlaybackRequested else { return }
+    /// resume: do not call `willResume` again or seek (including AutoRewind). Returns whether playback is
+    /// requested: already, or now; `false` without loaded media or when the engine refused at once.
+    @discardableResult
+    public func play() -> Bool {
+        guard !isRetired, phase == .loaded else { return false }
+        guard !engine.isPlaybackRequested else { return true }
         resumeIntent += 1
         resumingIntent = nil
         startEngine()
+        return engine.isPlaybackRequested
     }
 
     public func setVolume(_ volume: Float) {

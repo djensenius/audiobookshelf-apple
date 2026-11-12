@@ -63,4 +63,31 @@ public final class AuthorsModel {
             if !(error is CancellationError) { self.error = error }
         }
     }
+
+    /// Patches the loaded list with a socket change, as the legacy page did: a new author is
+    /// appended, or replaces the one with its ID; an update replaces it in place; a removal drops
+    /// it. A payload without a book count keeps the shown one. Changes in other libraries, and
+    /// any before the first load, are ignored; an update for an author not in the list is too,
+    /// since the server may hide them from this user.
+    public func apply(_ change: LibraryChange) {
+        guard hasLoaded, change.libraryID == libraryID, case .author(let change) = change else { return }
+        switch change {
+        case .added(let author, _):
+            if !replace(author) { authors.append(AuthorSummary(author: author)) }
+        case .updated(let author, _):
+            replace(author)
+        case .removed(let id, _):
+            authors.removeAll { $0.id == id }
+        }
+    }
+
+    @discardableResult
+    private func replace(_ author: Author) -> Bool {
+        guard let index = authors.firstIndex(where: { $0.id == author.id }) else { return false }
+        let summary = AuthorSummary(author: author)
+        authors[index] = AuthorSummary(
+            id: summary.id, name: summary.name, bookCount: summary.bookCount ?? authors[index].bookCount,
+            hasImage: summary.hasImage, imageUpdatedAt: summary.imageUpdatedAt)
+        return true
+    }
 }

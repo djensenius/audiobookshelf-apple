@@ -34,6 +34,94 @@ import Testing
         #expect(progress == DownloadProgress(partID: partID, recordID: record.id, bytesWritten: 11, expectedBytes: 11))
     }
 
+    /// A cover-only record (#326) whose local item was deleted is discarded: deleted and
+    /// reported, its cover left on disk for the manager, and no local item made.
+    @Test func discardsACoverOnlyRecordWithoutItsItem() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.store.upsertRecord(
+            DownloadRecordDTO(
+                key: MediaKey(serverConnectionID: harness.connectionID, libraryItemId: "li_1"), mediaType: .podcast,
+                title: "The Show", relativeDirectory: "li_1",
+                media: LocalMediaSnapshot(metadata: .init(title: "The Show")),
+                parts: [
+                    DownloadPartDTO(
+                        id: partID, kind: .cover, serverPath: DownloadRequests.coverPath(itemID: "li_1", updatedAt: 0),
+                        filename: "cover.jpg", mimeType: "image/jpeg", expectedBytes: 0, bytesWritten: 0,
+                        destinationRelativePath: "li_1/cover.jpg", state: .queued)
+                ])
+        ).record
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        let update = await engine.next { if case .recordDiscarded = $0 { true } else { false } }
+        guard case .recordDiscarded(let discarded) = update else {
+            Issue.record("Unexpected \(String(describing: update))")
+            return
+        }
+        #expect(discarded.id == record.id)
+        #expect(discarded.parts.map(\.state) == [.completed])
+        #expect(try await harness.store.record(id: record.id) == nil)
+        #expect(try await harness.localItems.allItems().isEmpty)
+        #expect(harness.fileExists("li_1/cover.jpg"))
+    }
+
+    /// A cover over the limit, declared or sent without a length, fails for good as too large
+    /// and never reaches its destination.
+    @Test(arguments: [true, false])
+    func failsACoverOverTheLimit(declared: Bool) async throws {
+        let limit = DownloadEngine.maxCoverBytes
+        let reply: StubReply =
+            declared
+            ? .status(
+                200, body: Data("img".utf8), contentType: "image/jpeg", headers: ["Content-Length": "\(limit + 1)"])
+            : .status(
+                200, body: Data(count: Int(limit) + 1), contentType: "image/jpeg", headers: ["Content-Length": ""])
+        try await expectTooLarge(reply)
+    }
+
+    /// An error page over the cover limit, with no declared length, is stopped as too large
+    /// too, rather than written in full to temporary storage.
+    @Test(arguments: [404, 200])
+    func failsAnErrorBodyOverTheCoverLimit(status: Int) async throws {
+        try await expectTooLarge(
+            .status(
+                status, body: Data(count: Int(DownloadEngine.maxCoverBytes) + 1), contentType: "text/html",
+                headers: ["Content-Length": ""]))
+    }
+
+    /// Downloads a cover-only record's cover answered with `reply`: it fails for good as too
+    /// large and never reaches its destination.
+    private func expectTooLarge(_ reply: StubReply) async throws {
+        let harness = try await DownloadHarness { _ in reply }
+        let partID = UUID()
+        let record = try await harness.store.upsertRecord(
+            DownloadRecordDTO(
+                key: MediaKey(serverConnectionID: harness.connectionID, libraryItemId: "li_1"), mediaType: .podcast,
+                title: "The Show", relativeDirectory: "li_1",
+                media: LocalMediaSnapshot(metadata: .init(title: "The Show")),
+                parts: [
+                    DownloadPartDTO(
+                        id: partID, kind: .cover, serverPath: DownloadRequests.coverPath(itemID: "li_1", updatedAt: 0),
+                        filename: "cover.jpg", mimeType: "image/jpeg", expectedBytes: 0, bytesWritten: 0,
+                        destinationRelativePath: "li_1/cover-1.jpg", state: .queued)
+                ])
+        ).record
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        let update = await engine.next { if case .partFailed = $0 { true } else { false } }
+        guard case .partFailed(partID, record.id, let code, _, let willRetry) = update else {
+            Issue.record("Unexpected \(String(describing: update))")
+            return
+        }
+        #expect(code == .tooLarge)
+        #expect(!willRetry)
+        #expect(!harness.fileExists("li_1/cover-1.jpg"))
+    }
+
     /// The record is reported started once, when its first part moves it from queued to
     /// downloading, before any part completes; its other part starts without a report.
     @Test func reportsARecordStartedOnce() async throws {

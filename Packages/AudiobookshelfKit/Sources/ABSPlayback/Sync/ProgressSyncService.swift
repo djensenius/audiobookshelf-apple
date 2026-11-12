@@ -12,6 +12,9 @@ public protocol ProgressSyncService: Sendable {
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress?
     /// `POST /api/session/:id/sync`. Must return only once the request's task has completed.
     func syncSession(id: String, report: PlaybackSyncReport) async throws
+    /// `GET /api/session/:id`: the open session, with the listening time the server has applied
+    /// to it. Throws `APIError.notFound` once it is no longer open.
+    func openSession(id: String) async throws -> PlaybackSession
     /// `PATCH /api/me/progress/:itemID[/:episodeID]` with one field group.
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws
 }
@@ -28,6 +31,10 @@ public struct APIProgressSyncService: ProgressSyncService {
 
     public func syncSession(id: String, report: PlaybackSyncReport) async throws {
         _ = try await client.send(SessionEndpoints.sync(sessionID: id, report: report))
+    }
+
+    public func openSession(id: String) async throws -> PlaybackSession {
+        try await client.send(SessionEndpoints.openSession(id: id))
     }
 
     public func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {

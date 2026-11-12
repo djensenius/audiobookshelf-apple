@@ -10,6 +10,8 @@ import SwiftData
         case connectionNotFound(UUID)
         /// Some of the download's parts haven't completed.
         case incompleteDownload
+        /// A cover-only download's local item doesn't exist (it was deleted meanwhile).
+        case itemNotFound
     }
 
     /// What ``deleteEpisode(itemID:episodeId:deletingEmptyItem:now:)`` removed.
@@ -35,8 +37,13 @@ import SwiftData
     /// `relativeDirectory` is set when it is created and never moved. A cover part sets
     /// `coverRelativePath`.
     ///
-    /// - Throws: ``StoreError/incompleteDownload`` unless every part completed, and
-    ///   ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist.
+    /// A cover-only download (`DownloadRecordDTO.isCoverOnly`) only sets the existing item's
+    /// cover and its time, and only while it has no cover; its media, files and title stay as
+    /// they are. A file it fetched that the item doesn't use is left for the janitor's sweep.
+    ///
+    /// - Throws: ``StoreError/incompleteDownload`` unless every part completed,
+    ///   ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist, and
+    ///   ``StoreError/itemNotFound`` for a cover-only download without its item.
     /// - Parameter coverUpdatedAt: The server's cover timestamp; `nil` falls back to the
     ///   snapshot's `coverUpdatedAt`, and when both are `nil` the stored one is kept. A re-download
     ///   whose snapshot has no timestamp (saved before snapshot version 2) keeps the old value.
@@ -52,6 +59,18 @@ import SwiftData
         let title = isEpisode ? download.media.metadata.title : download.title
         let coverPath = download.parts.last { $0.kind == .cover }?.destinationRelativePath
         let files = download.parts.compactMap { Self.file(from: $0, episodeId: key.episodeId) }
+        if download.isCoverOnly {
+            return try commit {
+                guard
+                    let item = try fetchItem(
+                        serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+                else { throw StoreError.itemNotFound }
+                // A cover the item got meanwhile (an episode carried one) is kept.
+                Self.setCoverIfMissing(
+                    item, relativePath: coverPath, updatedAt: coverUpdatedAt ?? download.media.coverUpdatedAt, now: now)
+                return LocalLibraryItemDTO(item)
+            }
+        }
         return try commit {
             guard let connection = try fetchConnection(id: key.serverConnectionID) else {
                 throw StoreError.connectionNotFound(key.serverConnectionID)
@@ -127,6 +146,30 @@ import SwiftData
             item.updatedAt = now
             return true
         }
+    }
+
+    /// Makes `relativePath` the item's cover, with `updatedAt` when known, unless the item has
+    /// a cover: checked and set in one transaction, so a cover a finalised download gave it
+    /// meanwhile is kept. Returns `false` when it has one or the item doesn't exist.
+    @discardableResult
+    public func setCoverIfMissing(
+        itemID: UUID, relativePath: String, updatedAt: Date?, now: Date = .now
+    ) throws -> Bool {
+        try commit {
+            guard let item = try fetchItem(id: itemID) else { return false }
+            return Self.setCoverIfMissing(item, relativePath: relativePath, updatedAt: updatedAt, now: now)
+        }
+    }
+
+    @discardableResult
+    private static func setCoverIfMissing(
+        _ item: LocalLibraryItem, relativePath: String?, updatedAt: Date?, now: Date
+    ) -> Bool {
+        guard item.coverRelativePath == nil else { return false }
+        item.coverRelativePath = relativePath
+        if let updatedAt { item.coverUpdatedAt = updatedAt }
+        item.updatedAt = now
+        return true
     }
 
     /// Removes one downloaded podcast episode, its files and its snapshot entry, in one

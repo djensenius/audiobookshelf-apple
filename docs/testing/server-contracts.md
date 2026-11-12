@@ -150,8 +150,22 @@ PATCHes and legacy recording accessors remain recording-only; tests using this m
 
 Neither first-page absence, `/sync` success nor durable audio-report evidence proves delivery
 of listening time. No production recovery, resend, backoff, close-routing or history policy
-changes here. The original #171/#158/#195/#53 work and `lateCompletingSyncIsCountedOnce`
-acceptance remain open; the old suite is not imported or declared satisfied.
+changes here. The original #158/#195/#53 work remains open; the old suite is not imported or
+declared satisfied.
+
+Ambiguous `/sync` reconciliation (#381) is covered by `ProgressSyncReconcileTests`, against this
+model. `ProgressSyncer` keeps the listening time the server has acknowledged for the session,
+and after an ambiguous failure reads `GET /api/session/:id` before its first report once
+`reconcileDelay` (a request timeout plus a margin) has passed:
+`lateCompletingSyncIsCountedOnce` (the client gives up on a `/sync` whose application the
+server holds past the next report; the lookup waits, sees it applied and doesn't resend it), an
+unapplied report resent exactly once (also across a failed evidence save or an undelivered
+report), and a failed lookup or a total matching neither outcome dropping the time instead of
+sending it blind. `/sync` has no idempotency key, so a request still unprocessed after the delay
+would be counted twice; the delay bounds that risk, it doesn't remove it. The fake's
+`abandonedSyncs` gives up with `.timedOut` once the request has entered the model, which then
+applies it when the test opens its gates. A snapshot still unreconciled when the session closes
+is dropped (#382).
 
 ## Add a contract
 

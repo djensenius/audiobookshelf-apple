@@ -30,9 +30,15 @@ final class StubProgressSyncService: ProgressSyncService {
         var sessionClient: SessionModelClient?
         var syncs: [(id: String, report: PlaybackSyncReport)] = []
         var patches: [Patch] = []
+        /// With a session client, a non-nil error fails the request before it reaches the model.
         var syncErrors: [APIError?] = []
         var patchErrors: [APIError?] = []
         var syncGates: [Gate] = []
+        /// Model `/sync` requests the client gives up on (`.timedOut`) once they have entered the
+        /// server; the model still completes each when the test opens its gates.
+        var abandonedSyncs: [ReconciliationSessionModel.Request] = []
+        /// Without a session client, `GET /api/session/:id` answers these in order, then 404.
+        var lookupReplies: [Result<PlaybackSession, APIError>] = []
         var serverSyncs: [ServerSync] = []
         var serverProgress: [MediaKey: MediaProgress] = [:]
         var fetches: [MediaKey] = []
@@ -126,6 +132,15 @@ final class StubProgressSyncService: ProgressSyncService {
         for continuation in reached { continuation.resume() }
         await gate?.wait()
         if let client = state.withLock({ $0.sessionClient }) {
+            // A queued error never reaches the model, like a failed connection.
+            if let error { throw error }
+            if let abandoned = state.withLock({ $0.abandonedSyncs.isEmpty ? nil : $0.abandonedSyncs.removeFirst() }) {
+                // The server carries on with the request; the client stops waiting for it.
+                Task { try? await client.model.sync(client, id: id, report: report) }
+                await abandoned.entered.wait()
+                state.withLock { $0.log.append("sync \(number) timed out") }
+                throw APIError.timedOut
+            }
             try await client.model.sync(client, id: id, report: report)
             state.withLock { $0.log.append("sync \(number) done") }
             return
@@ -151,6 +166,15 @@ final class StubProgressSyncService: ProgressSyncService {
         if Task.isCancelled { state.withLock { $0.canceledCalls.append("sync") } }
         state.withLock { $0.log.append("sync \(number) done") }
         if let error { throw error }
+    }
+
+    func openSession(id: String) async throws -> PlaybackSession {
+        let (client, reply) = state.withLock { state in
+            state.log.append("lookup \(id)")
+            return (state.sessionClient, state.lookupReplies.isEmpty ? nil : state.lookupReplies.removeFirst())
+        }
+        if let client { return try await client.model.lookup(client, id: id) }
+        return try (reply ?? .failure(.notFound)).get()
     }
 
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {
