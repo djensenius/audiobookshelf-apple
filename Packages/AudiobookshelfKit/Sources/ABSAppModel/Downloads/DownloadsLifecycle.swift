@@ -232,7 +232,8 @@ public final class DownloadsLifecycle: SessionParticipant {
             await previous?.value
             // Paused within the quiesce, so a failure's replay can't queue a record again after
             // the read; pausing seals resume data with the old credentials, so it's discarded after.
-            // A pause that isn't saved leaves a record the next activation would restart.
+            // A pause that isn't saved leaves a record the next activation would restart. One a
+            // policy restart has paused for now is skipped, but its resume is refused once this began.
             let paused = Mutex(true)
             let quiesced = await engine.quiesce(connectionID: connectionID) {
                 do {

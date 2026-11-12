@@ -745,6 +745,30 @@ import Testing
         never.open()
     }
 
+    /// A caller that paused a record to restart it, while a quiesce of its server ran from
+    /// start to end, doesn't resume it: the quiesce passed over the paused record. A later
+    /// resume (by the user, signed in again) still does.
+    @Test func resumeUnlessQuiescedSinceLeavesARecordPausedAfterAQuiesce() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.pause(recordID: record.id))
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation) == false)
+
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        #expect(await harness.session?.session.allTasks.allSatisfy { $0.state != .running } ?? true)
+        #expect(try await engine.resume(recordID: record.id))
+        await harness.waitForRequests(2)
+        never.open()
+    }
+
     /// A part failing for good stops its siblings and may replay a start that overlapped it,
     /// after which its transfer would run with the old token: the quiesce waits for it, then
     /// stops what it started. In production the sign-out pauses the record first.

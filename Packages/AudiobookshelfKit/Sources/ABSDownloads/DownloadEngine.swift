@@ -217,6 +217,10 @@ public actor DownloadEngine {
     /// The connections being quiesced, one entry per call: a failure's replay doesn't queue
     /// their records again.
     private var quiescingConnections: [UUID] = []
+    /// Counts ``quiesce(connectionID:pausing:)`` calls, and the count at each connection's last
+    /// one, so a resume can tell whether one began since a point (``quiesceGeneration()``).
+    private var quiesceCount = 0
+    private var lastQuiesces: [UUID: Int] = [:]
     /// Connections quiesced without a session: their transfers that survived a relaunch (any
     /// task this engine didn't create) are cancelled, not adopted, and their results dropped,
     /// for the rest of the process. Only in memory: TODO(#411) keep it across a relaunch.
@@ -507,16 +511,45 @@ public actor DownloadEngine {
     /// - Returns: `false` when the record doesn't exist.
     @discardableResult
     public func resume(recordID: UUID) async throws -> Bool {
-        try await serialized(recordID) { try await $0.performResume(recordID) }
+        try await serialized(recordID) { try await $0.performResume(recordID, unlessQuiescedSince: nil) }
     }
 
-    private func performResume(_ recordID: UUID) async throws -> Bool {
+    /// ``resume(recordID:)`` for a caller that paused the record itself after reading it
+    /// (``DownloadManager/restartActiveTransfers()``): a quiesce of the record's server that is
+    /// under way or began since `generation` (a ``quiesceGeneration()``) may have passed over
+    /// the record while it was paused, so the resume pauses it instead and starts nothing: its
+    /// transfers would run with the old credentials.
+    ///
+    /// - Returns: `false` when the record doesn't exist, or such a quiesce kept it paused.
+    @discardableResult
+    public func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        try await serialized(recordID) { try await $0.performResume(recordID, unlessQuiescedSince: generation) }
+    }
+
+    /// The quiesce count now, for ``resume(recordID:unlessQuiescedSince:)`` and
+    /// ``hasQuiesced(connectionID:since:)``.
+    public func quiesceGeneration() -> Int {
+        quiesceCount
+    }
+
+    /// Whether a quiesce of `connectionID` is under way or began since `generation`.
+    public func hasQuiesced(connectionID: UUID, since generation: Int) -> Bool {
+        quiescingConnections.contains(connectionID) || lastQuiesces[connectionID, default: 0] > generation
+    }
+
+    private func performResume(_ recordID: UUID, unlessQuiescedSince generation: Int?) async throws -> Bool {
         resumeGenerations[recordID, default: 0] += 1
         resumingRecords.insert(recordID)
         defer { resumingRecords.remove(recordID) }
         guard try await store.setState(.queued, forRecord: recordID),
             let record = try await readRecord(store, recordID)
         else { return false }
+        // Checked once the record is queued: a quiesce that begins later finds it so and pauses it.
+        if let generation, hasQuiesced(connectionID: record.key.serverConnectionID, since: generation) {
+            Log.downloads.notice("Not resuming a download of a server whose downloads are being stopped")
+            _ = try await store.setState(.paused, forRecord: recordID, expecting: [.queued])
+            return false
+        }
         await start(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), resumingRecordID: recordID)
         return true
     }
@@ -583,6 +616,8 @@ public actor DownloadEngine {
     ///   once the session is created; a later call tries the rest again.
     public func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void = {}) async -> Bool {
         quiescingConnections.append(connectionID)
+        quiesceCount += 1
+        lastQuiesces[connectionID] = quiesceCount
         defer {
             if let index = quiescingConnections.firstIndex(of: connectionID) {
                 quiescingConnections.remove(at: index)

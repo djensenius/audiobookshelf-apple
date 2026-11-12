@@ -74,23 +74,29 @@ extension DownloadManager {
     }
 
     /// Pauses, then resumes, a record that is still `downloading`, for
-    /// ``restartActiveTransfers()``; its caller holds the item.
+    /// ``restartActiveTransfers()``; its caller holds the item. A sign-out's quiesce of its
+    /// server that begins meanwhile passes over it while it is paused, so then it stays paused.
     private func restart(_ recordID: UUID) async throws(DownloadManagerError) {
+        let generation = await engine.quiesceGeneration()
         // Paused or cancelled by the user meanwhile: not restarted.
-        guard try await read({ try await self.store.record(id: recordID) })?.state == .downloading,
+        guard let record = try await read({ try await self.store.record(id: recordID) }),
+            record.state == .downloading,
             try await read({ try await self.engine.pause(recordID: recordID) })
         else { return }
         var failure: DownloadManagerError?
         for _ in 0..<2 {
             do throws(DownloadManagerError) {
-                _ = try await read { try await self.engine.resume(recordID: recordID) }
+                _ = try await read {
+                    try await self.engine.resume(recordID: recordID, unlessQuiescedSince: generation)
+                }
                 failure = nil
                 break
             } catch {
                 failure = error
             }
         }
-        if failure != nil {
+        let connectionID = record.key.serverConnectionID
+        if failure != nil, await !engine.hasQuiesced(connectionID: connectionID, since: generation) {
             // Not left paused, as if by the user.
             _ = try? await read {
                 try await self.store.setState(.queued, forRecord: recordID, expecting: [.paused])

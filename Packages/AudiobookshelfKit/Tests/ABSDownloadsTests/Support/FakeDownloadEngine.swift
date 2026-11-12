@@ -156,6 +156,31 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         _ = await ensureSession()
         return queued
     }
+
+    /// The quiesce generations ``hasQuiesced(connectionID:since:)`` reports as quiesced since.
+    private var quiescedSince: Set<Int> = []
+
+    /// Makes ``hasQuiesced(connectionID:since:)`` and ``resume(recordID:unlessQuiescedSince:)``
+    /// treat every connection as quiesced since `generation`.
+    func quiesce(since generation: Int) {
+        quiescedSince.insert(generation)
+    }
+
+    func quiesceGeneration() -> Int { 0 }
+
+    func hasQuiesced(connectionID: UUID, since generation: Int) -> Bool {
+        quiescedSince.contains(generation)
+    }
+
+    /// ``resume(recordID:)``, unless quiesced since `generation` (and not made to throw): then it
+    /// changes nothing, as the engine's puts the record back to `paused`.
+    func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        guard !quiescedSince.contains(generation) || failingResumes > 0 else {
+            calls.append(.resume(recordID))
+            return false
+        }
+        return try await resume(recordID: recordID)
+    }
 }
 
 /// Records the manager's progress links and detaches; `before` runs first, and with `failing`,

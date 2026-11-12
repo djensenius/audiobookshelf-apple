@@ -118,6 +118,39 @@ import Testing
         #expect(try await fixture.store.record(id: episode.id)?.state == .queued)
     }
 
+    /// The restart resumes a record unless a sign-out's quiesce of its server began since the
+    /// restart did: that quiesce passed over the record while it was paused.
+    @Test func restartDoesNotResumeARecordIfItsServerWasQuiescedMeanwhile() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.quiesce(since: 0)
+
+        try await manager.restartActiveTransfers()
+
+        #expect(await fixture.engine.calls == [.pause(book.id), .resume(book.id)])
+        #expect(await fixture.engine.resumed.isEmpty)
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
+    /// A sign-out's quiesce of the server that began during the restart passed over the paused
+    /// record, so a resume that fails twice leaves it paused, as that quiesce leaves the rest:
+    /// queued, the next activation would start it again.
+    @Test func restartLeavesARecordPausedWhoseResumesFailedAfterAQuiesce() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.failNextResumes(2)
+        await fixture.engine.quiesce(since: 0)
+
+        await #expect(throws: DownloadManagerError.storeFailure) { try await manager.restartActiveTransfers() }
+
+        #expect(await fixture.engine.calls == [.pause(book.id), .resume(book.id), .resume(book.id)])
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
     /// A restart waits for an enqueue of the item, and leaves a record paused meanwhile alone.
     @Test func restartSkipsARecordPausedMeanwhile() async throws {
         let fixture = try await ManagerFixture()
