@@ -77,7 +77,7 @@ public enum EbookLocation: Sendable, Hashable {
     }
 }
 
-/// Where a reader opens: the newer of the local and the server location (ADR 0003 dates).
+/// Where a reader opens: the store row's location, which owns the position (ADR 0003, #101).
 public struct EbookResumePoint: Sendable, Equatable {
     public enum Source: Sendable, Equatable {
         case local
@@ -99,49 +99,26 @@ public struct EbookResumePoint: Sendable, Equatable {
 
     public static let beginning = EbookResumePoint(location: nil, progress: nil, source: .beginning)
 
-    /// Picks the newer valid location.
-    ///
-    /// - The local row is dated by when its ebook group was saved (``LocalMediaProgressDTO/ebookSavedAt``),
-    ///   never by its row-wide `lastUpdate`, which audio edits move.
-    /// - The server's progress is dated by its `lastUpdate`. That date is row-wide too, so an unsent
-    ///   local edit stays newest while the server's ebook values are still the ones the row last
-    ///   saw: another device's audio change mustn't win over a page turned here.
-    /// - On equal dates the server wins, so an unsent edit wins only when strictly newer, as when
-    ///   the store merges. An undated server value loses to any local one.
-    /// - A server value older than the row's server baseline (`serverBaseline.lastUpdate`) is a
-    ///   stale snapshot (cached or delayed) the store would drop: it isn't a candidate while the
-    ///   row has a valid location, even when an audio update moved that baseline past the row's
-    ///   unsent ebook edit.
-    /// - The chosen progress is ``normalized(_:)``, as a recorded one is.
-    /// - A location that isn't valid for `kind` is not a candidate; with no candidate the reader
-    ///   opens at the start. An unsent edit this reader can't open doesn't hide the server's
-    ///   unchanged location.
-    public static func resolve(kind: ReaderKind, local: LocalMediaProgressDTO?, server: MediaProgress?) -> Self {
+    /// The first location valid for `kind`, in order: the row's, the row's before a merge
+    /// replaced it (`replaced`, when the merge brought a location for another format), then
+    /// `server`, the progress known without a row. Dates aren't compared: the row already holds
+    /// the store's decision. The chosen progress is ``normalized(_:)``, as a recorded one is.
+    public static func resolve(
+        kind: ReaderKind, local: LocalMediaProgressDTO?, replaced: LocalMediaProgressDTO? = nil,
+        server: MediaProgress?
+    ) -> Self {
         let style = kind.locationStyle
-        var best: (point: EbookResumePoint, date: Date)?
-        let localIsValid = EbookLocation(local?.ebookLocation, style: style) != nil
-        let localSupersedesServer = local?.ebookDirty == true && localIsValid
-        if let server, let location = EbookLocation(server.ebookLocation, style: style),
-            !(localSupersedesServer && local?.serverEbookUnchanged(in: server) == true)
-        {
-            let date = server.lastUpdate.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? .distantPast
-            // A snapshot older than the server progress the row last took, which the store would
-            // drop, can't win over the row's own location.
-            if !(localIsValid && local?.serverBaseline.map({ date < $0.lastUpdate }) == true) {
-                best = (
-                    EbookResumePoint(location: location, progress: normalized(server.ebookProgress), source: .server),
-                    date
-                )
+        let candidates: [(String?, Double?, Source)] = [
+            (local?.ebookLocation, local?.ebookProgress, .local),
+            (replaced?.ebookLocation, replaced?.ebookProgress, .local),
+            (server?.ebookLocation, server?.ebookProgress, .server),
+        ]
+        for (stored, progress, source) in candidates {
+            if let location = EbookLocation(stored, style: style) {
+                return EbookResumePoint(location: location, progress: normalized(progress), source: source)
             }
         }
-        if let local, let date = local.ebookSavedAt, let location = EbookLocation(local.ebookLocation, style: style),
-            best.map({ date > $0.date }) ?? true
-        {
-            best = (
-                EbookResumePoint(location: location, progress: normalized(local.ebookProgress), source: .local), date
-            )
-        }
-        return best?.point ?? .beginning
+        return .beginning
     }
 
     /// A saved progress as a reader takes it: `nil` when unknown or non-finite, else clamped to

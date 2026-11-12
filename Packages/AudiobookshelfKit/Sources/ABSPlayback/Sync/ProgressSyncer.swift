@@ -929,6 +929,21 @@ public final class ProgressSyncer {
                 return
             }
         }
+        // Socket ebook values are a hint to fetch, never merged themselves (ADR 0003).
+        let ebookFetches = await store.needsEbookFetch
+            .filter { $0.serverConnectionID == service.serverConnectionID && !attemptedKeys.contains($0) }
+            .sorted { $0.rawValue < $1.rawValue }
+        for key in ebookFetches {
+            await waitForPendingWrites()
+            guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
+            do {
+                _ = try await fetchProgress(for: key, attempted: &attemptedConfirmations, attemptedKeys: &attemptedKeys)
+            } catch {
+                logger.error("Fetching ebook progress failed: \(String(describing: error), privacy: .public)")
+                drainOutcome.failed = true
+                return
+            }
+        }
         drainOutcome.completed = true
         await refreshActiveProgress(unlessAttempted: attemptedKeys)
     }

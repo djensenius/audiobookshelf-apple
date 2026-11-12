@@ -323,7 +323,8 @@ Model notes:
     the server already holds the acknowledged value.
   - **Merge** (replaces the row-wide rule in
     `ApiClient.syncLocalSessionsWithServer`), for each group when server progress
-    arrives:
+    arrives (the dirty cases below are for audio and finished; a dirty ebook group
+    follows its own rule, below):
     - not dirty: take the server values;
     - dirty, and the server's values for the group equal the baseline's: the
       server hasn't changed that group since we last saw it, so the local values
@@ -373,10 +374,10 @@ Model notes:
       the send's edit (an earlier finish isn't this send's echo). The ack keeps
       such an un-finish send as evidence while a newer finished edit is pending,
       so that edit survives the finished echo; an unchanged edit takes it;
-    - a missing `ebookProgress` is sent as 0 (above), so its echo matches
-      exactly; a baseline of 0 never stands for a sent `nil`. Only the ack that
-      creates progress records 0 for an unsent `ebookProgress` the device had as
-      `nil`, which is what creation stores.
+    - a missing `ebookProgress` is sent as 0 (above), so the baseline the ack
+      records is what the server stores; a baseline of 0 never stands for a sent
+      `nil`. Only the ack that creates progress records 0 for an unsent
+      `ebookProgress` the device had as `nil`, which is what creation stores.
 
     Other normalizations need nothing: the server clamps `progress` (not
     compared); creation defaults `currentTime` and `duration` to 0, which only
@@ -388,6 +389,28 @@ Model notes:
     and one running behind loses them. This is accepted: the server's per-group
     edit times aren't available, and the baseline and send history settle every
     case that doesn't involve another device.
+  - **Ebook progress is local-authoritative while dirty** (#101, P6-11a). A page
+    turn is saved to the row at once (dirty, with `ebookEditedAt` as the edit's
+    identity); only the PATCH is debounced. A dirty ebook group keeps its local
+    values against every server value: there is no echo matching, baseline
+    comparison or conflict dating for it, and no server value clears its flag.
+    Only the acknowledgement of a send whose `ebookEditedAt` equals the row's
+    settles it (by identity, never by comparing values), so the ack of an older
+    send leaves a newer turn dirty, to be sent next. The ebook entries of
+    `unacknowledgedSends` stay until an ebook send is acknowledged; they still
+    shield the other groups from an ebook PATCH's side effects (#53). A clean
+    ebook group takes server values under the usual generation and stale checks.
+    Socket events don't merge ebook values: when one differs from the row it only
+    records the row in `LocalProgressStore.needsEbookFetch` (with a new
+    generation, so only a fetch issued afterwards clears it), and the syncer's
+    next drain fetches `/api/me/progress/:id` for it. Its audio and finished
+    values merge as usual. The reader resumes from the row (falling back to the
+    server's value only when there is no row), and a clean row is refreshed from
+    the server first. The trade-off, as in the legacy reader (`EpubReader.vue`
+    and `PdfReader.vue` save locally, then PATCH fire-and-forget): delivery is at
+    least once, so a lost response re-sends the same position, and an old offline
+    position sent later overwrites newer reading made elsewhere in the meantime.
+    That is accepted; the next turn on either device moves it on.
   - **Clearing.** The PATCH is built from a snapshot of the dirty groups' values
     and their `<group>EditedAt`, taken when it is sent; a retry always takes a new
     snapshot of the current values, never the earlier one. Before sending, the
@@ -832,7 +855,9 @@ Ongoing checks:
   arrives by the fetch, or at once by socket when the ack had a server time; a newer edit survives the
   server's normalized echo (an un-finish auto-finished near the end, a created
   `ebookProgress` of 0) after an ack or a lost response, and an unchanged edit
-  takes it; the echo of an older lost send with the same value (a seek back to
+  takes it after an ack; a dirty ebook edit survives any server value, and only
+  the ack of its own send clears it; a socket ebook value asks for a fetch
+  instead of merging; the echo of an older lost send with the same value (a seek back to
   200 after 300, or an earlier auto-finished un-finish) doesn't acknowledge a
   newer undelivered edit, nor does one matching only the newest after the older
   send was dropped from the full list (the group stays truncated and dirty until

@@ -126,9 +126,6 @@ public enum SessionUploadResult: Sendable, Equatable {
 
     // In memory only: no fetch or PATCH outlives the process.
     private var generation: UInt64 = 0
-    /// The latest ebook turn saved per row key, so an earlier one saved after it is dropped. In
-    /// memory: turns waiting to be saved don't outlive the process.
-    private var latestEbookTurns: [String: EbookTurnIntent] = [:]
     private var rowGenerations: [String: UInt64] = [:]
     /// Weak registrations are swept on every capture; storage is bounded by overlapping starts,
     /// not every media key ever seen. Abandoned/failed starts need no asynchronous cleanup task.
@@ -147,6 +144,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// acknowledgement, with the latest socket value received meanwhile and its capture.
     /// Rows whose latest send was an ebook one: their next send goes back to audio or finished.
     private var ebookSentLast: Set<String> = []
+    /// Rows a socket event reported another ebook position for (``needsEbookFetch``), with the
+    /// generation a fetch must be captured at to answer the request.
+    private var ebookFetchRequests: [String: (key: MediaKey, generation: UInt64)] = [:]
     private var awaitingFetch:
         [String: (key: MediaKey, acknowledgement: UUID, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] = [:]
 
@@ -160,6 +160,13 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// the acknowledged values, which the server holds unless it normalized them.
     public var needsConfirmationFetch: Set<MediaKey> {
         Set(awaitingFetch.values.map(\.key))
+    }
+
+    /// Rows a socket event reported a different ebook position for. Socket ebook values are never
+    /// merged (ADR 0003, #101): fetch each row like ``needsConfirmationFetch`` and apply it with
+    /// `source: .fetch`, which clears the request.
+    public var needsEbookFetch: Set<MediaKey> {
+        Set(ebookFetchRequests.values.map(\.key))
     }
 
     /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
@@ -281,46 +288,6 @@ public enum SessionUploadResult: Sendable, Equatable {
             now: now, playbackToken: nil)
     }
 
-    /// Records an ebook turn made at `now` and saved later, unless it was superseded meanwhile.
-    /// The checks and the write are one step on this actor. A turn is dropped when:
-    /// - a later turn of the same media was saved first, for example by another reader: `intent`
-    ///   orders them by when they were made, whatever the wall clock did;
-    /// - the server's ebook position changed to one dated at or after the turn: a merge in between
-    ///   would have taken that position over the turn (the server wins ties), so saving the turn
-    ///   now would mark it dirty against that value and PATCH over it.
-    ///
-    /// - Parameters:
-    ///   - intent: When the turn was made, from ``EbookTurnIntent/next()``.
-    ///   - knownPositions: The server ebook positions the editor accounted for when the turn was
-    ///     made: the row's ``LocalMediaProgressDTO/serverBaseline`` as last read, and the values
-    ///     it saved since, whose acknowledgement moves the baseline too. Compared with
-    ///     ``EbookPosition/matches(_:)``. `nil` when unknown, which never drops the turn.
-    ///   - serverProgress, localLibraryItemID: As for ``recordEdit(_:for:serverProgress:localLibraryItemID:now:)``.
-    /// - Returns: The saved row, or `nil` when the turn was dropped.
-    @discardableResult
-    public func recordEbookTurn(
-        _ ebook: ProgressEdit.Ebook,
-        for key: MediaKey,
-        intent: EbookTurnIntent,
-        knownPositions: [EbookPosition]?,
-        serverProgress: ProgressBaseline? = nil,
-        localLibraryItemID: UUID? = nil,
-        now: Date
-    ) throws -> LocalMediaProgressDTO? {
-        if let latest = latestEbookTurns[key.rawValue], latest > intent { return nil }
-        if let knownPositions, let row = try fetchRow(key), let baseline = ProgressSyncState(row).serverBaseline,
-            baseline.lastUpdate >= now, baseline.ebookLocationIsUnknown != true,
-            !knownPositions.contains(where: { $0.matches(baseline.ebookPosition) })
-        {
-            return nil
-        }
-        let saved = try recordEdit(
-            ProgressEdit(ebook: ebook), for: key, serverProgress: serverProgress,
-            localLibraryItemID: localLibraryItemID, now: now, playbackToken: nil)
-        latestEbookTurns[key.rawValue] = intent
-        return saved
-    }
-
     @discardableResult
     private func recordEdit(
         _ edit: ProgressEdit, for key: MediaKey, serverProgress: ProgressBaseline?,
@@ -440,6 +407,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// after the acknowledgement is applied (``needsConfirmationFetch``), socket values for the
     /// row aren't merged; the latest is kept and merged after that fetch only if its `lastUpdate`
     /// is strictly later than the fetch's (on a tie the fetch wins).
+    ///
+    /// A socket event's ebook values are never merged: one that differs from the row's ebook
+    /// position requests a fetch instead (``needsEbookFetch``).
     @discardableResult
     public func applyServerProgress(
         _ updates: [MediaKey: ProgressBaseline],
@@ -448,6 +418,7 @@ public enum SessionUploadResult: Sendable, Equatable {
     ) throws -> Set<MediaKey> {
         var recorded: [String: ProgressBaseline] = [:]
         var confirmed: Set<String> = []
+        var ebookFetches: [String: MediaKey] = [:]
         let merged = try commit {
             var merged: Set<MediaKey> = []
             let rows = try fetchRows(of: Set(updates.keys.map(\.serverConnectionID)))
@@ -455,9 +426,14 @@ public enum SessionUploadResult: Sendable, Equatable {
                 let raw = key.rawValue
                 guard let row = rows[raw] else { continue }
                 if hasChanged(key, since: capturedAt) { continue }
+                if source == .socket,
+                    row.ebookLocation != server.ebookLocation || row.ebookProgress != server.ebookProgress
+                {
+                    ebookFetches[raw] = key
+                }
                 let takingTies = source == .fetch && capturedAt.value >= mergedAt[raw] ?? 0
                 guard let awaiting = awaitingFetch[raw] else {
-                    if merge(server, into: row, takingTies: takingTies) { merged.insert(key) }
+                    if merge(server, into: row, takingTies: takingTies, source: source) { merged.insert(key) }
                     continue
                 }
                 guard source == .fetch else {
@@ -466,12 +442,12 @@ public enum SessionUploadResult: Sendable, Equatable {
                 }
                 // Passing the generation check, the fetch was issued after the acknowledgement.
                 confirmed.insert(raw)
-                if merge(server, into: row, takingTies: takingTies) { merged.insert(key) }
+                if merge(server, into: row, takingTies: takingTies, source: source) { merged.insert(key) }
                 // Server times are milliseconds, so a pre-PATCH snapshot can tie the fetch; only a
                 // strictly newer one can have been emitted after it.
                 if let latest = awaiting.latest, rowGenerations[raw] ?? 0 <= latest.capturedAt,
                     latest.server.lastUpdate > server.lastUpdate,
-                    merge(latest.server, into: row)
+                    merge(latest.server, into: row, source: .socket)
                 {
                     merged.insert(key)
                 }
@@ -483,6 +459,19 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         for raw in confirmed {
             awaitingFetch[raw] = nil
+        }
+        // A fetch issued after a request answers it, whatever happens to its values.
+        if source == .fetch {
+            for key in updates.keys {
+                if let request = ebookFetchRequests[key.rawValue], capturedAt.value >= request.generation {
+                    ebookFetchRequests[key.rawValue] = nil
+                }
+            }
+        }
+        if !ebookFetches.isEmpty {
+            // Fetches already issued may predate the socket's value: only later ones answer it.
+            generation += 1
+            for (raw, key) in ebookFetches { ebookFetchRequests[raw] = (key, generation) }
         }
         if !merged.isEmpty {
             generation += 1
@@ -798,12 +787,19 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// the baseline's time may hold another write made before the one the baseline holds (an
     /// earlier event, or a fetch read before it); it counts as stale unless `takingTies` (a fetch
     /// issued after the baseline's values were merged, so read after the server held them).
-    private func merge(_ server: ProgressBaseline, into row: LocalMediaProgress, takingTies: Bool = false) -> Bool {
+    private func merge(
+        _ server: ProgressBaseline, into row: LocalMediaProgress, takingTies: Bool = false,
+        source: ServerProgressSource
+    ) -> Bool {
         if !takingTies, let baseline = row.serverBaseline, server.lastUpdate <= baseline.lastUpdate {
             return false
         }
         var state = ProgressSyncState(row)
-        guard state.merge(server, excluding: inFlight[row.key]?.groups ?? []) else { return false }
+        // A socket's ebook values only prompt a fetch (``needsEbookFetch``).
+        guard
+            state.merge(
+                server, excluding: inFlight[row.key]?.groups ?? [], skipping: source == .socket ? .ebook : [])
+        else { return false }
         state.write(to: row)
         return true
     }
