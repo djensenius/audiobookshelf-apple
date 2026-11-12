@@ -128,6 +128,31 @@ private let pods = makeLibrary("pods", mediaType: .podcast)
         }
     }
 
+    /// A compact scene restored in a book library's Series section: when that library is gone
+    /// and a podcast library replaces it, Series falls back to the default grid, but the launch
+    /// link's screen, pushed onto the Library path, stays with its pending play link.
+    @Test func sectionFallbackFromARestoredLibraryKeepsALaunchLink() async throws {
+        try await withLibrarySettings { settings in
+            let store = await loadedStore(settings, libraries: [pods], defaultLibraryID: "pods")
+            let router = Router(identity: identityA)
+            router.restoreLibrary(id: "gone", kind: .book)
+            router.librarySection = .series
+            router[path: .library] = [.series(id: "s1")]
+            let play = PlayLink(itemID: "li_1")
+            router.open(DeepLink(.play(play)))
+            let opened = router[path: .library]
+            #expect(opened.last == .item(id: "li_1"))
+
+            SceneLibrarySelection.reconcile(router, store: store)
+
+            #expect(router.libraryID == "pods")
+            #expect(router.librarySection == nil)
+            #expect(router.selectedTab == .library)
+            #expect(router[path: .library] == opened)
+            #expect(router.pendingPlayLink == play)
+        }
+    }
+
     /// A user with no libraries: a saved or previous library is dropped with its library-scoped
     /// paths, other tabs are kept, and a library link has nothing to open.
     @Test func loadedWithoutLibraries() async throws {

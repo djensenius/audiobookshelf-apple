@@ -232,13 +232,17 @@ public final class Router {
     /// Falls back from unsupported sections: the selected tab to Library, the Library section
     /// to the default grid (dropping the Library path, which came from that section), and
     /// clears the paths of unsupported section tabs.
-    func repairSections(supported: Set<AppTab>) {
+    ///
+    /// - Parameter keepsLibraryPath: keeps the Library path when its section falls back, for a
+    ///   library replacing one that was never checked: the path may hold a launch or deep link's
+    ///   screens, opened since, which keep their pending play link.
+    func repairSections(supported: Set<AppTab>, keepsLibraryPath: Bool = false) {
         if selectedTab.isSection, !supported.contains(selectedTab) {
             selectedTab = .library
         }
         if let section = librarySection, !section.isSection || !supported.contains(section) {
             librarySection = nil
-            self[path: .library] = []
+            if !keepsLibraryPath { self[path: .library] = [] }
         }
         for tab in AppTab.sections where !supported.contains(tab) {
             self[path: tab] = []

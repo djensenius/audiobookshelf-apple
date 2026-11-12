@@ -119,10 +119,11 @@ public enum SceneLibrarySelection {
     }
 
     /// Shows `library` in place of an unchecked guess, keeping the paths; sections it doesn't
-    /// support are still repaired.
+    /// support are still repaired, but an unsupported Library section falls back to the default
+    /// grid with its path, which may hold a launch link's screens.
     private static func adopt(_ library: Library, in router: Router) {
         router.restoreLibrary(id: library.id, kind: LibraryKind(library.mediaType))
-        router.repairSections(supported: router.supportedSections)
+        router.repairSections(supported: router.supportedSections, keepsLibraryPath: true)
         router.isLibraryChecked = true
     }
 }
