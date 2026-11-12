@@ -166,6 +166,48 @@ struct PlaybackScopeTests {
         #expect(other.coordinator.phase == .idle)
     }
 
+    // MARK: Resume
+
+    /// A user resume of a restored item asks for the system's primary session once it plays.
+    @Test func aUserResumeAsksToBecomePrimaryWhenPlaybackStarts() async throws {
+        let h = try ScopeHarness()
+        h.s.h.lastPlayed.record = record(h.s.h.connectionID, item: "a")
+        #expect(h.scope.start())
+
+        await h.scope.resume(rewindingBy: nil)
+
+        #expect(h.coordinator.isPlaybackRequested)
+        #expect(h.nowPlaying.log == ["primary"])
+        // So does resuming after a pause.
+        h.coordinator.pause()
+        await h.scope.resume(rewindingBy: nil)
+        #expect(h.nowPlaying.log == ["primary", "primary"])
+    }
+
+    @Test func aRefusedResumeDoesNotAskToBecomePrimary() async throws {
+        let h = try ScopeHarness()
+        h.s.h.lastPlayed.record = record(h.s.h.connectionID, item: "a")
+        #expect(h.scope.start())
+        h.s.h.policy.decision = .denied(.cellular)
+
+        await h.scope.resume(rewindingBy: nil)
+
+        #expect(h.coordinator.error != nil)
+        #expect(!h.coordinator.isPlaybackRequested)
+        #expect(h.nowPlaying.log.isEmpty)
+    }
+
+    @Test func aRetiredScopeDoesNotAskToBecomePrimary() async throws {
+        let h = try ScopeHarness()
+        h.s.h.lastPlayed.record = record(h.s.h.connectionID, item: "a")
+        #expect(h.scope.start())
+
+        h.scope.retire(reason: .accountSwitch)
+        await h.scope.resume(rewindingBy: nil)
+
+        #expect(!h.nowPlaying.log.contains("primary"))
+    }
+
     // MARK: Retire
 
     @Test func retireStopsSynchronously() async throws {

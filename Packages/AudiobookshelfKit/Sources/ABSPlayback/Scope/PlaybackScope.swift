@@ -164,6 +164,16 @@ public final class PlaybackScope {
         await nowPlaying.requestSystemPrimary()
     }
 
+    /// Resumes for the user (the player's play button, which may restart a restored item), then
+    /// asks for the system's primary Now Playing session if playback is requested without an
+    /// error. Remote commands (Lock Screen, headphones) resume the coordinator through the bridge
+    /// instead, and don't ask.
+    public func resume(rewindingBy seconds: Double?) async {
+        await coordinator.resume(rewindingBy: seconds)
+        guard !coordinator.isRetired, coordinator.isPlaybackRequested, coordinator.error == nil else { return }
+        await nowPlaying.requestSystemPrimary()
+    }
+
     /// Swaps the account's client and features after a reconnect, without rebuilding anything.
     public func reconnect(client: APIClient?, features: ServerFeatures?) {
         services?.update(client: client, features: features)

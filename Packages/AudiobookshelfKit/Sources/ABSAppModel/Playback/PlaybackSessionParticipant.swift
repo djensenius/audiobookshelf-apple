@@ -26,7 +26,9 @@ public protocol PlaybackScopeHandle: AnyObject, Sendable {
 }
 
 extension PlaybackScope: PlaybackScopeHandle {
-    public var playback: any PlayerPlaybackControlling { coordinator }
+    /// The coordinator, with user resumes routed through the scope (``ScopePlayback``). A new
+    /// adapter on each read; the participant reads it once per session.
+    public var playback: any PlayerPlaybackControlling { ScopePlayback(scope: self) }
 }
 
 /// What the app builds a session's ``PlaybackScopeHandle`` from.
