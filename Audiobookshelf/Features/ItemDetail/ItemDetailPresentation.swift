@@ -163,3 +163,42 @@ struct ItemDetailPlayFailure: Equatable {
         message = error.localizedDescription
     }
 }
+
+/// A chapter row's text, and the question asked before playing it (legacy `index.vue:580-588`).
+struct ItemDetailChapterPresentation: Equatable {
+    /// The server's title, or "Chapter 3" when it's blank.
+    let title: String
+    /// `m:ss` or `h:mm:ss`, as legacy `$secondsToTimestamp`.
+    let startText: String
+    let durationText: String
+    /// The title with the start and duration spoken in full.
+    let accessibilityLabel: String
+    /// "Start playback for "{book}" at {start}?", with the time playback will actually start.
+    let confirmMessage: String
+
+    /// - Parameters:
+    ///   - position: The chapter's 1-based place in the list, to number an untitled chapter.
+    ///   - bookTitle: For the confirmation, as legacy.
+    ///   - playbackStart: Where playing the chapter starts, ``ItemDetailModel/startTime(for:)``,
+    ///     which can differ from its start (past the end of the book, say). The confirmation shows
+    ///     it, so the user confirms the time that plays; the row shows the chapter's own start.
+    init(
+        chapter: ItemDetailModel.ChapterRow, position: Int, bookTitle: String, playbackStart: TimeInterval,
+        locale: Locale
+    ) {
+        title =
+            chapter.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? L10n.string(
+                "LabelItemDetailChapterUntitled", position.formatted(.number.locale(locale)), locale: locale)
+            : chapter.title
+        startText = DurationStyle.timestamp.string(chapter.start, locale: locale)
+        durationText = DurationStyle.timestamp.string(chapter.duration, locale: locale)
+        accessibilityLabel = L10n.string(
+            "LabelItemDetailChapterAccessibility", title,
+            DurationStyle.timestamp.accessibilityString(chapter.start, locale: locale),
+            DurationStyle.timestamp.accessibilityString(chapter.duration, locale: locale), locale: locale)
+        confirmMessage = L10n.string(
+            "MessageConfirmPlaybackTime", bookTitle, DurationStyle.timestamp.string(playbackStart, locale: locale),
+            locale: locale)
+    }
+}
