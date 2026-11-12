@@ -11,13 +11,22 @@ final class StreamStubProtocol: URLProtocol {
         var mimeType = "audio/mpeg"
         /// A status other than 200 is sent with no body.
         var status = 200
-        /// Answers a `Range` request with `206`; when `false`, always `200` with the whole body.
+        /// Answers a `Range` request with `206`; when `false`, always `200` with the whole body
+        /// (still sending `Accept-Ranges: bytes`, as Express does behind a proxy that drops `Range`).
         var honorsRange = true
         /// Answers every `Range` request with a `206` from this offset instead of the requested one.
         var rangeStartsAt: Int?
         /// Answers a request for one of these paths with a 302 to its URL instead.
         var redirects: [String: String] = [:]
+        /// Sends the body in chunks of this many bytes.
+        var chunkSize = Int.max
+        /// Sends the response and the first chunk, then nothing more until the load is stopped.
+        var holdsAfterFirstChunk = false
+        /// Sends only this many bytes of the body it announced, then finishes cleanly.
+        var truncatesTo: Int?
         var requests: [URLRequest] = []
+        /// How many loads the session stopped (each one does, when it ends or is cancelled).
+        var stops = 0
     }
 
     private static let routes = Mutex<[String: Route]>([:])
@@ -35,6 +44,10 @@ final class StreamStubProtocol: URLProtocol {
 
     static func requests(_ host: String) -> [URLRequest] {
         routes.withLock { $0[host]?.requests ?? [] }
+    }
+
+    static func stops(_ host: String) -> Int {
+        routes.withLock { $0[host]?.stops ?? 0 }
     }
 
     static func configuration() -> URLSessionConfiguration {
@@ -68,7 +81,7 @@ final class StreamStubProtocol: URLProtocol {
         }
         let total = route.body.count
         var status = route.status
-        var headers = ["Content-Type": route.mimeType, "Accept-Ranges": route.honorsRange ? "bytes" : "none"]
+        var headers = ["Content-Type": route.mimeType, "Accept-Ranges": "bytes"]
         var body = status == 200 ? route.body : Data()
         if status == 200, route.honorsRange, let range = request.value(forHTTPHeaderField: "Range"),
             let match = range.firstMatch(of: /^bytes=(\d+)-(\d*)$/), let start = Int(match.1), start < total
@@ -83,13 +96,23 @@ final class StreamStubProtocol: URLProtocol {
             body = route.body.subdata(in: start..<(end + 1))
         }
         headers["Content-Length"] = String(body.count)
+        if let truncatesTo = route.truncatesTo { body = body.prefix(truncatesTo) }
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        if !body.isEmpty { client?.urlProtocol(self, didLoad: body) }
+        var offset = 0
+        while offset < body.count {
+            let end = offset + min(route.chunkSize, body.count - offset)
+            client?.urlProtocol(self, didLoad: body.subdata(in: offset..<end))
+            offset = end
+            if route.holdsAfterFirstChunk { return }
+        }
         client?.urlProtocolDidFinishLoading(self)
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        guard let host = request.url?.host() else { return }
+        Self.routes.withLock { $0[host]?.stops += 1 }
+    }
 }
 
 /// A ``ResourceLoadingRequest`` that records what the loader gives it.

@@ -16,19 +16,29 @@ struct HeaderStreamingTransportTests {
         HeaderStreamingTransport(customHeaders: headers, configuration: StreamStubProtocol.configuration())
     }
 
-    /// Runs one loading request for `url` through `transport`'s loader and waits for it to finish.
+    /// Runs one loading request for `url` through `transport`'s loader and waits for it to finish,
+    /// checking that it was finished exactly once.
     private func load(
         _ url: String, range: RequestedRange?, wantsContentInformation: Bool = true,
-        through transport: HeaderStreamingTransport, mimeType: String? = "audio/mpeg"
+        through transport: HeaderStreamingTransport, mimeType: String? = "audio/mpeg",
+        networkAccess: NetworkAccess? = nil, registers: Bool = true
     ) async throws -> RecordingLoadingRequest {
         let url = try #require(URL(string: url))
         let request = RecordingLoadingRequest(range: range, wantsContentInformation: wantsContentInformation)
         let loaderURL = HeaderStreamingTransport.loaderURL(for: url)
         let loader = transport.loader
-        loader.register(loaderURL, track: .init(mimeType: mimeType, networkAccess: nil))
+        if registers { loader.register(loaderURL, track: .init(mimeType: mimeType, networkAccess: networkAccess)) }
         loader.queue.async { loader.start(request, loaderURL: loaderURL) }
         await request.finished()
+        loader.queue.sync {}
+        #expect(request.finishCount == 1)
         return request
+    }
+
+    /// Waits up to two seconds for `condition`.
+    private func eventually(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
     }
 
     // MARK: - URLs, ranges and content information
@@ -57,22 +67,26 @@ struct HeaderStreamingTransportTests {
             HTTPURLResponse(
                 url: url, statusCode: 206, httpVersion: nil,
                 headerFields: ["Content-Range": "bytes 100-199/5000", "Content-Type": "application/octet-stream"]))
-        let (info, offset) = try #require(
+        let (info, first, last) = try #require(
             HeaderResourceLoader.contentInformation(from: partial, mimeType: "audio/mpeg"))
         #expect(
             info == ContentInformation(contentType: "public.mp3", contentLength: 5000, isByteRangeAccessSupported: true)
         )
-        #expect(offset == 100)
+        #expect(first == 100)
+        #expect(last == 199)
 
+        // A `200` to a `Range` request: no range access, even though `Accept-Ranges` claims it.
         let full = try #require(
             HTTPURLResponse(
                 url: url, statusCode: 200, httpVersion: nil,
                 headerFields: ["Content-Length": "5000", "Content-Type": "audio/mp4", "Accept-Ranges": "bytes"]))
-        let (fullInfo, fullOffset) = try #require(HeaderResourceLoader.contentInformation(from: full, mimeType: nil))
+        let (fullInfo, fullFirst, fullLast) = try #require(
+            HeaderResourceLoader.contentInformation(from: full, mimeType: nil))
         #expect(fullInfo.contentType == UTType(mimeType: "audio/mp4")?.identifier)
         #expect(fullInfo.contentLength == 5000)
-        #expect(fullInfo.isByteRangeAccessSupported)
-        #expect(fullOffset == 0)
+        #expect(!fullInfo.isByteRangeAccessSupported)
+        #expect(fullFirst == 0)
+        #expect(fullLast == 4999)
 
         let broken = try #require(
             HTTPURLResponse(
@@ -99,6 +113,7 @@ struct HeaderStreamingTransportTests {
         #expect(sent.value(forHTTPHeaderField: "CF-Access-Client-Id") == "client")
         #expect(sent.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
         #expect(sent.value(forHTTPHeaderField: "Range") == "bytes=100-299")
+        #expect(sent.value(forHTTPHeaderField: "Accept-Encoding") == "identity")
         #expect(sent.value(forHTTPHeaderField: "Authorization") == nil)
         #expect(sent.value(forHTTPHeaderField: "Cookie") == nil)
     }
@@ -125,25 +140,35 @@ struct HeaderStreamingTransportTests {
         #expect(StreamStubProtocol.requests(host).first?.value(forHTTPHeaderField: "Range") == "bytes=900-")
     }
 
-    @Test func fullResponseToARangeIsSkippedAndTrimmed() async throws {
+    @Test func fullResponseFromTheStartIsTrimmedAcrossChunks() async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body, honorsRange: false, chunkSize: 64))
+        let request = try await load(
+            "https://\(host)/t", range: RequestedRange(offset: 0, length: 150), through: transport())
+
+        #expect(request.error == nil)
+        #expect(request.data == Self.body.subdata(in: 0..<150))
+        #expect(request.information?.isByteRangeAccessSupported == false)
+    }
+
+    /// A proxy that drops `Range` while the server still sends `Accept-Ranges: bytes`: reading on
+    /// to the offset would download everything before it, so the load fails instead.
+    @Test func fullResponseToALaterRangeIsNotSkippedThrough() async throws {
         let host = StreamStubProtocol.register(.init(body: Self.body, honorsRange: false))
         let request = try await load(
             "https://\(host)/t", range: RequestedRange(offset: 300, length: 100), through: transport())
 
-        #expect(request.error == nil)
-        #expect(request.data == Self.body.subdata(in: 300..<400))
-        #expect(request.information?.isByteRangeAccessSupported == false)
-        #expect(request.finishCount == 1)
+        #expect(request.error as? HeaderStreamingError == .rangeNotHonored)
+        #expect(request.data.isEmpty)
     }
 
-    @Test(arguments: [(50, true), (200, false)])
+    @Test(arguments: [(0, true), (50, true), (200, false)])
     func partialResponseFromAnotherOffset(startsAt: Int, isUsable: Bool) async throws {
-        let host = StreamStubProtocol.register(.init(body: Self.body, rangeStartsAt: startsAt))
+        let host = StreamStubProtocol.register(.init(body: Self.body, rangeStartsAt: startsAt, chunkSize: 32))
         let request = try await load(
             "https://\(host)/t", range: RequestedRange(offset: 100, length: 50), through: transport())
 
         if isUsable {
-            // An earlier start is skipped up to the requested offset.
+            // An earlier start is skipped up to the requested offset, across chunks.
             #expect(request.error == nil)
             #expect(request.data == Self.body.subdata(in: 100..<150))
         } else {
@@ -152,7 +177,106 @@ struct HeaderStreamingTransportTests {
         }
     }
 
-    @Test func cookiesAreNotSent() async throws {
+    @Test func shortPartialResponseFails() async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body))
+        // The stub answers `bytes 900-999/1000` for a request that wants up to byte 1099.
+        let request = try await load(
+            "https://\(host)/t", range: RequestedRange(offset: 900, length: 200), through: transport())
+
+        #expect(request.error as? HeaderStreamingError == .invalidRange)
+        #expect(request.data.isEmpty)
+    }
+
+    @Test func bodyEndingEarlyFails() async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body, truncatesTo: 50))
+        let request = try await load(
+            "https://\(host)/t", range: RequestedRange(offset: 0, length: 200), through: transport())
+
+        #expect((request.error as? URLError)?.code == .networkConnectionLost)
+        #expect(request.data == Self.body.subdata(in: 0..<50))
+    }
+
+    @Test func textResponseIsRefused() async throws {
+        let host = StreamStubProtocol.register(.init(body: Data("<html>Sign in</html>".utf8), mimeType: "text/html"))
+        let request = try await load(
+            "https://\(host)/t", range: RequestedRange(offset: 0, length: 2), through: transport())
+
+        #expect(request.error as? HeaderStreamingError == .unexpectedContentType("text/html"))
+        #expect(request.information == nil)
+    }
+
+    @Test func unregisteredOrUnloadableURLsFailClosed() async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body))
+        let transport = transport()
+        let unregistered = try await load(
+            "https://\(host)/t", range: RequestedRange(offset: 0, length: 2), through: transport, registers: false)
+        #expect((unregistered.error as? URLError)?.code == .unsupportedURL)
+
+        let unloadable = RecordingLoadingRequest(range: RequestedRange(offset: 0, length: 2))
+        let loader = transport.loader
+        loader.register(HeaderStreamingTransport.unloadableURL, track: .init())
+        loader.queue.async { loader.start(unloadable, loaderURL: HeaderStreamingTransport.unloadableURL) }
+        await unloadable.finished()
+        #expect((unloadable.error as? URLError)?.code == .unsupportedURL)
+        #expect(StreamStubProtocol.requests(host).isEmpty)
+    }
+
+    @Test func cancelledLoadIsNeverFinishedNorFed() async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body, chunkSize: 100, holdsAfterFirstChunk: true))
+        let transport = transport()
+        let loader = transport.loader
+        let url = HeaderStreamingTransport.loaderURL(for: try #require(URL(string: "https://\(host)/t")))
+        loader.register(url, track: .init())
+        let request = RecordingLoadingRequest(range: RequestedRange(offset: 0, length: 500))
+        loader.queue.async { loader.start(request, loaderURL: url) }
+        try await eventually { !request.data.isEmpty }
+
+        loader.queue.async { loader.cancel(request) }
+        try await eventually { StreamStubProtocol.stops(host) == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        loader.queue.sync {}
+
+        #expect(StreamStubProtocol.stops(host) == 1)
+        #expect(request.finishCount == 0)
+        #expect(request.data == Self.body.subdata(in: 0..<100))
+    }
+
+    /// The transport released while a load runs: the load finishes cancelled, a later one fails
+    /// cleanly instead of creating a task in the invalidated session, and the loader is freed.
+    @Test func releasingTheTransportEndsItsLoadsAndFreesTheLoader() async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body, chunkSize: 100, holdsAfterFirstChunk: true))
+        var transport: HeaderStreamingTransport? = transport()
+        let url = HeaderStreamingTransport.loaderURL(for: try #require(URL(string: "https://\(host)/t")))
+        let running = RecordingLoadingRequest(range: RequestedRange(offset: 0, length: 500))
+        let later = RecordingLoadingRequest(range: RequestedRange(offset: 0, length: 2))
+        weak var weakLoader: HeaderResourceLoader?
+        do {
+            let loader = try #require(transport?.loader)
+            weakLoader = loader
+            loader.register(url, track: .init())
+            loader.queue.async { loader.start(running, loaderURL: url) }
+            try await eventually { !running.data.isEmpty }
+
+            transport = nil
+            await running.finished()
+            // Fails at once, in `start`, rather than through a task in the invalidated session.
+            let failedAtOnce = loader.queue.sync {
+                loader.start(later, loaderURL: url)
+                return later.finishCount == 1
+            }
+            #expect(failedAtOnce)
+            await later.finished()
+        }
+
+        #expect((running.error as? URLError)?.code == .cancelled)
+        #expect(running.finishCount == 1)
+        #expect((later.error as? URLError)?.code == .cancelled)
+        #expect(StreamStubProtocol.requests(host).count == 1)
+        try await eventually { weakLoader == nil }
+        #expect(weakLoader == nil)
+    }
+
+    @Test func cookiesAreNotSentAndTheSessionKeepsNoState() async throws {
         let host = StreamStubProtocol.register(.init(body: Self.body))
         let jar = HTTPCookieStorage()
         let cookie = try #require(
@@ -163,14 +287,29 @@ struct HeaderStreamingTransportTests {
         configuration.httpCookieStorage = jar
         configuration.httpShouldSetCookies = true
         configuration.httpCookieAcceptPolicy = .always
+        configuration.httpAdditionalHeaders = ["Authorization": "Bearer t"]
+        configuration.urlCredentialStorage = .shared
+        configuration.urlCache = URLCache(memoryCapacity: 1 << 20, diskCapacity: 0)
         let transport = HeaderStreamingTransport(customHeaders: Self.proxyHeaders, configuration: configuration)
         let request = try await load(
-            "https://\(host)/t", range: RequestedRange(offset: 0, length: 2), through: transport)
+            "https://\(host)/t", range: RequestedRange(offset: 0, length: 2), through: transport,
+            networkAccess: NetworkAccess(policy: .never))
 
         #expect(request.error == nil)
         let sent = try #require(StreamStubProtocol.requests(host).first)
         #expect(sent.value(forHTTPHeaderField: "Cookie") == nil)
+        #expect(sent.value(forHTTPHeaderField: "Authorization") == nil)
         #expect(!sent.httpShouldHandleCookies)
+        // The session itself: no state, and the first track's network access.
+        let effective = try #require(transport.loader.sessionConfiguration)
+        #expect(effective.httpCookieStorage == nil)
+        #expect(!effective.httpShouldSetCookies)
+        #expect(effective.urlCache == nil)
+        #expect(effective.urlCredentialStorage == nil)
+        #expect(effective.httpAdditionalHeaders == nil)
+        #expect(!effective.allowsCellularAccess)
+        #expect(!effective.allowsExpensiveNetworkAccess)
+        #expect(!effective.allowsConstrainedNetworkAccess)
     }
 
     @Test func httpErrorFailsTheLoadWithItsStatus() async throws {
@@ -191,7 +330,7 @@ struct HeaderStreamingTransportTests {
             .init(redirects: ["/public/session/s/track/1": "https://\(target)/cdn/track"]))
         let request = try await load(
             "https://\(origin)/public/session/s/track/1", range: RequestedRange(offset: 10, length: 20),
-            through: transport())
+            through: transport(), networkAccess: NetworkAccess(policy: .never))
 
         #expect(request.error == nil)
         #expect(request.data == Self.body.subdata(in: 10..<30))
@@ -202,6 +341,11 @@ struct HeaderStreamingTransportTests {
             #expect(hop.value(forHTTPHeaderField: name) == nil, "\(name)")
         }
         #expect(hop.value(forHTTPHeaderField: "Range") == "bytes=10-29")
+        #expect(hop.value(forHTTPHeaderField: "Accept-Encoding") == "identity")
+        // `RedirectPolicy` builds the stripped hop afresh; the flags must come back with it.
+        #expect(!hop.allowsCellularAccess)
+        #expect(!hop.allowsExpensiveNetworkAccess)
+        #expect(!hop.allowsConstrainedNetworkAccess)
     }
 
     @Test func sameOriginRedirectKeepsTheCustomHeaders() async throws {

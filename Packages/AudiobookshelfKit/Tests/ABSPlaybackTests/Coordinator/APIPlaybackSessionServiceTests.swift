@@ -167,6 +167,8 @@ struct APIPlaybackSessionServiceTests {
         let transport = try #require(stream.transport)
         let request = RecordingLoadingRequest(range: RequestedRange(offset: 0, length: 8))
         let loaderURL = HeaderStreamingTransport.loaderURL(for: try #require(stream.urls.first))
+        // Registers the track, as the engine does.
+        _ = transport.makeAsset(url: try #require(stream.urls.first), mimeType: nil, networkAccess: nil)
         transport.loader.queue.async { transport.loader.start(request, loaderURL: loaderURL) }
         await request.finished()
 
