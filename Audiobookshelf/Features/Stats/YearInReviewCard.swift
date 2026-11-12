@@ -94,6 +94,7 @@ struct YearInReviewCard: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
+            // l10n-ignore: brand name, not translated
             Text(verbatim: "audiobookshelf")
                 .font(.system(size: 22))
                 .foregroundStyle(Self.tan)
