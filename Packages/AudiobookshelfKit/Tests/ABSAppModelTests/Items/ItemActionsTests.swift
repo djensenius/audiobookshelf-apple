@@ -31,6 +31,10 @@ private struct GatedWriter: ProgressWriting {
     let gate = GatedCalls<Write, Void>()
     /// The progress IDs of deletes, held until the test replies.
     let deletes = GatedCalls<String, Void>()
+    /// The server's progress ID per item, where it isn't `mp-<item>`; `.some(nil)` for none.
+    let serverProgressIDs = Locked<[String: String?]>([:])
+    /// Thrown by the next progress ID lookups.
+    let resolveError = Locked<TestError?>(nil)
     /// The most requests in flight at once, for the per-key serialization.
     let concurrency = Concurrency()
     /// Each write as it arrives, and the test's own markers, in order.
@@ -41,6 +45,12 @@ private struct GatedWriter: ProgressWriting {
         concurrency.enter()
         defer { concurrency.leave() }
         try await gate.call(Write(itemID: itemID, episodeID: episodeID, update: update))
+    }
+
+    func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        if let error = resolveError.value { throw error }
+        if let id = serverProgressIDs.value[itemID] { return id }
+        return "mp-\(itemID)"
     }
 
     func deleteProgress(id: String) async throws {
@@ -55,11 +65,17 @@ private struct FirstGatedWriter: ProgressWriting {
     let gate = GatedCalls<Write, Void>()
     let writes = Locked<[Write]>([])
     let deletes = Locked<[String]>([])
+    let resolves = Locked<[String]>([])
 
     func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
         let write = Write(itemID: itemID, episodeID: episodeID, update: update)
         writes.value.append(write)
         if writes.value.count == 1 { try await gate.call(write) }
+    }
+
+    func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        resolves.value.append(itemID)
+        return "mp-\(itemID)"
     }
 
     /// Records the delete and succeeds at once.
@@ -398,7 +414,7 @@ private func makeActions(_ cache: ProgressCache, _ writer: any ProgressWriting) 
         let actions = makeActions(cache, writer)
 
         try await actions.discardProgress(ItemActionTarget(libraryItemID: "item", duration: 100))
-        #expect(writer.deletes.value.isEmpty && writer.writes.value.isEmpty)
+        #expect(writer.deletes.value.isEmpty && writer.writes.value.isEmpty && writer.resolves.value.isEmpty)
         #expect(cache.progress(libraryItemID: "item") == nil)
     }
 
@@ -474,5 +490,76 @@ private func makeActions(_ cache: ProgressCache, _ writer: any ProgressWriting) 
         // Actions made before the switch never run against the next account, even unqueued.
         await #expect(throws: CancellationError.self) { try await actions.discardProgress(target) }
         #expect(writer.deletes.value.isEmpty)
+    }
+
+    @Test func discardAfterOptimisticFinishResolvesServerID() async throws {
+        let cache = ProgressCache()
+        let writer = GatedWriter()
+        writer.serverProgressIDs.value["item"] = "srv-uuid"
+        let actions = makeActions(cache, writer)
+        var writes = writer.gate.calls.makeAsyncIterator()
+        var deletes = writer.deletes.calls.makeAsyncIterator()
+        let target = ItemActionTarget(libraryItemID: "item", duration: 100)
+
+        let finish = Task { try await actions.markFinished(target) }
+        try #require(await writes.next()).reply.resume(returning: ())
+        try await finish.value
+        // The optimistic entry has a local ID; the PATCH answers no progress.
+        #expect(cache.progress(libraryItemID: "item")?.id == "item")
+
+        let discard = Task { try await actions.discardProgress(target) }
+        let delete = try #require(await deletes.next())
+        #expect(delete.request == "srv-uuid")
+        delete.reply.resume(returning: ())
+        try await discard.value
+        #expect(cache.progress(libraryItemID: "item") == nil)
+    }
+
+    @Test func discardWithNoServerProgressCommitsWithoutDelete() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress())
+        let writer = GatedWriter()
+        writer.serverProgressIDs.value["item"] = .some(nil)
+        let actions = makeActions(cache, writer)
+
+        try await actions.discardProgress(ItemActionTarget(libraryItemID: "item"))
+        #expect(cache.progress(libraryItemID: "item") == nil)
+        #expect(writer.log.value.isEmpty)
+        // Committed: a list requested now is authoritative.
+        let row = progress(current: 5, lastUpdate: 9_000)
+        #expect(cache.seed([row], token: cache.beginSeed()))
+        #expect(cache.progress(libraryItemID: "item") == row)
+    }
+
+    @Test func discardRollsBackWhenResolvingTheIDFails() async throws {
+        let cache = ProgressCache()
+        let previous = progress()
+        cache.apply(previous)
+        let writer = GatedWriter()
+        writer.resolveError.value = .offline
+        let actions = makeActions(cache, writer)
+
+        await #expect(throws: TestError.self) {
+            try await actions.discardProgress(ItemActionTarget(libraryItemID: "item"))
+        }
+        #expect(cache.progress(libraryItemID: "item") == previous)
+        #expect(writer.log.value.isEmpty)
+    }
+
+    @Test func discardTreatsANotFoundDeleteAsDone() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress())
+        let writer = GatedWriter()
+        let actions = makeActions(cache, writer)
+        var deletes = writer.deletes.calls.makeAsyncIterator()
+
+        let action = Task { try await actions.discardProgress(ItemActionTarget(libraryItemID: "item")) }
+        try #require(await deletes.next()).reply.resume(throwing: APIError.notFound)
+        try await action.value
+        #expect(cache.progress(libraryItemID: "item") == nil)
+        // Committed, not rolled back: a list requested now is authoritative.
+        let row = progress(current: 5, lastUpdate: 9_000)
+        #expect(cache.seed([row], token: cache.beginSeed()))
+        #expect(cache.progress(libraryItemID: "item") == row)
     }
 }

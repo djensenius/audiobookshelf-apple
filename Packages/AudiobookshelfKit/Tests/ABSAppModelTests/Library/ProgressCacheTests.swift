@@ -340,6 +340,21 @@ private func progress(
         #expect(cache.progress(libraryItemID: "book") == nil)
     }
 
+    @Test func removalRollbackSkippedAfterASecondRemoval() throws {
+        let cache = ProgressCache()
+        let previous = progress("book", currentTime: 5, lastUpdate: 10)
+        cache.apply(previous)
+        let session = cache.sessionToken()
+        // Two discards on the same key, for example from two action instances: the value is nil
+        // after both, so only the revision tells them apart.
+        let first = try #require(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: session))
+        let second = try #require(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: session))
+
+        #expect(!cache.rollbackOptimistic(first, to: previous, token: session))
+        #expect(cache.progress(libraryItemID: "book") == nil)
+        #expect(cache.commitOptimistic(second, token: session))
+    }
+
     @Test func seedRequestedBeforeRemovalDoesNotRestore() throws {
         let cache = ProgressCache()
         let row = progress("book", currentTime: 5, lastUpdate: 10)

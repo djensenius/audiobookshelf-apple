@@ -5,7 +5,7 @@ import SwiftUI
 
 extension View {
     /// Adds the book screen's More menu ("…") to the toolbar, with its confirmations, failure
-    /// alert, details sheet and History destination.
+    /// alert and details sheet.
     func itemDetailMoreMenu(model: ItemDetailModel, serverURL: URL?) -> some View {
         modifier(ItemDetailMoreMenu(model: model, serverURL: serverURL))
     }
@@ -16,11 +16,13 @@ extension View {
 /// the environment's `itemActions`, which update the progress cache at once and roll back on
 /// failure; a failure shows an alert. Marking finished over progress and discarding ask first, in
 /// a centred alert as legacy `Dialog.confirm` did. Share links to the web client, so it needs
-/// the server's address; Add to playlist stays hidden until the playlist editor exists.
+/// the server's address; History pushes its route on the scene's ``Router`` (ADR 0004), so it is
+/// hidden without one (previews); Add to playlist stays hidden until the playlist editor exists.
 private struct ItemDetailMoreMenu: ViewModifier {
     let model: ItemDetailModel
     let serverURL: URL?
     @Environment(\.itemActions) private var itemActions
+    @Environment(Router.self) private var router: Router?
     /// The action waiting for confirmation, kept while the alert is dismissed.
     @State private var pendingAction: ItemDetailMenuAction?
     @State private var showsConfirmation = false
@@ -30,13 +32,13 @@ private struct ItemDetailMoreMenu: ViewModifier {
     @State private var failureKey: String?
     @State private var showsFailure = false
     @State private var showsDetails = false
-    @State private var showsHistory = false
 
     /// The playlist editor doesn't exist yet.
     private static let canEditPlaylists = false
 
     private var actions: [ItemDetailMenuAction] {
         model.menuActions(canEditPlaylists: Self.canEditPlaylists, canShare: serverURL != nil)
+            .filter { $0 != .history || router != nil }
     }
 
     func body(content: Content) -> some View {
@@ -74,9 +76,6 @@ private struct ItemDetailMoreMenu: ViewModifier {
             .sheet(isPresented: $showsDetails) {
                 ItemDetailInfoSheet(model: model)
             }
-            .navigationDestination(isPresented: $showsHistory) {
-                RouteDestination(route: .history(itemID: model.itemID))
-            }
     }
 
     private func menu(_ actions: [ItemDetailMenuAction]) -> some View {
@@ -110,7 +109,7 @@ private struct ItemDetailMoreMenu: ViewModifier {
         case .history:
             // A button rather than a `NavigationLink` in the menu, which doesn't push everywhere.
             Button {
-                showsHistory = true
+                BrowsePresentation.open(.history(itemID: model.itemID), in: router)
             } label: {
                 label(action)
             }

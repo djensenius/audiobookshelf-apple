@@ -428,7 +428,7 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
         try await send((any GroupsService).self) { try await $0.playlistDetail(id: id) }
     }
 
-    // MARK: ServerURLProviding
+    // MARK: Server address (forwarded to the client's ServerURLProviding)
 
     /// The current client's server address, which follows a reconnect with a new address.
     public func serverURL() async throws -> URL {

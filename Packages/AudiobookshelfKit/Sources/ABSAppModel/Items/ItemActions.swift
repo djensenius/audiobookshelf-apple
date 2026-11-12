@@ -50,6 +50,9 @@ public struct NoOpItemActions: ItemActionPerforming {
 /// (`DELETE /api/me/progress/:id`); `APIClient` conforms.
 public protocol ProgressWriting: Sendable {
     func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws
+    /// The server's ID of the user's progress on the item or episode
+    /// (`GET /api/me/progress/:item[/:episode]`), or `nil` when the server has none.
+    func progressID(itemID: String, episodeID: String?) async throws -> String?
     /// Deletes one progress by its own ID (``MediaProgress/id``), not the item's.
     func deleteProgress(id: String) async throws
 }
@@ -57,6 +60,10 @@ public protocol ProgressWriting: Sendable {
 extension APIClient: ProgressWriting {
     public func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
         _ = try await send(ProgressEndpoints.update(itemID: itemID, episodeID: episodeID, update))
+    }
+
+    public func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        try await mediaProgress(itemID: itemID, episodeID: episodeID)?.id
     }
 
     public func deleteProgress(id: String) async throws {
@@ -74,12 +81,16 @@ extension APIClient: ProgressWriting {
 /// - A rollback restores the previous progress only while the cache still holds the optimistic
 ///   value (``ProgressCache/rollback(_:to:)``): an update that arrived meanwhile (socket, local
 ///   playback) is newer and stays.
-/// - Discarding removes the progress from the cache, then sends the DELETE with the progress's
-///   own ID; without progress it sends nothing.
+/// - Discarding removes the progress from the cache, asks the server for its progress ID (a
+///   cached entry may be an optimistic one with a local ID), and deletes that. Without cached
+///   progress it sends nothing; without server progress it sends no DELETE. A DELETE answered
+///   404 counts as done: the progress is already gone.
 /// - An action runs to completion even if its caller is cancelled, so the cache and the server
 ///   don't end up disagreeing about a half-done action.
 /// - Optimistic ordering is tracked separately from server timestamps. A full progress seed
 ///   requested after a successful action reconciles its authoritative row, even with clock skew.
+/// - The per-key queue belongs to this instance: inject one instance per account and share it
+///   between screens (#181), or actions from two instances on the same key can interleave.
 /// - The local playback database isn't touched; reconciling it with a newer server value is the
 ///   syncer's job (P2-06d, #158).
 @MainActor
@@ -217,7 +228,13 @@ public final class ProgressItemActions: ItemActionPerforming {
                 libraryItemID: target.libraryItemID, episodeID: target.episodeID, token: session)
         else { throw CancellationError() }
         do {
-            try await writer.deleteProgress(id: before.id)
+            if let id = try await writer.progressID(itemID: target.libraryItemID, episodeID: target.episodeID) {
+                do {
+                    try await writer.deleteProgress(id: id)
+                } catch APIError.notFound {
+                    // Deleted already, for example from another device.
+                }
+            }
         } catch {
             guard cache.isCurrent(session) else { throw CancellationError() }
             cache.rollbackOptimistic(removal, to: before, token: session)

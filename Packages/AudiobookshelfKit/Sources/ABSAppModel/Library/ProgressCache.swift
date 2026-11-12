@@ -242,6 +242,10 @@ public final class ProgressCache {
     /// before it, and is marked optimistic, so seeds requested before its commit don't restore
     /// the progress the server still has. ``rollbackOptimistic(_:to:token:)`` puts the progress
     /// back only while the entry still has that revision and no value.
+    ///
+    /// As with ``rollback(_:to:)``, a seed that arrives while the removal is in flight and is
+    /// kept out by it, followed by a failed DELETE, leaves the rollback restoring the pre-image,
+    /// which may be older than that seed's row; the next seed corrects it.
     func applyOptimisticRemoval(
         libraryItemID: String, episodeID: String?, token: SessionToken
     ) -> OptimisticUpdate? {

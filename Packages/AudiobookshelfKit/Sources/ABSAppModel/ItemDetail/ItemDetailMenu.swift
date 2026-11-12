@@ -29,6 +29,7 @@ extension ItemDetailModel {
     /// - Add to playlist and Share only when the caller can perform them.
     public func menuActions(canEditPlaylists: Bool, canShare: Bool) -> [ItemDetailMenuAction] {
         guard let item, item.book != nil else { return [] }
+        // TODO(#345): share the gone check with the app's `ItemDetailGoneState` once slice A lands.
         let present = !item.isMissing && !item.isInvalid && (error as? APIError) != .notFound
         var actions: [ItemDetailMenuAction] = []
         if present {
