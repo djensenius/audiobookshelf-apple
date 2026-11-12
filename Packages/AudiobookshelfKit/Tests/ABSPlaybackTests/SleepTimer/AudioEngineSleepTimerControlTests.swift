@@ -21,7 +21,7 @@ struct AudioEngineSleepTimerControlTests {
         #expect(await control.seek(to: 470) == 470)
         engine.seekResult = .superseded
         #expect(await control.seek(to: 400) == nil, "Only where it landed")
-        control.play()
+        #expect(control.play())
         #expect(engine.calls == ["seek", "seek", "play"])
 
         control.setVolume(0.25)

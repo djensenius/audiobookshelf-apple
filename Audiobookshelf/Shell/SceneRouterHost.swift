@@ -20,6 +20,8 @@ struct SceneRouterHost: View {
 
     @State private var navigation: SceneNavigation
     @State private var serverSwitchPrompt = ServerSwitchPrompt()
+    /// The screens with a Refresh command, for View ▸ Refresh.
+    @State private var refreshCommands = RefreshCommandRegistry()
     @SceneStorage private var snapshot: Data?
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
@@ -47,6 +49,7 @@ struct SceneRouterHost: View {
             ServerSwitchConfirmationModifier(router: navigation.router, reopen: reopen, prompt: $serverSwitchPrompt)
         )
         .focusedSceneValue(navigation.router)
+        .refreshCommands(refreshCommands, router: navigation.router)
         .onAppear(perform: restoreOnce)
         .onChange(of: pendingLink) { openPendingLink() }
         // Written through as the navigation changes, so a quit or a crash loses at most the last

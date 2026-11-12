@@ -19,6 +19,8 @@ import Observation
 ///   through the same check as ``request(item:episodeID:connectionID:)`` (``gate(waitingForPath:)``).
 /// - ``records`` and ``progress`` follow ``DownloadManager/events()`` from ``start()`` on, on top
 ///   of the records stored when it ran. A completed, cancelled or removed record leaves both.
+///   Cover-only records (``DownloadRecordDTO/isCoverOnly``), which fetch a podcast's cover
+///   again, are left out of both.
 /// - While ``AppSettings/downloadUsingCellular`` is ``CellularPolicy/never``, transfers that may
 ///   have been given metered access (``networkAccess`` handed out cellular or Low Data Mode flags
 ///   since the last restart, or before the controller existed) restart under the new flags
@@ -255,6 +257,9 @@ public final class DownloadsController {
     }
 
     private func upsert(_ record: DownloadRecordDTO) {
+        // A cover-only record restores a podcast's cover (#326); it isn't a download the user
+        // started, so it isn't listed, and its progress is dropped.
+        guard !record.isCoverOnly else { return }
         if let index = records.firstIndex(where: { $0.id == record.id }) {
             records[index] = record
         } else {

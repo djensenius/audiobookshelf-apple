@@ -88,9 +88,8 @@ private final class RecordedPlays {
             """
         let notes = try #require(EpisodeDetailPresentation.showNotes(html: html))
         #expect(String(notes.characters) == "Guests: Ada & Grace.\n\nRead the notes or the archive.")
-        // Trimmed: the converter starts a link's run at the space before it.
         let links = notes.runs.compactMap { run in
-            run.link.map { (String(notes[run.range].characters).trimmingCharacters(in: .whitespaces), $0) }
+            run.link.map { (String(notes[run.range].characters), $0) }
         }
         #expect(links.map(\.0) == ["the notes", "the archive"])
         #expect(

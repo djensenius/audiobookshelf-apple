@@ -233,15 +233,15 @@ struct PlaybackCoordinatorSleepTimerTests {
         h.engine.failingPlays = 1
         let events = h.events.count
         let control: any SleepTimerPlaybackControl = h.coordinator
-        control.play()
+        #expect(!control.play(), "A refused start reports it")
         let failure = PlaybackCoordinatorError.engine(
             .audioSessionActivationFailed(description: "Session activation failed"))
         #expect(h.coordinator.error == failure)
         #expect(!h.coordinator.isPlaying)
         #expect(h.events.since(events) == [.failed(failure)])
 
-        control.play()
-        control.play()  // Already playing: do not announce or request a duplicate start.
+        #expect(control.play())
+        #expect(control.play(), "Already playing: accepted without announcing or requesting a duplicate start")
         #expect(h.events.since(events) == [.failed(failure), .playbackStarted])
         #expect(h.engine.playCount == 3)
         #expect(h.coordinator.error == nil)
@@ -254,7 +254,7 @@ struct PlaybackCoordinatorSleepTimerTests {
         let h = try CoordinatorHarness()
         let control: any SleepTimerPlaybackControl = h.coordinator
         #expect(control.pendingSeekTarget == nil)
-        control.play()
+        #expect(!control.play(), "Nothing loaded to play")
         #expect(h.engine.playCount == 0, "Timer play never opens a session or loads media")
         h.engine.interruptedLoads = 1
         await h.coordinator.play(itemID: "A", startTime: 1000)
@@ -273,7 +273,7 @@ struct PlaybackCoordinatorSleepTimerTests {
         h.coordinator.stop()
         #expect(control.pendingSeekTarget == nil)
         let plays = h.engine.playCount
-        control.play()
+        #expect(!control.play())
         #expect(h.engine.playCount == plays)
     }
 

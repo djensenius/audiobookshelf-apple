@@ -27,7 +27,11 @@ struct AuthorDetailView: View {
         }
         .task(id: key) {
             host = .updated(host, for: key, store: store) { key, services, _ in
-                AuthorsPresentation.makeDetail(authorID: authorID, key: key, services: services)
+                let model = AuthorsPresentation.makeDetail(authorID: authorID, key: key, services: services)
+                store?.observeLibraryChanges(connectionKey: key.connection, owner: model) { [weak model] in
+                    model?.apply($0)
+                }
+                return model
             }
             await host?.model.loadIfNeeded()
         }

@@ -111,7 +111,8 @@ extension DownloadManager {
     ///    follows, and the user can delete the new local item instead;
     /// 3. ``DownloadManagerEvent/recordRemoved(recordID:)`` is reported;
     /// 4. if its cover part was the item's only cover stored or on its way, another record of
-    ///    the item gets one (see ``handOffCover(_:of:)``);
+    ///    the item gets one, or else the item's local item gets it back (see
+    ///    ``handOffCover(_:of:)``), unless the record only fetched that cover;
     /// 5. its files that no local item or other record uses are removed, with folders left
     ///    empty, so a shared podcast `cover.jpg` stays while anything uses it.
     ///
@@ -150,7 +151,8 @@ extension DownloadManager {
             let cover = deleted.parts.first { $0.kind == .cover }.map {
                 CoverSource(
                     serverPath: $0.serverPath, relativePath: $0.destinationRelativePath,
-                    isStored: $0.state == .completed, updatedAt: deleted.media.coverUpdatedAt)
+                    isStored: $0.state == .completed, updatedAt: deleted.media.coverUpdatedAt,
+                    restoresLocalItem: !deleted.isCoverOnly)
             }
             await cleanUp(
                 after: deleted.key, removing: deleted.parts.map(\.destinationRelativePath), folder: nil, cover: cover)

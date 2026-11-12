@@ -23,7 +23,11 @@ struct AuthorsView: View {
         .navigationTitle(Text(verbatim: L10n.string(AppTab.authors.titleKey)))
         .task(id: key) {
             host = .updated(host, for: key, store: store) { key, services, _ in
-                AuthorsModel(libraryID: key.libraryID, service: services)
+                let model = AuthorsModel(libraryID: key.libraryID, service: services)
+                store?.observeLibraryChanges(connectionKey: key.connection, owner: model) { [weak model] in
+                    model?.apply($0)
+                }
+                return model
             }
             await host?.model.loadIfNeeded()
         }
