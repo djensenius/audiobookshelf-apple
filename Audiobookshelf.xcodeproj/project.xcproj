@@ -164,7 +164,7 @@
       "package-product-members": [
         {
           "package": "AudiobookshelfKit",
-          "product-name": "AudiobookshelfKit",
+          "product-name": "AudiobookshelfWidgetKit",
           "build-phase": { "build-phase": "frameworks" },
         },
       ],
