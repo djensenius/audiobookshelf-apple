@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSUI
@@ -15,6 +16,26 @@ import Testing
             itemID: item.id, service: PreviewItemDetailService(item: item, behavior: .succeed), cache: ProgressCache())
         await detail.load()
         return PodcastDetailModel(detail: detail, cache: ProgressCache(), settings: nil, locale: locale)
+    }
+
+    /// The feed sheet's row ignores its children for VoiceOver, so the value carries everything
+    /// the row shows besides the title, the subtitle included.
+    @Test func feedEpisodeValueReadsWhatTheRowShows() throws {
+        let full = try #require(
+            RSSFeedEpisode(
+                raw: .object([
+                    "enclosure": .object(["url": .string("https://x/1.mp3")]), "title": .string("Pilot"),
+                    "episode": .string("4"), "subtitle": .string("Where it all began."),
+                    "publishedAt": .number(1_700_000_000_000),
+                ])))
+        let published = try #require(PodcastDetailPresentation.publishedText(full.publishedAt, locale: locale))
+        #expect(
+            PodcastFeedEpisodePresentation.accessibilityValue(full, isInLibrary: true, locale: locale)
+                == "Episode #4, \(published), In library, Where it all began.")
+
+        let bare = try #require(
+            RSSFeedEpisode(raw: .object(["enclosure": .object(["url": .string("https://x/2.mp3")])])))
+        #expect(PodcastFeedEpisodePresentation.accessibilityValue(bare, isInLibrary: false, locale: locale).isEmpty)
     }
 
     @Test func everyMenuTitleIsLocalized() {

@@ -206,8 +206,27 @@ private struct PodcastFeedEpisodeRow: View {
         .disabled(row.isInLibrary || isDisabled)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: episode.title))
-        .accessibilityValue(Text(verbatim: [number, published, inLibrary].compactMap { $0 }.joined(separator: ", ")))
+        .accessibilityValue(
+            Text(
+                verbatim: PodcastFeedEpisodePresentation.accessibilityValue(
+                    episode, isInLibrary: row.isInLibrary, locale: locale))
+        )
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// What VoiceOver reads after a feed episode's title, as the row shows it: the episode number,
+/// the publish date, In library, then the subtitle (whole, as the row truncates it).
+enum PodcastFeedEpisodePresentation {
+    static func accessibilityValue(_ episode: RSSFeedEpisode, isInLibrary: Bool, locale: Locale) -> String {
+        [
+            episode.episode.map { L10n.string("LabelPodcastDetailEpisodeNumber", $0, locale: locale) },
+            PodcastDetailPresentation.publishedText(episode.publishedAt, locale: locale),
+            isInLibrary ? L10n.string("LabelPodcastFeedInLibrary") : nil,
+            episode.subtitle,
+        ]
+        .compactMap { $0 }
+        .joined(separator: ", ")
     }
 }
 
