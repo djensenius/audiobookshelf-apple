@@ -35,6 +35,18 @@ import Testing
         #expect(ComicReaderLayout.markedAlone(nil).isEmpty)
     }
 
+    @Test func comicInfoImagesThatArentPagesAreIgnored() {
+        let info = ComicInfo(singlePageImages: [Int.max, -1, Int.min, 2])
+        #expect(ComicReaderLayout.markedAlone(info) == [3])
+    }
+
+    @Test func onlyPagesNearTheCurrentOneStayDecoded() {
+        let kept = (1...20).filter { ComicReaderLayout.keepsDecoded($0, current: 10) }
+        #expect(kept == Array(6...14))
+        #expect(!ComicReaderLayout.keepsDecoded(Int.min, current: 10))
+        #expect(!ComicReaderLayout.keepsDecoded(Int.max, current: -10))
+    }
+
     @Test func onlyWiderThanTallIsLandscape() {
         #expect(ComicReaderLayout.isLandscape(CGSize(width: 200, height: 100)))
         #expect(!ComicReaderLayout.isLandscape(CGSize(width: 100, height: 100)))

@@ -80,6 +80,8 @@ private struct ComicPagesView: View {
                     ComicPagerView(model: model, gap: layout.gutter, isZoomed: $isZoomed, onTap: onTap)
                 }
             }
+            // The comic's direction alone orders the pages; an RTL locale mustn't mirror them again.
+            .environment(\.layoutDirection, .leftToRight)
             .ignoresSafeArea()
             if showsControls {
                 ComicControls(model: model)
@@ -180,13 +182,16 @@ private struct ComicScrollView: View {
     }
 }
 
-/// One page, decoded when it first shows.
+/// One page, decoded while it's near the page being read and released once it's further away;
+/// lazy stacks keep offscreen views' state, so the image would otherwise stay in memory.
 private struct ComicPageView: View {
     let model: ComicReaderModel
     let page: Int
     /// Vertical scroll: as wide as the reader, as tall as the image needs.
     var fillsWidth = false
     @State private var image: ComicPageImage?
+    /// Kept after the image is released, so vertical scroll heights don't change.
+    @State private var size: CGSize?
     @State private var failed = false
 
     var body: some View {
@@ -195,6 +200,8 @@ private struct ComicPageView: View {
                 Image(decorative: image.image, scale: 1)
                     .resizable()
                     .aspectRatio(image.size, contentMode: .fit)
+            } else if let size {
+                Color.clear.aspectRatio(size, contentMode: .fit)
             } else if failed {
                 Image(systemName: "exclamationmark.triangle")
                     .foregroundStyle(.secondary)
@@ -204,9 +211,17 @@ private struct ComicPageView: View {
                     .frame(maxWidth: .infinity, minHeight: fillsWidth ? 400 : 0)
             }
         }
-        .task(id: page) {
-            image = await model.image(ofPage: page)
-            failed = image == nil
+        .task(id: ComicReaderLayout.keepsDecoded(page, current: model.currentPage)) {
+            guard ComicReaderLayout.keepsDecoded(page, current: model.currentPage) else {
+                image = nil
+                return
+            }
+            guard image == nil else { return }
+            let decoded = await model.image(ofPage: page)
+            guard !Task.isCancelled else { return }
+            image = decoded
+            size = decoded?.size ?? size
+            failed = decoded == nil
         }
     }
 }
@@ -238,6 +253,7 @@ private struct ComicZoom: ViewModifier {
                         let range = ComicReaderLayout.zoomRange
                         scale = min(max(baseScale * value.magnification, range.lowerBound), range.upperBound)
                         offset = ComicReaderLayout.clampedOffset(baseOffset, scale: scale, size: size)
+                        if isZoomed != (scale > 1) { isZoomed = scale > 1 }
                     }
                     .onEnded { _ in settle() }
             )
@@ -260,7 +276,13 @@ private struct ComicZoom: ViewModifier {
                 settle()
             }
             .onTapGesture(perform: onTap)
-            .onDisappear { if scale > 1 { isZoomed = false } }
+            .onDisappear {
+                if scale > 1 { isZoomed = false }
+                scale = 1
+                baseScale = 1
+                offset = .zero
+                baseOffset = .zero
+            }
     }
 
     private func settle() {

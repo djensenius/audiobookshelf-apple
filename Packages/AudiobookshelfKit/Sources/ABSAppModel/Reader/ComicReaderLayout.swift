@@ -56,9 +56,24 @@ public enum ComicReaderLayout {
     }
 
     /// The pages shown alone in a spread because `ComicInfo.xml` marks them: its `<Page Image>`
-    /// indexes are 0-based, so image `n` is page `n + 1`.
+    /// indexes are 0-based, so image `n` is page `n + 1`. Indexes that aren't a page (negative, or
+    /// too large to add 1 to) are ignored.
     public static func markedAlone(_ info: ComicInfo?) -> Set<Int> {
-        Set((info?.singlePageImages ?? []).map { $0 + 1 })
+        Set(
+            (info?.singlePageImages ?? []).compactMap { image in
+                let (page, overflow) = image.addingReportingOverflow(1)
+                return image >= 0 && !overflow ? page : nil
+            })
+    }
+
+    /// The pages a reader keeps decoded around `current`, so a long comic doesn't hold every page
+    /// it has shown: the spreads either side, and one more for the swipe in progress.
+    public static let decodeRadius = 4
+
+    /// Whether `page` is close enough to `current` to keep its decoded image.
+    public static func keepsDecoded(_ page: Int, current: Int) -> Bool {
+        let (distance, overflow) = page.subtractingReportingOverflow(current)
+        return !overflow && (-decodeRadius...decodeRadius).contains(distance)
     }
 
     /// Whether an image is landscape, which usually means a pre-joined spread.

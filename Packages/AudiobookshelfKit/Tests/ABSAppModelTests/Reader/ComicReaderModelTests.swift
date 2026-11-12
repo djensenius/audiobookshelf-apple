@@ -160,6 +160,19 @@ import UniformTypeIdentifiers
         #expect(await reader.image(ofPage: 10) == nil)
     }
 
+    @Test func aHugeMarkedImageIndexDoesntCrashTheOpen() async throws {
+        let info = Data(
+            """
+            <ComicInfo><Pages><Page Image="9223372036854775807" DoublePage="True"/>\
+            <Page Image="-1" DoublePage="True"/></Pages></ComicInfo>
+            """.utf8)
+        let reader = model(try makeComic(pages: 4, extra: [("ComicInfo.xml", info)]))
+        await reader.open()
+        reader.setTwoUp(true)
+        #expect(reader.state == .ready)
+        #expect(reader.spreads.map(\.pages) == [[1], [2, 3], [4]])
+    }
+
     // MARK: Direction
 
     @Test func mangaOpensRightToLeftAndArrowsFollowIt() async throws {
