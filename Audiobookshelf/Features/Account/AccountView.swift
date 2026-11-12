@@ -1,24 +1,44 @@
 import ABSAppModel
+import ABSCore
 import ABSData
 import ABSUI
 import SwiftUI
 
-/// The Account tab (`pages/account.vue`): the signed-in user and server, switching, signing out,
-/// Logs and (on iOS) Settings. Reads the accounts and lifecycle from the environment (`RootView`).
+/// The Account tab (`pages/account.vue`, `SideDrawer.vue`): the signed-in user, their type and
+/// server, with a warning for a server older than the app supports; switching and signing out,
+/// after a confirmation; Stats, Logs and (on iOS) Settings; and the app's version, repository and
+/// license. Reads the accounts and lifecycle from the environment (`RootView`).
 struct AccountView: View {
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @Environment(\.openURL) private var openURL
     @State private var isSigningOut = false
+    @State private var isConfirmingSignOut = false
+
+    /// The legacy app's repository (`pages/account.vue`, `pages/connect.vue`) and its license.
+    private static let repositoryURL = URL(string: "https://github.com/advplyr/audiobookshelf-app")
+    private static let licenseURL = URL(string: "https://github.com/advplyr/audiobookshelf-app/blob/master/LICENSE")
 
     var body: some View {
         Form {
             if let user = accounts?.state.user {
                 Section {
                     row("LabelUsername", value: user.username)
+                    if let type = userType(of: user) {
+                        row("LabelAccountType", value: type)
+                    }
                     row("LabelHost", value: user.serverAddress)
                     if let version = user.serverVersion {
                         row("LabelServerVersion", value: version)
+                    }
+                    if let warning = AccountDetails.serverVersionWarning(user.serverVersion) {
+                        Label {
+                            Text(verbatim: warning.message)
+                        } icon: {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(ABSColor.warning)
+                        }
+                        .font(.footnote)
                     }
                 }
             }
@@ -28,18 +48,7 @@ struct AccountView: View {
                 }
                 if let lifecycle {
                     Button(role: .destructive) {
-                        guard
-                            let task = AccountActions(lifecycle: lifecycle, accounts: accounts).signOut(openURL: {
-                                openURL($0)
-                            })
-                        else { return }
-                        isSigningOut = true
-                        // Only while it runs: the lifecycle can refuse it (another window's change
-                        // left this account first), and this screen may then stay.
-                        Task {
-                            await task.value
-                            isSigningOut = false
-                        }
+                        isConfirmingSignOut = true
                     } label: {
                         label("ButtonLogout", systemImage: "rectangle.portrait.and.arrow.right")
                     }
@@ -47,6 +56,9 @@ struct AccountView: View {
                 }
             }
             Section {
+                NavigationLink(value: Route.stats) {
+                    label("ButtonUserStats", systemImage: "chart.bar")
+                }
                 #if os(iOS)
                     NavigationLink(value: Route.settings) {
                         label("HeaderSettings", systemImage: "gearshape")
@@ -56,9 +68,55 @@ struct AccountView: View {
                     label("ButtonLogs", systemImage: "doc.text.magnifyingglass")
                 }
             }
+            Section {
+                if let version = AccountDetails.appVersion(infoDictionary: Bundle.main.infoDictionary) {
+                    row("LabelAppVersion", value: version)
+                }
+                if let repositoryURL = Self.repositoryURL {
+                    Link(destination: repositoryURL) {
+                        label("MessageFollowTheProjectOnGithub", systemImage: "chevron.left.forwardslash.chevron.right")
+                    }
+                }
+                if let licenseURL = Self.licenseURL {
+                    Link(destination: licenseURL) {
+                        label("LabelLicenseGPL", systemImage: "doc.plaintext")
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .navigationTitle(Text(verbatim: L10n.string(AppTab.account.titleKey)))
+        .confirmationDialog(
+            Text(verbatim: L10n.string("MessageConfirmLogout")), isPresented: $isConfirmingSignOut,
+            titleVisibility: .visible
+        ) {
+            Button(role: .destructive) {
+                signOut()
+            } label: {
+                Text(verbatim: L10n.string("ButtonLogout"))
+            }
+        }
+    }
+
+    /// The user's type, when the authorization is this user's (it isn't offline): its label, or
+    /// the server's value for a type this client doesn't know.
+    private func userType(of user: AccountUser) -> String? {
+        guard let authorized = accounts?.authorization?.user, authorized.id == user.userId else { return nil }
+        return AccountDetails.userTypeKey(authorized.type).map { L10n.string($0) } ?? authorized.type.rawValue
+    }
+
+    /// Signs out once confirmed, unless the session stopped accepting changes meanwhile.
+    private func signOut() {
+        guard !isSigningOut, let lifecycle,
+            let task = AccountActions(lifecycle: lifecycle, accounts: accounts).signOut(openURL: { openURL($0) })
+        else { return }
+        isSigningOut = true
+        // Only while it runs: the lifecycle can refuse it (another window's change left this
+        // account first), and this screen may then stay.
+        Task {
+            await task.value
+            isSigningOut = false
+        }
     }
 
     private func row(_ titleKey: String, value: String) -> some View {
@@ -277,6 +335,17 @@ struct ServersView: View {
             }
         }
         .contentShape(.rect)
+    }
+}
+
+extension ServerVersionWarning {
+    /// The warning's text: the connect screen's messages for an unsupported or unknown version.
+    var message: String {
+        switch self {
+        case .tooOld(let version, let minimum):
+            L10n.string("MessageConnectUnsupportedVersion", version, minimum.description)
+        case .unknownVersion(let minimum): L10n.string("MessageConnectUnknownVersion", minimum.description)
+        }
     }
 }
 
