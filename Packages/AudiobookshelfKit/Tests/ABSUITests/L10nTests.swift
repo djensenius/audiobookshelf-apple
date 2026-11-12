@@ -31,6 +31,18 @@ import Testing
         #expect(value == "3 episodes, 1 incomplete")
     }
 
+    /// A plural key picks its form by the count and formats the count for the locale, with or without a locale,
+    /// and in a locale that has only the English forms.
+    @Test func pluralPicksTheFormForTheCount() {
+        let english = Locale(identifier: "en_US")
+        #expect(L10n.plural("SharedBookCount", count: 1, locale: english) == "1 book")
+        #expect(L10n.plural("SharedBookCount", count: 2, locale: english) == "2 books")
+        #expect(L10n.plural("SharedBookCount", count: 1_234, locale: english) == "1,234 books")
+        #expect(L10n.plural("SharedBookCount", count: 1_234, locale: Locale(identifier: "de")) == "1.234 books")
+        #expect(L10n.plural("SharedBookCount", count: 1) == "1 book")
+        #expect(L10n.plural("SharedBookCount", count: 5) == "5 books")
+    }
+
     @Test func looksUpPreferredLocalization() {
         // The test runner has no localizations of its own, so it resolves to English.
         #expect(L10n.string("ButtonCancel") == "Cancel")

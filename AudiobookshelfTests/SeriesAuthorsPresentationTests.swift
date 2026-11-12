@@ -607,8 +607,8 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
 
     @Test func bookCountPrefersTheLibrarysTotal() {
         let author = AuthorSummary(id: "aut_1", name: "Author", bookCount: 3)
-        #expect(AuthorsPresentation.bookCount(total: 5, author: author) == L10n.string("SharedBookCount", "5"))
-        #expect(AuthorsPresentation.bookCount(total: nil, author: author) == L10n.string("SharedBookCount", "3"))
+        #expect(AuthorsPresentation.bookCount(total: 5, author: author) == L10n.plural("SharedBookCount", count: 5))
+        #expect(AuthorsPresentation.bookCount(total: nil, author: author) == L10n.plural("SharedBookCount", count: 3))
         #expect(AuthorsPresentation.bookCount(total: nil, author: AuthorSummary(id: "aut_2", name: "Author")) == nil)
         #expect(AuthorsPresentation.bookCount(total: 0, author: author)?.contains("0") == true)
     }

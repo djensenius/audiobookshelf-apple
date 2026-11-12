@@ -65,8 +65,7 @@ enum LibraryPresentation {
         if mediaType == .podcast {
             return "\(number) \(L10n.string(total == 1 ? "LabelPodcast" : "LabelPodcasts", locale: locale))"
         }
-        return total == 1
-            ? L10n.string("LabelSearchOneBook", locale: locale) : L10n.string("SharedBookCount", number, locale: locale)
+        return L10n.plural("SharedBookCount", count: total, locale: locale)
     }
 
     /// How a list of `columns` columns pages: enough per page to fill a few rows, and the next page asked for two

@@ -27,6 +27,13 @@ public enum L10n {
         return String(format: format, locale: locale ?? .current, arguments: arguments)
     }
 
+    /// The plural string for `key` (a plural in `Localization/native/`, see `docs/localization.md`)
+    /// in the form for `count`: "1 book", "3 books". `count` is shown formatted for the locale and
+    /// `arguments` replace `{1}`, `{2}`, … Plurals carry no markup.
+    public static func plural(_ key: String, count: Int, _ arguments: String..., locale: Locale? = nil) -> String {
+        String(format: lookup(key, locale: locale), locale: locale ?? .current, arguments: [count] + arguments)
+    }
+
     /// The string for `key` with its inline Markdown rendered and line breaks kept.
     ///
     /// Only the localized format is parsed as Markdown; `arguments` are inserted afterwards

@@ -35,8 +35,9 @@ enum ItemPresentation {
         return item.subtitle
     }
 
-    static func bookCount(_ count: Int) -> String {
-        L10n.string("SharedBookCount", count.formatted())
+    /// "1 book", "12 books".
+    static func bookCount(_ count: Int, locale: Locale? = nil) -> String {
+        L10n.plural("SharedBookCount", count: count, locale: locale)
     }
 
     /// Title, subtitle, series, then "Explicit" and "Abridged" when set, as one VoiceOver label.

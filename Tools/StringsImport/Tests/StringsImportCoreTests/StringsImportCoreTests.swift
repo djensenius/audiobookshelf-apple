@@ -332,3 +332,93 @@ import Testing
         #expect(run("--bogus").status == 1)
     }
 }
+
+@Suite struct PluralTests {
+    let files = [
+        LocaleFile(
+            name: "en-us", strings: ["ButtonCancel": "Cancel"],
+            plurals: ["SharedBookCount": ["one": "{0} book", "other": "{0} books"]]),
+        LocaleFile(name: "de", strings: ["ButtonCancel": "Abbrechen"]),
+        LocaleFile(
+            name: "fr", strings: [:], plurals: ["SharedBookCount": ["one": "{0} livre", "other": "{0} livres"]]),
+    ]
+
+    func plural(_ json: String, _ key: String, _ locale: String) throws -> [String: [String: String]]? {
+        let catalog = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        let strings = catalog?["strings"] as? [String: [String: Any]]
+        let localizations = strings?[key]?["localizations"] as? [String: [String: Any]]
+        let variations = localizations?[locale]?["variations"] as? [String: [String: [String: [String: String]]]]
+        return variations?["plural"]?.mapValues { $0["stringUnit"] ?? [:] }
+    }
+
+    @Test func convertsTheCountToAnInteger() {
+        #expect(StringConverter.convertPlural("{0} book") == "%1$lld book")
+        #expect(StringConverter.convertPlural("{0} books by {1}, {0}%") == "%1$lld books by %2$@, %1$lld%%")
+    }
+
+    @Test func writesPluralVariationsAndFillsUntranslatedLocales() throws {
+        let json = try CatalogBuilder.build(files: files).json
+        #expect(
+            try plural(json, "SharedBookCount", "en")
+                == [
+                    "one": ["state": "translated", "value": "%1$lld book"],
+                    "other": ["state": "translated", "value": "%1$lld books"],
+                ])
+        #expect(
+            try plural(json, "SharedBookCount", "de")
+                == [
+                    "one": ["state": "new", "value": "%1$lld book"],
+                    "other": ["state": "new", "value": "%1$lld books"],
+                ])
+        #expect(try plural(json, "SharedBookCount", "fr")?["one"]?["value"] == "%1$lld livre")
+        #expect(json.contains(#""value" : "Abbrechen""#))
+    }
+
+    @Test(arguments: [
+        ["one": "{0} book"],
+        ["one": "One book", "other": "{0} books"],
+        ["single": "{0} book", "other": "{0} books"],
+    ])
+    func rejectsUnusableSourcePlurals(forms: [String: String]) {
+        let files = [LocaleFile(name: "en-us", strings: [:], plurals: ["SharedBookCount": forms])]
+        #expect(throws: ImportError.self) { try CatalogBuilder.build(files: files) }
+    }
+
+    @Test func skipsUnusableTranslationsWithWarnings() throws {
+        let files = [
+            files[0],
+            LocaleFile(
+                name: "de", strings: ["SharedBookCount": "{0} Bücher"],
+                plurals: ["ButtonCancel": ["other": "{0}"]]),
+            LocaleFile(
+                name: "fr", strings: ["ButtonCancel": "Annuler"],
+                plurals: ["SharedBookCount": ["other": "{0} livres de {1}"]]),
+        ]
+        let result = try CatalogBuilder.build(files: files)
+        #expect(
+            result.warnings == [
+                "de: skipped ButtonCancel: not a plural in en-us.json",
+                "de: skipped SharedBookCount: a plural in en-us.json",
+                "fr: skipped SharedBookCount: uses {1}, which the source string does not have",
+            ])
+        #expect(try plural(result.json, "SharedBookCount", "fr")?["other"]?["state"] == "new")
+    }
+
+    @Test func loadsAndMergesNativePlurals() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "PluralTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try #"{"A": "a", "SharedBookCount": {"one": "{0} book", "other": "{0} books"}}"#
+            .write(to: directory.appending(path: "en-us.json"), atomically: true, encoding: .utf8)
+        let native = try LocaleFile.load(directory: directory)
+        #expect(native == [LocaleFile(name: "en-us", strings: ["A": "a"], plurals: files[0].plurals)])
+
+        let legacy = [LocaleFile(name: "en-us", strings: ["ButtonCancel": "Cancel"])]
+        let merged = try LocaleFile.merging(legacy: legacy, native: native)
+        #expect(merged.first?.plurals == files[0].plurals)
+        #expect(throws: ImportError.duplicateKey(key: "SharedBookCount", fileName: "en-us")) {
+            try LocaleFile.merging(
+                legacy: merged, native: [LocaleFile(name: "en-us", strings: [:], plurals: files[0].plurals)])
+        }
+    }
+}

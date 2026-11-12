@@ -38,6 +38,25 @@ The importer is the local package `Tools/StringsImport` (library `StringsImportC
    `L10n.string("LabelByAuthor", author)`, or `L10n.attributed("HeaderWelcome", name)` for
    values with Markdown.
 
+### Plurals
+
+A native key whose text depends on a number is a JSON object of CLDR plural categories
+instead of a string, with `other` required and the count `{0}` in every form:
+
+```json
+"SharedBookCount": {
+  "one": "{0} book",
+  "other": "{0} books"
+}
+```
+
+The importer writes it as the catalog's plural variations, with `{0}` as the integer
+`%1$lld` (the String Catalog compiler requires the count in every form). Look it up with
+`L10n.plural("SharedBookCount", count: 1)`, which picks the form and formats the count for
+the locale; never with `L10n.string`. Translations in `Localization/native/<file>.json` are
+objects too, with the categories their language uses; a locale without one gets the English
+forms marked "new".
+
 The importer fails if a native key also exists in `strings/`; pick another key. Native
 keys nobody has translated get the English fill like any other key.
 
@@ -78,7 +97,7 @@ asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
   placeholder is kept, with a warning.
 - Output is deterministic (sorted keys, Xcode's JSON layout), so rerunning is a no-op.
 
-There are no plurals in the legacy strings. RTL and pseudo-locale checks are out of scope
+There are no plurals in the legacy strings; only native keys can be plurals (see above). RTL and pseudo-locale checks are out of scope
 for now.
 
 ## Missing translations

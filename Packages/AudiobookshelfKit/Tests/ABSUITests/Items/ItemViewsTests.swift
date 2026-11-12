@@ -44,6 +44,17 @@ private final class FakeProgressEntry {
         #expect(ItemPresentation.accessibilityLabel(item) == "Barsoom, 3 books")
     }
 
+    /// One book isn't "1 books" (#319).
+    @Test func bookCountIsPlural() {
+        let english = Locale(identifier: "en_US")
+        #expect(ItemPresentation.bookCount(1, locale: english) == "1 book")
+        #expect(ItemPresentation.bookCount(0, locale: english) == "0 books")
+        #expect(ItemPresentation.bookCount(2, locale: english) == "2 books")
+        let series = ItemSummary(
+            id: "series-s", itemID: "li", seriesID: "s", kind: .series, title: "Barsoom", bookCount: 1)
+        #expect(ItemPresentation.subtitle(series) == "1 book")
+    }
+
     @Test func cardValueSpeaksProgressFinishedAndMissing() {
         let locale = Locale(identifier: "en_US")
         func value(_ item: ItemSummary, _ progress: ItemProgress?) -> String {
