@@ -86,8 +86,17 @@ public struct ResumeDataVault: Sendable {
     }
 
     /// Deletes the blob for `partID`, if any.
-    public func delete(partID: UUID) {
-        try? FileManager.default.removeItem(at: fileURL(partID: partID))
+    ///
+    /// - Returns: `false` when the blob is still there (the file couldn't be removed).
+    @discardableResult
+    public func delete(partID: UUID) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: fileURL(partID: partID))
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+        } catch {
+            return false
+        }
+        return true
     }
 
     private static func additionalData(_ partID: UUID, _ credentialTag: Data) -> Data {

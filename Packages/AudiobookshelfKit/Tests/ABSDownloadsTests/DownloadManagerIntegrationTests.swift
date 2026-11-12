@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSCore
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSData
@@ -94,6 +95,139 @@ import Testing
         #expect(record.id == recordID)
         #expect(record.parts.allSatisfy { $0.state != .completed })
         gate.open()
+    }
+
+    /// A restart for a stricter cellular policy pauses a downloading record, then resumes it. A
+    /// sign-out's cleanup that begins in between (here, while the pause stops the transfer)
+    /// passes over the paused record, so the resume starts nothing: no transfer runs on with
+    /// the old credentials, and the record stays paused like the rest.
+    @Test func restartDoesNotResumeARecordWhoseServerIsQuiescedMeanwhile() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let record = try await harness.addRecord(parts: [UUID()])
+        let (cancelStarted, cancelContinuation) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let held = Mutex(false)
+        let engine = harness.makeEngine(cancel: { task in
+            if !held.withLock({ held in
+                defer { held = true }
+                return held
+            }) {
+                cancelContinuation.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+            return await task.cancelByProducingResumeData()
+        })
+        let manager = DownloadManager(
+            store: harness.store, localItems: harness.localItems, engine: engine, locations: harness.locations,
+            capacity: FakeCapacity(), clock: harness.clock)
+        try await manager.start()
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        try #require(try await harness.store.record(id: record.id)?.state == .downloading)
+
+        let restart = Task { try await manager.restartActiveTransfers() }
+        for await _ in cancelStarted { break }
+        // The sign-out's cleanup, as DownloadsLifecycle runs it.
+        let (paused, pausedContinuation) = AsyncStream.makeStream(of: Void.self)
+        let store = harness.store
+        let connectionID = harness.connectionID
+        let cleanup = Task {
+            await engine.quiesce(connectionID: connectionID) {
+                for record in (try? await store.records(serverConnectionID: connectionID)) ?? []
+                where [.queued, .downloading].contains(record.state) {
+                    _ = try? await manager.pause(recordID: record.id)
+                }
+                pausedContinuation.yield()
+            }
+        }
+        for await _ in paused { break }
+        release.open()
+        _ = await cleanup.value
+        try await restart.value
+
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        let tasks = await harness.session?.session.allTasks ?? []
+        #expect(tasks.allSatisfy { $0.state != .running })
+        never.open()
+    }
+
+    /// A sign-out's pauses wait on each other for episodes of one podcast (the manager holds the
+    /// podcast's item for each), so one whose cancellation hangs would keep the other's transfer
+    /// running with the old credentials: the quiesce cancels every transfer before pausing.
+    @Test func quiesceStopsEveryEpisodeEvenIfAPauseWouldHang() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        var records: [DownloadRecordDTO] = []
+        for episode in ["ep_1", "ep_2"] {
+            let record = DownloadRecordDTO(
+                key: MediaKey(serverConnectionID: harness.connectionID, libraryItemId: "li_1", episodeId: episode),
+                mediaType: .podcast, title: episode, state: .queued, relativeDirectory: "li_1",
+                media: LocalMediaSnapshot(metadata: .init(title: "The Podcast")),
+                parts: [
+                    DownloadPartDTO(
+                        kind: .audio, serverPath: DownloadRequests.filePath(itemID: "li_1", ino: episode),
+                        filename: "\(episode).mp3", mimeType: "audio/mpeg", episodeId: episode, expectedBytes: 11,
+                        destinationRelativePath: "li_1/\(episode).mp3")
+                ])
+            records.append(try await harness.store.upsertRecord(record).record)
+        }
+        // The first cancellation that keeps resume data never returns until released.
+        let (cancelStarted, cancelContinuation) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let held = Mutex(false)
+        let engine = harness.makeEngine(cancel: { task in
+            if !held.withLock({ held in
+                defer { held = true }
+                return held
+            }) {
+                cancelContinuation.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+            return await task.cancelByProducingResumeData()
+        })
+        let manager = DownloadManager(
+            store: harness.store, localItems: harness.localItems, engine: engine, locations: harness.locations,
+            capacity: FakeCapacity(), clock: harness.clock)
+        try await manager.start()
+        #expect(await engine.activate())
+        await harness.waitForRequests(2)
+
+        // The sign-out's cleanup, as DownloadsLifecycle runs it.
+        let recordIDs = records.map(\.id)
+        let quiescing = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                await withTaskGroup(of: Void.self) { group in
+                    for recordID in recordIDs {
+                        group.addTask { _ = try? await manager.pause(recordID: recordID) }
+                    }
+                }
+            }
+        }
+        // Whichever comes first: the quiesce ends, or a pause hangs in its cancellation.
+        let (outcomes, outcome) = AsyncStream.makeStream(of: Bool.self)
+        Task {
+            _ = await quiescing.value
+            outcome.yield(true)
+        }
+        let watching = Task {
+            for await _ in cancelStarted {
+                outcome.yield(false)
+                break
+            }
+        }
+        let ended = await outcomes.first { _ in true } ?? false
+        watching.cancel()
+
+        let running = await harness.session?.session.allTasks.filter { $0.state == .running } ?? []
+        #expect(running.isEmpty)
+        #expect(ended)
+        release.open()
+        _ = await quiescing.value
+        for record in records {
+            #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        }
+        never.open()
     }
 
     /// Deleting a podcast while its cover is fetched again (a cover-only record) cancels that

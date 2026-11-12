@@ -267,6 +267,29 @@ import Testing
         #expect(harness.requests.count == 4)
     }
 
+    /// A deactivation before an activation's restart launches anything stops the restart.
+    @Test func deactivateStopsAPendingRestart() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let engine = Mutex<DownloadEngine?>(nil)
+        let deactivating = Mutex(false)
+        let made = harness.makeEngine(readRecords: { store in
+            if deactivating.withLock({ $0 }) { await engine.withLock { $0 }?.deactivate() }
+            return try await store.allRecords()
+        })
+        engine.withLock { $0 = made }
+        #expect(await made.attachSurvivingTransfers())
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        deactivating.withLock { $0 = true }
+
+        #expect(await made.activate())
+        await made.waitForRestart()
+
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
+        #expect(part.taskIdentifier == nil)
+    }
+
     @Test func backgroundWakeDoesNotRestartButActivateDoes() async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let partID = UUID()
@@ -537,6 +560,580 @@ import Testing
         #expect(!part.hasResumeData)
         #expect(
             !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
+    }
+
+    /// After a relaunch, a sign-out can come before anything attached the session: the
+    /// quiesce attaches first, so a surviving transfer with the old token is stopped too.
+    @Test func quiesceStopsASurvivorOfARelaunch() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let base = harness.base
+        let engine = harness.makeEngine(prepare: { stub in
+            var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+            request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+            stub.leaveTask(request, description: partID.uuidString)
+        })
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.taskIdentifier == nil)
+        #expect(!part.hasResumeData)
+        #expect(
+            !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
+    }
+
+    /// Without a session nothing can be stopped, so the quiesce reports it didn't finish.
+    @Test func quiesceWithoutASessionReportsItDidNotFinish() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        try await harness.addRecord(parts: [UUID()], state: .downloading, partState: .running)
+        let engine = harness.makeEngine(readRecords: { _ in throw TestError() })
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(harness.sessions.withLock { $0.isEmpty })
+    }
+
+    /// Without a session the transfers can't be stopped, but the resume data sealed with the old
+    /// credentials is deleted at once, and a transfer that survived the relaunch is cancelled,
+    /// not adopted, once the session is created, even after signing in again meanwhile.
+    @Test func quiesceWithoutASessionDeletesResumeDataAndLaterCancelsSurvivors() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        let reads = Mutex(0)
+        let base = harness.base
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                // Only the first activation's read fails.
+                let read = reads.withLock {
+                    $0 += 1
+                    return $0
+                }
+                if read == 1 { throw TestError() }
+                return try await store.allRecords()
+            },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+            })
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(harness.sessions.withLock { $0.isEmpty })
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+
+        // Signed in again (the record is still downloading), then the app comes to the foreground.
+        #expect(await engine.activate())
+
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        // The part starts again with the new credentials.
+        await harness.waitForRequests(2)
+        #expect(harness.requests.map(\.authorization) == ["Bearer previous", "Bearer token-1"])
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        never.open()
+    }
+
+    /// A transfer that survived the relaunch and finished before or while the session was
+    /// created was made with the old credentials: its file isn't adopted, and its part starts
+    /// again with the new ones.
+    @Test func quiesceWithoutASessionDropsASurvivorThatFinished() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { request in
+            request.authorization == "Bearer previous" ? .status(200) : .status(200, gate: never)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let reads = Mutex(0)
+        let base = harness.base
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                let read = reads.withLock {
+                    $0 += 1
+                    return $0
+                }
+                if read == 1 { throw TestError() }
+                return try await store.allRecords()
+            },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+                // Finished before the engine lists the session's tasks, so only its completion
+                // reaches the engine.
+                let deadline = Date.now.addingTimeInterval(10)
+                while stub.leftovers.withLock({ $0.first?.state }) != .completed, Date.now < deadline {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+            })
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+
+        #expect(await engine.activate())
+
+        await harness.waitForRequests(2)
+        #expect(harness.requests.map(\.authorization) == ["Bearer previous", "Bearer token-1"])
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .running)
+        #expect(part.hasResumeData == false)
+        #expect(
+            !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
+        never.open()
+    }
+
+    /// Resume data that couldn't be deleted, because the downloads couldn't be read, leaves the
+    /// quiesce unfinished, so it's tried again.
+    @Test func quiesceThatCouldNotDeleteTheResumeDataReportsItDidNotFinish() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let goodReads = Mutex(Int.max)
+        let engine = harness.makeEngine(readRecords: { store in
+            let fails = goodReads.withLock {
+                $0 -= 1
+                return $0 < 0
+            }
+            if fails { throw TestError() }
+            return try await store.allRecords()
+        })
+        #expect(await engine.activate())
+        // The quiesce's own read succeeds; the discard's fails.
+        goodReads.withLock { $0 = 1 }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == true)
+    }
+
+    /// Resume data that couldn't be deleted (here, a read-only folder) stays flagged, both when
+    /// its transfer is stopped and in the discard, so the quiesce reports it and a later one
+    /// deletes it.
+    @Test func quiesceThatCouldNotDeleteABlobKeepsItFlaggedForALaterOne() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID)
+        let folder = blob.deletingLastPathComponent().path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == true)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(!FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        never.open()
+    }
+
+    /// With a session but no readable downloads, the transfers the engine knows of are still
+    /// stopped: they run with the old credentials. The quiesce reports it didn't finish.
+    @Test func quiesceThatCouldNotReadTheDownloadsStillStopsKnownTransfers() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let failsReads = Mutex(false)
+        let engine = harness.makeEngine(readRecords: { store in
+            if failsReads.withLock({ $0 }) { throw TestError() }
+            return try await store.allRecords()
+        })
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        #expect(try await harness.store.part(id: partID)?.state == .running)
+        failsReads.withLock { $0 = true }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+        let tasks = await harness.session?.session.allTasks ?? []
+        #expect(tasks.allSatisfy { $0.state != .running })
+        never.open()
+    }
+
+    /// A caller that paused a record to restart it, while a quiesce of its server ran from
+    /// start to end, doesn't resume it: the quiesce passed over the paused record. A later
+    /// resume (by the user, signed in again) still does.
+    @Test func resumeUnlessQuiescedSinceLeavesARecordPausedAfterAQuiesce() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.pause(recordID: record.id))
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation) == false)
+
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        #expect(await harness.session?.session.allTasks.allSatisfy { $0.state != .running } ?? true)
+        #expect(try await engine.resume(recordID: record.id))
+        await harness.waitForRequests(2)
+        never.open()
+    }
+
+    /// A generation taken while a quiesce of the server is under way (a restart beginning
+    /// during a sign-out's cleanup) precedes that quiesce, so once it ends, a resume since that
+    /// generation still leaves the record paused: the quiesce may have passed over it.
+    @Test func resumeUnlessQuiescedSinceCountsAQuiesceUnderWayAtTheGeneration() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let record = try await harness.addRecord(parts: [UUID()])
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        let (pausing, pausingReached) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let quiesce = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                pausingReached.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+        }
+        for await _ in pausing { break }
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.pause(recordID: record.id))
+        release.open()
+        _ = await quiesce.value
+
+        #expect(await engine.hasQuiesced(connectionID: harness.connectionID, since: generation))
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation) == false)
+
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        #expect(await harness.session?.session.allTasks.allSatisfy { $0.state != .running } ?? true)
+        never.open()
+    }
+
+    /// A quiesce rejects its server's transfers that survived a relaunch before it waits for
+    /// the session, so the activation it waits for (or one beginning once that one failed)
+    /// cancels them instead of adopting them.
+    @Test func quiesceRejectsSurvivorsBeforeWaitingForTheSession() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let (reading, readingReached) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let reads = Mutex(0)
+        let adoptions = Mutex(0)
+        let base = harness.base
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                // Only the first activation's read waits.
+                if reads.withLock({
+                    $0 += 1
+                    return $0
+                }) == 1 {
+                    readingReached.yield()
+                    await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+                }
+                return try await store.allRecords()
+            },
+            adoptionStarted: { _ in adoptions.withLock { $0 += 1 } },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+            })
+        // The quiesce's own wait for the session: the activation reads the downloads.
+        let quiesce = Task { await engine.quiesce(connectionID: harness.connectionID) }
+        for await _ in reading { break }
+        release.open()
+        #expect(await quiesce.value)
+
+        #expect(adoptions.withLock { $0 } == 0)
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        never.open()
+    }
+
+    /// A quiesce rejects its server's surviving transfers before it pauses the records, so a
+    /// foreground activation while it pauses them cancels them instead of adopting them.
+    @Test func quiesceRejectsSurvivorsWhileItPauses() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let adoptions = Mutex(0)
+        let base = harness.base
+        let engine = harness.makeEngine(
+            adoptionStarted: { _ in adoptions.withLock { $0 += 1 } },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+            })
+        let (pausing, pausingReached) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let quiesce = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                pausingReached.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+        }
+        for await _ in pausing { break }
+
+        #expect(await engine.activate())
+        release.open()
+        _ = await quiesce.value
+
+        #expect(adoptions.withLock { $0 } == 0)
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        never.open()
+    }
+
+    /// A quiesce cancels a launch's redirect check under way, so its request, which carries the
+    /// old token, can't follow a later redirect after the sign-out; no transfer starts either.
+    @Test func quiesceCancelsALaunchsRedirectCheck() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let preflight = HangingPreflight()
+        let engine = harness.makeEngine(preflight: preflight)
+        let start = Task { await engine.start(partIDs: [partID]) }
+        for await _ in preflight.arrivals { break }
+
+        _ = await engine.quiesce(connectionID: harness.connectionID)
+        await start.value
+
+        #expect(preflight.wasCancelled.withLock { $0 })
+        #expect(harness.requests.isEmpty)
+    }
+
+    /// A quiesce while a launch reads its credentials, before its check exists to cancel: the
+    /// launch sends no check with the old token once the read returns.
+    @Test func quiesceDuringACredentialsReadSendsNoCheck() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let preflight = StubPreflight()
+        let engine = harness.makeEngine(preflight: preflight)
+        let connectionID = harness.connectionID
+        harness.credentials.hook.withLock { $0 = { _ = await engine.quiesce(connectionID: connectionID) } }
+
+        await engine.start(partIDs: [partID])
+
+        #expect(harness.credentials.calls == [nil])
+        #expect(preflight.requests.isEmpty)
+        #expect(harness.requests.isEmpty)
+    }
+
+    /// A pause whose seal failed, and whose previous blob couldn't be deleted, leaves a blob
+    /// with the old credentials on an unflagged part: the discard deletes it too.
+    @Test func discardResumeDataDeletesAnUnflaggedBlob() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        try #require(try await harness.store.part(id: partID)?.hasResumeData == false)
+        try #require(FileManager.default.fileExists(atPath: blob))
+        let engine = harness.makeEngine()
+
+        #expect(await engine.discardResumeData(connectionID: harness.connectionID))
+
+        #expect(!FileManager.default.fileExists(atPath: blob))
+    }
+
+    /// A completion whose blob couldn't be deleted leaves one with the old credentials on a
+    /// completed part: the discard deletes it too.
+    @Test func discardResumeDataDeletesACompletedPartsBlob() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        try #require(try await harness.store.completePart(partID: partID, finalBytes: 6))
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        try #require(try await harness.store.part(id: partID)?.state == .completed)
+        try #require(FileManager.default.fileExists(atPath: blob))
+        let engine = harness.makeEngine()
+
+        #expect(await engine.discardResumeData(connectionID: harness.connectionID))
+
+        #expect(!FileManager.default.fileExists(atPath: blob))
+    }
+
+    /// A part failing for good stops its siblings and may replay a start that overlapped it,
+    /// after which its transfer would run with the old token: the quiesce waits for it, then
+    /// stops what it started. In production the sign-out pauses the record first.
+    @Test(arguments: [false, true])
+    func quiesceWaitsForAFailureForGoodAndStopsItsReplay(pausing: Bool) async throws {
+        let failure = StubGate()
+        let never = StubGate()
+        let failingRequests = Mutex(0)
+        let harness = try await DownloadHarness { request in
+            guard request.url?.path().contains("/file/1/") == true else { return .status(200, gate: never) }
+            let count = failingRequests.withLock {
+                $0 += 1
+                return $0
+            }
+            return count == 1 ? .status(404, body: Data(), gate: failure) : .status(200, gate: never)
+        }
+        let failing = UUID()
+        let sibling = UUID()
+        let record = try await harness.addRecord(parts: [failing, sibling])
+        let seams = FailureSeams()
+        seams.hold(failing)
+        let (replays, replayReached) = AsyncStream.makeStream(of: Void.self)
+        let releaseReplay = StubGate()
+        let engine = harness.makeEngine(
+            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure,
+            beforeReplayStart: { _ in
+                replayReached.yield()
+                await withCheckedContinuation { continuation in releaseReplay.run { continuation.resume() } }
+            })
+        await engine.start(partIDs: [failing, sibling])
+        await harness.waitForRequests(2)
+        failure.open()
+        _ = await seams.nextHeld()
+        // A start while the part is settling is replayed once its failure is handled; the replay
+        // has queued the record when the sign-out begins.
+        await engine.start(partIDs: [failing])
+        seams.release()
+        _ = await replays.first { _ in true }
+
+        let finished = Mutex(false)
+        let quiescing = Task {
+            defer { finished.withLock { $0 = true } }
+            return await engine.quiesce(connectionID: harness.connectionID) {
+                if pausing { _ = try? await engine.pause(recordID: record.id) }
+            }
+        }
+        while await engine.failureWaiterCount == 0, !finished.withLock({ $0 }) { await Task.yield() }
+        #expect(await engine.failureWaiterCount > 0)
+        releaseReplay.open()
+        #expect(await quiescing.value)
+        _ = await seams.nextSettled()
+
+        let running = await harness.session?.session.allTasks.filter { $0.state == .running } ?? []
+        #expect(running.isEmpty)
+        for partID in [failing, sibling] {
+            #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        }
+        if pausing { #expect(try await harness.store.record(id: record.id)?.state == .paused) }
+        never.open()
+    }
+
+    /// The replay's launch can fail the same part for good again (here the server now redirects
+    /// the download off its origin, which the preflight refuses) while the first failure is still under way: the quiesce keeps waiting
+    /// until that one has finished too, not only the one that ended first.
+    @Test func quiesceWaitsForTheOuterFailureWhenTheReplayFailsThePartAgain() async throws {
+        let failure = StubGate()
+        let harness = try await DownloadHarness { _ in .status(404, body: Data(), gate: failure) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let seams = FailureSeams()
+        seams.hold(partID)
+        let (replays, replayReached) = AsyncStream.makeStream(of: Void.self)
+        let releaseReplay = StubGate()
+        let (outerSettles, outerSettling) = AsyncStream.makeStream(of: Void.self)
+        let releaseOuter = StubGate()
+        let settled = Mutex(0)
+        let redirected = Mutex(false)
+        let engine = harness.makeEngine(
+            beforeStoppingSiblings: seams.beforeStoppingSiblings,
+            afterPermanentFailure: { _ in
+                // The replay's failure settles first, within the outer failure's replay.
+                let count = settled.withLock {
+                    $0 += 1
+                    return $0
+                }
+                guard count == 2 else { return }
+                outerSettling.yield()
+                await withCheckedContinuation { continuation in releaseOuter.run { continuation.resume() } }
+            },
+            beforeReplayStart: { _ in
+                replayReached.yield()
+                await withCheckedContinuation { continuation in releaseReplay.run { continuation.resume() } }
+            },
+            preflight: StubPreflight { request, _ throws(DownloadRedirectPreflightError) in
+                guard redirected.withLock({ $0 }) else { return request }
+                throw .offOrigin(URL(string: "https://elsewhere.example/1.mp3")!)
+            })
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        failure.open()
+        #expect(await seams.nextHeld() == partID)
+        await engine.start(partIDs: [partID])
+        redirected.withLock { $0 = true }
+        seams.release()
+        _ = await replays.first { _ in true }
+
+        let finished = Mutex(false)
+        let quiescing = Task {
+            defer { finished.withLock { $0 = true } }
+            return await engine.quiesce(connectionID: harness.connectionID)
+        }
+        while await engine.failureWaiterCount == 0, !finished.withLock({ $0 }) { await Task.yield() }
+        #expect(await engine.failureWaiterCount > 0)
+        releaseReplay.open()
+        _ = await outerSettles.first { _ in true }
+        // The replay's failure has ended; the outer one hasn't.
+        while await engine.failureWaiterCount == 0, !finished.withLock({ $0 }) { await Task.yield() }
+        #expect(!finished.withLock { $0 })
+        releaseOuter.open()
+
+        #expect(await quiescing.value)
+        #expect(settled.withLock { $0 } == 2)
+        #expect(try await harness.store.part(id: partID)?.state == .failed)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// A sign-out pauses only queued and downloading records, so a `failed` one stays failed.
+    /// A replay of a plain start that overlapped its failure would queue it again, and the next
+    /// activation restart it: while the server is quiesced, the replay is skipped.
+    @Test func quiesceKeepsAReplayFromQueuingAFailedRecord() async throws {
+        let failure = StubGate()
+        let never = StubGate()
+        let counter = PathCounter()
+        let harness = try await DownloadHarness { request in
+            counter.next(request) == 1 ? .status(404, body: Data(), gate: failure) : .status(200, gate: never)
+        }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let seams = FailureSeams()
+        seams.hold(partID)
+        let engine = harness.makeEngine(
+            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure)
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        failure.open()
+        #expect(await seams.nextHeld() == partID)
+        await engine.start(partIDs: [partID])
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+
+        let (pauses, paused) = AsyncStream.makeStream(of: Void.self)
+        // The lifecycle's pause leaves the failed record as it is.
+        let quiescing = Task { await engine.quiesce(connectionID: harness.connectionID) { paused.yield() } }
+        _ = await pauses.first { _ in true }
+        seams.release()
+
+        #expect(await seams.nextSettled() == partID)
+        #expect(await quiescing.value)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        #expect(harness.requests.count == 1)
+        never.open()
     }
 
     @Test func partDeletedWhileLaunchingIsNotRequested() async throws {
@@ -1678,6 +2275,16 @@ import Testing
         #expect(try await engine.pause(recordID: UUID()) == false)
     }
 
+    /// A failure saved after the caller read the record (a sign-out's cleanup, say) stays.
+    @Test func pauseLeavesAFailedRecordFailed() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let record = try await harness.addRecord(parts: [UUID()], state: .failed)
+        let engine = harness.makeEngine()
+
+        #expect(try await engine.pause(recordID: record.id) == false)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+    }
+
     @Test func failedPauseReadLeavesRecordAndTransferConsistent() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
@@ -1879,5 +2486,30 @@ import Testing
         let item = try await harness.localItems.item(serverConnectionID: harness.connectionID, libraryItemId: "li_1")
         #expect(item?.files.map(\.size) == [11])
         #expect(harness.requests.count == 1)
+    }
+}
+
+/// A redirect check that waits until it's cancelled (at most 5 s, then clears the request) and
+/// records whether it was.
+private final class HangingPreflight: DownloadRedirectPreflighting {
+    let arrivals: AsyncStream<Void>
+    private let arrived: AsyncStream<Void>.Continuation
+    let wasCancelled = Mutex(false)
+
+    init() {
+        (arrivals, arrived) = AsyncStream.makeStream()
+    }
+
+    func waitForNetwork(_ request: URLRequest) async -> Bool { true }
+
+    func check(_ request: URLRequest) async throws(DownloadRedirectPreflightError) -> URLRequest {
+        arrived.yield()
+        do {
+            try await Task.sleep(for: .seconds(5))
+        } catch {
+            wasCancelled.withLock { $0 = true }
+            throw .unreachable(.cancelled)
+        }
+        return request
     }
 }

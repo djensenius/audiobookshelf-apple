@@ -404,6 +404,7 @@ public final class AccountManager {
             id = try? await store.connectionToRestore()?.id
         }
         guard let id else { return nil }
+        forgetDownloadClient(id)
         let signedOutAt = await saveSignOut(of: id)
         let credentials = self.credentials(for: id)
         // Not a session that a sign-in started after this call saved, whichever reached the
@@ -453,6 +454,7 @@ public final class AccountManager {
     public func remove(_ id: UUID) async throws -> URL? {
         removing.insert(id)
         defer { removing.remove(id) }
+        forgetDownloadClient(id)
         let wasActive = activeConnection?.id == id
         let activeClient = wasActive ? client : nil
         // Signed out first, so a restore or switch that's reading the session stops at once; put
@@ -483,6 +485,7 @@ public final class AccountManager {
         // removed it.
         removals += 1
         removedLogins[ServerLogin(address: connection.address, userId: connection.userId)] = removals
+        await credentialsRemoved?(id)
         var storeError: (any Error)?
         do {
             _ = try await store.remove(id: id, now: now())
@@ -528,6 +531,107 @@ public final class AccountManager {
     /// Whether a sign-in, restore or switch began since the last ``logout()``: its end-session URL
     /// would then end or interrupt that in the shared browser.
     public var hasBegunSinceLogout: Bool { operation != latestLogout }
+
+    // MARK: - Downloads
+
+    /// Awaited by ``remove(_:)`` once the connection's Keychain items are deleted, before the
+    /// store removes it and its server session is ended: the app stops its downloads and
+    /// discards their resume data there. Not called when the delete fails, so the connection
+    /// keeps its downloads' progress along with its session.
+    @ObservationIgnored public var credentialsRemoved: (@MainActor (UUID) async -> Void)?
+
+    /// Called when a connection's session expires (its tokens are deleted, or a sign-out is
+    /// saved), active or not, and even before its session is restored: the app stops that
+    /// connection's downloads and discards their resume data there, even when its running
+    /// session's end may be a switch. Also for a connection being removed, whose Keychain delete
+    /// may still fail, so ``credentialsRemoved`` isn't called; the app serializes the two cleanups.
+    @ObservationIgnored public var credentialsExpired: (@MainActor (UUID) -> Void)?
+
+    /// Clients for download credentials of saved connections that aren't active, so a
+    /// connection's download parts share one client, with the credentials' generation they were
+    /// made for: every sign-in, sign-out, expiry and removal bumps it, so a client made before
+    /// a new session (whose custom headers may differ) isn't used after it.
+    @ObservationIgnored private var downloadClients: [UUID: (client: APIClient, generation: Int)] = [:]
+    /// Counts ``logout()``, ``remove(_:)`` and expiries per connection, so a lookup that
+    /// overlapped one doesn't keep a client.
+    @ObservationIgnored private var downloadClientResets: [UUID: Int] = [:]
+
+    /// The client for a connection's download credentials (`AccountDownloadCredentials`): the
+    /// active client, or for another saved connection that is connected, not signed out, not
+    /// being removed and has a saved session, a client over its credentials (shared with the
+    /// app's own clients, so a refresh is saved and joined), kept until that connection's next
+    /// sign-in, ``logout()``, ``remove(_:)`` or expiry. Reads the store, not ``connections``, so
+    /// it works in a background wake before the session is restored. `nil` otherwise.
+    public func downloadClient(for id: UUID) async -> APIClient? {
+        if let client = await activeClient(for: id) { return client }
+        guard !removing.contains(id) else { return nil }
+        let reset = downloadClientResets[id, default: 0]
+        // Read each time: an expiry whose delete failed saves a sign-out without a logout.
+        guard let connection = try? await store.connection(id: id), !connection.isDisconnected,
+            connection.signedOutAt == nil, downloadClientResets[id, default: 0] == reset, !removing.contains(id)
+        else { return nil }
+        if let client = await activeClient(for: id) { return client }
+        let credentials = self.credentials(for: id)
+        // The generation first: headers a newer sign-in saved meanwhile are kept under the older
+        // generation, so the next lookup makes a client again rather than keeping stale ones.
+        guard let read = try? await credentials.loadSession(), read.session != nil,
+            downloadClientResets[id, default: 0] == reset, !removing.contains(id)
+        else { return nil }
+        if let client = await activeClient(for: id) { return client }
+        if let cached = downloadClients[id], cached.generation == read.generation { return cached.client }
+        guard let saved = try? await credentials.load(), saved.session != nil,
+            downloadClientResets[id, default: 0] == reset, !removing.contains(id)
+        else { return nil }
+        if let client = await activeClient(for: id) { return client }
+        if let cached = downloadClients[id], cached.generation == read.generation { return cached.client }
+        guard let created = makeClient(connection, customHeaders: saved.customHeaders, credentials: credentials) else {
+            return nil
+        }
+        downloadClients[id] = (created, read.generation)
+        return created
+    }
+
+    /// The active client, if `id` is the active connection and the client has the custom
+    /// headers of its saved credentials: a sign-in to it (even one that then failed) may have
+    /// saved others, and then a client over the saved credentials is made instead.
+    private func activeClient(for id: UUID) async -> APIClient? {
+        guard activeConnection?.id == id, let client,
+            let saved = try? await credentials(for: id).load(),
+            await client.configuration.customHeaders == saved.customHeaders,
+            activeConnection?.id == id, self.client === client
+        else { return nil }
+        return client
+    }
+
+    /// Reads a download access token of `id` with `read`, from the client
+    /// ``downloadClient(for:)`` returns, and returns both only if they belong to one sign-in:
+    /// the connection's credentials weren't replaced during the read (a sign-in, sign-out,
+    /// expiry or removal changes their generation; a refresh doesn't) and the client has their
+    /// custom headers. Otherwise `nil`, so a token is never sent with another sign-in's headers;
+    /// a later lookup makes a client again.
+    public func downloadAccess(
+        for id: UUID, read: @Sendable (APIClient) async throws -> String?
+    ) async throws -> (client: APIClient, token: String)? {
+        guard let client = await downloadClient(for: id) else { return nil }
+        let credentials = self.credentials(for: id)
+        guard let before = try? await credentials.loadSession().generation,
+            let token = try await read(client)
+        else { return nil }
+        // Generations only grow, and a sign-in saves its tokens and generation together, so an
+        // unchanged generation means the token is the saved credentials'.
+        guard let after = try? await credentials.loadConfiguration(), after.generation == before,
+            await client.configuration.customHeaders == after.customHeaders
+        else {
+            Log.downloads.notice("A connection's credentials changed while reading a download token; not using it")
+            return nil
+        }
+        return (client, token)
+    }
+
+    private func forgetDownloadClient(_ id: UUID) {
+        downloadClients[id] = nil
+        downloadClientResets[id, default: 0] += 1
+    }
 
     // MARK: - Private
 
@@ -754,9 +858,12 @@ public final class AccountManager {
     private func sessionExpired(_ id: UUID, generation: Int, deleteFailed: Bool) async {
         // A sign-in since the expiry replaced the session.
         guard generation > signInGenerations[id, default: 0] else { return }
+        // A kept download client has no tokens now, and a lookup that overlapped this mustn't keep one.
+        forgetDownloadClient(id)
         // A sign-in that saved the expired session mustn't activate it.
         expiredGenerations[id] = generation
         Log.auth.notice("The session expired")
+        credentialsExpired?(id)
         if activeConnection?.id == id, !removing.contains(id) { signOutLocally(error: .server(.sessionExpired)) }
         guard deleteFailed, !removing.contains(id) else { return }
         await willSaveExpiry?()
