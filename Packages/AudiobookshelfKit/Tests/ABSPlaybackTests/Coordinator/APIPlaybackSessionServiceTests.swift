@@ -127,11 +127,55 @@ struct APIPlaybackSessionServiceTests {
         await #expect(throws: CancellationError.self) { try await resolving.value }
     }
 
-    @Test func customHeadersNeedTheMissingTransport() async throws {
+    @Test func customHeadersGetAHeaderTransport() async throws {
         let service = try service(version: ServerVersion(2, 37, 0), customHeaders: ["X-Proxy": "1"])
-        await #expect(throws: StreamResolutionError.customHeaderTransportUnavailable) {
-            try await service.resolveStream(for: episodeSession(index: 1))
+        let stream = try await service.resolveStream(for: episodeSession(index: 1))
+
+        #expect(stream.plan.transport == .customHeaderResourceLoader)
+        #expect(stream.transport != nil)
+        #expect(stream.urls.map(\.absoluteString) == ["https://abs.example/abs/public/session/sess/track/1"])
+    }
+
+    @Test func noCustomHeadersNoTransport() async throws {
+        let stream = try await service(version: ServerVersion(2, 37, 0)).resolveStream(for: episodeSession(index: 1))
+        #expect(stream.transport == nil)
+    }
+
+    @Test func transcodeWithCustomHeadersStaysUnsupported() async throws {
+        let service = try service(version: ServerVersion(2, 37, 0), customHeaders: ["X-Proxy": "1"])
+        let session = PlaybackSession(
+            id: "sess", libraryItemId: "li", mediaType: .book, playMethod: .transcode,
+            audioTracks: [AudioTrack(index: 1, startOffset: 0, duration: 60, contentUrl: "/hls/sess/output.m3u8")])
+        await #expect(throws: StreamResolutionError.resolution(.transcodeUnavailableWithCustomHeaders)) {
+            try await service.resolveStream(for: session)
         }
+    }
+
+    /// The live service's transport carries the connection's headers end to end.
+    @Test func headerTransportSendsTheConnectionHeaders() async throws {
+        let host = StreamStubProtocol.register(.init(body: Data(repeating: 7, count: 64)))
+        let configuration = try APIClientConfiguration(
+            baseURL: try #require(URL(string: "https://\(host)")), customHeaders: ["X-Proxy": "token"])
+        let service = APIPlaybackSessionService(
+            serverConnectionID: UUID(),
+            client: APIClient(
+                configuration: configuration,
+                tokenProvider: StaticTokens(value: ABSAPI.AuthTokens(accessToken: "a", refreshToken: "r"))),
+            features: ServerFeatures(version: ServerVersion(2, 37, 0)), deviceIdentifiers: StaticDevice(),
+            streamingConfiguration: { StreamStubProtocol.configuration() })
+        let stream = try await service.resolveStream(for: episodeSession(index: 1))
+        let transport = try #require(stream.transport)
+        let request = RecordingLoadingRequest(range: RequestedRange(offset: 0, length: 8))
+        let loaderURL = HeaderStreamingTransport.loaderURL(for: try #require(stream.urls.first))
+        transport.loader.queue.async { transport.loader.start(request, loaderURL: loaderURL) }
+        await request.finished()
+
+        #expect(request.error == nil)
+        #expect(request.data == Data(repeating: 7, count: 8))
+        let sent = try #require(StreamStubProtocol.requests(host).first)
+        #expect(sent.url?.path() == "/public/session/sess/track/1")
+        #expect(sent.value(forHTTPHeaderField: "X-Proxy") == "token")
+        #expect(sent.value(forHTTPHeaderField: "Authorization") == nil)
     }
 
     @Test func resolutionErrorsAreWrapped() async throws {

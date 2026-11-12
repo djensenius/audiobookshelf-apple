@@ -305,14 +305,7 @@ public final class AudioEngine: AudioEngineProtocol {
     }
 
     private func makeItem(trackIndex: Int, source: AudioEngineSource) -> AVPlayerItem {
-        let asset =
-            assets[trackIndex]
-            ?? AVURLAsset(
-                url: source.trackURLs[trackIndex],
-                options: Self.assetOptions(
-                    prefersPreciseTiming: source.prefersPreciseTiming,
-                    mimeType: source.mimeType(trackIndex: trackIndex),
-                    networkAccess: source.networkAccess))
+        let asset = assets[trackIndex] ?? makeAsset(trackIndex: trackIndex, source: source)
         assets[trackIndex] = asset
         let item = AVPlayerItem(asset: asset)
         item.audioTimePitchAlgorithm = .timeDomain
@@ -321,6 +314,15 @@ public final class AudioEngine: AudioEngineProtocol {
             item.forwardPlaybackEndTime = CMTime(seconds: track.forwardPlaybackEndTime, preferredTimescale: 1000)
         }
         return item
+    }
+
+    private func makeAsset(trackIndex: Int, source: AudioEngineSource) -> AVURLAsset {
+        let url = source.trackURLs[trackIndex]
+        let mimeType = source.mimeType(trackIndex: trackIndex)
+        let options = Self.assetOptions(
+            prefersPreciseTiming: source.prefersPreciseTiming, mimeType: mimeType, networkAccess: source.networkAccess)
+        guard let transport = source.headerTransport else { return AVURLAsset(url: url, options: options) }
+        return transport.makeAsset(url: url, options: options, mimeType: mimeType, networkAccess: source.networkAccess)
     }
 
     private func clearQueue() {
