@@ -205,8 +205,10 @@ public actor DownloadManager {
                 logError("Couldn't read downloads to track", error)
             }
             // A refetch whose failure was saved before the process ended: nothing resumes it.
+            // One too large stays dropped, as its update would have.
             for record in records where record.isCoverOnly && record.state == .failed {
-                await dropFailedRefetch(record.id)
+                let tooLarge = record.parts.contains { DownloadEngine.failedAsTooLarge($0.lastError) }
+                await dropFailedRefetch(record.id, code: tooLarge ? .tooLarge : nil)
             }
         }
         try locations.prepare()

@@ -215,7 +215,11 @@ extension DownloadManager {
             do throws(DownloadManagerError) {
                 if size != nil {
                     try await adoptCover(cover.relativePath, updatedAt: cover.updatedAt, for: localItem)
-                } else if try await !refetchCover(cover, for: localItem) {
+                    refusedCovers[itemKey] = nil
+                } else if try await refetchCover(cover, for: localItem) {
+                    // A cover kept earlier is done with: a refetch failing for good keeps its own.
+                    refusedCovers[itemKey] = nil
+                } else {
                     // Signed out: kept for a completion after signing in.
                     refusedCovers[itemKey] = cover
                 }

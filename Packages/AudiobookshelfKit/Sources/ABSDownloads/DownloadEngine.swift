@@ -1038,8 +1038,16 @@ public actor DownloadEngine {
         await restart?.value
     }
 
-    private static func tooLargeMessage(_ limit: Int64) -> String {
-        "The file is larger than \(limit) bytes."
+    private static let tooLargePrefix = "The file is larger than "
+
+    static func tooLargeMessage(_ limit: Int64) -> String {
+        "\(tooLargePrefix)\(limit) bytes."
+    }
+
+    /// Whether a part's saved `lastError` is that of a ``DownloadFailureCode/tooLarge`` failure:
+    /// the store keeps only the message, not the code.
+    static func failedAsTooLarge(_ lastError: String?) -> Bool {
+        lastError?.hasPrefix(tooLargePrefix) == true
     }
 
     private func handleProgress(_ task: URLSessionTask, bytesWritten: Int64, expectedBytes: Int64) async {
@@ -1047,13 +1055,15 @@ public actor DownloadEngine {
         guard let partID = task.partID, let context = contexts[partID],
             tasks[partID]?.taskIdentifier == task.taskIdentifier
         else { return }
-        guard DownloadSessionDelegate.classify(response: task.response, task: task) == nil else { return }
+        // Before the check below: an error body over the limit (a large 404 page, say) is
+        // stopped too, rather than written in full to temporary storage.
         if let limit = context.maxBytes, bytesWritten > limit || expectedBytes > limit {
             ignoredTasks.insert(task.taskIdentifier)
             task.cancel()
             await failPermanently(partID, code: .tooLarge, message: Self.tooLargeMessage(limit))
             return
         }
+        guard DownloadSessionDelegate.classify(response: task.response, task: task) == nil else { return }
         authRetried.remove(partID)
         let expected = expectedBytes > 0 ? expectedBytes : context.expectedBytes
         let decision = throttle.record(

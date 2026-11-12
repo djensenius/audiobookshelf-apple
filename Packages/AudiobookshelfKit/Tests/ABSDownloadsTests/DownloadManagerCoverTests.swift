@@ -261,12 +261,14 @@ import Testing
     }
 
     /// A refetch whose failure was saved before the process ended is dropped at start, its
-    /// cover kept for the item's next completion.
-    @Test func aRefetchFailedBeforeARelaunchIsDroppedAtStart() async throws {
+    /// cover kept for the item's next completion, unless it failed as too large.
+    @Test(arguments: [false, true])
+    func aRefetchFailedBeforeARelaunchIsDroppedAtStart(tooLarge: Bool) async throws {
         let fixture = try await ManagerFixture()
         let part = DownloadPartDTO(
             kind: .cover, serverPath: "/api/items/\(Self.item.id)/cover", filename: "cover.jpg", mimeType: "image/jpeg",
-            expectedBytes: 0, bytesWritten: 0, destinationRelativePath: "show/cover-1.jpg", state: .failed)
+            expectedBytes: 0, bytesWritten: 0, destinationRelativePath: "show/cover-1.jpg", state: .failed,
+            lastError: tooLarge ? DownloadEngine.tooLargeMessage(DownloadEngine.maxCoverBytes) : "404")
         let record = try #require(
             try await fixture.store.insertRecordIfSignedIn(
                 DownloadRecordDTO(
@@ -278,7 +280,35 @@ import Testing
         try await manager.start()
 
         #expect(try await fixture.store.allRecords().isEmpty)
-        #expect(await manager.refusedCovers[fixture.key(Self.item)]?.serverPath == part.serverPath)
+        #expect(await manager.refusedCovers[fixture.key(Self.item)]?.serverPath == (tooLarge ? nil : part.serverPath))
+    }
+
+    /// A cover kept while signed out is done with once a later hand-off fetches it again: when
+    /// that refetch fails as too large, nothing is left to fetch it once more.
+    @Test func aCoverKeptWhileSignedOutIsDroppedByALaterHandOff() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, _) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        try Self.setSignedOut(true, fixture)
+        #expect(try await manager.cancel(recordID: first.id))
+        try #require(await manager.refusedCovers[fixture.key(Self.item)] != nil)
+        try #require(try await fixture.store.record(key: fixture.key(Self.item)) == nil)
+        try Self.setSignedOut(false, fixture)
+        let third = try await Self.enqueue("ep_3", fixture, manager)
+        try #require(third.parts.contains { $0.kind == .cover })
+
+        #expect(try await manager.cancel(recordID: third.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        let part = try #require(refetch.parts.first)
+        let message = DownloadEngine.tooLargeMessage(DownloadEngine.maxCoverBytes)
+        try await fixture.store.setPartState(.failed, partID: part.id, taskIdentifier: nil, error: message)
+        _ = try await fixture.store.setState(.failed, forRecord: refetch.id)
+        fixture.engine.updateContinuation.yield(
+            .partFailed(partID: part.id, recordID: refetch.id, code: .tooLarge, message: message, willRetry: false))
+
+        #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
+        await manager.holdingItem(fixture.key(Self.item)) {}
+        #expect(await manager.refusedCovers[fixture.key(Self.item)] == nil)
+        #expect(try await fixture.store.allRecords().isEmpty)
     }
 
     /// Nothing is fetched for a connection that was signed out or disconnected.

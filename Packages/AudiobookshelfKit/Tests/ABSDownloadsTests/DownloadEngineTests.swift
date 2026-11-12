@@ -78,6 +78,22 @@ import Testing
                 200, body: Data("img".utf8), contentType: "image/jpeg", headers: ["Content-Length": "\(limit + 1)"])
             : .status(
                 200, body: Data(count: Int(limit) + 1), contentType: "image/jpeg", headers: ["Content-Length": ""])
+        try await expectTooLarge(reply)
+    }
+
+    /// An error page over the cover limit, with no declared length, is stopped as too large
+    /// too, rather than written in full to temporary storage.
+    @Test(arguments: [404, 200])
+    func failsAnErrorBodyOverTheCoverLimit(status: Int) async throws {
+        try await expectTooLarge(
+            .status(
+                status, body: Data(count: Int(DownloadEngine.maxCoverBytes) + 1), contentType: "text/html",
+                headers: ["Content-Length": ""]))
+    }
+
+    /// Downloads a cover-only record's cover answered with `reply`: it fails for good as too
+    /// large and never reaches its destination.
+    private func expectTooLarge(_ reply: StubReply) async throws {
         let harness = try await DownloadHarness { _ in reply }
         let partID = UUID()
         let record = try await harness.store.upsertRecord(
