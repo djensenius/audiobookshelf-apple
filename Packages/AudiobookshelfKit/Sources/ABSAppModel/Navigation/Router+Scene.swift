@@ -10,7 +10,8 @@ extension Router {
 
     /// Starts a scene the way ADR 0004 orders it: restores the saved snapshot, adapts the
     /// selection to the size class, and only then opens the link that launched or continued
-    /// the scene.
+    /// the scene. A new window opened for a screen (`window`) starts at that screen instead of
+    /// the defaults, unless the scene has saved state, which wins.
     ///
     /// The order matters. A restore resets every path and pending request, so a link opened
     /// before it would be lost, and ``normalize(isCompact:)`` must see the restored selection
@@ -19,11 +20,17 @@ extension Router {
     /// - Parameters:
     ///   - data: The scene's saved ``snapshotData``; `nil` or unreadable data starts from the
     ///     defaults.
+    ///   - window: The screen the scene's window was opened for, used only when `data` is `nil`.
+    ///     One of another server or user is ignored, like a snapshot of theirs.
     ///   - isCompact: Whether the scene's horizontal size class is compact.
     ///   - link: A link the scene held until it was ready, for example one that cold-launched
     ///     the app.
-    public func restoreScene(from data: Data?, isCompact: Bool, opening link: DeepLink?) {
-        restore(from: data)
+    public func restoreScene(from data: Data?, window: WindowRoute? = nil, isCompact: Bool, opening link: DeepLink?) {
+        if data == nil, let window {
+            snapshot = window.snapshot
+        } else {
+            restore(from: data)
+        }
         normalize(isCompact: isCompact)
         if let link { open(link) }
     }
