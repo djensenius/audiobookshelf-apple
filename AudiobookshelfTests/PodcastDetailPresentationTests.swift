@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSUI
@@ -15,6 +16,66 @@ import Testing
             itemID: item.id, service: PreviewItemDetailService(item: item, behavior: .succeed), cache: ProgressCache())
         await detail.load()
         return PodcastDetailModel(detail: detail, cache: ProgressCache(), settings: nil, locale: locale)
+    }
+
+    /// The feed sheet's row ignores its children for VoiceOver, so the value carries everything
+    /// the row shows besides the title, the subtitle included.
+    @Test func feedEpisodeValueReadsWhatTheRowShows() throws {
+        let full = try #require(
+            RSSFeedEpisode(
+                raw: .object([
+                    "enclosure": .object(["url": .string("https://x/1.mp3")]), "title": .string("Pilot"),
+                    "episode": .string("4"), "subtitle": .string("Where it all began."),
+                    "publishedAt": .number(1_700_000_000_000),
+                ])))
+        let published = try #require(PodcastDetailPresentation.publishedText(full.publishedAt, locale: locale))
+        #expect(
+            PodcastFeedEpisodePresentation.accessibilityValue(full, isInLibrary: true, locale: locale)
+                == "Episode #4, \(published), In library, Where it all began.")
+
+        let bare = try #require(
+            RSSFeedEpisode(raw: .object(["enclosure": .object(["url": .string("https://x/2.mp3")])])))
+        #expect(PodcastFeedEpisodePresentation.accessibilityValue(bare, isInLibrary: false, locale: locale).isEmpty)
+    }
+
+    /// An untitled feed episode still gets a title users can tell apart, shown in the row and read
+    /// by VoiceOver: the number, else the date, else the enclosure's file name, never the whole URL.
+    @Test func untitledFeedEpisodeTitleSaysWhichEpisode() throws {
+        func episode(_ fields: [String: RawJSONValue], url: String = "https://x/1.mp3") throws -> RSSFeedEpisode {
+            try #require(
+                RSSFeedEpisode(raw: .object(fields.merging(["enclosure": .object(["url": .string(url)])]) { $1 })))
+        }
+        func label(_ episode: RSSFeedEpisode) -> String {
+            PodcastFeedEpisodePresentation.displayTitle(episode, locale: locale)
+        }
+        #expect(label(try episode(["title": .string("Pilot"), "episode": .string("4")])) == "Pilot")
+        #expect(
+            label(
+                try episode([
+                    "title": .string("  "), "episode": .string("4"), "publishedAt": .number(1_700_000_000_000),
+                ]))
+                == "Untitled episode, Episode #4")
+        let dated = try episode(["publishedAt": .number(1_700_000_000_000)])
+        let published = try #require(PodcastDetailPresentation.publishedText(dated.publishedAt, locale: locale))
+        #expect(label(dated) == "Untitled episode, \(published)")
+        #expect(
+            label(try episode([:], url: "https://cdn.example.com/show/ep%2012.mp3?token=secret"))
+                == "Untitled episode, ep 12.mp3")
+        #expect(label(try episode([:], url: "https://cdn.example.com")) == "Untitled episode")
+    }
+
+    /// A feed episode with only an enclosure shows no number, subtitle or date, so its row's title
+    /// is all that tells two of them apart. The negative control is the raw title the row showed
+    /// before: empty for both.
+    @Test func enclosureOnlyFeedEpisodesShowDistinctTitles() throws {
+        let episodes = try ["https://x/show/first.mp3", "https://x/show/second.mp3"].map { url in
+            try #require(RSSFeedEpisode(raw: .object(["enclosure": .object(["url": .string(url)])])))
+        }
+        let titles = episodes.map { PodcastFeedEpisodePresentation.displayTitle($0, locale: locale) }
+        #expect(titles == ["Untitled episode, first.mp3", "Untitled episode, second.mp3"])
+
+        #expect(episodes.allSatisfy { $0.episode == nil && $0.subtitle == nil && $0.publishedAt == nil })
+        #expect(episodes.map(\.title) == ["", ""])
     }
 
     @Test func everyMenuTitleIsLocalized() {
