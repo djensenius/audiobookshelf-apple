@@ -62,10 +62,12 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `CollectionWriteContractTests` | Five collection writes; ordered two-book lifecycle and empty reads; permissions, atomic invalid create, no-ops/errors, version differences and failure teardown |
 | `PlaylistWriteContractTests` | Five owner-only writes; book/episode lifecycles, strict raw membership checks, ownership/access denials, atomic invalid add, safe characterization and exact-ID failure teardown |
 | `PlaybackSessionContractTests` | Start, sync and close; resume; same-device takeover; track URLs and ranges; downloads; local session upload |
+| `ListeningSessionContractTests` | An episode's stored sessions after a close, kept off the book's page; unknown item and unknown episode 404s |
 | `ProgressContractTests` | Each progress group, `lastUpdate`, finished and auto-finish, ebook progress, batch update, delete |
 | `LocalProgressContractTests` | `LocalProgressStore` sending to the server and settling on what it holds |
+| `BookmarkContractTests` | Create at whole and fractional times, rename on an existing time, update, delete by `pathTime`, a second delete (404), `GET /api/me` across items with raw counts, empty title (400) |
 
-Not covered yet: bookmarks, listening stats, Socket.IO events
+Not covered yet: listening stats, Socket.IO events
 (`ABSRealtime`) and OpenID sign-in (see [oidc.md](oidc.md) for the manual check).
 
 See [owned search contracts](search-contracts.md) for the explicit mode, fail-closed ownership,
@@ -98,6 +100,9 @@ Behaviour that holds on both, and that fixtures did not capture:
 - An ebook-only PATCH on a new row creates `duration` 0 and `currentTime` 0, and a location
   without `ebookProgress` keeps the stored `ebookProgress`.
 - An uploaded local session older than the stored progress is kept, with `progressSynced` false.
+- A bookmark is matched by item and `time ==` the number in the path, so `12.345` must travel as
+  `12.345`. Creating at an existing time renames that bookmark. Updating or deleting a missing
+  one is a 404, and an empty title is a 400 `Invalid title`.
 
 ### Sequential session evidence and the reconciliation test model (#275)
 
@@ -143,10 +148,31 @@ Limits: application/storage is atomic in this small model; the actual `syncSessi
 `saveSession` without awaiting it. Sequential live observations do **not** establish a database
 visibility barrier, late-processing fence or universal exactly-once/no-loss guarantee. Equal-date
 ordering is unspecified on the server (the model has a deterministic fixture tie-break).
-The model uses fixed 3600-second media and does not simulate auto-finish, ebook intent, PATCH
-semantics, permissions, local uploads, transport admission races or asynchronous database writes.
-PATCHes and legacy recording accessors remain recording-only; tests using this model inspect
-`fetchProgress`, `openSession` and `listeningSessions`. Unconfigured fake defaults are unchanged.
+The model uses fixed 3600-second media and does not simulate auto-finish, ebook intent,
+permissions, local uploads, transport admission races or asynchronous database writes.
+`PATCH /api/me/progress/:id` (#380) sets the groups sent, creating the row if absent, and, only
+when something changed or a `progress` was written, dates it with the model's clock (the body
+carries no `lastUpdate`): a PATCH that changes nothing leaves the row, `lastUpdate` included, as
+it was. `isFinished` follows the contract above and acts only when it changes the state
+(finishing stores progress 1 and `finishedAt`; un-finishing resets finished progress to 0);
+finishing finished progress keeps its `finishedAt` unless a date is sent. An audio PATCH that
+moves finished progress at least 10 s from the end un-finishes it. On existing progress a
+`progress` equal to the stored position's ratio is ignored and any other is written, even one
+equal to the stored progress, as on the server. A queued
+`fetchErrors` or `patchErrors` entry fails before reaching the model. Legacy recording
+accessors remain recording-only; tests using this model inspect `fetchProgress`, `openSession`
+and `listeningSessions`. Unconfigured fake defaults are unchanged.
+
+Stale writes on this shared ledger (#380, ADR 0007 decision 8) are covered by
+`ProgressStaleDrainTests` (in a real conflict a drain keeps another device's newer position and
+PATCHes only a newer edit; it defers on a failed read, creates absent progress, and
+characterizes clock skew) and `ProgressLateCloseTests` (a `/sync` or `/close` from a session
+this device has moved on from, held before its session lookup, answers 404 after the takeover,
+and one applied before it with its response lost still leaves the newer session's position; no
+`/close` is resent; and a slow `/close` can still overwrite another device's newer report, a
+documented limit). Groups ADR 0003 shields from the time comparison, and a request whose lookup
+passed before the takeover but writes after it, are documented limits the model doesn't exercise
+(ADR 0007 decision 8).
 
 Neither first-page absence, `/sync` success nor durable audio-report evidence proves delivery
 of listening time. No production recovery, resend, backoff, close-routing or history policy
