@@ -574,10 +574,58 @@ import Testing
         #expect(harness.sessions.withLock { $0.isEmpty })
     }
 
+    /// Without a session the transfers can't be stopped, but the resume data sealed with the old
+    /// credentials is deleted at once, and a transfer that survived the relaunch is cancelled,
+    /// not adopted, once the session is created, even after signing in again meanwhile.
+    @Test func quiesceWithoutASessionDeletesResumeDataAndLaterCancelsSurvivors() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        let reads = Mutex(0)
+        let base = harness.base
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                // Only the first activation's read fails.
+                let read = reads.withLock {
+                    $0 += 1
+                    return $0
+                }
+                if read == 1 { throw TestError() }
+                return try await store.allRecords()
+            },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+            })
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(harness.sessions.withLock { $0.isEmpty })
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+
+        // Signed in again (the record is still downloading), then the app comes to the foreground.
+        #expect(await engine.activate())
+
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        // The part starts again with the new credentials.
+        await harness.waitForRequests(2)
+        #expect(harness.requests.map(\.authorization) == ["Bearer previous", "Bearer token-1"])
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        never.open()
+    }
+
     /// A part failing for good stops its siblings and may replay a start that overlapped it,
     /// after which its transfer would run with the old token: the quiesce waits for it, then
-    /// stops what it started.
-    @Test func quiesceWaitsForAFailureForGoodAndStopsItsReplay() async throws {
+    /// stops what it started. In production the sign-out pauses the record first.
+    @Test(arguments: [false, true])
+    func quiesceWaitsForAFailureForGoodAndStopsItsReplay(pausing: Bool) async throws {
         let failure = StubGate()
         let never = StubGate()
         let failingRequests = Mutex(0)
@@ -591,25 +639,37 @@ import Testing
         }
         let failing = UUID()
         let sibling = UUID()
-        try await harness.addRecord(parts: [failing, sibling])
+        let record = try await harness.addRecord(parts: [failing, sibling])
         let seams = FailureSeams()
         seams.hold(failing)
+        let (replays, replayReached) = AsyncStream.makeStream(of: Void.self)
+        let releaseReplay = StubGate()
         let engine = harness.makeEngine(
-            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure)
+            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure,
+            beforeReplayStart: { _ in
+                replayReached.yield()
+                await withCheckedContinuation { continuation in releaseReplay.run { continuation.resume() } }
+            })
         await engine.start(partIDs: [failing, sibling])
         await harness.waitForRequests(2)
         failure.open()
         _ = await seams.nextHeld()
-        // A start while the part is settling is replayed once its failure is handled.
+        // A start while the part is settling is replayed once its failure is handled; the replay
+        // has queued the record when the sign-out begins.
         await engine.start(partIDs: [failing])
+        seams.release()
+        _ = await replays.first { _ in true }
 
         let finished = Mutex(false)
         let quiescing = Task {
             defer { finished.withLock { $0 = true } }
-            return await engine.quiesce(connectionID: harness.connectionID)
+            return await engine.quiesce(connectionID: harness.connectionID) {
+                if pausing { _ = try? await engine.pause(recordID: record.id) }
+            }
         }
         while await engine.failureWaiterCount == 0, !finished.withLock({ $0 }) { await Task.yield() }
-        seams.release()
+        #expect(await engine.failureWaiterCount > 0)
+        releaseReplay.open()
         #expect(await quiescing.value)
         _ = await seams.nextSettled()
 
@@ -618,6 +678,106 @@ import Testing
         for partID in [failing, sibling] {
             #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
         }
+        if pausing { #expect(try await harness.store.record(id: record.id)?.state == .paused) }
+        never.open()
+    }
+
+    /// The replay's launch can fail the same part for good again (here the server now needs
+    /// custom headers) while the first failure is still under way: the quiesce keeps waiting
+    /// until that one has finished too, not only the one that ended first.
+    @Test func quiesceWaitsForTheOuterFailureWhenTheReplayFailsThePartAgain() async throws {
+        let failure = StubGate()
+        let harness = try await DownloadHarness { _ in .status(404, body: Data(), gate: failure) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let seams = FailureSeams()
+        seams.hold(partID)
+        let (replays, replayReached) = AsyncStream.makeStream(of: Void.self)
+        let releaseReplay = StubGate()
+        let (outerSettles, outerSettling) = AsyncStream.makeStream(of: Void.self)
+        let releaseOuter = StubGate()
+        let settled = Mutex(0)
+        let engine = harness.makeEngine(
+            beforeStoppingSiblings: seams.beforeStoppingSiblings,
+            afterPermanentFailure: { _ in
+                // The replay's failure settles first, within the outer failure's replay.
+                let count = settled.withLock {
+                    $0 += 1
+                    return $0
+                }
+                guard count == 2 else { return }
+                outerSettling.yield()
+                await withCheckedContinuation { continuation in releaseOuter.run { continuation.resume() } }
+            },
+            beforeReplayStart: { _ in
+                replayReached.yield()
+                await withCheckedContinuation { continuation in releaseReplay.run { continuation.resume() } }
+            })
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        failure.open()
+        #expect(await seams.nextHeld() == partID)
+        await engine.start(partIDs: [partID])
+        harness.credentials.configurationOverride.withLock {
+            $0 = try? APIClientConfiguration(
+                baseURL: URL(string: harness.base)!, customHeaders: ["CF-Access-Client-Secret": "secret"])
+        }
+        seams.release()
+        _ = await replays.first { _ in true }
+
+        let finished = Mutex(false)
+        let quiescing = Task {
+            defer { finished.withLock { $0 = true } }
+            return await engine.quiesce(connectionID: harness.connectionID)
+        }
+        while await engine.failureWaiterCount == 0, !finished.withLock({ $0 }) { await Task.yield() }
+        #expect(await engine.failureWaiterCount > 0)
+        releaseReplay.open()
+        _ = await outerSettles.first { _ in true }
+        // The replay's failure has ended; the outer one hasn't.
+        while await engine.failureWaiterCount == 0, !finished.withLock({ $0 }) { await Task.yield() }
+        #expect(!finished.withLock { $0 })
+        releaseOuter.open()
+
+        #expect(await quiescing.value)
+        #expect(settled.withLock { $0 } == 2)
+        #expect(try await harness.store.part(id: partID)?.state == .failed)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// A sign-out pauses only queued and downloading records, so a `failed` one stays failed.
+    /// A replay of a plain start that overlapped its failure would queue it again, and the next
+    /// activation restart it: while the server is quiesced, the replay is skipped.
+    @Test func quiesceKeepsAReplayFromQueuingAFailedRecord() async throws {
+        let failure = StubGate()
+        let never = StubGate()
+        let counter = PathCounter()
+        let harness = try await DownloadHarness { request in
+            counter.next(request) == 1 ? .status(404, body: Data(), gate: failure) : .status(200, gate: never)
+        }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let seams = FailureSeams()
+        seams.hold(partID)
+        let engine = harness.makeEngine(
+            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure)
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        failure.open()
+        #expect(await seams.nextHeld() == partID)
+        await engine.start(partIDs: [partID])
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+
+        let (pauses, paused) = AsyncStream.makeStream(of: Void.self)
+        // The lifecycle's pause leaves the failed record as it is.
+        let quiescing = Task { await engine.quiesce(connectionID: harness.connectionID) { paused.yield() } }
+        _ = await pauses.first { _ in true }
+        seams.release()
+
+        #expect(await seams.nextSettled() == partID)
+        #expect(await quiescing.value)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        #expect(harness.requests.count == 1)
         never.open()
     }
 

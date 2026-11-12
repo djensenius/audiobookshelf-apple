@@ -117,13 +117,16 @@ Signing out, an expired session or removing a server pauses that connection's qu
 running downloads, then deletes its resume data (ADR 0003). The paused downloads stay
 paused after signing back in.
 
-The clean-up (`DownloadEngine.quiesce(connectionID:)`) attaches to the session first, stops
-every transfer of the connection and waits for failures being handled before deleting the
-resume data. A removal runs it once the Keychain items are deleted and before the store
-removes the server (`AccountManager.credentialsRemoved`), so a failed removal keeps the
-downloads' progress. A new sign-in to the same server waits for a clean-up still running,
-and one that found no session is retried at the next activation. Nothing is activated
-until the download folders are prepared.
+The clean-up (`DownloadEngine.quiesce(connectionID:pausing:)`) pauses the records, attaches
+to the session, stops every transfer of the connection and waits for failures being handled
+before deleting the resume data; meanwhile a failure's replay doesn't queue a record again.
+A removal runs it once the Keychain items are deleted and before the store removes the
+server (`AccountManager.credentialsRemoved`), so a failed removal keeps the downloads'
+progress. A new sign-in to the same server waits for a clean-up still running (a wait over
+5 seconds is logged). One that found no session still deletes the resume data, cancels the
+connection's transfers that survived a relaunch once the session is created, and is
+retried at the next activation unless the server is signed in to first. Nothing is
+activated until the download folders are prepared.
 
 1. Start the 500 MB download, then sign out from the Account tab. Check that the
    download shows as paused, `nsurlsessiond` cancels the task, and `ResumeData/` holds

@@ -10,8 +10,8 @@ public protocol DownloadsLifecycleEngine: Sendable {
     func activate() async -> Bool
     /// See ``DownloadEngine/deactivate()``.
     func deactivate() async
-    /// See ``DownloadEngine/quiesce(connectionID:)``.
-    func quiesce(connectionID: UUID) async -> Bool
+    /// See ``DownloadEngine/quiesce(connectionID:pausing:)``.
+    func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void) async -> Bool
 }
 
 extension DownloadEngine: DownloadsLifecycleEngine {}
@@ -41,18 +41,24 @@ extension DownloadManager: DownloadsLifecycleManager {}
 ///   the next phase. ``SessionScenePhase/background`` deactivates the engine, after any
 ///   activation called before it, so the app never stays activated in the background.
 /// - As a ``SessionParticipant``, a sign-out or expiry of the session's connection pauses that
-///   connection's queued and downloading records, then quiesces it
-///   (``DownloadEngine/quiesce(connectionID:)``): every transfer stops and its resume data is
-///   discarded (ADR 0003), since resume data is sealed to the credentials it was made with and
-///   couldn't be used after signing in again. The records stay paused after signing in again;
-///   the user resumes them. This is local only, so it is also safe for an expiry. A switch keeps
-///   them running: the other connection's credentials stay saved. A removal does the same as a
-///   sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted.
+///   connection's queued and downloading records, within a quiesce of it
+///   (``DownloadEngine/quiesce(connectionID:pausing:)``): every transfer stops and its resume
+///   data is discarded (ADR 0003), since resume data is sealed to the credentials it was made
+///   with and couldn't be used after signing in again. The records stay paused after signing in
+///   again; the user resumes them. This is local only, so it is also safe for an expiry. A switch
+///   keeps them running: the other connection's credentials stay saved. A removal does the same
+///   as a sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted.
 /// - A cleanup runs in its own task, so it outlives the session teardown's time budget; a new
 ///   session of the same connection waits for it in ``sessionDidStart(_:)``, so it can't pause
 ///   or discard what that session starts. A cleanup that couldn't stop the transfers (the engine
-///   had no session) is tried again after the next successful activation, unless a session of
-///   the connection starts first.
+///   had no session) still deletes the resume data it can, and is tried again after the next
+///   successful activation, unless a session of the connection starts first; either way the
+///   engine cancels the connection's transfers that survived a relaunch once it has a session.
+/// - These waits (a new session's, and a removal's in ``connectionRemoved(_:)``, which
+///   ``AccountManager/remove(_:)`` awaits) have no time limit, so a later sign-in or removal can
+///   never overlap a cleanup; one longer than ``slowCleanup`` is logged. The trade-off: if a step
+///   of the cleanup (a store write, a transfer's cancellation) never returned, they would wait
+///   for good.
 @MainActor
 public final class DownloadsLifecycle: SessionParticipant {
     private let engine: any DownloadsLifecycleEngine
@@ -181,7 +187,7 @@ public final class DownloadsLifecycle: SessionParticipant {
         // A cleanup that outlived the last teardown's budget pauses and discards only what the
         // ended session left; then it isn't tried again over this session's downloads.
         while let pending = cleanups[id] {
-            await pending.value
+            await Self.wait(for: pending)
             // Done unless a retry after an activation began meanwhile.
             if cleanups[id] == pending { break }
         }
@@ -205,23 +211,27 @@ public final class DownloadsLifecycle: SessionParticipant {
         let previous = cleanups[connectionID]
         let cleanup = Task {
             await previous?.value
-            do {
-                for record in try await records(connectionID) where [.queued, .downloading].contains(record.state) {
-                    do {
-                        _ = try await manager.pause(recordID: record.id)
-                    } catch {
-                        Log.downloads.error(
-                            "Couldn't pause a download of a signed-out server: \(String(describing: error), privacy: .public)"
-                        )
+            // Paused within the quiesce, so a failure's replay can't queue a record again after
+            // the read; pausing seals resume data with the old credentials, so it's discarded after.
+            let quiesced = await engine.quiesce(connectionID: connectionID) {
+                do {
+                    for record in try await records(connectionID)
+                    where [.queued, .downloading].contains(record.state) {
+                        do {
+                            _ = try await manager.pause(recordID: record.id)
+                        } catch {
+                            Log.downloads.error(
+                                "Couldn't pause a download of a signed-out server: \(String(describing: error), privacy: .public)"
+                            )
+                        }
                     }
+                } catch {
+                    Log.downloads.error(
+                        "Couldn't read the downloads of a signed-out server: \(Log.redact(String(describing: error)), privacy: .public)"
+                    )
                 }
-            } catch {
-                Log.downloads.error(
-                    "Couldn't read the downloads of a signed-out server: \(Log.redact(String(describing: error)), privacy: .public)"
-                )
             }
-            // Pausing seals resume data with the old credentials, so it's discarded after.
-            if await engine.quiesce(connectionID: connectionID) {
+            if quiesced {
                 self.unfinishedCleanups.remove(connectionID)
             } else {
                 Log.downloads.error("Couldn't stop a signed-out server's downloads; will retry")
@@ -229,7 +239,21 @@ public final class DownloadsLifecycle: SessionParticipant {
             }
         }
         cleanups[connectionID] = cleanup
-        await cleanup.value
+        await Self.wait(for: cleanup)
         if cleanups[connectionID] == cleanup { cleanups[connectionID] = nil }
+    }
+
+    /// How long a wait for a cleanup lasts before it's logged.
+    static let slowCleanup: Duration = .seconds(5)
+
+    /// Waits for `cleanup` without a time limit (see ``DownloadsLifecycle``), logging once if it
+    /// takes longer than ``slowCleanup``.
+    private static func wait(for cleanup: Task<Void, Never>) async {
+        let warning = Task {
+            try await Task.sleep(for: slowCleanup)
+            Log.downloads.warning("Still waiting for a signed-out server's downloads to stop")
+        }
+        await cleanup.value
+        warning.cancel()
     }
 }

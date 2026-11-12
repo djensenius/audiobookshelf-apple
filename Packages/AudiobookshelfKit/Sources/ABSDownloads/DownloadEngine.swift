@@ -208,11 +208,18 @@ public actor DownloadEngine {
     /// can't launch until ``reconcile()`` saves it.
     private var pendingRecordFailures: Set<UUID> = []
     /// The connections of the failures for good under way, from the start of their handling
-    /// until their replay has started, and the ``quiesce(connectionID:)`` calls waiting for them.
+    /// until their replay has started, and the ``quiesce(connectionID:pausing:)`` calls waiting
+    /// for them.
     private var failingConnections: [UUID] = []
     private var failureWaiters: [CheckedContinuation<Void, Never>] = []
-    /// Internal so tests can tell when ``quiesce(connectionID:)`` waits for a failure.
+    /// Internal so tests can tell when ``quiesce(connectionID:pausing:)`` waits for a failure.
     var failureWaiterCount: Int { failureWaiters.count }
+    /// The connections being quiesced, one entry per call: a failure's replay doesn't queue
+    /// their records again.
+    private var quiescingConnections: [UUID] = []
+    /// Connections quiesced without a session: their transfers that survived a relaunch are
+    /// cancelled, not adopted, once the session is created.
+    private var survivorsToStop: Set<UUID> = []
     /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the results
     /// they finished with meanwhile: those are handled only once the transfer is adopted.
     private var adopting: Set<Int> = []
@@ -545,17 +552,33 @@ public actor DownloadEngine {
     /// deletes their resume data, for a sign-out or removal (ADR 0003). It first attaches to the
     /// transfers that survived a relaunch, so they are stopped too, and waits for the parts being
     /// failed for good, whose sibling stops and replays could otherwise run after the discard.
-    /// Set the records' state first (for example `paused`), so nothing starts them again.
     ///
-    /// - Returns: `false`, stopping and deleting nothing, when there is no session (the downloads
-    ///   couldn't be read, or another process holds it); a later call tries again.
-    public func quiesce(connectionID: UUID) async -> Bool {
-        guard await ensureSession() else { return false }
+    /// - Parameter pausing: sets the connection's records' state (for example `paused`), so
+    ///   nothing starts them again. It runs first; from then until this returns, a failure's
+    ///   replay doesn't queue a record of the connection again (one left `failed` stays so).
+    /// - Returns: `false` when there is no session (the downloads couldn't be read, or another
+    ///   process holds it) or the downloads couldn't be read. The resume data is still deleted
+    ///   where it can be, and the transfers that survived a relaunch are cancelled once the
+    ///   session is created; a later call tries the rest again.
+    public func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void = {}) async -> Bool {
+        quiescingConnections.append(connectionID)
+        defer {
+            if let index = quiescingConnections.firstIndex(of: connectionID) {
+                quiescingConnections.remove(at: index)
+            }
+        }
+        await pausing()
+        guard await ensureSession() else {
+            survivorsToStop.insert(connectionID)
+            await discardResumeData(connectionID: connectionID)
+            return false
+        }
         let records: [DownloadRecordDTO]
         do {
             records = try await loadRecords()
         } catch {
             logError("Couldn't read downloads; not stopping a server's downloads", error)
+            await discardResumeData(connectionID: connectionID)
             return false
         }
         await waitForFailuresForGood(of: connectionID)
@@ -648,6 +671,18 @@ public actor DownloadEngine {
         // A task that finished on the way is left to its completion, which adopts it first.
         for task in await session.allTasks where task.state != .completed {
             if let partID = task.partID, tasks[partID] === task { continue }
+            if let partID = task.partID, let context = contexts[partID],
+                survivorsToStop.contains(context.connectionID), tasks[partID] == nil
+            {
+                // Its server was signed out of while there was no session: it carries the old
+                // credentials (ADR 0003). Its part stays running, so it is queued below.
+                ignoredTasks.insert(task.taskIdentifier)
+                task.cancel()
+                vault.delete(partID: partID)
+                contexts[partID]?.hasResumeData = false
+                await persist { _ = try await $0.updatePart(partID: partID, hasResumeData: false) }
+                continue
+            }
             guard let partID = task.partID, contexts[partID] != nil, tasks[partID] == nil,
                 let download = task as? URLSessionDownloadTask
             else {
@@ -657,6 +692,7 @@ public actor DownloadEngine {
             }
             await reattach(download, partID: partID, activationOwnsSession: true)
         }
+        survivorsToStop.removeAll()
         // A part left running without a transfer: either its transfer moved the file, but iOS
         // ended the process before the completion was saved, or the app ended before the system
         // kept the transfer. The first completes, but only while the store still has the part
@@ -1439,7 +1475,8 @@ public actor DownloadEngine {
     /// replay leaves the record `failed` when another part of it failed for good while this
     /// failure was under way: restarting only this part would strand that one. If activation is
     /// handling the failure while reattaching a task, the replay reuses its session instead of
-    /// awaiting the activation task that is already handling it.
+    /// awaiting the activation task that is already handling it. No replay is made while the
+    /// part's server is being quiesced (``quiesce(connectionID:pausing:)``).
     private func failPermanently(
         _ partID: UUID, code: DownloadFailureCode, message: String, retryCount: Int? = nil,
         activationOwnsSession: Bool = false
@@ -1453,7 +1490,7 @@ public actor DownloadEngine {
         }
         failingForGood[context.recordID, default: []].append(partID)
         // One entry per failure under way (a part twice while its replay's launch fails it
-        // again), until its replay has started, for quiesce(connectionID:).
+        // again), until its replay has started, for quiesce(connectionID:pausing:).
         failingConnections.append(context.connectionID)
         defer {
             if let index = failingConnections.firstIndex(of: context.connectionID) {
@@ -1507,8 +1544,19 @@ public actor DownloadEngine {
                 resumeNeedsReplay || overlappingFailures.contains(partID)
                 ? [.queued, .downloading] : [.queued, .downloading, .failed]
             do {
-                guard try await store.setState(.queued, forRecord: context.recordID, expecting: replayable)
+                // A sign-out pausing the server's records leaves a `failed` one as it is.
+                guard !quiescingConnections.contains(context.connectionID),
+                    try await store.setState(.queued, forRecord: context.recordID, expecting: replayable)
                 else {
+                    endFailingForGood(partID, recordID: context.recordID)
+                    if let afterPermanentFailure { await afterPermanentFailure(partID) }
+                    return
+                }
+                // One that began during the write may have read the record while it was `failed`.
+                if quiescingConnections.contains(context.connectionID) {
+                    if replayable.contains(.failed) {
+                        _ = try await store.setState(.failed, forRecord: context.recordID, expecting: [.queued])
+                    }
                     endFailingForGood(partID, recordID: context.recordID)
                     if let afterPermanentFailure { await afterPermanentFailure(partID) }
                     return

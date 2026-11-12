@@ -62,8 +62,9 @@ private actor FakeEngine: DownloadsLifecycleEngine {
         quiesceResults = Array(repeating: false, count: count)
     }
 
-    /// Skipped when cancelled, as work that checks for cancellation would be.
-    func quiesce(connectionID: UUID) -> Bool {
+    /// Pauses first, then is skipped when cancelled, as work that checks for cancellation would be.
+    func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void) async -> Bool {
+        await pausing()
         guard !Task.isCancelled else {
             calls.append("cancelled quiesce \(connectionID)")
             return false

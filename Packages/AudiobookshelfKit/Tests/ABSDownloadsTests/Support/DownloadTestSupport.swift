@@ -14,6 +14,8 @@ final class FakeCredentials: DownloadCredentialProviding {
     private let failingCalls = Mutex<Set<Int>>([])
     /// Runs before ``credentials(for:replacing:)`` returns.
     let hook = Mutex<(@Sendable () async -> Void)?>(nil)
+    /// Replaces ``configuration`` in the next ``credentials(for:replacing:)`` results.
+    let configurationOverride = Mutex<APIClientConfiguration?>(nil)
 
     init(baseURL: URL, customHeaders: [String: String] = [:]) {
         configuration = try! APIClientConfiguration(baseURL: baseURL, customHeaders: customHeaders)
@@ -43,7 +45,8 @@ final class FakeCredentials: DownloadCredentialProviding {
         }
         if let hook = hook.withLock({ $0 }) { await hook() }
         if failingCalls.withLock({ $0.remove(call) != nil }) { throw TestError() }
-        return DownloadCredentials(configuration: configuration, accessToken: "token-\(token)")
+        return DownloadCredentials(
+            configuration: configurationOverride.withLock { $0 } ?? configuration, accessToken: "token-\(token)")
     }
 }
 
