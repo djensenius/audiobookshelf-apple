@@ -92,4 +92,101 @@ import Testing
         let progress = try JSONDecoder().decode(FinishedProgressResponse.self, from: Data(#"{"id":"usr-1"}"#.utf8))
         #expect(progress.finishedCount == 0)
     }
+
+    // MARK: Year in review
+
+    @Test func yearStatsRequests() {
+        let user = StatsEndpoints.userYearStats(year: 2024)
+        #expect(user.method == .get)
+        #expect(user.path == "/api/me/stats/year/2024")
+        #expect(user.body == nil)
+        #expect(user.requiresAuthentication)
+        let server = StatsEndpoints.serverYearStats(year: 2023)
+        #expect(server.method == .get)
+        #expect(server.path == "/api/stats/year/2023")
+        #expect(server.body == nil)
+        #expect(server.requiresAuthentication)
+        #expect(StatsEndpoints.userType().path == "/api/me")
+    }
+
+    /// The server's `userStats.getStatsForYear` response, trimmed.
+    @Test func clientDecodesUserYearStats() async throws {
+        let stub = StubServer { _ in
+            .json(
+                #"{"totalListeningSessions":42,"totalListeningTime":90000,"totalBookListeningTime":80000,"#
+                    + #""totalPodcastListeningTime":10000,"topAuthors":[{"name":"Author One","time":50000}],"#
+                    + #""topGenres":[{"genre":"Fantasy","time":60000}],"#
+                    + #""mostListenedNarrator":{"time":40000,"name":"Narrator One"},"#
+                    + #""mostListenedMonth":{"month":2,"time":20000},"numBooksFinished":3,"numBooksListened":5,"#
+                    + #""longestAudiobookFinished":null,"booksWithCovers":["li-2"],"#
+                    + #""finishedBooksWithCovers":["li-1"]}"#)
+        }
+        let stats = try await makeClient(stub).send(StatsEndpoints.userYearStats(year: 2024))
+        #expect(stats.totalListeningSessions == 42)
+        #expect(stats.totalListeningTime == 90000)
+        #expect(stats.topAuthors == [YearStatsNameTime(name: "Author One", time: 50000)])
+        #expect(stats.topGenres == [YearStatsGenreTime(genre: "Fantasy", time: 60000)])
+        #expect(stats.mostListenedMonth == YearStatsMonthTime(month: 2, time: 20000))
+        #expect(stats.numBooksFinished == 3)
+        #expect(stats.longestAudiobookFinished == nil)
+        #expect(stats.booksWithCovers == ["li-2"])
+        #expect(stats.finishedBooksWithCovers == ["li-1"])
+        let request = try #require(stub.requests.first)
+        #expect(request.httpMethod == "GET")
+        #expect(request.url?.path() == "/abs/api/me/stats/year/2024")
+    }
+
+    /// The server's `adminStats.getStatsForYear` response, trimmed.
+    @Test func clientDecodesServerYearStats() async throws {
+        let stub = StubServer { _ in
+            .json(
+                #"{"numListeningSessions":120,"numBooksAdded":10,"numAuthorsAdded":4,"#
+                    + #""totalBooksAddedSize":5368709120,"totalBooksAddedDuration":360000,"#
+                    + #""booksAddedWithCovers":["li-1"],"totalBooksSize":10737418240,"#
+                    + #""totalBooksDuration":720000.75,"totalListeningTime":"250000.5","numBooks":20,"#
+                    + #""topAuthors":[{"name":"Author One","time":100000}],"#
+                    + #""topNarrators":[{"name":"Narrator One","time":90000}],"topGenres":[]}"#)
+        }
+        let stats = try await makeClient(stub).send(StatsEndpoints.serverYearStats(year: 2023))
+        #expect(stats.numListeningSessions == 120)
+        #expect(stats.numBooksAdded == 10)
+        #expect(stats.totalBooksAddedSize == 5_368_709_120)
+        #expect(stats.totalListeningTime == 250000.5)
+        #expect(stats.booksAddedWithCovers == ["li-1"])
+        #expect(stats.topNarrators == [YearStatsNameTime(name: "Narrator One", time: 90000)])
+        let request = try #require(stub.requests.first)
+        #expect(request.url?.path() == "/abs/api/stats/year/2023")
+    }
+
+    /// A non-admin asking for the server's year gets 403 from the server's stats middleware.
+    @Test func serverYearStatsIsForbiddenForNonAdmins() async throws {
+        let stub = StubServer { _ in .text("Forbidden", status: 403) }
+        await #expect(throws: APIError.forbidden(message: "Forbidden")) {
+            try await makeClient(stub).send(StatsEndpoints.serverYearStats(year: 2023))
+        }
+    }
+
+    @Test func userTypeDecodesOnlyTheType() async throws {
+        let stub = StubServer { _ in
+            .json(#"{"id":"usr-1","username":"david","type":"admin","mediaProgress":[{"id":"mp-1"}]}"#)
+        }
+        let response = try await makeClient(stub).send(StatsEndpoints.userType())
+        #expect(response.type == .admin)
+        #expect(response.isAdminOrUp)
+        let request = try #require(stub.requests.first)
+        #expect(request.url?.path() == "/abs/api/me")
+    }
+
+    @Test func onlyAdminAndRootAreAdminOrUp() throws {
+        func decode(_ json: String) throws -> UserTypeResponse {
+            try JSONDecoder().decode(UserTypeResponse.self, from: Data(json.utf8))
+        }
+        #expect(try decode(#"{"type":"root"}"#).isAdminOrUp)
+        #expect(try decode(#"{"type":"admin"}"#).isAdminOrUp)
+        #expect(try !decode(#"{"type":"user"}"#).isAdminOrUp)
+        #expect(try !decode(#"{"type":"guest"}"#).isAdminOrUp)
+        #expect(try !decode(#"{"type":"superuser"}"#).isAdminOrUp)
+        #expect(try decode(#"{"type":7}"#).type == .user)
+        #expect(try decode(#"{}"#).type == .user)
+    }
 }
