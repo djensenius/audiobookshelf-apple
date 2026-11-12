@@ -189,6 +189,28 @@ private let restored = LastPlayedRecord(
         }
     }
 
+    @Test func jumpWhoseTrackDoesNotLoadFails() async throws {
+        try await withPerformer { performer, playback, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 50)
+            playback.jumpOutcome = .fails
+            await #expect(throws: PlaybackIntentFailure.jumpFailed) {
+                try await performer.jump(forward: true, seconds: 30)
+            }
+            #expect(playback.calls == [.jump(30)])
+        }
+    }
+
+    @Test func jumpThatLandsLaterSucceeds() async throws {
+        try await withPerformer { performer, playback, _ in
+            // Queued while starting, or superseded by a later seek: `nil`, but not a failure.
+            playback.start(FakePlaybackControl.bookSession())
+            playback.jumpOutcome = .superseded
+            let interval = try await performer.jump(forward: false, seconds: 10)
+            #expect(interval == 10)
+            #expect(playback.calls == [.jump(-10)])
+        }
+    }
+
     // MARK: Sleep timer
 
     @Test func sleepTimerStartsForMinutes() async throws {

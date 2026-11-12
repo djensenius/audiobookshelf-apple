@@ -31,6 +31,36 @@ struct PlaybackCoordinatorJumpTests {
 
     // MARK: - Jumps
 
+    @Test func aJumpWhoseTargetFailsToLoadIsReportedUntilTheNextJump() async throws {
+        await coordinator.play(itemID: "a")
+        #expect(coordinator.phase == .loaded)
+        engine.seekResults = [.failed]
+        #expect(await coordinator.jump(by: 30) == nil)
+        #expect(coordinator.lastSeekFailed)
+        #expect(await coordinator.jump(by: 30) != nil)
+        #expect(!coordinator.lastSeekFailed)
+    }
+
+    @Test(arguments: [SeekResult.superseded, .interrupted])
+    func aJumpThatLandsLaterIsNotAFailure(result: SeekResult) async throws {
+        await coordinator.play(itemID: "a")
+        engine.seekResults = [.failed, result]
+        await coordinator.jump(by: 30)
+        #expect(await coordinator.jump(by: 30) == nil)
+        #expect(!coordinator.lastSeekFailed)
+    }
+
+    @Test func aJumpQueuedWhileStartingIsNotAFailure() async throws {
+        await coordinator.play(itemID: "a")
+        engine.seekResults = [.failed]
+        await coordinator.jump(by: 30)
+        let (play, gate) = await playHeld("b")
+        #expect(await coordinator.jump(by: 30) == nil)
+        #expect(!coordinator.lastSeekFailed)
+        gate.open()
+        await play.value
+    }
+
     @Test func jumpAfterAnUnloadedSeekMovesTheChosenPosition() async throws {
         h.lastPlayed.record = h.record("a", position: 120, age: 3600)
         coordinator.restoreLastPlayed()

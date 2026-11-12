@@ -1,4 +1,5 @@
 {
+  "IntentErrorJumpFailed": "Audiobookshelf couldn't jump there because that part of the book or episode didn't load.",
   "IntentErrorNoChapterEnd": "There's no chapter end ahead to stop at.",
   "IntentErrorNothingPlaying": "Nothing is playing in Audiobookshelf.",
   "IntentErrorNothingToResume": "There's nothing to resume. Play a book or episode in Audiobookshelf first.",

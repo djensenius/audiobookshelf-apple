@@ -20,6 +20,7 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
     var isPlaying = false
     var isBuffering = false
     var isPlaybackRequested = false
+    let lastSeekFailed = false
     var timeline: PlaybackTimeline?
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }

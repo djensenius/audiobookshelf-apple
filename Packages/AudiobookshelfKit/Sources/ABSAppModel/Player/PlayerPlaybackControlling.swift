@@ -23,6 +23,9 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     var isBuffering: Bool { get }
     /// The play intent: `true` while starting, playing or stalled with play requested.
     var isPlaybackRequested: Bool { get }
+    /// Whether the latest seek or jump failed to load its target, unlike a `nil` landing from a
+    /// queued or superseded one.
+    var lastSeekFailed: Bool { get }
     /// The loaded timeline; `nil` unless media is loaded.
     var timeline: PlaybackTimeline? { get }
     var chapterIndex: Int? { get }

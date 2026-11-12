@@ -12,6 +12,8 @@ public enum PlaybackIntentFailure: Error, Equatable, Sendable {
     case sleepTimerUnavailable
     /// End of chapter was asked for with no chapter or track end ahead.
     case noChapterEnd
+    /// The jump's target track couldn't load.
+    case jumpFailed
     /// Playback didn't start: the streaming policy blocked it or asks first, the session failed to
     /// start, or the audio session wouldn't activate. The player shows why when the app is opened.
     case playbackFailed
@@ -89,7 +91,9 @@ public struct PlaybackIntentPerformer {
     /// Jumps forward or back by `seconds`, or by the user's jump interval for that direction when
     /// `seconds` is `nil` or not positive.
     /// - Returns: The seconds jumped.
-    /// - Throws: ``PlaybackIntentFailure/nothingPlaying`` when no item is loaded or restored.
+    /// - Throws: ``PlaybackIntentFailure/nothingPlaying`` when no item is loaded or restored, and
+    ///   ``PlaybackIntentFailure/jumpFailed`` when the target track couldn't load. A jump queued
+    ///   while starting, or superseded by a later seek, also lands nowhere yet but succeeds.
     @discardableResult
     public func jump(forward: Bool, seconds: Int?) async throws(PlaybackIntentFailure) -> Int {
         guard playback.phase != .idle else { throw .nothingPlaying }
@@ -99,7 +103,8 @@ public struct PlaybackIntentPerformer {
         } else {
             interval = forward ? settings.jumpForwardTime : settings.jumpBackwardsTime
         }
-        await playback.jump(by: Double(forward ? interval : -interval))
+        let landed = await playback.jump(by: Double(forward ? interval : -interval))
+        guard landed != nil || !playback.lastSeekFailed else { throw .jumpFailed }
         return interval
     }
 

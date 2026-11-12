@@ -1,6 +1,17 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "IntentErrorJumpFailed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Audiobookshelf couldn't jump there because that part of the book or episode didn't load."
+          }
+        }
+      }
+    },
     "IntentErrorNoChapterEnd" : {
       "extractionState" : "manual",
       "localizations" : {

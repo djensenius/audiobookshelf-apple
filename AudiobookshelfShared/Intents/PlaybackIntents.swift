@@ -43,6 +43,8 @@ enum PlaybackIntentError: Error, Equatable, CustomLocalizedStringResourceConvert
     case sleepTimerUnavailable
     /// End of chapter was asked for with no chapter end ahead.
     case noChapterEnd
+    /// A jump's target track couldn't load.
+    case jumpFailed
     /// Playback didn't start (blocked by the streaming setting, or failed); the app shows why.
     case playbackFailed
 
@@ -53,6 +55,7 @@ enum PlaybackIntentError: Error, Equatable, CustomLocalizedStringResourceConvert
         case .nothingPlaying: LocalizedStringResource("IntentErrorNothingPlaying", table: "AppIntents")
         case .sleepTimerUnavailable: LocalizedStringResource("IntentErrorSleepTimerUnavailable", table: "AppIntents")
         case .noChapterEnd: LocalizedStringResource("IntentErrorNoChapterEnd", table: "AppIntents")
+        case .jumpFailed: LocalizedStringResource("IntentErrorJumpFailed", table: "AppIntents")
         case .playbackFailed: LocalizedStringResource("IntentErrorPlaybackFailed", table: "AppIntents")
         }
     }

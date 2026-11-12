@@ -30,6 +30,7 @@ final class ScopePlayback: PlayerPlaybackControlling {
     var isPlaying: Bool { coordinator.isPlaying }
     var isBuffering: Bool { coordinator.isBuffering }
     var isPlaybackRequested: Bool { coordinator.isPlaybackRequested }
+    var lastSeekFailed: Bool { coordinator.lastSeekFailed }
     var timeline: PlaybackTimeline? { coordinator.timeline }
     var chapterIndex: Int? { coordinator.chapterIndex }
     var chapter: Chapter? { coordinator.chapter }

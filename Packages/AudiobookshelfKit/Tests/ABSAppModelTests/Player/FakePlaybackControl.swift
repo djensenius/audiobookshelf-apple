@@ -31,6 +31,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var isPlaying = false
     var isBuffering = false
     var isPlaybackRequested = false
+    private(set) var lastSeekFailed = false
     var timeline: PlaybackTimeline?
     /// Whether seeks land; one that doesn't returns `nil` and leaves playback where it was.
     var seeksLand = true
@@ -40,6 +41,11 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     /// Makes ``resume(rewindingBy:)`` fail as the coordinator's does when the streaming policy blocks
     /// it or the audio session won't activate: it sets ``error`` and leaves play unrequested.
     var resumeFailure: PlaybackCoordinatorError?
+    /// How ``jump(by:)`` ends, as the coordinator's can: landing, returning `nil` because it was
+    /// queued or superseded, or returning `nil` with ``lastSeekFailed`` because the target track
+    /// wouldn't load.
+    enum JumpOutcome { case lands, superseded, fails }
+    var jumpOutcome = JumpOutcome.lands
     private(set) var calls: [Call] = []
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
@@ -75,6 +81,8 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
 
     func jump(by offset: Double) async -> Double? {
         calls.append(.jump(offset))
+        lastSeekFailed = jumpOutcome == .fails
+        guard jumpOutcome == .lands else { return nil }
         currentTime = timeline?.clamp(currentTime + offset) ?? max(currentTime + offset, 0)
         return currentTime
     }
