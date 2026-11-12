@@ -179,12 +179,14 @@ struct ItemCardActionsHost<Content: View>: View {
     @Environment(Router.self) private var router: Router?
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     /// The key of the message for the last failed action, kept while the alert is dismissed.
     @State private var failureKey: String?
     @State private var showsFailure = false
 
     var body: some View {
-        content(ItemCardActions.actionContext(canPlay: playItem != nil)) { perform($0, on: $1) }
+        content(context) { perform($0, on: $1) }
             .alert(
                 Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
                 presenting: failureKey
@@ -193,9 +195,17 @@ struct ItemCardActionsHost<Content: View>: View {
             }
     }
 
+    private var context: ItemActionContext {
+        ItemCardActions.actionContext(canPlay: playItem != nil, canOpenInNewWindow: supportsMultipleWindows)
+    }
+
     private func perform(_ kind: ItemActionKind, on item: ItemSummary) {
         guard kind != .openDetails else {
             BrowsePresentation.open(ItemCardActions.route(for: item), in: router)
+            return
+        }
+        guard kind != .openInNewWindow else {
+            OpenInNewWindow.open(ItemCardActions.route(for: item), from: router, with: openWindow)
             return
         }
         let actions = itemActions

@@ -7,7 +7,7 @@ import Foundation
 ///
 /// Personalized shelves may add `recentEpisode`, `numEpisodesIncomplete`, and `progressLastUpdate`;
 /// series-filtered lists and the continue-series shelf add `series`, and lists requested with
-/// `collapseseries=1` add `collapsedSeries`.
+/// `collapseseries=1` add `collapsedSeries`. Requests with `include=rssfeed` add `rssFeed`.
 public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
     public let id: String
     public let ino: String?
@@ -47,6 +47,8 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
     public let series: Series?
     /// Set when this item stands in for a collapsed series.
     public let collapsedSeries: CollapsedSeries?
+    /// The item's open RSS feed (`include=rssfeed`); `nil` when none is open or it wasn't asked for.
+    public let rssFeed: RssFeed?
 
     public init(
         id: String, ino: String? = nil, oldLibraryItemId: String? = nil, libraryId: String, folderId: String? = nil,
@@ -56,7 +58,7 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
         scanVersion: String? = nil, isMissing: Bool = false, isInvalid: Bool = false, mediaType: MediaType,
         media: LibraryItemMedia? = nil, libraryFiles: [LibraryFile]? = nil, numFiles: Int? = nil, size: Int? = nil,
         recentEpisode: PodcastEpisode? = nil, numEpisodesIncomplete: Int? = nil, progressLastUpdate: Int? = nil,
-        series: Series? = nil, collapsedSeries: CollapsedSeries? = nil
+        series: Series? = nil, collapsedSeries: CollapsedSeries? = nil, rssFeed: RssFeed? = nil
     ) {
         self.id = id
         self.ino = ino
@@ -85,6 +87,7 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
         self.progressLastUpdate = progressLastUpdate
         self.series = series
         self.collapsedSeries = collapsedSeries
+        self.rssFeed = rssFeed
     }
 
     enum CodingKeys: String, CodingKey {
@@ -92,6 +95,7 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
         case mtimeMs, ctimeMs, birthtimeMs, addedAt, updatedAt, lastScan, scanVersion
         case isMissing, isInvalid, mediaType, media, libraryFiles, numFiles, size
         case recentEpisode, numEpisodesIncomplete, progressLastUpdate, series, collapsedSeries
+        case rssFeed
     }
 
     public init(from decoder: any Decoder) throws {
@@ -127,6 +131,8 @@ public struct LibraryItem: Sendable, Hashable, Codable, Identifiable {
         progressLastUpdate = try container.decodeIfPresent(Int.self, forKey: .progressLastUpdate)
         series = try container.decodeIfPresent(Series.self, forKey: .series)
         collapsedSeries = try container.decodeIfPresent(CollapsedSeries.self, forKey: .collapsedSeries)
+        // An extra; a feed this client can't read never fails the item.
+        rssFeed = (try? container.decodeIfPresent(RssFeed.self, forKey: .rssFeed)) ?? nil
     }
 
     public var book: Book? {

@@ -105,7 +105,7 @@ import Testing
     }
 
     @Test func downloadedItemsStillPlayAndOpen() {
-        for kind in [ItemActionKind.play, .openDetails] {
+        for kind in [ItemActionKind.play, .openDetails, .openInNewWindow] {
             #expect(offline.reasonKey(for: kind, isDownloaded: true) == nil)
             #expect(offline.reasonKey(for: kind, isDownloaded: false) == "MessageNoNetworkConnection")
         }
