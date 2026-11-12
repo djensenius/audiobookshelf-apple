@@ -1,6 +1,7 @@
 import ABSCore
 import ABSData
 import Foundation
+import SwiftData
 import Synchronization
 
 @testable import ABSDownloads
@@ -213,6 +214,8 @@ final class ManagerFixture: Sendable {
     let root = FileManager.default.temporaryDirectory.appending(path: "manager-\(UUID().uuidString)")
     let store: DownloadStore
     let localItems: LocalItemStore
+    let connections: ServerConnectionStore
+    let container: ModelContainer
     let connectionID: UUID
     let engine: FakeDownloadEngine
     let capacity: FakeCapacity
@@ -231,8 +234,9 @@ final class ManagerFixture: Sendable {
         checkpoints = stream
         checkpoint = continuation
         capacity = FakeCapacity { continuation.yield(.capacity) }
-        let container = try DataStack(location: .inMemory).container
-        connectionID = try await ServerConnectionStore(modelContainer: container).upsertLogin(
+        container = try DataStack(location: .inMemory).container
+        connections = ServerConnectionStore(modelContainer: container)
+        connectionID = try await connections.upsertLogin(
             address: ServerAddress("https://abs.example.com")!, userId: "usr_1", username: "reader",
             authMethod: .local, serverVersion: "2.26.0"
         ).id
