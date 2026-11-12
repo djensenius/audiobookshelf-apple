@@ -14,6 +14,23 @@ private struct StaticTokens: TokenProvider {
     func expireSession(ifCurrent rejected: ABSAPI.AuthTokens) async -> Bool { false }
 }
 
+/// Another request's refresh between reads: each read returns the next token (the last repeats).
+private final class RotatingTokens: TokenProvider {
+    private let remaining: Mutex<[String]>
+
+    init(_ tokens: [String]) {
+        remaining = Mutex(tokens)
+    }
+
+    func tokens() async -> ABSAPI.AuthTokens? {
+        let token = remaining.withLock { $0.count > 1 ? $0.removeFirst() : $0.first }
+        return token.map { ABSAPI.AuthTokens(accessToken: $0, refreshToken: "r") }
+    }
+
+    func replaceTokens(expected: ABSAPI.AuthTokens, with new: ABSAPI.AuthTokens) async -> Bool { false }
+    func expireSession(ifCurrent rejected: ABSAPI.AuthTokens) async -> Bool { false }
+}
+
 private struct StaticDevice: DeviceIdentifying {
     func deviceIdentifier() async -> String { "device" }
 }
@@ -68,6 +85,36 @@ struct APIPlaybackSessionServiceTests {
     @Test func tokenFallbackAddsTheAccessToken() async throws {
         let stream = try await service().resolveStream(for: episodeSession(index: nil))
         #expect(stream.urls.map(\.absoluteString) == ["https://abs.example/abs/api/items/li-9/file/77?token=a%2Bb"])
+        #expect(stream.accessToken == "a+b")
+    }
+
+    @Test func tokenFallbackTracksShareOneToken() async throws {
+        let configuration = try APIClientConfiguration(baseURL: try #require(URL(string: "https://abs.example/abs")))
+        let service = APIPlaybackSessionService(
+            serverConnectionID: UUID(),
+            client: APIClient(configuration: configuration, tokenProvider: RotatingTokens(["one", "two", "three"])),
+            features: ServerFeatures(version: ServerVersion(2, 26, 2)), deviceIdentifiers: StaticDevice())
+        let session = PlaybackSession(
+            id: "sess", libraryItemId: "li-9", episodeId: "ep-1", mediaType: .podcast, duration: 200,
+            playMethod: .directPlay,
+            audioTracks: [
+                AudioTrack(
+                    index: nil, startOffset: 0, duration: 100, contentUrl: "/api/items/li-9/file/1",
+                    mimeType: "audio/mpeg"),
+                AudioTrack(
+                    index: nil, startOffset: 100, duration: 100, contentUrl: "/api/items/li-9/file/2",
+                    mimeType: "audio/mpeg"),
+            ])
+
+        let stream = try await service.resolveStream(for: session)
+
+        // Every URL carries the token recorded for a 401 refresh.
+        let token = try #require(stream.accessToken)
+        #expect(
+            stream.urls.map(\.absoluteString) == [
+                "https://abs.example/abs/api/items/li-9/file/1?token=\(token)",
+                "https://abs.example/abs/api/items/li-9/file/2?token=\(token)",
+            ])
     }
 
     @Test func tokenFallbackWithoutTokensFails() async throws {
@@ -109,6 +156,37 @@ struct APIPlaybackSessionServiceTests {
         await #expect(throws: APIError.http(status: 502, message: "Bad gateway")) {
             try await service.resolveStream(for: episodeSession(index: nil))
         }
+    }
+
+    @Test func refreshStreamAccessReplacesEvenAnUnexpiredToken() async throws {
+        // Recovery's 401 path: the stream was rejected, so the token is refreshed whatever its expiry.
+        let fresh = jwt(expiringAt: pinnedNow.addingTimeInterval(7200))
+        let (service, tokens, server) = try await refreshingService(
+            accessToken: jwt(expiringAt: pinnedNow.addingTimeInterval(3600)), refresh: .issuing(fresh))
+
+        try await service.refreshStreamAccess(replacing: nil)
+
+        #expect(server.requests.map { $0.url?.path() } == ["/abs/auth/refresh"])
+        #expect(tokens.current?.accessToken == fresh)
+    }
+
+    @Test func refreshStreamAccessKeepsATokenAnotherCallerAlreadyReplaced() async throws {
+        // The stream used `old`; another request has since replaced it, so nothing is refreshed.
+        let current = jwt(expiringAt: pinnedNow.addingTimeInterval(3600))
+        let (service, tokens, server) = try await refreshingService(
+            accessToken: current, refresh: .issuing(jwt(expiringAt: pinnedNow.addingTimeInterval(7200))))
+
+        try await service.refreshStreamAccess(replacing: jwt(expiringAt: pinnedNow.addingTimeInterval(-60)))
+
+        #expect(server.requests.isEmpty)
+        #expect(tokens.current?.accessToken == current)
+    }
+
+    @Test func refreshStreamAccessReportsARejectedRefresh() async throws {
+        let (service, _, _) = try await refreshingService(
+            accessToken: jwt(expiringAt: pinnedNow.addingTimeInterval(3600)), refresh: .rejected)
+
+        await #expect(throws: APIError.sessionExpired) { try await service.refreshStreamAccess(replacing: nil) }
     }
 
     @Test func tokenFallbackPropagatesCancellation() async throws {
