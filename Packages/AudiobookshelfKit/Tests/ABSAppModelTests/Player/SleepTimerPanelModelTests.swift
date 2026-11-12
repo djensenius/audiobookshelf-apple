@@ -49,10 +49,11 @@ private final class Harness {
     }
 }
 
-/// An automatic 1-minute timer whose window spans the day.
-private func autoSleepOptions() throws -> SleepTimerOptions {
+/// An automatic 1-minute timer whose window spans the day, rewinding `rewind` seconds when it expires.
+private func autoSleepOptions(rewind: TimeInterval? = nil) throws -> SleepTimerOptions {
     let window = try AutoSleepPolicy(
-        start: #require(.init(hour: 0, minute: 0)), end: #require(.init(hour: 23, minute: 59)), mode: .duration(60))
+        start: #require(.init(hour: 0, minute: 0)), end: #require(.init(hour: 23, minute: 59)), mode: .duration(60),
+        rewindOnExpiry: rewind)
     return SleepTimerOptions(fadesOut: false, autoSleep: window)
 }
 
@@ -159,13 +160,15 @@ private final class Flag: Sendable {
         #expect(harness.panel.state == .running(isAutomatic: false, isEndOfChapter: false))
     }
 
-    @Test func adjustmentsWithoutTimerDoNothing() throws {
+    @Test func adjustmentsWithoutTimerDoNothing() async throws {
         let harness = try Harness()
         harness.load()
         harness.panel.add()
         harness.panel.subtract()
         #expect(harness.panel.state == .idle)
-        #expect(harness.panel.restart() == false)
+        #expect(harness.panel.offersRestart == false)
+        #expect(await harness.panel.restart() == .unavailable)
+        #expect(harness.panel.cancelRequest() == nil)
     }
 
     @Test func automaticCancelNeedsConfirmation() throws {
@@ -233,7 +236,8 @@ private final class Flag: Sendable {
         // Back after the deadline, before the grace task has run: the sheet still offers a restart.
         harness.clock.advance(by: .seconds(SleepTimer.gracePeriod + 1))
         #expect(harness.panel.state == .restartable(isAutomatic: false))
-        #expect(harness.panel.restart() == false)
+        #expect(harness.panel.offersRestart == false)
+        #expect(await harness.panel.restart() == .unavailable)
         #expect(harness.playback.isPlaying == false)
         #expect(await eventually { harness.panel.state == .idle }, "The grace task catches up")
     }
@@ -255,10 +259,93 @@ private final class Flag: Sendable {
         #expect(harness.panel.state == .restartable(isAutomatic: false))
         #expect(harness.panel.remaining == nil)
         #expect(harness.panel.needsCancelConfirmation == false)
+        #expect(harness.panel.offersRestart)
 
-        #expect(harness.panel.restart())
+        #expect(await harness.panel.restart() == .resumed)
+        #expect(harness.playback.isPlaying, "The restart waits for playback to resume")
         #expect(harness.panel.state == .running(isAutomatic: false, isEndOfChapter: false))
         #expect(harness.panel.remaining == 60)
-        #expect(await eventually { harness.playback.isPlaying }, "The restart resumes playback")
+    }
+
+    /// A restart whose rewind doesn't land reports it, rather than passing for a success once accepted, and the
+    /// grace period comes back.
+    @Test func failedRestartRewindReportsFailure() async throws {
+        let harness = try Harness(options: autoSleepOptions(rewind: 30))
+        harness.load()
+        _ = harness.timer.playbackWillStart(at: noon)
+        harness.expire()
+        #expect(harness.panel.offersRestart)
+        harness.playback.seeksLand = false
+
+        #expect(await harness.panel.restart() == .failed)
+        #expect(harness.playback.calls.last == .seek(90), "It tried the automatic rewind")
+        #expect(harness.playback.isPlaying == false)
+        #expect(harness.panel.state == .restartable(isAutomatic: true), "The grace period is back")
+        #expect(harness.panel.offersRestart)
+    }
+
+    /// An end-of-chapter timer that paused playback at the end of the media can't restart: Restart isn't offered,
+    /// and asked anyway it says so.
+    @Test func endOfChapterAtEndOfMediaOffersNoRestart() async throws {
+        let harness = try Harness()
+        harness.load(at: 390)
+        #expect(harness.panel.startEndOfChapter())
+        harness.playback.currentTime = 400
+        harness.play(10)
+        #expect(harness.playback.isPlaying == false, "The timer paused playback")
+        #expect(harness.panel.state == .restartable(isAutomatic: false))
+
+        #expect(harness.panel.offersRestart == false)
+        #expect(await harness.panel.restart() == .unavailable)
+        #expect(harness.panel.state == .restartable(isAutomatic: false), "Cancel still ends the grace period")
+    }
+
+    /// Confirming a cancel opened for the automatic timer leaves a timer started since alone, and still keeps
+    /// the automatic timer off.
+    @Test func confirmingCancelSparesANewerTimer() throws {
+        let harness = try Harness(options: autoSleepOptions())
+        harness.load()
+        _ = harness.timer.playbackWillStart(at: noon)
+        let request = try #require(harness.panel.cancelRequest())
+        #expect(request.isAutomatic)
+
+        harness.panel.start(minutes: 15)  // Another player window, while the confirmation is open.
+        harness.panel.confirmCancel(request)
+        #expect(harness.panel.state == .running(isAutomatic: false, isEndOfChapter: false))
+
+        harness.panel.cancel()
+        _ = harness.timer.playbackWillStart(at: noon.addingTimeInterval(600))
+        #expect(harness.panel.state == .idle, "Suppressed until the window ends")
+    }
+
+    /// Confirming once the automatic timer's grace period ran out still keeps it off.
+    @Test func confirmingAfterGraceEndsStillSuppresses() async throws {
+        let harness = try Harness(options: autoSleepOptions())
+        harness.load()
+        _ = harness.timer.playbackWillStart(at: noon)
+        harness.expire()
+        let request = try #require(harness.panel.cancelRequest())
+        #expect(request.isAutomatic)
+        harness.clock.advance(by: .seconds(SleepTimer.gracePeriod + 1))
+        #expect(await eventually { harness.panel.state == .idle })
+
+        harness.panel.confirmCancel(request)
+        harness.playback.play()
+        _ = harness.timer.playbackWillStart(at: noon.addingTimeInterval(600))
+        #expect(harness.panel.state == .idle, "Suppressed until the window ends")
+    }
+
+    /// A restart keeps the timer's identity: confirming a cancel opened during the grace period cancels it.
+    @Test func confirmingCancelAfterRestartCancelsTheSameTimer() async throws {
+        let harness = try Harness(options: autoSleepOptions())
+        harness.load()
+        _ = harness.timer.playbackWillStart(at: noon)
+        harness.expire()
+        let request = try #require(harness.panel.cancelRequest())
+
+        #expect(await harness.panel.restart() == .resumed)
+        #expect(harness.panel.state == .running(isAutomatic: true, isEndOfChapter: false))
+        harness.panel.confirmCancel(request)
+        #expect(harness.panel.state == .idle)
     }
 }

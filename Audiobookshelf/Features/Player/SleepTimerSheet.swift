@@ -165,6 +165,10 @@ private struct SleepTimerPanel: View {
     let panel: SleepTimerPanelModel
     let close: () -> Void
     @State private var confirmsCancel = false
+    /// The timer the cancel confirmation is about; confirming acts on it only.
+    @State private var cancelRequest: SleepTimerPanelModel.CancelRequest?
+    @State private var isRestarting = false
+    @State private var showsRestartFailure = false
     @State private var showsEndOfChapterFailure = false
     @Environment(\.locale) private var locale
 
@@ -175,21 +179,21 @@ private struct SleepTimerPanel: View {
             case .idle:
                 lengths
             case .restartable(let isAutomatic):
-                Section {
-                    Text(verbatim: L10n.string("MessageSleepTimerCanRestart"))
-                    Button {
-                        // Past the deadline the grace task hasn't noticed yet, the restart fails and the
-                        // state turns idle, showing the lengths.
-                        if panel.restart() { close() }
-                    } label: {
-                        Label {
-                            Text(verbatim: L10n.string("ButtonRestartSleepTimer"))
-                        } icon: {
-                            Image(systemName: "arrow.counterclockwise")
+                // Hidden where it couldn't restart (an end-of-chapter timer at the end of the media).
+                if panel.offersRestart {
+                    Section {
+                        Text(verbatim: L10n.string("MessageSleepTimerCanRestart"))
+                        Button(action: restart) {
+                            Label {
+                                Text(verbatim: L10n.string("ButtonRestartSleepTimer"))
+                            } icon: {
+                                Image(systemName: "arrow.counterclockwise")
+                            }
                         }
+                        .disabled(isRestarting)
+                    } footer: {
+                        shakeHint
                     }
-                } footer: {
-                    shakeHint
                 }
                 cancelSection(isAutomatic: isAutomatic)
                 lengths
@@ -216,14 +220,21 @@ private struct SleepTimerPanel: View {
                 cancelSection(isAutomatic: isAutomatic)
             }
         }
-        .alert(Text(verbatim: L10n.string("HeaderConfirm")), isPresented: $confirmsCancel) {
+        .alert(
+            Text(verbatim: L10n.string("HeaderConfirm")), isPresented: $confirmsCancel, presenting: cancelRequest
+        ) { request in
             Button(L10n.string("ButtonDisableAutoTimer"), role: .destructive) {
-                panel.cancel()
+                panel.confirmCancel(request)
                 close()
             }
             Button(L10n.string("ButtonCancel"), role: .cancel) {}
-        } message: {
+        } message: { _ in
             Text(verbatim: L10n.string("MessageConfirmDisableAutoTimer"))
+        }
+        .alert(Text(verbatim: L10n.string("HeaderSleepTimer")), isPresented: $showsRestartFailure) {
+            Button(L10n.string("ButtonOk")) {}
+        } message: {
+            Text(verbatim: L10n.string("MessageSleepTimerRestartFailed"))
         }
         .alert(Text(verbatim: L10n.string("LabelEndOfChapter")), isPresented: $showsEndOfChapterFailure) {
             Button(L10n.string("ButtonOk")) {}
@@ -236,7 +247,8 @@ private struct SleepTimerPanel: View {
     private func cancelSection(isAutomatic: Bool) -> some View {
         Section {
             Button(role: .destructive) {
-                if panel.needsCancelConfirmation {
+                if panel.needsCancelConfirmation, let request = panel.cancelRequest() {
+                    cancelRequest = request
                     confirmsCancel = true
                 } else {
                     panel.cancel()
@@ -244,6 +256,22 @@ private struct SleepTimerPanel: View {
                 }
             } label: {
                 Text(verbatim: L10n.string(isAutomatic ? "ButtonDisableAutoTimer" : "ButtonCancelTimer"))
+            }
+        }
+    }
+
+    /// Restarts the expired timer, closing once playback resumes. When it can't (the grace period ran out
+    /// before the timer noticed, or the rewind didn't land), the sheet stays open and says so; when
+    /// something else came first, the state shows what it did.
+    private func restart() {
+        isRestarting = true
+        Task {
+            let result = await panel.restart()
+            isRestarting = false
+            switch result {
+            case .resumed: close()
+            case .unavailable, .failed: showsRestartFailure = true
+            case .superseded: break
             }
         }
     }

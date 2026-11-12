@@ -185,6 +185,7 @@
   "MessageShakeToResetHint": "Shake your device to restart the timer.",
   "MessageSleepTimerCanRestart": "The sleep timer paused playback. Restart it soon to keep listening.",
   "MessageSleepTimerEndOfChapterUnavailable": "There's no chapter end ahead to stop at.",
+  "MessageSleepTimerRestartFailed": "The sleep timer couldn't restart playback.",
   "MessageStatsChartSummary": "Listened {0} in the last 7 days, a daily average of {1}.",
   "MessageStatsLoadFailed": "Couldn't load your stats.",
   "MessageStatsRefreshFailed": "Couldn't refresh your stats. Showing the last ones loaded.",

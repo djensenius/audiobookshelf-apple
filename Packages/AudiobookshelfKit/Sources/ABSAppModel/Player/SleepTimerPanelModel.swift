@@ -29,6 +29,14 @@ public final class SleepTimerPanelModel {
         case restartable(isAutomatic: Bool)
     }
 
+    /// The timer a cancel confirmation was opened for, so confirming acts on that timer only (``confirmCancel(_:)``).
+    public struct CancelRequest: Equatable, Sendable {
+        /// The timer's ``SleepTimer/runIdentity``.
+        public let identity: Int
+        /// Whether it was the automatic timer, which confirming suppresses even once it has ended.
+        public let isAutomatic: Bool
+    }
+
     public let timer: SleepTimer
     private let player: PlayerViewModel
 
@@ -89,10 +97,29 @@ public final class SleepTimerPanelModel {
         timer.cancel()
     }
 
-    /// Restarts the timer that recently expired, resuming playback. `false` when the grace period is over, which
-    /// ``state`` may not show yet: the timer notices at its next turn on the main actor.
-    @discardableResult
-    public func restart() -> Bool {
-        timer.reset()
+    /// What a cancel confirmation opened now is about; `nil` when no timer runs or can restart.
+    public func cancelRequest() -> CancelRequest? {
+        timer.runIdentity.map { CancelRequest(identity: $0, isAutomatic: needsCancelConfirmation) }
+    }
+
+    /// Cancels the timer `request` was made for if it's still running or in its grace period, never a newer one
+    /// (another window may have started one while the confirmation was open). For the automatic timer, once it has
+    /// ended, it still keeps it off until its window ends, as the confirmation said it would.
+    public func confirmCancel(_ request: CancelRequest) {
+        guard !timer.cancel(identity: request.identity), request.isAutomatic else { return }
+        timer.suppressAutomaticTimer()
+    }
+
+    /// Whether Restart is offered in the ``State/restartable(isAutomatic:)`` state: not once the grace period is
+    /// over, nor for an end-of-chapter timer at the end of the media, where it couldn't restart. Reads the playback
+    /// position, which stays put while the timer has paused playback.
+    public var offersRestart: Bool { timer.isRestartAvailable }
+
+    /// Restarts the timer that recently expired and waits for playback to resume. ``SleepTimer/RestartResult/
+    /// unavailable`` when the grace period is over (which ``state`` may not show yet: the timer notices at its next
+    /// turn on the main actor) or the timer can't restart; ``SleepTimer/RestartResult/failed`` when the rewind didn't
+    /// land, which brings the grace period back.
+    public func restart() async -> SleepTimer.RestartResult {
+        await timer.restart()
     }
 }
