@@ -195,10 +195,12 @@ public final class PlaybackCoordinator {
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
     private var resumingIntent: Int?
-    /// Where the latest resume's automatic rewind landed; its `didSeek` isn't a user seek (#384).
+    /// Where the latest automatic seek (a resume's rewind, or a load's late landing) landed; its
+    /// `didSeek` isn't a user seek (#384).
     @ObservationIgnored public private(set) var resumeRewindLanding: Double?
     @ObservationIgnored private var seekIsResumeRewind = false
-    /// An interrupted resume rewind whose landing the engine still owes.
+    /// An automatic seek (an interrupted resume rewind, or the load's own) whose landing the engine
+    /// still owes; any other seek clears it.
     @ObservationIgnored private var rewindAwaitsLanding = false
     /// How the latest start's server progress moved the stored position (history, #384).
     @ObservationIgnored public private(set) var startProgressChange: ServerAudioPositionChange?
@@ -540,6 +542,9 @@ public final class PlaybackCoordinator {
         let jumpOffset = pendingJumpOffset
         pendingJumpOffset = 0
         awaitingSeekLanding = true
+        // However late the engine lands the load's own target, that's not a user seek (#384).
+        rewindAwaitsLanding = true
+        resumeRewindLanding = nil
         var seekTarget: Double?
         if let pending, pending != plannedStart {
             // A seek while loading: normalize before adding jumps, just as the initial load does.
@@ -559,6 +564,7 @@ public final class PlaybackCoordinator {
         // Even a newer seek or tick during catch-up must report its landing after `loaded`.
         if engine.pendingSeekTarget == nil, awaitingSeekLanding {
             awaitingSeekLanding = false
+            rewindAwaitsLanding = false
             emit(.didSeek(time: engine.currentTime))
         }
         guard current == generation, phase == .loaded else { return }

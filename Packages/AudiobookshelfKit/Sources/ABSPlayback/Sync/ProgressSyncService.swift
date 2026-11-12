@@ -90,7 +90,8 @@ public protocol PlaybackProgressSource: AnyObject {
     var chapterIndex: Int? { get }
     /// The open session's title, for playback history.
     var sessionDisplayTitle: String? { get }
-    /// Where the latest resume's automatic rewind landed (history doesn't count it as a seek).
+    /// Where the latest automatic seek (a resume's rewind, or a load's late landing) landed
+    /// (history doesn't count it as a seek).
     var resumeRewindLanding: Double? { get }
     /// How the latest start's server progress moved the stored position (history).
     var startProgressChange: ServerAudioPositionChange? { get }

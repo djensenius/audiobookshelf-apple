@@ -190,13 +190,14 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     }
 
     /// Lands the pending seek, as the real engine's retry does once the player can: the position
-    /// becomes the target, the player starts if play was requested, and the next tick fires.
-    func landPendingSeek() {
+    /// becomes the target (or `time`, as a first tick past it), the player starts if play was
+    /// requested, and the next tick fires.
+    func landPendingSeek(at time: Double? = nil) {
         guard let target = pendingSeekTarget else { return }
         pendingSeekTarget = nil
-        currentTime = target
+        currentTime = time ?? target
         if isPlaybackRequested { startPlayer() } else { state = .paused }
-        onEvent?(.tick(target))
+        onEvent?(.tick(currentTime))
     }
 
     /// Plays to the end, as the real engine does: play is no longer requested.
