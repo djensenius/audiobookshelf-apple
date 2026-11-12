@@ -18,7 +18,7 @@ struct SearchView: View {
     @State private var session = SearchSession()
 
     private var key: SearchSession.Key? {
-        guard let store, let connectionKey = store.connectionKey, let libraryID = router?.libraryID else { return nil }
+        guard let store, let connectionKey = store.connectedKey, let libraryID = router?.libraryID else { return nil }
         return SearchSession.Key(store: ObjectIdentifier(store), connectionKey: connectionKey, libraryID: libraryID)
     }
 
@@ -29,7 +29,7 @@ struct SearchView: View {
             } else {
                 SearchContent(
                     state: .placeholder(
-                        canSearch: store?.connectionKey != nil && !(session.key == key && session.isUnavailable),
+                        canSearch: store?.connectedKey != nil && !(session.key == key && session.isUnavailable),
                         libraryID: router?.libraryID))
             }
         }

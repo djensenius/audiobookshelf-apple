@@ -9,6 +9,12 @@ public enum UserEndpoints {
         Endpoint(.get, "/api/me")
     }
 
+    /// `GET /api/me`, decoded for the user's full progress list (``UserProgressResponse``), the
+    /// only list complete enough to seed the library's progress cache.
+    public static func progress() -> Endpoint<UserProgressResponse> {
+        Endpoint(.get, "/api/me")
+    }
+
     /// `GET /api/me`, decoded only for the user's bookmarks.
     public static func meBookmarks() -> Endpoint<UserBookmarksResponse> {
         Endpoint(.get, "/api/me")
