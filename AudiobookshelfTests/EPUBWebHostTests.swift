@@ -116,13 +116,18 @@ private final class ReaderPage {
     }
 
     /// Replaces epub.js with a stand-in whose sections fail to display with `displayError`, if
-    /// given, or never finish displaying while `window.fakeOptions.displayHangs`, and whose table of
-    /// contents never loads unless `navigation`. Its starting rendition takes the spread `true`, as
+    /// given, or never finish displaying while `window.fakeOptions.displayHangs`; whose books never
+    /// open while `window.fakeOptions.openedHangs`; and whose table of contents is `toc`, from a
+    /// navigation document at `navPath`, but never loads unless `navigation`. Its starting rendition takes the spread `true`, as
     /// epub.js's does for a book whose metadata says `both`. The latest book and rendition are
     /// `window.fakeBook` and `window.fakeRendition`; the sections it shows, `window.fakeContents`.
-    func fakeEPUBJS(displayError: String? = nil, displayHangs: Bool = false, navigation: Bool = true) async throws {
+    func fakeEPUBJS(
+        displayError: String? = nil, displayHangs: Bool = false, openedHangs: Bool = false, navigation: Bool = true,
+        toc: [[String: Any]] = [], navPath: String? = nil
+    ) async throws {
         let options = try JSONSerialization.data(withJSONObject: [
-            "displayError": displayError ?? "", "displayHangs": displayHangs, "navigation": navigation,
+            "displayError": displayError ?? "", "displayHangs": displayHangs, "openedHangs": openedHangs,
+            "navigation": navigation, "toc": toc, "navPath": navPath ?? "",
         ])
         _ = try await controller.webView.evaluateJavaScript(
             "window.fakeOptions = \(String(decoding: options, as: UTF8.self));\n\(Self.fakeEPUBJS)")
@@ -176,14 +181,17 @@ private final class ReaderPage {
                 return new Promise(function (resolve) { (window.fakeHeld = window.fakeHeld || []).push(resolve) })
               }
               if (!options.displayError) return Promise.resolve()
+              // As epub.js's queue does: a failed display holds it until `displaying` settles.
+              rendition.displaying = { resolve: function () { window.fakeReleased = (window.fakeReleased || 0) + 1 } }
               setTimeout(function () { rendition.emit('displayerror', new Error(options.displayError)) }, 0)
               return never
             }
           })
           return window.fakeBook = emitter({
-            opened: Promise.resolve(),
+            opened: options.openedHangs ? new Promise(function (resolve) { window.fakeHeldOpen = resolve }) : Promise.resolve(),
             ready: never,
-            loaded: { navigation: options.navigation ? Promise.resolve({ toc: [] }) : never },
+            packaging: { navPath: options.navPath },
+            loaded: { navigation: options.navigation ? Promise.resolve({ toc: options.toc }) : never },
             spine: {
               get: function () { return null },
               hooks: { content: { register: function (hook) { window.fakeSpineHook = hook } } }
@@ -651,6 +659,107 @@ private final class ReaderPage {
         try await page.open("tiny")
 
         #expect(try await page.evaluate("window.fakeBook.pageList.pageFromCfi('epubcfi(/6/2)')") == "-1")
+    }
+
+    /// A book replaced before epub.js opens it (which a broken package never does) fails its `open`.
+    @Test(.timeLimit(.minutes(1))) func replacingABookBeforeItOpensSettlesTheOldOpen() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(openedHangs: true)
+        let first = Task { try await page.open("first") }
+        while try await page.evaluate("typeof window.fakeHeldOpen") != #""function""# {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = try await page.evaluate("window.fakeOptions.openedHangs = false")
+
+        try await page.open("second")
+
+        await #expect(throws: (any Error).self) { try await first.value }
+        #expect(page.last("error") == nil)
+    }
+
+    /// A section that fails to display releases epub.js's queue, so `next` and `prev` still run,
+    /// whether a command displayed it or epub.js did.
+    @Test(.timeLimit(.minutes(1))) func aFailedDisplayReleasesEpubJSsQueue() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(displayError: "No such section")
+
+        await #expect(throws: (any Error).self) { try await page.open("tiny") }
+        #expect(try await page.evaluate("window.fakeReleased") == "1")
+
+        _ = try await page.evaluate("window.fakeRendition.emit('displayerror', new Error('Bad link'))")
+        #expect(try await page.evaluate("window.fakeReleased") == "2")
+    }
+
+    /// The table of contents' links are relative to the package, as the spine and `relocated` are,
+    /// not to the navigation document they're in.
+    @Test(.timeLimit(.minutes(1))) func tableOfContentsLinksAreRelativeToThePackage() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        let toc: [[String: Any]] = [
+            ["id": "one", "label": "One", "href": "../text/c1.xhtml#p2", "subitems": [["href": "c%201.xhtml"]]],
+            ["id": "away", "label": "Away", "href": "https://example.com/c1.xhtml"],
+        ]
+        try await page.fakeEPUBJS(toc: toc, navPath: "nav/toc.xhtml")
+
+        try await page.open("tiny")
+
+        let items = try #require(try await page.next("toc")["items"] as? [[String: Any]])
+        #expect(items.map { $0["href"] as? String } == ["text/c1.xhtml#p2", "https://example.com/c1.xhtml"])
+        let subitems = try #require(items.first?["subitems"] as? [[String: Any]])
+        #expect(subitems.map { $0["href"] as? String } == ["nav/c 1.xhtml"])
+    }
+
+    /// epub.js copies an asset out of the archive once per listing, all at once, so a book listing
+    /// one twice is refused.
+    @Test(.timeLimit(.minutes(1))) func anAssetListedTwiceIsRefused() async throws {
+        let manifest =
+            #"<item id="a" href="a.png" media-type="image/png"/>"#
+            + #"<item id="b" href="./a.png" media-type="image/png"/>"#
+        let png = TinyEPUB.Entry(name: "OEBPS/a.png", body: Data(count: 16))
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(extra: [png], manifest: manifest) })
+
+        await #expect(throws: (any Error).self) { try await page.open("twice") }
+
+        let error = try #require(page.last("error"))
+        #expect(error["phase"] as? String == "open")
+        #expect(error["message"] as? String == "The book lists a file more than once")
+    }
+
+    /// Each asset's URL is swapped for its blob URL once, in style sheets and sections alike, not
+    /// again inside the blob URLs the earlier swaps put in.
+    @Test(.timeLimit(.minutes(1))) func assetURLsAreSubstitutedOnce() async throws {
+        let names = ["a", "b", "c", "d"]
+        let manifest =
+            names.map { #"<item id="\#($0)" href="\#($0)" media-type="image/png"/>"# }.joined()
+            + #"<item id="css" href="style.css" media-type="text/css"/>"#
+        let extra =
+            names.map { TinyEPUB.Entry(name: "OEBPS/\($0)", body: Data(count: 16)) }
+            + [TinyEPUB.Entry(name: "OEBPS/style.css", body: Data("a b c d".utf8))]
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(extra: extra, manifest: manifest) })
+        // Keeps the real book, and the blobs epub.js makes, where the test can read them.
+        _ = try await page.controller.webView.evaluateJavaScript(
+            """
+            const ePub = window.ePub
+            window.ePub = function (data, options) { return (window.testBook = ePub(data, options)) }
+            const create = URL.createObjectURL
+            window.testBlobs = {}
+            URL.createObjectURL = function (blob) { const url = create(blob); window.testBlobs[url] = blob; return url }
+            1
+            """)
+        let opening = Task { try await page.open("assets") }
+        defer { opening.cancel() }
+        while try await page.evaluate("window.testBook !== undefined") != "true" {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let counts = try await page.controller.webView.callAsyncJavaScript(
+            """
+            await window.testBook.opened
+            const resources = window.testBook.resources
+            const css = resources.replacementUrls[resources.urls.indexOf('style.css')]
+            const section = resources.substitute('a b c d', '/OEBPS/c1.xhtml')
+            return [await window.testBlobs[css].text(), section].map((text) => text.split('blob:').length - 1)
+            """, contentWorld: .page)
+        #expect(counts as? [Int] == [4, 4])
     }
 
     @Test func aCommandMustBeAJSONObject() async {

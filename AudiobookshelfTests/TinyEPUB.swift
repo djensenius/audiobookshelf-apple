@@ -17,9 +17,9 @@ enum TinyEPUB {
 
     static var data: Data { data() }
 
-    /// The book, with `extra` entries after its own, and without its navigation document (though
-    /// the package still lists it) when `navigation` is false.
-    static func data(extra: [Entry] = [], navigation: Bool = true) -> Data {
+    /// The book, with `extra` entries after its own and `manifest` items after its own, and without
+    /// its navigation document (though the package still lists it) when `navigation` is false.
+    static func data(extra: [Entry] = [], manifest: String = "", navigation: Bool = true) -> Data {
         let files: [(name: String, text: String)] = [
             ("mimetype", "application/epub+zip"),
             (
@@ -41,7 +41,7 @@ enum TinyEPUB {
                 </metadata>
                 <manifest>
                 <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
-                <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>
+                <item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>\(manifest)
                 </manifest>
                 <spine><itemref idref="c1"/></spine>
                 </package>

@@ -57,13 +57,26 @@
     post({ type: 'error', message: message, phase: phase })
   }
 
-  function tocItems(items) {
+  // A navigation document's links are relative to it, but epub.js's spine (and `relocated`'s href)
+  // to the package; this makes `href` relative to the package, given the document's `navPath`.
+  function packageHref(href, navPath) {
+    if (!navPath) return href
+    try {
+      const url = new URL(href, new URL(navPath, 'http://package/'))
+      if (url.origin !== 'http://package') return href
+      return decodeURI(url.pathname.slice(1)) + url.hash
+    } catch (error) {
+      return href
+    }
+  }
+
+  function tocItems(items, navPath) {
     return (items || []).map(function (item) {
       return {
         id: String(item.id || ''),
         label: String(item.label || '').trim(),
-        href: String(item.href || ''),
-        subitems: tocItems(item.subitems)
+        href: packageHref(String(item.href || ''), navPath),
+        subitems: tocItems(item.subitems, navPath)
       }
     })
   }
@@ -273,6 +286,70 @@
     }
   }
 
+  // Every URL in `content` swapped for its replacement in one pass, longest first. epub.js swaps
+  // each in turn over the whole text, so a later URL also matches inside the blob URLs an earlier
+  // one put in, and the text grows exponentially with the assets a book lists.
+  function substituteOnce(content, urls, replacements) {
+    const swaps = new Map()
+    urls.forEach(function (url, index) {
+      if (url && replacements[index] && !swaps.has(url)) swaps.set(url, replacements[index])
+    })
+    if (swaps.size === 0) return content
+    const pattern = Array.from(swaps.keys())
+      .sort(function (a, b) {
+        return b.length - a.length
+      })
+      .map(function (url) {
+        return url.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
+      })
+      .join('|')
+    return content.replace(new RegExp(pattern, 'g'), function (url) {
+      return swaps.get(url)
+    })
+  }
+
+  // Wraps the book's unpacking, which epub.js does once the package loads: refuses an asset listed
+  // twice (epub.js copies each listing out of the archive at once, past the size limits), and
+  // swaps epub.js's sections' and style sheets' URL substitution for `substituteOnce`.
+  function guardResources(opening) {
+    const unpack = opening.unpack
+    opening.unpack = function (packaging) {
+      const assets = new Set()
+      for (const item of Object.values(packaging.manifest || {})) {
+        if (!item.href || item.type === 'application/xhtml+xml' || item.type === 'text/html') continue
+        let path = this.resolve(item.href)
+        try {
+          path = decodeURIComponent(path)
+        } catch (error) {}
+        // epub.js reports any failure to open as "Cannot load book"; `open` says why.
+        if (assets.has(path)) throw (this.refusal = new Error('The book lists a file more than once'))
+        assets.add(path)
+      }
+      const unpacked = unpack.call(this, packaging)
+      const resources = this.resources
+      resources.substitute = function (content, url) {
+        return substituteOnce(content, url ? this.relativeTo(url) : this.urls, this.replacementUrls)
+      }
+      // As epub.js's own, which `replaceCss` calls once the assets' blob URLs exist.
+      resources.createCssFile = function (href) {
+        if (href.charAt(0) === '/') return Promise.resolve()
+        const absolute = this.settings.resolver(href)
+        const text = this.settings.archive.getText(absolute)
+        if (!text) return Promise.resolve()
+        return text.then(
+          function (css) {
+            const replaced = substituteOnce(css, this.relativeTo(absolute), this.replacementUrls)
+            return URL.createObjectURL(new Blob([replaced], { type: 'text/css' }))
+          }.bind(this),
+          function () {
+            return undefined
+          }
+        )
+      }
+      return unpacked
+    }
+  }
+
   async function fetchBook(url) {
     const response = await fetch(url)
     if (!response.ok) throw new Error('The book could not be loaded (HTTP ' + response.status + ')')
@@ -291,6 +368,12 @@
     })
   }
 
+  // epub.js leaves a section that failed to display holding its queue, so `next` and `prev` would
+  // wait for good; settling the failed display lets the queue move on.
+  function releaseQueue(shown) {
+    if (shown.displaying) shown.displaying.resolve()
+  }
+
   // Displays `target`. epub.js reports a section it can't render only as `displayerror` and leaves
   // `display`'s promise pending, so this settles on either, or on the book being closed.
   async function display(current, shown, target) {
@@ -302,6 +385,9 @@
     current.pendingDisplays += 1
     try {
       return await Promise.race([shown.display(target), failed, current.closed])
+    } catch (error) {
+      releaseQueue(shown)
+      throw error
     } finally {
       current.pendingDisplays -= 1
       shown.off('displayerror', onError)
@@ -346,6 +432,7 @@
     if (!isCurrent()) return
 
     book = window.ePub(data, { openAs: 'binary' })
+    guardResources(book)
     book.spine.hooks.content.register(keepBookFont)
     // A book that fails to load leaves `opened` pending for good; epub.js only says `openFailed`.
     const failed = new Promise(function (resolve, reject) {
@@ -385,7 +472,9 @@
     })
     shown.on('displayerror', function (error) {
       // One of epub.js's own displays (a command's display reports its failure itself).
-      if (isCurrent() && state.pendingDisplays === 0) postError('display', error)
+      if (!isCurrent() || state.pendingDisplays > 0) return
+      releaseQueue(shown)
+      postError('display', error)
     })
 
     // epub.js never settles the table of contents when the book's navigation document is missing.
@@ -393,7 +482,9 @@
     const navigationTimeout = Number(window.absReaderNavigationTimeoutMs) || NAVIGATION_TIMEOUT_MS
     withDeadline(opened.loaded.navigation, navigationTimeout, 'The table of contents did not load')
       .then(function (navigation) {
-        if (isCurrent()) post({ type: 'toc', items: tocItems(navigation && navigation.toc) })
+        const packaging = opened.packaging || {}
+        const navPath = packaging.navPath || packaging.ncxPath
+        if (isCurrent()) post({ type: 'toc', items: tocItems(navigation && navigation.toc, navPath) })
       })
       .catch(function (error) {
         if (isCurrent()) postError('toc', error)
@@ -401,11 +492,11 @@
 
     try {
       // Not `ready`: that also waits for the table of contents.
-      await Promise.race([opened.opened, failed])
+      await Promise.race([opened.opened, failed, state.closed])
       // epub.js's start takes the book's `rendition:spread` over ours; the reader's setting wins.
       await Promise.race([shown.started, failed, state.closed])
     } catch (error) {
-      throw Object.assign(asError(error), { phase: 'open' })
+      throw Object.assign(asError(opened.refusal || error), { phase: 'open' })
     }
     if (!isCurrent()) return
     applySpread(shown)
