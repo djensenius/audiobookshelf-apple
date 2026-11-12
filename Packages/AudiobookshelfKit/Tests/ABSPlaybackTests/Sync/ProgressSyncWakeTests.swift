@@ -103,8 +103,8 @@ struct ProgressSyncWakeTests {
         await s.play(for: 15, settling: false)
         await s.service.waitForSyncs(2)
         s.sleeper.fire()
-        await wake.value
         response.open()
+        await wake.value
         await s.settle()
 
         #expect(s.service.reports.map(\.currentTime) == [15, 30])
@@ -113,6 +113,54 @@ struct ProgressSyncWakeTests {
         #expect(s.service.reports.count == (fails ? 2 : 3))
         #expect((s.syncer.syncWake != nil) == fails)
         await s.settle()
+    }
+
+    /// A flush sent during a backoff and still in flight when the backoff ends answers for the
+    /// wake: nothing more after a success, the next backoff's wake after a server error, and the
+    /// wake's own report after a failure that schedules none.
+    @Test(arguments: [nil, APIError.http(status: 503, message: nil), .network(.cannotConnectToHost)])
+    func aWakeWaitsForAFlushInFlight(failure: APIError?) async throws {
+        let s = try SyncHarness()
+        let response = Gate()
+        defer { response.open() }
+        s.service.state.withLock {
+            $0.syncErrors = [Self.status(503), failure]
+            $0.syncGates = [Gate(), response]
+        }
+        s.service.state.withLock { $0.syncGates[0].open() }
+        await s.coordinator.play(itemID: "a")
+        s.coordinator.pause()
+        await s.settle()
+        let wake = try #require(s.syncer.syncWake)
+
+        s.h.clock.advance(by: 5)
+        let flush = Task { await s.syncer.flush() }
+        await s.service.waitForSyncs(2)
+        // The backoff ends with the flush still in flight.
+        s.h.clock.advance(by: 10)
+        s.sleeper.fire()
+        response.open()
+        await wake.value
+        await flush.value
+        await s.settle()
+
+        switch failure {
+        case nil:
+            #expect(s.service.reports.count == 2)
+            #expect(s.syncer.syncWake == nil)
+        case .http?:
+            #expect(s.service.reports.count == 2)
+            let next = try #require(s.syncer.syncWake)
+            s.h.clock.advance(by: 30)
+            s.sleeper.fire()
+            await next.value
+            await s.settle()
+            #expect(s.sleeper.delays == [15, 30])
+            #expect(s.service.reports.count == 3)
+        default:
+            #expect(s.service.reports.count == 3)
+        }
+        #expect(Set(s.service.reports.map(\.currentTime)).count == 1)
     }
 
     /// A wake scheduled before the account switched sends nothing after it.

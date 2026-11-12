@@ -565,12 +565,18 @@ public final class ProgressSyncer {
             current?.retryAt = retryAt
             // Report when the backoff ends even if no tick or pause triggers it (a paused session).
             // The clock and the sleep are both monotonic, so the backoff has ended by then. Not
-            // if a newer failure moved it, or a report already went out since it ended: one in
-            // flight answers for itself, and a failure schedules the next wake.
+            // if a newer failure moved it, or a report already went out since it ended. A report
+            // still in flight (a flush ignores the backoff) answers first: its success cancels
+            // this wake and a server error reschedules it; any other failure leaves it to retry.
             let ownership = current?.ownership
             syncWake?.cancel()
             syncWake = scheduleWake(after: backoff) { syncer in
-                guard syncer.current?.ownership == ownership, syncer.current?.retryAt == retryAt else { return }
+                while let inFlight = syncer.inFlightSync, inFlight.sessionID == syncer.current?.sessionID {
+                    guard (try? await inFlight.done.wait()) != nil else { return }
+                }
+                guard !Task.isCancelled, !syncer.isDetached, !syncer.isTransportQuiesced,
+                    syncer.current?.ownership == ownership, syncer.current?.retryAt == retryAt
+                else { return }
                 syncer.syncWake = nil
                 if let sent = syncer.lastSyncAt, sent >= retryAt { return }
                 syncer.requestSync()
@@ -588,13 +594,13 @@ public final class ProgressSyncer {
 
     /// Runs `action` after `delay` monotonic seconds, unless cancelled, detached or quiesced first.
     private func scheduleWake(
-        after delay: TimeInterval, _ action: @escaping @MainActor (ProgressSyncer) -> Void
+        after delay: TimeInterval, _ action: @escaping @MainActor (ProgressSyncer) async -> Void
     ) -> Task<Void, Never> {
         let sleep = clock.sleep
         return Task { [weak self] in
             do { try await sleep(delay) } catch { return }
             guard let self, !Task.isCancelled, !self.isDetached, !self.isTransportQuiesced else { return }
-            action(self)
+            await action(self)
         }
     }
 
