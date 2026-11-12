@@ -111,18 +111,28 @@ enum BookmarkFailure {
 struct BookmarksSheet: View {
     let model: PlayerViewModel
     let close: () -> Void
+
+    var body: some View {
+        BookmarksPane(model: model, onSelect: close)
+            .playerSheetStyle(title: L10n.string("LabelYourBookmarks"), onDone: close)
+    }
+}
+
+/// The bookmarks without the sheet's frame, for the sheet and for the full player's details pane
+/// on a large display (#84). Choosing a bookmark seeks to it, then calls `onSelect`. Its form opens
+/// in the enclosing `NavigationStack`.
+struct BookmarksPane: View {
+    let model: PlayerViewModel
+    let onSelect: () -> Void
     @Environment(\.bookmarkStore) private var store
 
     var body: some View {
-        Group {
-            if let store {
-                BookmarksContent(
-                    bookmarks: PlayerBookmarksModel(player: model, store: store), rate: model.rate, close: close)
-            } else {
-                NoBookmarksView()
-            }
+        if let store {
+            BookmarksContent(
+                bookmarks: PlayerBookmarksModel(player: model, store: store), rate: model.rate, close: onSelect)
+        } else {
+            NoBookmarksView()
         }
-        .playerSheetStyle(title: L10n.string("LabelYourBookmarks"), onDone: close)
     }
 }
 
