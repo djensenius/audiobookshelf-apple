@@ -107,6 +107,21 @@ private struct StubRssFeedService: RssFeedService {
         #expect(RssFeedPresentation.content(.loaded, feed: nil) == .openForm)
     }
 
+    /// A failed lookup with a carried-over feed doesn't read as open.
+    @Test func onlyTheOpenFeedReadsAsOpen() {
+        let feed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
+        let failed = RssFeedPresentation.content(.failed, feed: feed)
+        #expect(failed.titleKey == "HeaderOpenRSSFeed")
+        #expect(failed.dismissKey == "ButtonCancel")
+        let open = RssFeedPresentation.content(.loaded, feed: feed)
+        #expect(open.titleKey == "HeaderRSSFeedIsOpen")
+        #expect(open.dismissKey == "ButtonDone")
+        for content in [RssFeedPresentation.Content.loading, .openForm] {
+            #expect(content.titleKey == "HeaderOpenRSSFeed")
+            #expect(content.dismissKey == "ButtonCancel")
+        }
+    }
+
     /// What the screen fetched shows until the sheet knows better.
     @MainActor
     @Test func theIndicatorFollowsTheSheetOnceItKnows() async {

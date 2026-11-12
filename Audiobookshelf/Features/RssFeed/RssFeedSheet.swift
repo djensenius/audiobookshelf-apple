@@ -52,6 +52,15 @@ enum RssFeedPresentation {
         case retry
         case open(RssFeed)
         case openForm
+
+        /// The open feed's title and Done only while it shows; otherwise opening a feed and Cancel.
+        var titleKey: String {
+            if case .open = self { "HeaderRSSFeedIsOpen" } else { "HeaderOpenRSSFeed" }
+        }
+
+        var dismissKey: String {
+            if case .open = self { "ButtonDone" } else { "ButtonCancel" }
+        }
     }
 
     /// Progress, then Retry when the lookup failed, before any feed: one carried over from the last
@@ -158,7 +167,7 @@ struct RssFeedSheet: View {
     }
 
     var body: some View {
-        let feed = model.feed ?? closedFeed
+        let content = RssFeedPresentation.content(model.loadState, feed: model.feed ?? closedFeed)
         NavigationStack {
             ScrollViewReader { proxy in
                 Form {
@@ -166,7 +175,7 @@ struct RssFeedSheet: View {
                         RssFeedErrorSection(error: error)
                             .id(Self.errorID)
                     }
-                    switch RssFeedPresentation.content(model.loadState, feed: feed) {
+                    switch content {
                     case .loading:
                         ProgressView {
                             Text(verbatim: L10n.string("MessageLoading"))
@@ -194,11 +203,11 @@ struct RssFeedSheet: View {
                     AccessibilityNotification.Announcement(RssFeedPresentation.announcement(for: error)).post()
                 }
             }
-            .navigationTitle(Text(verbatim: L10n.string(feed == nil ? "HeaderOpenRSSFeed" : "HeaderRSSFeedIsOpen")))
+            .navigationTitle(Text(verbatim: L10n.string(content.titleKey)))
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar { toolbar(feed: feed) }
+            .toolbar { toolbar(content) }
         }
         .interactiveDismissDisabled(model.isWorking)
         .task { await model.load() }
@@ -210,16 +219,16 @@ struct RssFeedSheet: View {
     }
 
     @ToolbarContentBuilder
-    private func toolbar(feed: RssFeed?) -> some ToolbarContent {
+    private func toolbar(_ content: RssFeedPresentation.Content) -> some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button {
                 dismiss()
             } label: {
-                Text(verbatim: L10n.string(feed == nil ? "ButtonCancel" : "ButtonDone"))
+                Text(verbatim: L10n.string(content.dismissKey))
             }
             .disabled(model.isWorking)
         }
-        if feed == nil, model.loadState == .loaded {
+        if content == .openForm {
             ToolbarItem(placement: .confirmationAction) {
                 if model.isWorking {
                     ProgressView()
