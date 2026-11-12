@@ -217,9 +217,12 @@ public actor DownloadEngine {
     /// The connections being quiesced, one entry per call: a failure's replay doesn't queue
     /// their records again.
     private var quiescingConnections: [UUID] = []
-    /// Connections quiesced without a session: their transfers that survived a relaunch are
-    /// cancelled, not adopted, once the session is created.
+    /// Connections quiesced without a session: their transfers that survived a relaunch (any
+    /// task this engine didn't create) are cancelled, not adopted, and their results dropped,
+    /// for the rest of the process. Only in memory: TODO(#N) keep it across a relaunch.
     private var survivorsToStop: Set<UUID> = []
+    /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
+    private var createdTasks: Set<Int> = []
     /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the results
     /// they finished with meanwhile: those are handled only once the transfer is adopted.
     private var adopting: Set<Int> = []
@@ -538,14 +541,24 @@ public actor DownloadEngine {
     /// removal or a credential change (ADR 0003). Their next start is a fresh request. Only the
     /// parts' resume-data flags are written, so a part that failed or started since the
     /// downloads were read keeps its state.
-    public func discardResumeData(connectionID: UUID) async {
-        let records = ((try? await readRecords(store)) ?? []).filter { $0.key.serverConnectionID == connectionID }
+    ///
+    /// - Returns: `false`, deleting nothing, when the downloads couldn't be read.
+    @discardableResult
+    public func discardResumeData(connectionID: UUID) async -> Bool {
+        let records: [DownloadRecordDTO]
+        do {
+            records = try await readRecords(store).filter { $0.key.serverConnectionID == connectionID }
+        } catch {
+            logError("Couldn't read downloads; not deleting a server's resume data", error)
+            return false
+        }
         for part in records.flatMap(\.parts)
         where part.state != .completed && (part.hasResumeData || contexts[part.id]?.hasResumeData == true) {
             vault.delete(partID: part.id)
             contexts[part.id]?.hasResumeData = false
             await persist { _ = try await $0.updatePart(partID: part.id, hasResumeData: false) }
         }
+        return true
     }
 
     /// Stops every transfer of `connectionID`'s downloads, whatever their record's state, then
@@ -557,8 +570,8 @@ public actor DownloadEngine {
     ///   nothing starts them again. It runs first; from then until this returns, a failure's
     ///   replay doesn't queue a record of the connection again (one left `failed` stays so).
     /// - Returns: `false` when there is no session (the downloads couldn't be read, or another
-    ///   process holds it) or the downloads couldn't be read. The resume data is still deleted
-    ///   where it can be, and the transfers that survived a relaunch are cancelled once the
+    ///   process holds it) or the downloads couldn't be read, at any step. The resume data is
+    ///   still deleted where it can be, and the transfers that survived a relaunch are cancelled once the
     ///   session is created; a later call tries the rest again.
     public func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void = {}) async -> Bool {
         quiescingConnections.append(connectionID)
@@ -591,8 +604,7 @@ public actor DownloadEngine {
             }
         await stop(partIDs: Array(parts), keepingResumeData: false)
         await waitForFailuresForGood(of: connectionID)
-        await discardResumeData(connectionID: connectionID)
-        return true
+        return await discardResumeData(connectionID: connectionID)
     }
 
     private func waitForFailuresForGood(of connectionID: UUID) async {
@@ -671,16 +683,10 @@ public actor DownloadEngine {
         // A task that finished on the way is left to its completion, which adopts it first.
         for task in await session.allTasks where task.state != .completed {
             if let partID = task.partID, tasks[partID] === task { continue }
-            if let partID = task.partID, let context = contexts[partID],
-                survivorsToStop.contains(context.connectionID), tasks[partID] == nil
-            {
-                // Its server was signed out of while there was no session: it carries the old
-                // credentials (ADR 0003). Its part stays running, so it is queued below.
+            if isSurvivorToStop(task) {
+                // Its part stays running, so it is queued below.
                 ignoredTasks.insert(task.taskIdentifier)
                 task.cancel()
-                vault.delete(partID: partID)
-                contexts[partID]?.hasResumeData = false
-                await persist { _ = try await $0.updatePart(partID: partID, hasResumeData: false) }
                 continue
             }
             guard let partID = task.partID, contexts[partID] != nil, tasks[partID] == nil,
@@ -692,7 +698,6 @@ public actor DownloadEngine {
             }
             await reattach(download, partID: partID, activationOwnsSession: true)
         }
-        survivorsToStop.removeAll()
         // A part left running without a transfer: either its transfer moved the file, but iOS
         // ended the process before the completion was saved, or the app ended before the system
         // kept the transfer. The first completes, but only while the store still has the part
@@ -813,6 +818,13 @@ public actor DownloadEngine {
         }
         await persist { try await $0.setPartState(.running, partID: partID, taskIdentifier: task.taskIdentifier) }
         if task.state == .suspended, tasks[partID] === task { task.resume() }
+    }
+
+    /// Whether `task` survived a relaunch and its server was quiesced without a session: it
+    /// carries the credentials of before the sign-out (ADR 0003).
+    private func isSurvivorToStop(_ task: URLSessionTask) -> Bool {
+        guard let partID = task.partID, let context = contexts[partID] else { return false }
+        return survivorsToStop.contains(context.connectionID) && !createdTasks.contains(task.taskIdentifier)
     }
 
     /// Lets the session's tasks finish, then creates it again (on ``sessionInvalidated()``).
@@ -1019,6 +1031,7 @@ public actor DownloadEngine {
             }
         }
         let task = resumeData.map(session.downloadTask(withResumeData:)) ?? session.downloadTask(with: request)
+        createdTasks.insert(task.taskIdentifier)
         task.taskDescription = partID.uuidString
         if let notBefore { task.earliestBeginDate = notBefore }
         tasks[partID] = task
@@ -1141,6 +1154,14 @@ public actor DownloadEngine {
         if ignoredTasks.remove(task.taskIdentifier) != nil { return }
         guard let partID = task.partID, contexts[partID] != nil else { return }
         let current = tasks[partID]
+        // Finished before or while the session was created: neither its result nor its resume
+        // data is kept. A part it left running is queued again.
+        if isSurvivorToStop(task) {
+            if current == nil, launching[partID] == nil, !settling.contains(partID) {
+                await persistIdle(partID) { _ = try await $0.queuePart(partID: partID, expecting: [.running]) }
+            }
+            return
+        }
         // A surviving transfer's result waits for its adoption, so it can't complete or fail a
         // stopped record's part. One that finished before it was adopted is adopted first.
         if adopting.contains(task.taskIdentifier) {

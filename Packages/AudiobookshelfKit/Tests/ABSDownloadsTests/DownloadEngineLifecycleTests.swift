@@ -621,6 +621,77 @@ import Testing
         never.open()
     }
 
+    /// A transfer that survived the relaunch and finished before or while the session was
+    /// created was made with the old credentials: its file isn't adopted, and its part starts
+    /// again with the new ones.
+    @Test func quiesceWithoutASessionDropsASurvivorThatFinished() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { request in
+            request.authorization == "Bearer previous" ? .status(200) : .status(200, gate: never)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let reads = Mutex(0)
+        let base = harness.base
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                let read = reads.withLock {
+                    $0 += 1
+                    return $0
+                }
+                if read == 1 { throw TestError() }
+                return try await store.allRecords()
+            },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+                // Finished before the engine lists the session's tasks, so only its completion
+                // reaches the engine.
+                let deadline = Date.now.addingTimeInterval(10)
+                while stub.leftovers.withLock({ $0.first?.state }) != .completed, Date.now < deadline {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+            })
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+
+        #expect(await engine.activate())
+
+        await harness.waitForRequests(2)
+        #expect(harness.requests.map(\.authorization) == ["Bearer previous", "Bearer token-1"])
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .running)
+        #expect(part.hasResumeData == false)
+        #expect(
+            !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
+        never.open()
+    }
+
+    /// Resume data that couldn't be deleted, because the downloads couldn't be read, leaves the
+    /// quiesce unfinished, so it's tried again.
+    @Test func quiesceThatCouldNotDeleteTheResumeDataReportsItDidNotFinish() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let goodReads = Mutex(Int.max)
+        let engine = harness.makeEngine(readRecords: { store in
+            let fails = goodReads.withLock {
+                $0 -= 1
+                return $0 < 0
+            }
+            if fails { throw TestError() }
+            return try await store.allRecords()
+        })
+        #expect(await engine.activate())
+        // The quiesce's own read succeeds; the discard's fails.
+        goodReads.withLock { $0 = 1 }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == true)
+    }
+
     /// A part failing for good stops its siblings and may replay a start that overlapped it,
     /// after which its transfer would run with the old token: the quiesce waits for it, then
     /// stops what it started. In production the sign-out pauses the record first.
