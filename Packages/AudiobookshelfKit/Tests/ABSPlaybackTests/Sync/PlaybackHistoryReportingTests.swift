@@ -344,6 +344,54 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.seek).map(\.position) == (superseded ? [5] : []))
     }
 
+    @Test func retryingAnInterruptedResumeRewindIsNotASeek() async throws {
+        let (s, spy) = try Self.harness()
+        s.h.settings.disableAutoRewind = false
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 20)
+        s.coordinator.pause()
+        await s.settle()
+        s.h.clock.advance(by: 120)
+        // The rewind's seek is interrupted; pausing and resuming again retries it, and it lands.
+        s.h.engine.seekResults = [.interrupted]
+        await s.coordinator.resume()
+        s.coordinator.pause()
+        await s.coordinator.resume()
+        await Self.settle(s)
+
+        #expect(s.h.engine.seeks.suffix(2) == [10, 10])
+        #expect(s.coordinator.currentTime == 10)
+        #expect(spy.entries(.seek).isEmpty)
+    }
+
+    @Test func aLateSupersededSeekLeavesTheInterruptedRewindARewind() async throws {
+        let (s, spy) = try Self.harness()
+        s.h.settings.disableAutoRewind = false
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 20)
+        s.coordinator.pause()
+        await s.settle()
+        s.h.clock.advance(by: 120)
+        // A user seek is held; a second one replaces it and lands.
+        let held = Gate()
+        defer { held.open() }
+        s.h.engine.seekGates = [held]
+        let first = Task { await s.coordinator.seek(to: 30) }
+        await yieldUntil { s.h.engine.seeks.count == 1 }
+        await s.coordinator.seek(to: 60)
+        // Resuming rewinds 10 s; that seek is interrupted, so the engine owes its landing.
+        s.h.engine.seekResults = [.interrupted]
+        await s.coordinator.resume()
+        // The held seek returns superseded, then the rewind lands on a tick.
+        held.open()
+        #expect(await first.value == nil)
+        s.h.engine.landPendingSeek()
+        await Self.settle(s)
+
+        #expect(s.h.engine.seeks == [30, 60, 50])
+        #expect(spy.entries(.seek).map(\.position) == [60])
+    }
+
     @Test func aReportIsRecordedBeforeTheDrainAfterIt() async throws {
         let (s, spy) = try Self.harness()
         let started = Gate()

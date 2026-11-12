@@ -613,8 +613,10 @@ public final class PlaybackCoordinator {
             target = startTime
         } else if let pending = engine.pendingSeekTarget {
             // The user's interrupted seek is where playback goes: not rewound from the old
-            // position, nor replaced by the restart from the end.
+            // position, nor replaced by the restart from the end. Retrying an interrupted resume
+            // rewind keeps it a rewind, not a user seek.
             target = pending
+            isRewind = rewindAwaitsLanding
         } else if atEnd {
             target = 0
         } else {
@@ -678,6 +680,8 @@ public final class PlaybackCoordinator {
             awaitingSeekLanding = true
             let result = await engine.seek(to: target)
             guard current == generation, phase == .loaded else { return nil }
+            // A newer seek owns the landing state now.
+            guard result != .superseded else { return nil }
             guard result == .completed else {
                 awaitingSeekLanding = isFinishingLoad || engine.pendingSeekTarget != nil
                 rewindAwaitsLanding = isResumeRewind && result == .interrupted
