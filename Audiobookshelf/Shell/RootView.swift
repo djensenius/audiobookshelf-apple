@@ -66,14 +66,14 @@ struct RootView: View {
             .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
     }
 
-    /// One link waits at a time: the last one received wins, including over a confirmed server
-    /// switch's link (``SceneLinks``).
     /// The shared library store while it serves `identity`'s account, `nil` otherwise.
     private func servedStore(for identity: SessionIdentity) -> LibraryStore? {
         guard let store = library?.store, store.serves(identity) else { return nil }
         return store
     }
 
+    /// One link waits at a time: the last one received wins, including over a confirmed server
+    /// switch's link (``SceneLinks``).
     private func receive(_ link: DeepLink) {
         links.receive(link, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
     }
