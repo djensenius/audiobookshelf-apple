@@ -592,7 +592,7 @@ public actor DownloadEngine {
     /// downloads were read keeps its state.
     ///
     /// - Returns: `false` when the downloads couldn't be read (deleting nothing) or a blob couldn't
-    ///   be deleted (its part stays flagged).
+    ///   be deleted (a flagged part stays flagged).
     @discardableResult
     public func discardResumeData(connectionID: UUID) async -> Bool {
         let records: [DownloadRecordDTO]
@@ -603,13 +603,15 @@ public actor DownloadEngine {
             return false
         }
         var deleted = true
-        for part in records.flatMap(\.parts)
-        where part.state != .completed && (part.hasResumeData || contexts[part.id]?.hasResumeData == true) {
+        // Every unfinished part, flagged or not: a pause whose seal failed, and whose previous
+        // blob couldn't be deleted, leaves one unflagged.
+        for part in records.flatMap(\.parts) where part.state != .completed {
             guard vault.delete(partID: part.id) else {
-                Log.downloads.error("Couldn't delete resume data; it stays flagged")
+                Log.downloads.error("Couldn't delete resume data; a flagged part stays flagged")
                 deleted = false
                 continue
             }
+            guard part.hasResumeData || contexts[part.id]?.hasResumeData == true else { continue }
             contexts[part.id]?.hasResumeData = false
             await persist { _ = try await $0.updatePart(partID: part.id, hasResumeData: false) }
         }
@@ -631,6 +633,10 @@ public actor DownloadEngine {
     ///   once the session is created; a later call tries the rest again.
     public func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void = {}) async -> Bool {
         quiescingConnections.append(connectionID)
+        // Its surviving transfers are rejected before anything is awaited, so no activation
+        // adopts one meanwhile, even one that begins while the records are being paused or
+        // after this call's attachment failed.
+        survivorsToStop.insert(connectionID)
         defer {
             if let index = quiescingConnections.firstIndex(of: connectionID) {
                 quiescingConnections.remove(at: index)
@@ -640,9 +646,6 @@ public actor DownloadEngine {
             lastQuiesces[connectionID] = quiesceCount
         }
         await pausing()
-        // Before attaching, so no activation adopts one while this waits, even one that begins
-        // after this one's attachment failed.
-        survivorsToStop.insert(connectionID)
         guard await ensureSession() else {
             await discardResumeData(connectionID: connectionID)
             return false

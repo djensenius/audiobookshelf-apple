@@ -217,6 +217,26 @@ private final class TokenServer: Sendable {
         #expect(await manager.downloadClient(for: idA) === client)
     }
 
+    /// While the active connection signs in again with new headers, its new credentials are
+    /// saved before its client is replaced (here, while the session they replace is ended):
+    /// the lookup makes a client with the new headers instead of the active one's.
+    @Test func signingInAgainWhileActiveDoesNotHandOutTheOldClient() async throws {
+        let serverA = TokenServer(userId: "usr-a")
+        let idA = try await signIn(to: serverA)
+        let old = try #require(manager.client)
+        let logout = StubURLProtocol.hold(host: serverA.host, path: "/abs/logout")
+
+        let again = Task { try await signIn(to: serverA, customHeaders: ["X-Proxy": "1"]) }
+        await logout.arrived()
+        let client = try #require(await manager.downloadClient(for: idA))
+        logout.open()
+        #expect(try await again.value == idA)
+
+        #expect(client !== old)
+        #expect(await client.configuration.customHeaders == ["X-Proxy": "1"])
+        #expect(await manager.downloadClient(for: idA) === manager.client)
+    }
+
     // MARK: - Expiry
 
     /// An expiry is reported, active or not, so the downloads are stopped even when no

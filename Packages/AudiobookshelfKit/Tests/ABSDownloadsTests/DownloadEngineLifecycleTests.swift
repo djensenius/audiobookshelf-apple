@@ -844,6 +844,59 @@ import Testing
         never.open()
     }
 
+    /// A quiesce rejects its server's surviving transfers before it pauses the records, so a
+    /// foreground activation while it pauses them cancels them instead of adopting them.
+    @Test func quiesceRejectsSurvivorsWhileItPauses() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let adoptions = Mutex(0)
+        let base = harness.base
+        let engine = harness.makeEngine(
+            adoptionStarted: { _ in adoptions.withLock { $0 += 1 } },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+            })
+        let (pausing, pausingReached) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let quiesce = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                pausingReached.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+        }
+        for await _ in pausing { break }
+
+        #expect(await engine.activate())
+        release.open()
+        _ = await quiesce.value
+
+        #expect(adoptions.withLock { $0 } == 0)
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        never.open()
+    }
+
+    /// A pause whose seal failed, and whose previous blob couldn't be deleted, leaves a blob
+    /// with the old credentials on an unflagged part: the discard deletes it too.
+    @Test func discardResumeDataDeletesAnUnflaggedBlob() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        try #require(try await harness.store.part(id: partID)?.hasResumeData == false)
+        try #require(FileManager.default.fileExists(atPath: blob))
+        let engine = harness.makeEngine()
+
+        #expect(await engine.discardResumeData(connectionID: harness.connectionID))
+
+        #expect(!FileManager.default.fileExists(atPath: blob))
+    }
+
     /// A part failing for good stops its siblings and may replay a start that overlapped it,
     /// after which its transfer would run with the old token: the quiesce waits for it, then
     /// stops what it started. In production the sign-out pauses the record first.
