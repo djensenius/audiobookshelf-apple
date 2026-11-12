@@ -11,6 +11,8 @@ import Foundation
 /// ZIPFoundation reads. That also bounds the data-descriptor position. A malformed ZIP64 field
 /// leaves ZIPFoundation with the `0xFFFFFFFF` placeholder, which is checked like any other value.
 /// An encrypted record is rejected: ZIPFoundation would silently stop listing entries there.
+/// ZIPFoundation also lists only as many records as the end record counts, so the counted records
+/// must fill the directory size the end record declares.
 ///
 /// ZIPFoundation's entries keep their headers (path, extra field, comment, and the local header's
 /// path and extra field, read again for every record that shares it). Those must total at most
@@ -54,6 +56,7 @@ enum ComicArchivePreflight {
             guard headerBytes <= maxHeaderBytes else { throw .tooManyEntries }
             position = extraOffset + UInt64(lengths[1] + lengths[2])
         }
+        guard position - end.offset == end.size else { throw .notAZip }
     }
 
     private struct File {
@@ -75,9 +78,9 @@ enum ComicArchivePreflight {
             return Data(data)
         }
 
-        /// The entry count and directory offset ZIPFoundation uses. It takes the last end-record
+        /// The entry count, directory size and directory offset ZIPFoundation uses. It takes the last end-record
         /// signature, so a search of the trailer from its end finds the same one, or none.
-        func endOfCentralDirectory() -> (count: UInt64, offset: UInt64)? {
+        func endOfCentralDirectory() -> (count: UInt64, size: UInt64, offset: UInt64)? {
             let trailerLength = min(length, UInt64(maxTrailerBytes))
             guard trailerLength >= 22, let trailer = bytes(at: length - trailerLength, count: Int(trailerLength)),
                 let index = stride(from: trailer.count - 22, through: 0, by: -1).first(where: {
@@ -90,9 +93,12 @@ enum ComicArchivePreflight {
                 locator.uint32(at: 0) == 0x0706_4B50, let record = bytes(at: offset - 76, count: 56),
                 record.uint32(at: 0) == 0x0606_4B50, record.uint16(at: 14) >= 45
             {
-                return (record.uint64(at: 32), record.uint64(at: 48))
+                return (record.uint64(at: 32), record.uint64(at: 40), record.uint64(at: 48))
             }
-            return (UInt64(trailer.uint16(at: index + 10)), UInt64(trailer.uint32(at: index + 16)))
+            return (
+                UInt64(trailer.uint16(at: index + 10)), UInt64(trailer.uint32(at: index + 12)),
+                UInt64(trailer.uint32(at: index + 16))
+            )
         }
     }
 

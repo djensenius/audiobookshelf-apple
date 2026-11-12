@@ -350,6 +350,20 @@ import Testing
         #expect(throws: ComicArchiveError.notAZip) { try ComicArchive(url: pastEnd, cacheDirectory: cache) }
     }
 
+    @Test func anUnderstatedEntryCountThrowsRatherThanHidingPages() throws {
+        let files = pages("1.jpg", "2.jpg")
+        let records = [Record(name: "1.jpg"), Record(name: "2.jpg", file: 1)]
+        let url = try makeRawZip(files: files, records: records)
+        #expect(try ComicArchive(url: url, cacheDirectory: cache).pagePaths == ["1.jpg", "2.jpg"])
+        let handle = try FileHandle(forUpdating: url)
+        try handle.seek(toOffset: try handle.seekToEnd() - 22 + 8)
+        try handle.write(contentsOf: Data([1, 0, 1, 0]))
+        try handle.close()
+        #expect(throws: ComicArchiveError.notAZip) { try ComicArchive(url: url, cacheDirectory: cache) }
+        let zip64 = try makeRawZip(files: files, records: records, zip64End: (1, nil), name: "zip64.cbz")
+        #expect(throws: ComicArchiveError.notAZip) { try ComicArchive(url: zip64, cacheDirectory: cache) }
+    }
+
     @Test func anEndRecordMustBeInTheLastBytes() throws {
         for (padding, opens) in [(0xFFFF, true), (0x1_0000, false)] {
             let url = try makeZip(pages("1.jpg"), name: "padded-\(padding).cbz")
