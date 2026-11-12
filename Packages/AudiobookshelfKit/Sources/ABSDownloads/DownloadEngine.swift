@@ -229,13 +229,15 @@ public actor DownloadEngine {
     /// The connections being quiesced, one entry per call: a failure's replay doesn't queue
     /// their records again.
     private var quiescingConnections: [UUID] = []
-    /// Counts ``quiesce(connectionID:pausing:)`` calls, and the count at each connection's last
-    /// one, so a resume can tell whether one began since a point (``quiesceGeneration()``).
+    /// Counts the ``quiesce(connectionID:pausing:)`` calls that ended, and the count at each
+    /// connection's last one, so a resume can tell whether one was under way at, or began
+    /// since, a point (``quiesceGeneration()``).
     private var quiesceCount = 0
     private var lastQuiesces: [UUID: Int] = [:]
-    /// Connections quiesced without a session: their transfers that survived a relaunch (any
-    /// task this engine didn't create) are cancelled, not adopted, and their results dropped,
-    /// for the rest of the process. Only in memory: TODO(#411) keep it across a relaunch.
+    /// Connections quiesced: their transfers that survived a relaunch (any task this engine
+    /// didn't create) are cancelled, not adopted, and their results dropped, for the rest of the
+    /// process; they carry the credentials of before the sign-out. Only in memory:
+    /// TODO(#411) keep it across a relaunch.
     private var survivorsToStop: Set<UUID> = []
     /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
     private var createdTasks: Set<Int> = []
@@ -544,7 +546,8 @@ public actor DownloadEngine {
         quiesceCount
     }
 
-    /// Whether a quiesce of `connectionID` is under way or began since `generation`.
+    /// Whether a quiesce of `connectionID` is under way, or was under way at or began since
+    /// `generation`.
     public func hasQuiesced(connectionID: UUID, since generation: Int) -> Bool {
         quiescingConnections.contains(connectionID) || lastQuiesces[connectionID, default: 0] > generation
     }
@@ -628,16 +631,19 @@ public actor DownloadEngine {
     ///   once the session is created; a later call tries the rest again.
     public func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void = {}) async -> Bool {
         quiescingConnections.append(connectionID)
-        quiesceCount += 1
-        lastQuiesces[connectionID] = quiesceCount
         defer {
             if let index = quiescingConnections.firstIndex(of: connectionID) {
                 quiescingConnections.remove(at: index)
             }
+            // Counted as it ends, so a generation taken while it was under way precedes it.
+            quiesceCount += 1
+            lastQuiesces[connectionID] = quiesceCount
         }
         await pausing()
+        // Before attaching, so no activation adopts one while this waits, even one that begins
+        // after this one's attachment failed.
+        survivorsToStop.insert(connectionID)
         guard await ensureSession() else {
-            survivorsToStop.insert(connectionID)
             await discardResumeData(connectionID: connectionID)
             return false
         }
@@ -876,8 +882,8 @@ public actor DownloadEngine {
         if task.state == .suspended, tasks[partID] === task { task.resume() }
     }
 
-    /// Whether `task` survived a relaunch and its server was quiesced without a session: it
-    /// carries the credentials of before the sign-out (ADR 0003).
+    /// Whether `task` survived a relaunch and its server was quiesced: it carries the
+    /// credentials of before the sign-out (ADR 0003).
     private func isSurvivorToStop(_ task: URLSessionTask) -> Bool {
         guard let partID = task.partID, let context = contexts[partID] else { return false }
         return survivorsToStop.contains(context.connectionID) && !createdTasks.contains(task.taskIdentifier)

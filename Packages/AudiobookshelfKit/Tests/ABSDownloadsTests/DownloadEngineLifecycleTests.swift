@@ -769,6 +769,81 @@ import Testing
         never.open()
     }
 
+    /// A generation taken while a quiesce of the server is under way (a restart beginning
+    /// during a sign-out's cleanup) precedes that quiesce, so once it ends, a resume since that
+    /// generation still leaves the record paused: the quiesce may have passed over it.
+    @Test func resumeUnlessQuiescedSinceCountsAQuiesceUnderWayAtTheGeneration() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let record = try await harness.addRecord(parts: [UUID()])
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        let (pausing, pausingReached) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let quiesce = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                pausingReached.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+        }
+        for await _ in pausing { break }
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.pause(recordID: record.id))
+        release.open()
+        _ = await quiesce.value
+
+        #expect(await engine.hasQuiesced(connectionID: harness.connectionID, since: generation))
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation) == false)
+
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        #expect(await harness.session?.session.allTasks.allSatisfy { $0.state != .running } ?? true)
+        never.open()
+    }
+
+    /// A quiesce rejects its server's transfers that survived a relaunch before it waits for
+    /// the session, so the activation it waits for (or one beginning once that one failed)
+    /// cancels them instead of adopting them.
+    @Test func quiesceRejectsSurvivorsBeforeWaitingForTheSession() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let (reading, readingReached) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let reads = Mutex(0)
+        let adoptions = Mutex(0)
+        let base = harness.base
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                // Only the first activation's read waits.
+                if reads.withLock({
+                    $0 += 1
+                    return $0
+                }) == 1 {
+                    readingReached.yield()
+                    await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+                }
+                return try await store.allRecords()
+            },
+            adoptionStarted: { _ in adoptions.withLock { $0 += 1 } },
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+            })
+        // The quiesce's own wait for the session: the activation reads the downloads.
+        let quiesce = Task { await engine.quiesce(connectionID: harness.connectionID) }
+        for await _ in reading { break }
+        release.open()
+        #expect(await quiesce.value)
+
+        #expect(adoptions.withLock { $0 } == 0)
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        never.open()
+    }
+
     /// A part failing for good stops its siblings and may replay a start that overlapped it,
     /// after which its transfer would run with the old token: the quiesce waits for it, then
     /// stops what it started. In production the sign-out pauses the record first.

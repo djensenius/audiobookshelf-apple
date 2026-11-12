@@ -98,8 +98,15 @@ extension DownloadManager {
         let connectionID = record.key.serverConnectionID
         if failure != nil, await !engine.hasQuiesced(connectionID: connectionID, since: generation) {
             // Not left paused, as if by the user.
-            _ = try? await read {
+            let queued = try? await read {
                 try await self.store.setState(.queued, forRecord: recordID, expecting: [.paused])
+            }
+            // Checked again once queued, as the engine's resume does: a quiesce that began
+            // before the write may have passed over the paused record.
+            if queued == true, await engine.hasQuiesced(connectionID: connectionID, since: generation) {
+                _ = try? await read {
+                    try await self.store.setState(.paused, forRecord: recordID, expecting: [.queued])
+                }
             }
         }
         await refresh(recordID, announce: true)

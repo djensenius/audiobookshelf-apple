@@ -166,10 +166,22 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         quiescedSince.insert(generation)
     }
 
+    /// The generations a quiesce begins since as soon as ``hasQuiesced(connectionID:since:)``
+    /// is first asked about them (answering `false`), as one beginning just after that check.
+    private var quiescingAfterCheck: Set<Int> = []
+
+    func quiesce(afterNextCheckSince generation: Int) {
+        quiescingAfterCheck.insert(generation)
+    }
+
     func quiesceGeneration() -> Int { 0 }
 
     func hasQuiesced(connectionID: UUID, since generation: Int) -> Bool {
-        quiescedSince.contains(generation)
+        if quiescingAfterCheck.remove(generation) != nil {
+            quiescedSince.insert(generation)
+            return false
+        }
+        return quiescedSince.contains(generation)
     }
 
     /// ``resume(recordID:)``, unless quiesced since `generation` (and not made to throw): then it
