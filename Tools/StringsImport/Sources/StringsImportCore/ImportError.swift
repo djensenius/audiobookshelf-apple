@@ -5,6 +5,7 @@ public enum ImportError: Error, Equatable, CustomStringConvertible {
     case duplicateLocale(identifier: String)
     case invalidFile(fileName: String, reason: String)
     case duplicateKey(key: String, fileName: String)
+    case invalidBaselineLine(line: Int)
 
     public var description: String {
         switch self {
@@ -19,6 +20,8 @@ public enum ImportError: Error, Equatable, CustomStringConvertible {
             "\(fileName).json: \(reason)"
         case .duplicateKey(let key, let fileName):
             "native \(fileName).json defines \(key), which strings/ already has; rename the native key"
+        case .invalidBaselineLine(let line):
+            "\(HardCodedBaseline.path):\(line): expected '<file path><tab><source line>'"
         }
     }
 }

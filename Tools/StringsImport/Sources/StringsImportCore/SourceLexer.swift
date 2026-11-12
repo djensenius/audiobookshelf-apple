@@ -1,5 +1,6 @@
-/// Blanks out the comments in Swift source for ``SourceScanner``: enough of Swift's lexical
-/// structure to tell comments from string literals, not a parser.
+/// Blanks out the comments (and, if asked, the string literals' text) in Swift source for
+/// ``SourceScanner``: enough of Swift's lexical structure to tell comments from string literals,
+/// not a parser.
 enum SourceLexer {
     private enum Context {
         /// Top-level code.
@@ -22,7 +23,10 @@ enum SourceLexer {
     /// and line numbers are unchanged. Comments are `//` to the end of the line and `/* … */`,
     /// nested; neither starts inside a string literal. A single-line string ends at its line even
     /// if unterminated, so a misread (a quote in a regex literal) doesn't spread past it.
-    static func blankingComments(_ source: [UInt8]) -> [UInt8] {
+    ///
+    /// With `strings`, the text of string literals is blanked too (their quotes and
+    /// interpolated code are kept), so a brace or `#` in a string isn't taken for code.
+    static func blankingComments(_ source: [UInt8], strings: Bool = false) -> [UInt8] {
         var bytes = source
         var stack: [Context] = [.code]
         var index = 0
@@ -90,6 +94,11 @@ enum SourceLexer {
                 }
             case .string(let multiline, let count):
                 let byte = bytes[index]
+                let start = index
+                defer {
+                    // The text just passed over, not the closing quote or an interpolation's `\(`.
+                    if strings, case .string = stack.last, index > start { blank(start..<index) }
+                }
                 if byte == newline, !multiline {
                     stack.removeLast()
                     index += 1
