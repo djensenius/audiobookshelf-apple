@@ -901,9 +901,30 @@ public final class PlaybackCoordinator {
         case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: next.key))
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: next.key))
         }
+        let endedAt = (position: position, duration: engine.duration, lastPlayedAt: lastPlayedAt)
+        let attempt = generation + 1
         isStartingAdvance = true
         await start(key: next.key, startTime: nil, prepared: next)
         isStartingAdvance = false
+        // The next item left the queue during the close wait, so its start sent nothing (#338):
+        // back to the end of the item that ended, rather than leave the removed one selected.
+        // Not once the user asked for another item: a play still in its policy check hasn't
+        // bumped `generation` yet, but has the play-request counter.
+        guard generation == attempt, policyCheck == ended.playRequest, pendingPlayKey == nil,
+            phase == .unloaded, mediaKey == next.key, error == nil,
+            nextItemProvider?.isStillNext(next.key) == false
+        else { return }
+        generation += 1
+        mediaKey = key
+        restoredRecord = lastPlayedStore.load().flatMap { $0.key == key ? $0 : nil }
+        unloadedPosition = endedAt.position
+        unloadedDuration = endedAt.duration
+        lastPlayedAt = endedAt.lastPlayedAt
+        isResolvingStart = false
+        // Seeks and jumps made while the removed item was starting were for it, not this one.
+        pendingStartTime = nil
+        pendingJumpOffset = 0
+        emit(.itemChanged(key))
     }
 
     /// What the advance must find unchanged when the item ended: the generation, the resume
@@ -1111,7 +1132,7 @@ public final class PlaybackCoordinator {
         await waitForCloses()
         guard self.generation == generation else { return nil }
         // The next item changed during the wait (removed from the queue): no `/play`; the start
-        // ends as a cancelled one, with the item unloaded (#338).
+        // ends as a cancelled one, and the advance returns to the ended item (#338).
         if let prepared, nextItemProvider?.isStillNext(prepared.key) == false { throw CancellationError() }
         let sessions = self.sessions
         let progressStore = self.progressStore

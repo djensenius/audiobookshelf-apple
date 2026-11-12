@@ -283,22 +283,75 @@ struct AutoAdvanceTests {
         #expect(coordinator.error == nil)
     }
 
-    /// L3: B left the queue while the ended session's close was in flight: no `/play` for it.
+    /// #338: B left the queue while the ended session's close was in flight: no `/play` for it,
+    /// and A is selected again, unloaded at its end, rather than the removed B.
     @Test func itemRemovedDuringTheCloseWaitIsNotStarted() async {
         a.enqueue("B")
         await a.play("A")
+        let before = a.fetches
+
+        await removeBDuringTheCloseWait {}
+
+        #expect(a.service.starts == ["A"])
+        #expect(a.fetches == before)
+        #expect(coordinator.mediaKey == a.key("A"))
+        #expect(coordinator.phase == .unloaded)
+        #expect(coordinator.currentTime == 3600)
+        #expect(coordinator.error == nil)
+        #expect(a.h.events.events.last == .itemChanged(a.key("A")))
+        #expect(a.activity.active == 0)
+    }
+
+    /// #338: a play for C still in its policy check when B's start gives up wins over the return to A.
+    @Test func playRequestedDuringTheCloseWaitStillStarts() async {
+        a.enqueue("B")
+        await a.play("A")
+        let policyGate = Gate()
+        a.h.policy.gate = policyGate
+        var playing: Task<Void, Never>?
+
+        await removeBDuringTheCloseWait {
+            playing = Task { await coordinator.play(itemID: "C") }
+            await yieldUntil { coordinator.pendingPlayKey == a.key("C") }
+        }
+        policyGate.open()
+        await playing?.value
+
+        #expect(a.service.starts == ["A", "C"])
+        #expect(coordinator.mediaKey == a.key("C"))
+    }
+
+    enum PositionCommand: CaseIterable { case seek, jumpBack }
+
+    /// #338: a seek or jump made while B was starting was for B; A stays at its end.
+    @Test(arguments: PositionCommand.allCases)
+    func positionCommandsForTheRemovedItemDontMoveA(_ command: PositionCommand) async {
+        a.enqueue("B")
+        await a.play("A")
+
+        await removeBDuringTheCloseWait {
+            switch command {
+            case .seek: _ = await coordinator.seek(to: 100)
+            case .jumpBack: await coordinator.jump(by: -30)
+            }
+        }
+
+        #expect(coordinator.mediaKey == a.key("A"))
+        #expect(coordinator.currentTime == 3600)
+        await coordinator.play(itemID: "A")
+        #expect(a.h.engine.loads.last?.time == 0)
+    }
+
+    /// Ends A with B next, does `action` while A's close holds B's start, then removes B.
+    private func removeBDuringTheCloseWait(_ action: () async -> Void) async {
         let gate = Gate()
         a.service.state.withLock { $0.closeGates["A-1"] = gate }
         a.h.engine.finish()
         await yieldUntil { a.service.closes == ["A-1"] }
-
+        await action()
         a.queue.remove(a.key("B"))
         gate.open()
         await coordinator.waitForAutoAdvance()
-
-        #expect(a.service.starts == ["A"])
-        #expect(coordinator.phase == .unloaded)
-        #expect(a.activity.active == 0)
     }
 
     // MARK: - Background activity

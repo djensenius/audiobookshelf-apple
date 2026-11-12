@@ -14,7 +14,8 @@ enum ItemDetailPreviewData {
         "Swashbuckling Heroes", "A Very Long Tag Without Any Natural Place To Break It Up",
     ])
 
-    /// A Princess of Mars, with rich metadata; the parameters vary it for previews and tests.
+    /// A Princess of Mars, with rich metadata, chapters, three tracks, and two ebook files among
+    /// its library files; the parameters vary it for previews and tests.
     static func makeBook(
         authors: [Author] = [Author(id: "aut_burroughs", name: "Edgar Rice Burroughs")],
         narrators: [String] = ["Grover Gardner", "Stefan Rudnicki"],
@@ -36,11 +37,42 @@ enum ItemDetailPreviewData {
             language: "English", explicit: true, abridged: true)
         let book = Book(
             id: "book_li_barsoom_1", libraryItemId: "li_barsoom_1", metadata: metadata,
-            coverPath: "/metadata/items/li_barsoom_1/cover.jpg", tags: tags,
-            tracks: [AudioTrack(index: 1, duration: duration)], duration: duration, numTracks: 1)
+            coverPath: "/metadata/items/li_barsoom_1/cover.jpg", tags: tags, chapters: chapters(duration: duration),
+            ebookFile: EbookFile(ino: "ino_epub", metadata: file("A Princess of Mars.epub"), ebookFormat: .epub),
+            tracks: (1...3).map { index in
+                AudioTrack(
+                    index: index, startOffset: duration / 3 * Double(index - 1), duration: duration / 3,
+                    title: "Part \(index)", metadata: file("A Princess of Mars - Part \(index).m4b"))
+            }, duration: duration, numTracks: 3)
         return ABSCore.LibraryItem(
             id: "li_barsoom_1", libraryId: SampleLibrary.libraryID, updatedAt: 14, mediaType: .book,
-            media: .book(book), size: size)
+            media: .book(book),
+            libraryFiles: [
+                LibraryFile(ino: "ino_part1", metadata: file("A Princess of Mars - Part 1.m4b"), fileType: "audio"),
+                LibraryFile(
+                    ino: "ino_epub", metadata: file("A Princess of Mars.epub", size: 412_000), fileType: "ebook"),
+                LibraryFile(ino: "ino_cover", metadata: file("cover.jpg"), fileType: "image"),
+                LibraryFile(
+                    ino: "ino_pdf", metadata: file("A Princess of Mars (1917 facsimile).pdf", size: 18_300_000),
+                    isSupplementary: true, fileType: "ebook"),
+            ], size: size)
+    }
+
+    /// Chapters 1–5 by name, then numbered ones to the end; one has no title.
+    private static func chapters(duration: Double) -> [Chapter] {
+        let named = ["On the Arizona Hills", "The Escape of the Dead", "My Advent on Mars", "A Prisoner", ""]
+        let count = 28
+        let length = duration / Double(count)
+        return (0..<count).map { index in
+            Chapter(
+                id: index, start: length * Double(index), end: length * Double(index + 1),
+                title: index < named.count ? named[index] : "Chapter \(index + 1)")
+        }
+    }
+
+    private static func file(_ name: String, size: Int? = nil) -> FileMetadata {
+        let ext = name.split(separator: ".").last.map { ".\($0)" }
+        return FileMetadata(filename: name, ext: ext, path: "/audiobooks/A Princess of Mars/\(name)", size: size)
     }
 
     /// An ebook with no audio tracks.
@@ -81,8 +113,8 @@ struct PreviewItemDetailService: ItemDetailService {
     }
 }
 
-/// ``ItemDetailScreen`` over a preview model, with a `playItem` that does nothing unless
-/// `canPlay` is off.
+/// ``ItemDetailScreen`` over a preview model, with a `playItem` that logs its start time, or
+/// none when `canPlay` is off.
 struct ItemDetailPreview: View {
     @State private var model: ItemDetailModel
     private let canPlay: Bool
@@ -105,6 +137,13 @@ struct ItemDetailPreview: View {
             ItemDetailScreen(model: model)
                 .task { await model.loadIfNeeded() }
         }
-        .environment(\.playItem, canPlay ? PlayItemAction { _, _, _ in } : nil)
+        .environment(
+            \.playItem,
+            canPlay
+                ? PlayItemAction { itemID, _, startTime in
+                    Log.ui.notice(
+                        "Preview play \(itemID, privacy: .public) from \(startTime.map { "\($0)" } ?? "saved position", privacy: .public)"
+                    )
+                } : nil)
     }
 }

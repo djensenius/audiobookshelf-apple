@@ -167,6 +167,24 @@ import SwiftData
         }
     }
 
+    /// Deletes a connection ``remove(id:now:)`` disconnected, once nothing retains it (the same
+    /// checks as `remove`), for the downloads' cleanup pass, which decides from an earlier read.
+    /// In the same write, it does nothing unless the row still exists, is still disconnected,
+    /// and still has `disconnectedAt`: a login since then (which reuses the `id` and clears
+    /// `isDisconnected`) or a later removal wins. It never marks a connection disconnected.
+    ///
+    /// - Returns: whether the connection was deleted.
+    @discardableResult
+    public func removeIfDisconnected(id: UUID, disconnectedAt: Date?) throws -> Bool {
+        try commit {
+            guard let record = try fetchRecord(id: id), record.isDisconnected,
+                record.disconnectedAt == disconnectedAt, try !hasRetainedRecords(connectionID: id)
+            else { return false }
+            modelContext.delete(record)
+            return true
+        }
+    }
+
     // MARK: - Private
 
     private func fetchRecord(id: UUID) throws -> ServerConnectionRecord? {

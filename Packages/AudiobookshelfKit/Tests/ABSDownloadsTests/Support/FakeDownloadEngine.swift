@@ -1,6 +1,7 @@
 import ABSCore
 import ABSData
 import Foundation
+import SwiftData
 import Synchronization
 
 @testable import ABSDownloads
@@ -60,6 +61,14 @@ actor FakeDownloadEngine: DownloadEngineControlling {
 
     func stop(partIDs: [UUID], keepingResumeData: Bool) async {
         stopped.append(Stop(partIDs: partIDs, keepingResumeData: keepingResumeData))
+        await afterStop?(partIDs)
+    }
+
+    /// Runs after each stop is recorded, before it returns, as a launch racing it can.
+    private var afterStop: (@Sendable ([UUID]) async -> Void)?
+
+    func onStop(_ body: @escaping @Sendable ([UUID]) async -> Void) {
+        afterStop = body
     }
 
     /// Marks a record whose parts have all completed as being finalised, reading it now.
@@ -213,6 +222,8 @@ final class ManagerFixture: Sendable {
     let root = FileManager.default.temporaryDirectory.appending(path: "manager-\(UUID().uuidString)")
     let store: DownloadStore
     let localItems: LocalItemStore
+    let connections: ServerConnectionStore
+    let container: ModelContainer
     let connectionID: UUID
     let engine: FakeDownloadEngine
     let capacity: FakeCapacity
@@ -231,8 +242,9 @@ final class ManagerFixture: Sendable {
         checkpoints = stream
         checkpoint = continuation
         capacity = FakeCapacity { continuation.yield(.capacity) }
-        let container = try DataStack(location: .inMemory).container
-        connectionID = try await ServerConnectionStore(modelContainer: container).upsertLogin(
+        container = try DataStack(location: .inMemory).container
+        connections = ServerConnectionStore(modelContainer: container)
+        connectionID = try await connections.upsertLogin(
             address: ServerAddress("https://abs.example.com")!, userId: "usr_1", username: "reader",
             authMethod: .local, serverVersion: "2.26.0"
         ).id
@@ -340,9 +352,11 @@ final class ManagerFixture: Sendable {
 
     /// Stores `item` (or its episode) as downloaded, as the engine does when a record completes.
     @discardableResult
-    func storeDownloaded(_ item: LibraryItem, episodeID: String? = nil) async throws -> LocalLibraryItemDTO {
+    func storeDownloaded(
+        _ item: LibraryItem, episodeID: String? = nil, connectionID: UUID? = nil
+    ) async throws -> LocalLibraryItemDTO {
         var record = try DownloadPlanner(locations: locations).plan(
-            item: item, episodeID: episodeID, connectionID: connectionID, existingCoverPath: nil)
+            item: item, episodeID: episodeID, connectionID: connectionID ?? self.connectionID, existingCoverPath: nil)
         for index in record.parts.indices {
             record.parts[index].state = .completed
             record.parts[index].bytesWritten = record.parts[index].expectedBytes
