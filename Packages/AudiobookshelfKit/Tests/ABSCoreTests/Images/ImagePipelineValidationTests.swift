@@ -159,6 +159,19 @@ import UniformTypeIdentifiers
         #expect(await pipeline.networkFetchCount == 0)
     }
 
+    @Test func aPlainHTTPExternalCoverIsNeverFetchedButHTTPSIs() async throws {
+        let host = PipelineHarness.pngRoute()
+        let store = CoverFileStore(directory: directory.appending(path: "Images"), limit: 1 << 20)
+        let pipeline = ImagePipeline(
+            limits: .iPhone, fileStore: store, sessionConfiguration: ImageStubProtocol.configuration())
+        await #expect(throws: ImagePipelineError.noRequest) {
+            try await pipeline.image(for: harness.key(url: URL(string: "http://\(host)/cover.png")), pixelBox: gridBox)
+        }
+        #expect(await pipeline.networkFetchCount == 0)
+        _ = try await pipeline.image(for: harness.key(url: URL(string: "https://\(host)/cover.png")), pixelBox: gridBox)
+        #expect(await pipeline.networkFetchCount == 1)
+    }
+
     @Test func removedServerSkipsDownloadedCoversUntilItsBuilderIsSetAgain() async throws {
         let covers = CountingCovers(file: try TestImages.file(width: 100, height: 160, in: directory))
         let store = CoverFileStore(directory: directory.appending(path: "Images"), limit: 1 << 20)

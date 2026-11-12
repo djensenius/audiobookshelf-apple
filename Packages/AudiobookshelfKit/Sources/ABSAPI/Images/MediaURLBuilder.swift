@@ -56,8 +56,8 @@ public struct MediaURLBuilder: ImageRequestBuilding {
             url = built
             sendsCustomHeaders = true
         case .external(let external):
-            // Only this server or a public host: a server-supplied URL mustn't reach this device or
-            // the user's network.
+            // Only this server or a public `https` host: a server-supplied URL mustn't reach this
+            // device or the user's network.
             guard ImageDestination.isAllowed(external, server: configuration.baseURL) else { return nil }
             url = external
             // Credentials never leave the server's origin.

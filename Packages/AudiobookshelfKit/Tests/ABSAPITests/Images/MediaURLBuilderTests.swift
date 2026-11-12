@@ -91,7 +91,11 @@ private func makeBuilder(customHeaders: [String: String] = [:]) throws -> MediaU
         #expect(try makeBuilder().imageRequest(for: .external(file)) == nil)
     }
 
-    @Test(arguments: ["http://127.0.0.1:8080/admin/reboot", "http://192.168.1.1/cover.jpg", "http://nas.local/c.jpg"])
+    @Test(arguments: [
+        "http://127.0.0.1:8080/admin/reboot", "https://192.168.1.1/cover.jpg", "https://nas.local/c.jpg",
+        // A public name over plain http could resolve to a local service.
+        "http://images.example/cover.jpg",
+    ])
     func externalSourceOnThisDeviceOrTheLocalNetworkIsRejected(url: String) throws {
         let external = try #require(URL(string: url))
         #expect(try makeBuilder().imageRequest(for: .external(external)) == nil)

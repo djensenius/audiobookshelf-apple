@@ -173,8 +173,8 @@ final class ImageDownload: Sendable {
     /// origin keep the original headers. Once a hop leaves it, the request is rebuilt with only
     /// `Accept`, and every later hop stays stripped. No hop uses cookies. A hop off the request's
     /// origin must pass ``ImageDestination``: the first request did, so its origin is the
-    /// connection's server or a public host, and nothing else on this device or the local network
-    /// is reachable.
+    /// connection's server or a public `https` host, and any other hop must be a public `https`
+    /// host, so nothing else on this device or the local network is reachable.
     func redirect(following response: HTTPURLResponse, to request: URLRequest) -> URLRequest? {
         guard let target = request.url, ImageDestination.isAllowed(target, server: original.url) else { return nil }
         let wasStripped = state.withLock { $0.isStripped }
