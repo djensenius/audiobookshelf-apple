@@ -150,4 +150,37 @@ import Testing
         let download = ImageDownload(original: original)
         #expect(try hop(download, from: "https://abs.example/a", to: "http://abs.example/b") == nil)
     }
+
+    @Test(arguments: ["http://127.0.0.1/admin", "http://[::1]/a", "http://192.168.1.1/a", "http://nas.local/a"])
+    func aHopToThisDeviceOrTheLocalNetworkIsRefused(target: String) throws {
+        let download = ImageDownload(original: original)
+        #expect(try hop(download, from: "http://abs.example/a", to: target) == nil)
+        // Also after a public hop.
+        let other = ImageDownload(original: original)
+        _ = try hop(other, from: "http://abs.example/a", to: "http://cdn.example/b")
+        #expect(try hop(other, from: "http://cdn.example/b", to: target) == nil)
+    }
+
+    @Test func aLocalNetworkServerMayRedirectWithinItsOriginButNotElsewhereOnTheNetwork() throws {
+        var request = URLRequest(url: try #require(URL(string: "http://192.168.1.5:13378/api/items/1/cover")))
+        request.setValue("secret", forHTTPHeaderField: "CF-Access-Client-Secret")
+        let download = ImageDownload(original: request)
+        let same = try hop(download, from: "http://192.168.1.5:13378/a", to: "http://192.168.1.5:13378/b")
+        #expect(same?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
+        #expect(try hop(download, from: "http://192.168.1.5:13378/b", to: "http://192.168.1.5:8080/c") == nil)
+        #expect(try hop(download, from: "http://192.168.1.5:13378/b", to: "http://192.168.1.6:13378/c") == nil)
+    }
+
+    @Test func aCrossOriginHopDropsAuthorization() throws {
+        var request = original
+        request.setValue("Bearer t", forHTTPHeaderField: "Authorization")
+        let download = ImageDownload(original: request)
+        let from = try #require(URL(string: "http://abs.example/a"))
+        let response = try #require(HTTPURLResponse(url: from, statusCode: 302, httpVersion: nil, headerFields: nil))
+        var proposed = URLRequest(url: try #require(URL(string: "https://cdn.example/b")))
+        proposed.setValue("Bearer t", forHTTPHeaderField: "Authorization")
+        let next = try #require(download.redirect(following: response, to: proposed))
+        #expect(next.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(next.value(forHTTPHeaderField: "CF-Access-Client-Secret") == nil)
+    }
 }

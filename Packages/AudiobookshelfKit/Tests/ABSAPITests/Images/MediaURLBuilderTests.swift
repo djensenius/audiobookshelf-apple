@@ -90,4 +90,18 @@ private func makeBuilder(customHeaders: [String: String] = [:]) throws -> MediaU
         let file = try #require(URL(string: "file:///tmp/cover.jpg"))
         #expect(try makeBuilder().imageRequest(for: .external(file)) == nil)
     }
+
+    @Test(arguments: ["http://127.0.0.1:8080/admin/reboot", "http://192.168.1.1/cover.jpg", "http://nas.local/c.jpg"])
+    func externalSourceOnThisDeviceOrTheLocalNetworkIsRejected(url: String) throws {
+        let external = try #require(URL(string: url))
+        #expect(try makeBuilder().imageRequest(for: .external(external)) == nil)
+    }
+
+    @Test func externalSourceOnALocalNetworkServersOwnOriginIsAllowed() throws {
+        let base = try #require(URL(string: "http://192.168.1.5:13378"))
+        let builder = MediaURLBuilder(configuration: try APIClientConfiguration(baseURL: base))
+        let external = try #require(URL(string: "http://192.168.1.5:13378/metadata/items/li1/cover.jpg"))
+
+        #expect(builder.imageRequest(for: .external(external))?.url == external)
+    }
 }

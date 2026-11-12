@@ -336,8 +336,9 @@ public actor ImagePipeline {
         if let builder = builders[key.serverID] {
             built = builder.imageRequest(for: key.source)
         } else if let url = key.externalURL {
-            // External covers never carry the server's headers, so no builder is needed.
-            built = URLRequest(url: url)
+            // External covers never carry the server's headers, so no builder is needed. Without
+            // the server's address, only a public host is allowed.
+            built = ImageDestination.isAllowed(url, server: nil) ? URLRequest(url: url) : nil
         } else {
             built = nil
         }

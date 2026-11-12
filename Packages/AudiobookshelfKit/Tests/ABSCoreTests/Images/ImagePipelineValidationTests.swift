@@ -148,6 +148,17 @@ import UniformTypeIdentifiers
         _ = try await pipeline.image(for: harness.key(), pixelBox: gridBox)
     }
 
+    @Test func anExternalCoverOnThisDeviceIsNeverFetchedWithoutABuilder() async throws {
+        let store = CoverFileStore(directory: directory.appending(path: "Images"), limit: 1 << 20)
+        let pipeline = ImagePipeline(
+            limits: .iPhone, fileStore: store, sessionConfiguration: ImageStubProtocol.configuration())
+        let local = harness.key(url: URL(string: "http://127.0.0.1:8080/admin/reboot"))
+        await #expect(throws: ImagePipelineError.noRequest) {
+            try await pipeline.image(for: local, pixelBox: gridBox)
+        }
+        #expect(await pipeline.networkFetchCount == 0)
+    }
+
     @Test func removedServerSkipsDownloadedCoversUntilItsBuilderIsSetAgain() async throws {
         let covers = CountingCovers(file: try TestImages.file(width: 100, height: 160, in: directory))
         let store = CoverFileStore(directory: directory.appending(path: "Images"), limit: 1 << 20)
