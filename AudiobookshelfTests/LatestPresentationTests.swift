@@ -84,6 +84,19 @@ private func recent(_ id: String, explicit: Bool = false) -> RecentEpisode {
             LatestPresentation.detailsValue(plain, published: nil, badges: [], spokenSummary: nil) == "Classic Tales")
     }
 
+    @Test func goToPodcastOpensTheEpisodesPodcastOnTheSelectedTab() throws {
+        let row = try #require(LatestEpisode(recent("e1")))
+        let route = LatestPresentation.podcastRoute(row)
+        #expect(route == .item(id: "li_pod"))
+        #expect(L10n.string("ButtonGoToPodcast") != "ButtonGoToPodcast")
+
+        let router = Router()
+        router.selectedTab = .latest
+        BrowsePresentation.open(route, in: router)
+        BrowsePresentation.open(route, in: router)
+        #expect(router[path: .latest] == [.item(id: "li_pod")])
+    }
+
     @Test func theModelLoadsTheKeysLibraryAndResolvesItsStates() async throws {
         let suite = "LatestPresentationTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
