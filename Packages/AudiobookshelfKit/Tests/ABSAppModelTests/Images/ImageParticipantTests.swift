@@ -14,6 +14,7 @@ private final class FakeBuilderSink: ImageRequestBuilderSink {
         case set(UUID, URLRequest?)
         case cleared(UUID)
         case removed(UUID)
+        case swept(keeping: Set<UUID>)
     }
 
     enum Call: Hashable {
@@ -22,6 +23,10 @@ private final class FakeBuilderSink: ImageRequestBuilderSink {
 
     private(set) var events: [Event] = []
     var holding: Set<Call> = []
+    /// The servers with cached covers, for a sweep.
+    var cachedServers: Set<UUID> = []
+    /// The servers given a builder, as the pipeline tracks them: a sweep keeps them.
+    private var sessionServers: Set<UUID> = []
     private var held: [CheckedContinuation<Void, Never>] = []
 
     var heldCount: Int { held.count }
@@ -35,6 +40,7 @@ private final class FakeBuilderSink: ImageRequestBuilderSink {
     }
 
     func setRequestBuilder(_ builder: (any ImageRequestBuilding)?, for serverID: UUID) async {
+        sessionServers.insert(serverID)
         if let builder {
             await hold(.set)
             events.append(.set(serverID, builder.imageRequest(for: Self.cover)))
@@ -47,6 +53,18 @@ private final class FakeBuilderSink: ImageRequestBuilderSink {
     func removeServer(_ serverID: UUID) async {
         await hold(.remove)
         events.append(.removed(serverID))
+    }
+
+    func serversToSweep(keepingOnly saved: Set<UUID>) async -> Set<UUID> {
+        events.append(.swept(keeping: saved))
+        return cachedServers.subtracting(saved)
+    }
+
+    func removeServerUnlessInSession(_ serverID: UUID) async -> Bool {
+        await hold(.remove)
+        guard !sessionServers.contains(serverID) else { return false }
+        events.append(.removed(serverID))
+        return true
     }
 
     private func hold(_ call: Call) async {
@@ -269,5 +287,66 @@ private func settle() async {
         connections.saved = [identityA.connectionID]
         await settle()
         #expect(sink.removals == [identityB.connectionID])
+    }
+
+    // MARK: - Sweep (#421)
+
+    @Test func sweepKeepsTheSavedConnectionsOncePerLaunch() async {
+        let participant = ImageParticipant(sink: sink)
+        let saved: Set = [identityA.connectionID]
+
+        await participant.sweepRemovedConnections { saved }
+        await participant.sweepRemovedConnections { [] }
+
+        #expect(sink.events == [.swept(keeping: saved)])
+    }
+
+    @Test func sweepRemovesUnsavedServersButNotOnesWithASession() async throws {
+        let participant = ImageParticipant(sink: sink)
+        let removed = UUID()
+        sink.cachedServers = [identityA.connectionID, identityB.connectionID, removed]
+        // B signed in before the sweep but after the saved connections were read.
+        await participant.sessionDidStart(context(identityB, client: try client("https://b.example")))
+
+        await participant.sweepRemovedConnections { [identityA.connectionID] }
+
+        #expect(sink.removals == [removed])
+    }
+
+    /// A session started for a server while the sweep removes it (a disconnected connection
+    /// signed in again) installs its builder only after the removal, lease wait included, so it
+    /// can't cache covers the removal then deletes.
+    @Test func aSessionStartedDuringASweptRemovalWaitsForIt() async throws {
+        let participant = ImageParticipant(sink: sink)
+        sink.cachedServers = [identityA.connectionID]
+        sink.holding = [.remove]
+        let sweep = Task { await participant.sweepRemovedConnections { [] } }
+        #expect(await eventually { sink.heldCount == 1 })
+
+        let start = Task {
+            await participant.sessionDidStart(context(identityA, client: try? client("https://abs.example")))
+        }
+        await settle()
+        #expect(!sink.didSet(identityA))
+
+        sink.release()
+        await sweep.value
+        await start.value
+        #expect(sink.removals == [identityA.connectionID])
+        guard case .set(identityA.connectionID, _) = sink.events.last else {
+            Issue.record("Expected A's builder after its removal, got \(sink.events)")
+            return
+        }
+    }
+
+    @Test func sweepDeletesNothingWhenTheStoreCantBeRead() async {
+        let participant = ImageParticipant(sink: sink)
+
+        await participant.sweepRemovedConnections { nil }
+
+        #expect(sink.events.isEmpty)
+        // A later launch's read that works still sweeps.
+        await participant.sweepRemovedConnections { [identityA.connectionID] }
+        #expect(sink.events == [.swept(keeping: [identityA.connectionID])])
     }
 }
