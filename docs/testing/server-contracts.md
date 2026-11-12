@@ -62,10 +62,12 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `CollectionWriteContractTests` | Five collection writes; ordered two-book lifecycle and empty reads; permissions, atomic invalid create, no-ops/errors, version differences and failure teardown |
 | `PlaylistWriteContractTests` | Five owner-only writes; book/episode lifecycles, strict raw membership checks, ownership/access denials, atomic invalid add, safe characterization and exact-ID failure teardown |
 | `PlaybackSessionContractTests` | Start, sync and close; resume; same-device takeover; track URLs and ranges; downloads; local session upload |
+| `ListeningSessionContractTests` | An episode's stored sessions after a close, kept off the book's page; unknown item and unknown episode 404s |
 | `ProgressContractTests` | Each progress group, `lastUpdate`, finished and auto-finish, ebook progress, batch update, delete |
 | `LocalProgressContractTests` | `LocalProgressStore` sending to the server and settling on what it holds |
+| `BookmarkContractTests` | Create at whole and fractional times, rename on an existing time, update, delete by `pathTime`, a second delete (404), `GET /api/me` across items with raw counts, empty title (400) |
 
-Not covered yet: bookmarks, listening stats, Socket.IO events
+Not covered yet: listening stats, Socket.IO events
 (`ABSRealtime`) and OpenID sign-in (see [oidc.md](oidc.md) for the manual check).
 
 See [owned search contracts](search-contracts.md) for the explicit mode, fail-closed ownership,
@@ -98,6 +100,9 @@ Behaviour that holds on both, and that fixtures did not capture:
 - An ebook-only PATCH on a new row creates `duration` 0 and `currentTime` 0, and a location
   without `ebookProgress` keeps the stored `ebookProgress`.
 - An uploaded local session older than the stored progress is kept, with `progressSynced` false.
+- A bookmark is matched by item and `time ==` the number in the path, so `12.345` must travel as
+  `12.345`. Creating at an existing time renames that bookmark. Updating or deleting a missing
+  one is a 404, and an empty title is a 400 `Invalid title`.
 
 ### Sequential session evidence and the reconciliation test model (#275)
 

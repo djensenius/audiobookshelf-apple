@@ -1,0 +1,15 @@
+{
+  "feed": {
+    "id": "feed-fixture",
+    "entityType": "series",
+    "entityId": "series-fixture",
+    "feedUrl": "/feed/synthetic-series",
+    "meta": {
+      "title": "Synthetic Series",
+      "description": null,
+      "preventIndexing": true,
+      "ownerName": "Ada Fixture",
+      "ownerEmail": null
+    }
+  }
+}
