@@ -38,7 +38,8 @@ import SwiftData
     /// `coverRelativePath`.
     ///
     /// A cover-only download (`DownloadRecordDTO.isCoverOnly`) only sets the existing item's
-    /// cover and its time; its media, files and title stay as they are.
+    /// cover and its time, and only while it has no cover; its media, files and title stay as
+    /// they are. A file it fetched that the item doesn't use is left for the janitor's sweep.
     ///
     /// - Throws: ``StoreError/incompleteDownload`` unless every part completed,
     ///   ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist, and
@@ -64,6 +65,8 @@ import SwiftData
                     let item = try fetchItem(
                         serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
                 else { throw StoreError.itemNotFound }
+                // A cover the item got meanwhile (an episode carried one) is kept.
+                guard item.coverRelativePath == nil else { return LocalLibraryItemDTO(item) }
                 item.coverRelativePath = coverPath
                 if let coverUpdatedAt = coverUpdatedAt ?? download.media.coverUpdatedAt {
                     item.coverUpdatedAt = coverUpdatedAt

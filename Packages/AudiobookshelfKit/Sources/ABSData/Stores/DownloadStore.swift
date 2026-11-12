@@ -100,9 +100,12 @@ import SwiftData
         }
     }
 
-    /// Saves a new record, in one transaction, unless its connection is signed out or
-    /// disconnected, or a record with its key or `id` exists. For downloads nobody asked for
-    /// (a cover fetched again), which mustn't replace a record or start after a sign-out.
+    /// Saves a new record unless its connection is signed out or disconnected, or a record with
+    /// its key or `id` exists. For downloads nobody asked for (a cover fetched again), which
+    /// mustn't replace a record or start after a sign-out. The checks and the insert are one
+    /// transaction of this context only: a sign-out or connection removal saved from another
+    /// context at the same time can still miss it (best effort); the `DownloadJanitor` purges
+    /// such an orphan with the connection's other records.
     ///
     /// - Returns: the saved record, or `nil` without writing.
     /// - Throws: ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist, or

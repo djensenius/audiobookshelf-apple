@@ -348,6 +348,13 @@ import Testing
         #expect(updated.title == item.title)
         #expect(updated.media == item.media)
         #expect(updated.files == item.files)
+        // A cover the item has by then is kept.
+        var other = cover
+        other.parts = [part(.cover, "other.jpg", directory: "li_2")]
+        other.media.coverUpdatedAt = later
+        let kept = try await store.upsertFromDownload(other, now: later.addingTimeInterval(5))
+        #expect(kept.coverRelativePath == "li_2/cover.jpg")
+        #expect(kept.coverUpdatedAt == coverDate)
         let orphan = DownloadRecordDTO(
             key: MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_9"), mediaType: .podcast,
             title: "Gone", relativeDirectory: "li_9", media: LocalMediaSnapshot(metadata: .init(title: "Gone")),

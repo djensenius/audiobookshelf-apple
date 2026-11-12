@@ -20,7 +20,8 @@ import Testing
     /// Cancelling episode 1 can't hand the cover to anything, so a cover-only record fetches it
     /// again, and once it completes the local item has its cover.
     @Test func cancellingTheCoverHolderAfterTheOthersCompletedRefetchesTheCover() async throws {
-        let (fixture, manager, events) = try await Self.started()
+        let linker = FakeProgressLinker()
+        let (fixture, manager, events) = try await Self.started(progressLinking: linker)
         let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
         let cover = try #require(first.parts.last { $0.kind == .cover })
 
@@ -35,13 +36,13 @@ import Testing
         #expect(part.state == .queued)
         #expect(refetch.media.coverUpdatedAt == first.media.coverUpdatedAt)
         #expect(await fixture.engine.started.last == [part.id])
-        #expect(await events.next { _ in true } == .recordRemoved(recordID: first.id))
-        #expect(await events.next { _ in true } == .recordChanged(refetch))
+        #expect(await events.next { $0 == .recordRemoved(recordID: first.id) } != nil)
+        #expect(await events.next { $0 == .recordChanged(refetch) } != nil)
 
         try write(part.destinationRelativePath, fixture)
         try await Self.finalise(refetch, fixture)
 
-        #expect(await events.next { _ in true } == .recordRemoved(recordID: refetch.id))
+        #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
         let restored = try #require(try await fixture.localItems.item(id: local.id))
         #expect(restored.coverRelativePath == cover.destinationRelativePath)
         #expect(restored.coverUpdatedAt == first.media.coverUpdatedAt)
@@ -49,6 +50,8 @@ import Testing
         #expect(restored.media == local.media)
         #expect(exists(cover.destinationRelativePath, fixture))
         #expect(try await fixture.store.allRecords().isEmpty)
+        // Only episode 2 is linked: the refetch downloaded no media.
+        #expect(linker.calls == [.link(fixture.key(Self.item, episodeID: "ep_2"), local.id)])
     }
 
     /// A cover the cancelled record had already fetched becomes the local item's, as it is: the
@@ -107,8 +110,9 @@ import Testing
         #expect(try await fixture.localItems.item(id: local.id)?.coverRelativePath == nil)
     }
 
-    /// While a refetch is paused, another refused cover doesn't queue a second one.
-    @Test func aPausedRefetchIsNotDuplicated() async throws {
+    /// While a refetch is paused, another refused cover resumes it instead of queueing a second
+    /// one: hidden from the user, it would never be resumed otherwise.
+    @Test func aPausedRefetchIsResumedNotDuplicated() async throws {
         let (fixture, manager, events) = try await Self.started()
         let (first, _) = try await Self.secondEpisodeCompleted(fixture, manager, events)
         #expect(try await manager.cancel(recordID: first.id))
@@ -122,16 +126,18 @@ import Testing
 
         let records = try await fixture.store.allRecords()
         #expect(records.map(\.id) == [refetch.id])
-        #expect(records.first?.state == .paused)
+        #expect(records.first?.state == .queued)
+        #expect(await fixture.engine.resumed == [refetch.id])
     }
 
-    /// Nothing is fetched for a connection that was signed out.
-    @Test func nothingIsRefetchedAfterSignOut() async throws {
+    /// Nothing is fetched for a connection that was signed out or disconnected.
+    @Test(arguments: [false, true])
+    func nothingIsRefetchedAfterSignOut(disconnected: Bool) async throws {
         let (fixture, manager, events) = try await Self.started()
         let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
         let context = ModelContext(fixture.container)
         let connection = try #require(try context.fetch(FetchDescriptor<ServerConnectionRecord>()).first)
-        connection.signedOutAt = .now
+        if disconnected { connection.isDisconnected = true } else { connection.signedOutAt = .now }
         try context.save()
 
         #expect(try await manager.cancel(recordID: first.id))
@@ -173,11 +179,186 @@ import Testing
         }
     }
 
+    /// A refetch that fails for good is dropped, hidden as it is, and the item's next episode
+    /// completion fetches the cover again in a fresh record.
+    @Test func aRefetchThatFailsForGoodIsFetchedAgainAtTheNextCompletion() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, _) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        let cover = try #require(first.parts.last { $0.kind == .cover })
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        // Planned while the refetch is on its way: without a cover.
+        let third = try await Self.enqueue("ep_3", fixture, manager)
+        try #require(!third.parts.contains { $0.kind == .cover })
+        let part = try #require(refetch.parts.first)
+        try await fixture.store.setPartState(.failed, partID: part.id, taskIdentifier: nil, error: "404")
+        _ = try await fixture.store.setState(.failed, forRecord: refetch.id)
+
+        fixture.engine.updateContinuation.yield(
+            .partFailed(partID: part.id, recordID: refetch.id, code: .httpStatus, message: "404", willRetry: false))
+
+        let outcome = await events.next {
+            switch $0 {
+            case .recordRemoved(refetch.id), .failed: true
+            default: false
+            }
+        }
+        #expect(outcome == .recordRemoved(recordID: refetch.id))
+        #expect(try await fixture.store.record(key: fixture.key(Self.item)) == nil)
+
+        try write(third.parts[0].destinationRelativePath, fixture)
+        try await Self.finalise(third, fixture)
+
+        let again = try #require(await Self.nextRecordChanged(events))
+        #expect(again.isCoverOnly)
+        #expect(again.id != refetch.id)
+        #expect(again.parts.map(\.serverPath) == [cover.serverPath])
+        #expect(try await fixture.store.record(key: fixture.key(Self.item))?.id == again.id)
+    }
+
+    /// The engine finalised the last episode into a new local item between the hand-off's read
+    /// of the local item and its read of the records: the hand-off reads the local item again
+    /// and fetches the cover for it.
+    @Test func aCoverRefusedWhileTheLastEpisodeIsFinalisedIsFetchedAgain() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let first = try await Self.enqueue("ep_1", fixture, manager)
+        let second = try await Self.enqueue("ep_2", fixture, manager)
+        let cover = try #require(first.parts.last { $0.kind == .cover })
+        for part in second.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 1) }
+        try await fixture.engine.settle(second.id)
+        fixture.holdCoverHandOff()
+
+        let cancel = Task { try await manager.cancel(recordID: first.id) }
+        #expect(await fixture.checkpoints.first { $0 == .coverHandOffReading } != nil)
+        try await fixture.engine.finishSettling()
+        fixture.releaseCoverHandOff()
+
+        #expect(try await cancel.value)
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        #expect(refetch.isCoverOnly)
+        #expect(refetch.parts.map(\.serverPath) == [cover.serverPath])
+    }
+
+    /// An episode completes into a podcast without a cover while the episode holding it is
+    /// paused: the item's `cover.jpg`, still on disk, becomes its cover; without it, nothing is
+    /// fetched, as the server may have no cover.
+    @Test(arguments: [false, true])
+    func aCompletionWithoutARefusedCover(coverOnDisk: Bool) async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let first = try await Self.enqueue("ep_1", fixture, manager)
+        let second = try await Self.enqueue("ep_2", fixture, manager)
+        #expect(try await manager.pause(recordID: first.id))
+        let path = try DownloadLayout(
+            connectionID: fixture.connectionID, libraryItemID: Self.item.id, locations: fixture.locations
+        ).coverPath()
+        if coverOnDisk { try write(path, fixture) }
+        let starts = await fixture.engine.started.count
+
+        try await Self.finalise(second, fixture)
+
+        guard
+            case .completed(_, let itemID, _) = await events.next(where: {
+                if case .completed = $0 { true } else { false }
+            })
+        else { throw UnexpectedEvent() }
+        let local = try #require(try await fixture.localItems.item(id: itemID))
+        #expect(local.coverRelativePath == (coverOnDisk ? path : nil))
+        #expect(try await fixture.store.allRecords().map(\.id) == [first.id])
+        #expect(await fixture.engine.started.count == starts)
+    }
+
+    /// A deleted podcast's cover can't go to its last episode, being finalised: that episode's
+    /// completion, into a new local item, fetches it again.
+    @Test func aDeletedItemsCoverIsFetchedAgainAtTheNextCompletion() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let first = try await Self.enqueue("ep_1", fixture, manager)
+        let second = try await Self.enqueue("ep_2", fixture, manager)
+        let cover = try #require(first.parts.last { $0.kind == .cover })
+        for part in first.parts { try write(part.destinationRelativePath, fixture) }
+        try await Self.finalise(first, fixture)
+        guard
+            case .completed(_, let itemID, _) = await events.next(where: {
+                if case .completed = $0 { true } else { false }
+            })
+        else { throw UnexpectedEvent() }
+        for part in second.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 1) }
+        try await fixture.engine.settle(second.id)
+
+        #expect(try await manager.deleteLocalItem(id: itemID))
+        #expect(!exists(cover.destinationRelativePath, fixture))
+        try await fixture.engine.finishSettling()
+
+        let refetch = try #require(await Self.nextRecordChanged(events))
+        #expect(refetch.isCoverOnly)
+        #expect(refetch.parts.map(\.serverPath) == [cover.serverPath])
+    }
+
+    /// A refetch discarded after its item was deleted gives its cover to a local item made since.
+    @Test func aRefetchDiscardedAfterTheItemWasMadeAgain() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        let path = try #require(refetch.parts.first?.destinationRelativePath)
+        #expect(try await manager.deleteLocalItem(id: local.id))
+        let third = try await Self.enqueue("ep_3", fixture, manager)
+        for part in third.parts { try write(part.destinationRelativePath, fixture) }
+        try await Self.finalise(third, fixture)
+        guard
+            case .completed(_, let itemID, _) = await events.next(where: {
+                if case .completed = $0 { true } else { false }
+            })
+        else { throw UnexpectedEvent() }
+        var discarded = refetch
+        discarded.parts[0].state = .completed
+        try write(path, fixture)
+        _ = try await fixture.store.deleteRecord(refetch.id)
+
+        fixture.engine.updateContinuation.yield(.recordDiscarded(discarded))
+
+        #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
+        #expect(try await fixture.localItems.item(id: itemID)?.coverRelativePath == path)
+        #expect(exists(path, fixture))
+    }
+
+    /// A book's local item never gets a cover-only record: a book record always plans its own.
+    @Test func aBookIsNeverRefetched() async throws {
+        let (fixture, manager, _) = try await Self.started()
+        let book = LibraryItemFixtures.book()
+        let local = try await fixture.storeDownloaded(book)
+        _ = try await fixture.localItems.updateCover(itemID: local.id, relativePath: nil, updatedAt: nil)
+        let result = try await manager.enqueue(
+            item: book, episodeID: nil, connectionID: fixture.connectionID, replacingExisting: true)
+        guard case .started(let id) = result else { throw UnexpectedResult(result: result) }
+
+        #expect(try await manager.cancel(recordID: id))
+
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(try await fixture.localItems.item(id: local.id)?.coverRelativePath == nil)
+    }
+
+    /// Enqueueing a podcast without an episode isn't taken for its refetch, which shares the
+    /// podcast's key: the planner refuses it.
+    @Test func aPodcastWithoutAnEpisodeIsNotTheRefetch() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        try #require(try await fixture.store.record(key: fixture.key(Self.item))?.isCoverOnly == true)
+        // Without a local item, whose episodes would make it already downloaded.
+        #expect(try await manager.deleteLocalItem(id: local.id))
+
+        await #expect(throws: DownloadManagerError.episodeNotFound) {
+            try await manager.enqueue(item: Self.item, episodeID: nil, connectionID: fixture.connectionID)
+        }
+    }
+
     // MARK: - Helpers
 
-    private static func started() async throws -> (ManagerFixture, DownloadManager, AsyncStream<DownloadManagerEvent>) {
+    private static func started(
+        progressLinking: (any LocalProgressLinking)? = nil
+    ) async throws -> (ManagerFixture, DownloadManager, AsyncStream<DownloadManagerEvent>) {
         let fixture = try await ManagerFixture()
-        let manager = fixture.makeManager()
+        let manager = fixture.makeManager(progressLinking: progressLinking)
         try await manager.start()
         return (fixture, manager, await manager.events())
     }

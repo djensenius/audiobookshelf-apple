@@ -70,6 +70,9 @@ public actor DownloadManager {
     private let recordRead: (@Sendable (UUID) async -> Void)?
     /// Called by a clean-up between its two reads of the paths still in use.
     let usedPathsReading: (@Sendable () async -> Void)?
+    /// Called by a cover hand-off between its first read of the local item and its read of the
+    /// records.
+    let coverHandOffReading: (@Sendable () async -> Void)?
 
     /// Items with an enqueue, control, deletion or completion under way, by their item-level
     /// key (no episode). Each of these holds its item (``holdingItem(_:_:)``), so two calls for
@@ -93,10 +96,12 @@ public actor DownloadManager {
     /// overlapped one is made again (``readSettled(_:)``).
     private var forgotten = 0
     // Known limitation: a relaunch before the next episode completes loses a refused cover.
-    /// Covers of items that had no local item when nothing took them over
-    /// (``handOffCover(_:of:)``), by item-level key, while episode records of the item that are
-    /// being finalised remain: the first of them to complete fetches it again
-    /// (``restoreCover(after:itemID:)``). In memory only.
+    /// Covers of items to fetch again at the item's next episode completion
+    /// (``restoreCover(after:itemID:)``), by item-level key: one nothing took over while the
+    /// item had no local item (``handOffCover(_:of:)``) and episode records of it remained, or
+    /// one whose refetch failed for good (``dropFailedRefetch(_:)``). Dropped once used, or when
+    /// an episode completes into a deleted item and no record of the item is left. In memory
+    /// only.
     var refusedCovers: [MediaKey: CoverSource] = [:]
 
     /// - Parameters:
@@ -132,7 +137,8 @@ public actor DownloadManager {
         subscriberRemoved: (@Sendable () -> Void)? = nil,
         trackingRecords: (@Sendable () async -> Void)? = nil,
         recordRead: (@Sendable (UUID) async -> Void)? = nil,
-        usedPathsReading: (@Sendable () async -> Void)? = nil
+        usedPathsReading: (@Sendable () async -> Void)? = nil,
+        coverHandOffReading: (@Sendable () async -> Void)? = nil
     ) {
         self.store = store
         self.localItems = localItems
@@ -148,6 +154,7 @@ public actor DownloadManager {
         self.trackingRecords = trackingRecords
         self.recordRead = recordRead
         self.usedPathsReading = usedPathsReading
+        self.coverHandOffReading = coverHandOffReading
     }
 
     deinit {
@@ -257,6 +264,8 @@ public actor DownloadManager {
         defer { endEnqueuing(itemKey) }
         let key = MediaKey(serverConnectionID: connectionID, libraryItemId: item.id, episodeId: episodeID)
         var existing = try await read { try await self.store.record(key: key) }
+        // A cover-only record (#326) shares a podcast's item-level key; it isn't this download.
+        if existing?.isCoverOnly == true { existing = nil }
         if let record = existing, !replacingExisting {
             if let result = try await keep(record, item: item) { return result }
             // The record was finalised or deleted meanwhile: plan as if it never existed.
@@ -452,7 +461,10 @@ public actor DownloadManager {
         case .partFailed(_, let recordID, let code, let message, let willRetry):
             await refresh(recordID, announce: true)
             // A record cancelled meanwhile isn't tracked any more, and isn't reported again.
-            if !willRetry, tracked[recordID] != nil {
+            guard !willRetry, let record = tracked[recordID] else { break }
+            if record.isCoverOnly {
+                await dropFailedRefetch(recordID)
+            } else {
                 emit(.failed(recordID: recordID, code: code, message: message))
             }
         case .recordComplete(let recordID, let itemID):
@@ -476,7 +488,8 @@ public actor DownloadManager {
         var key = forget(recordID)
         if key == nil { key = await bookKey(ofLocalItem: itemID) }
         guard let key else {
-            Log.downloads.fault("A download completed that the manager didn't track")
+            // A podcast's record (an episode, or a cover-only one) can't be told from its item.
+            Log.downloads.fault("A download completed that the manager didn't track and isn't a book")
             return
         }
         await holdingItem(key) {
@@ -491,6 +504,7 @@ public actor DownloadManager {
             }
             guard downloaded, !isCoverOnly else {
                 reportRemoved(recordID)
+                if !isCoverOnly, key.episodeId != nil { await dropRefusedCoverIfUnused(key) }
                 return
             }
             await linkProgress(key: key, itemID: itemID)

@@ -169,9 +169,10 @@ extension DownloadManager {
     ///   to complete (``restoreCover(after:itemID:)``).
     func handOffCover(_ cover: CoverSource, of key: MediaKey) async throws(DownloadManagerError) {
         let itemKey = Self.itemKey(key)
-        let localItem = try await read {
+        var localItem = try await read {
             try await self.localItems.item(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
         }
+        await coverHandOffReading?()
         let existing = try await existingCover(for: itemKey, localItem: localItem)
         guard existing.pendingPath == nil, existing.completed == nil else { return }
         let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
@@ -199,8 +200,16 @@ extension DownloadManager {
             return
         }
         guard cover.restoresLocalItem else { return }
+        if localItem == nil {
+            // Read again, as `usedPaths(of:)` does: the engine may have finalised the last
+            // record into a new local item, and deleted it, since the first read.
+            localItem = try await read {
+                try await self.localItems.item(
+                    serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+            }
+        }
         if let localItem {
-            guard localItem.mediaType == .podcast else { return }
+            guard localItem.mediaType == .podcast, localItem.coverRelativePath == nil else { return }
             // Logged, not thrown: the clean-up goes on, and the files nothing uses go.
             do throws(DownloadManagerError) {
                 if size != nil {
