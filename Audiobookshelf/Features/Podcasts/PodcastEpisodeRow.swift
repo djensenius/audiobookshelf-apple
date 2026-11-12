@@ -53,12 +53,9 @@ struct PodcastEpisodeRow: View {
             )
             .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
             .itemActions(actions, perform: perform)
-            controls(progress: progress, actions: actions.map(\.kind))
-            if let progress, progress.isInProgress {
-                ProgressView(value: progress.fraction)
-                    .tint(ABSColor.progress)
-                    .accessibilityHidden(true)
-            }
+            EpisodeRowControls(
+                status: model.status(for: episode), progress: progress, actions: actions.map(\.kind),
+                isStarting: isStarting, isOtherStarting: isOtherStarting, isUpdating: isUpdating, perform: perform)
         }
         .padding(.vertical, ABSSpacing.medium)
     }
@@ -77,69 +74,9 @@ struct PodcastEpisodeRow: View {
                     .font(.subheadline)
                     .lineLimit(2)
             }
-            if !badges.isEmpty {
-                ItemDetailFlowLayout(spacing: ABSSpacing.xSmall) {
-                    ForEach(Array(badges.enumerated()), id: \.offset) { _, badge in
-                        Text(verbatim: badge)
-                            .font(.caption)
-                            .padding(.horizontal, ABSSpacing.small)
-                            .padding(.vertical, ABSSpacing.xxSmall)
-                            .background(ABSColor.secondarySurface, in: .capsule)
-                    }
-                }
-                .padding(.top, ABSSpacing.xSmall)
-            }
+            EpisodeBadges(badges: badges)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(.rect)
-    }
-
-    private func controls(progress: ItemProgress?, actions: [ItemActionKind]) -> some View {
-        let status = PodcastDetailPresentation.statusText(model.status(for: episode), locale: locale)
-        let isFinished = progress?.isFinished == true
-        let toggle: ItemActionKind = isFinished ? .markNotFinished : .markFinished
-        let toggleTitle = L10n.string(isFinished ? "SharedMarkAsNotFinished" : "MessageMarkAsFinished")
-        return HStack(spacing: ABSSpacing.medium) {
-            Button {
-                perform(.play)
-            } label: {
-                Label {
-                    Text(verbatim: status.text.isEmpty ? L10n.string("ButtonPlayEpisode") : status.text)
-                        .monospacedDigit()
-                } icon: {
-                    if isStarting {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "play.fill")
-                    }
-                }
-            }
-            .buttonStyle(.bordered)
-            .buttonBorderShape(.capsule)
-            .tint(isFinished ? Color.secondary : ABSColor.success)
-            .disabled(!actions.contains(.play) || isStarting || isOtherStarting)
-            .accessibilityLabel(Text(verbatim: L10n.string("ButtonPlayEpisode")))
-            .accessibilityValue(Text(verbatim: status.spoken))
-            Button {
-                perform(toggle)
-            } label: {
-                Label {
-                    Text(verbatim: toggleTitle)
-                } icon: {
-                    Image(systemName: isFinished ? "checkmark.circle.fill" : "checkmark.circle")
-                        .foregroundStyle(
-                            isFinished ? AnyShapeStyle(ABSColor.success) : AnyShapeStyle(ABSColor.mutedForeground))
-                }
-                .labelStyle(.iconOnly)
-                .imageScale(.large)
-                .frame(minWidth: 44, minHeight: 44)
-                .contentShape(.rect)
-            }
-            .buttonStyle(.borderless)
-            .disabled(!actions.contains(toggle) || isUpdating)
-            .help(Text(verbatim: toggleTitle))
-            Spacer(minLength: 0)
-        }
     }
 }
