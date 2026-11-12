@@ -107,6 +107,50 @@ import Testing
         #expect(PodcastEpisodeActions.available(for: nil, progress: nil, context: context, isGone: false).isEmpty)
     }
 
+    /// The shared controls of the podcast and Latest rows: Play's text, the finished toggle, the busy states and the
+    /// progress bar.
+    @Test func episodeRowControlsFollowStatusProgressAndBusyStates() {
+        func state(
+            _ status: PodcastDetailModel.EpisodeStatus, _ progress: ItemProgress?, actions: [ItemActionKind],
+            starting: Bool = false, otherStarting: Bool = false, updating: Bool = false
+        ) -> EpisodeRowControlsState {
+            EpisodeRowControlsState(
+                status: status, progress: progress, actions: actions, isStarting: starting,
+                isOtherStarting: otherStarting, isUpdating: updating, locale: locale)
+        }
+        let fresh = state(.notStarted(duration: 1_800), nil, actions: [.play, .markFinished])
+        #expect(fresh.playTitle == "30m")
+        #expect(fresh.playSpoken == "30 minutes")
+        #expect(fresh.canPlay && fresh.canToggle && !fresh.isFinished)
+        #expect(fresh.toggle == .markFinished)
+        #expect(fresh.toggleTitle == L10n.string("MessageMarkAsFinished"))
+        #expect(fresh.toggleSystemImage == "checkmark.circle")
+        #expect(fresh.progressFraction == nil)
+
+        // Under a minute the button just says Play Episode.
+        #expect(state(.notStarted(duration: 20), nil, actions: [.play]).playTitle == L10n.string("ButtonPlayEpisode"))
+
+        let listening = state(
+            .inProgress(remaining: 840), ItemProgress(fraction: 0.6), actions: [.play, .markFinished], starting: true)
+        #expect(listening.playTitle == "14m remaining")
+        #expect(listening.progressFraction == 0.6)
+        #expect(!listening.canPlay && listening.canToggle)
+        #expect(!state(.finished, nil, actions: [.play], otherStarting: true).canPlay)
+
+        let finished = state(
+            .finished, ItemProgress(fraction: 1, isFinished: true), actions: [.play, .markNotFinished], updating: true)
+        #expect(finished.playTitle == "Finished")
+        #expect(finished.isFinished && finished.canPlay && !finished.canToggle)
+        #expect(finished.toggle == .markNotFinished)
+        #expect(finished.toggleTitle == L10n.string("SharedMarkAsNotFinished"))
+        #expect(finished.toggleSystemImage == "checkmark.circle.fill")
+        #expect(finished.progressFraction == nil)
+
+        // A podcast gone from the server offers no actions, so nothing can be pressed.
+        let gone = state(.notStarted(duration: 1_800), nil, actions: [])
+        #expect(!gone.canPlay && !gone.canToggle)
+    }
+
     @Test func aFinishedEpisodePlaysFromTheStart() async {
         let episode = ItemSummary(id: "e1", itemID: "li", episodeID: "e1", kind: .episode, title: "E")
         let played = PlayedStarts()

@@ -29,6 +29,11 @@ enum LatestPresentation {
         return formatter.localizedString(for: date, relativeTo: now)
     }
 
+    /// Where Go to Podcast leads (legacy's podcast title linking to `/item/:libraryItemId`): the episode's podcast.
+    static func podcastRoute(_ row: LatestEpisode) -> Route {
+        .item(id: row.itemID)
+    }
+
     /// The row's details as VoiceOver reads them after the episode's title: the podcast, "Explicit", when it was
     /// published, the badges and the start of the summary.
     static func detailsValue(
