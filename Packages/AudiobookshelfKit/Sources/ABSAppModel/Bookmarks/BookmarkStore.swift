@@ -96,6 +96,8 @@ public final class BookmarkStore: SessionParticipant {
     @ObservationIgnored private var tails: [String: Tail] = [:]
     /// Every write not finished yet, including those queued behind a newer tail.
     @ObservationIgnored private var writeTasks: [Int: Task<Result<AudioBookmark?, any Error>, Never>] = [:]
+    /// Every load not finished yet, by seed request.
+    @ObservationIgnored private var loadTasks: [Int: Task<[AudioBookmark], any Error>] = [:]
     @ObservationIgnored private var tickets = 0
     /// Increases with every finished write.
     @ObservationIgnored private var commitSerial = 0
@@ -129,12 +131,17 @@ public final class BookmarkStore: SessionParticipant {
     ///
     /// Throws ``BookmarkStoreError/unavailable`` without a usable connection, `CancellationError`
     /// when ``clear()`` or the end of the session dropped the response, or the request's error.
+    /// The request runs in a task the store owns, which ``clear()`` and the end of the session
+    /// cancel, and so does cancelling the caller.
     public func refresh() async throws {
         guard let service = availableService else { throw BookmarkStoreError.unavailable }
         let token = beginSeed()
         loads += 1
         isLoading = true
+        let task = Task { try await service.allBookmarks() }
+        loadTasks[token.request] = task
         defer {
+            loadTasks[token.request] = nil
             // ``clear()`` reset the count, so a load from before it mustn't change it.
             if token.generation == generation {
                 loads -= 1
@@ -143,7 +150,11 @@ public final class BookmarkStore: SessionParticipant {
         }
         let bookmarks: [AudioBookmark]
         do {
-            bookmarks = try await service.allBookmarks()
+            bookmarks = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
         } catch {
             guard token.generation == generation else { throw CancellationError() }
             throw error
@@ -162,9 +173,11 @@ public final class BookmarkStore: SessionParticipant {
         appliedSeedRequest = 0
         pending = [:]
         tails = [:]
-        // A write still running could otherwise be retried with the next session's tokens.
+        // A write or load still running could otherwise be retried with the next session's tokens.
         for task in writeTasks.values { task.cancel() }
         writeTasks = [:]
+        for task in loadTasks.values { task.cancel() }
+        loadTasks = [:]
         loads = 0
         if isLoading { isLoading = false }
         committed = [:]
