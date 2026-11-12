@@ -68,6 +68,9 @@ public final class YearInReviewModel {
     public private(set) var error: (any Error)?
     /// Whether the user is admin or root, from `GET /api/me`; `false` until known.
     public private(set) var isAdminOrUp = false
+    /// Counts successful loads, even ones returning unchanged stats, so a view can redo what
+    /// depends on more than the stats, such as the card's cover downloads, after a refresh.
+    public private(set) var loadRevision = 0
 
     @ObservationIgnored private let service: any StatsService
     @ObservationIgnored private var hasCheckedUserType = false
@@ -172,6 +175,7 @@ public final class YearInReviewModel {
         case .success(let loaded):
             content = loaded
             error = nil
+            loadRevision += 1
         case .failure(let error):
             if !(error is CancellationError) { self.error = error }
         }

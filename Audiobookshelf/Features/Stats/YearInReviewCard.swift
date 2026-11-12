@@ -233,7 +233,9 @@ struct YearInReviewCard: View {
         func number(_ value: Int) -> String { value.formatted(.number.locale(locale)) }
         func count(_ key: String, _ value: Int) -> String { L10n.plural(key, count: value, locale: locale) }
         func time(_ seconds: Double) -> String {
-            L10n.string("LabelYearInReviewTimeSpentListening", listeningTime(seconds, locale: locale), locale: locale)
+            L10n.string(
+                "LabelYearInReviewTimeSpentListening", listeningTime(seconds, locale: locale, spoken: true),
+                locale: locale)
         }
         switch content {
         case .user(let stats):
@@ -278,12 +280,14 @@ struct YearInReviewCard: View {
     }
 
     /// Like legacy `$elapsedPrettyExtended(time, true, false)`: days, hours and minutes, with
-    /// "0m" for none.
-    static func listeningTime(_ seconds: Double, locale: Locale) -> String {
-        let text = DurationStyle.elapsed(showSeconds: false).string(seconds, locale: locale)
+    /// "0m" for none. `spoken` gives the full unit names VoiceOver reads ("1 day, 2 hours").
+    static func listeningTime(_ seconds: Double, locale: Locale, spoken: Bool = false) -> String {
+        let style = DurationStyle.elapsed(showSeconds: false)
+        let text =
+            spoken ? style.accessibilityString(seconds, locale: locale) : style.string(seconds, locale: locale)
         guard text.isEmpty else { return text }
         return Duration.zero.formatted(
-            Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: .narrow).locale(locale))
+            Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: spoken ? .wide : .narrow).locale(locale))
     }
 
     /// What VoiceOver reads for the rendered card: the title, the totals and the top lists.

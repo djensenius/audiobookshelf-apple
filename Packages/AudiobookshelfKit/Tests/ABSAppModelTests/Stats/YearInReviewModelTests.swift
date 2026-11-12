@@ -207,6 +207,24 @@ private func date(_ iso: String) throws -> Date {
         #expect(service.calls.withLock { $0 }.count(where: { $0.hasPrefix("user/") }) == 2)
     }
 
+    /// Each successful load bumps the revision, even with unchanged stats, so the view renders
+    /// the card again and retries covers that failed. Negative control: a failed load doesn't.
+    @Test func successfulLoadsBumpTheRevisionEvenWithUnchangedStats() async throws {
+        let service = FakeYearService(type: .user)
+        let model = try model(service)
+        #expect(model.loadRevision == 0)
+        await model.load()
+        let first = model.content
+        #expect(model.loadRevision == 1)
+        await model.load()
+        #expect(model.content == first)
+        #expect(model.loadRevision == 2)
+        service.failsYearStats.withLock { $0 = true }
+        await model.load()
+        #expect(model.error != nil)
+        #expect(model.loadRevision == 2)
+    }
+
     @Test func changingTheYearClearsTheOldStatsWhileLoading() async throws {
         let service = FakeYearService(type: .user)
         let model = try model(service)

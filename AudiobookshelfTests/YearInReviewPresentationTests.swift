@@ -100,6 +100,8 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
     @Test func tilesShowTheLegacyTotals() {
         let user = YearInReviewCard.tiles(for: .user(userStats), locale: english)
         #expect(user.map(\.value) == ["7", "1d 2h", "42", "9"])
+        // VoiceOver reads the full unit names; the tile shows the narrow ones.
+        #expect(user[1].spoken == "1 day, 2 hours spent listening")
         #expect(
             user.map(\.labelKey) == [
                 "LabelYearInReviewBooksFinished", "LabelYearInReviewSpentListening", "LabelYearInReviewSessions",
@@ -111,7 +113,7 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
         #expect(server.map(\.value) == ["3", "0m", "1,200", "2"])
         #expect(
             server.map(\.spoken) == [
-                "3 books added", "0m spent listening", "1,200 listening sessions", "2 authors added",
+                "3 books added", "0 minutes spent listening", "1,200 listening sessions", "2 authors added",
             ])
     }
 
@@ -124,13 +126,13 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
             locale: english)
         #expect(
             one.map(\.spoken) == [
-                "1 book finished", "1m spent listening", "1 listening session", "1 book listened to",
+                "1 book finished", "1 minute spent listening", "1 listening session", "1 book listened to",
             ])
     }
 
     @Test func summaryReadsTheTotalsAndTopLists() {
         let summary = YearInReviewCard.summary(for: .user(userStats), year: 2025, locale: english)
-        #expect(summary.hasPrefix("2025 Year in Review, 7 books finished, 1d 2h spent listening"))
+        #expect(summary.hasPrefix("2025 Year in Review, 7 books finished, 1 day, 2 hours spent listening"))
         #expect(summary.contains("Top Authors: Mary Shelley and Bram Stoker"))
         #expect(summary.hasSuffix("Top Genres: Horror"))
     }
@@ -153,8 +155,10 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
 
     // MARK: Render slot
 
-    private func key(year: Int, variant: YearInReviewVariant = .user) -> YearInReviewRenderKey {
-        YearInReviewRenderKey(content: .user(userStats), year: year, variant: variant, scale: 2, locale: english)
+    private func key(year: Int, variant: YearInReviewVariant = .user, revision: Int = 1) -> YearInReviewRenderKey {
+        YearInReviewRenderKey(
+            content: .user(userStats), year: year, variant: variant, scale: 2, locale: english,
+            loadRevision: revision)
     }
 
     /// A render that finishes after the selection changed doesn't replace the newer one's image,
@@ -191,5 +195,31 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
         let publishedFailure = slot.finish(nil, for: current, current: current)
         #expect(publishedFailure)
         #expect(slot.failed)
+    }
+
+    /// A successful refresh with unchanged stats gives a new key, so the view renders again and
+    /// retries covers that failed, while the current image stays shown until the new one is
+    /// ready. Negative control: without a refresh the key is unchanged, so nothing re-renders.
+    @Test func refreshOfUnchangedStatsRendersAgain() {
+        let loaded = key(year: 2024, revision: 1)
+        let refreshed = key(year: 2024, revision: 2)
+        #expect(key(year: 2024, revision: 1) == loaded)
+        #expect(refreshed != loaded)
+        #expect(refreshed.isSameSelection(as: loaded))
+        #expect(!key(year: 2025, revision: 2).isSameSelection(as: loaded))
+        var slot = YearInReviewRenderSlot<String>()
+        slot.begin(loaded)
+        let missingCovers = slot.finish("no covers", for: loaded, current: loaded)
+        #expect(missingCovers)
+        slot.begin(refreshed)
+        #expect(slot.image == "no covers")
+        let stale = slot.finish("late", for: loaded, current: refreshed)
+        #expect(!stale)
+        let withCovers = slot.finish("covers", for: refreshed, current: refreshed)
+        #expect(withCovers)
+        #expect(slot.image == "covers")
+        // Another selection still clears the image while it renders.
+        slot.begin(key(year: 2025, revision: 2))
+        #expect(slot.image == nil)
     }
 }

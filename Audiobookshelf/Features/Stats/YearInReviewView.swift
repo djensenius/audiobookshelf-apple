@@ -48,10 +48,12 @@ private struct YearInReviewContentView: View {
     /// Whether the last render of the loaded stats produced no image.
     private var renderFailed: Bool { rendered.failed }
 
-    /// What the card shows now.
+    /// What the card shows now. A successful refresh changes the key even when the stats are
+    /// unchanged, so covers that failed to download are fetched again.
     private var renderKey: YearInReviewRenderKey {
         YearInReviewRenderKey(
-            content: model.content, year: model.year, variant: model.variant, scale: renderScale, locale: locale)
+            content: model.content, year: model.year, variant: model.variant, scale: renderScale, locale: locale,
+            loadRevision: model.loadRevision)
     }
 
     var body: some View {
@@ -198,6 +200,15 @@ struct YearInReviewRenderKey: Hashable {
     var variant: YearInReviewVariant
     var scale: Double
     var locale: Locale
+    /// The model's ``YearInReviewModel/loadRevision``: bumped by each successful refresh.
+    var loadRevision = 0
+
+    /// Whether `other` shows the same card, perhaps from another load of the same stats.
+    func isSameSelection(as other: Self) -> Bool {
+        var other = other
+        other.loadRevision = loadRevision
+        return self == other
+    }
 }
 
 /// The card image shown and shared. Renders await covers, so an earlier one can finish after
@@ -210,10 +221,15 @@ struct YearInReviewRenderSlot<Image> {
     private(set) var key: YearInReviewRenderKey?
 
     /// Starts rendering `key`, clearing the image so another selection's isn't shown meanwhile.
+    /// A re-render of the same selection after a refresh keeps showing the current image; a
+    /// retry of the same key starts over.
     mutating func begin(_ key: YearInReviewRenderKey) {
+        let isRefresh = self.key.map { $0 != key && $0.isSameSelection(as: key) } ?? false
         self.key = key
-        image = nil
-        failed = false
+        if !isRefresh {
+            image = nil
+            failed = false
+        }
     }
 
     /// Publishes a render of `key` unless another render began since or `current`, the selection
