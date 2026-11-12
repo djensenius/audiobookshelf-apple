@@ -46,6 +46,8 @@ public final class SleepTimerAttachment {
             control: coordinator, feedback: feedback, shakeDetector: shakeDetector,
             options: Self.options(from: settings), clock: clock, calendar: calendar, tickInterval: tickInterval)
         let timer = timer
+        // The observer only hears of later loads, so the timer starts with the item already loaded.
+        timer.itemDidChange(coordinator.mediaKey?.rawValue)
         // The timer's own pause on `.ended` is delivered after `.ended`, and would end the grace period it opened.
         var pausedAtEnd = false
         observerToken = coordinator.addObserver { [weak timer] event in

@@ -160,6 +160,23 @@ struct SleepTimerAttachmentTests {
         attachment.detach()
     }
 
+    /// Attaching to a coordinator that already has an item tells the timer about it, so stopping that item later
+    /// is an item change that ends the grace period.
+    @Test func attachingAfterALoadTracksTheLoadedItem() async throws {
+        let t = try AttachmentHarness()
+        await t.coordinator.play(itemID: "A", startTime: 1000)
+        let attachment = try t.attach()
+        let timer = attachment.timer
+        await t.expire(timer)
+        #expect(timer.canRestart)
+
+        t.coordinator.stop()
+
+        #expect(!timer.canRestart)
+        #expect(!timer.reset())
+        attachment.detach()
+    }
+
     /// The timer pauses on `.ended`, before its next tick, so the queue doesn't advance and retarget it to B.
     @Test func endOfChapterTimerOnTheFinalChapterStopsTheQueueAdvance() async throws {
         let a = try AdvanceHarness()
