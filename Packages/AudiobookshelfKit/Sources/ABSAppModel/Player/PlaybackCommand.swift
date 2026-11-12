@@ -23,6 +23,12 @@ public enum PlaybackCommand: Hashable, CaseIterable, Sendable {
     case addBookmark
 }
 
+/// A Playback menu command that failed, for the menu to report.
+public enum PlaybackCommandFailure: Hashable, Sendable {
+    /// Add Bookmark's request failed, and the store rolled the bookmark back.
+    case addBookmark
+}
+
 /// An item of the Playback menu's Sleep Timer submenu.
 public enum SleepTimerCommand: Hashable, Sendable {
     /// Starts a timer of this many minutes, replacing any running one.
@@ -44,7 +50,8 @@ public enum SleepTimerCommand: Hashable, Sendable {
 ///   commands when they would move, and Add Bookmark when the bookmarks sheet's Create Bookmark
 ///   would be enabled (``PlayerBookmarksModel/canCreate``).
 /// - ``perform(_:)`` does nothing when the command isn't enabled, so a shortcut that fires before
-///   the menu has updated can't act on a state the menu didn't offer.
+///   the menu has updated can't act on a state the menu didn't offer. It returns a failed Add
+///   Bookmark, for the menu to report as the bookmarks sheet does.
 ///
 /// The next chapter, End of Chapter and Add Bookmark rules read the playback time, so read them only
 /// in small leaf views.
@@ -84,10 +91,12 @@ public struct PlaybackCommandsModel {
         }
     }
 
-    /// Runs `command` on the player; does nothing when it isn't enabled. Add Bookmark ignores
-    /// failures: the store rolls back a write the server rejects.
-    public func perform(_ command: PlaybackCommand) async {
-        guard isEnabled(command), let player = activePlayer else { return }
+    /// Runs `command` on the player; does nothing when it isn't enabled.
+    /// - Returns: ``PlaybackCommandFailure/addBookmark`` when Add Bookmark fails, after the store
+    ///   has rolled the bookmark back; `nil` otherwise, and when its request was cancelled.
+    @discardableResult
+    public func perform(_ command: PlaybackCommand) async -> PlaybackCommandFailure? {
+        guard isEnabled(command), let player = activePlayer else { return nil }
         switch command {
         case .playPause: await player.togglePlayPause()
         case .jumpBackward: await player.jumpBackward()
@@ -97,9 +106,15 @@ public struct PlaybackCommandsModel {
         case .speedUp: player.stepRate(up: true)
         case .speedDown: player.stepRate(up: false)
         case .addBookmark:
-            guard let model = bookmarksModel(player), let itemID = model.currentItemID else { return }
-            try? await model.create(title: "", itemID: itemID, at: model.creationTime)
+            guard let model = bookmarksModel(player), let itemID = model.currentItemID else { return nil }
+            do {
+                try await model.create(title: "", itemID: itemID, at: model.creationTime)
+            } catch is CancellationError {
+            } catch {
+                return .addBookmark
+            }
         }
+        return nil
     }
 
     private func bookmarksModel(_ player: PlayerViewModel) -> PlayerBookmarksModel? {

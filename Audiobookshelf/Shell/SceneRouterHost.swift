@@ -49,6 +49,7 @@ struct SceneRouterHost: View {
             ServerSwitchConfirmationModifier(router: navigation.router, reopen: reopen, prompt: $serverSwitchPrompt)
         )
         .focusedSceneValue(navigation.router)
+        .playbackCommandAlert()
         .refreshCommands(refreshCommands, router: navigation.router)
         .onAppear(perform: restoreOnce)
         .onChange(of: pendingLink) { openPendingLink() }

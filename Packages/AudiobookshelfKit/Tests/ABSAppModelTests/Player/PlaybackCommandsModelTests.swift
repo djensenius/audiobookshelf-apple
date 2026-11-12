@@ -165,9 +165,30 @@ struct PlaybackCommandsModelTests {
         #expect(time == 31)
         #expect(!title.isEmpty, "The date and time, as for an empty title (D9)")
         write.reply.resume(returning: nil)
-        await add.value
+        #expect(await add.value == nil)
         #expect(store.bookmarks(itemID: "li_book").map(\.time) == [30, 31])
         #expect(!model.isEnabled(.addBookmark), "Now one is at this second")
+    }
+
+    @Test func addBookmarkReportsAFailedRequest() async throws {
+        let harness = try Harness()
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        store.replaceAll(from: bookmarkUser([]))
+        harness.load(at: 31)
+        let model = harness.model(bookmarks: store)
+        var writes = service.writes.calls.makeAsyncIterator()
+
+        let rejected = Task { await model.perform(.addBookmark) }
+        try #require(await writes.next()).reply.resume(throwing: BookmarkTestError.rejected)
+        #expect(await rejected.value == .addBookmark)
+        #expect(store.bookmarks(itemID: "li_book").isEmpty, "The store rolled it back")
+
+        // Cancelling isn't failing, as in the bookmarks sheet.
+        let cancelled = Task { await model.perform(.addBookmark) }
+        try #require(await writes.next()).reply.resume(throwing: CancellationError())
+        #expect(await cancelled.value == nil)
+        #expect(store.bookmarks(itemID: "li_book").isEmpty)
     }
 
     @Test func addBookmarkWaitsForLoad() async throws {

@@ -37,9 +37,22 @@ import Testing
         #expect(SleepTimerCommand.cancel.title(locale: locale) == "Cancel Timer")
     }
 
+    @MainActor
+    @Test func failedBookmarkShowsTheSheetsMessage() {
+        #expect(PlaybackCommandFailure.addBookmark.messageKey == "ToastBookmarkCreateFailed")
+
+        let alert = PlaybackCommandAlert()
+        #expect(!alert.isPresented)
+        alert.show(.addBookmark)
+        #expect(alert.isPresented)
+        #expect(alert.failure == .addBookmark)
+    }
+
     @Test(
-        arguments: ["HeaderPlayback", "HeaderSleepTimer", "LabelEndOfChapter", "ButtonCancelTimer", "ButtonPause"]
-            + PlaybackCommand.allCases.map { $0.titleKey(showsPause: false) })
+        arguments: [
+            "HeaderPlayback", "HeaderSleepTimer", "LabelEndOfChapter", "ButtonCancelTimer", "ButtonPause",
+            PlaybackCommandFailure.addBookmark.messageKey,
+        ] + PlaybackCommand.allCases.map { $0.titleKey(showsPause: false) })
     func menuStringsResolve(key: String) {
         #expect(L10n.string(key) != key, "\(key) is missing from the catalog")
     }
