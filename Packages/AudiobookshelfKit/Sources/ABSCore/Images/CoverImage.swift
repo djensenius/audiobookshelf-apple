@@ -25,6 +25,8 @@ public final class CoverImage: Sendable {
     public var cost: Int { bitmap.cost }
     public var pixelWidth: Int { cgImage.width }
     public var pixelHeight: Int { cgImage.height }
+    /// The version the bitmap shows, older than the requested key's for a stale downloaded cover.
+    public var updatedAt: Int? { bitmap.updatedAt }
 }
 
 /// A decoded bitmap, charged to the ledger for as long as it exists.
@@ -32,11 +34,13 @@ final class DecodedBitmap: Sendable {
     let cgImage: CGImage
     let cost: Int
     let ledger: ImageMemoryLedger?
+    let updatedAt: Int?
     /// The live ``CoverImage`` wrappers.
     let holders = Atomic<Int>(0)
 
-    init(_ cgImage: CGImage, ledger: ImageMemoryLedger?) {
+    init(_ cgImage: CGImage, ledger: ImageMemoryLedger?, updatedAt: Int? = nil) {
         self.cgImage = cgImage
+        self.updatedAt = updatedAt
         self.cost = cgImage.bytesPerRow * cgImage.height
         self.ledger = ledger
         ledger?.add(cost)

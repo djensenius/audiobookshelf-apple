@@ -281,10 +281,12 @@ import UniformTypeIdentifiers
         // Version 3 isn't cached: offline shows the stale download without caching it as v3.
         let stale = try await offline.image(for: key(updatedAt: 3), pixelBox: box)
         #expect(stale.pixelWidth == 100)
+        #expect(stale.updatedAt == 1)
         let requests = ImageStubProtocol.route(host)?.requests.count
         online.withLock { $0 = true }
         let fresh = try await offline.image(for: key(updatedAt: 3), pixelBox: box)
         #expect(fresh.pixelWidth == 200)
+        #expect(fresh.updatedAt == 3)
         #expect(ImageStubProtocol.route(host)?.requests.count == (requests ?? 0) + 1)
     }
 }

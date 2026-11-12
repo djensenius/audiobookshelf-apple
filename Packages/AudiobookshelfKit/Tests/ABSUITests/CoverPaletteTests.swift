@@ -75,7 +75,7 @@ import Testing
         let image = try Self.image(left: (10, 200, 30))
         let palette = CoverPalette { key in
             loads.withLock { $0.append(key) }
-            return image
+            return (image, key.updatedAt)
         }
         #expect(palette.cachedColor(for: key) == nil)
 
@@ -97,7 +97,7 @@ import Testing
         let image = try Self.image(left: (240, 240, 240))
         let palette = CoverPalette { _ in
             if fails.withLock({ $0 }) { throw URLError(.notConnectedToInternet) }
-            return image
+            return (image, key.updatedAt)
         }
 
         #expect(await palette.color(for: key) == .fallback)
@@ -108,14 +108,30 @@ import Testing
         #expect(color.isLight)
     }
 
+    @Test func staleFallbackColourIsNotKeptForTheRequestedVersion() async throws {
+        let online = Mutex(false)
+        let (old, new) = (try Self.image(left: (200, 0, 0)), try Self.image(left: (0, 0, 200)))
+        var requested = key
+        requested.updatedAt = 2
+        // Offline, the pipeline shows the downloaded cover's older version 1.
+        let palette = CoverPalette { key in online.withLock { $0 } ? (new, key.updatedAt) : (old, 1) }
+
+        expect(await palette.color(for: requested), (200, 0, 0))
+        #expect(palette.cachedColor(for: requested) == nil)
+        #expect(palette.cachedColor(for: key) != nil)
+        online.withLock { $0 = true }
+        expect(await palette.color(for: requested), (0, 0, 200))
+        #expect(palette.cachedColor(for: requested) == palette.cachedColor(for: requested.with(bucket: .large)))
+    }
+
     @Test func concurrentCallersShareOneLoad() async throws {
         let loads = Mutex(0)
         let released = Mutex(false)
         let image = try Self.image(left: (90, 90, 90))
-        let palette = CoverPalette { _ in
+        let palette = CoverPalette { key in
             loads.withLock { $0 += 1 }
             while !released.withLock({ $0 }) { try await Task.sleep(for: .milliseconds(1)) }
-            return image
+            return (image, key.updatedAt)
         }
         let first = Task { await palette.color(for: key) }
         while loads.withLock({ $0 }) == 0 { await Task.yield() }
@@ -129,7 +145,7 @@ import Testing
 
     @Test func cacheKeepsAtMostItsCapacity() async throws {
         let image = try Self.image(left: (10, 20, 30))
-        let palette = CoverPalette(capacity: 2) { _ in image }
+        let palette = CoverPalette(capacity: 2) { key in (image, key.updatedAt) }
         let keys = (1...3).map {
             ImageKey(serverID: key.serverID, kind: .itemCover, entityID: "li_\($0)", updatedAt: 1)
         }

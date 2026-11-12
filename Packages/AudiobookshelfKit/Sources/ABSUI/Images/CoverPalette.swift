@@ -41,19 +41,28 @@ public final class CoverPalette: Sendable {
     private struct State {
         var colors: [ImageKey: CoverColor] = [:]
         /// Averages in progress, which concurrent callers for the same key share.
-        var loads: [ImageKey: Task<CoverColor?, Never>] = [:]
+        var loads: [ImageKey: Task<Averaged?, Never>] = [:]
     }
 
+    /// A colour and the key of the version it was averaged from.
+    private typealias Averaged = (color: CoverColor, shown: ImageKey)
+
     private let state = Mutex(State())
-    private let load: @Sendable (ImageKey) async throws -> CGImage
+    private let load: @Sendable (ImageKey) async throws -> Loaded
     private let capacity: Int
 
+    /// A loaded cover and the version it shows, older than the key's for a stale downloaded cover.
+    typealias Loaded = (image: CGImage, updatedAt: Int?)
+
     public convenience init(pipeline: ImagePipeline) {
-        self.init { key in try await pipeline.cgImage(for: key, size: CGSize(width: 64, height: 64)) }
+        self.init { key in
+            let cover = try await pipeline.image(for: key, pixelBox: PixelBox(width: 64, height: 64))
+            return (cover.cgImage, cover.updatedAt)
+        }
     }
 
     /// - Parameter capacity: the most colours kept; one is dropped to make room for another.
-    init(capacity: Int = 1_000, load: @escaping @Sendable (ImageKey) async throws -> CGImage) {
+    init(capacity: Int = 1_000, load: @escaping @Sendable (ImageKey) async throws -> Loaded) {
         self.capacity = capacity
         self.load = load
     }
@@ -64,28 +73,36 @@ public final class CoverPalette: Sendable {
     }
 
     /// The average colour of `key`'s cover, or ``CoverColor/fallback`` if it can't be loaded.
-    /// The fallback isn't cached, so a later call tries again.
+    /// The fallback isn't cached, so a later call tries again. A stale cover's colour is cached
+    /// under the version it shows, so once the requested version loads, its colour replaces it.
     public func color(for key: ImageKey) async -> CoverColor {
         let key = key.with(bucket: .small)
-        let (cached, task) = state.withLock { state -> (CoverColor?, Task<CoverColor?, Never>?) in
+        let (cached, task) = state.withLock { state -> (CoverColor?, Task<Averaged?, Never>?) in
             if let color = state.colors[key] { return (color, nil) }
             if let task = state.loads[key] { return (nil, task) }
-            let task = Task { [load] in (try? await load(key)).flatMap(Self.averageColor) }
+            let task = Task { [load] () -> Averaged? in
+                guard let loaded = try? await load(key), let color = Self.averageColor(of: loaded.image) else {
+                    return nil
+                }
+                var shown = key
+                shown.updatedAt = loaded.updatedAt
+                return (color, shown)
+            }
             state.loads[key] = task
             return (nil, task)
         }
         guard let task else { return cached ?? .fallback }
-        let color = await task.value
+        let averaged = await task.value
         state.withLock { state in
             guard state.loads[key] == task else { return }
             state.loads[key] = nil
-            guard let color else { return }
-            if state.colors.count >= capacity, state.colors[key] == nil {
+            guard let (color, shown) = averaged else { return }
+            if state.colors.count >= capacity, state.colors[shown] == nil {
                 state.colors.remove(at: state.colors.startIndex)
             }
-            state.colors[key] = color
+            state.colors[shown] = color
         }
-        return color ?? .fallback
+        return averaged?.color ?? .fallback
     }
 
     private static let sRGB = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()

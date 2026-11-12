@@ -229,7 +229,7 @@ public actor ImagePipeline {
             throw skipsDownloaded ? ImagePipelineError.unsupportedImage : .fileMissing
         }
         try Task.checkCancellation()
-        let image = DecodedBitmap(cgImage, ledger: ledger)
+        let image = DecodedBitmap(cgImage, ledger: ledger, updatedAt: storeKey.key.updatedAt)
         ledger.unreserve(reserved)
         reserved = 0
         try cache(image, for: storeKey)
