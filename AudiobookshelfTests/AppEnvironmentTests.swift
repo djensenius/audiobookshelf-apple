@@ -51,6 +51,26 @@ import Testing
         }
     }
 
+    /// The writer's observers must not keep a released environment's lifecycle, and so the
+    /// writer itself, alive.
+    @Test func aReleasedEnvironmentReleasesItsWidgetWriter() async throws {
+        try await withSettings { settings in
+            weak var lifecycle: SessionLifecycle?
+            weak var writer: WidgetSnapshotWriter?
+            do {
+                let environment = AppEnvironment(
+                    settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain())
+                lifecycle = environment.lifecycle
+                writer = environment.widgetSnapshots
+                for _ in 0..<100 { await Task.yield() }
+            }
+            for _ in 0..<100 { await Task.yield() }
+
+            #expect(writer == nil)
+            #expect(lifecycle == nil)
+        }
+    }
+
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
         try await withSettings { settings in
             let keychain = ConnectTestKeychain()

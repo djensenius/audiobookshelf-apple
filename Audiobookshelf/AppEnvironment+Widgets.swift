@@ -34,8 +34,11 @@ extension AppEnvironment {
         let writer = WidgetSnapshotWriter(
             fileURL: shared ? WidgetSnapshot.defaultFileURL() : nil,
             reloader: shared ? WidgetCenterReloader() : NoWidgetReloads())
-        writer.followLaunch { lifecycle.gate }
-        writer.followRejectedSwitches { (lifecycle.signedOutSwitches, lifecycle.signedOutSwitchConnectionID) }
+        // Weakly: the lifecycle keeps the writer, whose observers keep these closures.
+        writer.followLaunch { [weak lifecycle] in lifecycle?.gate ?? .launching }
+        writer.followRejectedSwitches { [weak lifecycle] in
+            (lifecycle?.signedOutSwitches ?? 0, lifecycle?.signedOutSwitchConnectionID)
+        }
         if let accounts {
             writer.followRemovals { Set(accounts.connections.map(\.id)) }
         }
