@@ -604,6 +604,17 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
+    /// The Edit control follows the list's structure, not a switch or removal in flight, so it
+    /// can't vanish mid-edit; once nothing is removable, edit mode ends.
+    @Test func editIsOfferedWhileAnotherServerIsSaved() {
+        let (active, other) = (UUID(), UUID())
+        #expect(AccountActions.offersRemoval(among: [active, other], activeID: active))
+        #expect(AccountActions.offersRemoval(among: [other, active], activeID: active))
+        // Removing the last other server leaves nothing to edit.
+        #expect(!AccountActions.offersRemoval(among: [active], activeID: active))
+        #expect(!AccountActions.offersRemoval(among: [], activeID: active))
+    }
+
     @Test func removalIsRefusedWhileSwitching() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle

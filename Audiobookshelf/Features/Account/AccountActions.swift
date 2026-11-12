@@ -70,6 +70,13 @@ struct AccountActions {
         return connectionID != running.identity.connectionID && connectionID != accounts.activeConnection?.id
     }
 
+    /// Whether the server list has any row removal could ever apply to: a saved server other than
+    /// the active one. Structural, so it doesn't flicker with a switch or removal in flight; the
+    /// list's Edit control shows while it holds, and edit mode ends once it doesn't.
+    static func offersRemoval(among connectionIDs: [UUID], activeID: UUID?) -> Bool {
+        connectionIDs.contains { $0 != activeID }
+    }
+
     /// Forgets a saved server other than the running one, and its saved session, through
     /// ``SessionLifecycle/removeAccount(_:)`` as the add-server sheet's backend does; the session
     /// keeps running. As there, an OpenID end-session page isn't opened.

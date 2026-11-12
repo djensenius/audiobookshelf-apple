@@ -95,6 +95,16 @@ struct ServersView: View {
     /// A removal in flight, so no switch or other removal starts meanwhile.
     @State private var isRemoving = false
     @State private var removeFailed = false
+    #if os(iOS)
+        /// Owned here so the list leaves edit mode once nothing is removable.
+        @State private var editMode = EditMode.inactive
+
+        /// Whether Edit shows: ``AccountActions/offersRemoval(among:activeID:)``.
+        private var offersRemoval: Bool {
+            AccountActions.offersRemoval(
+                among: (accounts?.connections ?? []).map(\.id), activeID: accounts?.activeConnection?.id)
+        }
+    #endif
     /// Whether each connection has a saved session to switch to (``AccountManager/hasSession(_:)``).
     @State private var hasSession: [UUID: Bool] = [:]
 
@@ -151,9 +161,22 @@ struct ServersView: View {
         .navigationTitle(Text(verbatim: L10n.string("HeaderServers")))
         #if os(iOS)
             .toolbar {
-                if servers.contains(where: canRemove) {
-                    EditButton()
+                // Shown by the list's structure, never hidden mid-edit; a plain Button, as it
+                // toggles the edit mode owned here.
+                if offersRemoval {
+                    Button {
+                        withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                    } label: {
+                        Text(verbatim: L10n.string(editMode.isEditing ? "ButtonDone" : "ButtonEdit"))
+                    }
+                    .disabled(
+                        !editMode.isEditing
+                            && (switchingTo != nil || isRemoving || lifecycle?.acceptsAccountChanges != true))
                 }
+            }
+            .environment(\.editMode, $editMode)
+            .onChange(of: offersRemoval) { _, offers in
+                if !offers { withAnimation { editMode = .inactive } }
             }
         #endif
         .switchServerFailedAlert(isPresented: $switchFailed, failure: switchFailure)
