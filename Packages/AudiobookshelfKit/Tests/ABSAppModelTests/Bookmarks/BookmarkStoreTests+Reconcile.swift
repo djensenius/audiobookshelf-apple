@@ -285,4 +285,73 @@ extension BookmarkStoreTests {
         await store.sessionWillEnd(.signOut)
         #expect(!store.hasLoaded)
     }
+
+    @Test func deleteOfBookmarkGoneOnServerSucceeds() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        let existing = bookmark("item", 30)
+        store.replaceAll(from: bookmarkUser([existing]))
+        var writes = service.writes.calls.makeAsyncIterator()
+
+        let delete = Task { try await store.delete(existing) }
+        try #require(await writes.next()).reply.resume(throwing: APIError.notFound)
+        try await delete.value
+        #expect(store.bookmarks(itemID: "item").isEmpty)
+    }
+
+    // MARK: A create on a key an earlier write finished, during an older load
+
+    /// Starts a refresh, deletes and commits the bookmark at 30 s, then starts a create there.
+    private func createAfterCommittedDeleteDuringLoad(
+        _ service: FakeBookmarkService, _ store: BookmarkStore
+    ) async throws -> CreateDuringLoad {
+        let existing = bookmark("item", 30, "Old", createdAt: 1)
+        store.replaceAll(from: bookmarkUser([existing]))
+        var writes = service.writes.calls.makeAsyncIterator()
+        var loads = service.loads.calls.makeAsyncIterator()
+
+        let refresh = Task { try await store.refresh() }
+        let load = try #require(await loads.next())
+        let delete = Task { try await store.delete(existing) }
+        try #require(await writes.next()).reply.resume(returning: nil)
+        try await delete.value
+        let create = Task { try await store.create(itemID: "item", time: 30, title: "Again") }
+        let createWrite = try #require(await writes.next())
+        return CreateDuringLoad(load: load, refresh: refresh, write: createWrite, create: create)
+    }
+
+    @Test func failedCreateAfterCommittedDeleteDuringOlderLoadRollsBack() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        let setup = try await createAfterCommittedDeleteDuringLoad(service, store)
+
+        setup.load.reply.resume(returning: [])
+        try await setup.refresh.value
+        #expect(store.bookmarks(itemID: "item") == [bookmark("item", 30, "Again")])
+        setup.write.reply.resume(throwing: BookmarkTestError.rejected)
+
+        await #expect(throws: BookmarkTestError.rejected) { try await setup.create.value }
+        #expect(store.bookmarks(itemID: "item").isEmpty)
+    }
+
+    @Test func createAfterCommittedDeleteDuringOlderLoadKeepsServerCopy() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        let setup = try await createAfterCommittedDeleteDuringLoad(service, store)
+
+        setup.load.reply.resume(returning: [])
+        try await setup.refresh.value
+        let saved = bookmark("item", 30, "Again", createdAt: 42)
+        setup.write.reply.resume(returning: saved)
+
+        #expect(try await setup.create.value == saved)
+        #expect(store.bookmarks(itemID: "item") == [saved])
+    }
+}
+
+private struct CreateDuringLoad {
+    let load: GatedCalls<Int, [AudioBookmark]>.Call
+    let refresh: Task<Void, any Error>
+    let write: GatedCalls<BookmarkRequest, AudioBookmark?>.Call
+    let create: Task<AudioBookmark, any Error>
 }

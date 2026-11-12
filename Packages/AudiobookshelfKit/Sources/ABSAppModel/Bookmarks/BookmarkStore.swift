@@ -168,13 +168,19 @@ public final class BookmarkStore: SessionParticipant {
                 continue
             }
             // The response may predate this write: keep the list as the write left it.
-            Self.set(pendingKeys[key]?.before ?? value(at: key), at: key, in: &next)
+            if let write = pendingKeys[key] {
+                Self.set(write.before, at: key, in: &next)
+            } else {
+                Self.set(value(at: key), at: key, in: &next)
+            }
         }
         for ticket in pending.keys.sorted() {
             guard var write = pending[ticket] else { continue }
             if Self.value(at: write.key, in: next) == write.before {
                 Self.set(write.optimistic, at: write.key, in: &next)
             } else {
+                // Known limitation: this also drops a reply newer than this load; the socket's
+                // `user_updated` (#183) corrects the list.
                 write.isSuperseded = true
                 pending[ticket] = write
             }
@@ -258,7 +264,11 @@ public final class BookmarkStore: SessionParticipant {
             case .rename(let title):
                 saved = try await service.renameBookmark(itemID: key.itemID, time: key.time, title: title)
             case .delete:
-                try await service.deleteBookmark(itemID: key.itemID, time: key.time)
+                do {
+                    try await service.deleteBookmark(itemID: key.itemID, time: key.time)
+                } catch APIError.notFound {
+                    // Already gone on the server: deleting is idempotent.
+                }
                 saved = nil
             }
         } catch {
@@ -283,6 +293,7 @@ public final class BookmarkStore: SessionParticipant {
     /// Whether the write's entry still holds its optimistic value, unchanged by any load.
     private func holdsOptimistic(_ ticket: Int) -> Bool {
         guard let write = pending[ticket], !write.isSuperseded else { return false }
+        // A backstop: only a load changes the entry meanwhile, and it marks the write superseded.
         return value(at: write.key) == write.optimistic
     }
 
