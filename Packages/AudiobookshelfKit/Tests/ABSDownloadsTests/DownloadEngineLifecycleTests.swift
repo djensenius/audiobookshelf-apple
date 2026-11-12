@@ -580,6 +580,8 @@ import Testing
 
         let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
         #expect(survivor.state != .running)
+        // Its listing cancelled the survivor, so the next launch has nothing to cancel.
+        #expect(harness.locations.connectionsWithSurvivorsToStop().isEmpty)
         let part = try #require(try await harness.store.part(id: partID))
         #expect(part.taskIdentifier == nil)
         #expect(!part.hasResumeData)
@@ -690,6 +692,44 @@ import Testing
         never.open()
     }
 
+    /// A relaunch before any session was created still cancels the transfer that survived it:
+    /// the quiesce is kept on disk until a session's listing has cancelled its survivors.
+    @Test func aRelaunchAfterAQuiesceWithoutASessionStillCancelsSurvivors() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        let signedOut = harness.makeEngine(readRecords: { _ in throw TestError() })
+        #expect(await signedOut.quiesce(connectionID: harness.connectionID) == false)
+        #expect(harness.sessions.withLock { $0.isEmpty })
+        #expect(harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        // iOS ends the app before a session exists; the next launch finds the old transfer.
+        let base = harness.base
+        let relaunched = harness.makeEngine(
+            registry: DownloadEngineRegistry(),
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+            })
+        #expect(await relaunched.activate())
+
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        try #require(survivor.state != .running)
+        // The part starts again with the new credentials.
+        await harness.waitForRequests(2)
+        #expect(harness.requests.map(\.authorization) == ["Bearer previous", "Bearer token-1"])
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        #expect(!harness.fileExists("li_1/1.mp3"))
+        #expect(harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        never.open()
+    }
+
     /// Resume data that couldn't be deleted, because the downloads couldn't be read, leaves the
     /// quiesce unfinished, so it's tried again.
     @Test func quiesceThatCouldNotDeleteTheResumeDataReportsItDidNotFinish() async throws {
@@ -765,6 +805,9 @@ import Testing
         #expect(try await harness.store.part(id: partID)?.state == .queued)
         let tasks = await harness.session?.session.allTasks ?? []
         #expect(tasks.allSatisfy { $0.state != .running })
+        // The session was listed before the quiesce, which cancelled what it adopted: no marker
+        // is left to cancel this launch's later transfers after a relaunch.
+        #expect(harness.locations.connectionsWithSurvivorsToStop().isEmpty)
         never.open()
     }
 

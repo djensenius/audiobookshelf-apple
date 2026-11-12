@@ -12,6 +12,10 @@ public struct DownloadLocations: Sendable {
     /// `Application Support/Transfers/`: one empty marker per part, written when its current
     /// transfer starts (see ``markTransferStart(partID:)``).
     let transfersRoot: URL
+    /// `Application Support/SurvivorsToStop/`: one empty marker per quiesced connection whose
+    /// surviving transfers no session listing has cancelled yet (see
+    /// ``markSurvivorsToStop(connectionID:)``).
+    let survivorsToStopRoot: URL
 
     /// - Parameter root: the directory that holds `Downloads/` and `ResumeData/`; tests pass a
     ///   temporary directory.
@@ -19,6 +23,7 @@ public struct DownloadLocations: Sendable {
         downloadsRoot = root.appending(path: "Downloads", directoryHint: .isDirectory)
         resumeDataRoot = root.appending(path: "ResumeData", directoryHint: .isDirectory)
         transfersRoot = root.appending(path: "Transfers", directoryHint: .isDirectory)
+        survivorsToStopRoot = root.appending(path: "SurvivorsToStop", directoryHint: .isDirectory)
     }
 
     /// Creates ``downloadsRoot`` and ``resumeDataRoot`` if needed and excludes both from
@@ -127,6 +132,35 @@ public struct DownloadLocations: Sendable {
 
     private func transferMarker(partID: UUID) -> URL {
         transfersRoot.appending(path: partID.uuidString, directoryHint: .notDirectory)
+    }
+
+    // MARK: - Survivors to stop
+
+    /// Records that `connectionID` was quiesced, so a later launch cancels its transfers that
+    /// survived a relaunch instead of adopting them (ADR 0003). A file, not a store row: the
+    /// marker matters most when the download store can't be read.
+    func markSurvivorsToStop(connectionID: UUID) throws {
+        try FileManager.default.createDirectory(at: survivorsToStopRoot, withIntermediateDirectories: true)
+        try Data().write(
+            to: survivorsToStopMarker(connectionID: connectionID),
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// Forgets `connectionID`'s marker once a session listing has cancelled its survivors.
+    func clearSurvivorsToStop(connectionID: UUID) {
+        try? FileManager.default.removeItem(at: survivorsToStopMarker(connectionID: connectionID))
+    }
+
+    /// The connections with a marker; empty when there are none or the directory can't be read.
+    func connectionsWithSurvivorsToStop() -> Set<UUID> {
+        let names =
+            (try? FileManager.default.contentsOfDirectory(atPath: survivorsToStopRoot.path(percentEncoded: false)))
+            ?? []
+        return Set(names.compactMap(UUID.init(uuidString:)))
+    }
+
+    private func survivorsToStopMarker(connectionID: UUID) -> URL {
+        survivorsToStopRoot.appending(path: connectionID.uuidString, directoryHint: .notDirectory)
     }
 
     /// Whether `error`, or an error it wraps, is `NSFileWriteOutOfSpaceError` or `ENOSPC`.

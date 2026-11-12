@@ -246,8 +246,9 @@ public actor DownloadEngine {
     private var lastQuiesces: [UUID: Int] = [:]
     /// Connections quiesced: their transfers that survived a relaunch (any task this engine
     /// didn't create) are cancelled, not adopted, and their results dropped, for the rest of the
-    /// process; they carry the credentials of before the sign-out. Only in memory:
-    /// TODO(#411) keep it across a relaunch.
+    /// process; they carry the credentials of before the sign-out. Each is also marked on disk
+    /// (``DownloadLocations/markSurvivorsToStop(connectionID:)``) until a session listing has
+    /// cancelled its survivors, so a relaunch before that still cancels them.
     private var survivorsToStop: Set<UUID> = []
     /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
     private var createdTasks: Set<Int> = []
@@ -333,6 +334,9 @@ public actor DownloadEngine {
         self.credentials = credentials
         self.vault = vault
         self.locations = locations
+        // Before the first activation lists the session's tasks: a quiesce of a previous launch
+        // may not have had a session to cancel them in.
+        survivorsToStop = locations.connectionsWithSurvivorsToStop()
         self.retryPolicy = retryPolicy
         self.networkAccess = networkAccess
         self.clock = clock
@@ -654,6 +658,11 @@ public actor DownloadEngine {
         // adopts one meanwhile, even one that begins while the records are being paused or
         // after this call's attachment failed.
         survivorsToStop.insert(connectionID)
+        do {
+            try locations.markSurvivorsToStop(connectionID: connectionID)
+        } catch {
+            logError("Couldn't save a server's sign-out for the next launch", error)
+        }
         // The pauses can wait on each other (the manager holds a podcast's item for each of its
         // episodes), so every transfer stops with the old credentials first, without a wait.
         let cancelled = cancelTransfers(of: connectionID)
@@ -670,6 +679,9 @@ public actor DownloadEngine {
             await discardResumeData(connectionID: connectionID)
             return false
         }
+        // The session's listing cancelled its survivors, or adopted them before this call, which
+        // cancelled them above.
+        locations.clearSurvivorsToStop(connectionID: connectionID)
         // Without the records, the transfers the engine knows of are still stopped.
         let records: [DownloadRecordDTO]?
         do {
@@ -787,6 +799,8 @@ public actor DownloadEngine {
         isInvalidatingSession = false
         ignoredTasks.removeAll()
         startEventLoop()
+        // Taken before the listing, so a connection quiesced during it keeps its marker.
+        let listedSurvivorsToStop = survivorsToStop
         // A task that finished on the way is left to its completion, which adopts it first.
         for task in await session.allTasks where task.state != .completed {
             if let partID = task.partID, tasks[partID] === task { continue }
@@ -805,6 +819,7 @@ public actor DownloadEngine {
             }
             await reattach(download, partID: partID, activationOwnsSession: true)
         }
+        for connectionID in listedSurvivorsToStop { locations.clearSurvivorsToStop(connectionID: connectionID) }
         // A part left running without a transfer: either its transfer moved the file, but iOS
         // ended the process before the completion was saved, or the app ended before the system
         // kept the transfer. The first completes, but only while the store still has the part
