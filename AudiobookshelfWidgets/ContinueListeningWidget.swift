@@ -40,17 +40,19 @@ struct ContinueListeningProvider: TimelineProvider {
     }
 
     func getSnapshot(in context: Context, completion: @escaping (ContinueListeningEntry) -> Void) {
-        completion(Self.entry())
+        completion(Self.entry(for: context.family))
     }
 
     /// One entry, kept until the app reloads the widget after a new snapshot.
     func getTimeline(in context: Context, completion: @escaping (Timeline<ContinueListeningEntry>) -> Void) {
-        completion(Timeline(entries: [Self.entry()], policy: .never))
+        completion(Timeline(entries: [Self.entry(for: context.family)], policy: .never))
     }
 
-    private static func entry() -> ContinueListeningEntry {
+    /// The snapshot, with its cover only for a family that draws it.
+    private static func entry(for family: WidgetFamily) -> ContinueListeningEntry {
         let snapshot = WidgetSnapshot.defaultFileURL().flatMap(WidgetSnapshot.read(from:))
-        return ContinueListeningEntry(date: .now, snapshot: snapshot, cover: snapshot?.cover.flatMap(cover(for:)))
+        let cover = family.showsContinueListeningCover ? snapshot?.cover.flatMap(cover(for:)) : nil
+        return ContinueListeningEntry(date: .now, snapshot: snapshot, cover: cover)
     }
 
     /// The snapshot's cover from the cache, downsampled; `nil` on a miss. Tries the 300 px file the
