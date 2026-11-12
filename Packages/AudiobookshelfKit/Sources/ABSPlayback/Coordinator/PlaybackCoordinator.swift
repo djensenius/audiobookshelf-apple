@@ -1028,6 +1028,8 @@ public final class PlaybackCoordinator {
             }
             // Account end cancels this owned task synchronously. Do not require the coordinator
             // to stay alive: ordinary stop has always allowed its captured close to outlive it.
+            // The syncer's report in flight for this session returns first (#337).
+            try? await handoff?.waitForSessionSync()
             guard !Task.isCancelled else {
                 operation.transport.resolve(.success(false))
                 return

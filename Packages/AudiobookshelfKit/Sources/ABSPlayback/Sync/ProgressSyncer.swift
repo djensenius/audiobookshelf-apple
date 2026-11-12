@@ -19,8 +19,9 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// - **One request at a time.** Every send runs on one serial queue, and a send
 ///   counts as finished only when the service call returns, after its task has completed. So no
 ///   report or PATCH goes out while an earlier one could still reach the server. The
-///   coordinator's `/close` doesn't go through this queue yet, so it can overlap a report in
-///   flight (#158).
+///   coordinator's final `/close` doesn't go through this queue, but waits until the closing
+///   session's last queued report has returned or been skipped
+///   (`PlaybackCloseHandoff.waitForSessionSync()`).
 /// - **Positions first.** Each report trigger saves `LocalMediaProgress` with `needsServerSync`
 ///   before sending. Local writes have their own serial queue, so a held request doesn't block
 ///   saving a newer seek or pause. Failed writes stay in memory for the next trigger or drain;
@@ -118,6 +119,9 @@ public final class ProgressSyncer {
     private var queuedSyncSessionID: String?
     /// Whether a ``flush()`` joined the queued `/sync`, so it goes out despite a backoff.
     private var queuedSyncIgnoresBackoff = false
+    /// The latest `/sync` queued, resolved once it finished or was skipped; the queue is serial,
+    /// so it also covers every earlier one. Its session's final close waits for it.
+    private var lastSync: (sessionID: String, done: PlaybackCloseResult<Void>)?
     private var tail: Task<Void, Never>?
     private var persistenceTail: Task<Void, Never>?
     /// Test seam: hold local persistence independently of transport.
@@ -359,7 +363,8 @@ public final class ProgressSyncer {
         else { return nil }
         let receipt = PlaybackCloseResult<Void>()
         positionReceipts[closing.key, default: []].append((position.revision, receipt))
-        return PlaybackCloseHandoff(report: report, position: receipt)
+        let sessionSync = lastSync?.sessionID == closing.sessionID ? lastSync?.done : nil
+        return PlaybackCloseHandoff(report: report, position: receipt, sessionSync: sessionSync)
     }
 
     /// A final sample may advance after the last tick. Targets and stalls earn nothing, and
@@ -420,11 +425,17 @@ public final class ProgressSyncer {
         }
         queuedSyncSessionID = sessionID
         queuedSyncIgnoresBackoff = ignoringBackoff
-        enqueue { [weak self] in await self?.sendSync(sessionID: sessionID) }
+        let done = PlaybackCloseResult<Void>()
+        lastSync = (sessionID, done)
+        enqueue { [weak self] in
+            await self?.sendSync(sessionID: sessionID, done: done)
+            done.resolve(.success(()))
+        }
     }
 
-    /// Sends the latest saved trigger for `sessionID`, if it is still current.
-    private func sendSync(sessionID: String) async {
+    /// Sends the latest saved trigger for `sessionID`, if it is still current, and resolves
+    /// `done` as soon as the `/sync` returned (before the drain that follows a success).
+    private func sendSync(sessionID: String, done: PlaybackCloseResult<Void>) async {
         await waitForPendingWrites()
         var ignoringBackoff = false
         if queuedSyncSessionID == sessionID {
@@ -478,6 +489,7 @@ public final class ProgressSyncer {
         current?.listened -= listened
         let outcome: SessionAudioOutcome
         do {
+            defer { done.resolve(.success(())) }
             try await service.syncSession(id: sessionID, report: report)
             outcome = .succeeded
             if current?.sessionID == sessionID {

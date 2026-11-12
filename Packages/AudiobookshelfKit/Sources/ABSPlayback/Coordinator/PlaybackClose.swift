@@ -23,15 +23,28 @@ public enum PlaybackStopReason: Sendable, Equatable {
 public struct PlaybackCloseHandoff: Sendable {
     public let report: PlaybackSyncReport
     let position: PlaybackCloseResult<Void>
+    /// Resolved once the closing session's last queued `/sync` has finished or been skipped.
+    let sessionSync: PlaybackCloseResult<Void>?
 
-    init(report: PlaybackSyncReport, position: PlaybackCloseResult<Void>) {
+    init(
+        report: PlaybackSyncReport, position: PlaybackCloseResult<Void>,
+        sessionSync: PlaybackCloseResult<Void>? = nil
+    ) {
         self.report = report
         self.position = position
+        self.sessionSync = sessionSync
     }
 
     /// Canceling a waiter never cancels ownership of the captured write.
     public func waitForAudioPosition() async throws {
         try await position.wait()
+    }
+
+    /// Waits until no `/sync` for the closing session is queued or in flight, so a `/close`
+    /// sent after it is the server's last word on the session (#337). Returns at once when none
+    /// was; throws only when the waiting task is cancelled.
+    public func waitForSessionSync() async throws {
+        try await sessionSync?.wait()
     }
 }
 
@@ -74,6 +87,8 @@ final class PlaybackCloseResult<Value: Sendable>: Sendable {
     private let state = Mutex(State())
 
     var result: Result<Value, any Error>? { state.withLock { $0.result } }
+    /// Waiters suspended now (tests).
+    var waiterCount: Int { state.withLock { $0.waiters.count } }
 
     func resolve(_ result: Result<Value, any Error>) {
         let waiters = state.withLock { state in
