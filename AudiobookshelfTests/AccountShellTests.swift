@@ -747,6 +747,29 @@ private final class Recorder: SessionParticipant {
         #expect(participant.playItem == nil && participant.bookmarks == nil)
     }
 
+    #if os(macOS)
+        /// The Now Playing window rebuilds its player for each session, so a switch discards a
+        /// pending bookmark edit even if the window never saw the session end.
+        @Test func theNowPlayingWindowsKeyChangesWithEachSession() async throws {
+            let environment = try makeEnvironment()
+            let participant = try #require(environment.playback.participant)
+            let (a, _, hosts) = try await twoServers(environment, recorder: Recorder())
+            defer { cleanUp(hosts) }
+            // Held, as the window's view graph holds the store it rendered.
+            let storeB = try #require(participant.bookmarks)
+
+            let switched = try await #require(
+                AccountActions(lifecycle: environment.lifecycle).switchAccount(to: a.connectionID)
+            ).value
+            #expect(switched.succeeded)
+            let keyA = try #require(NowPlayingWindow.sessionKey(participant.bookmarks))
+            #expect(keyA != NowPlayingWindow.sessionKey(storeB))
+
+            _ = await environment.lifecycle.signOut()
+            #expect(NowPlayingWindow.sessionKey(participant.bookmarks) == nil)
+        }
+    #endif
+
     // MARK: Server switch for a link
 
     @Test func aLinkForAnotherServerSwitchesOnlyOnceConfirmed() async throws {
