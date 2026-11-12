@@ -10,6 +10,8 @@ import SwiftData
         case connectionNotFound(UUID)
         /// Some of the download's parts haven't completed.
         case incompleteDownload
+        /// A cover-only download's local item doesn't exist (it was deleted meanwhile).
+        case itemNotFound
     }
 
     /// What ``deleteEpisode(itemID:episodeId:deletingEmptyItem:now:)`` removed.
@@ -35,8 +37,12 @@ import SwiftData
     /// `relativeDirectory` is set when it is created and never moved. A cover part sets
     /// `coverRelativePath`.
     ///
-    /// - Throws: ``StoreError/incompleteDownload`` unless every part completed, and
-    ///   ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist.
+    /// A cover-only download (`DownloadRecordDTO.isCoverOnly`) only sets the existing item's
+    /// cover and its time; its media, files and title stay as they are.
+    ///
+    /// - Throws: ``StoreError/incompleteDownload`` unless every part completed,
+    ///   ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist, and
+    ///   ``StoreError/itemNotFound`` for a cover-only download without its item.
     /// - Parameter coverUpdatedAt: The server's cover timestamp; `nil` falls back to the
     ///   snapshot's `coverUpdatedAt`, and when both are `nil` the stored one is kept. A re-download
     ///   whose snapshot has no timestamp (saved before snapshot version 2) keeps the old value.
@@ -52,6 +58,20 @@ import SwiftData
         let title = isEpisode ? download.media.metadata.title : download.title
         let coverPath = download.parts.last { $0.kind == .cover }?.destinationRelativePath
         let files = download.parts.compactMap { Self.file(from: $0, episodeId: key.episodeId) }
+        if download.isCoverOnly {
+            return try commit {
+                guard
+                    let item = try fetchItem(
+                        serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+                else { throw StoreError.itemNotFound }
+                item.coverRelativePath = coverPath
+                if let coverUpdatedAt = coverUpdatedAt ?? download.media.coverUpdatedAt {
+                    item.coverUpdatedAt = coverUpdatedAt
+                }
+                item.updatedAt = now
+                return LocalLibraryItemDTO(item)
+            }
+        }
         return try commit {
             guard let connection = try fetchConnection(id: key.serverConnectionID) else {
                 throw StoreError.connectionNotFound(key.serverConnectionID)

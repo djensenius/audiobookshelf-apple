@@ -16,8 +16,9 @@ public enum DownloadManagerEvent: Sendable, Equatable {
     case failed(recordID: UUID, code: DownloadFailureCode, message: String)
     /// The record is gone and left no downloaded media: it was cancelled
     /// (``DownloadManager/cancel(recordID:)``), or what it completed into (the local item, or
-    /// the episode) was deleted before its completion was reported. No other event follows for
-    /// it. Deleted local items aren't reported: the UI observes them.
+    /// the episode) was deleted before its completion was reported, or it only fetched an item's
+    /// cover again (``DownloadRecordDTO/isCoverOnly``). No other event follows for it. Deleted
+    /// local items aren't reported: the UI observes them.
     case recordRemoved(recordID: UUID)
 }
 

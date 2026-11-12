@@ -11,6 +11,9 @@ extension DownloadManager {
         /// Whether the file was fetched; it is handed over completed only if it is still there.
         var isStored: Bool
         var updatedAt: Date?
+        /// Whether, when no record takes it, the item's local item gets it back
+        /// (``handOffCover(_:of:)``); not for a cancelled cover-only record.
+        var restoresLocalItem = true
     }
 
     // MARK: - Deletion
@@ -157,6 +160,13 @@ extension DownloadManager {
     /// completed when its file is still there and started otherwise. Queued episodes share one
     /// cover part, so without this the episodes left would complete without a cover. (A book
     /// record always plans its own.)
+    ///
+    /// When no record takes it (each one left has completed, and the engine may be finalising
+    /// it), and `cover.restoresLocalItem`:
+    /// - a podcast's local item without a cover gets it back: the file itself while it is still
+    ///   there, or else a cover-only record that fetches it again (``refetchCover(_:for:)``);
+    /// - with no local item yet, it is kept in ``refusedCovers`` for the first of those records
+    ///   to complete (``restoreCover(after:itemID:)``).
     func handOffCover(_ cover: CoverSource, of key: MediaKey) async throws(DownloadManagerError) {
         let itemKey = Self.itemKey(key)
         let localItem = try await read {
@@ -187,6 +197,22 @@ extension DownloadManager {
             await refresh(record.id, announce: true)
             if part.state == .queued, isActive(record) { await engine.start(partIDs: [part.id]) }
             return
+        }
+        guard cover.restoresLocalItem else { return }
+        if let localItem {
+            guard localItem.mediaType == .podcast else { return }
+            // Logged, not thrown: the clean-up goes on, and the files nothing uses go.
+            do throws(DownloadManagerError) {
+                if size != nil {
+                    try await adoptCover(cover.relativePath, updatedAt: cover.updatedAt, for: localItem)
+                } else {
+                    try await refetchCover(cover, for: localItem)
+                }
+            } catch {
+                logError("Couldn't give a downloaded item its cover back", error)
+            }
+        } else if !records.isEmpty {
+            refusedCovers[itemKey] = cover
         }
     }
 

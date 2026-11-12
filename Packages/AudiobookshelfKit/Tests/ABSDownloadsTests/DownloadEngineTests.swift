@@ -34,6 +34,39 @@ import Testing
         #expect(progress == DownloadProgress(partID: partID, recordID: record.id, bytesWritten: 11, expectedBytes: 11))
     }
 
+    /// A cover-only record (#326) whose local item was deleted is discarded: deleted and
+    /// reported, its cover left on disk for the manager, and no local item made.
+    @Test func discardsACoverOnlyRecordWithoutItsItem() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.store.upsertRecord(
+            DownloadRecordDTO(
+                key: MediaKey(serverConnectionID: harness.connectionID, libraryItemId: "li_1"), mediaType: .podcast,
+                title: "The Show", relativeDirectory: "li_1",
+                media: LocalMediaSnapshot(metadata: .init(title: "The Show")),
+                parts: [
+                    DownloadPartDTO(
+                        id: partID, kind: .cover, serverPath: DownloadRequests.coverPath(itemID: "li_1", updatedAt: 0),
+                        filename: "cover.jpg", mimeType: "image/jpeg", expectedBytes: 0, bytesWritten: 0,
+                        destinationRelativePath: "li_1/cover.jpg", state: .queued)
+                ])
+        ).record
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        let update = await engine.next { if case .recordDiscarded = $0 { true } else { false } }
+        guard case .recordDiscarded(let discarded) = update else {
+            Issue.record("Unexpected \(String(describing: update))")
+            return
+        }
+        #expect(discarded.id == record.id)
+        #expect(discarded.parts.map(\.state) == [.completed])
+        #expect(try await harness.store.record(id: record.id) == nil)
+        #expect(try await harness.localItems.allItems().isEmpty)
+        #expect(harness.fileExists("li_1/cover.jpg"))
+    }
+
     @Test(arguments: [404, 204])
     func errorStatusFailsWithoutTouchingMediaLocation(status: Int) async throws {
         let harness = try await DownloadHarness { _ in .status(status, body: Data("Nope".utf8)) }

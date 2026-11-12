@@ -50,6 +50,9 @@ public enum DownloadUpdate: Sendable, Equatable {
     case partFailed(partID: UUID, recordID: UUID, code: DownloadFailureCode, message: String, willRetry: Bool)
     /// Every part completed: the record is now the local item `itemID` and was deleted.
     case recordComplete(recordID: UUID, itemID: UUID)
+    /// A cover-only record (`DownloadRecordDTO.isCoverOnly`) completed after its local item
+    /// was deleted: it was deleted as it was then, and its cover file is left on disk.
+    case recordDiscarded(DownloadRecordDTO)
     /// The engine has no working session (`sessionInUse` or `sessionLost`); the affected
     /// parts are queued.
     case sessionUnavailable(code: DownloadFailureCode, message: String)
@@ -1270,7 +1273,8 @@ public actor DownloadEngine {
         }
     }
 
-    /// Makes a complete record a local item, then deletes it. A failure is logged; the next
+    /// Makes a complete record a local item, then deletes it. A cover-only record whose local
+    /// item is gone is deleted and reported discarded instead. A failure is logged; the next
     /// activation repeats it.
     private func finalise(_ record: DownloadRecordDTO) async {
         guard finalising.insert(record.id).inserted else { return }
@@ -1279,6 +1283,14 @@ public actor DownloadEngine {
             let item = try await localItems.upsertFromDownload(record, now: now())
             try await store.deleteRecord(record.id)
             updateContinuation.yield(.recordComplete(recordID: record.id, itemID: item.id))
+        } catch LocalItemStore.StoreError.itemNotFound {
+            do {
+                if try await store.deleteRecord(record.id) != nil {
+                    updateContinuation.yield(.recordDiscarded(record))
+                }
+            } catch {
+                logError("Couldn't discard a cover download", error)
+            }
         } catch {
             logError("Couldn't finalise a download", error)
         }

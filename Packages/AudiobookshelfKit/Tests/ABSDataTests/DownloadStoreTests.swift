@@ -518,4 +518,37 @@ import Testing
         #expect(await store.hasUncommittedChanges == false)
         #expect(try await store.record(id: other.id) == other)
     }
+
+    /// A cover fetched again is saved only as a new record of a signed-in connection.
+    @Test func insertRecordIfSignedInRefusesATakenKeyAndASignedOutConnection() async throws {
+        let (store, container) = try makeStore()
+        let itemKey = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_2")
+        let cover = Self.record(
+            key: itemKey, parts: [Self.part(kind: .cover, trackIndex: nil, filename: "cover.jpg")])
+
+        let saved = try #require(try await store.insertRecordIfSignedIn(cover, now: now))
+        #expect(saved.isCoverOnly)
+        #expect(saved.parts == cover.parts)
+        #expect(saved.createdAt == now)
+        #expect(try await store.record(key: itemKey) == saved)
+        var again = Self.record(key: itemKey, parts: [Self.part(kind: .cover, trackIndex: nil, filename: "cover.jpg")])
+        #expect(try await store.insertRecordIfSignedIn(again) == nil)
+        #expect(try await store.record(key: itemKey) == saved)
+
+        _ = try await store.deleteRecord(saved.id)
+        let context = ModelContext(container)
+        let connection = try #require(try context.fetch(FetchDescriptor<ServerConnectionRecord>()).first)
+        connection.signedOutAt = now
+        try context.save()
+        #expect(try await store.insertRecordIfSignedIn(again) == nil)
+        connection.signedOutAt = nil
+        connection.isDisconnected = true
+        try context.save()
+        #expect(try await store.insertRecordIfSignedIn(again) == nil)
+        #expect(try await store.allRecords().isEmpty)
+        again.key = MediaKey(serverConnectionID: UUID(), libraryItemId: "li_2")
+        await #expect(throws: DownloadStore.StoreError.connectionNotFound(again.key.serverConnectionID)) {
+            try await store.insertRecordIfSignedIn(again)
+        }
+    }
 }
