@@ -278,6 +278,39 @@ public enum SessionUploadResult: Sendable, Equatable {
             now: now, playbackToken: nil)
     }
 
+    /// Records an ebook location turned at `now` and saved later, unless the server's ebook
+    /// location changed meanwhile to one dated after the turn: a merge in between would have
+    /// taken that location over the turn, so saving the turn now would mark it dirty against the
+    /// newer value and PATCH over it. The check and the write are one step on this actor.
+    ///
+    /// - Parameters:
+    ///   - knownLocations: The server ebook locations the editor accounted for when the turn was
+    ///     made: the row's ``LocalMediaProgressDTO/serverBaseline`` location as last read, and the
+    ///     locations it saved since, whose acknowledgement moves the baseline too. `nil` when
+    ///     unknown, which never drops the turn.
+    ///   - serverProgress, localLibraryItemID: As for ``recordEdit(_:for:serverProgress:localLibraryItemID:now:)``.
+    /// - Returns: The saved row, or `nil` when the turn was dropped: the row's baseline is dated
+    ///   after `now` and holds a location not in `knownLocations`.
+    @discardableResult
+    public func recordEbookTurn(
+        _ ebook: ProgressEdit.Ebook,
+        for key: MediaKey,
+        knownLocations: [String?]?,
+        serverProgress: ProgressBaseline? = nil,
+        localLibraryItemID: UUID? = nil,
+        now: Date
+    ) throws -> LocalMediaProgressDTO? {
+        if let knownLocations, let row = try fetchRow(key), let baseline = ProgressSyncState(row).serverBaseline,
+            baseline.lastUpdate > now, baseline.ebookLocationIsUnknown != true,
+            !knownLocations.contains(baseline.ebookLocation)
+        {
+            return nil
+        }
+        return try recordEdit(
+            ProgressEdit(ebook: ebook), for: key, serverProgress: serverProgress,
+            localLibraryItemID: localLibraryItemID, now: now, playbackToken: nil)
+    }
+
     @discardableResult
     private func recordEdit(
         _ edit: ProgressEdit, for key: MediaKey, serverProgress: ProgressBaseline?,

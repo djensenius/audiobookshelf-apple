@@ -679,6 +679,82 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(await resume.value == EbookResumePoint(location: .page(4), progress: 0.3, source: .local))
     }
 
+    /// Resuming while an older ebook PATCH (page 3) is in flight and a later page 5 is unsent:
+    /// the server answers page 3, dated after page 5. The store keeps page 5 (the group is in
+    /// flight), and the reader opens there rather than at the raw server value.
+    @Test func resumeDuringAnOlderInFlightPatchKeepsTheNewerLocalPage() async throws {
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "3", progress: 0.2)), for: key,
+            serverProgress: ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "2", lastUpdate: t0),
+            now: t0.addingTimeInterval(5))
+        let patch = try #require(try await store.beginSend(for: key, now: t0.addingTimeInterval(5)))
+        #expect(patch.values.ebook?.ebookLocation == "3")
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "5", progress: 0.4)), for: key, now: t0.addingTimeInterval(10))
+        service.server.value = serverProgress("3", progress: 0.2, at: t0.addingTimeInterval(20))
+        let model = makeModel()
+
+        #expect(await model.resume() == EbookResumePoint(location: .page(5), progress: 0.4, source: .local))
+        #expect(try await store.progress(for: key)?.ebookLocation == "5")
+    }
+
+    /// Another device's newer page 8, merged (by a socket event or another drain) while an older
+    /// turn to page 4 waits for its debounce, wins: the turn isn't saved against page 8 and
+    /// PATCHed over it. When the merge only moved audio, the turn is saved and sent (control).
+    @Test(arguments: [("8", false), ("2", true)])
+    func aTurnOlderThanAMergedServerPageIsNotSentOverIt(serverLocation: String, sendsTurn: Bool) async throws {
+        service.server.value = serverProgress("2", at: t0)
+        let model = makeModel()
+        _ = await model.resume()
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        time.value = t0.addingTimeInterval(10)
+        turn(model, to: 4)
+        #expect(await sleeps.next() == .seconds(2))
+
+        let elsewhere = ProgressBaseline(
+            currentTime: 120, progress: 0.2, duration: 600, isFinished: false, ebookLocation: serverLocation,
+            lastUpdate: t0.addingTimeInterval(20))
+        service.server.value = serverProgress(serverLocation, at: t0.addingTimeInterval(20))
+        let merged = try await store.applyServerProgress(
+            [key: elsewhere], capturedAt: await store.captureGeneration(), source: .socket)
+        #expect(merged.contains(key))
+        time.value = t0.addingTimeInterval(30)
+        clock.advance(by: .seconds(2))
+        await model.flush()
+
+        #expect(service.writes.value.contains { $0.update.ebookLocation == "4" } == sendsTurn)
+        #expect(try await store.progress(for: key)?.ebookLocation == (sendsTurn ? "4" : serverLocation))
+        #expect(service.server.value?.ebookLocation == (sendsTurn ? "4" : serverLocation))
+    }
+
+    /// The acknowledgement of this model's own PATCH (page 3), dated after a later turn to page 4,
+    /// moves the baseline but isn't another device's page: the turn is still saved and sent.
+    @Test func ownAcknowledgementDoesNotDropALaterTurn() async throws {
+        service.server.value = serverProgress("2", at: t0)
+        let model = makeModel()
+        _ = await model.resume()
+        service.holdPatches.value = true
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        turn(model, to: 3)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+        #expect(await eventually { service.heldCount == 1 })
+
+        time.value = t0.addingTimeInterval(10)
+        turn(model, to: 4)
+        #expect(await sleeps.next() == .seconds(2))
+        time.value = t0.addingTimeInterval(20)
+        service.releasePatches()
+        await model.drainTail?.value
+        #expect(try await store.progress(for: key)?.serverBaseline?.lastUpdate == t0.addingTimeInterval(20))
+
+        clock.advance(by: .seconds(2))
+        await model.flush()
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3", "4"])
+        #expect(try await store.progress(for: key)?.ebookLocation == "4")
+    }
+
     /// The first online resume keeps the server's position locally, so reopening offline
     /// without a page turn opens there too.
     @Test func anOnlineResumeIsKeptForAnOfflineReopen() async throws {
@@ -778,6 +854,28 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(
             EbookResumePoint.resolve(kind: .epub, local: local, server: server)
                 == EbookResumePoint(location: .cfi("epubcfi(/6/8)"), progress: 0.6, source: .local))
+    }
+
+    /// An audio update moves the row's baseline to t+60 while page 5 (edited at t+10) stays
+    /// unsent. A cached or delayed page 7 dated t+50, which the store would drop as older than
+    /// that baseline, doesn't win; page 7 dated after the baseline does (negative control).
+    @Test func aSnapshotOlderThanTheRowsBaselineLosesToItsUnsentPage() async throws {
+        _ = try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "5", progress: 0.4)), for: key,
+            serverProgress: baseline("2", at: t0), now: t0.addingTimeInterval(10))
+        var audio = baseline("2", at: t0.addingTimeInterval(60))
+        audio.currentTime = 120
+        audio.duration = 600
+        _ = try await store.applyServerProgress(
+            [key: audio], capturedAt: await store.captureGeneration(), source: .fetch)
+        let local = try #require(try await store.progress(for: key))
+        #expect(local.ebookDirty && local.ebookLocation == "5")
+        #expect(local.serverBaseline?.lastUpdate == t0.addingTimeInterval(60))
+
+        let stale = serverProgress("7", at: t0.addingTimeInterval(50))
+        #expect(EbookResumePoint.resolve(kind: .pdf, local: local, server: stale).location == .page(5))
+        let newer = serverProgress("7", at: t0.addingTimeInterval(70))
+        #expect(EbookResumePoint.resolve(kind: .pdf, local: local, server: newer).location == .page(7))
     }
 
     /// A clean row is dated by the baseline's `lastUpdate` when it is later than the edit.

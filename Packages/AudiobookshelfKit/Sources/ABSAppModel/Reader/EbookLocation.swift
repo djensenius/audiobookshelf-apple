@@ -108,19 +108,27 @@ public struct EbookResumePoint: Sendable, Equatable {
     ///   saw: another device's audio change mustn't win over a page turned here.
     /// - On equal dates the server wins, so an unsent edit wins only when strictly newer, as when
     ///   the store merges. An undated server value loses to any local one.
+    /// - A server value older than the row's server baseline (`serverBaseline.lastUpdate`) is a
+    ///   stale snapshot (cached or delayed) the store would drop: it isn't a candidate while the
+    ///   row has a valid location, even when an audio update moved that baseline past the row's
+    ///   unsent ebook edit.
     /// - A location that isn't valid for `kind` is not a candidate; with no candidate the reader
     ///   opens at the start. An unsent edit this reader can't open doesn't hide the server's
     ///   unchanged location.
     public static func resolve(kind: ReaderKind, local: LocalMediaProgressDTO?, server: MediaProgress?) -> Self {
         let style = kind.locationStyle
         var best: (point: EbookResumePoint, date: Date)?
-        let localSupersedesServer =
-            local?.ebookDirty == true && EbookLocation(local?.ebookLocation, style: style) != nil
+        let localIsValid = EbookLocation(local?.ebookLocation, style: style) != nil
+        let localSupersedesServer = local?.ebookDirty == true && localIsValid
         if let server, let location = EbookLocation(server.ebookLocation, style: style),
             !(localSupersedesServer && local?.serverEbookUnchanged(in: server) == true)
         {
             let date = server.lastUpdate.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? .distantPast
-            best = (EbookResumePoint(location: location, progress: server.ebookProgress, source: .server), date)
+            // A snapshot older than the server progress the row last took, which the store would
+            // drop, can't win over the row's own location.
+            if !(localIsValid && local?.serverBaseline.map({ date < $0.lastUpdate }) == true) {
+                best = (EbookResumePoint(location: location, progress: server.ebookProgress, source: .server), date)
+            }
         }
         if let local, let date = local.ebookSavedAt, let location = EbookLocation(local.ebookLocation, style: style),
             best.map({ date > $0.date }) ?? true
