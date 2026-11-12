@@ -19,7 +19,8 @@ import Foundation
 ///   (`canAddPodcast` is `false`, see `User.canAddPodcasts`), as legacy `BookshelfNavBar.vue`
 ///   does; while the user is unknown (`nil`, such as offline) the section is kept. A known
 ///   permission applies before the libraries load too, or when loading them fails, with or
-///   without a library, leaving the library unchecked.
+///   without a library, leaving the library unchecked; Add podcast shows again when the
+///   permission becomes `true` or unknown. Once loaded, the library's own sections apply.
 ///
 /// Nothing happens while the store serves another account than the router's.
 @MainActor
@@ -55,9 +56,11 @@ public enum SceneLibrarySelection {
             if router.libraryID == nil, let initial = store.initialLibraryID {
                 router.restoreLibrary(id: initial, kind: nil)
             }
-            if canAddPodcast == false { router.withholdSections([.addPodcast]) }
+            router.withholdSections(canAddPodcast == false ? [.addPodcast] : [])
             return
         }
+        // The library's sections below include the permission.
+        router.withholdSections([])
         if let pending = router.pendingLibraryID {
             if let library = store.libraries.first(where: { $0.id == pending }) {
                 show(library, in: router, canAddPodcast: canAddPodcast)

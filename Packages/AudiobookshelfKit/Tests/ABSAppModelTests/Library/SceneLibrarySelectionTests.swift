@@ -347,6 +347,48 @@ private let pods = makeLibrary("pods", mediaType: .podcast)
         }
     }
 
+    /// While the libraries stay unloaded, Add podcast follows the permission both ways on the
+    /// same router (`false → true`, `false → nil`), keeping the library unchecked and its paths;
+    /// once they load, the library's own sections apply.
+    @Test(arguments: [true, nil] as [Bool?])
+    func addPodcastReturnsWhenThePermissionChangesBeforeTheLibrariesLoad(regained: Bool?) async throws {
+        try await withLibrarySettings { settings in
+            let fails = Locked(true)
+            let store = LibraryStore(settings: settings)
+            var service = FakeLibraryService()
+            service.librariesHandler = {
+                if fails.value { throw TestError.unexpected }
+                return [pods]
+            }
+            store.attach(client: service, connectionKey: key)
+            await store.refresh()
+            #expect(!store.hasLoaded)
+
+            let restored = Router(identity: identityA)
+            restored.restoreLibrary(id: "pods", kind: .podcast)
+            restored[path: .library] = [.item(id: "li_1")]
+            let empty = Router(identity: identityA)
+            for router in [restored, empty] {
+                SceneLibrarySelection.reconcile(router, store: store, canAddPodcast: false)
+                #expect(!router.visibleSections.contains(.addPodcast))
+
+                SceneLibrarySelection.reconcile(router, store: store, canAddPodcast: regained)
+                #expect(router.visibleSections.contains(.addPodcast))
+                #expect(!router.isLibraryChecked)
+            }
+            #expect(restored.libraryID == "pods" && restored[path: .library] == [.item(id: "li_1")])
+            #expect(restored.visibleSections == [.playlists, .latest, .addPodcast])
+            #expect(empty.libraryID == nil && empty.visibleSections == AppTab.sections)
+
+            // Hidden again, then the libraries load for a user now allowed: the library's sections.
+            SceneLibrarySelection.reconcile(restored, store: store, canAddPodcast: false)
+            fails.value = false
+            await store.refresh()
+            SceneLibrarySelection.reconcile(restored, store: store, canAddPodcast: true)
+            #expect(restored.isLibraryChecked && restored.visibleSections.contains(.addPodcast))
+        }
+    }
+
     /// Losing the permission (a refreshed user, another account's role) while on Add podcast
     /// falls back to Library and drops the section's screens.
     @Test func losingThePermissionLeavesAddPodcast() async throws {
