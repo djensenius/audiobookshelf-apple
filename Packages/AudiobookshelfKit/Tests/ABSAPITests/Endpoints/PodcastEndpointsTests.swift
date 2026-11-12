@@ -100,8 +100,6 @@ import Testing
         // The string entry is skipped; the count is the server's.
         #expect(feed.episodes.map(\.title) == ["Episode Two", "Episode One"])
         #expect(feed.episodes.first?.enclosureURL == "https://feeds.example.com/ep2.mp3")
-        #expect(feed.episodes.first?.durationSeconds == 1_800 && feed.episodes.last?.durationSeconds == nil)
-        #expect(feed.episodes.first?.publishedAt == 1_791_374_400_000)
         #expect(feed.numEpisodes == 3)
     }
 

@@ -68,7 +68,7 @@ import Testing
         ("Plain Title", "Plain Title"), ("a:b:c", "a - bc"), ("What? Why*|\"/\\<>", "What Why"),
         ("line\nbreak\r\ttab\u{0}", "linebreaktab"), ("c1\u{85}\u{9F}x", "c1x"), ("...", ""), ("CON", ""),
         ("lpt1.txt", ""), ("Console", "Console"), ("com10", "com10"), ("Trailing. . ", "Trailing"),
-        (" Leading", " Leading"), ("Émission ☕️", "Émission ☕️"),
+        (" Leading", " Leading"), ("Émission ☕️", "Émission ☕️"), ("a/../b", "a..b"), ("/", ""),
     ])
     func sanitizingMatchesLegacy(input: String, expected: String) {
         #expect(NewPodcastDraft.sanitizedFilename(input) == expected)
@@ -87,7 +87,7 @@ import Testing
         let draft = makeDraft()
         #expect(draft.issues.isEmpty && draft.canSubmit && draft.request != nil)
 
-        for title in ["", "   ", "???", "..."] {
+        for title in ["", "   ", "???", "...", "/"] {
             draft.title = title
             #expect(draft.issues == [.titleMissing], "title \(title)")
             #expect(draft.path == nil && draft.request == nil && !draft.canSubmit)
@@ -139,7 +139,8 @@ import Testing
 
     @Test(arguments: [
         (APIError.http(status: 400, message: " Podcast already exists\n"), "Podcast already exists"),
-        (APIError.http(status: 500, message: nil), nil), (APIError.forbidden(message: ""), nil),
+        (APIError.http(status: 500, message: nil), nil), (APIError.forbidden(message: "Forbidden"), nil),
+        (APIError.http(status: 403, message: "Forbidden"), nil), (APIError.http(status: 404, message: "No"), nil),
         (APIError.network(.notConnectedToInternet), nil),
     ])
     func aRefusedSubmitKeepsTheServersMessage(error: APIError, message: String?) async throws {

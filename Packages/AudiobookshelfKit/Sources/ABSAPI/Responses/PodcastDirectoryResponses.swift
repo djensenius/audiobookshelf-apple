@@ -124,13 +124,11 @@ public struct PodcastFeedMetadata: Decodable, Sendable, Hashable {
     public let explicit: String?
     /// `itunes:type`: `episodic` or `serial`.
     public let type: String?
-    public let link: String?
-    public let pubDate: String?
 
     public init(
         title: String? = nil, author: String? = nil, description: String? = nil, descriptionPlain: String? = nil,
         image: String? = nil, categories: [String] = [], feedURL: String? = nil, language: String? = nil,
-        explicit: String? = nil, type: String? = nil, link: String? = nil, pubDate: String? = nil
+        explicit: String? = nil, type: String? = nil
     ) {
         self.title = title
         self.author = author
@@ -142,8 +140,6 @@ public struct PodcastFeedMetadata: Decodable, Sendable, Hashable {
         self.language = language
         self.explicit = explicit
         self.type = type
-        self.link = link
-        self.pubDate = pubDate
     }
 
     /// Whether ``explicit`` marks the podcast explicit (`yes`, `true` or `explicit`, ignoring case).
@@ -153,7 +149,7 @@ public struct PodcastFeedMetadata: Decodable, Sendable, Hashable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case title, author, description, descriptionPlain, image, categories, language, explicit, type, link, pubDate
+        case title, author, description, descriptionPlain, image, categories, language, explicit, type
         case feedURL = "feedUrl"
     }
 
@@ -169,34 +165,22 @@ public struct PodcastFeedMetadata: Decodable, Sendable, Hashable {
         language = container.lenientString(forKey: .language)
         explicit = container.lenientString(forKey: .explicit)
         type = container.lenientString(forKey: .type)
-        link = container.lenientString(forKey: .link)
-        pubDate = container.lenientString(forKey: .pubDate)
     }
 }
 
 /// One episode of a parsed feed; only what the add-podcast screens show.
 public struct PodcastFeedEpisode: Decodable, Sendable, Hashable {
     public let title: String?
-    public let descriptionPlain: String?
-    /// Epoch milliseconds.
-    public let publishedAt: Int?
-    public let durationSeconds: Double?
     /// The audio file's URL.
     public let enclosureURL: String?
 
-    public init(
-        title: String? = nil, descriptionPlain: String? = nil, publishedAt: Int? = nil, durationSeconds: Double? = nil,
-        enclosureURL: String? = nil
-    ) {
+    public init(title: String? = nil, enclosureURL: String? = nil) {
         self.title = title
-        self.descriptionPlain = descriptionPlain
-        self.publishedAt = publishedAt
-        self.durationSeconds = durationSeconds
         self.enclosureURL = enclosureURL
     }
 
     enum CodingKeys: String, CodingKey {
-        case title, descriptionPlain, publishedAt, durationSeconds, enclosure
+        case title, enclosure
     }
 
     enum EnclosureKeys: String, CodingKey {
@@ -206,9 +190,6 @@ public struct PodcastFeedEpisode: Decodable, Sendable, Hashable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         title = container.lenientString(forKey: .title)
-        descriptionPlain = container.lenientString(forKey: .descriptionPlain)
-        publishedAt = (try? container.decodeIfPresent(Int.self, forKey: .publishedAt)) ?? nil
-        durationSeconds = (try? container.decodeIfPresent(Double.self, forKey: .durationSeconds)) ?? nil
         let enclosure = try? container.nestedContainer(keyedBy: EnclosureKeys.self, forKey: .enclosure)
         enclosureURL = enclosure?.lenientString(forKey: .url)
     }

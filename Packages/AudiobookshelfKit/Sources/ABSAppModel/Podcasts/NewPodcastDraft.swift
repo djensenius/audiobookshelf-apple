@@ -139,16 +139,12 @@ public final class NewPodcastDraft: Identifiable {
         }
     }
 
-    /// The server's own message for ``submitError`` (such as "Podcast already exists"), which legacy shows; `nil`
-    /// for other failures, which show `ToastPodcastCreateFailed`.
+    /// The server's own message for a 400 (such as "Podcast already exists"), which legacy shows; `nil` for other
+    /// failures, such as 403's unlocalized "Forbidden", which show `ToastPodcastCreateFailed`.
     public var submitErrorMessage: String? {
-        guard let error = submitError as? APIError else { return nil }
-        switch error {
-        case .http(_, let message?), .forbidden(let message?), .unauthorized(let message?):
-            let message = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            return message.isEmpty ? nil : message
-        default: return nil
-        }
+        guard case .http(400, let message?) = submitError as? APIError else { return nil }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     // MARK: Paths

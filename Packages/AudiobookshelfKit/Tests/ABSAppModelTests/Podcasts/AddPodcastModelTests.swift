@@ -232,7 +232,8 @@ let podcastFolders = [
         ("http://a", true), ("https://a", true), ("HTTP:x", true), ("httpx", false), ("feeds.example.com", false),
         ("ftp://a", false),
     ])
-    func feedURLsAreDetectedLikeLegacy(text: String, isFeed: Bool) {
+    // Unlike legacy's case-sensitive `startsWith`, "HTTP:" counts too, so a pasted upper-case URL isn't searched for.
+    func feedURLsAreDetectedCaseInsensitively(text: String, isFeed: Bool) {
         #expect(AddPodcastModel.isFeedURL(text) == isFeed)
     }
 
@@ -243,5 +244,47 @@ let podcastFolders = [
     func onlyAdminsMayAddPodcasts(type: UserType, upload: Bool, allowed: Bool) {
         let user = User(id: "u", username: "u", type: type, permissions: UserPermissions(upload: upload))
         #expect(user.canAddPodcasts == allowed)
+    }
+
+    @Test func onlyAnAdminOnAPodcastLibraryIsReady() {
+        let admin = User(id: "u", username: "u", type: .admin)
+        let podcasts = Library(id: "lib", name: "P", mediaType: .podcast)
+        let books = Library(id: "books", name: "B", mediaType: .book)
+        let connection = UUID()
+        func resolve(_ user: User?, _ library: Library?, store: UUID? = connection) -> AddPodcastAccess {
+            .resolve(user: user, connectionID: connection, storeConnectionID: store, library: library)
+        }
+        let key = AddPodcastAccess.Key(connectionID: connection, userID: "u", libraryID: "lib")
+        #expect(resolve(admin, podcasts) == .ready(key))
+        #expect(resolve(admin, books) == .notPodcastLibrary)
+        #expect(resolve(User(id: "u", username: "u", type: .user), podcasts) == .notAllowed)
+        #expect(resolve(nil, podcasts) == .waiting && resolve(admin, nil) == .waiting)
+        #expect(resolve(admin, podcasts, store: UUID()) == .waiting)
+    }
+
+    @Test func aCreateIsOpenedOnlyForTheSameAccountAndLibrary() {
+        let key = AddPodcastAccess.Key(connectionID: UUID(), userID: "u", libraryID: "lib")
+        #expect(AddPodcastAccess.ready(key).canOpen(createdFor: key))
+        let otherLibrary = AddPodcastAccess.Key(connectionID: key.connectionID, userID: "u", libraryID: "other")
+        let otherServer = AddPodcastAccess.Key(connectionID: UUID(), userID: "u", libraryID: "lib")
+        for access in [AddPodcastAccess.ready(otherLibrary), .ready(otherServer), .waiting, .notAllowed] {
+            #expect(!access.canOpen(createdFor: key))
+        }
+    }
+
+    @Test func aLibraryRefreshUpdatesFoldersAndRegion() async throws {
+        let model = makeModel()
+        var calls = service.searches.calls.makeAsyncIterator()
+        let folders = [LibraryFolder(id: "f3", fullPath: "/new")]
+        model.update(library: Library(id: "other", name: "X", folders: [], mediaType: .podcast))
+        #expect(model.folders == podcastFolders)
+        let settings = LibrarySettings(podcastSearchRegion: "gb")
+        model.update(library: Library(id: "lib", name: "P", folders: folders, mediaType: .podcast, settings: settings))
+        #expect(model.folders == folders)
+        model.query = "q"
+        model.submit()
+        let call = try #require(await calls.next())
+        #expect(call.request.country == "gb")
+        call.reply.resume(returning: [])
     }
 }

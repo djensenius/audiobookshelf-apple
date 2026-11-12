@@ -36,6 +36,38 @@ extension User {
     }
 }
 
+/// What the Add podcast screen may show for the signed-in user and the scene's library.
+public enum AddPodcastAccess: Sendable, Hashable {
+    /// The account and library a model is built for; a create finishing for another key isn't opened.
+    public struct Key: Sendable, Hashable {
+        public let connectionID: UUID
+        public let userID: String
+        public let libraryID: String
+    }
+
+    case ready(Key)
+    /// The user isn't an admin.
+    case notAllowed
+    /// The library holds books; the server would still create a podcast in its folder.
+    case notPodcastLibrary
+    /// Signed out, or the user, connection or library isn't known yet.
+    case waiting
+
+    /// - Parameters:
+    ///   - storeConnectionID: The connection the library list belongs to; it must be the active one.
+    public static func resolve(user: User?, connectionID: UUID?, storeConnectionID: UUID?, library: Library?) -> Self {
+        if let user, !user.canAddPodcasts { return .notAllowed }
+        if let library, library.mediaType != .podcast { return .notPodcastLibrary }
+        guard let user, let connectionID, storeConnectionID == connectionID, let library else { return .waiting }
+        return .ready(Key(connectionID: connectionID, userID: user.id, libraryID: library.id))
+    }
+
+    /// Whether a podcast created for `key` may be opened: the screen still shows that account and library.
+    public func canOpen(createdFor key: Key) -> Bool {
+        self == .ready(key)
+    }
+}
+
 /// Why looking up a podcast's feed failed.
 public enum AddPodcastLookupError: Error, Sendable, Equatable {
     /// The directory entry has no RSS feed, so it can't be added (legacy "Invalid podcast - no feed").
@@ -72,12 +104,12 @@ public final class AddPodcastModel {
 
     public let libraryID: String
     /// The library's folders; the form picks one.
-    public let folders: [LibraryFolder]
+    public private(set) var folders: [LibraryFolder]
 
     /// The running search or lookup. Tests await it.
     @ObservationIgnored private(set) var task: Task<Void, Never>?
     @ObservationIgnored private let service: any AddPodcastService
-    @ObservationIgnored private let country: String?
+    @ObservationIgnored private var country: String?
     @ObservationIgnored private var generation = 0
 
     /// - Parameters:
@@ -85,6 +117,14 @@ public final class AddPodcastModel {
     public init(service: any AddPodcastService, library: Library) {
         self.service = service
         libraryID = library.id
+        folders = library.folders ?? []
+        country = library.settings?.podcastSearchRegion
+    }
+
+    /// Takes a refreshed library's folders and search region for later searches and forms; an open form keeps its
+    /// own.
+    public func update(library: Library) {
+        guard library.id == libraryID else { return }
         folders = library.folders ?? []
         country = library.settings?.podcastSearchRegion
     }
