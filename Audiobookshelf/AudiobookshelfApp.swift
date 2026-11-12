@@ -56,6 +56,17 @@ struct AudiobookshelfApp: App {
                     .modifier(AppThemeModifier(settings: settings))
             }
             .windowResizability(.contentMinSize)
+
+            // The full player; only ``PlayerSlot`` opens it, with a session.
+            Window(Text(verbatim: L10n.string("HeaderNowPlaying")), id: NowPlayingWindow.id) {
+                NowPlayingWindow(player: environment.player)
+                    .environment(settings)
+                    .environment(\.imagePipeline, environment.images.pipeline)
+                    .environment(\.libraryStore, environment.library?.store)
+                    .modifier(AppThemeModifier(settings: settings))
+            }
+            .restorationBehavior(.disabled)
+            .defaultLaunchBehavior(.suppressed)
         #endif
     }
 }

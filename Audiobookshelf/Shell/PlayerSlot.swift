@@ -36,17 +36,18 @@ final class PlaceholderPlayerState: PlayerSlotState {
 ///
 /// - iOS: the mini player is the tab view's bottom accessory, which sits above the tab bar and
 ///   follows the sidebar layout too; the full player is a full-screen cover.
-/// - macOS: the mini player is a bar under the content. The full player is the Now Playing
-///   window, which #183 opens when `Router/isFullPlayerPresented` turns on.
+/// - macOS: the mini player is a bar under the content. The full player is the
+///   ``NowPlayingWindow``, which opens when `Router/isFullPlayerPresented` turns on with a
+///   session; the flag then resets, so it can turn on again from any scene.
 /// - Both: the queue is an inspector, which compact width shows as a sheet.
 ///
 /// The mini and full players are ``MiniPlayerView`` and ``NowPlayingView`` when `player` is a
 /// ``PlayerViewModel``, as in the app, else placeholders. The queue inspector is a placeholder
 /// until #60.
 ///
-/// Without a session the full player closes (on macOS, the flag resets for #183's window), also
-/// when it is opened with none. A queue auto-advance that passes through `.idle` would close it
-/// too (#60).
+/// Without a session the full player closes, also when it is opened with none (on macOS, the
+/// flag resets and the window closes itself). A queue auto-advance that passes through `.idle`
+/// would close it too (#60).
 ///
 /// A playback failure (`errorMessageKey`) shows in an alert, with or without a session, and only
 /// in the active scene, so other windows don't repeat it. On iOS the full player shows it while
@@ -57,6 +58,9 @@ struct PlayerSlot: ViewModifier {
     let player: any PlayerSlotState
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appearsActive) private var appearsActive
+    #if os(macOS)
+        @Environment(\.openWindow) private var openWindow
+    #endif
     /// The failure this scene's alert was dismissed for.
     @State private var dismissedError: PlayerErrorMessage?
 
@@ -78,6 +82,11 @@ struct PlayerSlot: ViewModifier {
     /// ended while it was open, or it was opened without one.
     nonisolated static func presentsWithoutSession(isPresented: Bool, hasSession: Bool) -> Bool {
         isPresented && !hasSession
+    }
+
+    /// Whether turning the full player on opens the Now Playing window (macOS): only with a session.
+    nonisolated static func opensNowPlayingWindow(isPresented: Bool, hasSession: Bool) -> Bool {
+        isPresented && hasSession
     }
 
     /// The failure to show: the current one, unless the scene dismissed it.
@@ -153,6 +162,12 @@ struct PlayerSlot: ViewModifier {
                 }
                 .inspector(isPresented: $router.isQueueInspectorPresented) {
                     QueueInspectorPlaceholder()
+                }
+                .onChange(of: router.isFullPlayerPresented) { _, isPresented in
+                    if Self.opensNowPlayingWindow(isPresented: isPresented, hasSession: player.hasSession) {
+                        openWindow(id: NowPlayingWindow.id)
+                        router.isFullPlayerPresented = false
+                    }
                 }
         #endif
     }

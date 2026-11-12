@@ -48,6 +48,14 @@ import Testing
         #expect(!PlayerSlot.presentsWithoutSession(isPresented: false, hasSession: true))
     }
 
+    /// On macOS turning the full player on opens the Now Playing window, but only with a session.
+    @Test func theMacWindowOpensOnlyWithASession() {
+        #expect(PlayerSlot.opensNowPlayingWindow(isPresented: true, hasSession: true))
+        #expect(!PlayerSlot.opensNowPlayingWindow(isPresented: true, hasSession: false))
+        #expect(!PlayerSlot.opensNowPlayingWindow(isPresented: false, hasSession: true))
+        #expect(!PlayerSlot.opensNowPlayingWindow(isPresented: false, hasSession: false))
+    }
+
     @Test(arguments: [
         PlayerErrorMessage.streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed,
         .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed,
