@@ -603,9 +603,9 @@ public actor DownloadEngine {
             return false
         }
         var deleted = true
-        // Every unfinished part, flagged or not: a pause whose seal failed, and whose previous
-        // blob couldn't be deleted, leaves one unflagged.
-        for part in records.flatMap(\.parts) where part.state != .completed {
+        // Every part, flagged or not: a pause whose seal failed, and whose previous blob couldn't
+        // be deleted, leaves one unflagged, and a completion whose delete failed one completed.
+        for part in records.flatMap(\.parts) {
             guard vault.delete(partID: part.id) else {
                 Log.downloads.error("Couldn't delete resume data; a flagged part stays flagged")
                 deleted = false

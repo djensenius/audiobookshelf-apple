@@ -151,6 +151,23 @@ import Testing
         #expect(try await fixture.store.record(id: book.id)?.state == .paused)
     }
 
+    /// A guarded resume that queued the record, then couldn't pause it again after a quiesce,
+    /// throws: the restart pauses it, so the next activation doesn't start it with the old
+    /// credentials.
+    @Test func restartPausesARecordAFailedResumeQueuedAfterAQuiesce() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.failNextResumes(2, queueingFirst: true)
+        await fixture.engine.quiesce(since: 0)
+
+        await #expect(throws: DownloadManagerError.storeFailure) { try await manager.restartActiveTransfers() }
+
+        #expect(await fixture.engine.resumed.isEmpty)
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
     /// A quiesce that begins after the failed restart checked for one, but before it queued the
     /// record, may pass over the record while it is still paused: the restart checks again
     /// once it is queued, and puts it back to paused.

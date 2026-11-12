@@ -897,6 +897,24 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: blob))
     }
 
+    /// A completion whose blob couldn't be deleted leaves one with the old credentials on a
+    /// completed part: the discard deletes it too.
+    @Test func discardResumeDataDeletesACompletedPartsBlob() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        try #require(try await harness.store.completePart(partID: partID, finalBytes: 6))
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        try #require(try await harness.store.part(id: partID)?.state == .completed)
+        try #require(FileManager.default.fileExists(atPath: blob))
+        let engine = harness.makeEngine()
+
+        #expect(await engine.discardResumeData(connectionID: harness.connectionID))
+
+        #expect(!FileManager.default.fileExists(atPath: blob))
+    }
+
     /// A part failing for good stops its siblings and may replay a start that overlapped it,
     /// after which its transfer would run with the old token: the quiesce waits for it, then
     /// stops what it started. In production the sign-out pauses the record first.

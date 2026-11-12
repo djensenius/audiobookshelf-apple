@@ -49,6 +49,9 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     /// Whether ``resume(recordID:)`` deletes the record first, as a finalise running meanwhile does.
     private var finaliseBeforeResume = false
     private var failingResumes = 0
+    /// Whether a failing resume queues the record first, as the engine's guarded resume does
+    /// when it then can't pause it again.
+    private var failingResumesQueue = false
     private var hasSession = false
     private var sessionAvailable = true
     /// Records whose surviving transfer isn't adopted yet.
@@ -103,8 +106,9 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     }
 
     /// Makes the next `count` resumes throw before they change anything.
-    func failNextResumes(_ count: Int) {
+    func failNextResumes(_ count: Int, queueingFirst: Bool = false) {
         failingResumes = count
+        failingResumesQueue = queueingFirst
     }
 
     func finaliseOnResume() {
@@ -147,6 +151,7 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         calls.append(.resume(recordID))
         if failingResumes > 0 {
             failingResumes -= 1
+            if failingResumesQueue { _ = try await store.setState(.queued, forRecord: recordID) }
             throw ResumeFailure()
         }
         resumed.append(recordID)

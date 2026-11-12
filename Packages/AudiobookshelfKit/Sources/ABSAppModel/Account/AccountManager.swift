@@ -223,7 +223,6 @@ public final class AccountManager {
         defer { if isCurrent(operation) { pendingConnectionID = nil } }
         let session = StoredSession(tokens: result.tokens, openIDSession: result.openIDSession)
         var saved: (id: UUID, credentials: ConnectionCredentials, generation: Int)?
-        defer { if let id = saved?.id { savingSignIns[id, default: 1] -= 1 } }
         do {
             try ensureCurrent(operation)
             // Removed while authenticating; saving would bring it back.
@@ -241,7 +240,6 @@ public final class AccountManager {
                 session, customHeaders: server.configuration.customHeaders, operation: operation)
             signInGenerations[connection.id] = stored.generation
             saved = (connection.id, credentials, stored.generation)
-            savingSignIns[connection.id, default: 0] += 1
             if let replaced = stored.replaced, replaced.refreshToken != session.refreshToken {
                 // Signed in again: end the session this one replaced, best effort.
                 _ = await serverLogout(replaced, client: makeClient(server, credentials: nil))
@@ -555,9 +553,6 @@ public final class AccountManager {
     /// Counts ``logout()``, ``remove(_:)`` and expiries per connection, so a lookup that
     /// overlapped one doesn't keep a client.
     @ObservationIgnored private var downloadClientResets: [UUID: Int] = [:]
-    /// Counts the sign-ins per connection that saved their credentials and haven't finished, so
-    /// ``downloadClient(for:)`` doesn't hand out an active client made before them.
-    @ObservationIgnored private var savingSignIns: [UUID: Int] = [:]
 
     /// The client for a connection's download credentials (`AccountDownloadCredentials`): the
     /// active client, or for another saved connection that is connected, not signed out, not
@@ -566,26 +561,26 @@ public final class AccountManager {
     /// sign-in, ``logout()``, ``remove(_:)`` or expiry. Reads the store, not ``connections``, so
     /// it works in a background wake before the session is restored. `nil` otherwise.
     public func downloadClient(for id: UUID) async -> APIClient? {
-        if let client = activeClient(for: id) { return client }
+        if let client = await activeClient(for: id) { return client }
         guard !removing.contains(id) else { return nil }
         let reset = downloadClientResets[id, default: 0]
         // Read each time: an expiry whose delete failed saves a sign-out without a logout.
         guard let connection = try? await store.connection(id: id), !connection.isDisconnected,
             connection.signedOutAt == nil, downloadClientResets[id, default: 0] == reset, !removing.contains(id)
         else { return nil }
-        if let client = activeClient(for: id) { return client }
+        if let client = await activeClient(for: id) { return client }
         let credentials = self.credentials(for: id)
         // The generation first: headers a newer sign-in saved meanwhile are kept under the older
         // generation, so the next lookup makes a client again rather than keeping stale ones.
         guard let read = try? await credentials.loadSession(), read.session != nil,
             downloadClientResets[id, default: 0] == reset, !removing.contains(id)
         else { return nil }
-        if let client = activeClient(for: id) { return client }
+        if let client = await activeClient(for: id) { return client }
         if let cached = downloadClients[id], cached.generation == read.generation { return cached.client }
         guard let saved = try? await credentials.load(), saved.session != nil,
             downloadClientResets[id, default: 0] == reset, !removing.contains(id)
         else { return nil }
-        if let client = activeClient(for: id) { return client }
+        if let client = await activeClient(for: id) { return client }
         if let cached = downloadClients[id], cached.generation == read.generation { return cached.client }
         guard let created = makeClient(connection, customHeaders: saved.customHeaders, credentials: credentials) else {
             return nil
@@ -594,12 +589,41 @@ public final class AccountManager {
         return created
     }
 
-    /// The active client, if `id` is the active connection, unless a sign-in to it saved new
-    /// credentials that the client doesn't have yet: their custom headers may differ, so a
-    /// client over the saved credentials is made instead.
-    private func activeClient(for id: UUID) -> APIClient? {
-        guard activeConnection?.id == id, savingSignIns[id, default: 0] == 0 else { return nil }
+    /// The active client, if `id` is the active connection and the client has the custom
+    /// headers of its saved credentials: a sign-in to it (even one that then failed) may have
+    /// saved others, and then a client over the saved credentials is made instead.
+    private func activeClient(for id: UUID) async -> APIClient? {
+        guard activeConnection?.id == id, let client,
+            let saved = try? await credentials(for: id).load(),
+            await client.configuration.customHeaders == saved.customHeaders,
+            activeConnection?.id == id, self.client === client
+        else { return nil }
         return client
+    }
+
+    /// Reads a download access token of `id` with `read`, from the client
+    /// ``downloadClient(for:)`` returns, and returns both only if they belong to one sign-in:
+    /// the connection's credentials weren't replaced during the read (a sign-in, sign-out,
+    /// expiry or removal changes their generation; a refresh doesn't) and the client has their
+    /// custom headers. Otherwise `nil`, so a token is never sent with another sign-in's headers;
+    /// a later lookup makes a client again.
+    public func downloadAccess(
+        for id: UUID, read: @Sendable (APIClient) async throws -> String?
+    ) async throws -> (client: APIClient, token: String)? {
+        guard let client = await downloadClient(for: id) else { return nil }
+        let credentials = self.credentials(for: id)
+        guard let before = try? await credentials.loadSession().generation,
+            let token = try await read(client)
+        else { return nil }
+        // Generations only grow, and a sign-in saves its tokens and generation together, so an
+        // unchanged generation means the token is the saved credentials'.
+        guard let after = try? await credentials.loadConfiguration(), after.generation == before,
+            await client.configuration.customHeaders == after.customHeaders
+        else {
+            Log.downloads.notice("A connection's credentials changed while reading a download token; not using it")
+            return nil
+        }
+        return (client, token)
     }
 
     private func forgetDownloadClient(_ id: UUID) {

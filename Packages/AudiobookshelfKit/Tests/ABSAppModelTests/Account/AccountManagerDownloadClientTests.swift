@@ -237,6 +237,51 @@ private final class TokenServer: Sendable {
         #expect(await manager.downloadClient(for: idA) === manager.client)
     }
 
+    /// A sign-in to the active connection that saved new headers and tokens, then was
+    /// cancelled, leaves the active client with the old headers: the lookup doesn't hand it out
+    /// with the new tokens.
+    @Test func cancelledSignInAgainDoesNotHandOutTheOldClient() async throws {
+        let serverA = TokenServer(userId: "usr-a")
+        let idA = try await signIn(to: serverA)
+        let old = try #require(manager.client)
+        let logout = StubURLProtocol.hold(host: serverA.host, path: "/abs/logout")
+
+        let again = Task { try await signIn(to: serverA, customHeaders: ["X-Proxy": "1"]) }
+        await logout.arrived()
+        again.cancel()
+        logout.open()
+        _ = await again.result
+        #expect(manager.client === old)
+
+        let client = try #require(await manager.downloadClient(for: idA))
+        #expect(client !== old)
+        #expect(await client.configuration.customHeaders == ["X-Proxy": "1"])
+        let access = try #require(try await manager.downloadAccess(for: idA) { await $0.currentAccessToken() })
+        #expect(access.client === client)
+        #expect(access.token == "usr-a-access-2")
+    }
+
+    /// A token read while a sign-in replaces the connection's credentials isn't handed out with
+    /// the client looked up before it; the next lookup gets the new sign-in's.
+    @Test func tokenReadDuringASignInIsNotUsed() async throws {
+        let serverA = TokenServer(userId: "usr-a")
+        let idA = try await signIn(to: serverA)
+        let validated = try await ServerValidator(sessionConfiguration: { StubURLProtocol.sessionConfiguration() })
+            .validate(address: serverA.address, customHeaders: ["X-Proxy": "1"])
+        let manager = manager
+
+        let access = try await manager.downloadAccess(for: idA) { @MainActor client in
+            let token = await client.currentAccessToken()
+            try await manager.connect(local: validated, username: "david", password: "pw")
+            return token
+        }
+
+        #expect(access?.token == nil)
+        let fresh = try #require(try await manager.downloadAccess(for: idA) { await $0.currentAccessToken() })
+        #expect(await fresh.client.configuration.customHeaders == ["X-Proxy": "1"])
+        #expect(fresh.token == "usr-a-access-2")
+    }
+
     // MARK: - Expiry
 
     /// An expiry is reported, active or not, so the downloads are stopped even when no
