@@ -1,0 +1,90 @@
+{
+  "library": {
+    "id": "lib_sample",
+    "name": "LibriVox",
+    "folders": [
+      {
+        "id": "fol_sample",
+        "fullPath": "/audiobooks",
+        "libraryId": "lib_sample"
+      }
+    ],
+    "displayOrder": 1,
+    "icon": "audiobookshelf",
+    "mediaType": "book",
+    "provider": "google",
+    "settings": {
+      "coverAspectRatio": 1,
+      "disableWatcher": false,
+      "skipMatchingMediaWithAsin": false,
+      "skipMatchingMediaWithIsbn": false,
+      "autoScanCronExpression": null,
+      "audiobooksOnly": false,
+      "hideSingleBookSeries": false,
+      "onlyShowLaterBooksInContinueSeries": false,
+      "metadataPrecedence": [],
+      "markAsFinishedPercentComplete": null,
+      "markAsFinishedTimeRemaining": 10
+    },
+    "lastScan": 1700000000000,
+    "lastScanVersion": "2.26.0",
+    "createdAt": 1700000000000,
+    "lastUpdate": 1700000000000
+  },
+  "filterdata": {
+    "authors": [
+      {
+        "id": "aut_austen",
+        "name": "Jane Austen"
+      },
+      {
+        "id": "aut_shelley",
+        "name": "Mary Shelley"
+      },
+      {
+        "id": "aut_burroughs",
+        "name": "Edgar Rice Burroughs"
+      },
+      {
+        "id": "aut_doyle",
+        "name": "Arthur Conan Doyle"
+      },
+      {
+        "id": "aut_anonymous",
+        "name": "Anonymous"
+      }
+    ],
+    "series": [
+      {
+        "id": "ser_barsoom",
+        "name": "Barsoom"
+      }
+    ],
+    "genres": [
+      "Fiction"
+    ],
+    "tags": [],
+    "narrators": [
+      "LibriVox Volunteers"
+    ],
+    "languages": [
+      "English"
+    ],
+    "publishers": [
+      "LibriVox"
+    ],
+    "publishedDecades": [
+      "1810",
+      "1890",
+      "1910"
+    ],
+    "bookCount": 8,
+    "authorCount": 5,
+    "genreCount": 1,
+    "seriesCount": 1,
+    "numIssues": 0,
+    "loadedAt": 1700000000000
+  },
+  "issues": 0,
+  "numUserPlaylists": 0
+}
