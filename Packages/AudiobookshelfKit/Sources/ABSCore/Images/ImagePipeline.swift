@@ -22,6 +22,9 @@ public actor ImagePipeline {
     private var builders: [UUID: any ImageRequestBuilding] = [:]
     /// Servers removed since their builder was last set, which nothing may fetch for.
     private var removedServers: Set<UUID> = []
+    /// Servers given a builder (or told they have none) in this process and not removed since:
+    /// their connection is saved, even if a sweep read the saved connections before it was.
+    private var sessionServers: Set<UUID> = []
     private var fetches: [FetchKey: Flight<FetchedFile>] = [:]
     private var decodes: [MemoryKey: Flight<DecodedBitmap>] = [:]
     /// Network requests started, for tests.
@@ -69,6 +72,7 @@ public actor ImagePipeline {
     /// re-enables fetching for a server passed to ``removeServer(_:)``.
     public func setRequestBuilder(_ builder: (any ImageRequestBuilding)?, for serverID: UUID) {
         builders[serverID] = builder
+        sessionServers.insert(serverID)
         if builder != nil { removedServers.remove(serverID) }
     }
 
@@ -135,11 +139,61 @@ public actor ImagePipeline {
 
     /// Forgets a removed server: its request builder, in-flight fetches and decodes (which are
     /// cancelled), memory entries and cached files. Fetches already running can't write to the
-    /// store afterwards, and new ones fail until a builder is set again.
-    // TODO(#143): wait for the server's file leases before deleting its folder.
+    /// store afterwards, and new ones fail until a builder is set again. The files are deleted
+    /// once the decodes reading them have finished, or after a few seconds
+    /// (``CoverFileStore/removeServer(_:)``).
     public func removeServer(_ serverID: UUID) async {
+        forget(serverID)
+        await fileStore.removeServer(serverID)
+    }
+
+    /// Removes, as ``removeServer(_:)`` does, every server with cached covers or loads that isn't
+    /// in `saved`: connections removed in an earlier launch whose covers weren't deleted then
+    /// (#421). Pass the saved connections read from the store, never a list that may not have
+    /// loaded yet. Servers given a builder in this process are kept too, so a connection saved
+    /// after `saved` was read keeps its covers.
+    ///
+    /// Not ordered with ``setRequestBuilder(_:for:)``: the app sweeps through `ImageParticipant`,
+    /// which calls ``serversToSweep(keepingOnly:)`` and then ``removeServerUnlessInSession(_:)``
+    /// in each connection's queue, behind and before its builder installs.
+    public func removeServers(keepingOnly saved: Set<UUID>) async {
+        for serverID in await serversToSweep(keepingOnly: saved) {
+            await removeServerUnlessInSession(serverID)
+        }
+    }
+
+    /// A sweep's first step: forgets the memory entries and loads of every server not in `saved`
+    /// and not given a builder in this process, and returns those servers and the ones with
+    /// cached files not in `saved`, for ``removeServerUnlessInSession(_:)``. A forgotten load may
+    /// be past its cancellation check and about to store its server's first cover, so its server
+    /// is removed even without a folder: the removal refuses that write.
+    public func serversToSweep(keepingOnly saved: Set<UUID>) async -> Set<UUID> {
+        let kept = saved.union(sessionServers)
+        var unkept = Set(fetches.keys.map(\.key.serverID)).union(decodes.keys.map(\.key.serverID))
+        memory.removeAll { entry in
+            guard !kept.contains(entry.key.serverID) else { return false }
+            unkept.insert(entry.key.serverID)
+            return true
+        }
+        for serverID in unkept.subtracting(kept) { forget(serverID) }
+        return await fileStore.servers(notIn: saved).union(unkept.subtracting(kept))
+    }
+
+    /// A sweep's removal of one server, as ``removeServer(_:)``, unless it has been given a
+    /// builder in this process (a session started since the saved connections were read).
+    /// Returns whether it was removed.
+    @discardableResult
+    public func removeServerUnlessInSession(_ serverID: UUID) async -> Bool {
+        guard !sessionServers.contains(serverID) else { return false }
+        await removeServer(serverID)
+        return true
+    }
+
+    /// Everything but the files of ``removeServer(_:)``, before its first `await`.
+    private func forget(_ serverID: UUID) {
         builders[serverID] = nil
         removedServers.insert(serverID)
+        sessionServers.remove(serverID)
         // First, so the synchronous lookup stops returning the server's covers at once.
         memory.removeAll { $0.key.serverID == serverID }
         for (key, flight) in fetches where key.key.serverID == serverID {
@@ -150,7 +204,6 @@ public actor ImagePipeline {
             flight.cancel()
             decodes[key] = nil
         }
-        await fileStore.removeServer(serverID)
     }
 
     /// The bytes in the memory LRU, and of every live image plus reservations.

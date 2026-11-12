@@ -140,7 +140,7 @@ extension SceneContent {
 }
 
 extension SessionScenePhase {
-    fileprivate init(_ phase: ScenePhase) {
+    init(_ phase: ScenePhase) {
         switch phase {
         case .active: self = .active
         case .inactive: self = .inactive

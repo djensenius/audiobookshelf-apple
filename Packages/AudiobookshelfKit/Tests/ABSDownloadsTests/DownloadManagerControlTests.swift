@@ -46,6 +46,7 @@ import Testing
         for record in [queued, downloading] {
             #expect(try await manager.resume(recordID: record.id) == false)
             #expect(try await manager.retry(recordID: record.id) == false)
+            #expect(try await manager.resume(recordID: record.id, unlessQuiescedSince: 0) == false)
         }
         try await manager.restartActiveTransfers()
 
@@ -116,6 +117,72 @@ import Testing
         #expect(await fixture.engine.resumed == [order[1]])
         #expect(try await fixture.store.record(id: book.id)?.state == .queued)
         #expect(try await fixture.store.record(id: episode.id)?.state == .queued)
+    }
+
+    /// The restart resumes a record unless a sign-out's quiesce of its server began since the
+    /// restart did: that quiesce passed over the record while it was paused.
+    @Test func restartDoesNotResumeARecordIfItsServerWasQuiescedMeanwhile() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.quiesce(since: 0)
+
+        try await manager.restartActiveTransfers()
+
+        #expect(await fixture.engine.calls == [.pause(book.id), .resume(book.id)])
+        #expect(await fixture.engine.resumed.isEmpty)
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
+    /// A sign-out's quiesce of the server that began during the restart passed over the paused
+    /// record, so a resume that fails twice leaves it paused, as that quiesce leaves the rest:
+    /// queued, the next activation would start it again.
+    @Test func restartLeavesARecordPausedWhoseResumesFailedAfterAQuiesce() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.failNextResumes(2)
+        await fixture.engine.quiesce(since: 0)
+
+        await #expect(throws: DownloadManagerError.storeFailure) { try await manager.restartActiveTransfers() }
+
+        #expect(await fixture.engine.calls == [.pause(book.id), .resume(book.id), .resume(book.id)])
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
+    /// A guarded resume that queued the record, then couldn't pause it again after a quiesce,
+    /// throws: the restart pauses it, so the next activation doesn't start it with the old
+    /// credentials.
+    @Test func restartPausesARecordAFailedResumeQueuedAfterAQuiesce() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.failNextResumes(2, queueingFirst: true)
+        await fixture.engine.quiesce(since: 0)
+
+        await #expect(throws: DownloadManagerError.storeFailure) { try await manager.restartActiveTransfers() }
+
+        #expect(await fixture.engine.resumed.isEmpty)
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
+    /// A quiesce that begins after the failed restart checked for one, but before it queued the
+    /// record, may pass over the record while it is still paused: the restart checks again
+    /// once it is queued, and puts it back to paused.
+    @Test func restartLeavesARecordPausedWhoseServerIsQuiescedAsItIsQueued() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.failNextResumes(2)
+        await fixture.engine.quiesce(afterNextCheckSince: 0)
+
+        await #expect(throws: DownloadManagerError.storeFailure) { try await manager.restartActiveTransfers() }
+
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
     }
 
     /// A restart waits for an enqueue of the item, and leaves a record paused meanwhile alone.

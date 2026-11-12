@@ -1,6 +1,7 @@
 import ABSAppModel
 import ABSCore
 import ABSData
+import ABSDownloads
 import ABSUI
 import Foundation
 import Testing
@@ -13,24 +14,43 @@ import Testing
     import UIKit
 #endif
 
+/// Downloads for an `AppEnvironment` built by a test: a throwaway root, never the app's
+/// container, and a session that isn't the app's background one.
+struct TestDownloads {
+    let root = FileManager.default.temporaryDirectory.appending(
+        path: "AppEnvironmentTests-Downloads-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let makeSession: DownloadSessionFactory = {
+        URLSession(configuration: .ephemeral, delegate: $0, delegateQueue: nil)
+    }
+
+    func cleanUp() { try? FileManager.default.removeItem(at: root) }
+}
+
 @MainActor
 @Suite struct AppEnvironmentTests {
+    private let downloads = TestDownloads()
+
     /// Settings in a throwaway defaults suite, so a test never touches the app's.
     private func withSettings(_ body: (AppSettings) async throws -> Void) async throws {
         let suiteName = "AppEnvironmentTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            downloads.cleanUp()
+        }
         try await body(AppSettings(defaults: defaults))
     }
 
     @Test func buildsWithAnInMemoryStoreAndSettlesSignedOut() async throws {
         try await withSettings { settings in
             let environment = AppEnvironment(
-                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain())
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(),
+                downloadsRoot: downloads.root, makeDownloadSession: downloads.makeSession)
 
             #expect(environment.settings === settings)
             #expect(environment.dataStack != nil)
             #expect(environment.accounts != nil)
+            #expect(environment.downloads != nil)
             // The library is the lifecycle's seeder, and stays cleared while signed out.
             #expect(environment.library != nil)
             #expect(environment.lifecycle.gate == .launching)
@@ -42,10 +62,70 @@ import Testing
         }
     }
 
+    /// Built with the environment and launched without a scene, so a CarPlay-only launch or a
+    /// background wake has a running download stack.
+    @Test func launchesTheDownloadStackInTheInjectedRoot() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(),
+                downloadsRoot: downloads.root, makeDownloadSession: downloads.makeSession)
+            let stack = try #require(environment.downloads)
+            // A removal stops the downloads once its credentials are deleted.
+            #expect(environment.accounts?.credentialsRemoved != nil)
+
+            // The launch the environment began; the same task, so this waits for it.
+            await stack.lifecycle.launch().value
+
+            let locations = DownloadLocations(root: downloads.root)
+            for folder in [locations.downloadsRoot, locations.resumeDataRoot] {
+                #expect(FileManager.default.fileExists(atPath: folder.path(percentEncoded: false)), "\(folder)")
+            }
+        }
+    }
+
+    /// The app test host's environment: no download stack, so its real downloads stay as they are.
+    @Test func withoutADownloadsRootLeavesOutTheDownloadStack() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil,
+                makeDownloadSession: downloads.makeSession)
+
+            #expect(environment.accounts != nil)
+            #expect(environment.downloads == nil)
+            #expect(environment.accounts?.credentialsRemoved == nil)
+
+            await environment.lifecycle.start()
+
+            #expect(environment.lifecycle.gate == .connect)
+        }
+    }
+
+    /// A store other than the App Group one may not list the connections whose covers share the
+    /// App Group cover cache, so the launch sweep mustn't delete covers from it.
+    @Test func onlyTheAppGroupStoreSweepsRemovedConnectionsCovers() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "AppEnvironmentTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await withSettings { settings in
+            let inMemory = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            #expect(inMemory.accounts != nil)
+            #expect(!inMemory.images.sweepsRemovedConnections)
+
+            let onDisk = AppEnvironment(
+                settings: settings, storeLocation: .url(directory.appending(path: "Audiobookshelf.store")),
+                keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            #expect(onDisk.accounts != nil)
+            #expect(!onDisk.images.sweepsRemovedConnections)
+        }
+    }
+
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
         try await withSettings { settings in
             let keychain = ConnectTestKeychain()
-            let environment = AppEnvironment(settings: settings, storeLocation: .inMemory, keychain: keychain)
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: keychain, downloadsRoot: downloads.root,
+                makeDownloadSession: downloads.makeSession)
 
             let identifier = await environment.deviceIdentifiers.deviceIdentifier()
 
@@ -67,10 +147,12 @@ import Testing
         try await withSettings { settings in
             let location = DataStack.Location.url(blocker.appending(path: "Audiobookshelf.store"))
             let environment = AppEnvironment(
-                settings: settings, storeLocation: location, keychain: ConnectTestKeychain())
+                settings: settings, storeLocation: location, keychain: ConnectTestKeychain(),
+                downloadsRoot: downloads.root, makeDownloadSession: downloads.makeSession)
 
             #expect(environment.dataStack == nil)
             #expect(environment.accounts == nil)
+            #expect(environment.downloads == nil)
 
             await environment.lifecycle.start()
 

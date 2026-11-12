@@ -6,26 +6,42 @@ import UniformTypeIdentifiers
 
 @testable import ABSCore
 
-/// A one-shot gate: `wait()` returns once `open()` is called.
+/// A one-shot gate: `wait()` returns once `open()` is called, or once the waiting task is
+/// cancelled, so a test whose gate never opens fails at its time limit instead of hanging.
 final class Gate: Sendable {
-    private let state = Mutex<(isOpen: Bool, waiters: [CheckedContinuation<Void, Never>])>((false, []))
+    private struct State {
+        var isOpen = false
+        var nextID = 0
+        var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    }
+
+    private let state = Mutex(State())
 
     func open() {
         let waiters = state.withLock { state in
             state.isOpen = true
-            defer { state.waiters = [] }
-            return state.waiters
+            defer { state.waiters = [:] }
+            return state.waiters.values
         }
         for waiter in waiters { waiter.resume() }
     }
 
     func wait() async {
-        await withCheckedContinuation { continuation in
-            let isOpen = state.withLock { state in
-                if !state.isOpen { state.waiters.append(continuation) }
-                return state.isOpen
+        let id = state.withLock { state in
+            defer { state.nextID += 1 }
+            return state.nextID
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let resumes = state.withLock { state in
+                    guard !state.isOpen, !Task.isCancelled else { return true }
+                    state.waiters[id] = continuation
+                    return false
+                }
+                if resumes { continuation.resume() }
             }
-            if isOpen { continuation.resume() }
+        } onCancel: {
+            state.withLock { $0.waiters.removeValue(forKey: id) }?.resume()
         }
     }
 }
