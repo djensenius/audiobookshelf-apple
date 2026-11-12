@@ -62,6 +62,14 @@ struct AppPlayback {
         return AppPlayback(current: current, player: player, writer: writer, participant: participant)
     }
 
+    /// Hands the playback intents (widgets, controls, Shortcuts, Siri) to ``current``, so they
+    /// share the player with the app's UI and CarPlay. Once per process.
+    func registerIntents(settings: AppSettings) {
+        PlaybackIntentRouter.handler = PlaybackIntentHandler(
+            playback: current, settings: settings,
+            sleepTimer: { [weak participant] in participant?.sleepTimer })
+    }
+
     /// One account session's scope, over an engine of its own. The connection's last-played record
     /// and queue are kept in the settings' defaults, under keys of their own.
     private static func makeScope(

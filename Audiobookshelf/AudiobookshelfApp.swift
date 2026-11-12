@@ -11,6 +11,11 @@ struct AudiobookshelfApp: App {
     private var settings: AppSettings { environment.settings }
     @Environment(\.scenePhase) private var scenePhase
 
+    init() {
+        // Here rather than in `AppEnvironment`, so the environments tests build don't replace it.
+        environment.playback.registerIntents(settings: settings)
+    }
+
     var body: some Scene {
         // Every window; Open in New Window opens one at a screen (``WindowRoute``).
         WindowGroup(for: WindowRoute.self) { $windowRoute in
