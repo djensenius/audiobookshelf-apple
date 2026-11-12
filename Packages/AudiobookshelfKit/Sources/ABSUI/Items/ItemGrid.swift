@@ -2,15 +2,25 @@ import ABSCore
 import SwiftUI
 
 /// Sizing rules for ``ItemGrid``.
-enum ItemGridMetrics {
+public enum ItemGridMetrics {
     /// The narrowest a cell gets. It grows with Dynamic Type so large text gets fewer, wider
     /// columns instead of truncated titles.
-    static func minimumCellWidth(for size: DynamicTypeSize) -> CGFloat {
+    public static func minimumCellWidth(for size: DynamicTypeSize) -> CGFloat {
         switch size {
         case .xSmall, .small, .medium, .large: 140
         case .xLarge, .xxLarge, .xxxLarge: 160
         default: 220
         }
+    }
+
+    /// The columns an ``ItemGrid`` with the default spacing shows in `width` (its full width, with its
+    /// horizontal padding), as the adaptive layout fits them: as many minimum-width cells and spacings as fit,
+    /// at least one.
+    public static func columnCount(width: CGFloat, dynamicTypeSize: DynamicTypeSize) -> Int {
+        let spacing = ABSSpacing.large
+        let available = width - 2 * ABSSpacing.large
+        let fitting = ((available + spacing) / (minimumCellWidth(for: dynamicTypeSize) + spacing)).rounded(.down)
+        return max(1, fitting.isFinite ? Int(fitting) : 1)
     }
 }
 
