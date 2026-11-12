@@ -28,6 +28,10 @@ public final class Router {
     /// ``selectLibrary(id:kind:supportedSections:)``. A restored scene assumes every section of
     /// the library's kind until then, or every section when its kind is unknown.
     public private(set) var supportedSections: Set<AppTab> = []
+    /// Whether ``libraryID``, or having none, was checked against the account's loaded
+    /// libraries. A restored or guessed library isn't, even with a kind: until it is, the
+    /// scene may replace it without resetting the paths opened meanwhile.
+    public internal(set) var isLibraryChecked = false
     /// A library a deep link asked for, until the scene resolves it. A link carries only the
     /// ID, so the scene (S7a) looks up the library's kind and sections and calls
     /// ``selectLibrary(id:kind:supportedSections:)``, which clears this.
@@ -102,9 +106,10 @@ public final class Router {
 
     /// The sections the sidebar shows, in sidebar order: ``supportedSections`` once a library is
     /// selected, and every section before that, so the sidebar is never empty while the scene
-    /// has no library yet.
+    /// has no library yet. A user confirmed to have no libraries (``isLibraryChecked`` without a
+    /// library) gets none.
     public var visibleSections: [AppTab] {
-        libraryID == nil ? AppTab.sections : AppTab.sections.filter(supportedSections.contains)
+        libraryID == nil && !isLibraryChecked ? AppTab.sections : AppTab.sections.filter(supportedSections.contains)
     }
 
     /// Asks the scene to switch to library `id`, for a deep link that knows only the ID.
@@ -148,6 +153,7 @@ public final class Router {
         libraryID = id
         libraryKind = kind
         self.supportedSections = supportedSections
+        isLibraryChecked = true
         if pendingLibraryID == id { pendingLibraryID = nil }
         repairSections(supported: supportedSections)
     }
@@ -195,6 +201,7 @@ public final class Router {
         libraryID = nil
         libraryKind = nil
         supportedSections = []
+        isLibraryChecked = false
         librarySection = nil
         paths = [:]
     }
@@ -206,18 +213,36 @@ public final class Router {
         libraryID = id
         libraryKind = kind
         supportedSections = kind == nil ? Set(AppTab.sections) : AppTab.sections(for: kind)
+        isLibraryChecked = false
+    }
+
+    /// Shows no library, for a user confirmed to have none: resets the library-scoped paths and
+    /// the sections, and keeps Downloads and Account.
+    func clearLibrary() {
+        for tab in AppTab.allCases where tab.isLibraryScoped {
+            self[path: tab] = []
+        }
+        libraryID = nil
+        libraryKind = nil
+        supportedSections = []
+        isLibraryChecked = true
+        repairSections(supported: [])
     }
 
     /// Falls back from unsupported sections: the selected tab to Library, the Library section
     /// to the default grid (dropping the Library path, which came from that section), and
     /// clears the paths of unsupported section tabs.
-    func repairSections(supported: Set<AppTab>) {
+    ///
+    /// - Parameter keepsLibraryPath: keeps the Library path when its section falls back, for a
+    ///   library replacing one that was never checked: the path may hold a launch or deep link's
+    ///   screens, opened since, which keep their pending play link.
+    func repairSections(supported: Set<AppTab>, keepsLibraryPath: Bool = false) {
         if selectedTab.isSection, !supported.contains(selectedTab) {
             selectedTab = .library
         }
         if let section = librarySection, !section.isSection || !supported.contains(section) {
             librarySection = nil
-            self[path: .library] = []
+            if !keepsLibraryPath { self[path: .library] = [] }
         }
         for tab in AppTab.sections where !supported.contains(tab) {
             self[path: tab] = []

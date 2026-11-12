@@ -19,7 +19,9 @@ struct EpisodeDetailView: View {
     @State private var unavailableKey: EpisodeDetailHost.Key?
 
     private var key: EpisodeDetailHost.Key? {
-        guard let store, let connectionKey = store.connectionKey else { return nil }
+        // `connectedKey`: a reconnect that attaches a client, after an offline start without
+        // one, changes the key and retries the load.
+        guard let store, let connectionKey = store.connectedKey else { return nil }
         return EpisodeDetailHost.Key(
             itemID: itemID, episodeID: episodeID, store: ObjectIdentifier(store), connectionKey: connectionKey)
     }
@@ -35,7 +37,9 @@ struct EpisodeDetailView: View {
                 LoadingView()
             }
         }
-        .task(id: key) {
+        // With the store's online revision too: a reconnect that keeps the offline session's
+        // client leaves the key unchanged, and must still retry a failed load.
+        .task(id: DetailLoadTrigger(key: key, onlineRevision: store?.onlineRevision)) {
             guard let key, let store else {
                 host = nil
                 return

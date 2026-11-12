@@ -73,8 +73,10 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   that check, so its PATCH can overwrite another device's newer value. Nor does the merge
 ///   cover another device's write between GET and PATCH (the server offers no conditional write
 ///   here), or clock skew between this device's edit time and the server's `lastUpdate`
-///   (ADR 0007 decision 8, "Stale writes"). The drain never sends a `/sync` or `/close`; replaying
-///   deferred listening must pass #158-d2's admission rule.
+///   (ADR 0007 decision 8, "Stale writes"). The drain never sends a `/sync`; after the
+///   confirmations below, it resends the `/close`s the coordinator couldn't confirm
+///   (``CloseRetryQueue``, #382), each only once
+///   ``admitDeferredReport(sessionID:key:currentTime:editedAt:)`` admits it.
 ///   After settlements, outstanding PATCH acknowledgements get one confirmation lookup per key,
 ///   even on clean-only drains. Unresolved obligations remain for a later drain, without a resend.
 ///   Finally, the still-loaded session gets one baseline lookup if its key was not already read.
@@ -92,7 +94,7 @@ public final class ProgressSyncer {
     /// PATCHes per row in one drain: each group once, plus re-sends of groups edited meanwhile.
     static let maxSendsPerRow = 6
 
-    private struct Position: Equatable {
+    struct Position: Equatable {
         let revision: UInt64
         let token: PlaybackPositionToken
         let time: Double
@@ -100,7 +102,7 @@ public final class ProgressSyncer {
         let editedAt: Date
     }
 
-    private struct CurrentSession {
+    struct CurrentSession {
         /// Local ownership, not just the media key (or a server's reused session identifier).
         let ownership = UUID()
         let sessionID: String
@@ -131,13 +133,13 @@ public final class ProgressSyncer {
     }
 
     private weak var source: (any PlaybackProgressSource)?
-    private let service: any ProgressSyncService
-    private let store: LocalProgressStore
-    private let clock: ProgressSyncClock
+    let service: any ProgressSyncService
+    let store: LocalProgressStore
+    let clock: ProgressSyncClock
     private let tickInterval: TimeInterval
     private var observer: PlaybackObserverToken?
 
-    private var current: CurrentSession?
+    private(set) var current: CurrentSession?
     private var isPlaying = false
     private var lastTick: (uptime: TimeInterval, mediaTime: Double)?
     private var lastSyncAt: TimeInterval?
@@ -165,17 +167,17 @@ public final class ProgressSyncer {
     var beforeActiveProgressCapture: (@MainActor () async -> Void)?
     /// Test seam: observes admission without suspending between ownership validation and store submission.
     var activeProgressIntakeSubmitted: (@MainActor () -> Void)?
-    private var pendingPositions: [MediaKey: Position] = [:]
+    private(set) var pendingPositions: [MediaKey: Position] = [:]
     /// The pending positions whose last save failed, as opposed to ones merely still queued.
     private var failedPositions: [MediaKey: Position] = [:]
-    private var positionRevision: UInt64 = 0
+    private(set) var positionRevision: UInt64 = 0
     private var positionReceipts: [MediaKey: [(revision: UInt64, receipt: PlaybackCloseResult<Void>)]] = [:]
     private var transportTasks: [UUID: Task<Void, Never>] = [:]
-    private var isTransportQuiesced = false
+    private(set) var isTransportQuiesced = false
     /// `nil` error means success; neither outcome may be forgotten if the store throws.
     private var pendingSettlements: [MediaKey: (patch: ProgressPatch, error: String?, rejected: Bool)] = [:]
     /// Set by ``detach()``: queued requests are skipped; issued calls are canceled best-effort.
-    private var isDetached = false
+    private(set) var isDetached = false
     /// A drain is queued but not started; later requests join it.
     private var isDrainQueued = false
     /// The `/sync` scheduled for when the current session's backoff ends. Readable for tests.
@@ -186,12 +188,14 @@ public final class ProgressSyncer {
     private var drainFailures = 0
     /// How the drain running now ended: on a failure, or after its last pending row and
     /// confirmation (neither when it stopped early for another reason, such as a newer position).
-    private var drainOutcome: (failed: Bool, completed: Bool) = (false, false)
+    var drainOutcome: (failed: Bool, completed: Bool) = (false, false)
     /// Follows the network path; cancelled on detach and quiesce. Readable for tests to join.
     private(set) var pathTask: Task<Void, Never>?
     /// Test seam: called after each network path is handled, with whether it queued a drain
     /// (join it with ``waitForIdle()``).
     var pathHandled: (@MainActor (NetworkPath, Bool) -> Void)?
+    /// Closes the coordinator couldn't confirm, kept to retry (#382).
+    let closeQueue = CloseRetryQueue()
 
     /// Starts following `source`: observes its events and supplies its `finalCloseReport`.
     /// - Parameter store: Reuse the same writer across account-scope lifetimes. Independent
@@ -210,7 +214,12 @@ public final class ProgressSyncer {
         self.clock = clock
         self.tickInterval = tickInterval
         observer = source.addObserver { [weak self] event in self?.handle(event) }
-        source.finalCloseReport = { [weak self] closing in self?.closeReport(for: closing) }
+        source.finalCloseReport = { [weak self] closing in
+            guard let self, let handoff = closeReport(for: closing) else { return nil }
+            // closeReport just queued the closing position: its token stamps the retained close.
+            retainClose(handoff, for: closing, token: pendingPositions[closing.key]?.token)
+            return handoff
+        }
         source.quiesceProgressTransport = { [weak self] in self?.quiesceTransport() }
         if let paths { watch(paths.paths()) }
     }
@@ -225,6 +234,7 @@ public final class ProgressSyncer {
     public func detach() {
         quiesceTransport()
         isDetached = true
+        closeQueue.dropUnsaved()
         if let observer { source?.removeObserver(observer) }
         observer = nil
         source?.finalCloseReport = nil
@@ -813,7 +823,7 @@ public final class ProgressSyncer {
     }
 
     /// Drains again after a backoff, which grows with each failed drain.
-    private func scheduleDrainRetry() {
+    func scheduleDrainRetry() {
         drainFailures += 1
         drainWake?.cancel()
         drainWake = scheduleWake(after: Self.syncBackoff(afterFailures: drainFailures)) { syncer in
@@ -823,6 +833,8 @@ public final class ProgressSyncer {
     }
 
     private func drainPass() async {
+        // Only memory holds a close the capture couldn't save, and saving it needs no network.
+        await saveUnsavedCloses()
         guard await settleSessionAudioOutcomes() else {
             drainOutcome.failed = true
             return
@@ -929,6 +941,7 @@ public final class ProgressSyncer {
                 return
             }
         }
+        guard await retryRetainedCloses() else { return }
         drainOutcome.completed = true
         await refreshActiveProgress(unlessAttempted: attemptedKeys)
     }
@@ -969,7 +982,7 @@ public final class ProgressSyncer {
 
     /// Shared canonical intake for pre-drain and confirmation. A successful merge is not a
     /// confirmation receipt: the store alone owns and releases the acknowledgement obligation.
-    private func fetchProgress(
+    func fetchProgress(
         for key: MediaKey, attempted: inout [MediaKey: UUID], attemptedKeys: inout Set<MediaKey>,
         confirmationOnly: Bool = false
     ) async throws -> Bool {
@@ -1068,7 +1081,7 @@ public final class ProgressSyncer {
     }
 
     /// Later PATCHes would fail the same way, so the drain stops.
-    private static func isOffline(_ error: any Error) -> Bool {
+    static func isOffline(_ error: any Error) -> Bool {
         switch error as? APIError {
         case .network, .timedOut, .notAuthenticated, .sessionExpired: true
         default: false
@@ -1090,7 +1103,7 @@ public final class ProgressSyncer {
     }
 
     /// The error's case without associated values (which can carry server messages), for logs.
-    private static func caseName(_ error: any Error) -> String {
+    static func caseName(_ error: any Error) -> String {
         String(String(describing: error).prefix { $0 != "(" })
     }
 }

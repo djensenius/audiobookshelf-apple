@@ -51,6 +51,11 @@ public struct PlaybackFailure: Sendable, Hashable {
 }
 
 extension PlaybackFailure {
+    /// An item that never left `.unknown` (``AudioEngine/readinessTimeout``): a stall with no
+    /// error, retried like one.
+    static let readinessTimedOut = PlaybackFailure(
+        kind: .unknown, domain: "ABSPlayback.AudioEngine", code: -1, description: "The item never became ready")
+
     /// An `AVPlayerItemErrorLogEvent`'s fields (that class cannot be created in tests).
     struct ErrorLogEntry: Sendable, Hashable {
         var domain: String
