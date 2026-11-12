@@ -4,7 +4,8 @@ Xcode Cloud builds every push to `main` and sends iOS and macOS builds to intern
 TestFlight testers. A second workflow builds `v*` tags and sends them to external
 testers through Beta App Review ([Releasing a version](#releasing-a-version)). There is
 no Fastlane, and nothing uploads from a developer Mac. GitHub Actions only lints, builds
-and tests (see `.github/workflows/`).
+and tests (see `.github/workflows/`). The App Store listing, privacy answers, privacy
+manifests, export compliance and review notes are in [app-store.md](app-store.md).
 
 The Xcode Cloud workflows live in App Store Connect, not in this repository. The
 repository provides:
@@ -239,7 +240,8 @@ the app › Xcode Cloud):
       gets its own profiles with the same App Group and keychain group (plus App Sandbox
       on macOS). Don't upload certificates or profiles.
 - [ ] Export compliance: no prompt is expected, because
-      `ITSAppUsesNonExemptEncryption = NO` is set.
+      `ITSAppUsesNonExemptEncryption = NO` is set for the app and the widget extension
+      ([why](app-store.md#export-compliance)).
 - [ ] Start a build on `main`. Check:
   - both archives succeed;
   - the build log shows `Xcode 27.2` from `ci_post_clone.sh`;

@@ -45,48 +45,108 @@ enum RssFeedPresentation {
     static func isLoading(_ state: RssFeedModel.LoadState) -> Bool {
         state == .idle || state == .loading
     }
+
+    /// What the sheet's form shows.
+    enum Content: Equatable {
+        case loading
+        case retry
+        case open(RssFeed)
+        case openForm
+
+        /// The open feed's title and Done only while it shows; otherwise opening a feed and Cancel.
+        var titleKey: String {
+            if case .open = self { "HeaderRSSFeedIsOpen" } else { "HeaderOpenRSSFeed" }
+        }
+
+        var dismissKey: String {
+            if case .open = self { "ButtonDone" } else { "ButtonCancel" }
+        }
+    }
+
+    /// Progress, then Retry when the lookup failed, before any feed: one carried over from the last
+    /// sheet may be stale (replaced elsewhere), so it isn't offered for closing until a lookup succeeds.
+    static func content(_ state: RssFeedModel.LoadState, feed: RssFeed?) -> Content {
+        if isLoading(state) { return .loading }
+        if state == .failed { return .retry }
+        return feed.map(Content.open) ?? .openForm
+    }
+
+    /// Whether the entry shows a feed as open: the sheet's model once it knows the feed's state
+    /// (loaded, opened, closed, a live change, or carried over from the last sheet), else what the
+    /// screen fetched (`include=rssfeed`).
+    @MainActor
+    static func showsOpen(fetched: Bool, model: RssFeedModel?) -> Bool {
+        guard let model, model.hasKnownState else { return fetched }
+        return model.feed != nil
+    }
 }
 
 extension View {
     /// Adds RSS Feed (legacy `RssFeedModal.vue`) to the toolbar for admins, opening ``RssFeedSheet`` for
-    /// `target`; nothing when `target` is `nil`. The sheet closes when the account changes.
-    func rssFeedEntry(_ target: RssFeedTarget?) -> some View {
-        modifier(RssFeedEntry(target: target))
+    /// `target`; nothing when `target` is `nil`. `isOpen` is what the screen fetched, until the sheet
+    /// has loaded. The sheet closes when the account changes.
+    func rssFeedEntry(
+        _ target: RssFeedTarget?, isOpen: Bool = false, hasEpisodesWithoutPubDate: Bool = false
+    ) -> some View {
+        modifier(RssFeedEntry(target: target, isOpen: isOpen, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate))
+    }
+
+    /// Adds RSS Feed for a book or podcast; nothing when `entry` is `nil`.
+    func rssFeedEntry(_ entry: RssFeedItemEntry?) -> some View {
+        rssFeedEntry(
+            entry?.target, isOpen: entry?.isOpen ?? false,
+            hasEpisodesWithoutPubDate: entry?.hasEpisodesWithoutPubDate ?? false)
     }
 }
 
 private struct RssFeedEntry: ViewModifier {
     let target: RssFeedTarget?
+    let isOpen: Bool
+    let hasEpisodesWithoutPubDate: Bool
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var isPresented = false
+    /// The last sheet's model, kept after it closes so the entry shows what it last saw.
+    @State private var model: RssFeedModel?
 
     func body(content: Content) -> some View {
         let client = accounts?.client
         let shows = RssFeedPresentation.showsEntry(
             userType: accounts?.authorization?.user.type, hasClient: client != nil)
+        let open = RssFeedPresentation.showsOpen(fetched: isOpen, model: model?.target == target ? model : nil)
         content
             .toolbar {
-                if target != nil, shows {
+                if let target, let client, shows {
                     ToolbarItem(placement: .primaryAction) {
                         Button {
+                            // A fresh sheet each time, as before, starting from what the last one knew.
+                            let fresh = RssFeedModel(
+                                target: target, service: client, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate)
+                            if let model { fresh.seed(from: model) }
+                            model = fresh
                             isPresented = true
                         } label: {
                             Label {
                                 Text(verbatim: L10n.string("HeaderRSSFeed"))
                             } icon: {
-                                Image(systemName: "dot.radiowaves.up.forward")
+                                // Open shows a different symbol as well as the tint, not colour alone.
+                                Image(systemName: open ? "dot.radiowaves.left.and.right" : "dot.radiowaves.up.forward")
+                                    .foregroundStyle(open ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                             }
                         }
-                        .help(Text(verbatim: L10n.string("HeaderRSSFeed")))
+                        .help(Text(verbatim: L10n.string(open ? "LabelRSSFeedOpen" : "HeaderRSSFeed")))
+                        .accessibilityValue(open ? Text(verbatim: L10n.string("LabelRSSFeedOpen")) : Text(verbatim: ""))
                     }
                 }
             }
             .sheet(isPresented: $isPresented) {
-                if let target, let client {
-                    RssFeedSheet(model: RssFeedModel(target: target, service: client))
+                if let model {
+                    RssFeedSheet(model: model)
                 }
             }
-            .onChange(of: accounts?.activeConnection?.id) { isPresented = false }
+            .onChange(of: accounts?.activeConnection?.id) {
+                isPresented = false
+                model = nil
+            }
             .onChange(of: shows) { _, shows in if !shows { isPresented = false } }
     }
 }
@@ -107,7 +167,7 @@ struct RssFeedSheet: View {
     }
 
     var body: some View {
-        let feed = model.feed ?? closedFeed
+        let content = RssFeedPresentation.content(model.loadState, feed: model.feed ?? closedFeed)
         NavigationStack {
             ScrollViewReader { proxy in
                 Form {
@@ -115,20 +175,21 @@ struct RssFeedSheet: View {
                         RssFeedErrorSection(error: error)
                             .id(Self.errorID)
                     }
-                    if RssFeedPresentation.isLoading(model.loadState) {
+                    switch content {
+                    case .loading:
                         ProgressView {
                             Text(verbatim: L10n.string("MessageLoading"))
                         }
                         .frame(maxWidth: .infinity)
-                    } else if let feed {
-                        openFeed(feed)
-                    } else if model.loadState == .failed {
+                    case .retry:
                         Button {
                             Task { await model.load() }
                         } label: {
                             Text(verbatim: L10n.string("ButtonRetry"))
                         }
-                    } else {
+                    case .open(let feed):
+                        openFeed(feed)
+                    case .openForm:
                         RssFeedOpenForm(model: model)
                     }
                 }
@@ -142,11 +203,11 @@ struct RssFeedSheet: View {
                     AccessibilityNotification.Announcement(RssFeedPresentation.announcement(for: error)).post()
                 }
             }
-            .navigationTitle(Text(verbatim: L10n.string(feed == nil ? "HeaderOpenRSSFeed" : "HeaderRSSFeedIsOpen")))
+            .navigationTitle(Text(verbatim: L10n.string(content.titleKey)))
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar { toolbar(feed: feed) }
+            .toolbar { toolbar(content) }
         }
         .interactiveDismissDisabled(model.isWorking)
         .task { await model.load() }
@@ -158,16 +219,16 @@ struct RssFeedSheet: View {
     }
 
     @ToolbarContentBuilder
-    private func toolbar(feed: RssFeed?) -> some ToolbarContent {
+    private func toolbar(_ content: RssFeedPresentation.Content) -> some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button {
                 dismiss()
             } label: {
-                Text(verbatim: L10n.string(feed == nil ? "ButtonCancel" : "ButtonDone"))
+                Text(verbatim: L10n.string(content.dismissKey))
             }
             .disabled(model.isWorking)
         }
-        if feed == nil, model.loadState == .loaded {
+        if content == .openForm {
             ToolbarItem(placement: .confirmationAction) {
                 if model.isWorking {
                     ProgressView()
@@ -301,6 +362,10 @@ private struct RssFeedOpenForm: View {
                 }
                 if model.isInsecureServer {
                     Text(verbatim: L10n.string("NoteRSSFeedPodcastAppsHttps"))
+                        .foregroundStyle(.orange)
+                }
+                if model.hasEpisodesWithoutPubDate {
+                    Text(verbatim: L10n.string("NoteRSSFeedPodcastAppsPubDate"))
                         .foregroundStyle(.orange)
                 }
             }

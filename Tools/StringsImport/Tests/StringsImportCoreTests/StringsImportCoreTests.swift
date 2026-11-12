@@ -327,6 +327,32 @@ import Testing
         #expect(run("--check").status == 1)
     }
 
+    @Test func intentsCatalogIsWrittenAndChecked() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write(#"{"IntentPauseTitle": "Pause"}"#, to: "Localization/intents/en-us.json")
+        try FileManager.default.createDirectory(
+            at: root.appending(path: IntentsCatalog.catalogPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        #expect(run().status == 0)
+        #expect(run("--check").status == 0)
+        let catalog = try String(contentsOf: root.appending(path: IntentsCatalog.catalogPath), encoding: .utf8)
+        #expect(catalog.contains(#""IntentPauseTitle""#))
+
+        try write(#"{"IntentPauseTitle": "Pause", "IntentPlayTitle": "Play"}"#, to: "Localization/intents/en-us.json")
+        let stale = run("--check")
+        #expect(stale.status == 1)
+        #expect(stale.log.contains { $0.contains(IntentsCatalog.catalogPath) })
+    }
+
+    @Test func intentsKeysMustStartWithIntent() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write(#"{"ButtonPause": "Pause"}"#, to: "Localization/intents/en-us.json")
+        let result = run()
+        #expect(result.status == 1)
+        #expect(result.log.contains { $0.contains("ButtonPause must start with Intent") })
+    }
+
     @Test func rejectsUnknownArguments() {
         defer { try? FileManager.default.removeItem(at: root) }
         #expect(run("--bogus").status == 1)
@@ -682,7 +708,8 @@ import Testing
         #expect(files.map(\.path) == ["Audiobookshelf/Features/A/A.swift", "Audiobookshelf/Features/A/B.swift"])
     }
 
-    /// Every key the app uses exists, and Features/ has no hard-coded strings (what `strings:check` enforces).
+    /// Every key the app uses exists, and Features/ and ABSUI have no hard-coded strings beyond the
+    /// baseline, which has no stale entries (what `strings:check` enforces).
     @Test func repositorySourcesPass() throws {
         let root = URL(filePath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -694,7 +721,11 @@ import Testing
         let sources = try SourceScanner.load(root: root, paths: SourceScanner.keyPaths)
         #expect(sources.count > 100)
         #expect(SourceScanner.keyReferences(in: sources).required.filter { !keys.contains($0.key) } == [])
-        let features = sources.filter { $0.path.hasPrefix(SourceScanner.featuresPath + "/") }
-        #expect(features.flatMap { SourceScanner.hardCodedStrings(in: $0, keys: keys) } == [])
+        let scanned = sources.filter { SourceScanner.scansForHardCodedStrings($0.path) }
+        #expect(scanned.contains { $0.path.hasPrefix("Packages/AudiobookshelfKit/Sources/ABSUI/") })
+        let (new, stale) = try HardCodedBaseline.load(root: root)
+            .match(scanned.flatMap { SourceScanner.hardCodedStrings(in: $0, keys: keys) })
+        #expect(new == [])
+        #expect(stale.map(\.entry) == [])
     }
 }

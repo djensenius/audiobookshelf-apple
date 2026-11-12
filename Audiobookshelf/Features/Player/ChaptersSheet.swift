@@ -58,6 +58,18 @@ struct ChapterRowPresentation: Equatable {
 struct ChaptersSheet: View {
     let model: PlayerViewModel
     let close: () -> Void
+
+    var body: some View {
+        ChaptersPane(model: model, onSelect: close)
+            .playerSheetStyle(title: L10n.string("HeaderChapters"), onDone: close)
+    }
+}
+
+/// The chapter list without the sheet's frame, for the sheet and for the full player's details
+/// pane on a large display (#84). Choosing a chapter seeks to it, then calls `onSelect`.
+struct ChaptersPane: View {
+    let model: PlayerViewModel
+    let onSelect: () -> Void
     @Environment(\.locale) private var locale
 
     var body: some View {
@@ -66,20 +78,17 @@ struct ChaptersSheet: View {
             ChaptersList.Entry(
                 row: $0, presentation: ChapterRowPresentation(row: $0, position: $0.id + 1, rate: rate, locale: locale))
         }
-        Group {
-            if chapters.isEmpty {
-                ContentUnavailableView {
-                    Label {
-                        Text(verbatim: L10n.string("MessageNoChapters"))
-                    } icon: {
-                        Image(systemName: "list.bullet")
-                    }
+        if chapters.isEmpty {
+            ContentUnavailableView {
+                Label {
+                    Text(verbatim: L10n.string("MessageNoChapters"))
+                } icon: {
+                    Image(systemName: "list.bullet")
                 }
-            } else {
-                ChaptersList(model: model, chapters: chapters, close: close)
             }
+        } else {
+            ChaptersList(model: model, chapters: chapters, close: onSelect)
         }
-        .playerSheetStyle(title: L10n.string("HeaderChapters"), onDone: close)
     }
 }
 
