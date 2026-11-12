@@ -89,6 +89,8 @@ struct LibraryContent: View {
     var messages: BrowseMessages?
     @State private var showsFilter = false
     @Environment(Router.self) private var router: Router?
+    /// The tab whose stack shows the screen, for ⌥⌘F's frontmost check.
+    @Environment(\.navigationTab) private var navigationTab
     /// Between `onAppear` and `onDisappear`, which a covered stack screen or hidden tab isn't (as in `RefreshCommand`).
     @State private var isVisible = false
     /// The last user refresh failed and nothing loaded since.
@@ -131,7 +133,7 @@ struct LibraryContent: View {
         .toolbar {
             LibraryToolbar(
                 model: model, filterModel: filterModel, showsFilter: $showsFilter,
-                isFrontmost: placement.isFrontmost(in: router, isVisible: isVisible))
+                isFrontmost: placement.isFrontmost(in: router, owner: navigationTab, isVisible: isVisible))
         }
         .sheet(isPresented: $showsFilter) {
             if let filterModel {

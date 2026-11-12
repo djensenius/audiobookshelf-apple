@@ -131,23 +131,80 @@ import Testing
 
     @Test func crossOriginStripsAndStaysStrippedBackOnTheOrigin() throws {
         let download = ImageDownload(original: original)
-        let cross = try hop(download, from: "http://abs.example/a", to: "http://cdn.example/b")
+        let cross = try hop(download, from: "http://abs.example/a", to: "https://cdn.example/b")
         #expect(cross?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == nil)
         #expect(cross?.value(forHTTPHeaderField: "Accept") == "image/webp")
         #expect(cross?.httpShouldHandleCookies == false)
-        let back = try hop(download, from: "http://cdn.example/b", to: "http://abs.example/c")
+        let back = try hop(download, from: "https://cdn.example/b", to: "https://abs.example/c")
         #expect(back?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == nil)
         #expect(back?.httpShouldHandleCookies == false)
     }
 
     @Test func portChangeIsCrossOrigin() throws {
         let download = ImageDownload(original: original)
-        let next = try hop(download, from: "http://abs.example/a", to: "http://abs.example:8080/b")
+        let next = try hop(download, from: "http://abs.example/a", to: "https://abs.example:8443/b")
+        #expect(next != nil)
         #expect(next?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == nil)
     }
 
     @Test func downgradeIsRefused() throws {
         let download = ImageDownload(original: original)
         #expect(try hop(download, from: "https://abs.example/a", to: "http://abs.example/b") == nil)
+    }
+
+    @Test(arguments: ["https://127.0.0.1/admin", "https://[::1]/a", "https://192.168.1.1/a", "https://nas.local/a"])
+    func aHopToThisDeviceOrTheLocalNetworkIsRefused(target: String) throws {
+        let download = ImageDownload(original: original)
+        #expect(try hop(download, from: "http://abs.example/a", to: target) == nil)
+        // Also after a public hop.
+        let other = ImageDownload(original: original)
+        #expect(try hop(other, from: "http://abs.example/a", to: "https://cdn.example/b") != nil)
+        #expect(try hop(other, from: "https://cdn.example/b", to: target) == nil)
+    }
+
+    @Test func aLocalNetworkServerMayRedirectWithinItsOriginButNotElsewhereOnTheNetwork() throws {
+        var request = URLRequest(url: try #require(URL(string: "http://192.168.1.5:13378/api/items/1/cover")))
+        request.setValue("secret", forHTTPHeaderField: "CF-Access-Client-Secret")
+        let download = ImageDownload(original: request)
+        let same = try hop(download, from: "http://192.168.1.5:13378/a", to: "http://192.168.1.5:13378/b")
+        #expect(same?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
+        #expect(try hop(download, from: "http://192.168.1.5:13378/b", to: "http://192.168.1.5:8080/c") == nil)
+        #expect(try hop(download, from: "http://192.168.1.5:13378/b", to: "http://192.168.1.6:13378/c") == nil)
+    }
+
+    @Test func aPlainHTTPHopOffTheOriginIsRefused() throws {
+        let download = ImageDownload(original: original)
+        #expect(try hop(download, from: "http://abs.example/a", to: "http://cdn.example/b") == nil)
+        #expect(try hop(download, from: "http://abs.example/a", to: "http://abs.example:8080/b") == nil)
+        #expect(try hop(download, from: "http://abs.example/a", to: "https://cdn.example/b") != nil)
+        // From `https`, a foreign `http` host is a downgrade a rebound name could exploit.
+        #expect(try hop(download, from: "https://cdn.example/b", to: "http://images.example/c") == nil)
+    }
+
+    @Test func aHopToTheServersOwnHTTPOriginIsAllowed() throws {
+        var request = URLRequest(url: try #require(URL(string: "http://abs.example:8080/api/items/1/cover")))
+        request.setValue("secret", forHTTPHeaderField: "CF-Access-Client-Secret")
+        let download = ImageDownload(original: request)
+        let same = try hop(download, from: "http://abs.example:8080/a", to: "http://abs.example:8080/b")
+        #expect(same?.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
+    }
+
+    @Test func aForeignHTTPSCoverMayRedirectWithinItsOriginButNotToHTTP() throws {
+        let download = ImageDownload(original: URLRequest(url: try #require(URL(string: "https://cdn.example/a"))))
+        #expect(try hop(download, from: "https://cdn.example/a", to: "https://cdn.example/b") != nil)
+        #expect(try hop(download, from: "https://cdn.example/b", to: "http://other.example/c") == nil)
+    }
+
+    @Test func aCrossOriginHopDropsAuthorization() throws {
+        var request = original
+        request.setValue("Bearer t", forHTTPHeaderField: "Authorization")
+        let download = ImageDownload(original: request)
+        let from = try #require(URL(string: "http://abs.example/a"))
+        let response = try #require(HTTPURLResponse(url: from, statusCode: 302, httpVersion: nil, headerFields: nil))
+        var proposed = URLRequest(url: try #require(URL(string: "https://cdn.example/b")))
+        proposed.setValue("Bearer t", forHTTPHeaderField: "Authorization")
+        let next = try #require(download.redirect(following: response, to: proposed))
+        #expect(next.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(next.value(forHTTPHeaderField: "CF-Access-Client-Secret") == nil)
     }
 }
