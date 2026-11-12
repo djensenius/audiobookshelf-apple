@@ -651,6 +651,60 @@ struct AudioEngineTests {
         #expect(engine.player.rate == 2)
     }
 
+    @Test func anItemThatNeverBecomesReadyFailsAtItsDeadline() async throws {
+        let fixture = try AudioFixture()
+        let engine = AudioEngine(audioSession: nil, timeObserverInterval: 0.05, makePlayer: { NeverReadyPlayer() })
+        let waiting = Gate()
+        let deadline = Gate()
+        engine.readinessWait = { timeout in
+            #expect(timeout == AudioEngine.readinessTimeout)
+            waiting.open()
+            await deadline.wait()
+        }
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+        var finished = false
+        var thrown: AudioEngineError?
+        let load = Task {
+            defer { finished = true }
+            do throws(AudioEngineError) {
+                try await engine.load(fixture.source, at: 4)
+            } catch {
+                thrown = error
+            }
+        }
+        await waiting.wait()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(!finished)
+
+        deadline.open()
+        // Yields rather than awaiting the load, so a load that never returns fails rather than hangs.
+        for _ in 0..<2_000 where !finished { await Task.yield() }
+        if finished { await load.value }
+
+        let failure = AudioEngineError.itemFailed(trackIndex: 1, .readinessTimedOut)
+        #expect(finished)
+        #expect(thrown == failure)
+        #expect(events.withoutTicks == [.trackChanged(1), .failed(failure)])
+        #expect(engine.state == .failed(failure))
+    }
+
+    @Test func aReadyItemOutlivesItsDeadline() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        let deadline = Gate()
+        engine.readinessWait = { _ in await deadline.wait() }
+        var events: [AudioEngineEvent] = []
+        engine.onEvent = { events.append($0) }
+
+        try await engine.load(fixture.source, at: 4)
+        deadline.open()
+        for _ in 0..<200 { await Task.yield() }
+
+        #expect(engine.state == .paused)
+        #expect(!events.contains { if case .failed = $0 { true } else { false } })
+    }
+
     @Test func loadAfterPlayerFailureUsesAFreshPlayer() async throws {
         let fixture = try AudioFixture()
         let players = FailablePlayers()
@@ -1189,6 +1243,17 @@ extension [AudioEngineEvent] {
             return true
         }
     }
+}
+
+/// An `AVQueuePlayer` that only holds its items, never loading them, so they stay `.unknown`.
+final class NeverReadyPlayer: AVQueuePlayer {
+    // Nonisolated in AVFoundation; the engine only calls these on the main actor.
+    nonisolated(unsafe) private var held: [AVPlayerItem] = []
+
+    override var currentItem: AVPlayerItem? { held.first }
+    override func items() -> [AVPlayerItem] { held }
+    override func insert(_ item: AVPlayerItem, after afterItem: AVPlayerItem?) { held.append(item) }
+    override func removeAllItems() { held = [] }
 }
 
 /// An `AVQueuePlayer` whose `status` can be forced to `.failed`.
