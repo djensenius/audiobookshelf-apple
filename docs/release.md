@@ -292,7 +292,7 @@ way as `TestFlight (main)`, or duplicate that workflow and change it:
 | TestFlight shows build `(1)` for every build | Xcode Cloud didn't apply its build number. Don't use `agvtool`. Add a CI-only text edit of `"CURRENT_PROJECT_VERSION": "1"` in `project.xcproj` to `ci_post_clone.sh` (in the checkout only, never committed), and record it here. |
 | "What to Test" is empty or old | Check the `ci_post_xcodebuild.sh` log for `Wrote …/WhatToTest.en-US.txt` or a `Skipping What to Test notes: …` line, which gives the reason. Notes are only written after a successful archive for TestFlight. If the log says `CHANGELOG.md is missing or has no entries`, the notes list commits instead; add entries to `CHANGELOG.md`. |
 | Upload rejected because the version is closed or already released | App Store Connect doesn't take new builds for a version that is already on the App Store. Run `mise run release:version` with the next version and merge it. |
-| Package resolution fails | Xcode Cloud doesn't resolve packages automatically. Only the local `AudiobookshelfKit` package is used today. If a remote package is added, commit `Audiobookshelf.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`. |
+| Package resolution fails | Xcode Cloud doesn't resolve packages automatically. The only remote package is ZIPFoundation (pinned in `AudiobookshelfKit`). Its pin is committed in both `Packages/AudiobookshelfKit/Package.resolved` and `Audiobookshelf.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`; update both when a remote package changes. |
 
 ## References
 

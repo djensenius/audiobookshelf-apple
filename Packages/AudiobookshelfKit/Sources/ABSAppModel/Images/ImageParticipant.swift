@@ -10,6 +10,13 @@ public protocol ImageRequestBuilderSink: Sendable {
     func setRequestBuilder(_ builder: (any ImageRequestBuilding)?, for serverID: UUID) async
     /// Forgets a removed server and its cached covers.
     func removeServer(_ serverID: UUID) async
+    /// A sweep's first step: forgets what is loaded for servers not in `saved` and not given a
+    /// builder since launch, and returns the servers with cached covers not in `saved`.
+    func serversToSweep(keepingOnly saved: Set<UUID>) async -> Set<UUID>
+    /// Forgets a swept server and its cached covers, as ``removeServer(_:)`` does, unless it has
+    /// been given a builder since launch. Returns whether it was removed.
+    @discardableResult
+    func removeServerUnlessInSession(_ serverID: UUID) async -> Bool
 }
 
 extension ImagePipeline: ImageRequestBuilderSink {}
@@ -39,6 +46,8 @@ public final class ImageParticipant: SessionParticipant {
     private var connectionID: UUID?
     private var client: APIClient?
     private var removals: Task<Void, Never>?
+    /// Whether ``sweepRemovedConnections(savedConnections:)`` has run.
+    private var sweptRemovedConnections = false
     /// The latest pipeline call of each connection; the connection's next call waits for it.
     private var tails: [UUID: (call: Int, task: Task<Void, Never>)] = [:]
     private var nextCall = 0
@@ -106,6 +115,28 @@ public final class ImageParticipant: SessionParticipant {
                 known = saved
             }
         }
+    }
+
+    /// Deletes, once per launch, the covers of connections removed in an earlier launch: a
+    /// removal the app was terminated in after the store removed the connection, but before
+    /// ``remove(_:)`` ran, left them with no connection to follow (#421).
+    ///
+    /// Each server's removal runs in its connection's queue, like ``remove(_:)``: a session
+    /// started for it first keeps its covers, and one started meanwhile installs its builder only
+    /// once the removal (its lease wait included) is done, so it can't cache covers the removal
+    /// then deletes.
+    ///
+    /// - Parameter savedConnections: The saved connections read from the store, or `nil` if it
+    ///   can't be read, which skips the sweep (`AccountManager.savedConnectionIDs()`). Never a
+    ///   list that may not have loaded yet, which would delete every connection's covers.
+    public func sweepRemovedConnections(savedConnections: @MainActor () async -> Set<UUID>?) async {
+        guard !sweptRemovedConnections, let saved = await savedConnections() else { return }
+        sweptRemovedConnections = true
+        let sink = self.sink
+        let removals = await sink.serversToSweep(keepingOnly: saved).map { serverID in
+            enqueue(for: serverID) { await sink.removeServerUnlessInSession(serverID) }
+        }
+        for removal in removals { await removal.value }
     }
 
     // MARK: - Builder
