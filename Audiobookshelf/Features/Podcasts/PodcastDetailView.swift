@@ -104,23 +104,9 @@ struct PodcastDetailScreen: View {
         #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
         #endif
-        #if os(macOS)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        Task { await model.detail.load() }
-                    } label: {
-                        Label {
-                            Text(verbatim: L10n.string("ButtonRefresh"))
-                        } icon: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                    }
-                    .keyboardShortcut("r", modifiers: .command)
-                    .disabled(model.detail.isLoading)
-                }
-            }
-        #endif
+        .refreshCommand(.pushed(.item(id: model.detail.itemID)), isDisabled: model.detail.isLoading) {
+            Task { await model.detail.load() }
+        }
         .alert(
             Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
             presenting: failureKey

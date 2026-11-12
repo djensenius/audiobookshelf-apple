@@ -48,7 +48,8 @@ public enum ImageSource: Sendable, Hashable {
 ///
 /// Implementations never add the Audiobookshelf access token: both image routes are
 /// unauthenticated on every supported server. They send the connection's custom headers to
-/// the server's origin only, and no cookies.
+/// the server's origin only, and no cookies. An ``ImageSource/external(_:)`` URL is built only if
+/// ``ImageDestination/isAllowed(_:server:)`` allows it for the connection's server.
 public protocol ImageRequestBuilding: Sendable {
     /// Returns `nil` if no valid URL can be built.
     func imageRequest(for source: ImageSource) -> URLRequest?
