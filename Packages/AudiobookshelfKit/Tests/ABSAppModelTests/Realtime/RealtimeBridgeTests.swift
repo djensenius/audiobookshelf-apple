@@ -451,6 +451,26 @@ struct RealtimeBridgeTests {
                 == Array(repeating: LibraryConnectionKey(connectionID: identityA.connectionID, userID: "a"), count: 3))
     }
 
+    @Test func groupChangesReachTheHookWithTheirOwner() async throws {
+        let harness = BridgeHarness()
+        let socket = try await harness.start()
+        let changes = Recorder<LibraryChange>()
+        harness.bridge.onLibraryChange = { change, _ in changes.append(change) }
+        let collection = LibraryCollection(id: "col-1", libraryId: "lib-1", name: "Classics")
+        let playlist = Playlist(id: "pl-1", libraryId: "lib-1", userId: "a", name: "Road trip")
+
+        await harness.send(.collectionChanged(.updated(collection, libraryID: "lib-1")), on: socket)
+        await harness.send(.playlistChanged(.added(playlist, libraryID: "lib-1"), userID: "a"), on: socket)
+        await harness.send(.playlistChanged(.removed(id: "pl-1", libraryID: "lib-1"), userID: "z"), on: socket)
+
+        #expect(
+            changes.values == [
+                .collection(.updated(collection, libraryID: "lib-1")),
+                .playlist(.added(playlist, libraryID: "lib-1"), userID: "a"),
+                .playlist(.removed(id: "pl-1", libraryID: "lib-1"), userID: "z"),
+            ])
+    }
+
     @Test func authorChangesOfAStaleSessionNeverReachTheHook() async throws {
         let harness = BridgeHarness()
         let first = try await harness.start()

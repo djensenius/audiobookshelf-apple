@@ -190,10 +190,14 @@ Model notes:
   cancelled or deleted download held the podcast's only cover and no other record
   can take it, so the local item gets its cover back. Finishing it only sets the
   local item's cover while it has none. The UI doesn't list it, and it links no
-  progress. If its local item was deleted before it finishes, the engine deletes it
-  and reports `DownloadUpdate.recordDiscarded`, and the manager hands the cover on or
-  removes it. A refetch that fails for good is deleted, including one found failed
-  at start. Its cover is fetched again
+  progress. Deleting its local item cancels it, as cancelling an episode does (#367),
+  and hands its cover on to an episode queued meanwhile without one, or keeps it for
+  the next completion (`refusedCovers`); with no record left, nothing is kept. One
+  that the deletion paused but failed to delete is cancelled at the next start.
+  If it completed just before, the engine deletes it and reports
+  `DownloadUpdate.recordDiscarded`, and the manager hands the cover on or removes it.
+  A refetch that fails for good is deleted, including one found failed at start. Its
+  cover is fetched again
   at the item's next episode completion, as is a cover refused while the item had
   no local item yet. Those covers are kept in memory only (`refusedCovers`): a
   relaunch loses them, and the podcast then stays without a cover until another
