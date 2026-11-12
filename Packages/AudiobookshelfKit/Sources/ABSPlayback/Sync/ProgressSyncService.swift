@@ -17,6 +17,9 @@ public protocol ProgressSyncService: Sendable {
     func openSession(id: String) async throws -> PlaybackSession
     /// `PATCH /api/me/progress/:itemID[/:episodeID]` with one field group.
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws
+    /// `POST /api/session/:id/close`, applying `report` first when given: a retried final close
+    /// (#382). Throws `APIError.notFound` once the session is no longer open.
+    func closeSession(id: String, report: PlaybackSyncReport?) async throws
 }
 
 /// ``ProgressSyncService`` over one connection's ``APIClient``.
@@ -43,6 +46,10 @@ public struct APIProgressSyncService: ProgressSyncService {
 
     public func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {
         _ = try await client.send(ProgressEndpoints.update(itemID: itemID, episodeID: episodeID, update))
+    }
+
+    public func closeSession(id: String, report: PlaybackSyncReport?) async throws {
+        _ = try await client.send(SessionEndpoints.close(sessionID: id, report: report))
     }
 }
 

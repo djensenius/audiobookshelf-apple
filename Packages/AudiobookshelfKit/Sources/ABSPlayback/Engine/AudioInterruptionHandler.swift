@@ -51,7 +51,8 @@ public final class AudioInterruptionHandler {
             resumeAfterInterruption = false
         case .oldDeviceUnavailable:
             resumeAfterInterruption = false
-            if engine.isPlaybackRequested { engine.pause() }
+            // Even when paused: recovery may be about to restart playback.
+            engine.pauseForOutputLoss()
         }
     }
 }

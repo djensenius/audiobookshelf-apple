@@ -74,6 +74,9 @@ public final class AppSettings {
         /// The podcast episode list's filter and sort as a small JSON string (encoded by
         /// `EpisodeListPreferences`), shared by every podcast and account as in legacy.
         case podcastEpisodeListPreferences = "settings_podcastEpisodeListPreferences"
+        /// The ebook reader's ``ReaderSettings`` as a small JSON string, shared by every book
+        /// and account as in legacy (`ereaderSettings`).
+        case readerSettings = "settings_readerSettings"
     }
 
     /// Default values, for `@AppStorage` declarations that need one.
@@ -102,6 +105,7 @@ public final class AppSettings {
         public static let playbackRate = 1.0
         public static let chapterTrack = true
         public static let collapseBookSeries = false
+        public static let readerSettings = ReaderSettings()
     }
 
     /// The store the settings read from and write to.
@@ -234,6 +238,22 @@ public final class AppSettings {
                 defaults.removeObject(forKey: Key.podcastEpisodeListPreferences.rawValue)
             }
         }
+    }
+
+    // MARK: Reader
+
+    /// The ebook reader's theme, font and layout (``ReaderSettings``). Stored as JSON under
+    /// ``Key/readerSettings``; a missing or unreadable value reads as the defaults, field by
+    /// field, so settings stored before a field existed keep the rest.
+    public var readerSettings = Default.readerSettings {
+        didSet { persist(.readerSettings, Self.json(readerSettings)) }
+    }
+
+    nonisolated static func json(_ settings: ReaderSettings) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        // Encoding a struct of strings and integers can't fail.
+        return (try? encoder.encode(settings)).map { String(decoding: $0, as: UTF8.self) } ?? "{}"
     }
 
     @ObservationIgnored private var isReloading = false
@@ -489,6 +509,7 @@ public final class AppSettings {
         update(\.libraryViewPreferences, snapshot.libraryViewPreferences)
         update(\.recentSearches, snapshot.recentSearches)
         update(\.podcastEpisodeListPreferences, snapshot.podcastEpisodeListPreferences)
+        update(\.readerSettings, snapshot.readerSettings)
     }
 
     private func update<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<AppSettings, Value>, _ value: Value) {
@@ -533,6 +554,7 @@ extension AppSettings {
         public let libraryViewPreferences: [String: String]
         public let recentSearches: [String: String]
         public let podcastEpisodeListPreferences: String?
+        public let readerSettings: ReaderSettings
 
         init(defaults: UserDefaults) {
             let store = Reader(defaults: defaults)
@@ -571,6 +593,7 @@ extension AppSettings {
             libraryViewPreferences = store.stringDictionary(.libraryViewPreferences)
             recentSearches = store.stringDictionary(.recentSearches)
             podcastEpisodeListPreferences = store.optionalString(.podcastEpisodeListPreferences)
+            readerSettings = store.json(.readerSettings, Default.readerSettings)
         }
 
         public func lastLibraryID(serverID: String, userID: String) -> String? {
@@ -632,6 +655,14 @@ private struct Reader {
     where Value.RawValue == String {
         guard let raw = defaults.object(forKey: key.rawValue) as? String else { return fallback }
         return Value(rawValue: raw) ?? fallback
+    }
+
+    /// A JSON string decoded as `Value`, or `fallback` when there is none or it doesn't decode.
+    func json<Value: Decodable>(_ key: AppSettings.Key, _ fallback: Value) -> Value {
+        guard let string = defaults.object(forKey: key.rawValue) as? String,
+            let value = try? JSONDecoder().decode(Value.self, from: Data(string.utf8))
+        else { return fallback }
+        return value
     }
 
     func stringDictionary(_ key: AppSettings.Key) -> [String: String] {

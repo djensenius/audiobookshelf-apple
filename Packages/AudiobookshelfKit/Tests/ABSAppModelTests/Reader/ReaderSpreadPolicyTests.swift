@@ -1,3 +1,4 @@
+import ABSCore
 import CoreGraphics
 import Foundation
 import Testing
@@ -7,7 +8,7 @@ import Testing
 @Suite struct ReaderSpreadPolicyTests {
     struct Case: Sendable, CustomTestStringConvertible {
         let name: String
-        let setting: ReaderSpreadSetting
+        let setting: ReaderSettings.Spread
         let platform: ReaderPlatform
         let sizeClass: ReaderSizeClass?
         let size: CGSize
@@ -117,7 +118,7 @@ import Testing
     }
 
     @Test func settingSpellsTheBridgeValues() {
-        #expect(ReaderSpreadSetting.allCases.map(\.rawValue) == ["auto", "none"])
+        #expect(ReaderSettings.Spread.allCases.map(\.rawValue) == ["auto", "none"])
         #expect(ReaderSpreadPolicy.minimumMacSpreadWidth == 800)
     }
 }
