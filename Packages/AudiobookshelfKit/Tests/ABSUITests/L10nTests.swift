@@ -32,7 +32,7 @@ import Testing
     }
 
     /// A plural key picks its form by the count and formats the count for the locale, with or without a locale,
-    /// and in a locale that has only the English forms.
+    /// and in a locale without a translation.
     @Test func pluralPicksTheFormForTheCount() {
         let english = Locale(identifier: "en_US")
         #expect(L10n.plural("SharedBookCount", count: 1, locale: english) == "1 book")
@@ -41,6 +41,60 @@ import Testing
         #expect(L10n.plural("SharedBookCount", count: 1_234, locale: Locale(identifier: "de")) == "1.234 books")
         #expect(L10n.plural("SharedBookCount", count: 1) == "1 book")
         #expect(L10n.plural("SharedBookCount", count: 5) == "5 books")
+    }
+
+    /// A locale without a translation of a plural uses the English forms by English rules, not its own: Japanese
+    /// has only `other` ("1 books") and French puts 0 in `one` ("0 book"). The count keeps the locale's grouping.
+    @Test(arguments: ["ja", "fr", "de"])
+    func untranslatedPluralKeepsEnglishRules(identifier: String) {
+        let locale = Locale(identifier: identifier)
+        #expect(L10n.plural("SharedBookCount", count: 1, locale: locale) == "1 book")
+        #expect(L10n.plural("SharedBookCount", count: 0, locale: locale) == "0 books")
+        #expect(L10n.plural("SharedBookCount", count: 2, locale: locale) == "2 books")
+        let grouped = 1_234.formatted(.number.locale(locale))
+        #expect(L10n.plural("SharedBookCount", count: 1_234, locale: locale) == "\(grouped) books")
+        #expect(identifier != "ja" || grouped == "1,234")
+    }
+
+    /// A translated plural uses its own forms by its language's rules (French: 0 and 1 are `one`); a locale without
+    /// one falls back to English.
+    @Test func translatedPluralUsesItsOwnRules() throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: "L10nTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        func write(_ localization: String, _ one: String, _ other: String) throws {
+            let entry: [String: Any] = [
+                "Count": [
+                    "NSStringLocalizedFormatKey": "%#@value@",
+                    "value": [
+                        "NSStringFormatSpecTypeKey": "NSStringPluralRuleType", "NSStringFormatValueTypeKey": "lld",
+                        "one": one, "other": other,
+                    ],
+                ]
+            ]
+            let folder = directory.appending(path: "\(localization).lproj")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try PropertyListSerialization.data(fromPropertyList: entry, format: .xml, options: 0)
+                .write(to: folder.appending(path: "Localizable.stringsdict"))
+        }
+        try write("en", "%1$lld book", "%1$lld books")
+        try write("fr", "%1$lld livre", "%1$lld livres")
+        try FileManager.default.createDirectory(
+            at: directory.appending(path: "ja.lproj"), withIntermediateDirectories: true)
+        let bundle = try #require(Bundle(url: directory))
+        let english = L10n.EnglishPlurals(bundle: bundle)
+        func plural(_ count: Int, _ identifier: String) -> String {
+            L10n.plural(
+                "Count", count: count, arguments: [], locale: Locale(identifier: identifier), bundle: bundle,
+                english: english)
+        }
+
+        #expect(plural(0, "fr") == "0 livre")
+        #expect(plural(1, "fr") == "1 livre")
+        #expect(plural(2, "fr") == "2 livres")
+        #expect(plural(1, "ja") == "1 book")
+        #expect(plural(0, "ja") == "0 books")
+        #expect(plural(1, "en") == "1 book")
+        #expect(english.format("Missing", count: 1) == nil)
     }
 
     @Test func looksUpPreferredLocalization() {

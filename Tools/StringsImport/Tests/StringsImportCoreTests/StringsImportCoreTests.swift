@@ -356,7 +356,9 @@ import Testing
         #expect(StringConverter.convertPlural("{0} books by {1}, {0}%") == "%1$lld books by %2$@, %1$lld%%")
     }
 
-    @Test func writesPluralVariationsAndFillsUntranslatedLocales() throws {
+    /// Only translated locales get plural forms: a copy of the English forms would be picked by the
+    /// locale's plural rules ("1 books" in Japanese), so `L10n.plural` falls back to English instead.
+    @Test func writesPluralVariationsOnlyForTranslatedLocales() throws {
         let json = try CatalogBuilder.build(files: files).json
         #expect(
             try plural(json, "SharedBookCount", "en")
@@ -364,14 +366,14 @@ import Testing
                     "one": ["state": "translated", "value": "%1$lld book"],
                     "other": ["state": "translated", "value": "%1$lld books"],
                 ])
-        #expect(
-            try plural(json, "SharedBookCount", "de")
-                == [
-                    "one": ["state": "new", "value": "%1$lld book"],
-                    "other": ["state": "new", "value": "%1$lld books"],
-                ])
-        #expect(try plural(json, "SharedBookCount", "fr")?["one"]?["value"] == "%1$lld livre")
+        #expect(try plural(json, "SharedBookCount", "de") == nil)
         #expect(json.contains(#""value" : "Abbrechen""#))
+        #expect(try plural(json, "SharedBookCount", "fr")?["one"]?["value"] == "%1$lld livre")
+        // Strings are still filled with English.
+        let catalog = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        let cancel = (catalog?["strings"] as? [String: [String: Any]])?["ButtonCancel"]?["localizations"]
+        let french = (cancel as? [String: [String: [String: String]]])?["fr"]?["stringUnit"]
+        #expect(french == ["state": "new", "value": "Cancel"])
     }
 
     @Test(arguments: [
@@ -401,7 +403,7 @@ import Testing
                 "de: skipped SharedBookCount: a plural in en-us.json",
                 "fr: skipped SharedBookCount: uses {1}, which the source string does not have",
             ])
-        #expect(try plural(result.json, "SharedBookCount", "fr")?["other"]?["state"] == "new")
+        #expect(try plural(result.json, "SharedBookCount", "fr") == nil)
     }
 
     @Test func loadsAndMergesNativePlurals() throws {

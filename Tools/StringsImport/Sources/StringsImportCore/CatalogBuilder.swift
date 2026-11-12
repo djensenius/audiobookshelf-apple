@@ -166,10 +166,12 @@ public enum CatalogBuilder {
             }
         }
 
-        // A key a locale hasn't translated gets the English value marked "new". Without it
-        // the compiled table returns the key name (Foundation doesn't fall back per key).
+        // A string a locale hasn't translated gets the English value marked "new". Without it
+        // the compiled table returns the key name (Foundation doesn't fall back per key). A plural
+        // gets none: Foundation would pick the English forms by the locale's plural rules ("1 books"
+        // in Japanese), so `L10n.plural` falls back to English with English rules instead.
         let others = locales.subtracting([sourceLanguage]).sorted()
-        for key in entries.keys {
+        for key in entries.keys where sourceFile.plurals[key] == nil {
             guard let english = entries[key]?.localizations[sourceLanguage]?.markedNew else { continue }
             for locale in others where entries[key]?.localizations[locale] == nil {
                 entries[key]?.localizations[locale] = english
@@ -218,17 +220,10 @@ private struct Localization: Encodable {
         self.variations = variations
     }
 
-    /// The same values in the "new" state, for a locale that hasn't translated them.
+    /// The same string in the "new" state, for a locale that hasn't translated it.
     var markedNew: Localization {
         var result = self
         result.stringUnit?.state = "new"
-        if let plural = variations?.plural {
-            result.variations?.plural = plural.mapValues { variant in
-                var variant = variant
-                variant.stringUnit.state = "new"
-                return variant
-            }
-        }
         return result
     }
 }

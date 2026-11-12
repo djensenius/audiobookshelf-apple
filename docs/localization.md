@@ -54,8 +54,11 @@ The importer writes it as the catalog's plural variations, with `{0}` as the int
 `%1$lld` (the String Catalog compiler requires the count in every form). Look it up with
 `L10n.plural("SharedBookCount", count: 1)`, which picks the form and formats the count for
 the locale; never with `L10n.string`. Translations in `Localization/native/<file>.json` are
-objects too, with the categories their language uses; a locale without one gets the English
-forms marked "new".
+objects too, with the categories their language uses. A locale without one gets no entry
+(unlike strings, which get English marked "new"): Foundation would pick copied English forms by
+that locale's plural rules ("1 books" in Japanese, "0 book" in French). `L10n.plural` instead
+falls back to the English forms picked by English rules, with the count still formatted for the
+locale.
 
 The importer fails if a native key also exists in `strings/`; pick another key. Native
 keys nobody has translated get the English fill like any other key.
