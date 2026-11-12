@@ -36,6 +36,16 @@ import SwiftData
         case notFound
     }
 
+    /// What ``startPart(partID:expecting:now:)`` did.
+    public enum PartStart: Sendable, Equatable {
+        /// The part wasn't started (see ``DownloadStore/beginRunning(partID:expecting:now:)``).
+        case refused
+        /// The part is running; its record was already `.downloading`.
+        case started
+        /// The part is running, and its record `recordID` moved from `.queued` to `.downloading`.
+        case startedRecord(UUID)
+    }
+
     var pendingCommitFailure: (any Error)?
 
     /// Creates the record for `record.key`, or reconciles the existing one in place, keeping its
@@ -245,20 +255,29 @@ import SwiftData
     ///
     /// - Returns: whether the part was started.
     public func beginRunning(partID: UUID, expecting: Set<DownloadPartState>, now: Date = .now) throws -> Bool {
+        try startPart(partID: partID, expecting: expecting, now: now) != .refused
+    }
+
+    /// ``beginRunning(partID:expecting:now:)``, telling whether it moved the record from
+    /// `.queued` to `.downloading`, so the engine can report that change once.
+    public func startPart(partID: UUID, expecting: Set<DownloadPartState>, now: Date = .now) throws -> PartStart {
         try commit {
             guard let part = try fetchPart(id: partID), let record = part.record, let state = part.stateValue,
                 state != .completed, expecting.contains(state)
-            else { return false }
+            else { return .refused }
+            let start: PartStart
             switch record.stateValue {
-            case .queued: record.state = DownloadState.downloading.rawValue
-            case .downloading: break
-            case .paused, .failed, nil: return false
+            case .queued:
+                record.state = DownloadState.downloading.rawValue
+                start = .startedRecord(record.id)
+            case .downloading: start = .started
+            case .paused, .failed, nil: return .refused
             }
             part.state = DownloadPartState.running.rawValue
             part.taskIdentifier = nil
             part.lastError = nil
             record.updatedAt = now
-            return true
+            return start
         }
     }
 

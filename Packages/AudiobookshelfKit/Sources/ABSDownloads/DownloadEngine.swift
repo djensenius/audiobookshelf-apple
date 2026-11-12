@@ -53,6 +53,10 @@ public enum DownloadUpdate: Sendable, Equatable {
     /// The engine has no working session (`sessionInUse` or `sessionLost`); the affected
     /// parts are queued.
     case sessionUnavailable(code: DownloadFailureCode, message: String)
+    /// A part started and moved its record from `queued` to `downloading`: its first start, a
+    /// resume, or a transfer adopted after a relaunch. Not sent when the record was already
+    /// `downloading`, as for its other parts.
+    case recordStarted(recordID: UUID)
 }
 
 /// A part's live progress, throttled to about every 1% or 1 second.
@@ -627,11 +631,22 @@ public actor DownloadEngine {
     /// (which leaves a running part running). `false` when the store can't be read.
     private func isStillRunning(_ partID: UUID) async -> Bool {
         do {
-            return try await store.beginRunning(partID: partID, expecting: [.running], now: now())
+            return try await beginRunning(partID, expecting: [.running])
         } catch {
             logError("Couldn't check a download's state", error)
             return false
         }
+    }
+
+    /// ``DownloadStore/beginRunning(partID:expecting:now:)``, sending
+    /// ``DownloadUpdate/recordStarted(recordID:)`` when it moved the part's record from `queued`
+    /// to `downloading`.
+    private func beginRunning(_ partID: UUID, expecting: Set<DownloadPartState>) async throws -> Bool {
+        let start = try await store.startPart(partID: partID, expecting: expecting, now: now())
+        if case .startedRecord(let recordID) = start {
+            updateContinuation.yield(.recordStarted(recordID: recordID))
+        }
+        return start != .refused
     }
 
     private func startEventLoop() {
@@ -680,7 +695,7 @@ public actor DownloadEngine {
         tasks[partID] = task
         var adopts = false
         do {
-            adopts = try await store.beginRunning(partID: partID, expecting: [.queued, .running, .failed], now: now())
+            adopts = try await beginRunning(partID, expecting: [.queued, .running, .failed])
         } catch {
             logError("Couldn't record a surviving download; stopping it", error)
         }
@@ -847,7 +862,7 @@ public actor DownloadEngine {
         // complete the part, even if the process ends before the new marker is written.
         locations.clearTransferMarker(partID: partID)
         do {
-            guard try await store.beginRunning(partID: partID, expecting: startable, now: now()) else {
+            guard try await beginRunning(partID, expecting: startable) else {
                 // Completed, stopped, failed for good or deleted since it was read.
                 if launching[partID] == token { forget(partID) }
                 return

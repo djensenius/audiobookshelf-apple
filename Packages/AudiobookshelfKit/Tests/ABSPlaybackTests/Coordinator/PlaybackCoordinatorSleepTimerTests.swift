@@ -4,49 +4,39 @@ import Testing
 
 @testable import ABSPlayback
 
-/// Real timer and coordinator, with deterministic time, engine seeks and Now Playing publication.
-/// The observer wiring stays test-only: installing it per account belongs to #185.
+/// Real timer and coordinator, connected by a ``SleepTimerAttachment``, with deterministic time, engine seeks and Now
+/// Playing publication.
 @MainActor
 private final class CoordinatorTimerHarness {
     let b: BridgeHarness
     let clock = ManualClock()
     let feedback = FakeFeedback()
-    let timer: SleepTimer
+    let settings: ScratchSettings
+    let attachment: SleepTimerAttachment
     private(set) var willResumeCount = 0
 
     var h: CoordinatorHarness { b.h }
     var coordinator: PlaybackCoordinator { h.coordinator }
     var engine: CoordinatorTestEngine { h.engine }
+    var timer: SleepTimer { attachment.timer }
 
     init(automatic: Bool = false) throws {
         b = try BridgeHarness()
         let date = try makeDate(2026, 1, 15, 23, 0)
-        let autoSleep: AutoSleepPolicy =
-            if automatic {
-                AutoSleepPolicy(
-                    start: try #require(AutoSleepPolicy.TimeOfDay("22:00")),
-                    end: try #require(AutoSleepPolicy.TimeOfDay("06:00")),
-                    mode: .duration(70), rewindOnExpiry: 300)
-            } else {
-                .disabled
-            }
-        timer = SleepTimer(
-            control: b.coordinator, feedback: feedback,
-            options: SleepTimerOptions(playsResetFeedback: true, autoSleep: autoSleep),
-            clock: clock, calendar: .gregorianUTC, tickInterval: .seconds(1))
-        coordinator.willResume = { [weak self] in
-            guard let self else { return 0 }
-            willResumeCount += 1
-            return timer.playbackWillStart(at: date)
+        settings = try ScratchSettings()
+        if automatic {
+            settings.value.autoSleepTimer = true
+            settings.value.sleepTimerLength = 70_000
+            settings.value.autoSleepTimerAutoRewind = true
+            settings.value.autoSleepTimerAutoRewindTime = 300_000
         }
-        let timer = timer
-        _ = coordinator.addObserver { [weak timer] event in
-            switch event {
-            case .itemChanged(let key): timer?.itemDidChange(key?.rawValue)
-            case .didSeek(let time): timer?.didSeek(to: time)
-            case .paused: timer?.playbackDidPause()
-            default: break
-            }
+        attachment = SleepTimerAttachment(
+            coordinator: b.coordinator, settings: settings.value, feedback: feedback, shakeDetector: nil,
+            clock: clock, calendar: .gregorianUTC, now: { date }, tickInterval: .seconds(1))
+        let willResume = coordinator.willResume
+        coordinator.willResume = { [weak self] in
+            self?.willResumeCount += 1
+            return willResume?() ?? 0
         }
     }
 
@@ -203,6 +193,21 @@ struct PlaybackCoordinatorSleepTimerTests {
         t.timer.cancel()
     }
 
+    @Test func automaticEndOfChapterTimerStartsOnAFreshLoad() async throws {
+        let t = try CoordinatorTimerHarness(automatic: true)
+        t.settings.value.sleepTimerLength = 0
+        await until { t.timer.options.autoSleep.mode == .endOfChapter }
+
+        await t.coordinator.play(itemID: "A", startTime: 1000)
+
+        #expect(t.willResumeCount == 1)
+        #expect(t.coordinator.isPlaying)
+        #expect(t.timer.mode == .endOfChapter)
+        #expect(t.timer.isAutomatic)
+        #expect(t.timer.remaining == 2600, "To the end of the 3600-second track")
+        t.timer.cancel()
+    }
+
     @Test func cancelDuringFadeRestoresVolumeWithoutPausing() async throws {
         let t = try CoordinatorTimerHarness()
         await t.coordinator.play(itemID: "A", startTime: 1000)
@@ -270,6 +275,27 @@ struct PlaybackCoordinatorSleepTimerTests {
         let plays = h.engine.playCount
         control.play()
         #expect(h.engine.playCount == plays)
+    }
+
+    @Test func willResumeIsClearedOnlyByItsOwner() throws {
+        let h = try CoordinatorHarness()
+        let owner = NSObject()
+        let other = NSObject()
+
+        h.coordinator.setWillResume({ 1 }, owner: owner)
+        h.coordinator.clearWillResume(ownedBy: other)
+        #expect(h.coordinator.willResume?() == 1, "Another owner keeps the hook")
+        h.coordinator.clearWillResume(ownedBy: owner)
+        #expect(h.coordinator.willResume == nil)
+
+        h.coordinator.setWillResume({ 1 }, owner: owner)
+        h.coordinator.willResume = { 2 }
+        h.coordinator.clearWillResume(ownedBy: owner)
+        #expect(h.coordinator.willResume?() == 2, "A direct assignment ends the ownership")
+
+        h.coordinator.setWillResume({ 3 }, owner: other)
+        h.coordinator.clearWillResume(ownedBy: owner)
+        #expect(h.coordinator.willResume?() == 3, "A later owner takes over")
     }
 
     @Test func everyPauseIsPublishedWithoutChangingSavedPauseTime() async throws {
