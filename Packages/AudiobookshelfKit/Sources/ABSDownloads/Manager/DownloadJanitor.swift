@@ -85,7 +85,8 @@ public struct SweepReport: Sendable, Equatable {
 ///    or local item refers to: the engine creates a destination's folder, then moves the file
 ///    in. An item's folders (with orphaned files or not) are removed in the same hold as its
 ///    files, from the paths read again in it, so a download of it enqueued after the snapshot
-///    keeps its folder;
+///    keeps its folder. A connection's own folder (`<connection id>/`) stays while the
+///    connection exists, so a download creating an item's folder in it can't lose it midway;
 /// 4. deletes `ResumeData/<part id>.bin` blobs and `Transfers/<part id>` markers whose part no
 ///    record has (and that are older than ``recentInterval``). A part's marker is written only
 ///    once its record is saved, so a listed marker of a part in use is in the read; a part that
@@ -229,10 +230,13 @@ public actor DownloadJanitor {
             Self.addFolders(holding: result.used, to: &protected)
         }
 
-        // 3. Empty folders outside item folders (an item's went with its files).
+        // 3. Empty folders outside item folders (an item's went with its files). A connection's
+        // own folder stays while the connection exists: the engine creates it, then the item's
+        // folder in it, outside any hold.
+        let connectionFolders = Set(connections.map { DownloadLayout.collisionKey($0.id.uuidString) })
         report.removedFolders += Self.removeEmptyFolders(
             otherFolders, emptied: report.removedFiles + report.removedFolders, protecting: protected,
-            before: cutoff, locations: locations)
+            alsoProtecting: connectionFolders, before: cutoff, locations: locations)
 
         // 4. Resume data of parts that are gone.
         let parts = Set(records.flatMap(\.parts).map(\.id))

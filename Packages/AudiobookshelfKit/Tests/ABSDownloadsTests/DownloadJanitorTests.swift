@@ -433,6 +433,26 @@ import Testing
         #expect(exists(pendingFolder, fixture))
     }
 
+    /// An old empty folder of a connection that exists stays: the engine creates it, then an
+    /// item's folder in it, outside any hold. One of a connection that's gone still goes.
+    @Test func keepsTheEmptyFolderOfAConnectionThatExists() async throws {
+        let fixture = try await ManagerFixture()
+        let existing = fixture.connectionID.uuidString
+        let gone = UUID().uuidString
+        for folder in [existing, gone] {
+            try FileManager.default.createDirectory(
+                at: fixture.locations.downloadsRoot.appending(path: folder), withIntermediateDirectories: true)
+        }
+        try age(fixture)
+
+        let report = await janitor(fixture).sweep()
+
+        #expect(report.outcome == .completed)
+        #expect(report.removedFolders == [gone])
+        #expect(exists(existing, fixture))
+        #expect(!exists(gone, fixture))
+    }
+
     // MARK: - Paths
 
     /// A name starting with a combining mark: as Characters, the `/` before it and the mark are
