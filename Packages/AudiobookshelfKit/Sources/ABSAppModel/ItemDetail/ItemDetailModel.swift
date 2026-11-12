@@ -92,6 +92,9 @@ public final class ItemDetailModel {
     public private(set) var isLoading = false
     /// The error of the last load, cleared by the next successful one.
     public private(set) var error: (any Error)?
+    /// How many loads have installed an item. A load that's cancelled or superseded, which leaves
+    /// ``item`` and ``error`` as they were, doesn't count, so a change here means fresh data.
+    public private(set) var loadedRevision = 0
 
     @ObservationIgnored private let service: any ItemDetailService
     @ObservationIgnored private let cache: ProgressCache
@@ -142,9 +145,19 @@ public final class ItemDetailModel {
             tracks = book.map(Self.trackRows(book:)) ?? []
             ebookFiles = book.map { Self.ebookFileRows(item: loaded, book: $0) } ?? []
             error = nil
+            loadedRevision += 1
         case .failure(let error):
             if !(error is CancellationError) { self.error = error }
         }
+    }
+
+    /// Loads the item and returns whether an item was installed after the call began: by this
+    /// load, or by a newer one that superseded it and finished first. `false` after a failure or
+    /// cancellation, which leave ``error`` as it is (`nil`, perhaps) and the old item in place.
+    public func reload() async -> Bool {
+        let revision = loadedRevision
+        await load()
+        return loadedRevision != revision
     }
 
     // MARK: Item

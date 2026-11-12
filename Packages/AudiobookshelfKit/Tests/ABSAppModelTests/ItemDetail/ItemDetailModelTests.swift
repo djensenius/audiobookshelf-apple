@@ -241,6 +241,64 @@ private func loadedModel(
         #expect(model.error == nil)
     }
 
+    /// Only a load that installs an item counts as fresh: a cancelled or failed one doesn't,
+    /// though a cancelled one leaves `error` nil.
+    @Test func reloadReportsWhetherAnItemWasInstalled() async {
+        let failure = Locked<(any Error)?>(nil)
+        let model = ItemDetailModel(
+            itemID: "li-1",
+            service: FakeItemDetailService { id in
+                if let error = failure.value { throw error }
+                return makeBook(id: id)
+            }, cache: ProgressCache())
+        #expect(await model.reload())
+        #expect(model.loadedRevision == 1)
+
+        failure.value = CancellationError()
+        #expect(!(await model.reload()))
+        #expect(model.error == nil)
+
+        failure.value = TestError.offline
+        #expect(!(await model.reload()))
+        #expect(model.loadedRevision == 1)
+
+        failure.value = nil
+        #expect(await model.reload())
+        #expect(model.loadedRevision == 2)
+    }
+
+    /// A reload superseded by a newer load is fresh only if the newer one installed an item first.
+    @Test func aSupersededReloadIsFreshOnlyOnceTheNewerLoadInstalls() async throws {
+        let gate = GatedCalls<String, LibraryItem>()
+        var calls = gate.calls.makeAsyncIterator()
+        let model = ItemDetailModel(
+            itemID: "li-1", service: FakeItemDetailService { id in try await gate.call(id) }, cache: ProgressCache())
+
+        // The newer load is still running when the superseded reload returns.
+        let first = Task { await model.reload() }
+        let firstCall = try #require(await calls.next())
+        let second = Task { await model.load() }
+        let secondCall = try #require(await calls.next())
+        firstCall.reply.resume(returning: makeBook(title: "Old"))
+        #expect(!(await first.value))
+        #expect(model.error == nil)
+        #expect(model.loadedRevision == 0)
+        secondCall.reply.resume(returning: makeBook(title: "New"))
+        await second.value
+        #expect(model.loadedRevision == 1)
+
+        // The newer load finished first.
+        let third = Task { await model.reload() }
+        let thirdCall = try #require(await calls.next())
+        let fourth = Task { await model.load() }
+        let fourthCall = try #require(await calls.next())
+        fourthCall.reply.resume(returning: makeBook(title: "Newest"))
+        await fourth.value
+        thirdCall.reply.resume(returning: makeBook(title: "Stale"))
+        #expect(await third.value)
+        #expect(model.details?.title == "Newest")
+    }
+
     @Test func playButtonFollowsProgress() async {
         let cache = ProgressCache()
         let model = await loadedModel(cache: cache)
