@@ -95,6 +95,18 @@ private struct StubRssFeedService: RssFeedService {
                 == "Feed URL will be https://abs.example/feed/s")
     }
 
+    /// A feed carried over from the last sheet isn't offered for closing when the lookup failed: another
+    /// client may have replaced it.
+    @Test func aFailedLookupShowsRetryBeforeAnyFeed() {
+        let feed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
+        #expect(RssFeedPresentation.content(.failed, feed: feed) == .retry)
+        #expect(RssFeedPresentation.content(.failed, feed: nil) == .retry)
+        #expect(RssFeedPresentation.content(.idle, feed: feed) == .loading)
+        #expect(RssFeedPresentation.content(.loading, feed: nil) == .loading)
+        #expect(RssFeedPresentation.content(.loaded, feed: feed) == .open(feed))
+        #expect(RssFeedPresentation.content(.loaded, feed: nil) == .openForm)
+    }
+
     /// What the screen fetched shows until the sheet knows better.
     @MainActor
     @Test func theIndicatorFollowsTheSheetOnceItKnows() async {

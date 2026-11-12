@@ -46,6 +46,22 @@ enum RssFeedPresentation {
         state == .idle || state == .loading
     }
 
+    /// What the sheet's form shows.
+    enum Content: Equatable {
+        case loading
+        case retry
+        case open(RssFeed)
+        case openForm
+    }
+
+    /// Progress, then Retry when the lookup failed, before any feed: one carried over from the last
+    /// sheet may be stale (replaced elsewhere), so it isn't offered for closing until a lookup succeeds.
+    static func content(_ state: RssFeedModel.LoadState, feed: RssFeed?) -> Content {
+        if isLoading(state) { return .loading }
+        if state == .failed { return .retry }
+        return feed.map(Content.open) ?? .openForm
+    }
+
     /// Whether the entry shows a feed as open: the sheet's model once it knows the feed's state
     /// (loaded, opened, closed, a live change, or carried over from the last sheet), else what the
     /// screen fetched (`include=rssfeed`).
@@ -150,20 +166,21 @@ struct RssFeedSheet: View {
                         RssFeedErrorSection(error: error)
                             .id(Self.errorID)
                     }
-                    if RssFeedPresentation.isLoading(model.loadState) {
+                    switch RssFeedPresentation.content(model.loadState, feed: feed) {
+                    case .loading:
                         ProgressView {
                             Text(verbatim: L10n.string("MessageLoading"))
                         }
                         .frame(maxWidth: .infinity)
-                    } else if let feed {
-                        openFeed(feed)
-                    } else if model.loadState == .failed {
+                    case .retry:
                         Button {
                             Task { await model.load() }
                         } label: {
                             Text(verbatim: L10n.string("ButtonRetry"))
                         }
-                    } else {
+                    case .open(let feed):
+                        openFeed(feed)
+                    case .openForm:
                         RssFeedOpenForm(model: model)
                     }
                 }
