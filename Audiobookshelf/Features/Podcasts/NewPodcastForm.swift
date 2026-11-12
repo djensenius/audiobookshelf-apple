@@ -143,32 +143,22 @@ struct NewPodcastForm: View {
 
 #if DEBUG
     @MainActor
-    private func newPodcastPreviewDraft(title: String = "Classic Tales", folders: Bool = true) -> NewPodcastDraft {
+    private func newPodcastPreview(title: String = "Classic Tales", folders: Bool = true) -> some View {
         let feedURL = "https://feeds.example.com/classic-tales.xml"
         let metadata = PodcastFeedMetadata(
             title: title, author: "B. J. Harrison", descriptionPlain: "Classic stories, read aloud.",
             categories: ["Arts", "Books"], feedURL: feedURL)
-        return NewPodcastDraft(
+        let draft = NewPodcastDraft(
             service: AddPodcastPreviewService(), libraryID: SampleLibrary.libraryID,
             folders: folders ? [LibraryFolder(id: "f1", fullPath: "/podcasts")] : [],
             feed: PodcastFeed(metadata: metadata, numEpisodes: 812), feedURL: feedURL)
+        return NavigationStack { NewPodcastForm(draft: draft) { _ in } }
     }
 
-    #Preview("New podcast") {
-        @Previewable @State var draft = newPodcastPreviewDraft()
-        NavigationStack { NewPodcastForm(draft: draft) { _ in } }
-            .environment(\.serverID, UUID())
-    }
-
+    #Preview("New podcast") { newPodcastPreview().environment(\.serverID, UUID()) }
+    #Preview("Invalid") { newPodcastPreview(title: "", folders: false) }
     #Preview("Submit fails, dark, largest text") {
-        @Previewable @State var draft = newPodcastPreviewDraft(title: "Fail: Already Added")
-        NavigationStack { NewPodcastForm(draft: draft) { _ in } }
-            .environment(\.dynamicTypeSize, .accessibility5)
+        newPodcastPreview(title: "Fail: Already Added").environment(\.dynamicTypeSize, .accessibility5)
             .preferredColorScheme(.dark)
-    }
-
-    #Preview("Invalid") {
-        @Previewable @State var draft = newPodcastPreviewDraft(title: "", folders: false)
-        NavigationStack { NewPodcastForm(draft: draft) { _ in } }
     }
 #endif

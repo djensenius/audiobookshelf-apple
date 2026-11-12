@@ -238,8 +238,7 @@ enum AddPodcastPresentation {
         return (access, library)
     }
 
-    /// The external artwork at `url`; `nil` without a URL or while signed out. The entity ID is fixed so no feed URL
-    /// (which may carry a private token) reaches the cache file name; the key's hash of `url` tells covers apart.
+    /// Artwork at `url`, under a fixed ID so feed URLs (which may hold private tokens) stay out of cache names.
     static func coverKey(url: String?, serverID: UUID?) -> ImageKey? {
         guard let url, let externalURL = URL(string: url), let serverID else { return nil }
         return CoverRef(entityID: "add-podcast", externalURL: externalURL).key(serverID: serverID)
@@ -254,20 +253,16 @@ enum AddPodcastPresentation {
             if term == "fail" { throw APIError.notFound }
             return [
                 PodcastDirectoryResult(
-                    itunesID: "1", title: "Classic Tales", artistName: "B. J. Harrison",
-                    description: "The finest classic stories, read aloud.", genres: ["Arts", "Books"],
-                    trackCount: 812, feedURL: "https://feeds.example.com/classic-tales.xml", explicit: false),
+                    itunesID: "1", title: "Classic Tales", artistName: "B. J. Harrison", genres: ["Arts", "Books"],
+                    trackCount: 812, feedURL: "https://feeds.example.com/classic-tales.xml"),
                 PodcastDirectoryResult(
-                    itunesID: "2", title: "Night Shift Mysteries: A show with a title long enough to wrap",
-                    artistName: "Night Shift", genres: ["Fiction"], trackCount: 1, explicit: true),
+                    itunesID: "2", title: "Night Shift Mysteries: A title long enough to wrap", explicit: true),
             ]
         }
 
         func podcastFeed(rssFeed: String) async throws -> PodcastFeed {
             PodcastFeed(
-                metadata: PodcastFeedMetadata(
-                    title: "Classic Tales", author: "B. J. Harrison", descriptionPlain: "Stories, read aloud.",
-                    categories: ["Arts"], feedURL: rssFeed),
+                metadata: PodcastFeedMetadata(title: "Classic Tales", author: "B. J. Harrison", feedURL: rssFeed),
                 episodes: [PodcastFeedEpisode(title: "The Speckled Band")], numEpisodes: 812)
         }
 
@@ -279,7 +274,7 @@ enum AddPodcastPresentation {
         }
     }
 
-    /// Search results for `query`, in a library with two folders.
+    /// Search results for `query`, in a podcast library with one folder.
     private struct AddPodcastPreview: View {
         @State private var model = AddPodcastModel(
             service: AddPodcastPreviewService(),
@@ -308,7 +303,3 @@ enum AddPodcastPresentation {
         AddPodcastPreview(query: "nothing").environment(\.dynamicTypeSize, .accessibility5).preferredColorScheme(.dark)
     }
 #endif
-
-#Preview("Signed out") {
-    NavigationStack { AddPodcastView() }
-}

@@ -84,7 +84,6 @@ import Testing
         // Filesystems cap names at 255 UTF-8 bytes: 100 three-byte characters keep 83 and the extension.
         let cjk = NewPodcastDraft.sanitizedFilename(String(repeating: "語", count: 100) + ".mp3")
         #expect(cjk == String(repeating: "語", count: 83) + ".mp3")
-        // When the "extension" itself is too long, the whole name is cut instead.
         let dotted = NewPodcastDraft.sanitizedFilename("Mr. " + String(repeating: "語", count: 100))
         #expect(dotted == "Mr. " + String(repeating: "語", count: 83))
         #expect(NewPodcastDraft.sanitizedFilename(emoji).utf8.count <= NewPodcastDraft.maxFilenameBytes)
