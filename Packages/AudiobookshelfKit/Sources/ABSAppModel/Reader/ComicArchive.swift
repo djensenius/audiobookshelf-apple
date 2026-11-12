@@ -17,8 +17,8 @@ public enum ComicArchiveError: Error, Equatable, Sendable {
     case pageTooLarge(Int)
     /// The entry paths make more than ``ComicArchive/maxFolders`` folders.
     case tooManyFolders
-    /// The archive has more than ``ComicArchive/maxEntries`` entries, or its paths are longer than
-    /// ``ComicArchive/maxPathBytes`` in total.
+    /// The archive has more than ``ComicArchive/maxEntries`` entries, its paths are longer than
+    /// ``ComicArchive/maxPathBytes`` in total, or its headers are larger than 16 MiB in total.
     case tooManyEntries
 }
 
@@ -32,8 +32,8 @@ public enum ComicArchiveError: Error, Equatable, Sendable {
 ///
 /// Entry sizes in the ZIP headers aren't trusted: extraction stops at ``maxPageBytes`` of output
 /// (64 MiB by default) and at 1 MiB for `ComicInfo.xml`, and each entry's CRC-32 is checked.
-/// ZIPFoundation's entries keep their headers, which many records can share, so only the paths are
-/// kept and an entry is read again when it's extracted.
+/// The ZIP's structure is checked before ZIPFoundation reads it (``ComicArchivePreflight``), which
+/// also bounds the headers that the kept entries hold.
 public actor ComicArchive {
     /// The entry paths of the pages; page `n` is `pagePaths[n - 1]`.
     public nonisolated let pagePaths: [String]
@@ -49,8 +49,8 @@ public actor ComicArchive {
     public nonisolated var pageCount: Int { pagePaths.count }
 
     private let archive: Archive
-    /// The pages' positions among the archive's entries.
-    private let entryIndices: [Int]
+    /// The pages' entries, read once when opening.
+    private let pageEntries: [Entry]
     /// Cached pages, least recently requested first.
     private var cachedPages: [Int] = []
     /// How many entries were extracted, for tests.
@@ -73,6 +73,7 @@ public actor ComicArchive {
         url: URL, cacheDirectory: URL, maxCachedPages: Int = 12, maxPageBytes: Int = defaultMaxPageBytes
     ) throws(ComicArchiveError) {
         if (try? ComicArchiveFormat(contentsOf: url)) == .rar { throw .unsupportedRAR }
+        try ComicArchivePreflight.validate(url, maxEntries: Self.maxEntries)
         let archive: Archive
         do {
             archive = try Archive(url: url, accessMode: .read)
@@ -82,7 +83,7 @@ public actor ComicArchive {
         // Other entries only create folders, which decide the web client's order.
         var paths: [String] = []
         // Byte-exact keys: `String` equality would merge canonically equivalent names.
-        var fileIndices: [[UInt8]: Int] = [:]
+        var files: [[UInt8]: Entry] = [:]
         var pathBytes = 0
         for (index, entry) in archive.enumerated() {
             let path = entry.path
@@ -90,7 +91,7 @@ public actor ComicArchive {
             guard index < Self.maxEntries, pathBytes <= Self.maxPathBytes else { throw .tooManyEntries }
             if entry.type == .file {
                 paths.append(path)
-                if fileIndices[Array(path.utf8)] == nil { fileIndices[Array(path.utf8)] = index }
+                if files[Array(path.utf8)] == nil { files[Array(path.utf8)] = entry }
             } else {
                 paths.append(path.hasSuffix("/") ? path : path + "/")
             }
@@ -100,11 +101,11 @@ public actor ComicArchive {
         guard !pagePaths.isEmpty else { throw .noPages }
 
         self.archive = archive
-        self.entryIndices = pagePaths.compactMap { fileIndices[Array($0.utf8)] }
+        self.pageEntries = pagePaths.compactMap { files[Array($0.utf8)] }
         self.pagePaths = pagePaths
-        self.comicInfo = Self.comicInfoPath(in: fileOrder).flatMap { fileIndices[Array($0.utf8)] }.flatMap {
-            Self.entry(at: $0, in: archive)
-        }.flatMap { Self.readComicInfo($0, from: archive) }
+        self.comicInfo = Self.comicInfoPath(in: fileOrder).flatMap { files[Array($0.utf8)] }.flatMap {
+            Self.readComicInfo($0, from: archive)
+        }
         self.cacheDirectory = cacheDirectory
         self.maxCachedPages = max(maxCachedPages, 1)
         self.maxPageBytes = maxPageBytes
@@ -128,10 +129,7 @@ public actor ComicArchive {
         cachedPages.removeAll { $0 == number }
         do {
             try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
-            guard let entry = Self.entry(at: entryIndices[number - 1], in: archive) else {
-                throw ExtractionError.unreadable
-            }
-            try extract(entry, to: url)
+            try extract(pageEntries[number - 1], to: url)
         } catch ExtractionError.tooLarge {
             try? FileManager.default.removeItem(at: url)
             throw .pageTooLarge(number)
@@ -171,28 +169,26 @@ public actor ComicArchive {
 
     /// Extracts `entry` through `consumer` and returns its CRC-32. ZIPFoundation computes it but
     /// doesn't compare it with the entry's, so callers do.
-    private static func extract(
+    static func extract(
         _ entry: Entry, from archive: Archive, consumer: (Data) throws -> Void
     ) throws(ExtractionError) -> CRC32 {
         // ZIPFoundation 0.9.20 converts these sizes to `Int64` unchecked, which traps.
         let limit = UInt64(Int64.max)
         guard entry.compressedSize <= limit, entry.uncompressedSize <= limit else { throw .unreadable }
+        // Past the end of a truncated stored entry, ZIPFoundation passes empty chunks until it has
+        // counted the claimed size. Only an empty entry has an empty chunk, and only one.
+        var emptyChunks = 0
         do {
-            return try archive.extract(entry, skipCRC32: false, consumer: consumer)
+            return try archive.extract(entry, skipCRC32: false) { chunk in
+                emptyChunks = chunk.isEmpty ? emptyChunks + 1 : 0
+                guard emptyChunks < 2 else { throw ExtractionError.unreadable }
+                try consumer(chunk)
+            }
         } catch ExtractionError.tooLarge {
             throw .tooLarge
         } catch {
             throw .unreadable
         }
-    }
-
-    /// The entry at `index` in archive order.
-    private static func entry(at index: Int, in archive: Archive) -> Entry? {
-        let entries = archive.makeIterator()
-        for _ in 0..<index {
-            guard entries.next() != nil else { return nil }
-        }
-        return entries.next()
     }
 
     /// Deletes the extracted pages and the cache directory. Later pages are extracted again.
@@ -261,7 +257,7 @@ extension ComicArchive {
             return found.folder
         }
         entries: for path in paths {
-            var parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            var parts = components(of: path)
             let isFolder = parts.count > 1 && parts.last == ""
             if isFolder { parts.removeLast() }
             guard let name = parts.popLast() else { continue }
@@ -329,7 +325,7 @@ extension ComicArchive {
                 }
                 switch stack[top].folder.nodes[Array(name.utf8)] {
                 case .file(let path): files.append(path)
-                case .folder(let folder) where !name.hasPrefix("_"):
+                case .folder(let folder) where name.unicodeScalars.first != "_":
                     stack.append((folder, Self.javaScriptKeyOrder(folder.names)[...]))
                 case .folder, nil: break
                 }
@@ -364,9 +360,17 @@ extension ComicArchive {
     /// Whether `path` is a dotfile, such as a macOS `._` resource fork, or is in a folder starting
     /// with `_` or `.`, such as `__MACOSX`.
     private static func isSkipped(_ path: String) -> Bool {
-        let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard let name = components.last, !name.isEmpty, !name.hasPrefix(".") else { return true }
-        return components.dropLast().contains { $0.hasPrefix("_") || $0.hasPrefix(".") }
+        let initials = components(of: path).map(\.unicodeScalars.first)
+        guard let name = initials.last, let initial = name, initial != "." else { return true }
+        return initials.dropLast().contains { $0 == "_" || $0 == "." }
+    }
+
+    /// The path's components, split at each `/` scalar like JavaScript's `split("/")`. Splitting
+    /// `String` would keep a `/` followed by a combining mark, which is one `Character`.
+    private static func components(of path: String) -> [String] {
+        path.unicodeScalars.split(separator: "/", omittingEmptySubsequences: false).map {
+            String(String.UnicodeScalarView($0))
+        }
     }
 
     /// The last run of ASCII digits in the file name without its extension, as a `Double` like
