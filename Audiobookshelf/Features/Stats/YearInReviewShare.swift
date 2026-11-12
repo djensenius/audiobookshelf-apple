@@ -9,7 +9,8 @@ import UniformTypeIdentifiers
 struct YearInReviewShareImage: Transferable {
     let cgImage: CGImage
     let png: Data
-    /// Like legacy's `audiobookshelf_my_<year>.png`; `server` for the server's year.
+    /// Like legacy's `audiobookshelf_my_<year>.png`; `server` for the server's year, and a
+    /// suffix for the short and banner layouts (`audiobookshelf_my_<year>_short.png`).
     let filename: String
 
     static var transferRepresentation: some TransferRepresentation {
@@ -28,12 +29,14 @@ struct YearInReviewShareImage: Transferable {
                 card
                 .environment(\.locale, card.locale)
                 .environment(\.dynamicTypeSize, .large))
-        renderer.proposedSize = ProposedViewSize(YearInReviewCard.size)
+        renderer.proposedSize = ProposedViewSize(card.layout.size)
         renderer.scale = scale
         renderer.isOpaque = true
         guard let cgImage = renderer.cgImage, let png = pngData(cgImage) else { return nil }
         let owner = variant == .server ? "server" : "my"
-        return Self(cgImage: cgImage, png: png, filename: "audiobookshelf_\(owner)_\(card.year).png")
+        return Self(
+            cgImage: cgImage, png: png,
+            filename: "audiobookshelf_\(owner)_\(card.year)\(card.layout.filenameSuffix).png")
     }
 
     private static func pngData(_ image: CGImage) -> Data? {
