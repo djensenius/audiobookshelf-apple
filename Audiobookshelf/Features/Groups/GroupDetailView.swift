@@ -1,0 +1,172 @@
+import ABSAppModel
+import ABSCore
+import ABSUI
+import SwiftUI
+
+/// One collection or playlist (legacy `pages/collection/_id.vue` and `pages/playlist/_id.vue`): its cover, Play, its
+/// description and its members in order with their progress; a playlist's members mix books and podcast episodes.
+/// Builds one ``GroupDetailModel`` per store, account, library and group.
+struct GroupDetailView<Kind: GroupDetailKind>: View {
+    let kind: GroupSummary.Kind
+    let groupID: String
+    @Environment(\.libraryStore) private var store
+    @Environment(Router.self) private var router: Router?
+    @State private var host: BrowseModelHost<GroupDetailModel<Kind>>?
+
+    var body: some View {
+        let libraryID = router?.libraryID
+        let key = BrowseModelKey(store: store, libraryID: libraryID, entityID: groupID)
+        Group {
+            if let host, let model = host.model(for: key) {
+                GroupDetailContent(kind: kind, model: model)
+                    // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
+                    .environment(\.itemProgressReader, host.progressReader)
+            } else {
+                BrowsePlaceholder(libraryID: libraryID, messages: GroupPresentation.detailMessages(kind))
+                    .navigationTitle(Text(verbatim: L10n.string(GroupPresentation.detailTitleKey(kind))))
+            }
+        }
+        .task(id: key) {
+            host = .updated(host, for: key, store: store) { _, services, progress in
+                GroupDetailModel(id: groupID, service: services, cache: progress)
+            }
+            await host?.model.loadIfNeeded()
+        }
+    }
+}
+
+/// The group screen for one model; previews give it a fixture service.
+struct GroupDetailContent<Kind: GroupDetailKind>: View {
+    let kind: GroupSummary.Kind
+    let model: GroupDetailModel<Kind>
+
+    var body: some View {
+        let messages = GroupPresentation.detailMessages(kind)
+        BrowseStateView(state: GroupPresentation.state(of: model), messages: messages, retry: { reload() }) {
+            failed in
+            if let detail = model.detail {
+                ScrollView(.vertical) {
+                    VStack(alignment: .leading, spacing: ABSSpacing.large) {
+                        if failed {
+                            BrowseFailureRow(messageKey: messages.failed, retry: { reload() })
+                        }
+                        GroupDetailHeader(detail: detail, model: model)
+                        Text(verbatim: L10n.string(GroupPresentation.membersHeaderKey(kind)))
+                            .font(.headline)
+                            .accessibilityAddTraits(.isHeader)
+                            .padding(.horizontal, ABSSpacing.large)
+                        if detail.members.isEmpty {
+                            Text(verbatim: L10n.string(messages.empty))
+                                .foregroundStyle(ABSColor.mutedForeground)
+                                .padding(.horizontal, ABSSpacing.large)
+                        } else {
+                            BrowseItemGrid(elements: detail.members, item: \.summary)
+                        }
+                    }
+                    .padding(.vertical, ABSSpacing.large)
+                }
+            }
+        }
+        .navigationTitle(Text(verbatim: model.detail?.name ?? L10n.string(GroupPresentation.detailTitleKey(kind))))
+        .refreshable { await model.load() }
+        .refreshCommand(.pushed(GroupPresentation.route(kind, id: model.groupID)), isDisabled: model.isLoading) {
+            reload()
+        }
+    }
+
+    private func reload() {
+        Task { await model.load() }
+    }
+}
+
+/// The group cover, Play (shown while a member is playable) and the description.
+private struct GroupDetailHeader<Kind: GroupDetailKind>: View {
+    let detail: GroupDetail
+    let model: GroupDetailModel<Kind>
+    @Environment(\.serverID) private var serverID
+    @Environment(\.playItem) private var playItem
+    @State private var isStarting = false
+    /// The key of the message for the last failed start, kept while the alert is dismissed.
+    @State private var failureKey: String?
+    @State private var showsFailure = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ABSSpacing.medium) {
+            GroupCover(name: detail.name, covers: detail.covers, serverID: serverID)
+                .frame(maxWidth: 240)
+                .frame(maxWidth: .infinity)
+            if let playAll = GroupPresentation.playAll(of: model, canPlay: playItem != nil && !isStarting) {
+                Button {
+                    start(playAll)
+                } label: {
+                    Label {
+                        Text(verbatim: L10n.string("ButtonPlay"))
+                    } icon: {
+                        Image(systemName: "play.fill")
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!playAll.isEnabled)
+                .accessibilityLabel(Text(verbatim: GroupPresentation.playAllAccessibilityLabel(playAll)))
+            }
+            if let description = detail.description {
+                ExpandableText(description, collapsedLineLimit: 4)
+            }
+        }
+        .padding(.horizontal, ABSSpacing.large)
+        .alert(
+            Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
+            presenting: failureKey
+        ) { _ in
+            Button(L10n.string("ButtonOk")) {}
+        }
+    }
+
+    private func start(_ playAll: GroupPlayAll) {
+        let play = playItem
+        isStarting = true
+        Task {
+            defer { isStarting = false }
+            if let key = await GroupPresentation.performPlayAll(playAll, play: play) {
+                failureKey = key
+                showsFailure = true
+            }
+        }
+    }
+}
+
+#if DEBUG
+    #Preview("Collection") {
+        @Previewable @State var model = GroupsPreviewData.collection()
+        NavigationStack {
+            GroupDetailContent(kind: .collection, model: model)
+        }
+        .task { await model.load() }
+        .environment(\.serverID, UUID())
+        .environment(\.itemProgressReader, GroupsPreviewData.progressReader)
+        .environment(\.playItem, PlayItemAction { _, _, _ in })
+        .absBackground()
+    }
+
+    #Preview("Playlist, largest text, dark") {
+        @Previewable @State var model = GroupsPreviewData.playlist()
+        NavigationStack {
+            GroupDetailContent(kind: .playlist, model: model)
+        }
+        .task { await model.load() }
+        .environment(\.itemProgressReader, GroupsPreviewData.progressReader)
+        .environment(\.dynamicTypeSize, .accessibility3)
+        .absBackground()
+        .preferredColorScheme(.dark)
+    }
+
+    #Preview("Playlist, failed") {
+        @Previewable @State var model = GroupsPreviewData.playlist(fails: true)
+        NavigationStack {
+            GroupDetailContent(kind: .playlist, model: model)
+        }
+        .task { await model.load() }
+        .absBackground()
+    }
+#endif

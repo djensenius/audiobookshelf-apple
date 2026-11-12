@@ -1,28 +1,26 @@
 import ABSAppModel
 import SwiftUI
 
-/// The Playlists section, shown when the user has playlists (legacy
-/// `pages/bookshelf/playlists.vue`). A stub until the Playlists feature replaces this file.
+/// The Playlists section, shown when the user has playlists (legacy `pages/bookshelf/playlists.vue`).
 struct PlaylistsView: View {
     var body: some View {
-        FeatureStub(titleKey: AppTab.playlists.titleKey, systemImage: AppTab.playlists.systemImage)
+        GroupListView(kind: .playlist)
     }
 }
 
-/// One playlist (legacy `pages/playlist/_id.vue`). A stub until the Playlists feature replaces
-/// this file.
+/// One playlist (legacy `pages/playlist/_id.vue`): its books and podcast episodes with their progress, and Play.
 struct PlaylistDetailView: View {
     let playlistID: String
 
     var body: some View {
-        FeatureStub(titleKey: "HeaderPlaylist", systemImage: AppTab.playlists.systemImage, details: [playlistID])
+        GroupDetailView<PlaylistGroupKind>(kind: .playlist, groupID: playlistID)
     }
 }
 
-#Preview("Playlists") {
+#Preview("Playlists, signed out") {
     NavigationStack { PlaylistsView() }
 }
 
-#Preview("Detail") {
+#Preview("Detail, signed out") {
     NavigationStack { PlaylistDetailView(playlistID: "pl_1") }
 }

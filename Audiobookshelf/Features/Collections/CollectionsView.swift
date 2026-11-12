@@ -1,29 +1,26 @@
 import ABSAppModel
 import SwiftUI
 
-/// The Collections section of a book library (legacy `pages/bookshelf/collections.vue`). A stub
-/// until the Collections feature replaces this file.
+/// The Collections section of a book library (legacy `pages/bookshelf/collections.vue`).
 struct CollectionsView: View {
     var body: some View {
-        FeatureStub(titleKey: AppTab.collections.titleKey, systemImage: AppTab.collections.systemImage)
+        GroupListView(kind: .collection)
     }
 }
 
-/// One collection (legacy `pages/collection/_id.vue`). A stub until the Collections feature
-/// replaces this file.
+/// One collection (legacy `pages/collection/_id.vue`): its books with their progress, and Play.
 struct CollectionDetailView: View {
     let collectionID: String
 
     var body: some View {
-        FeatureStub(
-            titleKey: "HeaderCollection", systemImage: AppTab.collections.systemImage, details: [collectionID])
+        GroupDetailView<CollectionGroupKind>(kind: .collection, groupID: collectionID)
     }
 }
 
-#Preview("Collections") {
+#Preview("Collections, signed out") {
     NavigationStack { CollectionsView() }
 }
 
-#Preview("Detail") {
+#Preview("Detail, signed out") {
     NavigationStack { CollectionDetailView(collectionID: "col_1") }
 }
