@@ -18,6 +18,8 @@ public protocol PlaybackScopeHandle: AnyObject, Sendable {
     func play(itemID: String, episodeID: String?, startTime: Double?) async
     /// The account's play queue, read-only; `nil` when the scope has none.
     var queue: (any PlaybackQueueReading)? { get }
+    /// The sleep timer, detached when the scope is released; `nil` when the scope has none.
+    var sleepTimer: SleepTimer? { get }
     /// Changes the queue, unless the scope has retired.
     func editQueue(_ edit: (PlaybackQueue) -> Void)
     func reconnect(client: APIClient?, features: ServerFeatures?)
@@ -63,12 +65,15 @@ public struct PlaybackScopeRequest: Sendable {
 /// ``SessionStage/progressSource``: its coordinator and syncer write progress.
 ///
 /// - **Start** builds the scope, binds ``CurrentPlayback`` to its coordinator, publishes its
-///   ``queue``, restores the account's last-played item and publishes ``playItem``.
-/// - **Reconnect** swaps the client and features into the same scope; playback carries on.
+///   ``queue`` and ``sleepTimer``, restores the account's last-played item, publishes
+///   ``playItem``, and starts the session's own ``bookmarks``.
+/// - **Reconnect** swaps the client and features into the same scope, and reconnects the same
+///   bookmark store; playback carries on.
 /// - **End** retires the scope before its first `await`: playback stops for good and the final
-///   position is captured, before the next account can begin. It then waits, within
-///   `closeTimeout`, for the close, and releases the scope. The lifecycle may cancel that wait
-///   and start the next account while it runs; the old scope stays on its own account's services.
+///   position is captured, before the next account can begin. It then ends the bookmark store,
+///   waits, within `closeTimeout`, for the close, and releases the scope. The lifecycle may cancel
+///   that wait and start the next account while it runs; the old scope stays on its own account's
+///   services.
 /// - **Flush** saves the last-played record locally; sending progress is the syncer's (#184).
 @MainActor
 @Observable
@@ -79,6 +84,13 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     public private(set) var playItem: PlayItemAction?
     /// The current account's play queue; `nil` between sessions.
     public private(set) var queue: PlaybackQueueControl?
+    /// The current scope's sleep timer, for the player's `\.sleepTimer` environment value; `nil`
+    /// between sessions and for a scope without one.
+    public private(set) var sleepTimer: SleepTimer?
+    /// The current account's bookmarks (#57's D13): a store of its own for each session; `nil`
+    /// between sessions. The socket's `user_updated` doesn't reach it yet: #59's app wiring
+    /// connects `RealtimeBridge.onUserUpdated` to ``BookmarkStore/replaceAll(from:)``.
+    public private(set) var bookmarks: BookmarkStore?
     /// The latest ended session's close outcome, or why it isn't durable; `nil` until it finishes.
     /// A retirement the lifecycle cancelled can finish after a later session ended; its result is
     /// dropped rather than replacing that session's.
@@ -97,6 +109,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     @ObservationIgnored private let features: @MainActor (SessionIdentity) -> ServerFeatures?
     @ObservationIgnored private let requestSignOut: @MainActor (SessionContext) -> Void
     @ObservationIgnored private let closeTimeout: Duration
+    @ObservationIgnored private let makeBookmarks: @MainActor () -> BookmarkStore
     @ObservationIgnored private let makeScope: MakeScope
 
     /// - Parameters:
@@ -107,12 +120,15 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     ///   - requestSignOut: Called with the session's context when the server rejects it as
     ///     expired; the app passes ``SessionLifecycle/requestSignOut(of:)``.
     ///   - closeTimeout: How long an ending session waits for its close.
+    ///   - makeBookmarks: Builds each session's bookmark store; the app passes one whose
+    ///     `isOffline` reads the lifecycle's gate.
     ///   - makeScope: Builds the scope; the app passes ``PlaybackScope/make(_:makeNowPlaying:)``.
     public init(
         current: CurrentPlayback, writer: LocalProgressStore, deviceIdentifiers: any DeviceIdentifying,
         features: @escaping @MainActor (SessionIdentity) -> ServerFeatures?,
         requestSignOut: @escaping @MainActor (SessionContext) -> Void,
         closeTimeout: Duration = PlaybackCoordinator.closeWaitTimeout,
+        makeBookmarks: @escaping @MainActor () -> BookmarkStore = { BookmarkStore() },
         makeScope: @escaping MakeScope
     ) {
         self.current = current
@@ -121,6 +137,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         self.features = features
         self.requestSignOut = requestSignOut
         self.closeTimeout = closeTimeout
+        self.makeBookmarks = makeBookmarks
         self.makeScope = makeScope
     }
 
@@ -140,7 +157,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
             Log.playback.fault("A playback session started before the last one ended")
             reportMisuse("A playback session started before the last one ended")
             if let ending = retireScope(reason: .accountSwitch) {
-                Task { await self.finishRetirement(ending) }
+                Task { await self.finishRetirement(ending, reason: .switch) }
             }
         }
         let scope = makeScope(
@@ -155,30 +172,37 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         }
         current.bind(scope.playback)
         queue = PlaybackQueueControl(scope: scope)
+        sleepTimer = scope.sleepTimer
+        let bookmarks = makeBookmarks()
+        self.bookmarks = bookmarks
         scope.start()
         playItem = PlayItemAction { [weak scope] itemID, episodeID, startTime in
             await scope?.play(itemID: itemID, episodeID: episodeID, startTime: startTime)
         }
+        await bookmarks.sessionDidStart(context)
     }
 
     public func sessionDidReconnect(_ context: SessionContext) async {
         scope?.reconnect(client: context.client, features: features(context.identity))
+        await bookmarks?.sessionDidReconnect(context)
     }
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
         // Everything up to the first `await` runs before the lifecycle can move on.
         guard let ending = retireScope(reason: Self.stopReason(for: reason)) else { return }
-        await finishRetirement(ending)
+        await finishRetirement(ending, reason: reason)
     }
 
     private struct EndingScope {
         let scope: any PlaybackScopeHandle
         let sessionID: UInt64
+        let bookmarks: BookmarkStore?
     }
 
     /// Detaches and retires the running scope, synchronously.
     private func retireScope(reason: PlaybackStopReason) -> EndingScope? {
         guard let scope, let sessionID = scopeSessionID else { return nil }
+        let bookmarks = bookmarks
         self.scope = nil
         scopeSessionID = nil
         latestEndedSessionID = sessionID
@@ -186,15 +210,18 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         lastEnd = nil
         playItem = nil
         queue = nil
+        sleepTimer = nil
+        self.bookmarks = nil
         scope.onSessionRejected = nil
         scope.retire(reason: reason)
         current.bind(nil)
-        return EndingScope(scope: scope, sessionID: sessionID)
+        return EndingScope(scope: scope, sessionID: sessionID, bookmarks: bookmarks)
     }
 
-    /// Waits for the retired scope's close and releases it; records the result unless a later
-    /// session ended meanwhile.
-    private func finishRetirement(_ ending: EndingScope) async {
+    /// Ends the retired scope's bookmark store, waits for its close and releases it; records the
+    /// result unless a later session ended meanwhile.
+    private func finishRetirement(_ ending: EndingScope, reason: SessionEndReason) async {
+        await ending.bookmarks?.sessionWillEnd(reason)
         let result = await ending.scope.finishRetirement(timeout: closeTimeout)
         if case .failure(let error) = result {
             Log.playback.error(

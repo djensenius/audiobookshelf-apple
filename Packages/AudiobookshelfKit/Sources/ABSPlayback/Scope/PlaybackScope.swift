@@ -39,6 +39,9 @@ extension NowPlayingBridge: NowPlayingHandle {
 ///   an edit, and the connection's next scope loads what it saved.
 /// - **Reconnect.** ``reconnect(client:features:)`` swaps the client and features behind the
 ///   coordinator (``AccountPlaybackServices``); the scope and its playback carry on.
+/// - **Sleep timer.** The configured ``sleepTimer`` (#185) is attached to the coordinator, which
+///   asks it before playback starts and tells it of item changes and seeks, until the release
+///   detaches and cancels it.
 /// - **End.** ``retire(reason:)`` runs synchronously, before the session's teardown suspends: it
 ///   stops the coordinator for good and captures the final position.
 ///   ``finishRetirement(timeout:)`` then waits for the close, within a bound, and releases the
@@ -73,6 +76,10 @@ public final class PlaybackScope {
         public var lastPlayed: @MainActor (UUID) -> any LastPlayedStoring
         /// Where the connection's play queue is saved, under a key of its own.
         public var queueStore: any PlaybackQueueStoring
+        /// Builds the sleep timer over the scope's coordinator; the app passes
+        /// `{ SleepTimerAttachment(coordinator: $0, settings: settings) }` with the settings every
+        /// scene shares. `nil` leaves the scope without one.
+        public var makeSleepTimer: (@MainActor (PlaybackCoordinator) -> SleepTimerAttachment)?
 
         public init(
             connectionID: UUID, client: APIClient?, features: ServerFeatures?,
@@ -83,7 +90,8 @@ public final class PlaybackScope {
             lastPlayed: @escaping @MainActor (UUID) -> any LastPlayedStoring = {
                 PlaybackScope.lastPlayedStore(for: $0)
             },
-            queueStore: (any PlaybackQueueStoring)? = nil
+            queueStore: (any PlaybackQueueStoring)? = nil,
+            makeSleepTimer: (@MainActor (PlaybackCoordinator) -> SleepTimerAttachment)? = nil
         ) {
             self.connectionID = connectionID
             self.client = client
@@ -97,6 +105,7 @@ public final class PlaybackScope {
             self.backgroundActivity = backgroundActivity
             self.lastPlayed = lastPlayed
             self.queueStore = queueStore ?? UserDefaultsPlaybackQueueStore()
+            self.makeSleepTimer = makeSleepTimer
         }
     }
 
@@ -111,6 +120,10 @@ public final class PlaybackScope {
     /// Auto-advance over the connection's queue, attached to the coordinator until
     /// ``retire(reason:)``. `nil` only for a scope built without a queue (tests).
     let advancer: PlaybackQueueAdvancer?
+    /// The sleep timer, for the player; `nil` for a scope built without one. Its attachment is
+    /// detached, cancelling it, when the scope is released.
+    public var sleepTimer: SleepTimer? { sleepTimerAttachment?.timer }
+    private let sleepTimerAttachment: SleepTimerAttachment?
     private let nowPlaying: any NowPlayingHandle
     private var isRetired = false
     private var observer: PlaybackObserverToken?
@@ -133,8 +146,9 @@ public final class PlaybackScope {
     }
 
     /// Builds the services, then the coordinator, then the syncer (attached before any play),
-    /// then the Now Playing bridge, which the scope holds strongly, and the queue's advancer,
-    /// whose podcast fallback reads episodes through the services' current client.
+    /// then the sleep timer, if configured, then the Now Playing bridge, which the scope holds
+    /// strongly, and the queue's advancer, whose podcast fallback reads episodes through the
+    /// services' current client.
     public static func make(
         _ configuration: Configuration, makeNowPlaying: (PlaybackCoordinator) -> any NowPlayingHandle
     ) -> PlaybackScope {
@@ -149,6 +163,7 @@ public final class PlaybackScope {
         let syncer = ProgressSyncer(
             source: coordinator, service: services, store: configuration.writer,
             tickInterval: configuration.tickInterval, paths: nil)
+        let sleepTimer = configuration.makeSleepTimer?(coordinator)
         let queue = PlaybackQueue(serverConnectionID: configuration.connectionID, store: configuration.queueStore)
         let episodes = APIPodcastEpisodeSource(
             serverConnectionID: configuration.connectionID, localProgress: configuration.writer,
@@ -156,25 +171,29 @@ public final class PlaybackScope {
             fetchFinished: { try await services.client().send(UserEndpoints.me()) })
         return PlaybackScope(
             coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator),
-            queue: queue, episodes: episodes)
+            queue: queue, episodes: episodes, sleepTimer: sleepTimer)
     }
 
-    /// Test seam: a scope over a coordinator and a syncer already attached to it, and an
-    /// advancer over `queue`, when one is given, attached to the coordinator.
+    /// Test seam: a scope over a coordinator and a syncer already attached to it, an advancer
+    /// over `queue`, when one is given, attached to the coordinator, and `sleepTimer`, detached
+    /// when the scope is released.
     init(
         coordinator: PlaybackCoordinator, syncer: ProgressSyncer, services: AccountPlaybackServices?,
-        nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil
+        nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil,
+        sleepTimer: SleepTimerAttachment? = nil
     ) {
         self.coordinator = coordinator
         self.syncer = syncer
         self.services = services
         self.nowPlaying = nowPlaying
+        sleepTimerAttachment = sleepTimer
         advancer = queue.map { PlaybackQueueAdvancer(queue: $0, episodes: episodes) }
         advancer?.attach(to: coordinator)
         observer = coordinator.addObserver { [weak self] event in
             guard case .failed(.sessionStartFailed(.sessionExpired)) = event else { return }
             self?.sessionRejected()
         }
+        if let sleepTimer { onRelease { sleepTimer.detach() } }
     }
 
     private func sessionRejected() {
