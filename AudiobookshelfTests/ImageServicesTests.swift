@@ -19,6 +19,14 @@ private final class TrimLog: Sendable {
 
 @MainActor
 @Suite struct ImageServicesTests {
+    /// Services that record their trims in `log`. Each gets its own notification center, so a
+    /// memory warning one test posts doesn't reach another's services while they run in parallel.
+    private func makeServices(
+        logging log: TrimLog, notifications: NotificationCenter = NotificationCenter()
+    ) -> ImageServices {
+        ImageServices(accounts: nil, trim: { log.record($0) }, notifications: notifications)
+    }
+
     /// Runs `body` on a background queue, as the system delivers memory events.
     private func onBackgroundQueue(_ body: @escaping @Sendable () -> Void) async {
         await withCheckedContinuation { continuation in
@@ -38,7 +46,7 @@ private final class TrimLog: Sendable {
 
     @Test func memoryEventsTrimFromABackgroundQueue() async {
         let log = TrimLog()
-        let services = ImageServices(accounts: nil, trim: { log.record($0) })
+        let services = makeServices(logging: log)
         let trimmer = services.trimmer
 
         await onBackgroundQueue {
@@ -54,7 +62,7 @@ private final class TrimLog: Sendable {
     #if os(macOS)
         @Test func thePressureSourcesHandlerTrimsOffTheMainThread() async {
             let log = TrimLog()
-            let services = ImageServices(accounts: nil, trim: { log.record($0) })
+            let services = makeServices(logging: log)
             let warning = ImageServices.memoryPressureHandler(event: { .warning }, calling: services.trimmer)
             let critical = ImageServices.memoryPressureHandler(event: { .critical }, calling: services.trimmer)
             let released = ImageServices.memoryPressureHandler(event: { nil }, calling: services.trimmer)
@@ -73,10 +81,11 @@ private final class TrimLog: Sendable {
     #if os(iOS)
         @Test func aMemoryWarningPostedOffTheMainThreadEmptiesTheCache() async {
             let log = TrimLog()
-            let services = ImageServices(accounts: nil, trim: { log.record($0) })
+            let notifications = NotificationCenter()
+            let services = makeServices(logging: log, notifications: notifications)
 
             await onBackgroundQueue {
-                NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+                notifications.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
             }
 
             #expect(await waitFor(log, count: 1))
@@ -86,7 +95,7 @@ private final class TrimLog: Sendable {
 
         @Test func enteringTheBackgroundKeepsAQuarter() async {
             let log = TrimLog()
-            let services = ImageServices(accounts: nil, trim: { log.record($0) })
+            let services = makeServices(logging: log)
 
             services.didEnterBackground()
 

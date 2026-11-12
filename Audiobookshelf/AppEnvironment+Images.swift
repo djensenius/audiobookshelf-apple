@@ -24,6 +24,7 @@ final class ImageServices {
     private let online = OnlineFlag()
     private var networkTask: Task<Void, Never>?
     #if os(iOS)
+        private let notifications: NotificationCenter
         private var memoryWarnings: (any NSObjectProtocol)?
     #elseif os(macOS)
         private var memoryPressure: (any DispatchSourceMemoryPressure)?
@@ -31,7 +32,13 @@ final class ImageServices {
 
     /// - Parameter trim: Trims the memory cache to a fraction of its cap; tests record it. By
     ///   default, ``pipeline``'s ``ImagePipeline/trimMemory(toFraction:)``.
-    init(accounts: AccountManager?, trim: (@Sendable (_ fraction: Double) async -> Void)? = nil) {
+    /// - Parameter notifications: Where memory warnings arrive on iOS; tests pass their own, so
+    ///   one test's warning doesn't reach another's services.
+    init(
+        accounts: AccountManager?,
+        trim: (@Sendable (_ fraction: Double) async -> Void)? = nil,
+        notifications: NotificationCenter = .default
+    ) {
         let limits = Self.limits
         let online = self.online
         let pipeline = ImagePipeline(
@@ -44,12 +51,15 @@ final class ImageServices {
         self.pipeline = pipeline
         participant = ImageParticipant(sink: pipeline)
         trimmer = MemoryTrimmer(trim: trim ?? { await pipeline.trimMemory(toFraction: $0) })
+        #if os(iOS)
+            self.notifications = notifications
+        #endif
         if let accounts {
             participant.followRemovals { Set(accounts.connections.map(\.id)) }
         }
         followNetwork()
         #if os(iOS)
-            memoryWarnings = Self.observeMemoryWarnings(calling: trimmer)
+            memoryWarnings = Self.observeMemoryWarnings(in: notifications, calling: trimmer)
         #elseif os(macOS)
             memoryPressure = Self.observeMemoryPressure(calling: trimmer)
         #endif
@@ -58,7 +68,7 @@ final class ImageServices {
     isolated deinit {
         networkTask?.cancel()
         #if os(iOS)
-            if let memoryWarnings { NotificationCenter.default.removeObserver(memoryWarnings) }
+            if let memoryWarnings { notifications.removeObserver(memoryWarnings) }
         #elseif os(macOS)
             memoryPressure?.cancel()
         #endif
@@ -94,8 +104,10 @@ final class ImageServices {
     // on other threads, where Swift 6's isolation check would trap.
 
     #if os(iOS)
-        private nonisolated static func observeMemoryWarnings(calling trimmer: MemoryTrimmer) -> any NSObjectProtocol {
-            NotificationCenter.default.addObserver(
+        private nonisolated static func observeMemoryWarnings(
+            in notifications: NotificationCenter, calling trimmer: MemoryTrimmer
+        ) -> any NSObjectProtocol {
+            notifications.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil
             ) { _ in trimmer.memoryWarning() }
         }
