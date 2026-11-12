@@ -951,8 +951,10 @@ public final class PlaybackCoordinator {
     }
 
     /// The engine paused for a lost output: plays held outside it (recovery's, a resume awaiting
-    /// its seek, a start's) must not restart on the speaker.
+    /// its seek, a start's) must not restart on the speaker. Like ``pause()``, always emits `paused`,
+    /// even when already paused, so a sleep timer's pending resume is cancelled too.
     private func outputLost() {
+        defer { emit(.paused(time: currentTime)) }
         // As a pause does: a play awaiting its streaming check doesn't start.
         if pendingPlayKey != nil {
             policyCheck += 1
