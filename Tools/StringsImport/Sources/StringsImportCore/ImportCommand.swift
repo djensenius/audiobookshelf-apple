@@ -69,6 +69,10 @@ public enum ImportCommand {
             }
         }
 
+        if !IntentsCatalog.sync(root: root, check: check, log: log) {
+            outOfDate = true
+        }
+
         // Info.plist is hand-edited (rewriting it would reformat the file), so only verify it.
         if declaredLocalizations(at: root.appending(path: infoPlistPath)) != result.locales {
             let items = result.locales.map { "\t\t<string>\($0)</string>" }.joined(separator: "\n")
