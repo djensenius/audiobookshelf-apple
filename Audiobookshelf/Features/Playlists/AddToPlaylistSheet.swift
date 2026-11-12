@@ -4,6 +4,17 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
+extension View {
+    /// Presents ``AddToPlaylistSheet`` while `model` is set, and clears it when the sheet is dismissed.
+    func addToPlaylistSheet(_ model: Binding<AddToPlaylistModel?>) -> some View {
+        sheet(isPresented: Binding(get: { model.wrappedValue != nil }, set: { if !$0 { model.wrappedValue = nil } })) {
+            if let value = model.wrappedValue {
+                AddToPlaylistSheet(model: value)
+            }
+        }
+    }
+}
+
 /// The add-to-playlist sheet (legacy `components/modals/playlists/AddCreateModal.vue`): the user's playlists in the
 /// library, checked when they contain every entry, and a field to create a playlist with the entries. Tapping a row
 /// adds the entries or, when checked, removes them.
