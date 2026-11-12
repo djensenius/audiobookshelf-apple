@@ -625,6 +625,9 @@ private final class RecordingItemActions: ItemActionPerforming {
     func hideFromContinueListening(_ target: ItemActionTarget) async throws {
         try record(.hideFromContinueListening, target)
     }
+    func discardProgress(_ target: ItemActionTarget) async throws {
+        Issue.record("The series and author screens never discard progress")
+    }
 
     private func record(_ kind: ItemActionKind, _ target: ItemActionTarget) throws {
         calls.append((kind, target))

@@ -16,6 +16,8 @@ public protocol ItemActionPerforming: Sendable {
     func markNotFinished(_ target: ItemActionTarget) async throws
     /// Hides the item or episode from Continue Listening without touching its progress.
     func hideFromContinueListening(_ target: ItemActionTarget) async throws
+    /// Deletes the user's progress on the item or episode; does nothing when there is none.
+    func discardProgress(_ target: ItemActionTarget) async throws
 }
 
 /// The item or episode an action applies to.
@@ -41,16 +43,31 @@ public struct NoOpItemActions: ItemActionPerforming {
     public func markFinished(_ target: ItemActionTarget) async throws {}
     public func markNotFinished(_ target: ItemActionTarget) async throws {}
     public func hideFromContinueListening(_ target: ItemActionTarget) async throws {}
+    public func discardProgress(_ target: ItemActionTarget) async throws {}
 }
 
-/// Sends a progress change (`PATCH /api/me/progress/:item[/:episode]`); `APIClient` conforms.
+/// Sends a progress change (`PATCH /api/me/progress/:item[/:episode]`) or deletion
+/// (`DELETE /api/me/progress/:id`); `APIClient` conforms.
 public protocol ProgressWriting: Sendable {
     func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws
+    /// The server's ID of the user's progress on the item or episode
+    /// (`GET /api/me/progress/:item[/:episode]`), or `nil` when the server has none.
+    func progressID(itemID: String, episodeID: String?) async throws -> String?
+    /// Deletes one progress by its own ID (``MediaProgress/id``), not the item's.
+    func deleteProgress(id: String) async throws
 }
 
 extension APIClient: ProgressWriting {
     public func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
         _ = try await send(ProgressEndpoints.update(itemID: itemID, episodeID: episodeID, update))
+    }
+
+    public func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        try await mediaProgress(itemID: itemID, episodeID: episodeID)?.id
+    }
+
+    public func deleteProgress(id: String) async throws {
+        _ = try await send(ProgressEndpoints.delete(id: id))
     }
 }
 
@@ -64,10 +81,16 @@ extension APIClient: ProgressWriting {
 /// - A rollback restores the previous progress only while the cache still holds the optimistic
 ///   value (``ProgressCache/rollback(_:to:)``): an update that arrived meanwhile (socket, local
 ///   playback) is newer and stays.
+/// - Discarding removes the progress from the cache, asks the server for its progress ID (a
+///   cached entry may be an optimistic one with a local ID), and deletes that. Without cached
+///   progress it sends nothing; without server progress it sends no DELETE. A DELETE answered
+///   404 counts as done: the progress is already gone.
 /// - An action runs to completion even if its caller is cancelled, so the cache and the server
 ///   don't end up disagreeing about a half-done action.
 /// - Optimistic ordering is tracked separately from server timestamps. A full progress seed
 ///   requested after a successful action reconciles its authoritative row, even with clock skew.
+/// - The per-key queue belongs to this instance: inject one instance per account and share it
+///   between screens (#181), or actions from two instances on the same key can interleave.
 /// - The local playback database isn't touched; reconciling it with a newer server value is the
 ///   syncer's job (P2-06d, #158).
 @MainActor
@@ -116,6 +139,12 @@ public final class ProgressItemActions: ItemActionPerforming {
         }
     }
 
+    public func discardProgress(_ target: ItemActionTarget) async throws {
+        try await enqueue(target) { session in
+            try await self.discard(target, session: session)
+        }
+    }
+
     // MARK: Optimistic values
 
     private static func finished(_ target: ItemActionTarget, existing: MediaProgress?, at date: Date) -> MediaProgress {
@@ -138,6 +167,16 @@ public final class ProgressItemActions: ItemActionPerforming {
         _ target: ItemActionTarget, update: MediaProgressUpdate,
         optimistic: @escaping @MainActor (MediaProgress?, Date) -> MediaProgress?
     ) async throws {
+        try await enqueue(target) { session in
+            try await self.perform(target, update: update, optimistic: optimistic, session: session)
+        }
+    }
+
+    /// Runs `operation` after the actions already queued for `target`'s key.
+    private func enqueue(
+        _ target: ItemActionTarget,
+        operation: @escaping @MainActor (ProgressCache.SessionToken) async throws -> Void
+    ) async throws {
         let actionSession = cache.sessionToken()
         guard actionSession == sessionToken else { throw CancellationError() }
         let key = target.key
@@ -147,8 +186,7 @@ public final class ProgressItemActions: ItemActionPerforming {
         let task = Task<Result<Void, any Error>, Never> { @MainActor in
             _ = await previous?.value
             do {
-                try await self.perform(
-                    target, update: update, optimistic: optimistic, session: actionSession)
+                try await operation(actionSession)
                 return .success(())
             } catch {
                 return .failure(error)
@@ -178,5 +216,33 @@ public final class ProgressItemActions: ItemActionPerforming {
         }
         guard cache.isCurrent(session) else { throw CancellationError() }
         if let applied { cache.commitOptimistic(applied, token: session) }
+    }
+
+    private func discard(_ target: ItemActionTarget, session: ProgressCache.SessionToken) async throws {
+        guard cache.isCurrent(session) else { throw CancellationError() }
+        guard let before = cache.progress(libraryItemID: target.libraryItemID, episodeID: target.episodeID) else {
+            return
+        }
+        guard
+            let removal = cache.applyOptimisticRemoval(
+                libraryItemID: target.libraryItemID, episodeID: target.episodeID, token: session)
+        else { throw CancellationError() }
+        do {
+            if let id = try await writer.progressID(itemID: target.libraryItemID, episodeID: target.episodeID) {
+                // Signed out or switched account during the lookup: don't delete through the old writer.
+                guard cache.isCurrent(session) else { throw CancellationError() }
+                do {
+                    try await writer.deleteProgress(id: id)
+                } catch APIError.notFound {
+                    // Deleted already, for example from another device.
+                }
+            }
+        } catch {
+            guard cache.isCurrent(session) else { throw CancellationError() }
+            cache.rollbackOptimistic(removal, to: before, token: session)
+            throw error
+        }
+        guard cache.isCurrent(session) else { throw CancellationError() }
+        cache.commitOptimistic(removal, token: session)
     }
 }
