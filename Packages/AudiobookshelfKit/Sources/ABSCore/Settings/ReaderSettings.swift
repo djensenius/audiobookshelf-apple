@@ -25,7 +25,9 @@ public struct ReaderSettings: Sendable, Hashable, Codable {
         case sansSerif = "sans-serif"
     }
 
-    /// epub.js `spread`: `auto` shows two columns on wide layouts, `none` always one page.
+    /// The `spread` setting, as epub.js, the legacy app and the EPUB bridge spell it: `auto` shows
+    /// two pages when the layout is wide enough, `none` always one page. PDF, EPUB and comics
+    /// share it through ABSAppModel's `ReaderSpreadPolicy` (ADR 0008 decision 7).
     public enum Spread: String, CaseIterable, Sendable, Codable {
         case auto
         case none
