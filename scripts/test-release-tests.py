@@ -24,6 +24,7 @@ POST_XCODEBUILD = ROOT / "ci_scripts/ci_post_xcodebuild.sh"
 PROJECT = ROOT / "Audiobookshelf.xcodeproj"
 TIMEOUT = 120
 MAX_NOTES_BYTES = 4000
+BASELINE = "0.0.1"
 
 
 def run(args, cwd=None, env=None, timeout=TIMEOUT):
@@ -56,6 +57,13 @@ class SetVersionTests(unittest.TestCase):
         (self.project).mkdir()
         shutil.copy2(PROJECT / "project.xcproj", self.project / "project.xcproj")
         self.file = self.project / "project.xcproj"
+        # Pin every MARKETING_VERSION to a baseline none of the tests set, so the tests
+        # don't depend on (or break after a bump of) the repository's current version.
+        text, count = re.subn(
+            r'("MARKETING_VERSION(?:\[[^\]]*\])*": )"[^"]*"', rf'\1"{BASELINE}"', self.file.read_text()
+        )
+        self.assertGreaterEqual(count, 1)
+        self.file.write_text(text)
         git(self.scratch, "init", "--quiet")
         git(self.scratch, "add", ".")
         git(self.scratch, "commit", "--quiet", "-m", "baseline")
@@ -98,8 +106,29 @@ class SetVersionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Set MARKETING_VERSION to 12.3.40", result.stdout)
         self.assert_only_marketing_version("12.3.40", count)
-        self.assertNotIn('"MARKETING_VERSION": "0.1.0"', self.file.read_text())
+        self.assertNotIn(f'"MARKETING_VERSION": "{BASELINE}"', self.file.read_text())
         self.assertEqual(self.file.stat().st_mode & 0o777, (PROJECT / "project.xcproj").stat().st_mode & 0o777)
+
+    def test_the_project_is_replaced_atomically_and_keeps_its_mode(self):
+        self.file.chmod(0o640)  # git ignores this, so the fixture stays committed
+        before = self.file.stat().st_ino
+        result = self.set_version("3.4.5")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # A rename swaps in a new inode; writing through the original would keep it (and
+        # could truncate the project if the write failed partway).
+        self.assertNotEqual(self.file.stat().st_ino, before)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(sorted(p.name for p in self.project.iterdir()), ["project.xcproj"])
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    def test_a_failed_staging_write_leaves_the_project_untouched(self):
+        original = self.file.read_bytes()
+        self.project.chmod(0o555)
+        self.addCleanup(self.project.chmod, 0o755)
+        result = self.set_version("3.4.5")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.file.read_bytes(), original)
+        self.assertEqual(sorted(p.name for p in self.project.iterdir()), ["project.xcproj"])
 
     def test_conditional_settings_are_set_too(self):
         text = self.file.read_text()

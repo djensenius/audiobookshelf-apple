@@ -37,9 +37,11 @@ fi
 
 edited="$(mktemp "${TMPDIR:-/tmp}/set-version.edited.XXXXXX")"
 canonical="$(mktemp "${TMPDIR:-/tmp}/set-version.canonical.XXXXXX")"
+staged=""
 cleanup() {
   local status=$?
   rm -f "$edited" "$canonical"
+  if [[ -n "$staged" ]]; then rm -f "$staged"; fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -115,6 +117,13 @@ if cmp -s "$canonical" "$file"; then
   echo "MARKETING_VERSION is already $version in $file"
   exit 0
 fi
-# Write in place rather than mv, which would give the project mktemp's 0600 mode.
-cat "$canonical" >"$file"
+# Stage the whole replacement next to the project (same filesystem, so mv is an atomic
+# rename) and swap it in only once it is complete: a failed write, such as a full disk, then
+# leaves the original untouched. cp -p first so the staged file keeps the project's mode
+# rather than mktemp's 0600.
+staged="$(mktemp "$project/.project.xcproj.XXXXXX")"
+cp -p "$file" "$staged"
+cat "$canonical" >"$staged"
+mv -f "$staged" "$file"
+staged=""
 echo "Set MARKETING_VERSION to $version in $file"
