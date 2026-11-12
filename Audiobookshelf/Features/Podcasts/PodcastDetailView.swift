@@ -27,6 +27,8 @@ struct PodcastDetailView: View {
 
 /// The podcast screen over one ``PodcastDetailModel``. Plays and marks episodes through the
 /// environment's `playItem` and `itemActions`, as Home does, and shows an alert when that fails.
+/// Admins also get the server-side episode management (``podcastEpisodeManagement(model:access:removing:)``),
+/// as the signed-in account's user allows it.
 struct PodcastDetailScreen: View {
     @State private var model: PodcastDetailModel
     /// The episode whose Play is starting, so no other Play starts meanwhile.
@@ -39,6 +41,9 @@ struct PodcastDetailScreen: View {
     @State private var goneState = ItemDetailGoneState()
     /// The scroll view's width, which doesn't depend on the header layout chosen from it.
     @State private var width: CGFloat?
+    /// The episode whose removal from the server is being confirmed.
+    @State private var removingEpisode: PodcastEpisode?
+    @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
     @Environment(\.addToPlaylist) private var addToPlaylist
@@ -56,6 +61,8 @@ struct PodcastDetailScreen: View {
         // A podcast gone from the server can't be played, as on the book screen.
         let context = PodcastEpisodeActions.context(
             canPlay: playItem != nil && !isGone, canEditPlaylists: addToPlaylist != nil)
+        let access = PodcastEpisodeManagementAccess(
+            user: accounts?.authorization?.user, podcast: model.podcast, isGone: isGone)
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if let refreshFailure {
@@ -81,7 +88,8 @@ struct PodcastDetailScreen: View {
                             model: model, episode: episode, context: context, isGone: isGone,
                             isStarting: startingEpisodeID == episode.id,
                             isOtherStarting: startingEpisodeID != nil && startingEpisodeID != episode.id,
-                            isUpdating: updatingEpisodeIDs.contains(episode.id)
+                            isUpdating: updatingEpisodeIDs.contains(episode.id),
+                            remove: access.canRemoveEpisodes ? { removingEpisode = episode } : nil
                         ) { kind in
                             perform(kind, on: episode)
                         }
@@ -115,6 +123,7 @@ struct PodcastDetailScreen: View {
         ) { _ in
             Button(L10n.string("ButtonOk")) {}
         }
+        .podcastEpisodeManagement(model: model, access: access, removing: $removingEpisode)
     }
 
     /// No episodes at all, or none the filter and search let through, with Clear Filter.
