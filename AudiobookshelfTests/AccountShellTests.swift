@@ -49,8 +49,7 @@ private final class Recorder: SessionParticipant {
     func flush() async { events.append(.flush) }
 }
 
-/// The Account tab, the server list and the deep-link server switch, against the real
-/// accounts and lifecycle of an `AppEnvironment` with an in-memory store and Keychain.
+/// The Account tab, server list and link switch, against an in-memory `AppEnvironment`.
 @MainActor @Suite(.timeLimit(.minutes(1))) struct AccountShellTests {
     private let keychain = ConnectTestKeychain()
     private let suiteName = "AccountShellTests.\(UUID().uuidString)"
@@ -71,8 +70,7 @@ private final class Recorder: SessionParticipant {
         "\(prefix)\(UUID().uuidString.lowercased()).connect-ui.test"
     }
 
-    /// Signs in to `host` with a password, or through OpenID, in the connect flow; with a
-    /// `lifecycle`, as the server list's flow does while signed in.
+    /// Signs in to `host` in the connect flow; with a `lifecycle`, as the add-server sheet does.
     private func signIn(
         _ accounts: AccountManager, to host: String, openID: Bool = false, lifecycle: SessionLifecycle? = nil
     ) async throws -> SessionIdentity {
@@ -235,8 +233,7 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.opened.map(\.gate) == [.connect])
     }
 
-    /// While a switch runs, the old shell stays on screen, but nothing in it may start another
-    /// account change, from this window or another.
+    /// While a switch runs, nothing in the old shell, in any window, may start another change.
     @Test func accountChangesAreRefusedWhileSwitching() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -317,9 +314,8 @@ private final class Recorder: SessionParticipant {
                 == L10n.string("MessageSwitchServerSignedOut"))
     }
 
-    /// Two windows can both take the ready gate before either change starts; the changes after
-    /// the first, chosen from the account it left, do nothing. Each checks at its turn in the
-    /// lifecycle's queue, so running them in order is the same as queueing them together.
+    /// Two windows can both take the ready gate; changes after the first, chosen from the account
+    /// it left, do nothing at their turn in the queue, so running them in order is equivalent.
     @Test func changesChosenTogetherRunOnlyTheFirst() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -341,8 +337,7 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.opened.isEmpty)
     }
 
-    /// The server can reject the saved session's server version (or the session) when switching
-    /// to it, which signs out without an error.
+    /// A server can reject the saved session or its version on a switch, signing out silently.
     @Test func aSwitchThatEndsSignedOutFailsAndTheRootSaysSo() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -371,8 +366,7 @@ private final class Recorder: SessionParticipant {
         #expect(accounts.signedOutSwitchMessage() != L10n.string("MessageSwitchServerSignedOut"))
     }
 
-    /// Adding a server from the server list signs in as an account change: the session ends
-    /// through the lifecycle, and the account signed in before keeps its session.
+    /// Adding a server is an account change; the account signed in before keeps its session.
     @Test func addingAServerWhileSignedInKeepsTheOtherAccount() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -395,8 +389,7 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(a, isOffline: false))
     }
 
-    /// In the add-server sheet, the active server is already signed in and a signed-out one
-    /// needs the login step; neither ends the running session.
+    /// In the sheet, the active server and a signed-out one (login step) end nothing.
     @Test func resumingTheActiveOrASignedOutServerInTheSheetKeepsTheSession() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -426,8 +419,7 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
-    /// Pins today's behaviour: the account change starts before the server checks the password,
-    /// so a wrong one ends the running session, which starts again. A follow-up signs in first.
+    /// Pins today's behaviour: a wrong password restarts the running session (follow-up).
     @Test func aWrongPasswordInTheSheetRestartsTheSession() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -452,8 +444,20 @@ private final class Recorder: SessionParticipant {
         #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
         #expect(lifecycle.gate == .ready(a, isOffline: false))
         // The sheet's own change left A running, so trying again isn't refused as stale.
+        #expect(!model.isStale)
         await model.signIn()
         #expect(Array(recorder.events.dropFirst(before)).count == 6)
+    }
+
+    /// Another window's failed switch restarts B; the sheet opened before it closes.
+    @Test func aSheetWhoseSessionRestartedCloses() async throws {
+        let environment = try makeEnvironment()
+        let (_, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        let sheet = connectModel(try #require(environment.accounts), lifecycle: environment.lifecycle)
+        #expect(!sheet.isStale)
+        await #expect(throws: (any Error).self) { try await environment.lifecycle.switchAccount(to: UUID()) }
+        #expect(environment.lifecycle.gate == .ready(b, isOffline: false) && sheet.isStale)
     }
 
     /// A sheet opened from B and submitted after another window switched to A does nothing.
@@ -495,8 +499,7 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
-    /// An expiry deletes the session without setting `signedOutAt`; such a server can't be
-    /// switched to, so nothing ends the running session to try.
+    /// An expiry deletes the session but not `signedOutAt`: no switch, so nothing ends.
     @Test func aServerWhoseSessionWasDeletedIsntSwitchedTo() async throws {
         let environment = try makeEnvironment()
         let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
@@ -567,8 +570,7 @@ private final class Recorder: SessionParticipant {
         #expect(confirmation.confirm(request, prompt: &prompt, reopen: recorder.reopener(lifecycle)) == nil)
     }
 
-    /// A newer link replaces the one the dialog asked about; the dialog's actions for the old one,
-    /// which SwiftUI may still run, do nothing.
+    /// A newer link replaces the dialog's; actions SwiftUI still runs for the old one do nothing.
     @Test func theDialogsActionsForAReplacedLinkDoNothing() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -597,8 +599,7 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.waitingLink(lifecycle) == newer)
     }
 
-    /// A link that arrives once the switch is confirmed but before it has changed the gate is
-    /// newer than the confirmed one, so it opens after the switch, for the new account.
+    /// A link arriving after confirming, before the gate changes, opens after the switch instead.
     @Test func aLinkThatArrivesBeforeTheSwitchStartsOpensAfterIt() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -621,8 +622,7 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.waitingLink(lifecycle) == newer)
     }
 
-    /// A link the root has received, but the scene hasn't opened yet (which would replace the
-    /// dialog's link), is newer than the dialog's: confirming then does nothing, and it waits.
+    /// A link the root holds but the scene hasn't opened is newer: confirming does nothing.
     @Test func confirmingWhileANewerLinkWaitsDoesNothing() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
@@ -673,8 +673,7 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.waitingLink(lifecycle) == newer)
     }
 
-    /// A failed switch drops the link it was confirmed for, but not a newer one: that waits as if
-    /// it had just arrived, in the account the switch stayed on.
+    /// A failed switch drops its confirmed link; a newer one waits as if it had just arrived.
     @Test(arguments: [false, true])
     func aFailedSwitchKeepsOnlyANewerLink(replaced: Bool) {
         let identity = SessionIdentity(connectionID: UUID(), userID: "b")
@@ -691,8 +690,7 @@ private final class Recorder: SessionParticipant {
         #expect(links.link(atEpoch: 2) == (replaced ? newer : nil))
     }
 
-    /// Every newer link replaces the one the dialog asks about, wherever the router sends it:
-    /// one for this server navigates, one for an unknown or signed-out server is dropped.
+    /// Every newer link replaces the dialog's: this server's, an unknown or a signed-out one's.
     @Test(arguments: ["current", "unknown", "signedOut"])
     func aNewerLinkOfAnyKindReplacesTheDialogsLink(kind: String) async throws {
         let environment = try makeEnvironment()

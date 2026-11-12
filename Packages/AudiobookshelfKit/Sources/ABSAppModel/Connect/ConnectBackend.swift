@@ -43,6 +43,12 @@ public protocol ConnectBackend {
     /// The custom headers saved for a connection.
     func customHeaders(for id: UUID) async throws -> [String: String]
     func remove(_ id: UUID) async throws
+    /// Whether the session the flow was opened from has ended, so its sign-ins are refused.
+    var originHasEnded: Bool { get }
+}
+
+extension ConnectBackend {
+    public var originHasEnded: Bool { false }
 }
 
 /// The app's ``ConnectBackend``: validates with ``ServerValidator`` and signs in through
@@ -68,6 +74,7 @@ final class AccountConnectBackend: ConnectBackend {
     }
 
     var connections: [ServerConnectionDTO] { accounts.connections }
+    var originHasEnded: Bool { lifecycle.map { $0.readySession != origin } ?? false }
 
     func validate(address: String, customHeaders: [String: String]) async throws -> ConnectServer {
         ConnectServer(try await validator.validate(address: address, customHeaders: customHeaders))

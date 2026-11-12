@@ -155,6 +155,11 @@ public final class ConnectViewModel {
         }
     }
 
+    /// Whether to close the flow: the session it was opened from ended other than by its sign-in.
+    public var isStale: Bool {
+        if case .signingIn = phase { false } else { backend.originHasEnded }
+    }
+
     /// Username and password sign-in. Hidden for OpenID-only servers.
     public var showsPasswordLogin: Bool { server?.status.supportsLocalLogin ?? false }
     public var showsOpenIDLogin: Bool { server?.status.supportsOpenID ?? false }

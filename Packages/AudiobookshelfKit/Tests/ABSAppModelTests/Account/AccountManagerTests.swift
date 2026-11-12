@@ -430,6 +430,21 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(manager.connections.map(\.id) == [id])
     }
 
+    @Test func aSignInDuringLogoutDropsTheEndSessionURL() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        _ = try await signIn(manager, to: server, oidc: true)
+        server.update { $0.logoutRedirect = "https://idp.example/end-session" }
+        let held = server.hold("/logout")
+        let logout = Task { await manager.logout() }
+        await held.arrived()
+
+        _ = try await signIn(manager, to: server, oidc: true)
+        held.open()
+        #expect(await logout.value == nil && manager.state.user != nil)
+    }
+
     @Test func passwordLogoutSendsNoCookiesAndIgnoresNonWebRedirects() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()

@@ -415,7 +415,9 @@ public final class AccountManager {
         var logoutClient = activeClient
         if logoutClient == nil { logoutClient = await makeLogoutClient(for: id, credentials: credentials) }
         guard let logoutClient else { return nil }
-        return await serverLogout(ended, client: logoutClient)
+        let url = await serverLogout(ended, client: logoutClient)
+        // Not once a sign-in has begun: the shared browser would end or interrupt it.
+        return isCurrent(operation) ? url : nil
     }
 
     /// Forgets a saved connection: deletes its Keychain items and removes it from the store, then

@@ -317,8 +317,7 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
-    /// The sign-out a screen chooses checks, after the flush, that the source still shows the
-    /// account it ended, as ``SessionLifecycle/requestSignOut(of:)`` does.
+    /// A screen's sign-out checks after the flush that the source still shows the account.
     @Test(arguments: [false, true])
     func signOutDoesNotLogOutAnAccountPublishedDuringFlush(scoped: Bool) async throws {
         let harness = Harness()
@@ -462,8 +461,7 @@ private func teardown(_ reason: String) -> [String] {
         let harness = Harness()
         try await harness.started()
         let fromA = try #require(harness.lifecycle.readySession)
-        // A sign-out and a second switch, chosen from A (say, in another window) before the switch
-        // to B ended it. Each checks at its turn in the queue, so running them in order is the same.
+        // A sign-out and a second switch chosen from A before the switch to B ended it.
         try await harness.lifecycle.switchAccount(to: identityB.connectionID, from: fromA)
         let url = await harness.lifecycle.signOut(of: fromA)
         try await harness.lifecycle.switchAccount(to: identityA.connectionID, from: fromA)
@@ -521,8 +519,7 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
-    /// Another window's add-server sheet ended A's session to sign in; a switch chosen from A
-    /// meanwhile doesn't take that for an expiry, so it doesn't overtake the sign-in.
+    /// A switch chosen from A doesn't take a sheet's sign-in ending A for an expiry.
     @Test func aSwitchQueuedDuringASignInFromTheSameAccountDoesNothing() async throws {
         let harness = Harness()
         try await harness.started()
@@ -568,8 +565,7 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.signedOutSwitches == 1)
     }
 
-    /// Two switches chosen from A (say, in two windows); the first ends A, then fails because B
-    /// rejects its session. The second checks at its turn, so running them in order is the same.
+    /// Two switches chosen from A; the first ends A, then fails as B rejects its session.
     @Test func aSwitchChosenFromAnAccountAFailedSwitchEndedDoesNothing() async throws {
         let harness = Harness()
         try await harness.started()
@@ -601,8 +597,7 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
-    /// A expires; the first switch chosen from it runs and throws without starting a session.
-    /// The second is still not the first change, and the root learns why the first failed.
+    /// After A expires, only the first switch from it runs, and the root learns why it failed.
     @Test func onlyTheFirstSwitchFromAnExpiredAccountRunsEvenIfItFails() async throws {
         let harness = Harness()
         try await harness.started()
@@ -644,8 +639,7 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
-    /// A failed switch from A ends A's session and starts A's again. A sign-out or switch chosen
-    /// from the first session (say, in another window) is for a session that has gone.
+    /// A failed switch restarts A; changes chosen from A's first session do nothing.
     @Test func changesChosenFromAnAccountsEarlierSessionDoNothing() async throws {
         let harness = Harness()
         try await harness.started()

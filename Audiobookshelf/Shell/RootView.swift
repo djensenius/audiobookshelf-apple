@@ -12,10 +12,8 @@ import SwiftUI
 /// without a store is kept (``PendingLink/init(_:arrivingAt:epoch:)``), and the binding hands the
 /// host a link only while the epoch is the one it arrived in, so a link queued for one account
 /// never opens for another, even when this view didn't render the gates in between.
-///
-/// The lifecycle and the accounts are in the environment of everything below, so a screen such
-/// as the Account tab reads them with `@Environment` instead of through its initializer, and so is
-/// the shown account's `serverID` (``SceneContent/serverID``).
+/// The lifecycle, accounts and shown `serverID` (``SceneContent/serverID``) are in the
+/// environment of everything below.
 struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
@@ -23,8 +21,7 @@ struct RootView: View {
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var links = SceneLinks()
-    /// Why a switch ended signed out; the old shell, which would have said so, is gone. Kept
-    /// after dismissal, so the alert's text doesn't blank while it animates out.
+    /// Why a switch ended signed out, kept after dismissal so the text doesn't blank.
     @State private var switchSignedOutMessage: String?
     @State private var showsSwitchSignedOut = false
 
@@ -96,8 +93,7 @@ struct RootView: View {
             // A switch keeps the old shell on screen until the next session has started, so a
             // sign-in presented from it isn't torn down. It is the same case as a ready session,
             // so the shell, its router and its scene storage survive until the identity changes.
-            // A confirmed switch to another server hands its link here, to open after the
-            // switch, so the link carries the new account's epoch and reaches the new host.
+            // A confirmed switch's link, opened after it with the new account's epoch.
             SceneRouterHost(
                 identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil),
                 reopen: LinkReopener(

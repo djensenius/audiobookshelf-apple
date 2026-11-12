@@ -4,9 +4,8 @@ import ABSData
 import ABSUI
 import SwiftUI
 
-/// The links a scene has received, as `RootView` keeps them: the last one waits. During a
-/// confirmed switch, the last one since confirming waits in a slot, then with the new account's
-/// ``SessionLifecycle/linkEpoch``. A failed switch drops only the confirmed link.
+/// The links a scene received (`RootView`): the last waits. During a confirmed switch, the last
+/// since confirming waits for the new ``SessionLifecycle/linkEpoch``; a failure drops only it.
 struct SceneLinks {
     private(set) var pending: PendingLink?
     /// The link to open after the confirmed switch, while it runs.
@@ -62,8 +61,7 @@ struct SceneLinks {
     }
 }
 
-/// How a confirmed server switch hands its link to the root (`RootView`, ``SceneLinks``), which
-/// outlives the scene's host that the switch rebuilds.
+/// How a confirmed switch hands its link to the root, which outlives the host it rebuilds.
 @MainActor
 struct LinkReopener {
     /// Whether the root took the link; not when a newer one waits.
@@ -101,8 +99,7 @@ struct ServerSwitchPrompt {
         if request.generation == generation { shown = nil }
     }
 
-    /// Takes `request` to confirm, once: `false` when a newer one was presented since, or it was
-    /// taken already.
+    /// Takes `request` to confirm, once: `false` if taken already or a newer one was presented.
     mutating func take(_ request: ServerSwitchRequest) -> Bool {
         guard request.generation == generation else { return false }
         generation += 1
@@ -111,9 +108,8 @@ struct ServerSwitchPrompt {
     }
 }
 
-/// What the scene does with a link for another saved server (``Router/pendingServerSwitch``):
-/// drop it when the server isn't saved or has no session, or ask, then switch through the
-/// lifecycle. The switch rebuilds the host, so the root keeps the link (``LinkReopener``).
+/// A link for another saved server (``Router/pendingServerSwitch``): dropped without a session,
+/// or asked about, then switched to through the lifecycle, the root keeping the link.
 @MainActor
 struct ServerSwitchConfirmation {
     let lifecycle: SessionLifecycle
@@ -166,8 +162,7 @@ struct ServerSwitchConfirmation {
     }
 }
 
-/// Asks before opening a link for another saved server. Needs the lifecycle and the accounts in
-/// the environment (`RootView` puts them there).
+/// Asks before opening a link for another saved server; reads the environment `RootView` sets.
 struct ServerSwitchConfirmationModifier: ViewModifier {
     let router: Router
     let reopen: LinkReopener
@@ -229,8 +224,7 @@ struct ServerSwitchConfirmationModifier: ViewModifier {
 }
 
 extension View {
-    /// Tells the user a server switch failed, and why. A failed switch leaves the account where it
-    /// was, so the same shell, and this alert, stays on screen.
+    /// Tells the user why a switch failed; the account, shell and alert stay.
     func switchServerFailedAlert(isPresented: Binding<Bool>, failure: SwitchFailure) -> some View {
         alert(Text(verbatim: failure.message), isPresented: isPresented) {
             Button(role: .cancel) {

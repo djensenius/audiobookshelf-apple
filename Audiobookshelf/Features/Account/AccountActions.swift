@@ -15,8 +15,7 @@ struct AccountActions {
     /// Checks that a server switched to has a saved session before the running one ends.
     var accounts: AccountManager?
 
-    /// Signs out, then opens the identity provider's end-session page with `openURL` if the
-    /// server returned one (an OpenID session).
+    /// Signs out, then opens any OpenID end-session page with `openURL`.
     /// - Returns: The sign-out's task, or `nil` when the session isn't ready.
     @discardableResult
     func signOut(openURL: @escaping @MainActor (URL) -> Void) -> Task<Void, Never>? {

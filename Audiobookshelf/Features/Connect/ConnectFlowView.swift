@@ -59,6 +59,7 @@ struct ConnectFlowView: View {
         // In the add-server sheet, a sign-in (an OpenID one waits for the browser) keeps running
         // when the stack disappears; Cancel stops it, so a swipe can't dismiss the sheet meanwhile.
         .interactiveDismissDisabled(model.isBusy)
+        .onChange(of: model.isStale) { if model.isStale { onCancel?() } }
     }
 }
 
