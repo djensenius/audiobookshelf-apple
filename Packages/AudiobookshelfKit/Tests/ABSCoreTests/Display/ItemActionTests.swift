@@ -61,7 +61,18 @@ import Testing
         )
         .map(\.kind)
         #expect(actions == [.markFinished, .hideFromContinueListening, .openDetails])
-        #expect(ItemActionContext() == ItemActionContext(canEditPlaylists: false, canPlay: true, canShare: true))
+        #expect(
+            ItemActionContext()
+                == ItemActionContext(canEditPlaylists: false, canPlay: true, canShare: true, canOpenInNewWindow: false))
+    }
+
+    @Test func openInNewWindowNeedsItsContextAndComesLast() {
+        #expect(!kinds(summary()).contains(.openInNewWindow))
+        let context = ItemActionContext(canOpenInNewWindow: true)
+        for item in [summary(), summary(kind: .podcast), summary(kind: .series), summary(missing: true)] {
+            let actions = ItemAction.available(for: item, progress: nil, context: context).map(\.kind)
+            #expect(actions.suffix(2) == [.openDetails, .openInNewWindow], "\(item.kind)")
+        }
     }
 
     @Test func itemWithoutAudioCannotBePlayedButCanBeMarked() {
@@ -90,7 +101,11 @@ import Testing
     }
 
     @Test func actionsAreInMenuOrderWithoutDuplicates() {
-        let all = kinds(summary(kind: .episode), ItemProgress(fraction: 0.2), canEditPlaylists: true)
+        let all = ItemAction.available(
+            for: summary(kind: .episode), progress: ItemProgress(fraction: 0.2),
+            context: ItemActionContext(canEditPlaylists: true, canOpenInNewWindow: true)
+        )
+        .map(\.kind)
         #expect(all == ItemActionKind.allCases.filter(all.contains))
         #expect(Set(all).count == all.count)
     }
