@@ -142,9 +142,9 @@ extension URLRequest {
 /// wait for transfers that end without an update.
 private final class SignallingDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
     let target: DownloadSessionDelegate
-    let completed: @Sendable () -> Void
+    let completed: @Sendable ((any Error)?) -> Void
 
-    init(target: DownloadSessionDelegate, completed: @escaping @Sendable () -> Void) {
+    init(target: DownloadSessionDelegate, completed: @escaping @Sendable ((any Error)?) -> Void) {
         self.target = target
         self.completed = completed
     }
@@ -166,7 +166,7 @@ private final class SignallingDelegate: NSObject, URLSessionDownloadDelegate, Se
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         target.urlSession(session, task: task, didCompleteWithError: error)
-        completed()
+        completed(error)
     }
 
     func urlSession(
@@ -189,8 +189,9 @@ final class StubDownloadSession: DownloadSession {
     private let delegate: DownloadSessionDelegate?
     private let state = Mutex<(lastRequest: URLRequest?, resumed: [Data])>((nil, []))
 
-    /// - Parameter completed: called after the delegate has handled each task's completion.
-    init(delegate: any URLSessionDelegate, completed: @escaping @Sendable () -> Void = {}) {
+    /// - Parameter completed: called after the delegate has handled each task's completion,
+    ///   with its error.
+    init(delegate: any URLSessionDelegate, completed: @escaping @Sendable ((any Error)?) -> Void = { _ in }) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubDownloadProtocol.self]
         let target = delegate as? DownloadSessionDelegate

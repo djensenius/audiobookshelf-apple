@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSRealtime
 import Foundation
 
 /// A collection or playlist as shown on a list card: what the card shows, never the whole
@@ -180,6 +181,41 @@ extension ItemListModel where Query == String, Item == GroupSummary {
         ) { libraryID, page, limit in
             try await service.playlistsPage(libraryID: libraryID, page: page, limit: limit)
                 .map(GroupSummary.init(playlist:))
+        }
+    }
+
+    /// Applies a change the server pushed to this list of `kind`, like the web client's bookshelf:
+    /// an addition reloads the list (``refreshAfterServerChange()``), as the new group's place in
+    /// the server's order is unknown;
+    /// an update replaces the loaded group; a removal drops it. Changes to another library or kind,
+    /// and other users' playlists, are ignored.
+    public func apply(_ change: LibraryChange, kind: GroupSummary.Kind) {
+        let groupChange: LibraryEntityChange<GroupSummary>
+        switch (change, kind) {
+        case (.collection(let change), .collection):
+            groupChange = change.map(GroupSummary.init(collection:))
+        case (.playlist(let change, let userID), .playlist):
+            guard userID == connectionKey?.userID else { return }
+            groupChange = change.map(GroupSummary.init(playlist:))
+        default:
+            return
+        }
+        guard groupChange.libraryID == query else { return }
+        switch groupChange {
+        case .added: refreshAfterServerChange()
+        case .updated(let group, _): replaceItem(group)
+        case .removed(let id, _): removeItem(id: id)
+        }
+    }
+}
+
+extension LibraryEntityChange {
+    /// The change with its entity converted by `transform`.
+    func map<Other>(_ transform: (Entity) -> Other) -> LibraryEntityChange<Other> {
+        switch self {
+        case .added(let entity, let libraryID): .added(transform(entity), libraryID: libraryID)
+        case .updated(let entity, let libraryID): .updated(transform(entity), libraryID: libraryID)
+        case .removed(let id, let libraryID): .removed(id: id, libraryID: libraryID)
         }
     }
 }

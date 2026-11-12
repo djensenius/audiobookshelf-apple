@@ -52,7 +52,7 @@ public struct UserItemProgressUpdate: Sendable, Hashable, Decodable {
 }
 
 /// An entity of one library that the server added, updated or removed: `<entity>_added`,
-/// `<entity>_updated` and `<entity>_removed`. Authors use it; collections and playlists can too.
+/// `<entity>_updated` and `<entity>_removed`, for authors, collections and playlists.
 public enum LibraryEntityChange<Entity: Sendable & Hashable>: Sendable, Hashable {
     case added(Entity, libraryID: String)
     case updated(Entity, libraryID: String)
@@ -77,7 +77,10 @@ public enum RealtimeEvent: Sendable, Equatable {
     case authFailed(message: String?)
     case userUpdated(User)
     case userItemProgressUpdated(UserItemProgressUpdate)
-    case playlistAdded(Playlist)
+    /// `collection_added`, `collection_updated` or `collection_removed`.
+    case collectionChanged(LibraryEntityChange<LibraryCollection>)
+    /// `playlist_added`, `playlist_updated` or `playlist_removed`; `userID` is the playlist's owner.
+    case playlistChanged(LibraryEntityChange<Playlist>, userID: String)
     /// `author_added`, `author_updated` or `author_removed`.
     case authorChanged(LibraryEntityChange<Author>)
 }
@@ -99,8 +102,27 @@ extension RealtimeEvent {
             return .userUpdated(try argument(User.self, from: arguments))
         case "user_item_progress_updated":
             return .userItemProgressUpdated(try argument(UserItemProgressUpdate.self, from: arguments))
+        case "collection_added":
+            let collection = try argument(LibraryCollection.self, from: arguments)
+            return .collectionChanged(.added(collection, libraryID: collection.libraryId))
+        case "collection_updated":
+            let collection = try argument(LibraryCollection.self, from: arguments)
+            return .collectionChanged(.updated(collection, libraryID: collection.libraryId))
+        case "collection_removed":
+            let removed = try argument(LibraryScoped<EntityID>.self, from: arguments)
+            return .collectionChanged(.removed(id: removed.value.id, libraryID: removed.libraryID))
         case "playlist_added":
-            return .playlistAdded(try argument(Playlist.self, from: arguments))
+            let playlist = try argument(Owned<Playlist>.self, from: arguments)
+            return .playlistChanged(
+                .added(playlist.value, libraryID: playlist.value.libraryId), userID: playlist.userID)
+        case "playlist_updated":
+            let playlist = try argument(Owned<Playlist>.self, from: arguments)
+            return .playlistChanged(
+                .updated(playlist.value, libraryID: playlist.value.libraryId), userID: playlist.userID)
+        case "playlist_removed":
+            let removed = try argument(Owned<LibraryScoped<EntityID>>.self, from: arguments)
+            return .playlistChanged(
+                .removed(id: removed.value.value.id, libraryID: removed.value.libraryID), userID: removed.userID)
         case "author_added":
             let author = try argument(LibraryScoped<Author>.self, from: arguments)
             return .authorChanged(.added(author.value, libraryID: author.libraryID))
@@ -136,6 +158,21 @@ private struct LibraryScoped<Value: Decodable>: Decodable {
     init(from decoder: any Decoder) throws {
         value = try Value(from: decoder)
         libraryID = try decoder.container(keyedBy: CodingKeys.self).decode(String.self, forKey: .libraryId)
+    }
+}
+
+/// A payload that must name its owner in `userId`, decoded alongside the value itself.
+private struct Owned<Value: Decodable>: Decodable {
+    let value: Value
+    let userID: String
+
+    private enum CodingKeys: String, CodingKey {
+        case userId
+    }
+
+    init(from decoder: any Decoder) throws {
+        value = try Value(from: decoder)
+        userID = try decoder.container(keyedBy: CodingKeys.self).decode(String.self, forKey: .userId)
     }
 }
 
