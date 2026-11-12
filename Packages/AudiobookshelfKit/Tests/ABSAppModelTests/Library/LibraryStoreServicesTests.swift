@@ -114,6 +114,21 @@ private struct GatedWritingClient: LibraryService, ProgressWriting {
     func deleteProgress(id: String) async throws {}
 }
 
+/// `task`'s result, or `nil` when it hasn't finished within `timeout`. Doesn't wait for a task
+/// that is still blocked (awaiting a task's value ignores cancellation, so a task group can't).
+private func result(
+    of task: Task<Void, any Error>, within timeout: Duration
+) async -> Result<Void, any Error>? {
+    let (results, continuation) = AsyncStream<Result<Void, any Error>?>.makeStream()
+    Task { continuation.yield(await task.result) }
+    Task {
+        try? await Task.sleep(for: timeout)
+        continuation.yield(nil)
+    }
+    for await result in results { return result }
+    return nil
+}
+
 /// A feature request and the fake client method it must reach.
 struct StoreServiceForwarding: Sendable, CustomTestStringConvertible {
     let method: String
@@ -438,7 +453,13 @@ private let forwardings: [StoreServiceForwarding] = [
             await store.connect(client: WritingClient(name: "b", writes: writes), connectionKey: serverB)
             let windowB = try #require(store.sessionItemActions())
             let finishB = Task { try await windowB.markFinished(ItemActionTarget(libraryItemID: "x")) }
-            for _ in 0..<50 { await Task.yield() }
+            // While A's write is still held: B's action must finish on its own.
+            let resultB = await result(of: finishB, within: .seconds(5))
+            switch resultB {
+            case .success: break
+            case .failure(let error): Issue.record(error, "B's action failed")
+            case nil: Issue.record("B's action waited for A's pending write")
+            }
             #expect(store.progress.progress(libraryItemID: "x")?.isFinished == true)
             #expect(writes.value == ["b:x"])
 
@@ -451,7 +472,6 @@ private let forwardings: [StoreServiceForwarding] = [
 
             held.reply.resume()
             _ = await finish.result
-            try await finishB.value
             try await reset.value
             #expect(writes.value == ["b:x", "a1:x", "a2:x"])
         }
