@@ -18,6 +18,7 @@ public struct ExpandableText: View {
     @State private var isExpanded = false
     @State private var fullHeight: CGFloat = 0
     @State private var collapsedHeight: CGFloat = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(_ text: AttributedString, collapsedLineLimit: Int = 4) {
         source = .attributed(text)
@@ -42,6 +43,11 @@ public struct ExpandableText: View {
     }
 
     private var isTruncated: Bool { fullHeight > collapsedHeight + 1 }
+
+    /// How Read more and Read less resize the text: animated, or at once with Reduce Motion.
+    static func toggleAnimation(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .default
+    }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: ABSSpacing.small) {
@@ -69,7 +75,7 @@ public struct ExpandableText: View {
                 }
             if isTruncated || isExpanded {
                 Button {
-                    withAnimation { isExpanded.toggle() }
+                    withAnimation(Self.toggleAnimation(reduceMotion: reduceMotion)) { isExpanded.toggle() }
                 } label: {
                     Text(verbatim: L10n.string(isExpanded ? "ButtonReadLess" : "ButtonReadMore"))
                 }

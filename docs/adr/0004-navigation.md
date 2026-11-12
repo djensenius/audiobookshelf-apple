@@ -313,11 +313,21 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 
 IDs follow the URL rules. A present but invalid `item` or `episode` rejects the activity.
 
-**Handoff has no account identity yet.** The only ID this device has for a server is its local connection UUID, which each device makes for itself, so it means nothing on another device. It is **never published**.
+**Account identity.** The only ID this device has for a server is its local connection UUID, which each device makes for itself, so it means nothing on another device. It is **never published**. The payload names the account by the server's address and the user's ID instead, which are the same on every device signed in to it.
 
-- Until the payload names an account, the account that is active on the receiving device opens the item. An item that doesn't exist on that server shows the not-found state.
+| `userInfo` key | Type | Meaning |
+| --- | --- | --- |
+| `serverAddress` | string | The server's normalized address (`ServerAddress.description`, for example `https://abs.example.com/audiobookshelf`) |
+| `userID` | string | The user's ID on that server. Follows the ID rules |
+
+- The two keys are additive: a receiver that predates them ignores them and opens the item on its active account.
+- They come as a pair. Neither present means a payload from before they were added, which opens on the active account. Only one present, either empty or not a string, an address that isn't already in normalized form, or an invalid user ID rejects the activity, so it never opens on whichever account happens to be active. Other keys, known or not, are ignored.
 - `DeepLink.init?(handoff:)` ignores a `server` entry, whatever it holds.
-- A follow-up adds `serverAddress` (normalized) and `userID` to the payload. They are additive, so a receiver that predates them still opens the item. The receiver resolves them to a local connection before `Router.open(_:)`, using the connection list of the account manager (#203). It needs the first publisher too.
+- `HandoffActivity(userInfo:)` reads the link and the account (`HandoffAccount`). Before `Router.open(_:)`, `HandoffActivity.resolve(using:)` asks the `AccountSessionSource` for the connection signed in to that account (`connectionID(for:)`). `AccountManager` matches its saved connections on the normalized address and the exact user ID, skipping connections that were signed out of or disconnected, and those without a saved session (`hasSession(_:)`): an expiry deletes the tokens but keeps the connection without a sign-out, so a switch to it would fail. The most recently used one left wins. The lookup is `async` because it reads the Keychain. The protocol's default matches nothing.
+  - A match gives the link with `serverID` set to that connection. If it's the active connection the router opens it; otherwise the router's `pendingServerSwitch` asks before switching, as for a URL with `server=`.
+  - No match gives `accountNotSignedIn`: nothing opens, and the shell tells the user that account isn't signed in on this device.
+  - Two servers, or two users on one server, resolve to their own connections.
+- Wiring the resolution into `RootView.onContinueUserActivity`, forwarding `connectionID(for:)` from the app's `AccountSessionAdapter`, and publishing the activity from the item, episode and player screens are follow-ups (#219).
 
 ### State restoration
 
@@ -396,6 +406,7 @@ ArrangementView { primary } secondary: { secondary }
 
 - The view splits side by side only when the area is wider than tall: inner landscape, book pose, iPad landscape and Mac windows. Otherwise only the primary pane shows.
 - The primary pane reads `splitArrangementAxis`. When it is `nil` (not split), the primary pane shows the secondary content inline (detail) or offers it as a sheet (player).
+- *Amended by #84:* an active vertical `.division` splits the player at any size class, so a compact window across the fold never gets the column, whose scrubber and transport would cross the hinge.
 - **Player panes.** Primary is Now Playing: artwork, title, chapter, scrubber and transport. Secondary is Chapters, Up Next, Bookmarks or Description.
 - **Detail panes.** Primary is the cover, metadata and actions. Secondary is the description, chapters, tracks or episodes.
 
@@ -404,6 +415,8 @@ ArrangementView { primary } secondary: { secondary }
 - The player shows primary-only, because the area is taller than wide.
 - Now Playing lines up the boundary between artwork and controls with the active `.division` region that is wider than tall. Artwork and title go above the fold, and the scrubber and transport go on the stable lower half.
 - This follows the HIG laptop guidance through a reserved region, not a pose check.
+- *Amended by #84:* the player does this with an `ArrangementView` in the `.overlay` style, not `.split`. The controls are the primary, with `overlayArrangementEdge(.bottom)`. The artwork and title are the secondary. Folded, the overlay puts the secondary on the top half and the primary on the bottom half, clear of the hinge. `.split` would put the primary (the controls) on top.
+- Until the first geometry arrives, the player keeps the column layout, so laptop pose doesn't flash the split first.
 
 **Grids**
 
@@ -424,6 +437,7 @@ ArrangementView { primary } secondary: { secondary }
 - A small `ABSUI` wrapper (`DuoArrangement`) uses `ArrangementView` under `if #available(iOS 27.1, macOS 27.1, *)`.
 - Below 27.1 it falls back to `ViewThatFits`: an `HStack` of both panes when wide, otherwise primary-only.
 - 27.1 toolbar modifiers are gated inside `@ToolbarContentBuilder` with `if #available`.
+- *Amended by #84 for the player:* the player's arrangements stay in the app (`PlayerLayout`, `DuoPlayerLayouts.swift`), not in an ABSUI `DuoArrangement`, and have **no** 27.0 `ViewThatFits` fallback. #84 requires the player on iOS 27.0 (and on macOS) to stay exactly as it was, a single column, so below 27.1 there is nothing to fall back to. The 27.1 toolbar pieces are gated by `if #available` in the view rather than in the toolbar builder.
 
 #### Sketches
 
