@@ -170,6 +170,10 @@ private func loadedModel(_ item: LibraryItem) async -> ItemDetailModel {
         #expect(start(1000) < 1000)
         #expect(start(1000) > 999)
         #expect(start(5000) < 1000)
+        // The engine seeks in whole milliseconds (`CMTime`, timescale 1000): still before the end.
+        func milliseconds(_ seconds: Double) -> Double { (seconds * 1000).rounded() }
+        #expect(milliseconds(start(1000)) < 1_000_000)
+        #expect(milliseconds(start(999.9995)) < 1_000_000)
 
         // Without a known duration only the lower bound applies.
         let noDuration = await loadedModel(makeBook(duration: nil))

@@ -76,15 +76,19 @@ extension ItemDetailModel {
         return startTime(for: chapter)
     }
 
-    /// Where to start playing `chapter`: its start, `0` when negative or not finite, and before
-    /// the end of the book when its duration is known.
+    /// Where to start playing `chapter`: its start, `0` when negative or not finite, and
+    /// ``endMargin`` before the end of the book when its duration is known.
     public func startTime(for chapter: ChapterRow) -> TimeInterval {
         guard chapter.start.isFinite, chapter.start > 0 else { return 0 }
-        if let duration = details?.duration, chapter.start >= duration {
-            return max(0, duration.nextDown)
+        if let duration = details?.duration, chapter.start > duration - Self.endMargin {
+            return max(0, duration - Self.endMargin)
         }
         return chapter.start
     }
+
+    /// How far before the end of the book a clamped start is. The engine seeks in whole
+    /// milliseconds, so anything closer could round to the end and finish at once.
+    public static let endMargin: TimeInterval = 0.001
 
     // MARK: Mapping
 
