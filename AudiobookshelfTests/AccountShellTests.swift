@@ -527,6 +527,27 @@ private final class Recorder: SessionParticipant {
         #expect(environment.lifecycle.gate == .ready(b, isOffline: false) && sheet.isStale)
     }
 
+    /// A Log Out confirmation opened from B, confirmed after another window's failed switch
+    /// restarted B, doesn't sign out the new session (the Account page names its origin).
+    @Test func aLogoutConfirmedAfterARestartDoesNothing() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let recorder = Recorder()
+        let (_, b, hosts) = try await twoServers(environment, recorder: recorder)
+        defer { cleanUp(hosts) }
+        let actions = AccountActions(lifecycle: lifecycle)
+        let confirmedFrom = try #require(lifecycle.readySession)
+        await #expect(throws: (any Error).self) { try await lifecycle.switchAccount(to: UUID()) }
+        #expect(lifecycle.gate == .ready(b, isOffline: false) && lifecycle.readySession != confirmedFrom)
+        let before = recorder.events.count
+
+        await actions.signOut(from: confirmedFrom) { recorder.opened.append(($0, lifecycle.gate)) }
+
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
+        #expect(recorder.events.count == before && recorder.opened.isEmpty)
+        #expect(environment.accounts?.state.user != nil)
+    }
+
     /// A sheet opened from B and submitted after another window switched to A does nothing.
     @Test func aSheetOpenedBeforeASwitchDoesNotChangeAccounts() async throws {
         let environment = try makeEnvironment()

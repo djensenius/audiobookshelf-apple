@@ -13,7 +13,10 @@ struct AccountView: View {
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @Environment(\.openURL) private var openURL
     @State private var isSigningOut = false
-    @State private var isConfirmingSignOut = false
+    /// The session the Log Out confirmation was opened from, while it shows; signing out names it,
+    /// so the lifecycle refuses a confirmation that outlived it (say, another window's failed
+    /// switch restarted the account).
+    @State private var signOutOrigin: ReadySession?
 
     /// The legacy app's repository (`pages/account.vue`, `pages/connect.vue`) and its license.
     private static let repositoryURL = URL(string: "https://github.com/advplyr/audiobookshelf-app")
@@ -48,7 +51,7 @@ struct AccountView: View {
                 }
                 if let lifecycle {
                     Button(role: .destructive) {
-                        isConfirmingSignOut = true
+                        signOutOrigin = lifecycle.readySession
                     } label: {
                         label("ButtonLogout", systemImage: "rectangle.portrait.and.arrow.right")
                     }
@@ -87,11 +90,11 @@ struct AccountView: View {
         .formStyle(.grouped)
         .navigationTitle(Text(verbatim: L10n.string(AppTab.account.titleKey)))
         .confirmationDialog(
-            Text(verbatim: L10n.string("MessageConfirmLogout")), isPresented: $isConfirmingSignOut,
-            titleVisibility: .visible
-        ) {
+            Text(verbatim: L10n.string("MessageConfirmLogout")), isPresented: isConfirmingSignOut,
+            titleVisibility: .visible, presenting: signOutOrigin
+        ) { origin in
             Button(role: .destructive) {
-                signOut()
+                signOut(from: origin)
             } label: {
                 Text(verbatim: L10n.string("ButtonLogout"))
             }
@@ -105,16 +108,22 @@ struct AccountView: View {
         return AccountDetails.userTypeKey(authorized.type).map { L10n.string($0) } ?? authorized.type.rawValue
     }
 
-    /// Signs out once confirmed, unless the session stopped accepting changes meanwhile.
-    private func signOut() {
-        guard !isSigningOut, let lifecycle,
-            let task = AccountActions(lifecycle: lifecycle, accounts: accounts).signOut(openURL: { openURL($0) })
-        else { return }
+    /// Whether the Log Out confirmation shows: while it has the session it was opened from.
+    private var isConfirmingSignOut: Binding<Bool> {
+        Binding(get: { signOutOrigin != nil }, set: { if !$0 { signOutOrigin = nil } })
+    }
+
+    /// Signs out of `origin`, the session the confirmation was opened from. The lifecycle does
+    /// nothing if that session has ended or restarted since, so a stale confirmation can't sign
+    /// out the session that replaced it.
+    private func signOut(from origin: ReadySession) {
+        guard !isSigningOut, let lifecycle else { return }
+        let actions = AccountActions(lifecycle: lifecycle, accounts: accounts)
         isSigningOut = true
         // Only while it runs: the lifecycle can refuse it (another window's change left this
-        // account first), and this screen may then stay.
+        // session first), and this screen may then stay.
         Task {
-            await task.value
+            await actions.signOut(from: origin) { openURL($0) }
             isSigningOut = false
         }
     }
