@@ -34,11 +34,18 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   was turned away before the session handler ran (408, 429).
 /// - **Ambiguous failures (#381).** After a timeout, lost response or 5xx the server may or may
 ///   not have applied the report, so its listening time is kept as an unreconciled snapshot.
-///   The next report first reads the session (`GET /api/session/:id`) and compares its
-///   `timeListening` with the time acknowledged so far: if the snapshot was applied it is
-///   acknowledged; if not, it rides along in that report, once only; if the lookup fails or
-///   the total matches neither, it is dropped and logged, never sent blind. Closing or
-///   abandoning the session drops a snapshot still unreconciled (#382).
+///   The first report after ``reconcileDelay`` reads the session (`GET /api/session/:id`) and
+///   compares its `timeListening` with the time acknowledged so far: if the snapshot was
+///   applied it is acknowledged; if not, it rides along in that report, once only (recovered
+///   time is tracked until it is delivered or dropped, so no later failure resends it again);
+///   if the lookup fails or the total matches neither, it is dropped and logged, never sent
+///   blind. Reports in the meantime carry only new time; a second ambiguous failure first
+///   merges into the snapshot, which then counts only if all or none of it was applied.
+///   Closing or abandoning the session drops a snapshot still unreconciled (#382).
+///   Residual risk: `/sync` has no idempotency key, and the server's session shows only what it
+///   has applied, so an unchanged total can't prove the original request will never apply. The
+///   delay makes that need a request body the server fully received but still hadn't processed
+///   a request timeout plus a margin after the client gave up; then its time counts twice.
 /// - **Server errors (#171).** A `/sync` answered with 5xx, 408 or 429 backs off that session's
 ///   reports for ``syncInterval`` doubled per consecutive failure, up to ``maxSyncBackoff``;
 ///   ``flush()`` ignores the backoff. Positions are still saved meanwhile, and a periodic report
@@ -98,9 +105,12 @@ public final class ProgressSyncer {
         var listened: TimeInterval = 0
         /// The session's listening time the server is known to have applied.
         var ackedTotal: TimeInterval = 0
-        /// An ambiguously failed report's listening time, and how much of it was already a
-        /// resend (which isn't resent again).
-        var unreconciled: (delta: TimeInterval, resent: TimeInterval)?
+        /// An ambiguously failed report's listening time, how much of it was already a resend
+        /// (which isn't resent again), and the monotonic time the client gave up on it.
+        var unreconciled: (delta: TimeInterval, resent: TimeInterval, failedAt: TimeInterval)?
+        /// Of `listened`, the time a reconciliation recovered: already sent once, so a later
+        /// ambiguous failure doesn't resend it. Consumed and restored together with `listened`.
+        var recovered: TimeInterval = 0
         /// The latest report trigger, persisted independently of transport.
         var position: Position?
         /// Consecutive `/sync`s answered with 5xx, 408 or 429.
@@ -480,9 +490,8 @@ public final class ProgressSyncer {
             lastSyncAt = retryAt - Self.syncInterval
             return
         }
-        var resent: TimeInterval = 0
-        if session.unreconciled != nil {
-            resent = await reconcile(sessionID: sessionID)
+        if let snapshot = session.unreconciled, clock.uptime() >= snapshot.failedAt + reconcileDelay {
+            await reconcile(sessionID: sessionID)
             guard !isDetached, !isTransportQuiesced, let reread = current, reread.sessionID == sessionID,
                 reread.position != nil
             else { return }
@@ -518,7 +527,9 @@ public final class ProgressSyncer {
             return
         }
         // Ticks during the evidence save belong to the next report, not this captured delta.
+        let resent = session.recovered
         current?.listened -= listened
+        current?.recovered -= resent
         let outcome: SessionAudioOutcome
         // No suspension between the guard above and the call: a close sees it in flight.
         let done = PlaybackCloseResult<Void>()
@@ -554,6 +565,7 @@ public final class ProgressSyncer {
                 outcome = .notDelivered
                 if current?.sessionID == sessionID {
                     current?.listened += listened
+                    current?.recovered += resent
                 } else if listened > 0 {
                     // TODO(#158): carry it into the closed session's reconciliation.
                     logger.info(
@@ -564,7 +576,13 @@ public final class ProgressSyncer {
                 outcome = .ambiguous
                 if current?.sessionID == sessionID {
                     // Kept until the next report learns whether the server applied it.
-                    if listened > 0 { current?.unreconciled = (listened, resent) }
+                    if listened > 0 {
+                        // An earlier snapshot still waiting merges in: its outcome isn't known either.
+                        let earlier = current?.unreconciled
+                        current?.unreconciled = (
+                            listened + (earlier?.delta ?? 0), resent + (earlier?.resent ?? 0), clock.uptime()
+                        )
+                    }
                 } else if listened > 0 {
                     logger.info(
                         "Dropped \(listened, privacy: .public) s of listening time after an ambiguous sync failure (\(Self.caseName(error), privacy: .public)): the session closed"
@@ -584,12 +602,16 @@ public final class ProgressSyncer {
     /// this only absorbs rounding.
     static let reconcileTolerance: TimeInterval = 0.5
 
+    /// How long after giving up on an ambiguous `/sync` the session is looked up: the default
+    /// request timeout (30 s) plus a 30 s margin for a request the server is still processing.
+    var reconcileDelay: TimeInterval = 60
+
     /// Learns whether the server applied the ambiguous snapshot, from the session's
-    /// `timeListening`. Not applied, it joins this report's listening time once; returns how
-    /// much was resent. Otherwise the snapshot is acknowledged or dropped, never sent blind.
-    private func reconcile(sessionID: String) async -> TimeInterval {
+    /// `timeListening`. Not applied, it joins this report's listening time once, as recovered
+    /// time. Otherwise the snapshot is acknowledged or dropped, never sent blind.
+    private func reconcile(sessionID: String) async {
         guard let session = current, session.sessionID == sessionID, let snapshot = session.unreconciled
-        else { return 0 }
+        else { return }
         current?.unreconciled = nil
         let ownership = session.ownership
         let serverTotal: TimeInterval
@@ -597,28 +619,28 @@ public final class ProgressSyncer {
             serverTotal = try await service.openSession(id: sessionID).timeListening
         } catch {
             logDroppedSnapshot(snapshot.delta, reason: "the session lookup failed (\(Self.caseName(error)))")
-            return 0
+            return
         }
         guard !isDetached, !isTransportQuiesced, current?.ownership == ownership else {
             logDroppedSnapshot(snapshot.delta, reason: "the session ended while it was reconciled")
-            return 0
+            return
         }
         let acked = session.ackedTotal
         current?.ackedTotal = serverTotal
         if serverTotal >= acked + snapshot.delta - Self.reconcileTolerance {
-            return 0
+            return
         }
         guard abs(serverTotal - acked) <= Self.reconcileTolerance else {
             logDroppedSnapshot(
                 snapshot.delta, reason: "the server's total \(serverTotal) s matches neither outcome")
-            return 0
+            return
         }
         if snapshot.resent > 0 {
             logDroppedSnapshot(snapshot.resent, reason: "it was already resent once")
         }
         let resend = snapshot.delta - snapshot.resent
         current?.listened += resend
-        return resend
+        current?.recovered += resend
     }
 
     private func logDroppedSnapshot(_ delta: TimeInterval, reason: String) {

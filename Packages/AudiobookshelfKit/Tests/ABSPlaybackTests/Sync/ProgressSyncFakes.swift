@@ -30,6 +30,7 @@ final class StubProgressSyncService: ProgressSyncService {
         var sessionClient: SessionModelClient?
         var syncs: [(id: String, report: PlaybackSyncReport)] = []
         var patches: [Patch] = []
+        /// With a session client, a non-nil error fails the request before it reaches the model.
         var syncErrors: [APIError?] = []
         var patchErrors: [APIError?] = []
         var syncGates: [Gate] = []
@@ -131,6 +132,8 @@ final class StubProgressSyncService: ProgressSyncService {
         for continuation in reached { continuation.resume() }
         await gate?.wait()
         if let client = state.withLock({ $0.sessionClient }) {
+            // A queued error never reaches the model, like a failed connection.
+            if let error { throw error }
             if let abandoned = state.withLock({ $0.abandonedSyncs.isEmpty ? nil : $0.abandonedSyncs.removeFirst() }) {
                 // The server carries on with the request; the client stops waiting for it.
                 Task { try? await client.model.sync(client, id: id, report: report) }
