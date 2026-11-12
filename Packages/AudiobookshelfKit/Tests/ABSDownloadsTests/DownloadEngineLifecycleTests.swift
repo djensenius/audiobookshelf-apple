@@ -976,8 +976,8 @@ import Testing
         never.open()
     }
 
-    /// The replay's launch can fail the same part for good again (here the server now needs
-    /// custom headers) while the first failure is still under way: the quiesce keeps waiting
+    /// The replay's launch can fail the same part for good again (here the server now redirects
+    /// the download off its origin, which the preflight refuses) while the first failure is still under way: the quiesce keeps waiting
     /// until that one has finished too, not only the one that ended first.
     @Test func quiesceWaitsForTheOuterFailureWhenTheReplayFailsThePartAgain() async throws {
         let failure = StubGate()
@@ -991,6 +991,7 @@ import Testing
         let (outerSettles, outerSettling) = AsyncStream.makeStream(of: Void.self)
         let releaseOuter = StubGate()
         let settled = Mutex(0)
+        let redirected = Mutex(false)
         let engine = harness.makeEngine(
             beforeStoppingSiblings: seams.beforeStoppingSiblings,
             afterPermanentFailure: { _ in
@@ -1006,16 +1007,17 @@ import Testing
             beforeReplayStart: { _ in
                 replayReached.yield()
                 await withCheckedContinuation { continuation in releaseReplay.run { continuation.resume() } }
+            },
+            preflight: StubPreflight { request, _ throws(DownloadRedirectPreflightError) in
+                guard redirected.withLock({ $0 }) else { return request }
+                throw .offOrigin(URL(string: "https://elsewhere.example/1.mp3")!)
             })
         await engine.start(partIDs: [partID])
         await harness.waitForRequests(1)
         failure.open()
         #expect(await seams.nextHeld() == partID)
         await engine.start(partIDs: [partID])
-        harness.credentials.configurationOverride.withLock {
-            $0 = try? APIClientConfiguration(
-                baseURL: URL(string: harness.base)!, customHeaders: ["CF-Access-Client-Secret": "secret"])
-        }
+        redirected.withLock { $0 = true }
         seams.release()
         _ = await replays.first { _ in true }
 
