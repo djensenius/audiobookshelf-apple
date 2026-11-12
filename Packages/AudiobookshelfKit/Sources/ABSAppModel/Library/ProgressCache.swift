@@ -58,7 +58,8 @@ public final class ProgressCache {
 
     struct OptimisticUpdate: Sendable {
         fileprivate let key: String
-        fileprivate let progress: MediaProgress
+        /// The value applied: `nil` for ``ProgressCache/applyOptimisticRemoval(libraryItemID:episodeID:token:)``.
+        fileprivate let progress: MediaProgress?
         fileprivate let revision: Int
         fileprivate let previousRevision: Int
         fileprivate let previousRevisionBeforeApply: Int
@@ -143,8 +144,11 @@ public final class ProgressCache {
         }
         for (key, entry) in entries {
             guard let existing = entry.value else {
-                // A tombstone: removed while the list was being fetched.
-                if entry.revision > boundary { seeded[key] = nil }
+                // A tombstone: removed while the list was being fetched, or an optimistic removal
+                // the server may not have applied when this list was requested.
+                if entry.revision > boundary || (entry.isOptimistic && !Self.isCommitted(entry, before: token)) {
+                    seeded[key] = nil
+                }
                 continue
             }
             if entry.isOptimistic {
@@ -205,20 +209,48 @@ public final class ProgressCache {
     func applyOptimistic(_ progress: MediaProgress, token: SessionToken) -> OptimisticUpdate? {
         guard isCurrent(token) else { return nil }
         let entry = entry(for: progress.progressKey)
-        let previousRevision = entry.revision
-        let previousRevisionBeforeApply = entry.revisionBeforeApply
-        let previousIsOptimistic = entry.isOptimistic
-        let previousCommitSerial = entry.optimisticCommitSerial
-        revision += 1
-        entry.revisionBeforeApply = previousRevision
-        entry.revision = revision
+        let update = stamp(entry, key: progress.progressKey, progress: progress)
         entry.value = progress
+        return update
+    }
+
+    /// Gives `entry` a new revision for an optimistic update to `progress`, and returns the
+    /// update with what a rollback restores.
+    private func stamp(_ entry: Entry, key: String, progress: MediaProgress?) -> OptimisticUpdate {
+        let update = OptimisticUpdate(
+            key: key, progress: progress, revision: revision + 1,
+            previousRevision: entry.revision, previousRevisionBeforeApply: entry.revisionBeforeApply,
+            previousIsOptimistic: entry.isOptimistic, previousCommitSerial: entry.optimisticCommitSerial)
+        revision += 1
+        entry.revisionBeforeApply = entry.revision
+        entry.revision = revision
         entry.isOptimistic = true
         entry.optimisticCommitSerial = nil
-        return OptimisticUpdate(
-            key: progress.progressKey, progress: progress, revision: revision,
-            previousRevision: previousRevision, previousRevisionBeforeApply: previousRevisionBeforeApply,
-            previousIsOptimistic: previousIsOptimistic, previousCommitSerial: previousCommitSerial)
+        return update
+    }
+
+    /// Whether the optimistic `entry` was committed before the seed of `token` was requested.
+    private static func isCommitted(_ entry: Entry, before token: SeedToken) -> Bool {
+        guard let commitSerial = entry.optimisticCommitSerial else { return false }
+        return commitSerial <= token.optimisticCommitBoundary
+    }
+
+    /// Removes the progress of `libraryItemID` and `episodeID` until the server confirms or the
+    /// caller rolls back, like ``applyOptimistic(_:token:)`` with a `nil` value.
+    ///
+    /// The entry is stamped with a new ``revision``, so it is a tombstone for seeds requested
+    /// before it, and is marked optimistic, so seeds requested before its commit don't restore
+    /// the progress the server still has. ``rollbackOptimistic(_:to:token:)`` puts the progress
+    /// back only while the entry still has that revision and no value.
+    func applyOptimisticRemoval(
+        libraryItemID: String, episodeID: String?, token: SessionToken
+    ) -> OptimisticUpdate? {
+        guard isCurrent(token) else { return nil }
+        let key = MediaProgress.key(libraryItemID: libraryItemID, episodeID: episodeID)
+        let entry = entry(for: key)
+        let update = stamp(entry, key: key, progress: nil)
+        if entry.value != nil { entry.value = nil }
+        return update
     }
 
     @discardableResult

@@ -29,6 +29,8 @@ private final class Concurrency: Sendable {
 
 private struct GatedWriter: ProgressWriting {
     let gate = GatedCalls<Write, Void>()
+    /// The progress IDs of deletes, held until the test replies.
+    let deletes = GatedCalls<String, Void>()
     /// The most requests in flight at once, for the per-key serialization.
     let concurrency = Concurrency()
     /// Each write as it arrives, and the test's own markers, in order.
@@ -40,16 +42,29 @@ private struct GatedWriter: ProgressWriting {
         defer { concurrency.leave() }
         try await gate.call(Write(itemID: itemID, episodeID: episodeID, update: update))
     }
+
+    func deleteProgress(id: String) async throws {
+        log.value.append("delete \(id)")
+        concurrency.enter()
+        defer { concurrency.leave() }
+        try await deletes.call(id)
+    }
 }
 
 private struct FirstGatedWriter: ProgressWriting {
     let gate = GatedCalls<Write, Void>()
     let writes = Locked<[Write]>([])
+    let deletes = Locked<[String]>([])
 
     func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
         let write = Write(itemID: itemID, episodeID: episodeID, update: update)
         writes.value.append(write)
         if writes.value.count == 1 { try await gate.call(write) }
+    }
+
+    /// Records the delete and succeeds at once.
+    func deleteProgress(id: String) async throws {
+        deletes.value.append(id)
     }
 }
 
@@ -337,5 +352,127 @@ private func makeActions(_ cache: ProgressCache, _ writer: any ProgressWriting) 
         try await actions.markFinished(target)
         try await actions.markNotFinished(target)
         try await actions.hideFromContinueListening(target)
+        try await actions.discardProgress(target)
+    }
+
+    // MARK: Discard
+
+    @Test func discardRemovesOptimisticallyAndDeletesByProgressID() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress())
+        let writer = GatedWriter()
+        let actions = makeActions(cache, writer)
+        var deletes = writer.deletes.calls.makeAsyncIterator()
+
+        let action = Task { try await actions.discardProgress(ItemActionTarget(libraryItemID: "item")) }
+        let delete = try #require(await deletes.next())
+        #expect(delete.request == "mp-item")
+        #expect(cache.progress(libraryItemID: "item") == nil)
+
+        delete.reply.resume(returning: ())
+        try await action.value
+        #expect(cache.progress(libraryItemID: "item") == nil)
+        #expect(writer.log.value == ["delete mp-item"])
+    }
+
+    @Test func discardRollsBackOnFailureAndRethrows() async throws {
+        let cache = ProgressCache()
+        let previous = progress()
+        cache.apply(previous)
+        let writer = GatedWriter()
+        let actions = makeActions(cache, writer)
+        var deletes = writer.deletes.calls.makeAsyncIterator()
+
+        let action = Task { try await actions.discardProgress(ItemActionTarget(libraryItemID: "item")) }
+        let delete = try #require(await deletes.next())
+        #expect(cache.progress(libraryItemID: "item") == nil)
+        delete.reply.resume(throwing: TestError.offline)
+
+        await #expect(throws: TestError.self) { try await action.value }
+        #expect(cache.progress(libraryItemID: "item") == previous)
+    }
+
+    @Test func discardWithoutProgressSendsNothing() async throws {
+        let cache = ProgressCache()
+        let writer = FirstGatedWriter()
+        let actions = makeActions(cache, writer)
+
+        try await actions.discardProgress(ItemActionTarget(libraryItemID: "item", duration: 100))
+        #expect(writer.deletes.value.isEmpty && writer.writes.value.isEmpty)
+        #expect(cache.progress(libraryItemID: "item") == nil)
+    }
+
+    @Test func discardRollbackKeepsNewerUpdate() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress())
+        let writer = GatedWriter()
+        let actions = makeActions(cache, writer)
+        var deletes = writer.deletes.calls.makeAsyncIterator()
+
+        let action = Task { try await actions.discardProgress(ItemActionTarget(libraryItemID: "item")) }
+        let delete = try #require(await deletes.next())
+        // Playback elsewhere reported progress while the DELETE was in flight.
+        let newer = progress(current: 70, lastUpdate: 5_000)
+        #expect(cache.apply(newer))
+
+        delete.reply.resume(throwing: TestError.offline)
+        await #expect(throws: TestError.self) { try await action.value }
+        #expect(cache.progress(libraryItemID: "item") == newer)
+    }
+
+    @Test func discardWaitsForPendingMarkFinishedOnSameKey() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress())
+        let writer = GatedWriter()
+        let actions = makeActions(cache, writer)
+        var writes = writer.gate.calls.makeAsyncIterator()
+        var deletes = writer.deletes.calls.makeAsyncIterator()
+        let target = ItemActionTarget(libraryItemID: "item")
+
+        let finish = Task { try await actions.markFinished(target) }
+        let discard = Task { try await actions.discardProgress(target) }
+        let finishWrite = try #require(await writes.next())
+        #expect(cache.progress(libraryItemID: "item")?.isFinished == true)
+
+        writer.log.value.append("release")
+        finishWrite.reply.resume(returning: ())
+        try await finish.value
+        let delete = try #require(await deletes.next())
+        #expect(delete.request == "mp-item")
+        #expect(cache.progress(libraryItemID: "item") == nil)
+        delete.reply.resume(returning: ())
+        try await discard.value
+        #expect(
+            writer.log.value.map { $0.hasPrefix("write") ? "write" : $0 } == ["write", "release", "delete mp-item"])
+        #expect(writer.concurrency.peak == 1)
+    }
+
+    @Test func discardAfterAccountSwitchCancelsWithoutRequest() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress())
+        let writer = FirstGatedWriter()
+        let actions = makeActions(cache, writer)
+        var writes = writer.gate.calls.makeAsyncIterator()
+        let target = ItemActionTarget(libraryItemID: "item")
+
+        let first = Task { try await actions.markFinished(target) }
+        let firstWrite = try #require(await writes.next())
+        let discard = Task { try await actions.discardProgress(target) }
+        await Task.yield()
+
+        cache.clear()
+        let newAccountProgress = progress(current: 40, lastUpdate: 1_500)
+        cache.apply(newAccountProgress)
+        firstWrite.reply.resume(returning: ())
+
+        _ = await first.result
+        let discardResult = await discard.result
+        #expect(throws: CancellationError.self) { try discardResult.get() }
+        #expect(writer.deletes.value.isEmpty)
+        #expect(cache.progress(libraryItemID: "item") == newAccountProgress)
+
+        // Actions made before the switch never run against the next account, even unqueued.
+        await #expect(throws: CancellationError.self) { try await actions.discardProgress(target) }
+        #expect(writer.deletes.value.isEmpty)
     }
 }

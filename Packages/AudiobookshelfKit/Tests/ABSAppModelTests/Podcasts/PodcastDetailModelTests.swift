@@ -16,6 +16,7 @@ private struct FakeItemDetailService: ItemDetailService {
 /// A ``ProgressWriting`` whose writes succeed at once.
 private struct AcceptingWriter: ProgressWriting {
     func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {}
+    func deleteProgress(id: String) async throws {}
 }
 
 private let episodes = [

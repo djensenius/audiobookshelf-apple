@@ -12,7 +12,8 @@ import SwiftUI
 /// server or user switch; the key also covers a store that clears underneath it, and the
 /// store's services follow a reconnect of the same account. Without a store or a connected
 /// account (signed out, or before the shell provides one) the screen says the item is
-/// unavailable.
+/// unavailable. The server's address, for the More menu's Share, is read again each time the
+/// screen appears, so it follows a reconnect to a new address.
 struct ItemDetailView: View {
     let itemID: String
     @Environment(\.libraryStore) private var store
@@ -28,7 +29,7 @@ struct ItemDetailView: View {
     var body: some View {
         Group {
             if let host, host.key == key {
-                ItemDetailScreen(model: host.model)
+                ItemDetailScreen(model: host.model, serverURL: host.serverURL)
             } else if key == nil || unavailableKey == key {
                 ErrorStateView(title: L10n.string("MessageItemDetailUnavailable"), systemImage: "book")
                     .navigationTitle(Text(verbatim: L10n.string("HeaderDetails")))
@@ -49,7 +50,11 @@ struct ItemDetailView: View {
                 }
                 unavailableKey = nil
                 host = ItemDetailHost(
-                    key: key, model: ItemDetailModel(itemID: itemID, service: services, cache: store.progress))
+                    key: key, services: services,
+                    model: ItemDetailModel(itemID: itemID, service: services, cache: store.progress))
+            }
+            if let services = host?.services, let url = try? await services.serverURL(), host?.key == key {
+                host?.serverURL = url
             }
             // Also retries a first load cancelled when the view disappeared.
             await host?.model.loadIfNeeded()
@@ -66,13 +71,18 @@ private struct ItemDetailHost {
     }
 
     let key: Key
+    let services: LibraryStoreServices
     let model: ItemDetailModel
+    /// The server's address, for Share; `nil` until read, or when the client can't tell.
+    var serverURL: URL?
 }
 
 /// The states of one item's screen: loading, failed, not found, a podcast, or the book. Only the
-/// book's states get the item's navigation title here.
+/// book's states get the item's navigation title and the More menu here.
 struct ItemDetailScreen: View {
     let model: ItemDetailModel
+    /// The server's address, for the More menu's Share; without it there is no Share.
+    var serverURL: URL?
 
     var body: some View {
         if model.hasLoaded, model.mediaType == .podcast {
@@ -84,6 +94,7 @@ struct ItemDetailScreen: View {
                 #if os(iOS)
                     .navigationBarTitleDisplayMode(.inline)
                 #endif
+                .itemDetailMoreMenu(model: model, serverURL: serverURL)
         }
     }
 
@@ -152,6 +163,21 @@ struct ItemDetailScreen: View {
 
 #Preview("Not found") {
     ItemDetailPreview(item: ItemDetailPreviewData.book, behavior: .notFound)
+}
+
+#Preview("More menu with Share") {
+    @Previewable @State var model = ItemDetailModel(
+        itemID: ItemDetailPreviewData.book.id,
+        service: PreviewItemDetailService(item: ItemDetailPreviewData.book, behavior: .succeed),
+        cache: {
+            let cache = ProgressCache()
+            cache.apply(ItemDetailPreviewData.inProgress)
+            return cache
+        }())
+    NavigationStack {
+        ItemDetailScreen(model: model, serverURL: URL(string: "https://abs.example.com/audiobookshelf"))
+            .task { await model.loadIfNeeded() }
+    }
 }
 
 #Preview("No library store") {
