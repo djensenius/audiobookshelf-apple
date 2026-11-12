@@ -77,6 +77,8 @@ public final class PlaybackQueue: PlaybackQueueReading {
     @ObservationIgnored private let store: any PlaybackQueueStoring
     /// Called after every change; the attached ``PlaybackQueueAdvancer`` recomputes the next item.
     @ObservationIgnored var onItemsChange: (@MainActor () -> Void)?
+    /// Set when its scope retires: the queue stays as saved, for the connection's next scope.
+    @ObservationIgnored private var isRetired = false
 
     /// Loads the connection's saved queue from `store`.
     public init(serverConnectionID: UUID, store: any PlaybackQueueStoring) {
@@ -134,8 +136,14 @@ public final class PlaybackQueue: PlaybackQueueReading {
         update { $0.removeAll() }
     }
 
-    /// Applies `change` and saves the result when it differs.
+    /// Makes every later change a no-op, even through a reference kept from before.
+    func retire() {
+        isRetired = true
+    }
+
+    /// Applies `change` and saves the result when it differs, unless the queue has retired.
     private func update(_ change: (inout [QueueItem]) -> Void) {
+        guard !isRetired else { return }
         var updated = items
         change(&updated)
         guard updated != items else { return }

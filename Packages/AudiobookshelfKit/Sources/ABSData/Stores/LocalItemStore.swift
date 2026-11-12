@@ -3,6 +3,10 @@ import Foundation
 import SwiftData
 
 /// The only writer of `LocalLibraryItem` and `LocalFile` (ADR 0003).
+///
+/// Because every write goes through this actor, ``updates(serverConnectionID:)`` sees every change:
+/// after each write (or failed, rolled-back write) the store sends a fresh snapshot to every open
+/// stream. Share one instance between its writers (the download engine and manager) and readers.
 @ModelActor public actor LocalItemStore: StoreActor {
     public enum StoreError: Error, Equatable {
         /// The download's server connection doesn't exist, so the item's server address and
@@ -25,6 +29,12 @@ import SwiftData
     }
 
     var pendingCommitFailure: (any Error)?
+    private var observers: [UUID: Observer] = [:]
+
+    private struct Observer {
+        let serverConnectionID: UUID
+        let continuation: AsyncStream<[LocalLibraryItemDTO]>.Continuation
+    }
 
     /// Turns a completed download into a local item, idempotently, in one transaction.
     ///
@@ -54,6 +64,7 @@ import SwiftData
         now: Date = .now
     ) throws -> LocalLibraryItemDTO {
         guard download.isComplete else { throw StoreError.incompleteDownload }
+        defer { notifyObservers() }
         let key = download.key
         let isEpisode = key.episodeId != nil
         let title = isEpisode ? download.media.metadata.title : download.title
@@ -131,6 +142,25 @@ import SwiftData
         try fetchItems(FetchDescriptor(predicate: #Predicate { $0.serverConnectionID == serverConnectionID }))
     }
 
+    /// The connection's items, most recently added first: the current ones right away, then a new
+    /// snapshot after every write to the store. Only the newest unread snapshot is buffered. The
+    /// stream ends when the caller stops iterating it.
+    public func updates(serverConnectionID: UUID) throws -> AsyncStream<[LocalLibraryItemDTO]> {
+        let initial = try items(serverConnectionID: serverConnectionID)
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: [LocalLibraryItemDTO].self, bufferingPolicy: .bufferingNewest(1))
+        let id = UUID()
+        observers[id] = Observer(serverConnectionID: serverConnectionID, continuation: continuation)
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeObserver(id) }
+        }
+        continuation.yield(initial)
+        return stream
+    }
+
+    /// The number of open ``updates(serverConnectionID:)`` streams (tests only).
+    var observerCount: Int { observers.count }
+
     /// Records a refreshed cover (ADR 0005). Returns `false` when the item doesn't exist.
     @discardableResult
     public func updateCover(
@@ -139,7 +169,8 @@ import SwiftData
         updatedAt: Date?,
         now: Date = .now
     ) throws -> Bool {
-        try commit {
+        defer { notifyObservers() }
+        return try commit {
             guard let item = try fetchItem(id: itemID) else { return false }
             item.coverRelativePath = relativePath
             item.coverUpdatedAt = updatedAt
@@ -155,7 +186,8 @@ import SwiftData
     public func setCoverIfMissing(
         itemID: UUID, relativePath: String, updatedAt: Date?, now: Date = .now
     ) throws -> Bool {
-        try commit {
+        defer { notifyObservers() }
+        return try commit {
             guard let item = try fetchItem(id: itemID) else { return false }
             return Self.setCoverIfMissing(item, relativePath: relativePath, updatedAt: updatedAt, now: now)
         }
@@ -182,7 +214,8 @@ import SwiftData
     public func deleteEpisode(
         itemID: UUID, episodeId: String, deletingEmptyItem: Bool = false, now: Date = .now
     ) throws -> EpisodeDeletion? {
-        try commit {
+        defer { notifyObservers() }
+        return try commit {
             guard let item = try fetchItem(id: itemID) else { return nil }
             let removed = item.files.filter { $0.episodeId == episodeId }
             let deleted = removed.map(LocalFileDTO.init)
@@ -206,7 +239,8 @@ import SwiftData
     /// doesn't exist.
     @discardableResult
     public func deleteItem(id: UUID) throws -> LocalLibraryItemDTO? {
-        try commit {
+        defer { notifyObservers() }
+        return try commit {
             guard let item = try fetchItem(id: id) else { return nil }
             let deleted = LocalLibraryItemDTO(item)
             modelContext.delete(item)
@@ -215,6 +249,27 @@ import SwiftData
     }
 
     // MARK: - Private
+
+    private func notifyObservers() {
+        guard !observers.isEmpty else { return }
+        var snapshots: [UUID: [LocalLibraryItemDTO]] = [:]
+        for observer in observers.values {
+            let connectionID = observer.serverConnectionID
+            if snapshots[connectionID] == nil {
+                do {
+                    snapshots[connectionID] = try items(serverConnectionID: connectionID)
+                } catch {
+                    Log.data.error("Couldn't read downloaded items: \(error.localizedDescription, privacy: .public)")
+                    continue
+                }
+            }
+            if let snapshot = snapshots[connectionID] { observer.continuation.yield(snapshot) }
+        }
+    }
+
+    private func removeObserver(_ id: UUID) {
+        observers[id] = nil
+    }
 
     /// The file for an audio or ebook part. An episode download's files always carry its
     /// episode id, even when the part doesn't. Its size is the completed part's `bytesWritten`,
