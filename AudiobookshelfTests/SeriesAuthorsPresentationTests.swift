@@ -339,7 +339,7 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
             .root(.home), .root(.series), .root(.authors), .pushed(.series(id: "ser_1")),
             .pushed(.author(id: "aut_1")),
         ]
-        let frontmost = { screens.filter { $0.isFrontmost(in: router, isVisible: true) } }
+        let frontmost = { screens.filter { $0.isFrontmost(in: router, owner: nil, isVisible: true) } }
         #expect(frontmost() == [.root(.home)])
         // Home opened a series, then its author.
         router[path: .home] = [.series(id: "ser_1")]
@@ -352,12 +352,12 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         router.selectedTab = .library
         router.librarySection = .authors
         #expect(frontmost() == [.root(.authors)])
-        #expect(RefreshCommandPlacement.root(.home).isFrontmost(in: nil, isVisible: true))
-        #expect(!RefreshCommandPlacement.root(.home).isFrontmost(in: nil, isVisible: false))
+        #expect(RefreshCommandPlacement.root(.home).isFrontmost(in: nil, owner: nil, isVisible: true))
+        #expect(!RefreshCommandPlacement.root(.home).isFrontmost(in: nil, owner: nil, isVisible: false))
 
         // Copies of a placement: covered stack screens and hidden tabs have disappeared.
         let commands = { (screens: [(RefreshCommandPlacement, Bool)]) in
-            screens.filter { $0.0.isFrontmost(in: router, isVisible: $0.1) }.count
+            screens.filter { $0.0.isFrontmost(in: router, owner: nil, isVisible: $0.1) }.count
         }
         let seriesA = RefreshCommandPlacement.pushed(.series(id: "ser_a"))
         router.librarySection = .series
@@ -368,6 +368,105 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         router.selectedTab = .home
         router[path: .home] = [.series(id: "ser_a")]
         #expect(commands([(seriesA, true), (seriesA, false)]) == 1)  // Home, hidden Series tab
+    }
+
+    /// View ▸ Refresh runs only the frontmost screen's action, never a hidden tab's that is still registered (macOS
+    /// keeps hidden tabs appeared), and is disabled while that screen loads (#393).
+    @Test func refreshCommandRunsOnlyTheFrontmostScreen() {
+        let router = Router()
+        let registry = RefreshCommandRegistry()
+        var runs: [String] = []
+        func register(
+            _ name: String, _ placement: RefreshCommandPlacement, on owner: AppTab, loading: Bool = false
+        ) -> UUID {
+            let id = UUID()
+            registry.register(
+                id, .init(placement: placement, owner: owner, isDisabled: loading, perform: { runs.append(name) }))
+            return id
+        }
+        func refresh() -> Bool? {
+            let action = registry.frontmost(in: router)
+            action?.perform()
+            return action?.isDisabled
+        }
+
+        #expect(refresh() == nil)
+        let home = register("home", .root(.home), on: .home)
+        _ = register("series tab", .root(.series), on: .series)
+        _ = register("authors tab", .root(.authors), on: .authors, loading: true)
+        #expect(refresh() == false)
+        #expect(runs == ["home"])
+
+        // Home pushes a series: its screen is frontmost; Home is covered (and has disappeared).
+        router[path: .home] = [.series(id: "ser_1")]
+        registry.unregister(home)
+        let series = register("series", .pushed(.series(id: "ser_1")), on: .home, loading: true)
+        #expect(refresh() == true)
+        #expect(runs == ["home", "series"])
+        // Loaded: enabled again.
+        registry.register(
+            series, .init(placement: .pushed(.series(id: "ser_1")), owner: .home, isDisabled: false, perform: {}))
+        #expect(refresh() == false)
+
+        // Another tab: its root, not the hidden Home stack's series.
+        runs = []
+        router.selectedTab = .series
+        #expect(refresh() == false)
+        router.selectedTab = .authors
+        #expect(refresh() == true)
+        #expect(runs == ["series tab", "authors tab"])
+
+        // The pushed screen gone: nothing in Home.
+        router.selectedTab = .home
+        registry.unregister(series)
+        #expect(refresh() == nil)
+        #expect(runs == ["series tab", "authors tab"])
+    }
+
+    /// The same series pushed on Home and on Series, and the same section as Series' root and as the Library tab's
+    /// (compact width keeps both stacks): the selected tab's copy runs, whichever registered last (#393).
+    @Test func refreshCommandRunsTheSelectedTabsCopyOfASharedScreen() {
+        let route = Route.series(id: "ser_1")
+        for order in [[AppTab.home, .series], [.series, .home]] {
+            let router = Router()
+            router[path: .home] = [route]
+            router[path: .series] = [route]
+            let registry = RefreshCommandRegistry()
+            var runs: [AppTab] = []
+            for tab in order {
+                registry.register(
+                    UUID(),
+                    .init(
+                        placement: .pushed(route), owner: tab, isDisabled: tab == .series, perform: { runs.append(tab) }
+                    ))
+            }
+            for tab in [AppTab.home, .series] {
+                router.selectedTab = tab
+                let action = registry.frontmost(in: router)
+                #expect(action?.isDisabled == (tab == .series), "\(order) \(tab)")
+                action?.perform()
+            }
+            #expect(runs == [.home, .series], "\(order)")
+            #expect(
+                RefreshCommandPlacement.pushed(route).isFrontmost(in: router, owner: .home, isVisible: true) == false)
+        }
+
+        for order in [[AppTab.library, .series], [.series, .library]] {
+            let router = Router()
+            router.librarySection = .series
+            let registry = RefreshCommandRegistry()
+            var runs: [AppTab] = []
+            for tab in order {
+                registry.register(
+                    UUID(),
+                    .init(placement: .root(.series), owner: tab, isDisabled: false, perform: { runs.append(tab) }))
+            }
+            for tab in [AppTab.library, .series] {
+                router.selectedTab = tab
+                registry.frontmost(in: router)?.perform()
+            }
+            #expect(runs == [.library, .series], "\(order)")
+        }
     }
 
     @Test func failedRefreshShowsAboveTheItemsAndAFailedPageAfterThem() async throws {

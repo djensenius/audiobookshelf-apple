@@ -234,10 +234,13 @@ public final class NowPlayingController {
     /// app, after the playing state was passed to ``update(_:)``. Waits for the application-primary
     /// request; does nothing unless it succeeded, on macOS, or without a session. Failures are
     /// logged, never thrown, so they never block playback.
-    public func requestSystemPrimary() async {
+    /// - Parameter isStillWanted: Checked once the application-primary request finishes, right
+    ///   before asking: `false` (the user paused meanwhile) asks nothing.
+    public func requestSystemPrimary(while isStillWanted: @MainActor () -> Bool = { true }) async {
         guard let activationTask else { return }
         await activationTask.value
-        guard let session, self.activationTask == activationTask, activation == .succeeded else { return }
+        guard let session, self.activationTask == activationTask, activation == .succeeded, isStillWanted()
+        else { return }
         do {
             try await session.becomeSystemPrimary()
         } catch {
