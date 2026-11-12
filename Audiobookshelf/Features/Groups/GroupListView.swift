@@ -25,7 +25,11 @@ struct GroupListView: View {
         .navigationTitle(Text(verbatim: L10n.string(GroupPresentation.tab(kind).titleKey)))
         .task(id: key) {
             host = .updated(host, for: key, store: store) { key, services, _ in
-                GroupPresentation.makeList(kind, key: key, services: services)
+                let model = GroupPresentation.makeList(kind, key: key, services: services)
+                store?.observeLibraryChanges(connectionKey: key.connection, owner: model) { [weak model, kind] in
+                    model?.apply($0, kind: kind)
+                }
+                return model
             }
             if let model = host?.model, model.items.isEmpty, !model.reachedEnd {
                 await model.loadNextPage()?.value
@@ -42,8 +46,6 @@ struct GroupListContent: View {
     @Environment(\.serverID) private var serverID
     /// The last user refresh failed and nothing loaded since.
     @State private var refreshFailed = false
-    /// Successful user refreshes; cards report appearing again after each (as in ``BrowseItemGrid``).
-    @State private var refreshes = 0
 
     var body: some View {
         let messages = GroupPresentation.listMessages(kind)
@@ -58,7 +60,9 @@ struct GroupListContent: View {
                         GroupCard(group: group, serverID: serverID) {
                             BrowsePresentation.open(GroupPresentation.route(kind, id: group.id), in: router)
                         }
-                        .task(id: refreshes) { model.itemAppeared(id: group.id) }
+                        // Every successful refresh, the user's or a live update's, restarts these, so
+                        // cards whose IDs survived it report appearing again (as in ``BrowseItemGrid``).
+                        .task(id: model.refreshRevision) { model.itemAppeared(id: group.id) }
                     }
                     BrowsePagingFooter(
                         isLoading: model.isLoading, failed: placement == .footer, messageKey: messages.failed,
@@ -76,7 +80,6 @@ struct GroupListContent: View {
 
     private func refresh() async {
         refreshFailed = await BrowsePresentation.refresh(model)
-        if !refreshFailed { refreshes += 1 }
     }
 
     private func retry() {
