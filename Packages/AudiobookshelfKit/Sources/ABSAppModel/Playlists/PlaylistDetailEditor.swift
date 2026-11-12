@@ -59,14 +59,17 @@ public final class PlaylistDetailEditor {
     }
 
     /// Moves the members at `source` to before the member at `destination`, as SwiftUI's
-    /// `onMove` reports it, and saves the new order. Out-of-range offsets and moves that keep
-    /// the order are ignored.
-    public func move(fromOffsets source: IndexSet, toOffset destination: Int) async {
+    /// `onMove` reports it against `displayed`, the member IDs (``GroupMember/id``) in the order
+    /// the list showed, and saves the new order. Out-of-range offsets and moves that keep the
+    /// order are ignored, and so is a move once the playlist's order is no longer `displayed`
+    /// (a pushed update or a load answered first): its offsets could name other members.
+    public func move(fromOffsets source: IndexSet, toOffset destination: Int, in displayed: [String]) async {
         guard canEdit, let before = model.detail, !source.isEmpty,
-            source.allSatisfy(before.members.indices.contains), (0...before.members.count).contains(destination)
+            source.allSatisfy(displayed.indices.contains), (0...displayed.count).contains(destination)
         else { return }
+        let order = Self.moved(displayed, fromOffsets: source, toOffset: destination)
+        guard order != displayed, before.members.map(\.id) == displayed else { return }
         let members = Self.moved(before.members, fromOffsets: source, toOffset: destination)
-        guard members.map(\.id) != before.members.map(\.id) else { return }
         await write(.reorder, before: before, showing: members) { service in
             try await service.reorderPlaylist(id: before.id, items: members.map(\.reference))
         }
@@ -78,13 +81,14 @@ public final class PlaylistDetailEditor {
         else { return }
         let target = index + offset
         guard offset != 0, members.indices.contains(target) else { return }
-        await move(fromOffsets: [index], toOffset: offset > 0 ? target + 1 : target)
+        await move(fromOffsets: [index], toOffset: offset > 0 ? target + 1 : target, in: members.map(\.id))
     }
 
-    /// Removes the members at `offsets`, as SwiftUI's `onDelete` reports them.
-    public func remove(atOffsets offsets: IndexSet) async {
-        guard let members = model.detail?.members else { return }
-        await remove(memberIDs: Set(offsets.filter(members.indices.contains).map { members[$0].id }))
+    /// Removes the members at `offsets` in `displayed`, the member IDs in the order the list
+    /// showed, as SwiftUI's `onDelete` reports them. It removes them by ID, so an update that
+    /// reordered the playlist first can't make it remove another member.
+    public func remove(atOffsets offsets: IndexSet, in displayed: [String]) async {
+        await remove(memberIDs: Set(offsets.filter(displayed.indices.contains).map { displayed[$0] }))
     }
 
     /// Removes the members with these IDs (``GroupMember/id``); unknown IDs are ignored.

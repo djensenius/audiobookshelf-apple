@@ -90,10 +90,13 @@ struct PlaylistEditSheet: View {
                         }
                 }
                 .onMove { source, destination in
-                    Task { await editor.move(fromOffsets: source, toOffset: destination) }
+                    // The order this list showed, read now: a pushed update may land before the task runs.
+                    let displayed = members.map(\.id)
+                    Task { await editor.move(fromOffsets: source, toOffset: destination, in: displayed) }
                 }
                 .onDelete { offsets in
-                    Task { await editor.remove(atOffsets: offsets) }
+                    let displayed = members.map(\.id)
+                    Task { await editor.remove(atOffsets: offsets, in: displayed) }
                 }
                 .moveDisabled(!editor.canEdit)
                 .deleteDisabled(!editor.canEdit)

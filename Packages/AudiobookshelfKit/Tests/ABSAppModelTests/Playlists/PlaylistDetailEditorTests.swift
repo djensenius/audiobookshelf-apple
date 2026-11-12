@@ -97,6 +97,18 @@ private func memberIDs(_ editor: PlaylistDetailEditor) -> [String]? {
     editor.model.detail?.members.map(\.id)
 }
 
+extension PlaylistDetailEditor {
+    /// A move from a list that shows the playlist as it is now.
+    fileprivate func move(fromOffsets source: IndexSet, toOffset destination: Int) async {
+        await move(fromOffsets: source, toOffset: destination, in: model.detail?.members.map(\.id) ?? [])
+    }
+
+    /// A removal from a list that shows the playlist as it is now.
+    fileprivate func remove(atOffsets offsets: IndexSet) async {
+        await remove(atOffsets: offsets, in: model.detail?.members.map(\.id) ?? [])
+    }
+}
+
 @MainActor
 @Suite(.timeLimit(.minutes(1))) struct PlaylistDetailEditorTests {
     // MARK: Reorder
@@ -255,6 +267,19 @@ private func memberIDs(_ editor: PlaylistDetailEditor) -> [String]? {
         #expect(memberIDs(editor) == ["b1", "pod-e1", "b2"])
     }
 
+    /// A drag that ends after an update reordered the playlist is dropped: its offsets name the
+    /// members as the list showed them, which are now in other places.
+    @Test func aMoveAfterAnUpdateReorderedThePlaylistSendsNothing() async throws {
+        let editing = FakeEditing()
+        let editor = await loadedEditor(editing)
+        let displayed = try #require(memberIDs(editor))
+        editor.model.apply(.playlist(.updated(playlist([b2, b1, e1]), libraryID: "lib"), userID: "u1"))
+        await editor.move(fromOffsets: [2], toOffset: 0, in: displayed)
+        #expect(editing.log.all.isEmpty)
+        #expect(memberIDs(editor) == ["b2", "b1", "pod-e1"])
+        #expect(editor.failure == nil)
+    }
+
     @Test func voiceOverMovesOnePlaceAndStopsAtTheEnds() async {
         var editing = FakeEditing()
         editing.answer = { call in
@@ -337,6 +362,23 @@ private func memberIDs(_ editor: PlaylistDetailEditor) -> [String]? {
         await editor.remove(memberIDs: ["unknown"])
         await editor.remove(atOffsets: [])
         #expect(editing.log.all.isEmpty)
+    }
+
+    /// A swipe that ends after an update changed the playlist removes the member the list showed
+    /// in that row, not the one there now, and nothing once that member is gone.
+    @Test func aRemovalAfterAnUpdateRemovesTheMemberTheListShowed() async throws {
+        var editing = FakeEditing()
+        editing.answer = { _ in playlist([b2, e1]) }
+        let editor = await loadedEditor(editing)
+        let displayed = try #require(memberIDs(editor))
+        editor.model.apply(.playlist(.updated(playlist([b2, e1, b1]), libraryID: "lib"), userID: "u1"))
+        await editor.remove(atOffsets: [0], in: displayed)
+        #expect(editing.log.all == [.removeOne("p1", "b1")])
+        #expect(memberIDs(editor) == ["b2", "pod-e1"])
+
+        await editor.remove(atOffsets: [0], in: displayed)
+        #expect(editing.log.all == [.removeOne("p1", "b1")])
+        #expect(memberIDs(editor) == ["b2", "pod-e1"])
     }
 
     /// The server deletes a playlist whose last member is removed, and answers with no items.
