@@ -96,3 +96,184 @@ struct LibraryPaging: Hashable {
         model.list.setPaging(pageSize: pageSize, prefetchThreshold: prefetchThreshold)
     }
 }
+
+// MARK: - Sort, filter and view controls
+
+/// A sort in the Library screen's sort menu.
+struct LibrarySortOption: Hashable, Identifiable {
+    let key: LibrarySortKey
+    let titleKey: String
+    /// The library is sorted by this key.
+    let isSelected: Bool
+    /// The direction arrow the selected key shows; `nil` for the others.
+    let arrowSymbol: String?
+
+    var id: LibrarySortKey { key }
+}
+
+/// A value of a filter group in the filter sheet: `id` is the filter value, `name` is shown.
+struct LibraryFilterValue: Hashable, Identifiable {
+    let id: String
+    let name: String
+}
+
+extension LibraryPresentation {
+    /// The sort menu of a library of `mediaType` (legacy `OrderModal.vue`), the selected key with its direction.
+    static func sortOptions(for mediaType: MediaType, preferences: LibraryViewPreferences) -> [LibrarySortOption] {
+        LibrarySortKey.keys(for: mediaType).map { key in
+            let isSelected = key == preferences.sort
+            return LibrarySortOption(
+                key: key, titleKey: titleKey(for: key), isSelected: isSelected,
+                arrowSymbol: isSelected ? arrowSymbol(descending: preferences.descending) : nil)
+        }
+    }
+
+    static func arrowSymbol(descending: Bool) -> String {
+        descending ? "arrow.down" : "arrow.up"
+    }
+
+    /// The legacy label of a sort (`OrderModal.vue`).
+    static func titleKey(for sort: LibrarySortKey) -> String {
+        switch sort {
+        case .title: "LabelTitle"
+        case .authorFirstLast: "LabelAuthorFirstLast"
+        case .authorLastFirst: "LabelAuthorLastFirst"
+        case .publishedYear: "LabelPublishYear"
+        case .addedAt: "LabelAddedAt"
+        case .size: "LabelSize"
+        case .duration: "LabelDuration"
+        case .fileCreated: "LabelFileBirthtime"
+        case .fileModified: "LabelFileModified"
+        case .progress: "LabelLibrarySortByProgress"
+        case .progressStarted: "LabelLibrarySortByProgressStarted"
+        case .progressFinished: "LabelLibrarySortByProgressFinished"
+        case .random: "LabelRandomly"
+        case .podcastAuthor: "LabelAuthor"
+        case .episodeCount: "LabelNumberOfEpisodes"
+        }
+    }
+
+    static func directionKey(descending: Bool) -> String {
+        descending ? "LabelLibrarySortDescending" : "LabelLibrarySortAscending"
+    }
+
+    /// The legacy label of a filter group (`FilterModal.vue`).
+    static func titleKey(for group: LibraryFilterGroup) -> String {
+        switch group {
+        case .genres: "LabelGenre"
+        case .tags: "LabelTag"
+        case .series: "LabelSeries"
+        case .authors: "LabelAuthor"
+        case .narrators: "LabelNarrator"
+        case .languages: "LabelLanguage"
+        case .progress: "LabelProgress"
+        case .ebooks: "LabelEbooks"
+        case .issues: "ButtonIssues"
+        case .feedOpen: "LabelRSSFeedOpen"
+        case .explicit: "LabelExplicit"
+        }
+    }
+
+    static func titleKey(for progress: LibraryFilterModel.ProgressState) -> String {
+        switch progress {
+        case .finished: "LabelFinished"
+        case .inProgress: "LabelInProgress"
+        case .notStarted: "LabelNotStarted"
+        case .notFinished: "LabelNotFinished"
+        }
+    }
+
+    static func titleKey(for ebook: LibraryFilterModel.EbookKind) -> String {
+        switch ebook {
+        case .ebook: "LabelHasEbook"
+        case .supplementary: "LabelHasSupplementaryEbook"
+        }
+    }
+
+    static let viewModes: [LibraryViewMode] = [.grid, .list]
+
+    static func titleKey(for viewMode: LibraryViewMode) -> String {
+        viewMode == .grid ? "LabelLibraryGrid" : "LabelLibraryList"
+    }
+
+    static func symbol(for viewMode: LibraryViewMode) -> String {
+        viewMode == .grid ? "square.grid.2x2" : "list.bullet"
+    }
+
+    /// Collapse series is offered for book libraries only (an unknown type counts as books, as the preferences do).
+    static func showsCollapseSeries(for mediaType: MediaType) -> Bool {
+        mediaType != .podcast
+    }
+
+    /// Collapse Series is off while filtering by series, where the server ignores it.
+    static func isCollapseSeriesDisabled(_ preferences: LibraryViewPreferences) -> Bool {
+        preferences.filter?.group == .series
+    }
+
+    /// Whether the screen loads the filter choices before the sheet opens: the filter in use is an author or series
+    /// (other than "No series"), whose name only the choices have, so VoiceOver can read it.
+    static func loadsFilterChoicesEarly(for filter: LibraryViewPreferences.Filter?) -> Bool {
+        guard let filter, let value = filter.value else { return false }
+        switch filter.group {
+        case .authors: return true
+        case .series: return value != LibraryFilterModel.Choice.noSeries.id
+        default: return false
+        }
+    }
+
+    /// The values `group` offers, localized for progress and ebooks, with "No series" first in series; `nil` while the
+    /// library's filter data is needed and not loaded. Groups that take no value have none.
+    static func filterValues(
+        for group: LibraryFilterGroup, choices: LibraryFilterModel.Choices?, locale: Locale? = nil
+    ) -> [LibraryFilterValue]? {
+        func named(_ list: [LibraryFilterModel.Choice]) -> [LibraryFilterValue] {
+            list.map {
+                LibraryFilterValue(
+                    id: $0.id, name: $0 == .noSeries ? L10n.string("MessageNoSeries", locale: locale) : $0.name)
+            }
+        }
+        switch group {
+        case .progress:
+            return LibraryFilterModel.ProgressState.allCases.map {
+                LibraryFilterValue(id: $0.rawValue, name: L10n.string(titleKey(for: $0), locale: locale))
+            }
+        case .ebooks:
+            return LibraryFilterModel.EbookKind.allCases.map {
+                LibraryFilterValue(id: $0.rawValue, name: L10n.string(titleKey(for: $0), locale: locale))
+            }
+        case .issues, .feedOpen, .explicit:
+            return []
+        case .genres: return choices.map { named($0.genres) }
+        case .tags: return choices.map { named($0.tags) }
+        case .series: return choices.map { named($0.series) }
+        case .authors: return choices.map { named($0.authors) }
+        case .narrators: return choices.map { named($0.narrators) }
+        case .languages: return choices.map { named($0.languages) }
+        }
+    }
+
+    /// What the filter button tells VoiceOver: "All", the group ("Explicit"), or the group and value's name
+    /// ("Genre, Fantasy"). A series or author whose name isn't loaded shows the group alone; "No series" and the
+    /// progress and ebook values need no filter data.
+    static func filterSummary(
+        _ filter: LibraryViewPreferences.Filter?, choices: LibraryFilterModel.Choices?, locale: Locale? = nil
+    ) -> String {
+        guard let filter else { return L10n.string("LabelAll", locale: locale) }
+        let group = L10n.string(titleKey(for: filter.group), locale: locale)
+        guard let value = filter.value else { return group }
+        // "No series" needs no filter data, like the fixed progress and ebook values.
+        if filter.group == .series, value == LibraryFilterModel.Choice.noSeries.id {
+            return [group, L10n.string("MessageNoSeries", locale: locale)].joined(separator: ", ")
+        }
+        let name =
+            filterValues(for: filter.group, choices: choices, locale: locale)?.first { $0.id == value }?.name
+            ?? ([.series, .authors].contains(filter.group) ? nil : value)
+        return [group, name].compactMap(\.self).joined(separator: ", ")
+    }
+
+    /// Chooses `key` (legacy `OrderModal.vue`): the selected key flips the direction, another one sets it.
+    @MainActor
+    static func selectSort(_ key: LibrarySortKey, in model: LibraryItemsModel) {
+        model.update { $0.selectSort(key) }
+    }
+}

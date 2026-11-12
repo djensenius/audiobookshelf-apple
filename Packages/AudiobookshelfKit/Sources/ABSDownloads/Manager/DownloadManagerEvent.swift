@@ -3,7 +3,8 @@ import Foundation
 
 /// What ``DownloadManager/events()`` reports.
 public enum DownloadManagerEvent: Sendable, Equatable {
-    /// A record was created or changed: queued, resumed, or a part completed or failed.
+    /// A record was created or changed: queued, started downloading (a first start, a resume, or
+    /// a transfer adopted after a relaunch), resumed, or a part completed or failed.
     case recordChanged(DownloadRecordDTO)
     /// A record's live progress across all its parts, at most about once a second per record
     /// (and always when it reaches the end). `fraction` is `bytes` over the parts' expected
