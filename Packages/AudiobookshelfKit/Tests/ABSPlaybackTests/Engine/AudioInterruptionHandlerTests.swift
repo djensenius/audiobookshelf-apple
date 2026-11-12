@@ -12,6 +12,7 @@ final class FakeAudioEngine: AudioEngineProtocol {
     var currentTrackIndex: Int?
     var defaultRate: Float = 1
     var isPlaybackRequested = false
+    var wasPlaybackRequestedAtFailure = false
     var pendingSeekTarget: Double?
     var isAudioSessionActive = false
     var timeline: PlaybackTimeline?
@@ -27,6 +28,10 @@ final class FakeAudioEngine: AudioEngineProtocol {
     }
     func pause() {
         calls.append("pause")
+        isPlaybackRequested = false
+    }
+    func pauseForOutputLoss() {
+        calls.append("outputLost")
         isPlaybackRequested = false
     }
     func stop() { calls.append("stop") }
@@ -84,11 +89,12 @@ struct AudioInterruptionHandlerTests {
         handler.handle(.oldDeviceUnavailable)
         handler.handle(.interruptionEnded(shouldResume: true))
 
-        #expect(engine.calls == ["pause"])
+        // Reported even when paused, so a play held elsewhere (recovery) is dropped too.
+        #expect(engine.calls == ["pause", "outputLost"])
 
         engine.play()
         handler.handle(.oldDeviceUnavailable)
-        #expect(engine.calls == ["pause", "play", "pause"])
+        #expect(engine.calls == ["pause", "outputLost", "play", "outputLost"])
     }
 
     @Test func userPlayAndPauseClearLateResume() {

@@ -33,6 +33,8 @@ final class AppEnvironment {
     /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
     let deviceIdentifiers: any DeviceIdentifying
     let player: any PlayerSlotState
+    /// The shared library and its session participant (#181), or `nil` without ``accounts``.
+    let library: LibraryParticipant?
     /// The cover image pipeline and its session participant (#182).
     let images: ImageServices
     /// Writes the Continue Listening widget's snapshot (#89).
@@ -75,6 +77,7 @@ final class AppEnvironment {
         self.deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         // Replaced by the playback coordinator's view model with the player UI (#56).
         self.player = PlaceholderPlayerState()
+        self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
 
         // Images (#182).
         let images = ImageServices(accounts: accounts, covers: covers)

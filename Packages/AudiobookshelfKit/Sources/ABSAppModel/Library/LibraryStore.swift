@@ -10,11 +10,13 @@ import Observation
 /// passes it in. The last-used library per server and user is read from and saved to
 /// `AppSettings`.
 ///
-/// The store doesn't watch the signed-in account itself. The app shell wires it up:
-/// - when `AccountManager.activeConnection` becomes a connection, call
-///   ``connect(client:connectionKey:defaultLibraryID:)`` with that connection's `APIClient`,
-///   `LibraryConnectionKey(connectionID:userID:)` and the login's `userDefaultLibraryId`;
-/// - when it becomes `nil` (logout), call ``clear()``.
+/// The store doesn't watch the signed-in account itself. ``LibraryParticipant`` wires it to
+/// the session lifecycle:
+/// - when a session starts or reconnects, it calls ``attach(client:connectionKey:defaultLibraryID:)``
+///   with the session's `APIClient`, `LibraryConnectionKey(connectionID:userID:)` and the
+///   login's `userDefaultLibraryId`, then ``refresh()`` in a task it owns
+///   (``connect(client:connectionKey:defaultLibraryID:)`` does both in one call);
+/// - when the session ends (logout or switch), it calls ``clear()``.
 ///
 /// Connecting a different account clears everything first, including ``progress``, and
 /// responses to requests made for an earlier account are dropped. Per-library models
@@ -40,6 +42,11 @@ public final class LibraryStore {
     public private(set) var error: (any Error)?
     /// The server's default library for the user (`userDefaultLibraryId` from login).
     public private(set) var defaultLibraryID: String?
+    /// Bumped each time a client is attached online (a start or a reconnect), so a load that
+    /// failed offline can retry. An offline session can keep its client, and then a reconnect
+    /// leaves ``connectedKey`` unchanged. Add it to a load's trigger, not to a model's identity:
+    /// the account's models stay.
+    public private(set) var onlineRevision = 0
 
     /// The account's server progress; cleared with the store.
     public let progress = ProgressCache()
@@ -73,6 +80,19 @@ public final class LibraryStore {
     public func connect(
         client: any LibraryService, connectionKey: LibraryConnectionKey, defaultLibraryID: String? = nil
     ) async {
+        attach(client: client, connectionKey: connectionKey, defaultLibraryID: defaultLibraryID)
+        await refresh()
+    }
+
+    /// ``connect(client:connectionKey:defaultLibraryID:)`` without the refresh, for callers that
+    /// must return promptly and refresh in a task they own (the session's library participant).
+    /// A `nil` client (offline without one) serves the account's settings, such as
+    /// ``lastLibraryID``, until a later attach brings one. Attaching a client while not
+    /// `isOffline` bumps ``onlineRevision``.
+    public func attach(
+        client: (any LibraryService)?, connectionKey: LibraryConnectionKey, defaultLibraryID: String? = nil,
+        isOffline: Bool = false
+    ) {
         if connectionKey != self.connectionKey {
             clear()
             self.connectionKey = connectionKey
@@ -81,7 +101,7 @@ public final class LibraryStore {
         // Reconnecting the same account (for example with a new client) without a default keeps
         // the one from login; a new account was cleared above.
         if let defaultLibraryID { self.defaultLibraryID = defaultLibraryID }
-        await refresh()
+        if client != nil, !isOffline { onlineRevision += 1 }
     }
 
     /// Reloads the libraries list. Loaded details take the refreshed libraries (for example a
@@ -119,6 +139,20 @@ public final class LibraryStore {
         case .failure(let error):
             if !(error is CancellationError) { self.error = error }
         }
+    }
+
+    /// ``connectionKey`` while the store has a client for it, `nil` otherwise. Key a load on it
+    /// rather than on ``connectionKey``, so a reconnect that attaches a client to an account
+    /// started offline without one retries the load.
+    public var connectedKey: LibraryConnectionKey? {
+        client == nil ? nil : connectionKey
+    }
+
+    /// Whether the store serves `identity`'s account. A scene's shell outlives its account
+    /// during a switch, while the store already serves the next one; it must stop reading the
+    /// store then.
+    public func serves(_ identity: SessionIdentity) -> Bool {
+        connectionKey == LibraryConnectionKey(connectionID: identity.connectionID, userID: identity.userID)
     }
 
     /// Drops all data, progress and the client, for logout or before switching accounts.

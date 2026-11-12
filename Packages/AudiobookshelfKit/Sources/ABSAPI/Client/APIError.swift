@@ -30,7 +30,7 @@ public enum APIError: Error, Sendable, Equatable {
     /// A connection failure, timeout, 408, 429 or 5xx: the server may answer if asked again later.
     /// TLS, ATS and malformed-URL failures aren't transient. (``APIClient`` reports a timeout
     /// as ``timedOut``, never as `network(.timedOut)`.)
-    var isTransient: Bool {
+    public var isTransient: Bool {
         switch self {
         case .timedOut: true
         case .network(let code): Self.connectivityCodes.contains(code)

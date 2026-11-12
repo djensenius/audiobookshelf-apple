@@ -31,11 +31,14 @@ import Testing
             #expect(environment.settings === settings)
             #expect(environment.dataStack != nil)
             #expect(environment.accounts != nil)
+            // The library is the lifecycle's seeder, and stays cleared while signed out.
+            #expect(environment.library != nil)
             #expect(environment.lifecycle.gate == .launching)
 
             await environment.lifecycle.start()
 
             #expect(environment.lifecycle.gate == .connect)
+            #expect(environment.library?.store.connectionKey == nil)
         }
     }
 
