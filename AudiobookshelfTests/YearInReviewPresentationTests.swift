@@ -109,6 +109,23 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
             for: .server(ServerYearStats(numListeningSessions: 1200, numBooksAdded: 3, numAuthorsAdded: 2)),
             locale: english)
         #expect(server.map(\.value) == ["3", "0m", "1,200", "2"])
+        #expect(
+            server.map(\.spoken) == [
+                "3 books added", "0m spent listening", "1,200 listening sessions", "2 authors added",
+            ])
+    }
+
+    /// VoiceOver reads each total as one localized phrase, in the singular for one.
+    @Test func spokenTotalsUseThePluralForms() {
+        let one = YearInReviewCard.tiles(
+            for: .user(
+                UserYearStats(
+                    totalListeningSessions: 1, totalListeningTime: 60, numBooksFinished: 1, numBooksListened: 1)),
+            locale: english)
+        #expect(
+            one.map(\.spoken) == [
+                "1 book finished", "1m spent listening", "1 listening session", "1 book listened to",
+            ])
     }
 
     @Test func summaryReadsTheTotalsAndTopLists() {

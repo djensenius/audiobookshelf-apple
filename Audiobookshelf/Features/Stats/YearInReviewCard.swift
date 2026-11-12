@@ -27,7 +27,10 @@ struct YearInReviewCovers {
         let bucket = ImageWidthBucket(pixelWidth: pixelSide)
         let loaded = await withTaskGroup(of: (String, CoverImage?).self) { group in
             for id in ids.prefix(YearInReviewCard.maxCovers) {
-                // The stats give only IDs, so the key has no `updatedAt`.
+                // The stats give only IDs and nothing in the app caches items by ID, so the key has
+                // no `updatedAt`: a cover changed on the server shows its cached version until
+                // the cache ages it out. Fetching every item for its `updatedAt` would cost up to
+                // 30 extra requests per card.
                 let key = ImageKey(serverID: serverID, kind: .itemCover, entityID: id, updatedAt: nil, bucket: bucket)
                 group.addTask { (id, try? await pipeline.image(for: key, pixelBox: box)) }
             }
@@ -214,46 +217,61 @@ struct YearInReviewCard: View {
         }
     }
 
-    /// One of the four totals: a value, its label key and an SF Symbol.
+    /// One of the four totals: a value, its label key and an SF Symbol, plus the whole total as
+    /// one localized phrase for VoiceOver ("1 book finished"), since the card stacks the value
+    /// above the label.
     struct Stat: Hashable {
         var value: String
         var labelKey: String
         var systemImage: String
+        var spoken: String
     }
 
     /// The four totals, in the legacy order.
     static func tiles(for content: YearInReviewContent, locale: Locale) -> [Stat] {
         func number(_ value: Int) -> String { value.formatted(.number.locale(locale)) }
+        func count(_ key: String, _ value: Int) -> String { L10n.plural(key, count: value, locale: locale) }
+        func time(_ seconds: Double) -> String {
+            L10n.string("LabelYearInReviewTimeSpentListening", listeningTime(seconds, locale: locale), locale: locale)
+        }
         switch content {
         case .user(let stats):
             return [
                 Stat(
                     value: number(stats.numBooksFinished), labelKey: "LabelYearInReviewBooksFinished",
-                    systemImage: "checkmark.seal.fill"),
+                    systemImage: "checkmark.seal.fill",
+                    spoken: count("LabelYearInReviewBooksFinishedCount", stats.numBooksFinished)),
                 Stat(
                     value: listeningTime(stats.totalListeningTime, locale: locale),
-                    labelKey: "LabelYearInReviewSpentListening", systemImage: "clock.fill"),
+                    labelKey: "LabelYearInReviewSpentListening", systemImage: "clock.fill",
+                    spoken: time(stats.totalListeningTime)),
                 Stat(
                     value: number(stats.totalListeningSessions), labelKey: "LabelYearInReviewSessions",
-                    systemImage: "headphones"),
+                    systemImage: "headphones",
+                    spoken: count("LabelYearInReviewSessionCount", stats.totalListeningSessions)),
                 Stat(
                     value: number(stats.numBooksListened), labelKey: "LabelYearInReviewBooksListened",
-                    systemImage: "books.vertical.fill"),
+                    systemImage: "books.vertical.fill",
+                    spoken: count("LabelYearInReviewBooksListenedCount", stats.numBooksListened)),
             ]
         case .server(let stats):
             return [
                 Stat(
                     value: number(stats.numBooksAdded), labelKey: "LabelYearInReviewBooksAdded",
-                    systemImage: "plus.circle.fill"),
+                    systemImage: "plus.circle.fill",
+                    spoken: count("LabelYearInReviewBooksAddedCount", stats.numBooksAdded)),
                 Stat(
                     value: listeningTime(stats.totalListeningTime, locale: locale),
-                    labelKey: "LabelYearInReviewSpentListening", systemImage: "clock.fill"),
+                    labelKey: "LabelYearInReviewSpentListening", systemImage: "clock.fill",
+                    spoken: time(stats.totalListeningTime)),
                 Stat(
                     value: number(stats.numListeningSessions), labelKey: "LabelYearInReviewSessions",
-                    systemImage: "headphones"),
+                    systemImage: "headphones",
+                    spoken: count("LabelYearInReviewSessionCount", stats.numListeningSessions)),
                 Stat(
                     value: number(stats.numAuthorsAdded), labelKey: "LabelYearInReviewAuthorsAdded",
-                    systemImage: "person.2.fill"),
+                    systemImage: "person.2.fill",
+                    spoken: count("LabelYearInReviewAuthorsAddedCount", stats.numAuthorsAdded)),
             ]
         }
     }
@@ -270,7 +288,7 @@ struct YearInReviewCard: View {
     /// What VoiceOver reads for the rendered card: the title, the totals and the top lists.
     static func summary(for content: YearInReviewContent, year: Int, locale: Locale) -> String {
         var parts = [L10n.string("HeaderYearInReviewYear", String(year))]
-        parts += tiles(for: content, locale: locale).map { "\($0.value) \(L10n.string($0.labelKey))" }
+        parts += tiles(for: content, locale: locale).map(\.spoken)
         let (authors, genres): ([String], [String]) =
             switch content {
             case .user(let stats): (stats.topAuthors.map(\.name), stats.topGenres.map(\.genre))

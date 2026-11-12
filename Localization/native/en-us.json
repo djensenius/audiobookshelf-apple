@@ -102,13 +102,34 @@
   "LabelValue": "Value",
   "LabelYearInReviewAdditions": "Some additions include...",
   "LabelYearInReviewAuthorsAdded": "authors added",
+  "LabelYearInReviewAuthorsAddedCount": {
+    "one": "{0} author added",
+    "other": "{0} authors added"
+  },
   "LabelYearInReviewBooksAdded": "books added",
+  "LabelYearInReviewBooksAddedCount": {
+    "one": "{0} book added",
+    "other": "{0} books added"
+  },
   "LabelYearInReviewBooksFinished": "books finished",
+  "LabelYearInReviewBooksFinishedCount": {
+    "one": "{0} book finished",
+    "other": "{0} books finished"
+  },
   "LabelYearInReviewBooksListened": "books listened to",
+  "LabelYearInReviewBooksListenedCount": {
+    "one": "{0} book listened to",
+    "other": "{0} books listened to"
+  },
   "LabelYearInReviewFinishedBooks": "Some books finished this year...",
   "LabelYearInReviewServer": "Server",
+  "LabelYearInReviewSessionCount": {
+    "one": "{0} listening session",
+    "other": "{0} listening sessions"
+  },
   "LabelYearInReviewSessions": "sessions",
   "LabelYearInReviewSpentListening": "spent listening",
+  "LabelYearInReviewTimeSpentListening": "{0} spent listening",
   "LabelYearInReviewTopAuthors": "Top Authors",
   "LabelYearInReviewTopGenres": "Top Genres",
   "LabelYearInReviewUser": "You",
