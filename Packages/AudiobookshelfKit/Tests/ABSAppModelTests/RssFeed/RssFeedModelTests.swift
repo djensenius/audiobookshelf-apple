@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSRealtime
 import Foundation
 import Testing
 
@@ -241,5 +242,63 @@ private func feed(slug: String) -> RssFeed {
         #expect(!model.isInsecureServer)
         await model.load()
         #expect(model.isInsecureServer == insecure)
+    }
+
+    // MARK: Live changes
+
+    @Test func aLiveOpenOrCloseOfThisEntityIsShown() async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService())
+        await model.load()
+        let opened = feed(slug: "elsewhere")
+        model.apply(.opened(opened))
+        #expect(model.feed == opened)
+        model.apply(.closed(opened))
+        #expect(model.feed == nil)
+    }
+
+    @Test func otherEntitiesChangesAreIgnored() async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(current: { feed(slug: "open") }))
+        await model.load()
+        // Same ID, another kind of entity; then this kind, another ID.
+        let collection = RssFeed(id: "feed-col", entityType: "collection", entityId: "series-1", feedUrl: "/feed/c")
+        let otherSeries = RssFeed(id: "feed-other", entityType: "series", entityId: "series-2", feedUrl: "/feed/o")
+        for change in [
+            RssFeedChange.opened(collection), .closed(collection), .opened(otherSeries), .closed(otherSeries),
+        ] {
+            model.apply(change)
+        }
+        #expect(model.feed == feed(slug: "open"))
+    }
+
+    @Test func theCloseOfAnotherFeedKeepsTheOneShown() async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(current: { feed(slug: "open") }))
+        await model.load()
+        model.apply(.closed(feed(slug: "older")))
+        #expect(model.feed == feed(slug: "open"))
+    }
+
+    @Test(arguments: [RssFeedTarget.Kind.item, .collection, .series])
+    func eachKindMatchesTheServersEntityType(kind: RssFeedTarget.Kind) {
+        let model = RssFeedModel(target: RssFeedTarget(kind, id: "id-1"), service: FakeRssFeedService())
+        let type = ["item": "libraryItem", "collection": "collection", "series": "series"][kind.rawValue]!
+        let opened = RssFeed(id: "feed-1", entityType: type, entityId: "id-1", feedUrl: "/feed/one")
+        model.apply(.opened(opened))
+        #expect(model.feed == opened)
+    }
+
+    /// The fetch started before the change, so its answer is older and doesn't replace it.
+    @Test(arguments: [true, false])
+    func aLoadThatStartedBeforeALiveChangeKeepsTheChange(opens: Bool) async throws {
+        let gate = GatedCalls<Void, RssFeed?>()
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(current: { try await gate.call(()) }))
+        let load = Task { await model.load() }
+        var calls = gate.calls.makeAsyncIterator()
+        let call = try #require(await calls.next())
+        let live = feed(slug: "live")
+        model.apply(opens ? .opened(live) : .closed(live))
+        call.reply.resume(returning: opens ? nil : live)
+        await load.value
+        #expect(model.loadState == .loaded)
+        #expect(model.feed == (opens ? live : nil))
     }
 }

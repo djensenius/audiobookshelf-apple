@@ -45,48 +45,81 @@ enum RssFeedPresentation {
     static func isLoading(_ state: RssFeedModel.LoadState) -> Bool {
         state == .idle || state == .loading
     }
+
+    /// Whether the entry shows a feed as open: the sheet's model once it has loaded or seen a feed,
+    /// else what the screen fetched (`include=rssfeed`).
+    @MainActor
+    static func showsOpen(fetched: Bool, model: RssFeedModel?) -> Bool {
+        guard let model else { return fetched }
+        if model.feed != nil { return true }
+        return model.loadState == .loaded ? false : fetched
+    }
 }
 
 extension View {
     /// Adds RSS Feed (legacy `RssFeedModal.vue`) to the toolbar for admins, opening ``RssFeedSheet`` for
-    /// `target`; nothing when `target` is `nil`. The sheet closes when the account changes.
-    func rssFeedEntry(_ target: RssFeedTarget?) -> some View {
-        modifier(RssFeedEntry(target: target))
+    /// `target`; nothing when `target` is `nil`. `isOpen` is what the screen fetched, until the sheet
+    /// has loaded. The sheet closes when the account changes.
+    func rssFeedEntry(
+        _ target: RssFeedTarget?, isOpen: Bool = false, hasEpisodesWithoutPubDate: Bool = false
+    ) -> some View {
+        modifier(RssFeedEntry(target: target, isOpen: isOpen, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate))
+    }
+
+    /// Adds RSS Feed for a book or podcast; nothing when `entry` is `nil`.
+    func rssFeedEntry(_ entry: RssFeedItemEntry?) -> some View {
+        rssFeedEntry(
+            entry?.target, isOpen: entry?.isOpen ?? false,
+            hasEpisodesWithoutPubDate: entry?.hasEpisodesWithoutPubDate ?? false)
     }
 }
 
 private struct RssFeedEntry: ViewModifier {
     let target: RssFeedTarget?
+    let isOpen: Bool
+    let hasEpisodesWithoutPubDate: Bool
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var isPresented = false
+    /// The last sheet's model, kept after it closes so the entry shows what it last saw.
+    @State private var model: RssFeedModel?
 
     func body(content: Content) -> some View {
         let client = accounts?.client
         let shows = RssFeedPresentation.showsEntry(
             userType: accounts?.authorization?.user.type, hasClient: client != nil)
+        let open = RssFeedPresentation.showsOpen(fetched: isOpen, model: model?.target == target ? model : nil)
         content
             .toolbar {
-                if target != nil, shows {
+                if let target, let client, shows {
                     ToolbarItem(placement: .primaryAction) {
                         Button {
+                            // A fresh sheet each time, as before; the entry keeps the last one's state.
+                            model = RssFeedModel(
+                                target: target, service: client, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate)
                             isPresented = true
                         } label: {
                             Label {
                                 Text(verbatim: L10n.string("HeaderRSSFeed"))
                             } icon: {
-                                Image(systemName: "dot.radiowaves.up.forward")
+                                // Open shows a different symbol as well as the tint, not colour alone.
+                                Image(systemName: open ? "dot.radiowaves.left.and.right" : "dot.radiowaves.up.forward")
+                                    .foregroundStyle(open ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
                             }
                         }
-                        .help(Text(verbatim: L10n.string("HeaderRSSFeed")))
+                        .help(Text(verbatim: L10n.string(open ? "LabelRSSFeedOpen" : "HeaderRSSFeed")))
+                        .accessibilityValue(open ? Text(verbatim: L10n.string("LabelRSSFeedOpen")) : Text(verbatim: ""))
                     }
                 }
             }
             .sheet(isPresented: $isPresented) {
-                if let target, let client {
-                    RssFeedSheet(model: RssFeedModel(target: target, service: client))
+                if let model {
+                    RssFeedSheet(model: model)
                 }
             }
-            .onChange(of: accounts?.activeConnection?.id) { isPresented = false }
+            .onChange(of: accounts?.activeConnection?.id) {
+                isPresented = false
+                model = nil
+            }
             .onChange(of: shows) { _, shows in if !shows { isPresented = false } }
     }
 }
@@ -301,6 +334,10 @@ private struct RssFeedOpenForm: View {
                 }
                 if model.isInsecureServer {
                     Text(verbatim: L10n.string("NoteRSSFeedPodcastAppsHttps"))
+                        .foregroundStyle(.orange)
+                }
+                if model.hasEpisodesWithoutPubDate {
+                    Text(verbatim: L10n.string("NoteRSSFeedPodcastAppsPubDate"))
                         .foregroundStyle(.orange)
                 }
             }

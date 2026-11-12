@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSRealtime
 import Foundation
 import Observation
 
@@ -47,8 +48,9 @@ public enum RssFeedModelError: Error, Sendable, Hashable {
 /// manage feeds (``canManageFeeds(_:)``); the server refuses everyone else.
 ///
 /// ``load()`` fetches the current feed and the server address. ``open()`` validates the fields
-/// first and ``close()`` needs an open feed; while either runs, both return `false`. Live
-/// `rss_feed_open` and `rss_feed_closed` events aren't followed; load again to catch up.
+/// first and ``close()`` needs an open feed; while either runs, both return `false`. ``apply(_:)``
+/// follows live `rss_feed_open` and `rss_feed_closed` events (``RealtimeBridge/onRssFeedChange``)
+/// for this entity; a load that started before one doesn't overwrite it.
 @MainActor
 @Observable
 public final class RssFeedModel {
@@ -57,6 +59,9 @@ public final class RssFeedModel {
     }
 
     public let target: RssFeedTarget
+    /// A podcast with episodes that have no publication date, which some podcast apps need
+    /// (legacy `NoteRSSFeedPodcastAppsPubDate`).
+    public let hasEpisodesWithoutPubDate: Bool
     public private(set) var loadState: LoadState = .idle
     /// The open feed, or `nil` when none is.
     public private(set) var feed: RssFeed?
@@ -77,10 +82,13 @@ public final class RssFeedModel {
     public private(set) var failureCount = 0
 
     @ObservationIgnored private let service: any RssFeedService
+    /// Bumped by each live change, so a load that started earlier keeps the newer state.
+    @ObservationIgnored private var changeGeneration = 0
 
-    public init(target: RssFeedTarget, service: any RssFeedService) {
+    public init(target: RssFeedTarget, service: any RssFeedService, hasEpisodesWithoutPubDate: Bool = false) {
         self.target = target
         self.service = service
+        self.hasEpisodesWithoutPubDate = hasEpisodesWithoutPubDate
         slug = target.id
     }
 
@@ -111,9 +119,11 @@ public final class RssFeedModel {
     /// clears an earlier load failure.
     public func load() async {
         loadState = .loading
+        let generation = changeGeneration
         serverURL = await service.serverURL()
         do {
-            feed = try await service.currentFeed(for: target)
+            let current = try await service.currentFeed(for: target)
+            if generation == changeGeneration { feed = current }
             loadState = .loaded
             if error == .loadFailed { error = nil }
         } catch {
@@ -165,6 +175,31 @@ public final class RssFeedModel {
         } catch {
             self.error = .closeFailed
             return false
+        }
+    }
+
+    /// Follows a live open or close of this entity's feed (legacy item page `rssFeedOpen` and
+    /// `rssFeedClosed`); other entities' changes are ignored, as is the close of a feed other than
+    /// the one shown.
+    public func apply(_ change: RssFeedChange) {
+        let changed = change.feed
+        guard changed.entityId == target.id, changed.entityType == Self.entityType(target.kind) else { return }
+        switch change {
+        case .opened:
+            feed = changed
+        case .closed:
+            guard feed == nil || feed?.id == changed.id else { return }
+            feed = nil
+        }
+        changeGeneration += 1
+    }
+
+    /// The server's `entityType` for a target kind.
+    nonisolated static func entityType(_ kind: RssFeedTarget.Kind) -> String {
+        switch kind {
+        case .item: "libraryItem"
+        case .collection: "collection"
+        case .series: "series"
         }
     }
 

@@ -1,11 +1,24 @@
 import ABSAPI
 import ABSAppModel
 import ABSCore
+import ABSRealtime
 import ABSUI
 import Foundation
 import Testing
 
 @testable import Audiobookshelf
+
+/// Answers the current feed with `open`; nothing else is asked for.
+private struct StubRssFeedService: RssFeedService {
+    var open: RssFeed?
+
+    func serverURL() async -> URL { URL(string: "https://abs.example")! }
+    func currentFeed(for target: RssFeedTarget) async throws -> RssFeed? { open }
+    func openFeed(for target: RssFeedTarget, _ request: RssFeedOpenRequest) async throws -> RssFeed {
+        throw CancellationError()
+    }
+    func closeFeed(id: String) async throws {}
+}
 
 @Suite struct RssFeedPresentationTests {
     @Test(arguments: [
@@ -80,5 +93,23 @@ import Testing
         #expect(
             L10n.string("MessageFeedURLWillBe", "https://abs.example/feed/s", locale: Locale(identifier: "en"))
                 == "Feed URL will be https://abs.example/feed/s")
+    }
+
+    /// What the screen fetched shows until the sheet knows better.
+    @MainActor
+    @Test func theIndicatorFollowsTheSheetOnceItKnows() async {
+        let target = RssFeedTarget(.item, id: "li-1")
+        let feed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
+        #expect(RssFeedPresentation.showsOpen(fetched: true, model: nil))
+        #expect(!RssFeedPresentation.showsOpen(fetched: false, model: nil))
+
+        let closedNow = RssFeedModel(target: target, service: StubRssFeedService(open: nil))
+        #expect(RssFeedPresentation.showsOpen(fetched: true, model: closedNow))
+        await closedNow.load()
+        #expect(!RssFeedPresentation.showsOpen(fetched: true, model: closedNow))
+
+        let openedLive = RssFeedModel(target: target, service: StubRssFeedService(open: nil))
+        openedLive.apply(.opened(feed))
+        #expect(RssFeedPresentation.showsOpen(fetched: false, model: openedLive))
     }
 }
