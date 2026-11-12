@@ -34,8 +34,10 @@ final class ImageServices {
     ///   default, ``pipeline``'s ``ImagePipeline/trimMemory(toFraction:)``.
     /// - Parameter notifications: Where memory warnings arrive on iOS; tests pass their own, so
     ///   one test's warning doesn't reach another's services.
+    /// - Parameter sessionConfiguration: The pipeline's session configuration.
     init(
         accounts: AccountManager?,
+        sessionConfiguration: URLSessionConfiguration = .ephemeral,
         trim: (@Sendable (_ fraction: Double) async -> Void)? = nil,
         notifications: NotificationCenter = .default
     ) {
@@ -46,7 +48,7 @@ final class ImageServices {
             fileStore: CoverFileStore(directory: CoverFileStore.defaultDirectory(), limit: limits.diskBytes),
             // TODO(#143): pass the downloads' `DownloadedCoverLookup`, so downloaded items' covers
             // load from their files.
-            downloadedCovers: nil,
+            downloadedCovers: nil, sessionConfiguration: sessionConfiguration,
             isOnline: { online.isOnline })
         self.pipeline = pipeline
         participant = ImageParticipant(sink: pipeline)

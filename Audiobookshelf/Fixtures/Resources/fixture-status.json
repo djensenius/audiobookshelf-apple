@@ -1,0 +1,10 @@
+{
+  "app": "audiobookshelf",
+  "serverVersion": "2.26.0",
+  "isInit": true,
+  "language": "en-us",
+  "authMethods": [
+    "local"
+  ],
+  "authFormData": {}
+}
