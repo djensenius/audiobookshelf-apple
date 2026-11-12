@@ -57,6 +57,10 @@ final class ScopePlayback: PlayerPlaybackControlling {
         await coordinator.jump(by: offset)
     }
 
+    @discardableResult func jumpOutcome(by offset: Double) async -> JumpOutcome {
+        await coordinator.jumpOutcome(by: offset)
+    }
+
     func setRate(_ rate: Double) {
         coordinator.setRate(rate)
     }

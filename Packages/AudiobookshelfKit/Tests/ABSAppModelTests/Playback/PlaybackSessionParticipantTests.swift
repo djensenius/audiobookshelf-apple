@@ -39,6 +39,8 @@ private final class FakeScope: PlaybackScopeHandle {
     }
 
     var playback: any PlayerPlaybackControlling { control }
+    var queue: (any PlaybackQueueReading)? { nil }
+    func editQueue(_ edit: (PlaybackQueue) -> Void) {}
 
     func start() -> Bool {
         log.record("\(name).restore")
