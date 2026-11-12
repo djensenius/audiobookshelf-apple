@@ -121,10 +121,11 @@ extension ProgressSyncer {
     /// keeps it even if this syncer is detached meanwhile (an account switch lets the close go on).
     /// One kept to retry that was never saved, its settlement's save included, waits in
     /// ``CloseRetryQueue/unsaved`` for the next drain to save it. `ackedTotal` is the session's
-    /// listening time the server acknowledged, for a later 404's lookup.
+    /// listening time the server acknowledged, and `inFlightTotal` that of its `/sync` still out,
+    /// for a later 404's lookup.
     func retainClose(
         _ handoff: PlaybackCloseHandoff, for closing: ClosingSession, ackedTotal: TimeInterval,
-        token: PlaybackPositionToken?
+        inFlightTotal: TimeInterval, token: PlaybackPositionToken?
     ) {
         guard handoff.report.timeListened > 0, closing.key.serverConnectionID == service.serverConnectionID
         else { return }
@@ -148,7 +149,7 @@ extension ProgressSyncer {
             let close = PendingSessionCloseDTO(
                 key: closing.key, sessionID: closing.sessionID, currentTime: report.currentTime,
                 timeListened: report.timeListened, duration: report.duration, positionEditedAt: editedAt,
-                capturedAt: clock.now(), ackedTotal: ackedTotal)
+                capturedAt: clock.now(), ackedTotal: ackedTotal, inFlightTotal: inFlightTotal)
             var stored = false
             if handoff.transport.result == nil, editedAt != nil {
                 // The attempt may reach the server: a relaunch waits before resending it.

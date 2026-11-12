@@ -583,6 +583,9 @@ public enum SchemaV1: VersionedSchema {
         /// The session's listening time the server acknowledged before the close: a 404's
         /// lookup compares the session's stored record with it (ADR 0007).
         public var ackedTotal: Double = 0
+        /// The listening time of the session's `/sync` still out at the close, which may apply
+        /// after it: the lookup allows for either outcome (ADR 0007).
+        public var inFlightTotal: Double = 0
         /// Lookups of the session's stored record that failed after the server answered 404.
         public var failedLookups: Int = 0
 
@@ -599,6 +602,7 @@ public enum SchemaV1: VersionedSchema {
             lastAttemptAt: Date? = nil,
             attempts: Int = 0,
             ackedTotal: Double = 0,
+            inFlightTotal: Double = 0,
             failedLookups: Int = 0
         ) {
             self.serverConnectionID = serverConnectionID
@@ -613,6 +617,7 @@ public enum SchemaV1: VersionedSchema {
             self.lastAttemptAt = lastAttemptAt
             self.attempts = attempts
             self.ackedTotal = ackedTotal
+            self.inFlightTotal = inFlightTotal
             self.failedLookups = failedLookups
         }
     }

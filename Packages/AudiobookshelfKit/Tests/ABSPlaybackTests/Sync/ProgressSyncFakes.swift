@@ -55,8 +55,8 @@ final class StubProgressSyncService: ProgressSyncService {
         var closes: [(id: String, report: PlaybackSyncReport?)] = []
         /// Each retried `/close` takes the next (`nil` succeeds); an error never reaches the model.
         var closeErrors: [APIError?] = []
-        /// Each stored-session lookup takes the next (`nil` asks the model); an error never reaches it.
-        var recordsErrors: [APIError?] = []
+        /// Each stored-session lookup throws the next until none is left; an error never reaches the model.
+        var recordsErrors: [any Error] = []
         var log: [String] = []
         var canceledCalls: [String] = []
         var syncWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []

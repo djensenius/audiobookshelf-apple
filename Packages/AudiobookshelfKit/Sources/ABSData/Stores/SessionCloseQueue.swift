@@ -19,13 +19,15 @@ public struct PendingSessionCloseDTO: Sendable, Equatable {
     public var attempts: Int
     /// The session's listening time the server acknowledged before the close.
     public var ackedTotal: Double
+    /// The listening time of the session's `/sync` still out at the close.
+    public var inFlightTotal: Double
     /// Lookups of the session's stored record that failed after the server answered 404.
     public var failedLookups: Int
 
     public init(
         key: MediaKey, sessionID: String, currentTime: Double, timeListened: Double, duration: Double,
         positionEditedAt: Date?, capturedAt: Date, lastAttemptAt: Date? = nil, attempts: Int = 0,
-        ackedTotal: Double = 0, failedLookups: Int = 0
+        ackedTotal: Double = 0, inFlightTotal: Double = 0, failedLookups: Int = 0
     ) {
         self.key = key
         self.sessionID = sessionID
@@ -37,6 +39,7 @@ public struct PendingSessionCloseDTO: Sendable, Equatable {
         self.lastAttemptAt = lastAttemptAt
         self.attempts = attempts
         self.ackedTotal = ackedTotal
+        self.inFlightTotal = inFlightTotal
         self.failedLookups = failedLookups
     }
 
@@ -48,7 +51,7 @@ public struct PendingSessionCloseDTO: Sendable, Equatable {
             sessionID: model.sessionID, currentTime: model.currentTime, timeListened: model.timeListened,
             duration: model.duration, positionEditedAt: model.positionEditedAt, capturedAt: model.capturedAt,
             lastAttemptAt: model.lastAttemptAt, attempts: model.attempts, ackedTotal: model.ackedTotal,
-            failedLookups: model.failedLookups)
+            inFlightTotal: model.inFlightTotal, failedLookups: model.failedLookups)
     }
 }
 
@@ -70,6 +73,7 @@ extension LocalProgressStore {
                 model.lastAttemptAt = close.lastAttemptAt
                 model.attempts = close.attempts
                 model.ackedTotal = close.ackedTotal
+                model.inFlightTotal = close.inFlightTotal
                 model.failedLookups = close.failedLookups
             } else {
                 modelContext.insert(
@@ -79,7 +83,7 @@ extension LocalProgressStore {
                         currentTime: close.currentTime, timeListened: close.timeListened, duration: close.duration,
                         positionEditedAt: close.positionEditedAt, capturedAt: close.capturedAt,
                         lastAttemptAt: close.lastAttemptAt, attempts: close.attempts, ackedTotal: close.ackedTotal,
-                        failedLookups: close.failedLookups))
+                        inFlightTotal: close.inFlightTotal, failedLookups: close.failedLookups))
             }
         }
     }

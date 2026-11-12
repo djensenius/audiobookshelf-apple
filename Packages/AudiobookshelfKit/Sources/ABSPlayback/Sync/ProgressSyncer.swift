@@ -150,9 +150,9 @@ public final class ProgressSyncer {
     private var queuedSyncSessionID: String?
     /// Whether a ``flush()`` joined the queued `/sync`, so it goes out despite a backoff.
     private var queuedSyncIgnoresBackoff = false
-    /// The `/sync` inside `service.syncSession` now, resolved when the call returns. Its
-    /// session's final close waits for it; queued reports don't count.
-    private var inFlightSync: (sessionID: String, done: PlaybackCloseResult<Void>)?
+    /// The `/sync` inside `service.syncSession` now, resolved when the call returns, with the
+    /// listening time it reports. Its session's final close waits for it; queued reports don't count.
+    private var inFlightSync: (sessionID: String, done: PlaybackCloseResult<Void>, listened: TimeInterval)?
     private var tail: Task<Void, Never>?
     private var persistenceTail: Task<Void, Never>?
     /// Test seam: hold local persistence independently of transport.
@@ -216,12 +216,20 @@ public final class ProgressSyncer {
         observer = source.addObserver { [weak self] event in self?.handle(event) }
         source.finalCloseReport = { [weak self] closing in
             guard let self else { return nil }
-            // Read before closeReport ends the session: a 404's lookup compares with it.
-            let ackedTotal = current?.sessionID == closing.sessionID ? current?.ackedTotal ?? 0 : 0
+            // Read before closeReport ends the session: a 404's lookup compares with them. A
+            // `/sync` still out may apply after the close; the lookup allows for that only when
+            // no earlier report's outcome is unknown too, so either outcome tells.
+            let session = current?.sessionID == closing.sessionID ? current : nil
+            let ackedTotal = session?.ackedTotal ?? 0
+            var inFlightTotal: TimeInterval = 0
+            if let session, session.unreconciled == nil, let sync = inFlightSync, sync.sessionID == session.sessionID {
+                inFlightTotal = sync.listened
+            }
             guard let handoff = closeReport(for: closing) else { return nil }
             // closeReport just queued the closing position: its token stamps the retained close.
             retainClose(
-                handoff, for: closing, ackedTotal: ackedTotal, token: pendingPositions[closing.key]?.token)
+                handoff, for: closing, ackedTotal: ackedTotal, inFlightTotal: inFlightTotal,
+                token: pendingPositions[closing.key]?.token)
             return handoff
         }
         source.quiesceProgressTransport = { [weak self] in self?.quiesceTransport() }
@@ -554,7 +562,7 @@ public final class ProgressSyncer {
         let outcome: SessionAudioOutcome
         // No suspension between the guard above and the call: a close sees it in flight.
         let done = PlaybackCloseResult<Void>()
-        inFlightSync = (sessionID, done)
+        inFlightSync = (sessionID, done, listened)
         do {
             defer {
                 done.resolve(.success(()))

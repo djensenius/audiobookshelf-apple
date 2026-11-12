@@ -23,36 +23,45 @@ struct CloseReconciliationTests {
         return try JSONDecoder().decode(ListeningSessionsPage.self, from: data)
     }
 
-    /// Stored record (`nil`: not on the page), the close's acknowledged time, stored sessions
-    /// beyond the page, and the verdict.
-    nonisolated static let records: [(Double?, Double, Int, CloseReconciliation)] = [
-        (20, 15, 0, .applied),
-        (19.6, 15, 0, .applied),
+    /// Stored record (`nil`: not on the page), the close's acknowledged time, the time of a
+    /// `/sync` still out at the close, stored sessions beyond the page, and the verdict.
+    nonisolated static let records: [(Double?, Double, Double, Int, CloseReconciliation)] = [
+        (20, 15, 0, 0, .applied),
+        (19.6, 15, 0, 0, .applied),
         // Another report's time the client never learned of: still counted.
-        (25, 15, 0, .applied),
-        (15, 15, 0, .notApplied),
-        (15.4, 15, 0, .notApplied),
-        (19.4, 15, 0, .undecidable),
-        (17, 15, 0, .undecidable),
-        (14.4, 15, 0, .undecidable),
+        (25, 15, 0, 0, .applied),
+        (15, 15, 0, 0, .notApplied),
+        (15.4, 15, 0, 0, .notApplied),
+        (19.4, 15, 0, 0, .undecidable),
+        (17, 15, 0, 0, .undecidable),
+        (14.4, 15, 0, 0, .undecidable),
+        // A `/sync` of 15 s was still out: the record counts the close only above both.
+        (35, 15, 15, 0, .applied),
+        (30, 15, 15, 0, .notApplied),
+        (15, 15, 15, 0, .notApplied),
+        (25, 15, 15, 0, .undecidable),
+        (20, 15, 15, 0, .undecidable),
+        // The `/sync` of 5 s or the close: either could have made 20.
+        (20, 15, 5, 0, .undecidable),
         // No record: the server stores none before a session has listening time.
-        (nil, 0, 0, .notApplied),
-        (nil, 0, 1, .undecidable),
-        (nil, 15, 0, .undecidable),
+        (nil, 0, 0, 0, .notApplied),
+        (nil, 0, 15, 0, .notApplied),
+        (nil, 0, 0, 1, .undecidable),
+        (nil, 15, 0, 0, .undecidable),
     ]
 
-    /// Within the 0.5 s tolerance, a record with the close's 5 s above what was acknowledged
-    /// applied it and one at what was acknowledged didn't; anything else can't tell. A missing
-    /// record says "not applied" only when nothing was acknowledged and every stored session of
-    /// the media is on the page.
+    /// Within the 0.5 s tolerance, a record with the close's 5 s above what was acknowledged and
+    /// what was still out applied it, and one at what was acknowledged, with or without what was
+    /// still out, didn't; anything else can't tell. A missing record says "not applied" only when
+    /// nothing was acknowledged and every stored session of the media is on the page.
     @Test(arguments: records)
     func theStoredRecordDecides(
-        record: Double?, ackedTotal: Double, unlisted: Int, verdict: CloseReconciliation
+        record: Double?, ackedTotal: Double, inFlightTotal: Double, unlisted: Int, verdict: CloseReconciliation
     ) throws {
         let close = PendingSessionCloseDTO(
             key: MediaKey(serverConnectionID: UUID(), libraryItemId: "a"), sessionID: "session-1",
             currentTime: 20, timeListened: 5, duration: 3600, positionEditedAt: nil, capturedAt: .now,
-            ackedTotal: ackedTotal)
+            ackedTotal: ackedTotal, inFlightTotal: inFlightTotal)
         let listed = [("session-2", 30.0)] + (record.map { [("session-1", $0)] } ?? [])
         let page = try Self.page(listed, total: listed.count + unlisted)
 
@@ -68,7 +77,7 @@ struct CloseReconciliationTests {
         let f = try CloseRetryFixture()
         try await f.stopSessionOne(record == "applied" ? .appliedResponseLost : .unapplied)
         if record != "applied" { await f.model.restart() }
-        if record == "item gone" { f.s.service.state.withLock { $0.recordsErrors = [.notFound] } }
+        if record == "item gone" { f.s.service.state.withLock { $0.recordsErrors = [APIError.notFound] } }
 
         await f.drainWhenDue()
 
@@ -95,19 +104,21 @@ struct CloseReconciliationTests {
     /// A lookup that fails keeps the close, and later drains look again once due, backing off
     /// as resends do, without resending: the 404 already said the session is gone. Once a lookup
     /// answers, the record decides; after `maxCloseLookups` failures the close is dropped.
-    /// Offline nothing is learned or counted: the close stays as it was, so the next drain
-    /// resends it and meets the 404 again.
-    @Test(arguments: ["recovers", "keeps failing", "offline"])
+    /// Offline or cancelled nothing is learned or counted: the close stays as it was, so the next
+    /// drain resends it and meets the 404 again.
+    @Test(arguments: ["recovers", "keeps failing", "offline", "cancelled"])
     func aFailedLookupIsRetriedWithoutAResend(lookup: String) async throws {
         let f = try CloseRetryFixture()
         try await f.stopSessionOne(.unapplied)
         await f.model.restart()
         let limit = ProgressSyncer.maxCloseLookups
-        let errors: [APIError?] =
+        let learnsNothing = lookup == "offline" || lookup == "cancelled"
+        let errors: [any Error] =
             switch lookup {
-            case "recovers": [.http(status: 503, message: nil), .http(status: 500, message: nil)]
-            case "keeps failing": Array(repeating: .http(status: 500, message: nil), count: limit)
-            default: [.network(.notConnectedToInternet)]
+            case "recovers": [APIError.http(status: 503, message: nil), APIError.http(status: 500, message: nil)]
+            case "keeps failing": Array(repeating: APIError.http(status: 500, message: nil), count: limit)
+            case "cancelled": [CancellationError()]
+            default: [APIError.network(.notConnectedToInternet)]
             }
         f.s.service.state.withLock { $0.recordsErrors = errors }
 
@@ -115,8 +126,8 @@ struct CloseReconciliationTests {
 
         #expect(f.s.service.closes.map(\.id) == ["session-1"])
         let kept = try #require(try await f.queued().first)
-        #expect(kept.failedLookups == (lookup == "offline" ? 0 : 1))
-        #expect(kept.attempts == (lookup == "offline" ? 1 : 2))
+        #expect(kept.failedLookups == (learnsNothing ? 0 : 1))
+        #expect(kept.attempts == (learnsNothing ? 1 : 2))
         #expect(kept.lastAttemptAt == f.s.h.clock.now)
         #expect(f.s.syncer.drainWake != nil)
 
@@ -132,11 +143,91 @@ struct CloseReconciliationTests {
         }
 
         #expect(f.s.service.log.filter { $0 == "records a" }.count == lookups)
-        #expect(f.s.service.closes.map(\.id) == (lookup == "offline" ? ["session-1", "session-1"] : ["session-1"]))
-        #expect(f.verdicts == (lookup == "offline" ? [.send, .send] : [.send]))
+        #expect(f.s.service.closes.map(\.id) == (learnsNothing ? ["session-1", "session-1"] : ["session-1"]))
+        #expect(f.verdicts == (learnsNothing ? [.send, .send] : [.send]))
         #expect(try await f.queued().isEmpty)
         #expect(f.s.syncer.closeQueue.carried.map(\.seconds) == (lookup == "keeps failing" ? [] : [5]))
         #expect(try await f.listened("session-1") == 15)
+    }
+
+    /// A lookup that fails once the syncer stopped saves nothing: a replacement scope's drain
+    /// may have settled the close, and carried its time, meanwhile.
+    @Test(arguments: ["detach", "quiesce"])
+    func aLookupFailingAfterTheSyncerStopsSavesNothing(stop: String) async throws {
+        let f = try CloseRetryFixture()
+        try await f.stopSessionOne(.unapplied)
+        await f.model.restart()
+        let lookup = CloseRetryFixture.Request(.unapplied)
+        defer { lookup.release() }
+        await f.model.enqueue(lookup, for: .records)
+        f.s.h.clock.advance(by: f.s.syncer.reconcileDelay)
+        let drain = Task { await f.s.syncer.drainPendingProgress() }
+        await lookup.arrived.wait()
+
+        if stop == "detach" { f.s.syncer.detach() } else { f.s.syncer.quiesceTransport() }
+        // The replacement scope settles the close.
+        try await f.s.store.deleteSessionClose(serverConnectionID: f.s.h.connectionID, sessionID: "session-1")
+        lookup.release()
+        await drain.value
+
+        #expect(f.s.service.closes.map(\.id) == ["session-1"])
+        #expect(f.s.service.log.filter { $0 == "records a" }.count == 1)
+        #expect(try await f.queued().isEmpty)
+        #expect(f.s.syncer.closeQueue.carried.isEmpty)
+        #expect(f.s.syncer.drainWake == nil)
+    }
+
+    /// A `/sync` still out at the close may apply after it: its 15 s were applied, the close's
+    /// 5 s weren't, so the record stands at 30 and the 5 s are carried. When an earlier report's
+    /// outcome is unknown too, the record can't tell the `/sync` from that report and the close:
+    /// here the lost 10 s and the applied close make the 15 s of a `/sync` that never applied,
+    /// so only "applied" holds, and nothing is counted twice.
+    @Test(arguments: [false, true])
+    func aSyncStillOutAtTheCloseIsAllowedFor(earlierUnknown: Bool) async throws {
+        let f = try CloseRetryFixture()
+        let late = CloseRetryFixture.Request(earlierUnknown ? .unapplied : .acknowledged)
+        defer { late.release() }
+        await f.s.coordinator.play(itemID: "a")
+        if earlierUnknown {
+            let lost = CloseRetryFixture.Request(.appliedResponseLost)
+            lost.release()
+            await f.model.enqueue(lost, for: .sync)
+            await f.s.play(for: 10)
+            await f.s.syncer.flush()
+        } else {
+            await f.s.play(for: 15)
+        }
+        await f.model.enqueue(late, for: .sync)
+        await f.s.play(for: 15, settling: false)
+        await late.arrived.wait()
+        // The server takes the `/sync` before the close; the client hears of it only after.
+        late.enter.open()
+        late.apply.open()
+        await late.applicationFinished.wait()
+        await f.s.play(for: 5, settling: false)
+        let close = CloseRetryFixture.Request(earlierUnknown ? .appliedResponseLost : .unapplied)
+        close.release()
+        await f.model.enqueue(close, for: .close)
+        f.s.coordinator.stop()
+        late.respond.open()
+        await f.s.coordinator.waitForPendingCloses()
+        await f.s.settle()
+        await f.s.syncer.closeQueue.waitForCaptures()
+
+        let kept = try #require(try await f.queued().first)
+        #expect(kept.timeListened == 5)
+        #expect(kept.ackedTotal == (earlierUnknown ? 0 : 15))
+        #expect(kept.inFlightTotal == (earlierUnknown ? 0 : 15))
+        #expect(try await f.listened("session-1") == (earlierUnknown ? 15 : 30))
+
+        await f.model.restart()
+        await f.drainWhenDue()
+
+        #expect(f.verdicts == [.send])
+        #expect(f.s.service.closes.map(\.id) == ["session-1"])
+        #expect(f.s.service.log.filter { $0 == "records a" }.count == 1)
+        #expect(try await f.queued().isEmpty)
+        #expect(f.s.syncer.closeQueue.carried.map(\.seconds) == (earlierUnknown ? [] : [5]))
     }
 
     /// A close whose resend admission keeps holding back (here, every read of the server's

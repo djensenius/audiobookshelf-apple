@@ -37,26 +37,35 @@ extension ProgressSyncer {
     /// A 404'd close's outcome, from `page`: the first page of its media's stored sessions.
     ///
     /// The server saves a session's listening time with each report and keeps the record once
-    /// the session ends. The close's `ackedTotal` is what the server acknowledged before it; an
-    /// earlier report whose answer was lost can only add to the record. So, within
-    /// ``reconcileTolerance``, a record the close's time above `ackedTotal` applied it, one at
-    /// `ackedTotal` didn't, and any other can't tell. The server stores no record before the
-    /// session has listening time: with nothing acknowledged and every record on the page, a
-    /// missing one never applied. Checking "applied" first means "not applied" is never wrong.
+    /// the session ends. The close's `ackedTotal` is what the server acknowledged before it, and
+    /// its `inFlightTotal` what a `/sync` still out then reported, which may or may not have
+    /// applied; an earlier report whose answer was lost can only add to the record. So, within
+    /// ``reconcileTolerance``, a record holding all of these and the close applied it. One at
+    /// `ackedTotal`, or at `ackedTotal + inFlightTotal`, didn't, unless it also matches the close
+    /// applied without the `/sync`; any other can't tell. (`inFlightTotal` is 0 whenever an
+    /// earlier report's outcome is unknown too: the second match would prove nothing then.)
+    /// The server stores no record before the session has listening time: with nothing
+    /// acknowledged and every record on the page, a missing one shows nothing applied, the
+    /// `/sync` included.
     static func reconcileClose(_ close: PendingSessionCloseDTO, page: ListeningSessionsPage) -> CloseReconciliation {
         let tolerance = reconcileTolerance
+        let (acked, inFlight) = (close.ackedTotal, close.inFlightTotal)
         guard let record = page.sessions.first(where: { $0.id == close.sessionID }) else {
-            return page.total <= page.sessions.count && close.ackedTotal == 0 ? .notApplied : .undecidable
+            return page.total <= page.sessions.count && acked == 0 ? .notApplied : .undecidable
         }
-        if record.timeListening >= close.ackedTotal + close.timeListened - tolerance { return .applied }
-        return abs(record.timeListening - close.ackedTotal) <= tolerance ? .notApplied : .undecidable
+        let total = record.timeListening
+        if total >= acked + inFlight + close.timeListened - tolerance { return .applied }
+        let matches = { (expected: Double) in abs(total - expected) <= tolerance }
+        let notApplied = matches(acked) || matches(acked + inFlight)
+        return notApplied && !matches(acked + close.timeListened) ? .notApplied : .undecidable
     }
 
     /// Settles a retained close whose resend the server answered 404, or whose session must have
     /// ended, by its session's stored record (``reconcileClose(_:page:)``). A lookup that fails
     /// keeps it: later drains look again after ``closeRetryDelay(afterAttempts:)``, resending
-    /// nothing, and after ``maxCloseLookups`` failures it is undecidable. Offline, nothing
-    /// changes. A lookup for a missing item (404) or one refused for good is undecidable.
+    /// nothing, and after ``maxCloseLookups`` failures it is undecidable. Offline, cancelled or
+    /// once the syncer stopped, nothing changes. A lookup for a missing item (404) or one
+    /// refused for good is undecidable.
     /// Returns `false` when the drain should stop.
     func reconcileMissingClose(_ close: PendingSessionCloseDTO) async -> Bool {
         let verdict: CloseReconciliation
@@ -69,12 +78,16 @@ extension ProgressSyncer {
             verdict = .undecidable
         } catch {
             logger.error("Looking up a closed session failed: \(Self.caseName(error), privacy: .public)")
-            if close.failedLookups + 1 >= Self.maxCloseLookups, !Self.isOffline(error) {
+            // Offline or cancelled, nothing was learned. A stopped syncer saves nothing either: a
+            // replacement scope's drain may have settled the close (and carried its time) since.
+            let learnedNothing =
+                isDetached || isTransportQuiesced || error is CancellationError || Self.isOffline(error)
+            if close.failedLookups + 1 >= Self.maxCloseLookups, !learnedNothing {
                 verdict = .undecidable
             } else {
-                // Offline nothing was learned; otherwise the failure counts toward the bound.
+                // Unless nothing was learned, the failure counts toward the bound.
                 drainOutcome.failed = true
-                return Self.isOffline(error) ? false : await keepUnreconciledClose(close)
+                return learnedNothing ? false : await keepUnreconciledClose(close)
             }
         }
         // A detached syncer's close waits for the next scope's drain.

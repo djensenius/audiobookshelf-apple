@@ -28,14 +28,15 @@ struct SessionCloseQueueTests {
     }
 
     /// A close survives a relaunch, oldest capture first and per connection, with what a 404's
-    /// lookup reads (`ackedTotal`, `failedLookups`); saving again replaces it, and deleting a
-    /// missing one isn't an error.
+    /// lookup reads (`ackedTotal`, `inFlightTotal`, `failedLookups`); saving again replaces it,
+    /// and deleting a missing one isn't an error.
     @Test func closesPersistPerConnectionInCaptureOrder() async throws {
         let container = try DataStack(location: .inMemory).container
         let store = LocalProgressStore(modelContainer: container)
         let other = MediaKey(serverConnectionID: UUID(), libraryItemId: "a")
         var first = close("s-1", at: t0)
         first.ackedTotal = 15
+        first.inFlightTotal = 15
         try await store.saveSessionClose(close("s-2", at: t0 + 1))
         try await store.saveSessionClose(first)
         try await store.saveSessionClose(close("s-1", at: t0, key: other))
@@ -43,6 +44,7 @@ struct SessionCloseQueueTests {
         retried.attempts = 2
         retried.lastAttemptAt = t0 + 5
         retried.ackedTotal = 12.5
+        retried.inFlightTotal = 7.5
         retried.failedLookups = 1
         try await store.saveSessionClose(retried)
 
@@ -50,6 +52,7 @@ struct SessionCloseQueueTests {
         let closes = try await relaunched.sessionCloses(for: key.serverConnectionID)
         #expect(closes == [first, retried])
         #expect(closes.map(\.ackedTotal) == [15, 12.5] && closes.map(\.failedLookups) == [0, 1])
+        #expect(closes.map(\.inFlightTotal) == [15, 7.5])
         #expect(try await relaunched.sessionCloses(for: other.serverConnectionID).map(\.key) == [other])
 
         try await relaunched.deleteSessionClose(serverConnectionID: key.serverConnectionID, sessionID: "s-1")
