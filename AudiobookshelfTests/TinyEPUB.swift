@@ -72,6 +72,50 @@ enum TinyEPUB {
         return zip(entries)
     }
 
+    /// The book ending in a ZIP64 end record whose extensible data has a length of -6, which steps
+    /// JSZip 3.10.1's reader back onto the same field forever.
+    static var loopingZIP64: Data {
+        let book = data
+        let end = book.count - 22
+        func field(_ at: Int, _ size: Int) -> UInt64 {
+            (0..<size).reduce(0) { $0 | UInt64(book[end + at + $1]) << (8 * $1) }
+        }
+        var archive = book.prefix(end)
+        let record = UInt64(archive.count)
+        archive.append(le32(0x0606_4b50))
+        archive.append(le64(44 + 6))  // the record's size: its fixed fields, then the extensible data
+        archive.append(contentsOf: [le16(45), le16(45), le32(0), le32(0)].joined())
+        archive.append(
+            contentsOf: [le64(field(10, 2)), le64(field(10, 2)), le64(field(12, 4)), le64(field(16, 4))].joined())
+        archive.append(le16(1) + le32(0xFFFF_FFFA))  // an id, then the length -6
+        archive.append(le32(0x0706_4b50) + le32(0) + le64(record) + le32(1))  // the ZIP64 locator
+        archive.append(le32(0x0605_4b50))
+        archive.append(contentsOf: [le16(0xFFFF), le16(0xFFFF), le16(0xFFFF), le16(0xFFFF)].joined())
+        archive.append(le32(0xFFFF_FFFF) + le32(0xFFFF_FFFF) + le16(0))
+        return archive
+    }
+
+    /// An archive of one empty file whose `nameLength`-byte local name `count` directory entries
+    /// share, each with a one-byte name of its own.
+    static func sharingOneName(nameLength: Int, count: Int) -> Data {
+        var archive = le32(0x0403_4b50) + le16(20)
+        archive.append(header(method: 0, crc: 0, compressedSize: 0, size: 0, nameLength: UInt16(nameLength)))
+        archive.append(le16(0) + Data(repeating: 0x61, count: nameLength))
+        var directory = Data()
+        for _ in 0..<count {
+            directory.append(le32(0x0201_4b50) + le16(20) + le16(20))
+            directory.append(header(method: 0, crc: 0, compressedSize: 0, size: 0, nameLength: 1))
+            directory.append(contentsOf: [le16(0), le16(0), le16(0), le16(0), le32(0), le32(0)].joined())
+            directory.append(0x61)
+        }
+        let directoryOffset = UInt32(archive.count)
+        archive.append(directory)
+        archive.append(contentsOf: [le32(0x0605_4b50), le16(0), le16(0)].joined())
+        archive.append(le16(UInt16(count)) + le16(UInt16(count)) + le32(UInt32(directory.count)))
+        archive.append(le32(directoryOffset) + le16(0))
+        return archive
+    }
+
     /// A ZIP of `entries`, in order.
     private static func zip(_ entries: [Entry]) -> Data {
         var archive = Data()
@@ -126,6 +170,7 @@ enum TinyEPUB {
 
     private static func le16(_ value: UInt16) -> Data { withUnsafeBytes(of: value.littleEndian) { Data($0) } }
     private static func le32(_ value: UInt32) -> Data { withUnsafeBytes(of: value.littleEndian) { Data($0) } }
+    private static func le64(_ value: UInt64) -> Data { withUnsafeBytes(of: value.littleEndian) { Data($0) } }
 
     private static func crc32(_ data: Data) -> UInt32 {
         var crc: UInt32 = 0xFFFF_FFFF

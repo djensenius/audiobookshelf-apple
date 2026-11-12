@@ -94,12 +94,13 @@ private final class ReaderPage {
         }
     }
 
-    /// Opens `absreader://book/<id>.epub`.
-    func open(_ id: String, settings: [String: Any] = [:]) async throws {
-        let command: [String: Any] = [
+    /// Opens `absreader://book/<id>.epub`, with cached `locations` if given.
+    func open(_ id: String, settings: [String: Any] = [:], locations: String? = nil) async throws {
+        var command: [String: Any] = [
             "type": "open", "url": "absreader://book/\(id).epub",
             "settings": settings.merging(["themeRules": [:] as [String: Any]]) { mine, _ in mine },
         ]
+        command["locations"] = locations
         try await controller.send(JSONSerialization.data(withJSONObject: command))
     }
 
@@ -115,10 +116,13 @@ private final class ReaderPage {
     }
 
     /// Replaces epub.js with a stand-in whose sections fail to display with `displayError`, if
-    /// given, and whose table of contents never loads unless `navigation`.
-    func fakeEPUBJS(displayError: String? = nil, navigation: Bool = true) async throws {
+    /// given, or never finish displaying while `window.fakeOptions.displayHangs`, and whose table of
+    /// contents never loads unless `navigation`. Its starting rendition takes the spread `true`, as
+    /// epub.js's does for a book whose metadata says `both`. The latest book and rendition are
+    /// `window.fakeBook` and `window.fakeRendition`; the sections it shows, `window.fakeContents`.
+    func fakeEPUBJS(displayError: String? = nil, displayHangs: Bool = false, navigation: Bool = true) async throws {
         let options = try JSONSerialization.data(withJSONObject: [
-            "displayError": displayError ?? "", "navigation": navigation,
+            "displayError": displayError ?? "", "displayHangs": displayHangs, "navigation": navigation,
         ])
         _ = try await controller.webView.evaluateJavaScript(
             "window.fakeOptions = \(String(decoding: options, as: UTF8.self));\n\(Self.fakeEPUBJS)")
@@ -140,29 +144,55 @@ private final class ReaderPage {
             return target
           }
           window.fakeOverrides = {}
-          const rendition = emitter({
+          window.fakeContents = []
+          // As epub.js's themes do: overrides go on each section's body.
+          const css = function (name, value) {
+            window.fakeContents.forEach(function (contents) {
+              if (value) contents.content.style.setProperty(name, value, 'important')
+              else contents.content.style.removeProperty(name)
+            })
+          }
+          const rendition = window.fakeRendition = emitter({
             settings: {},
             themes: {
               register: function () {}, select: function () {}, fontSize: function () {},
-              font: function (family) { window.fakeOverrides['font-family'] = family },
-              removeOverride: function (name) { delete window.fakeOverrides[name] }
+              font: function (family) { window.fakeOverrides['font-family'] = family; css('font-family', family) },
+              removeOverride: function (name) {
+                window.fakeRemovals = (window.fakeRemovals || 0) + 1
+                delete window.fakeOverrides[name]
+                css(name)
+              }
             },
-            spread: function () {},
+            spread: function (value) { window.fakeSpread = value },
+            started: new Promise(function (resolve) {
+              setTimeout(function () { window.fakeSpread = true; resolve() }, 0)
+            }),
+            getContents: function () { return window.fakeContents },
             currentLocation: function () { return null },
             display: function () {
+              window.fakeDisplays = (window.fakeDisplays || 0) + 1
+              // Held, as epub.js's queue holds it: WebKit fails a call whose promise it collects.
+              if (window.fakeOptions.displayHangs) {
+                return new Promise(function (resolve) { (window.fakeHeld = window.fakeHeld || []).push(resolve) })
+              }
               if (!options.displayError) return Promise.resolve()
               setTimeout(function () { rendition.emit('displayerror', new Error(options.displayError)) }, 0)
               return never
             }
           })
-          return emitter({
+          return window.fakeBook = emitter({
             opened: Promise.resolve(),
             ready: never,
             loaded: { navigation: options.navigation ? Promise.resolve({ toc: [] }) : never },
-            spine: { get: function () { return null } },
+            spine: {
+              get: function () { return null },
+              hooks: { content: { register: function (hook) { window.fakeSpineHook = hook } } }
+            },
             locations: {
-              load: function () {}, length: function () { return 0 },
-              generate: function () { return never }, save: function () { return '' }
+              load: function (locations) { window.fakeLoadedLocations = locations },
+              length: function () { return window.fakeLoadedLocations ? 1 : 0 },
+              generate: function () { window.fakeGenerated = true; return never },
+              save: function () { return '' }
             },
             renderTo: function () { return rendition },
             destroy: function () {}
@@ -513,6 +543,114 @@ private final class ReaderPage {
 
         #expect(page.last("error")?["phase"] as? String == "applySettings")
         #expect(try await page.evaluate("window.fakeOverrides") == #"{"font-family":"serif"}"#)
+    }
+
+    /// A ZIP64 record whose length points back at itself, which would hang JSZip and the page, is
+    /// refused before JSZip reads it.
+    @Test(.timeLimit(.minutes(1))) func aLoopingZIP64RecordIsRefused() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.loopingZIP64 })
+
+        await #expect(throws: (any Error).self) { try await page.open("loop") }
+
+        let error = try #require(page.last("error"))
+        #expect(error["phase"] as? String == "open")
+        #expect((error["message"] as? String)?.contains("not an archive the reader can open") == true)
+    }
+
+    /// Entries sharing one long local name are refused once the names they'd decode pass 8 MiB.
+    @Test(.timeLimit(.minutes(1))) func namesSharedAcrossEntriesAreBounded() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.sharingOneName(nameLength: 60000, count: 150) })
+
+        await #expect(throws: (any Error).self) { try await page.open("names") }
+
+        #expect((page.last("error")?["message"] as? String)?.contains("not an archive the reader can open") == true)
+    }
+
+    /// Clearing the reader's font leaves a section's own inline font alone, or puts it back.
+    @Test(.timeLimit(.minutes(1))) func theBooksOwnFontSurvivesTheReaders() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+        try await page.open("tiny")
+        _ = try await page.evaluate(
+            """
+            (function () {
+              const section = new DOMParser().parseFromString(
+                '<html xmlns="http://www.w3.org/1999/xhtml"><head/><body style="font-family: Georgia"/></html>',
+                'application/xhtml+xml')
+              window.fakeSpineHook(section)
+              window.fakeContents.push({ content: section.querySelector('body') })
+              return 1
+            })()
+            """)
+        let body = "window.fakeContents[0].content.style"
+        func apply(_ font: String?) async throws {
+            let settings = font.map { #","fontFamily":"\#($0)""# } ?? ""
+            try await page.controller.send(
+                Data(#"{"type":"applySettings","settings":{"themeRules":{}\#(settings)}}"#.utf8))
+        }
+
+        try await apply(nil)
+        #expect(try await page.evaluate("\(body).fontFamily") == #""Georgia""#)
+        #expect(try await page.evaluate("window.fakeRemovals === undefined") == "true")
+        try await apply("sans-serif")
+        #expect(try await page.evaluate("\(body).fontFamily") == #""sans-serif""#)
+        try await apply(nil)
+        #expect(try await page.evaluate("\(body).fontFamily") == #""Georgia""#)
+        #expect(try await page.evaluate("\(body).getPropertyPriority('font-family')") == #""""#)
+    }
+
+    /// The reader's spread wins over the one epub.js takes from the book's metadata as it starts.
+    @Test(.timeLimit(.minutes(1))) func theReadersSpreadOutlastsTheBooks() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+
+        try await page.open("tiny", settings: ["spread": "none"])
+
+        #expect(try await page.evaluate("window.fakeSpread") == #""none""#)
+    }
+
+    /// Cached locations that aren't an array of CFIs aren't loaded; they're generated afresh.
+    @Test(.timeLimit(.minutes(1))) func unusableCachedLocationsAreRegenerated() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+
+        try await page.open("tiny", locations: "null")
+        #expect(try await page.evaluate("window.fakeLoadedLocations === undefined") == "true")
+        #expect(try await page.evaluate("window.fakeGenerated") == "true")
+
+        try await page.open("tiny", locations: #"["epubcfi(/6/2)"]"#)
+        #expect(try await page.evaluate("window.fakeLoadedLocations") == #"["epubcfi(/6/2)"]"#)
+    }
+
+    /// Replacing a book settles a display it left pending, and its pending display doesn't silence
+    /// the new book's display errors.
+    @Test(.timeLimit(.minutes(1))) func replacingABookSettlesItsPendingDisplay() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(displayHangs: true)
+        let first = Task { try await page.open("first") }
+        while try await page.evaluate("window.fakeDisplays > 0") != "true" {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = try await page.evaluate("window.fakeOptions.displayHangs = false")
+
+        try await page.open("second")
+        await #expect(throws: (any Error).self) { try await first.value }
+        #expect(page.last("error") == nil)
+
+        _ = try await page.evaluate("window.fakeRendition.emit('displayerror', new Error('Bad link'))")
+        let error = try await page.next("error")
+        #expect(error["phase"] as? String == "display")
+        #expect(error["message"] as? String == "Bad link")
+    }
+
+    /// Without a navigation document epub.js has no page list, which every relocation reads.
+    @Test(.timeLimit(.minutes(1))) func aBookWithoutNavigationStillHasAPageList() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(navigation: false)
+
+        try await page.open("tiny")
+
+        #expect(try await page.evaluate("window.fakeBook.pageList.pageFromCfi('epubcfi(/6/2)')") == "-1")
     }
 
     @Test func aCommandMustBeAJSONObject() async {

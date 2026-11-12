@@ -11,11 +11,17 @@
   // once and its actual output counted, since a ZIP's size fields can lie.
   const MAX_ENTRY_BYTES = 64 * 1024 * 1024
   const MAX_BOOK_BYTES = 512 * 1024 * 1024
+  // What the archive's directory may list, checked before JSZip reads it: entries, and the bytes of
+  // names, extra fields and comments it decodes (a local name counts once per entry using it).
+  const MAX_ENTRIES = 10000
+  const MAX_METADATA_BYTES = 8 * 1024 * 1024
   // How long the table of contents may take once the book is open; it comes from the archive
   // already in memory, so only a missing navigation document takes this long.
   const NAVIGATION_TIMEOUT_MS = 10000
   // The fonts the reader can override the book's with (ReaderSettings.FontFamily's raw values).
   const FONT_FAMILIES = ['serif', 'sans-serif']
+  // Where a section's own inline font is kept, since epub.js clears it with the reader's override.
+  const BOOK_FONT = 'data-abs-book-font'
 
   /** @type {any} */ let book = null
   /** @type {any} */ let rendition = null
@@ -25,8 +31,21 @@
   // Until the first display lands, relocations are epub.js settling on the start, not the reader.
   let displaying = false
   let lastRelocation = null
-  // Displays a command is awaiting: their failures reach that command, not the `displayerror` post.
-  let pendingDisplays = 0
+  // The open book's own state: the displays a command is awaiting (their failures reach that
+  // command, not the `displayerror` post), whether the reader's font is applied, and `closed`,
+  // which rejects when the book is replaced so nothing awaiting it is stranded.
+  /** @type {any} */ let session = null
+
+  function newSession() {
+    let close
+    const closed = new Promise(function (resolve, reject) {
+      close = function () {
+        reject(new Error('The book was closed'))
+      }
+    })
+    closed.catch(function () {})
+    return { pendingDisplays: 0, fontApplied: false, closed: closed, close: close }
+  }
 
   function post(event) {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.absReader
@@ -98,15 +117,45 @@
     rendition.themes.select('abs')
     rendition.themes.fontSize((Number(settings.fontScale) || 100) + '%')
     // As the legacy reader does: the font overrides the book's own (`!important`).
-    if (settings.fontFamily) rendition.themes.font(settings.fontFamily)
-    else rendition.themes.removeOverride('font-family')
+    if (settings.fontFamily) {
+      rendition.themes.font(settings.fontFamily)
+      session.fontApplied = true
+    } else if (session.fontApplied) {
+      rendition.themes.removeOverride('font-family')
+      restoreBookFonts(rendition)
+      session.fontApplied = false
+    }
     const gap = columnGap(settings)
     rendition.settings.gap = gap
     if (rendition.manager) rendition.manager.settings.gap = gap
-    rendition.spread(settings.spread === 'none' ? 'none' : 'auto', MIN_SPREAD_WIDTH)
+    applySpread(rendition)
+  }
+
+  function applySpread(shown) {
+    shown.spread(settings.spread === 'none' ? 'none' : 'auto', MIN_SPREAD_WIDTH)
+  }
+
+  // Keeps a section's inline font (a spine content hook, before epub.js applies any override).
+  function keepBookFont(section) {
+    const body = section.querySelector('body')
+    const value = body && body.style && body.style.getPropertyValue('font-family')
+    if (value) body.setAttribute(BOOK_FONT, value + '|' + body.style.getPropertyPriority('font-family'))
+  }
+
+  // epub.js's `removeOverride` deletes each section's inline font, its own included; put it back.
+  function restoreBookFonts(shown) {
+    shown.getContents().forEach(function (contents) {
+      const kept = contents.content && contents.content.getAttribute(BOOK_FONT)
+      if (!kept) return
+      const split = kept.lastIndexOf('|')
+      contents.content.style.setProperty('font-family', kept.slice(0, split), kept.slice(split + 1))
+    })
   }
 
   function closeBook() {
+    // Settle what's awaiting the old book first: epub.js's destroy can leave its displays pending.
+    if (session) session.close()
+    session = null
     if (book) book.destroy()
     book = null
     rendition = null
@@ -161,8 +210,61 @@
     })
   }
 
+  // JSZip 3.10.1 trusts the archive's directory: a ZIP64 record with a negative length loops it
+  // forever, and many entries can share one long local name. This walks the directory first,
+  // bounded, and fails on anything out of bounds. Lengths read unsigned and every step moves on.
+  function checkArchive(data) {
+    const view = new DataView(data)
+    const fail = function () {
+      throw new Error('The book is not an archive the reader can open')
+    }
+    const u16 = function (at) {
+      return view.getUint16(at, true)
+    }
+    const u32 = function (at) {
+      return view.getUint32(at, true)
+    }
+    // The end record: 22 bytes, then a comment of up to 65,535; JSZip takes the last one.
+    let end = view.byteLength - 22
+    const earliest = Math.max(0, view.byteLength - 65557)
+    while (end >= earliest && u32(end) !== 0x06054b50) end--
+    if (end < earliest) fail()
+    // All-ones fields mean ZIP64, which a book within the expansion limits never needs.
+    for (const at of [4, 6, 8, 10]) if (u16(end + at) === 0xffff) fail()
+    const start = u32(end + 16)
+    if (u32(end + 12) === 0xffffffff || start === 0xffffffff || start + u32(end + 12) !== end) fail()
+
+    let entries = 0
+    let metadata = 0
+    for (let at = start; at < end; entries++) {
+      if (entries >= MAX_ENTRIES || at + 46 > end || u32(at) !== 0x02014b50) fail()
+      const compressedSize = u32(at + 20)
+      const name = u16(at + 28)
+      const extra = u16(at + 30)
+      const comment = u16(at + 32)
+      const local = u32(at + 42)
+      if ([compressedSize, u32(at + 24), local].indexOf(0xffffffff) !== -1 || u16(at + 34) === 0xffff) fail()
+      const next = at + 46 + name + extra + comment
+      if (next > end) fail()
+      // Each extra field record must fit in the extra field.
+      const extraEnd = at + 46 + name + extra
+      for (let field = at + 46 + name; field + 4 <= extraEnd; field += 4 + u16(field + 2)) {
+        if (field + 4 + u16(field + 2) > extraEnd) fail()
+      }
+      // The local header, its name and extra field, and the data must lie before the directory.
+      if (local + 30 > start || u32(local) !== 0x04034b50) fail()
+      const localName = u16(local + 26)
+      const localExtra = u16(local + 28)
+      if (local + 30 + localName + localExtra + compressedSize > start) fail()
+      metadata += name + extra + comment + localName + localExtra
+      if (metadata > MAX_METADATA_BYTES) fail()
+      at = next
+    }
+  }
+
   // Fails when the archive inflates past the limits, before epub.js inflates any of it.
   async function checkExpansion(data) {
+    checkArchive(data)
     const zip = await window.JSZip.loadAsync(data)
     let total = 0
     for (const entry of Object.values(zip.files)) {
@@ -190,20 +292,33 @@
   }
 
   // Displays `target`. epub.js reports a section it can't render only as `displayerror` and leaves
-  // `display`'s promise pending, so this settles on either.
-  async function display(shown, target) {
+  // `display`'s promise pending, so this settles on either, or on the book being closed.
+  async function display(current, shown, target) {
     let onError
     const failed = new Promise(function (resolve, reject) {
       onError = reject
     })
     shown.on('displayerror', onError)
-    pendingDisplays += 1
+    current.pendingDisplays += 1
     try {
-      return await Promise.race([shown.display(target), failed])
+      return await Promise.race([shown.display(target), failed, current.closed])
     } finally {
-      pendingDisplays -= 1
+      current.pendingDisplays -= 1
       shown.off('displayerror', onError)
     }
+  }
+
+  // Locations cached by an earlier `locationsReady`: a JSON array of CFIs, or nothing usable.
+  // epub.js's `load` keeps whatever parses, even `null`, and then can't display.
+  function cachedLocations(value) {
+    try {
+      const parsed = JSON.parse(String(value))
+      const valid = Array.isArray(parsed) && parsed.length > 0
+      if (valid && parsed.every(function (cfi) { return typeof cfi === 'string' })) return parsed
+    } catch (error) {
+      return null
+    }
+    return null
   }
 
   async function open(command, context) {
@@ -212,6 +327,8 @@
     const opening = validSettings(command.settings)
     closeBook()
     settings = opening
+    session = newSession()
+    const state = session
     const current = ++generation
     context.generation = current
     const isCurrent = function () {
@@ -229,6 +346,7 @@
     if (!isCurrent()) return
 
     book = window.ePub(data, { openAs: 'binary' })
+    book.spine.hooks.content.register(keepBookFont)
     // A book that fails to load leaves `opened` pending for good; epub.js only says `openFailed`.
     const failed = new Promise(function (resolve, reject) {
       book.on('openFailed', reject)
@@ -267,7 +385,7 @@
     })
     shown.on('displayerror', function (error) {
       // One of epub.js's own displays (a command's display reports its failure itself).
-      if (isCurrent() && pendingDisplays === 0) postError('display', error)
+      if (isCurrent() && state.pendingDisplays === 0) postError('display', error)
     })
 
     // epub.js never settles the table of contents when the book's navigation document is missing.
@@ -284,10 +402,13 @@
     try {
       // Not `ready`: that also waits for the table of contents.
       await Promise.race([opened.opened, failed])
+      // epub.js's start takes the book's `rendition:spread` over ours; the reader's setting wins.
+      await Promise.race([shown.started, failed, state.closed])
     } catch (error) {
       throw Object.assign(asError(error), { phase: 'open' })
     }
     if (!isCurrent()) return
+    applySpread(shown)
 
     let target
     if (command.location) {
@@ -299,20 +420,34 @@
     }
 
     let locationsLoaded = false
-    if (command.locations) {
+    const cached = command.locations ? cachedLocations(command.locations) : null
+    if (cached) {
       try {
-        opened.locations.load(command.locations)
+        opened.locations.load(cached)
         locationsLoaded = opened.locations.length() > 0
       } catch (error) {
         locationsLoaded = false
       }
     }
 
+    // epub.js reads the page list on every relocation but only sets it once navigation loads, which
+    // a missing navigation document never does; a later load still replaces this empty one.
+    if (!opened.pageList) {
+      opened.pageList = {
+        pages: [],
+        locations: [],
+        pageFromCfi: function () {
+          return -1
+        },
+        destroy: function () {}
+      }
+    }
+
     displaying = true
     try {
       // As the legacy reader does: the first display can land a page off, the second settles it.
-      await display(shown, target)
-      if (isCurrent()) await display(shown, target)
+      await display(state, shown, target)
+      if (isCurrent()) await display(state, shown, target)
     } catch (error) {
       throw Object.assign(asError(error), { phase: 'display' })
     } finally {
@@ -350,11 +485,11 @@
       case 'open':
         return open(command, context)
       case 'display':
-        return display(requireRendition(), String(command.target || ''))
+        return display(session, requireRendition(), String(command.target || ''))
       case 'next':
-        return requireRendition().next()
+        return Promise.race([requireRendition().next(), session.closed])
       case 'prev':
-        return requireRendition().prev()
+        return Promise.race([requireRendition().prev(), session.closed])
       case 'applySettings':
         return applySettings(command.settings)
       default:
