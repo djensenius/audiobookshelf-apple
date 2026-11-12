@@ -177,14 +177,36 @@ struct HeaderStreamingTransportTests {
         }
     }
 
-    @Test func shortPartialResponseFails() async throws {
+    @Test func rangeClippedAtTheEndOfTheResourceSucceeds() async throws {
         let host = StreamStubProtocol.register(.init(body: Self.body))
         // The stub answers `bytes 900-999/1000` for a request that wants up to byte 1099.
         let request = try await load(
             "https://\(host)/t", range: RequestedRange(offset: 900, length: 200), through: transport())
 
+        #expect(request.error == nil)
+        #expect(request.data == Self.body.subdata(in: 900..<1000))
+    }
+
+    /// A `206` that ends before the requested end, or before the end of the resource for an
+    /// open-ended read, would leave the request unfulfilled.
+    @Test(arguments: [100, nil] as [Int64?])
+    func shortPartialResponseFails(length: Int64?) async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body, rangeEndsAt: 149))
+        let request = try await load(
+            "https://\(host)/t", range: RequestedRange(offset: 100, length: length), through: transport())
+
         #expect(request.error as? HeaderStreamingError == .invalidRange)
         #expect(request.data.isEmpty)
+    }
+
+    @Test func openEndedBodyEndingEarlyFails() async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body, truncatesTo: 20))
+        let request = try await load(
+            "https://\(host)/t", range: RequestedRange(offset: 900, length: nil), wantsContentInformation: false,
+            through: transport())
+
+        #expect((request.error as? URLError)?.code == .networkConnectionLost)
+        #expect(request.data == Self.body.subdata(in: 900..<920))
     }
 
     @Test func bodyEndingEarlyFails() async throws {
@@ -362,6 +384,20 @@ struct HeaderStreamingTransportTests {
             #expect(request.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
             #expect(request.value(forHTTPHeaderField: "Range") == "bytes=0-9")
         }
+    }
+
+    /// A redirect to an unrelated service on this device or the local network is refused even
+    /// where ``RedirectPolicy`` alone would follow it (`http` to `http`, or to `https`).
+    @Test(arguments: [("http", "http://127.0.0.1/track"), ("https", "https://192.168.1.20/track")])
+    func redirectToALocalServiceIsRefused(scheme: String, location: String) async throws {
+        let target = StreamStubProtocol.register(
+            .init(body: Self.body), host: try #require(URL(string: location)?.host()))
+        let origin = StreamStubProtocol.register(.init(redirects: ["/t": location]))
+        let request = try await load(
+            "\(scheme)://\(origin)/t", range: RequestedRange(offset: 0, length: 10), through: transport())
+
+        #expect(request.error as? HeaderStreamingError == .httpStatus(302))
+        #expect(StreamStubProtocol.requests(target).isEmpty)
     }
 
     @Test func downgradeToHTTPIsRefused() async throws {

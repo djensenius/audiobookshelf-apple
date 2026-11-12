@@ -16,6 +16,8 @@ final class StreamStubProtocol: URLProtocol {
         var honorsRange = true
         /// Answers every `Range` request with a `206` from this offset instead of the requested one.
         var rangeStartsAt: Int?
+        /// Ends every `206` at this offset at the latest, short of what was asked.
+        var rangeEndsAt: Int?
         /// Answers a request for one of these paths with a 302 to its URL instead.
         var redirects: [String: String] = [:]
         /// Sends the body in chunks of this many bytes.
@@ -32,7 +34,12 @@ final class StreamStubProtocol: URLProtocol {
     private static let routes = Mutex<[String: Route]>([:])
 
     static func register(_ route: Route) -> String {
-        let host = "\(UUID().uuidString.lowercased()).stream.test"
+        register(route, host: "\(UUID().uuidString.lowercased()).stream.test")
+    }
+
+    /// Serves `route` on a fixed `host`, such as a local address; one test per host.
+    @discardableResult
+    static func register(_ route: Route, host: String) -> String {
         routes.withLock { $0[host] = route }
         return host
     }
@@ -86,7 +93,7 @@ final class StreamStubProtocol: URLProtocol {
         if status == 200, route.honorsRange, let range = request.value(forHTTPHeaderField: "Range"),
             let match = range.firstMatch(of: /^bytes=(\d+)-(\d*)$/), let start = Int(match.1), start < total
         {
-            let requestedEnd = min(Int(match.2) ?? (total - 1), total - 1)
+            let requestedEnd = min(Int(match.2) ?? (total - 1), total - 1, route.rangeEndsAt ?? total)
             // From `rangeStartsAt` when set, through the requested end and at least the requested length.
             let end =
                 route.rangeStartsAt.map { min(max(requestedEnd, $0 + requestedEnd - start), total - 1) } ?? requestedEnd

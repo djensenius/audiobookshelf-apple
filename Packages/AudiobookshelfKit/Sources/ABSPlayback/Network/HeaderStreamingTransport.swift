@@ -13,7 +13,8 @@ import UniformTypeIdentifiers
 /// `Cookie` (reserved names are dropped even if given), no cookie jar, credential store or cache,
 /// and `Accept-Encoding: identity`. Redirects follow ``RedirectPolicy``: a hop that leaves the
 /// track's origin is stripped of the custom headers (it keeps only `Range`), and `https` to `http`
-/// is refused.
+/// is refused. A hop must also pass ``ImageDestination``: the track's own server, or a public
+/// `https` host, never an unrelated service on this device or the local network.
 ///
 /// A `200` answer to a `Range` request (a proxy that drops `Range`) reports no byte-range access,
 /// whatever `Accept-Ranges` says, and fails a load that starts past byte 0 with
@@ -360,9 +361,15 @@ final class HeaderResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URLSe
         else { return fail(HeaderStreamingError.invalidRange) }
         // A `200` starts at byte 0; reading on to the offset would download everything before it.
         if http.statusCode == 200, load.offset > 0 { return fail(HeaderStreamingError.rangeNotHonored) }
-        // A short answer would leave the request unfulfilled.
-        if let wanted = load.remaining, wanted > 0, let last, last < load.offset + wanted - 1 {
-            return fail(HeaderStreamingError.invalidRange)
+        if load.remaining != 0 {
+            // The last byte this load needs: the requested end clipped to the end of the resource,
+            // or that end (else the announced one) when the read is open-ended.
+            let resourceEnd = information.contentLength.map { $0 - 1 }
+            let wantedEnd = load.remaining.map { load.offset + $0 - 1 }
+            let needed = [wantedEnd, resourceEnd].compactMap { $0 }.min() ?? last
+            // A short answer would leave the request unfulfilled.
+            if let needed, let last, last < needed { return fail(HeaderStreamingError.invalidRange) }
+            load.remaining = needed.map { max($0 - load.offset + 1, 0) }
         }
         load.toSkip = load.offset - first
         if load.request.wantsContentInformation { load.request.fill(information) }
@@ -398,15 +405,17 @@ final class HeaderResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URLSe
         end(task, error: error)
     }
 
-    /// Applies ``RedirectPolicy``: a cross-origin hop loses the custom headers but keeps `Range`
-    /// and `Accept-Encoding`; a refused hop (such as `https` to `http`) fails the load with the
+    /// Applies ``RedirectPolicy`` and ``ImageDestination``'s destination rule (the track's own
+    /// server, or a public `https` host; never an unrelated service on this device or the local
+    /// network): a cross-origin hop loses the custom headers but keeps `Range` and
+    /// `Accept-Encoding`; a refused hop (such as `https` to `http`) fails the load with the
     /// redirect's status. Every hop carries the track's network access flags.
     func urlSession(
         _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest, completionHandler: @escaping @Sendable (URLRequest?) -> Void
     ) {
         guard let load = loads[task.taskIdentifier] else { return completionHandler(nil) }
-        guard
+        guard let target = request.url, ImageDestination.isAllowed(target, server: load.original.url),
             let hop = RedirectPolicy.hop(
                 following: response, to: request, original: load.original, wasStripped: load.isStripped)
         else {
