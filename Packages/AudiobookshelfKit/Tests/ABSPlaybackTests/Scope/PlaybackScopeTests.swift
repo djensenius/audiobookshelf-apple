@@ -68,9 +68,15 @@ private struct ScopeHarness {
     let nowPlaying = RecordingNowPlaying()
     let scope: PlaybackScope
 
-    init(progressStore: LocalProgressStore? = nil, connectionID: UUID = UUID()) throws {
+    init(progressStore: LocalProgressStore? = nil, connectionID: UUID = UUID(), queued: [String]? = nil) throws {
         s = try SyncHarness(progressStore: progressStore, connectionID: connectionID)
-        scope = PlaybackScope(coordinator: s.coordinator, syncer: s.syncer, services: nil, nowPlaying: nowPlaying)
+        let queue = queued.map { ids in
+            let queue = PlaybackQueue(serverConnectionID: connectionID, store: AdvanceQueueStore())
+            for id in ids { queue.addToEnd(QueueItem(libraryItemID: id, title: id)) }
+            return queue
+        }
+        scope = PlaybackScope(
+            coordinator: s.coordinator, syncer: s.syncer, services: nil, nowPlaying: nowPlaying, queue: queue)
     }
 
     var coordinator: PlaybackCoordinator { s.coordinator }
@@ -105,13 +111,14 @@ private struct StaticTokens: TokenProvider {
 private func madeScope(
     connectionID: UUID = UUID(), client: APIClient? = nil, features: ServerFeatures? = nil,
     writer: LocalProgressStore? = nil, nowPlaying: RecordingNowPlaying = RecordingNowPlaying(),
-    lastPlayed: @escaping @MainActor (UUID) -> any LastPlayedStoring = { _ in InMemoryLastPlayedStore() }
+    lastPlayed: @escaping @MainActor (UUID) -> any LastPlayedStoring = { _ in InMemoryLastPlayedStore() },
+    queueStore: any PlaybackQueueStoring = AdvanceQueueStore()
 ) throws -> PlaybackScope {
     let writer = try writer ?? LocalProgressStore(modelContainer: DataStack(location: .inMemory).container)
     let configuration = PlaybackScope.Configuration(
         connectionID: connectionID, client: client, features: features, deviceIdentifiers: FixedDevice(),
         writer: writer, settings: StubPlaybackSettings(), policy: StubStreamingPolicy(),
-        engine: CoordinatorTestEngine(), tickInterval: 0.5, lastPlayed: lastPlayed)
+        engine: CoordinatorTestEngine(), tickInterval: 0.5, lastPlayed: lastPlayed, queueStore: queueStore)
     return PlaybackScope.make(configuration) { coordinator in
         nowPlaying.coordinator = coordinator
         return nowPlaying
@@ -531,6 +538,68 @@ struct PlaybackScopeTests {
         #expect(outcome.sessions.map(\.audioPositionCommitted) == [true])
         await h.coordinator.waitForPendingCloses()
         #expect(h.s.h.service.closes.isEmpty)
+    }
+
+    // MARK: Queue
+
+    /// The scope owns its connection's queue, loaded from and saved to the connection's key, and
+    /// its advancer is the coordinator's next-item provider; another connection's scope over the
+    /// same store sees only its own.
+    @Test func makeOwnsTheConnectionsQueueAndAttachesItsAdvancer() throws {
+        let store = AdvanceQueueStore()
+        let id = UUID()
+        store.saved[id] = [QueueItem(libraryItemID: "b", title: "B")]
+        let scope = try madeScope(connectionID: id, queueStore: store)
+
+        let queue = try #require(scope.queue)
+        #expect(queue.serverConnectionID == id)
+        #expect(queue.items.map(\.libraryItemID) == ["b"])
+        #expect(scope.coordinator.nextItemProvider === scope.advancer)
+        scope.editQueue { $0.addToEnd(QueueItem(libraryItemID: "c", title: "C")) }
+        #expect(store.saved[id]?.map(\.libraryItemID) == ["b", "c"])
+
+        let other = try madeScope(queueStore: store)
+        #expect(other.queue?.items.isEmpty == true)
+        scope.retire(reason: .accountSwitch)
+        let again = try madeScope(connectionID: id, queueStore: store)
+        #expect(again.queue?.items.map(\.libraryItemID) == ["b", "c"])
+    }
+
+    /// When an item ends, the scope's coordinator plays the first queued item, which leaves the
+    /// queue as its session starts.
+    @Test func anEndingItemPlaysTheFirstQueuedOne() async throws {
+        let t = try ScopeHarness(queued: ["b"])
+        await t.scope.play(itemID: "a", episodeID: nil, startTime: nil)
+        await t.scope.advancer?.waitForPreparation()
+
+        t.s.h.engine.finish()
+        await t.coordinator.waitForAutoAdvance()
+
+        #expect(t.coordinator.mediaKey?.libraryItemId == "b")
+        #expect(t.scope.queue?.items.isEmpty == true)
+    }
+
+    /// Retirement detaches the advancer, so nothing advances, and leaves the queue as saved: a
+    /// later edit through the retired scope changes nothing.
+    @Test func retireDetachesTheAdvancer() async throws {
+        let t = try ScopeHarness(queued: ["b"])
+        await t.scope.play(itemID: "a", episodeID: nil, startTime: nil)
+        await t.scope.advancer?.waitForPreparation()
+        try #require(t.coordinator.nextItemProvider != nil)
+
+        t.scope.retire(reason: .accountSwitch)
+
+        #expect(t.coordinator.nextItemProvider == nil)
+        #expect(t.scope.queue?.items.map(\.libraryItemID) == ["b"])
+    }
+
+    @Test func aRetiredScopesQueueDoesNotChange() async throws {
+        let t = try ScopeHarness(queued: ["b"])
+
+        t.scope.retire(reason: .accountSwitch)
+        t.scope.editQueue { $0.clear() }
+
+        #expect(t.scope.queue?.items.map(\.libraryItemID) == ["b"])
     }
 
     // MARK: Shared writer
