@@ -85,8 +85,11 @@ extension NetworkPolicy: StreamingPolicyChecking {
 public protocol LocalProgressReading: Sendable {
     func progress(for key: MediaKey) async throws -> LocalMediaProgressDTO?
     func captureStartProgress(for key: MediaKey) async throws -> PlaybackStartProgressCapture
-    @discardableResult
-    func applyStartProgress(_ progress: MediaProgress, captured: PlaybackStartProgressCapture) async throws -> Bool
+    /// Applies the start's server progress; returns how it moved the stored audio position, or
+    /// `nil` when it applied nothing.
+    func applyStartProgressChange(
+        _ progress: MediaProgress, captured: PlaybackStartProgressCapture
+    ) async throws -> ServerAudioPositionChange?
 }
 
 extension LocalProgressStore: LocalProgressReading {}

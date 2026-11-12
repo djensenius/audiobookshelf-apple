@@ -261,6 +261,58 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.sync).map(\.position) == [900])
     }
 
+    @Test func serverProgressAppliedAtStartIsASyncBeforeThePlay() async throws {
+        let (s, spy) = try Self.harness()
+        let response = ActiveRefreshFixture.reply(s, time: 900)
+        s.h.service.state.withLock { $0.progress["a"] = response }
+        await s.coordinator.play(itemID: "a")
+        await Self.settle(s)
+
+        #expect(spy.entries.map(\.name) == [.sync, .play])
+        #expect(spy.entries.map(\.position) == [900, 900])
+        #expect(spy.entries(.sync).map(\.details) == ["Fetched from the server"])
+    }
+
+    @Test func theResumeRewindIsNotASeek() async throws {
+        let (s, spy) = try Self.harness()
+        s.h.settings.disableAutoRewind = false
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 20)
+        s.coordinator.pause()
+        await s.settle()
+        // Two minutes paused: resuming rewinds 10 s.
+        s.h.clock.advance(by: 120)
+        await s.coordinator.resume()
+        await s.coordinator.seek(to: 5)
+        await Self.settle(s)
+
+        #expect(s.h.engine.seeks.contains(10))
+        #expect(spy.entries(.play).map(\.position) == [0, 10])
+        #expect(spy.entries(.seek).map(\.position) == [5])
+    }
+
+    @Test func aReportIsRecordedBeforeTheDrainAfterIt() async throws {
+        let (s, spy) = try Self.harness()
+        let started = Gate()
+        let response = Gate()
+        defer { response.open() }
+        await s.coordinator.play(itemID: "a")
+        s.service.state.withLock {
+            $0.fetchStarted = started
+            $0.fetchGates = [response]
+        }
+        await s.play(for: 15, settling: false)
+        // The save's `/sync` succeeded; the drain after it is held at its GET.
+        await started.wait()
+        await s.coordinator.seek(to: 100)
+        await s.syncer.waitForHistory()
+
+        #expect(spy.entries.map(\.name) == [.play, .save, .seek])
+        #expect(spy.entries(.save).map(\.sync) == [.succeeded])
+        response.open()
+        await Self.settle(s)
+    }
+
     @Test(arguments: [900.0, 0])
     func serverProgressThatReplacedThePositionIsASync(serverTime: Double) async throws {
         let (s, spy) = try Self.harness()

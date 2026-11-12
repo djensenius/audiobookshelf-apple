@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSData
 import Foundation
 
 /// The server calls ``ProgressSyncer`` makes for one connection. ``APIProgressSyncService`` is
@@ -89,6 +90,10 @@ public protocol PlaybackProgressSource: AnyObject {
     var chapterIndex: Int? { get }
     /// The open session's title, for playback history.
     var sessionDisplayTitle: String? { get }
+    /// Where the latest resume's automatic rewind landed (history doesn't count it as a seek).
+    var resumeRewindLanding: Double? { get }
+    /// How the latest start's server progress moved the stored position (history).
+    var startProgressChange: ServerAudioPositionChange? { get }
     var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)? { get set }
     /// Synchronously suppresses sync/PATCH transport before account teardown can suspend.
     var quiesceProgressTransport: (@MainActor () -> Void)? { get set }

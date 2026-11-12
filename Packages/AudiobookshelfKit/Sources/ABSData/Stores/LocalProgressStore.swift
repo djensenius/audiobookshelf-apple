@@ -91,6 +91,11 @@ public enum ServerProgressSource: Sendable, Equatable {
 public struct ServerAudioPositionChange: Sendable, Equatable {
     public let from: Double?
     public let to: Double
+
+    public init(from: Double?, to: Double) {
+        self.from = from
+        self.to = to
+    }
 }
 
 /// The server's per-session answer to `POST /api/session/local-all`.

@@ -195,6 +195,11 @@ public final class PlaybackCoordinator {
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
     private var resumingIntent: Int?
+    /// Where the latest resume's automatic rewind landed; its `didSeek` isn't a user seek (#384).
+    @ObservationIgnored public private(set) var resumeRewindLanding: Double?
+    @ObservationIgnored private var seekIsResumeRewind = false
+    /// How the latest start's server progress moved the stored position (history, #384).
+    @ObservationIgnored public private(set) var startProgressChange: ServerAudioPositionChange?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
     /// When each close in ``closeTasks`` was sent, so a hanging one holds back only the first play
@@ -513,10 +518,11 @@ public final class PlaybackCoordinator {
         guard current == generation else { return }
         // Admit only after a successful load. Invalidation prevents a new submission, not an
         // already submitted actor mutation; the store independently checks atomic provenance.
+        startProgressChange = nil
         if !Task.isCancelled, localReadSucceeded, let capture = started.progressCapture,
             case .success(let progress?) = server
         {
-            _ = try? await progressStore.applyStartProgress(progress, captured: capture)
+            startProgressChange = try? await progressStore.applyStartProgressChange(progress, captured: capture)
         }
         guard current == generation else { return }
         phase = .loaded
@@ -598,6 +604,7 @@ public final class PlaybackCoordinator {
         let extra = Self.nonNegative(willResume?() ?? 0)
         guard current == generation else { return }
         let target: Double?
+        var isRewind = false
         if let startTime {
             target = startTime
         } else if let pending = engine.pendingSeekTarget {
@@ -616,8 +623,10 @@ public final class PlaybackCoordinator {
                 }
             let rewoundTarget = max(rewound - extra, 0)
             target = rewoundTarget < time ? rewoundTarget : nil
+            isRewind = true
         }
         if let target {
+            seekIsResumeRewind = isRewind
             await seek(to: target)
         }
         guard intent == resumeIntent, current == generation, phase == .loaded else { return }
@@ -657,6 +666,9 @@ public final class PlaybackCoordinator {
         case .loaded:
             let current = generation
             let target = engine.timeline?.clamp(time) ?? max(time, 0)
+            let isResumeRewind = seekIsResumeRewind
+            seekIsResumeRewind = false
+            resumeRewindLanding = nil
             reachedEnd = false
             awaitingSeekLanding = true
             let result = await engine.seek(to: target)
@@ -668,6 +680,7 @@ public final class PlaybackCoordinator {
             let landed = engine.currentTime
             if awaitingSeekLanding, !isFinishingLoad {
                 awaitingSeekLanding = false
+                if isResumeRewind { resumeRewindLanding = landed }
                 emit(.didSeek(time: landed))
                 saveLastPlayed()
             }

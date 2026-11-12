@@ -341,6 +341,7 @@ public final class ProgressSyncer {
             loadedTime = nil
         case .loaded(let time):
             current?.hasLoaded = true
+            if let key = current?.key { noteServerProgress(for: key, source?.startProgressChange) }
             loadedTime = time
             lastSyncAt = now
             chapterIndex = source?.chapterIndex
@@ -369,7 +370,9 @@ public final class ProgressSyncer {
             chapterIndex = source?.chapterIndex
             lastTick = isPlaying ? (now, time) : nil
             if loadedTime != time {
-                if let event = historyEvent(.seek, at: time) { history?.record([event], sync: .notAttempted) }
+                if time != source?.resumeRewindLanding, let event = historyEvent(.seek, at: time) {
+                    history?.record([event], sync: .notAttempted)
+                }
                 requestSync()
             }
         case .tick(let time):
@@ -471,6 +474,13 @@ public final class ProgressSyncer {
             let event = historyEvent(.sync, at: change.to), current?.key == key, current?.hasLoaded == true
         else { return }
         history?.record([event], sync: .notAttempted, details: "Fetched from the server")
+    }
+
+    /// Records a report's triggers as soon as its result is known, not after the evidence and
+    /// drains that follow it, and empties them so they aren't recorded again.
+    private func recordHistory(_ events: inout [PlaybackHistoryLog.Event]?, sync: PlaybackHistorySyncResult) {
+        history?.record(events ?? [], sync: sync)
+        events = []
     }
 
     /// Takes the first `count` triggers still queued for `sessionID`; later ones wait for their
@@ -628,6 +638,7 @@ public final class ProgressSyncer {
             try await service.syncSession(id: sessionID, report: report)
             outcome = .succeeded
             historyResult = .succeeded
+            recordHistory(&historyEvents, sync: historyResult)
             if current?.sessionID == sessionID {
                 current?.ackedTotal += report.timeListened
                 current?.syncFailures = 0
@@ -636,6 +647,7 @@ public final class ProgressSyncer {
             }
         } catch {
             historyResult = .failed(message: Self.caseName(error))
+            recordHistory(&historyEvents, sync: historyResult)
             let abandoned = noteSyncFailure(error, sessionID: sessionID)
             if case .notFound = error as? APIError {
                 // No session, so the server applied nothing; but there's no session to resend to.

@@ -30,11 +30,13 @@ private final class StartBaselineProbe: LocalProgressReading {
         return try await store.progress(for: key)
     }
 
-    func applyStartProgress(_ progress: MediaProgress, captured: PlaybackStartProgressCapture) async throws -> Bool {
+    func applyStartProgressChange(
+        _ progress: MediaProgress, captured: PlaybackStartProgressCapture
+    ) async throws -> ServerAudioPositionChange? {
         submissions.withLock { $0 += 1 }
         entered.open()
         if holdIntake { await release.wait() }
-        return try await store.applyStartProgress(progress, captured: captured)
+        return try await store.applyStartProgressChange(progress, captured: captured)
     }
 }
 
