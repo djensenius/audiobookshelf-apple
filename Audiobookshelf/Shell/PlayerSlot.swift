@@ -74,7 +74,7 @@ struct PlayerSlot: ViewModifier {
                 if stale { router.isFullPlayerPresented = false }
             }
             .onChange(of: player.errorMessageKey) { _, error in
-                if error == nil { dismissedError = nil }
+                dismissedError = Self.dismissed(afterChangeTo: error, dismissed: dismissedError)
             }
     }
 
@@ -94,6 +94,14 @@ struct PlayerSlot: ViewModifier {
         current: PlayerErrorMessage?, dismissed: PlayerErrorMessage?
     ) -> PlayerErrorMessage? {
         current == dismissed ? nil : current
+    }
+
+    /// The dismissal left once the failure changes: none, unless it changed back to the dismissed
+    /// one, so a different failure (or the first again, after another) shows.
+    nonisolated static func dismissed(
+        afterChangeTo error: PlayerErrorMessage?, dismissed: PlayerErrorMessage?
+    ) -> PlayerErrorMessage? {
+        error == dismissed ? dismissed : nil
     }
 
     /// The string key of a failure's message.

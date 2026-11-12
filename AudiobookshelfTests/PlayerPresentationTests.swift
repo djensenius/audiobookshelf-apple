@@ -72,4 +72,21 @@ import Testing
         #expect(PlayerSlot.shownError(current: .streamRejected, dismissed: .playbackFailed) == .streamRejected)
         #expect(PlayerSlot.shownError(current: nil, dismissed: nil) == nil)
     }
+
+    /// A different failure resets the dismissal: A, dismissed, then B shows, and A again after it.
+    @Test func aDifferentErrorResetsTheDismissal() {
+        var current: PlayerErrorMessage? = .playbackFailed
+        var dismissed: PlayerErrorMessage?
+        func change(to error: PlayerErrorMessage) {
+            current = error
+            dismissed = PlayerSlot.dismissed(afterChangeTo: error, dismissed: dismissed)
+        }
+        #expect(PlayerSlot.shownError(current: current, dismissed: dismissed) == .playbackFailed)
+        dismissed = current
+        #expect(PlayerSlot.shownError(current: current, dismissed: dismissed) == nil)
+        change(to: .streamRejected)
+        #expect(PlayerSlot.shownError(current: current, dismissed: dismissed) == .streamRejected)
+        change(to: .playbackFailed)
+        #expect(PlayerSlot.shownError(current: current, dismissed: dismissed) == .playbackFailed)
+    }
 }
