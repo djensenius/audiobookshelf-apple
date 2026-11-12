@@ -313,11 +313,21 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 
 IDs follow the URL rules. A present but invalid `item` or `episode` rejects the activity.
 
-**Handoff has no account identity yet.** The only ID this device has for a server is its local connection UUID, which each device makes for itself, so it means nothing on another device. It is **never published**.
+**Account identity.** The only ID this device has for a server is its local connection UUID, which each device makes for itself, so it means nothing on another device. It is **never published**. The payload names the account by the server's address and the user's ID instead, which are the same on every device signed in to it.
 
-- Until the payload names an account, the account that is active on the receiving device opens the item. An item that doesn't exist on that server shows the not-found state.
+| `userInfo` key | Type | Meaning |
+| --- | --- | --- |
+| `serverAddress` | string | The server's normalized address (`ServerAddress.description`, for example `https://abs.example.com/audiobookshelf`) |
+| `userID` | string | The user's ID on that server. Follows the ID rules |
+
+- The two keys are additive: a receiver that predates them ignores them and opens the item on its active account.
+- They come as a pair. Neither present means a payload from before they were added, which opens on the active account. Only one present, either empty or not a string, an address that isn't already in normalized form, or an invalid user ID rejects the activity, so it never opens on whichever account happens to be active. Other keys, known or not, are ignored.
 - `DeepLink.init?(handoff:)` ignores a `server` entry, whatever it holds.
-- A follow-up adds `serverAddress` (normalized) and `userID` to the payload. They are additive, so a receiver that predates them still opens the item. The receiver resolves them to a local connection before `Router.open(_:)`, using the connection list of the account manager (#203). It needs the first publisher too.
+- `HandoffActivity(userInfo:)` reads the link and the account (`HandoffAccount`). Before `Router.open(_:)`, `HandoffActivity.resolve(using:)` asks the `AccountSessionSource` for the connection signed in to that account (`connectionID(for:)`). `AccountManager` matches its saved connections on the normalized address and the exact user ID, skipping connections that were signed out of or disconnected; the most recently used one wins. The protocol's default matches nothing.
+  - A match gives the link with `serverID` set to that connection. If it's the active connection the router opens it; otherwise the router's `pendingServerSwitch` asks before switching, as for a URL with `server=`.
+  - No match gives `accountNotSignedIn`: nothing opens, and the shell tells the user that account isn't signed in on this device.
+  - Two servers, or two users on one server, resolve to their own connections.
+- Wiring the resolution into `RootView.onContinueUserActivity`, forwarding `connectionID(for:)` from the app's `AccountSessionAdapter`, and publishing the activity from the item, episode and player screens are follow-ups (#219).
 
 ### State restoration
 
