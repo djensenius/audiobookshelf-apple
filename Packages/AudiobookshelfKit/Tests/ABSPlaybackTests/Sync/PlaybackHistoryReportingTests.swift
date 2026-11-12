@@ -709,6 +709,44 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.sync).allSatisfy { $0.details == "Fetched from the server" && $0.sync == .notAttempted })
     }
 
+    /// The session stops or the syncer detaches once a merge is submitted, before its result is
+    /// handled: the committed change is still the session's Sync, before its Stop.
+    @Test(arguments: ["refresh", "fetch"], ["stop", "detach"])
+    func serverProgressMergedAsTheSessionEndsIsStillASync(merge: String, ending: String) async throws {
+        let (s, spy) = try Self.harness()
+        defer { s.syncer.detach() }
+        let key = s.h.key("a")
+        // A fetch merges only into an existing row.
+        s.h.service.state.withLock { $0.progress["a"] = ActiveRefreshFixture.reply(s, time: 300) }
+        await ActiveRefreshFixture.loadPaused(s)
+        s.h.clock.advance(by: 60)
+        s.service.state.withLock { $0.serverProgress[key] = ActiveRefreshFixture.reply(s, time: 900) }
+        let end: @MainActor () -> Void = {
+            if ending == "stop" { s.coordinator.stop() } else { s.syncer.detach() }
+        }
+        if merge == "refresh" {
+            s.syncer.activeProgressIntakeSubmitted = end
+            await s.syncer.drainPendingProgress()
+        } else {
+            s.syncer.fetchedProgressIntakeSubmitted = end
+            var attempted: [MediaKey: UUID] = [:]
+            var attemptedKeys: Set<MediaKey> = []
+            #expect(try await s.syncer.fetchProgress(for: key, attempted: &attempted, attemptedKeys: &attemptedKeys))
+        }
+        await s.coordinator.waitForPendingCloses()
+        await Self.settle(s)
+
+        // The start's own Sync (to 300), then the merge's; a stop's close saves its position after.
+        #expect(spy.entries(.sync).map(\.position) == [300, 900])
+        #expect(spy.entries(.sync).map(\.details) == ["Fetched from the server", "Fetched from the server"])
+        #expect(spy.entries(.sync).map(\.title) == ["Title a", "Title a"])
+        if ending == "stop" {
+            #expect(spy.entries.map(\.name).suffix(2) == [.sync, .stop])
+        } else {
+            #expect(try await s.store.progress(for: key)?.currentTime == 900)
+        }
+    }
+
     @Test func recordingNeverHoldsPlaybackOrSync() async throws {
         let (s, spy) = try Self.harness()
         let gate = Gate()

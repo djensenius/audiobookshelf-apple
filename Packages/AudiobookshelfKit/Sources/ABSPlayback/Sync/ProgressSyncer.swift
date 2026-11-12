@@ -192,6 +192,8 @@ public final class ProgressSyncer {
     var beforeActiveProgressCapture: (@MainActor () async -> Void)?
     /// Test seam: observes admission without suspending between ownership validation and store submission.
     var activeProgressIntakeSubmitted: (@MainActor () -> Void)?
+    /// Test seam: runs just before a fetched progress's store merge is submitted.
+    var fetchedProgressIntakeSubmitted: (@MainActor () -> Void)?
     private(set) var pendingPositions: [MediaKey: Position] = [:]
     /// The pending positions whose last save failed, as opposed to ones merely still queued.
     private var failedPositions: [MediaKey: Position] = [:]
@@ -371,7 +373,7 @@ public final class ProgressSyncer {
         case .loaded(let time):
             current?.hasLoaded = true
             if let key = current?.key {
-                noteServerProgress(for: key, source?.startProgressChange)
+                noteServerProgress(source?.startProgressChange, of: serverProgressOwner(for: key))
             } else if let change = source?.startProgressChange, Self.movesStoredPosition(change) {
                 // An observer that ran first stopped on the load: the start's change is the closed
                 // session's, before its Stop.
@@ -512,13 +514,34 @@ public final class ProgressSyncer {
         return .init(name: name, media: .init(key: session.key, displayTitle: session.title), position: position)
     }
 
-    /// Server progress for the loaded session's media was saved; it's history if the save moved
-    /// the stored position by a second or more (a created row moved it from 0).
-    private func noteServerProgress(for key: MediaKey, _ change: ServerAudioPositionChange?) {
-        guard let change, Self.movesStoredPosition(change),
-            let event = historyEvent(.sync, at: change.to), current?.key == key, current?.hasLoaded == true
-        else { return }
-        history?.record([event], sync: .notAttempted, details: Self.fetchedDetails)
+    /// The loaded session a server progress merge for `key` belongs to in history.
+    private struct ServerProgressOwner {
+        let sessionID: String
+        let ownership: UUID
+        let media: PlaybackHistoryMedia
+    }
+
+    /// Captured before the merge is submitted: the session can close or detach while it's awaited.
+    private func serverProgressOwner(for key: MediaKey) -> ServerProgressOwner? {
+        guard history != nil, let session = current, session.key == key, session.hasLoaded else { return nil }
+        return .init(
+            sessionID: session.sessionID, ownership: session.ownership,
+            media: .init(key: session.key, displayTitle: session.title))
+    }
+
+    /// Server progress for `owner`'s media was saved; it's history if the save moved the stored
+    /// position by a second or more (a created row moved it from 0). If the session closed
+    /// meanwhile and its Stop is still held, the Sync goes before it.
+    private func noteServerProgress(_ change: ServerAudioPositionChange?, of owner: ServerProgressOwner?) {
+        guard let owner, let change, Self.movesStoredPosition(change) else { return }
+        if current?.ownership != owner.ownership,
+            holdBeforeStop(.sync, at: change.to, sync: .notAttempted, details: Self.fetchedDetails, of: owner.sessionID)
+        {
+            return
+        }
+        history?.record(
+            [.init(name: .sync, media: owner.media, position: change.to)], sync: .notAttempted,
+            details: Self.fetchedDetails)
     }
 
     private static let fetchedDetails = "Fetched from the server"
@@ -553,17 +576,25 @@ public final class ProgressSyncer {
     /// An event that reached this syncer after its session closed (stopped by an observer that
     /// ran first) goes before the closed session's Stop: Pause and Finished with the `/close`'s
     /// result (it carries their report), others with `sync`. `position` defaults to the closing
-    /// position, or the duration for Finished.
+    /// position, or the duration for Finished. `sessionID` picks a held session other than the
+    /// first; returns whether one was held.
+    @discardableResult
     private func holdBeforeStop(
         _ name: PlaybackHistoryEventName, at position: Double? = nil, sync: PlaybackHistorySyncResult? = nil,
-        details: String? = nil
-    ) {
-        guard var held = closingHistory.first, let stop = held.events.last else { return }
+        details: String? = nil, of sessionID: String? = nil
+    ) -> Bool {
+        guard
+            let index = sessionID.map({ id in closingHistory.firstIndex { $0.sessionID == id } })
+                ?? closingHistory.indices.first,
+            let stop = closingHistory[index].events.last
+        else { return false }
+        var held = closingHistory[index]
         let at = position ?? (name == .finished ? held.duration : held.position)
         held.events.insert(
             .init(name: name, media: stop.media, position: at, sync: sync, details: details),
             at: held.events.count - 1)
-        closingHistory[0] = held
+        closingHistory[index] = held
+        return true
     }
 
     /// Records a report's triggers as soon as its result is known, not after the evidence and
@@ -1166,8 +1197,9 @@ public final class ProgressSyncer {
             guard ownsActiveRefresh(session), let progress else { return }
             // No suspension between ownership admission and submission. Already-submitted
             // actor work is not retroactively cancelled; atomic store provenance still applies.
+            let owner = serverProgressOwner(for: session.key)
             activeProgressIntakeSubmitted?()
-            noteServerProgress(for: session.key, try await store.applyStartProgressChange(progress, captured: capture))
+            noteServerProgress(try await store.applyStartProgressChange(progress, captured: capture), of: owner)
         } catch {
             logger.error("Refreshing active progress failed: \(String(describing: error), privacy: .public)")
         }
@@ -1216,9 +1248,11 @@ public final class ProgressSyncer {
             finishedAt: progress.finishedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
             ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
             lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
+        let owner = serverProgressOwner(for: key)
+        fetchedProgressIntakeSubmitted?()
         let merged = try await store.applyServerProgressChanges(
             [key: baseline], capturedAt: capturedAt, source: .fetch)
-        noteServerProgress(for: key, merged[key])
+        noteServerProgress(merged[key], of: owner)
         return merged[key] != nil
     }
 
