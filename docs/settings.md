@@ -55,7 +55,6 @@ These legacy settings are not ported:
 | `downloadUsingCellular`, `streamingUsingCellular` | Data | Low Data Mode counts as metered; on a Mac, so do expensive paths such as hotspots (`NetworkPolicy`). |
 | `androidAutoBrowseLimitForGrouping`, `androidAutoBrowseSeriesSequenceOrder` | Dropped | See above. |
 | `playbackRate`, `chapterTrack` (`PlayerSettings`) | Not on this screen | Set from the player, as in legacy; stored in `AppSettings`. |
-| `collapseBookSeries` (user settings) | Not on this screen | Collapse Series on a series page, as in legacy; stored in `AppSettings`. The library's own Collapse Series is per library, in `libraryViewPreferences`. |
 
 `AppSettings.lastLibraryIDs` is native-only navigation state and has no control.
 
