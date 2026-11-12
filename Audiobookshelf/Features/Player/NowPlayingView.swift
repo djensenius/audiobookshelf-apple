@@ -24,6 +24,10 @@ struct NowPlayingView: View {
     private let forcedLayout: PlayerLayout?
     @Environment(\.dismiss) private var dismiss
     @State private var sheet: PlayerSheet?
+    /// The details pane's tab, here so it survives arrangement changes.
+    @State private var detailsTab = PlayerDetailsTab.chapters
+    /// Whether the split arrangement is side by side, showing the details pane.
+    @State private var isSplit = false
     private var libraries = LibraryCoverSettings()
 
     init(model: PlayerViewModel, forcedLayout: PlayerLayout? = nil) {
@@ -63,7 +67,7 @@ struct NowPlayingView: View {
                 if layout.arrangement == .column {
                     column(layout)
                 } else {
-                    PlayerArrangement(arrangement: layout.arrangement) {
+                    PlayerArrangement(arrangement: layout.arrangement, isSplit: $isSplit) {
                         artwork
                     } titles: {
                         NowPlayingTitles(model: model)
@@ -72,7 +76,9 @@ struct NowPlayingView: View {
                         NowPlayingTransport(model: model)
                         secondaryControls
                     } details: {
-                        PlayerDetailsPane(model: model)
+                        PlayerDetailsPane(model: model, tab: $detailsTab)
+                    } backdrop: {
+                        PlayerBackdrop(model: model, shape: model.coverShape(in: libraries))
                     }
                 }
             } else {
@@ -83,8 +89,23 @@ struct NowPlayingView: View {
         #endif
     }
 
-    /// The column layout. With the transport in the toolbar's vertical bar, the column leaves it out.
+    /// The column layout. With the transport in the toolbar's vertical bar, the column leaves it
+    /// out. From iOS 27.1 the artwork extends behind it as a backdrop.
+    @ViewBuilder
     private func column(_ layout: PlayerLayout) -> some View {
+        #if os(iOS)
+            if #available(iOS 27.1, *) {
+                columnStack(layout)
+                    .background { PlayerBackdrop(model: model, shape: model.coverShape(in: libraries)) }
+            } else {
+                columnStack(layout)
+            }
+        #else
+            columnStack(layout)
+        #endif
+    }
+
+    private func columnStack(_ layout: PlayerLayout) -> some View {
         ScrollView {
             VStack(spacing: 20) {
                 artwork
@@ -104,8 +125,9 @@ struct NowPlayingView: View {
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    /// ``PlayerActionsBar`` in the bottom toolbar, or, with the transport in the toolbar's
-    /// vertical bar, ``PlayerVerticalToolbar``.
+    /// ``PlayerActionsBar`` in the bottom toolbar, without chapters and bookmarks while the
+    /// details pane shows them, or, with the transport in the toolbar's vertical bar,
+    /// ``PlayerVerticalToolbar``.
     @ViewBuilder
     private func actionsToolbar(_ content: some View, layout: PlayerLayout) -> some View {
         #if os(iOS)
@@ -113,7 +135,11 @@ struct NowPlayingView: View {
                 if layout.transportInToolbar {
                     content.toolbar { PlayerVerticalToolbar(model: model, sheet: $sheet) }
                 } else {
-                    content.toolbar { PlayerActionsBar(model: model, sheet: $sheet) }
+                    content.toolbar {
+                        PlayerActionsBar(
+                            model: model, sheet: $sheet,
+                            showsDetailSlots: !(layout.arrangement == .split && isSplit))
+                    }
                 }
             } else {
                 content.toolbar { PlayerActionsBar(model: model, sheet: $sheet) }
@@ -123,6 +149,7 @@ struct NowPlayingView: View {
         #endif
     }
 
+    /// The cover, at the size of its frame.
     private var artwork: some View {
         CoverView(
             key: model.coverKey, title: model.title, author: model.author, shape: model.coverShape(in: libraries)
@@ -184,7 +211,8 @@ private struct PlayerLayoutReader<Content: View>: View {
         @Environment(\.horizontalSizeClass) private var horizontalSizeClass
         @Environment(\.verticalSizeClass) private var verticalSizeClass
         @Environment(\.toolbarVerticalEdge) private var toolbarVerticalEdge
-        @State private var fold = PlayerFold.none
+        /// `nil` until the first geometry arrives.
+        @State private var fold: PlayerFold?
 
         var body: some View {
             let layout = PlayerLayout.resolve(
@@ -192,7 +220,7 @@ private struct PlayerLayoutReader<Content: View>: View {
                 regularHeight: verticalSizeClass == .regular, fold: fold, verticalToolbar: toolbarVerticalEdge != nil)
             content(layout)
                 .onGeometryChange(for: PlayerFold.self) { proxy in
-                    PlayerFold(divisions: proxy.reservedRegions(kind: .division).filter(\.isActive).map(\.frame))
+                    PlayerFold(divisions: proxy.reservedRegions(kind: .division).map { ($0.frame, $0.isActive) })
                 } action: {
                     fold = $0
                 }

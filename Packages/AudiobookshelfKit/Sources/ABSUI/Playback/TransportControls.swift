@@ -59,7 +59,7 @@ public struct TransportControls: View {
     nonisolated static let numberedJumpSymbols: Set<Int> = [5, 10, 15, 30, 45, 60, 75, 90]
 
     /// The jump button's symbol: numbered when SF Symbols has one for `seconds`, else plain.
-    public nonisolated static func jumpSymbol(forward: Bool, seconds: Int) -> String {
+    nonisolated static func jumpSymbol(forward: Bool, seconds: Int) -> String {
         let base = forward ? "goforward" : "gobackward"
         return numberedJumpSymbols.contains(seconds) ? "\(base).\(seconds)" : base
     }
@@ -77,19 +77,29 @@ public struct TransportControls: View {
     }
 
     /// The VoiceOver label of a jump button, for example "Jump forward 30 seconds".
-    public nonisolated static func jumpLabel(forward: Bool, seconds: Int, locale: Locale) -> String {
+    nonisolated static func jumpLabel(forward: Bool, seconds: Int, locale: Locale) -> String {
         let interval = DurationStyle.timestamp.accessibilityString(Double(seconds), locale: locale)
         return L10n.string(forward ? "LabelJumpForwardBy" : "LabelJumpBackwardBy", interval)
     }
 
     /// The play/pause button's VoiceOver label.
-    public nonisolated static func playPauseLabel(showsPause: Bool) -> String {
+    nonisolated static func playPauseLabel(showsPause: Bool) -> String {
         L10n.string(showsPause ? "ButtonPause" : "ButtonPlay")
     }
 
     /// The play/pause button's VoiceOver value: "Loading..." while buffering, else empty.
     nonisolated static func playPauseAccessibilityValue(isBuffering: Bool) -> String {
         isBuffering ? L10n.string("MessageLoading") : ""
+    }
+
+    /// The previous or next chapter button's symbol.
+    nonisolated static func chapterSymbol(next: Bool) -> String {
+        next ? "forward.end.fill" : "backward.end.fill"
+    }
+
+    /// The previous or next chapter button's VoiceOver label.
+    nonisolated static func chapterLabel(next: Bool) -> String {
+        L10n.string(next ? "LabelNextChapter" : "LabelPreviousChapter")
     }
 
     public var body: some View {
@@ -198,13 +208,13 @@ public struct TransportControls: View {
         return Button {
             tap(action)
         } label: {
-            Image(systemName: next ? "forward.end.fill" : "backward.end.fill")
+            Image(systemName: Self.chapterSymbol(next: next))
                 .font(.title2)
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(.rect)
         }
         .disabled(next ? !hasNextChapter : !hasPreviousChapter)
-        .accessibilityLabel(Text(verbatim: L10n.string(next ? "LabelNextChapter" : "LabelPreviousChapter")))
+        .accessibilityLabel(Text(verbatim: Self.chapterLabel(next: next)))
     }
 }
 
