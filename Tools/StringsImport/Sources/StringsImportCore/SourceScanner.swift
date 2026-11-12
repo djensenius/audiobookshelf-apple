@@ -106,6 +106,9 @@ public enum SourceScanner {
             // The brace depth a preview started at while in one, and whether its body has opened.
             var previewDepth: Int?
             var previewOpened = false
+            // Open parentheses since a preview started, before its body: a `{` inside `#Preview(…)`
+            // arguments (`width: { 320 }()`) isn't the body.
+            var previewParens = 0
             // A type or extension declaration whose body hasn't opened yet: its first line, the
             // depth there, and its header so far.
             var declaration: (start: Int, depth: Int, header: String)?
@@ -121,6 +124,7 @@ public enum SourceScanner {
                 if previewDepth == nil, line.contains("#Preview") {
                     previewDepth = depth
                     previewOpened = false
+                    previewParens = 0
                     declaration = nil
                 } else if previewDepth == nil {
                     if declaration == nil, line.contains(SourceScanner.typeDeclaration) {
@@ -136,19 +140,26 @@ public enum SourceScanner {
                             if line.contains("{"), SourceScanner.conformsToPreviewProvider(pending.header) {
                                 previewDepth = pending.depth
                                 previewOpened = false
+                                previewParens = 0
                                 result.formUnion((pending.start + 1)..<(index + 1))
                             }
                         }
                     }
                 }
-                let opened = line.filter { $0 == "{" }.count
-                depth += opened - line.filter { $0 == "}" }.count
+                if previewDepth != nil, !previewOpened {
+                    for character in line where !previewOpened {
+                        switch character {
+                        case "(": previewParens += 1
+                        case ")": previewParens -= 1
+                        case "{": previewOpened = previewParens <= 0
+                        default: break
+                        }
+                    }
+                }
+                depth += line.filter { $0 == "{" }.count - line.filter { $0 == "}" }.count
                 if previewDepth != nil || conditionals.contains(true) { result.insert(index + 1) }
                 // A preview ends when its braces close, once its body has opened.
-                if let start = previewDepth {
-                    previewOpened = previewOpened || opened > 0
-                    if previewOpened, depth <= start { previewDepth = nil }
-                }
+                if let start = previewDepth, previewOpened, depth <= start { previewDepth = nil }
             }
             return result
         }

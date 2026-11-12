@@ -94,6 +94,24 @@ import Testing
         #expect(lines(text) == [2, 10])
     }
 
+    /// A `{` in `#Preview(…)` arguments, even over several lines, isn't the body; the body is.
+    @Test func previewArgumentClosuresAreNotTheBody() {
+        let text = """
+            #Preview(
+                "Row",
+                traits: .fixedLayout(width: { 320 }(), height: 400)
+            ) {
+                Text("Preview")
+            }
+            #Preview("Inline", traits: .fixedLayout(width: { 320 }(), height: 400)) {
+                Text("Inline preview")
+            }
+            #Preview(traits: .sizeThatFitsLayout) { Text("One line") }
+            Text("After")
+            """
+        #expect(lines(text) == [11])
+    }
+
     /// A generic constraint or `where` clause naming `PreviewProvider` isn't a conformance, and a
     /// function isn't a preview type.
     @Test func genericConstraintsAreNotPreviews() {
@@ -323,14 +341,15 @@ import Testing
         #expect(run("--check").status == 0)
     }
 
-    /// Runs git in `root`, failing the test if it fails.
+    /// Runs git in `root`, failing the test if it fails. Signing is off: the fixture identity has
+    /// no key even when the user's config signs commits.
     func git(_ arguments: String...) throws {
         let process = Process()
         process.executableURL = URL(filePath: "/usr/bin/env")
         process.arguments =
             [
                 "git", "-C", root.path(percentEncoded: false), "-c", "user.name=Test", "-c",
-                "user.email=test@example.com",
+                "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
             ]
             + arguments
         process.standardOutput = FileHandle.nullDevice
