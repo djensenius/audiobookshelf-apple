@@ -107,9 +107,35 @@ mutation would write the removed key back. Queue UI and other features mutate
 through that owned instance, never the store directly; only connection removal
 calls `removeQueue`, after dropping the instance.
 
-This core has no app wiring, playback end hook, auto-advance, episode lookup,
-account-removal composition, or queue UI. It makes no progress-sync or
-exactly-once delivery guarantee.
+`PlaybackQueueAdvancer` adds auto-advance. When an item ends, it plays the first
+queued item. If the queue is empty and the item was a podcast episode, it plays
+the podcast's next unfinished episode instead, chosen with the legacy order and
+read through `PodcastEpisodeSource`, which uses the item plus `GET /api/me`.
+If every other episode is finished, playback stays at the end.
+
+The next item is prepared before the current one ends: the streaming decision,
+the server progress and the local progress capture are fetched ahead. This
+happens when an item loads, once on entering its last chapter, once in its last
+30 s, and again when the queue changes or the owner reports a progress or
+connection change; each preparation replaces the one in flight. A resume re-arms
+the near-end refreshes (refreshing at once inside them), and so does a seek out
+of them. After `.ended`, only the bounded wait for closes, `/play` and loading
+the stream are left. Fetches happen after `.ended` only when no preparation
+younger than 10 minutes is ready. Only the streaming decision for the path and
+setting known at the end counts, checked synchronously. The coordinator holds an injected
+`BackgroundActivity` around that work; `NoBackgroundActivity` is the default.
+
+Any user action (a play request too, even one the policy blocks), or a pause from
+an `.ended` observer such as the sleep timer, cancels the advance before its start. Once the start has begun it is an ordinary
+play: a pause loads the next item paused, and a detach leaves it to finish. A
+blocked streaming decision keeps the item queued and never consents on the
+user's behalf. A queued item removed during the close wait gets no `/play` and
+is left unloaded (#338). The coordinator and the advancer hold each other weakly, so
+the owner must retain the advancer.
+
+App wiring (the advancer, `UIApplication.beginBackgroundTask`, progress and
+connection hooks), account-removal composition and queue UI are not built yet.
+The queue makes no progress-sync or exactly-once delivery guarantee.
 
 ## App target layout
 
