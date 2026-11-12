@@ -78,7 +78,7 @@ private struct ItemDetailHost {
 }
 
 /// The states of one item's screen: loading, failed, not found, a podcast, or the book. Only the
-/// book's states get the item's navigation title and the More menu here.
+/// book's states get the item's navigation title and the More menu here; both get RSS Feed.
 struct ItemDetailScreen: View {
     let model: ItemDetailModel
     /// The server's address, for the More menu's Share; without it there is no Share.
@@ -88,6 +88,7 @@ struct ItemDetailScreen: View {
         if model.hasLoaded, model.mediaType == .podcast {
             // The podcast screen has its own title.
             PodcastDetailView(model: model)
+                .rssFeedEntry(RssFeedItemEntry(item: model.item))
         } else {
             bookContent
                 .navigationTitle(Text(verbatim: model.details?.title ?? L10n.string("HeaderDetails")))
@@ -95,6 +96,7 @@ struct ItemDetailScreen: View {
                     .navigationBarTitleDisplayMode(.inline)
                 #endif
                 .itemDetailMoreMenu(model: model, serverURL: serverURL)
+                .rssFeedEntry(RssFeedItemEntry(item: model.item))
         }
     }
 

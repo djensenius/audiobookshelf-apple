@@ -63,11 +63,28 @@ locale.
 The importer fails if a native key also exists in `strings/`; pick another key. Native
 keys nobody has translated get the English fill like any other key.
 
+### App Intents
+
+App Intents titles, parameters and error dialogs resolve their `LocalizedStringResource` in the
+bundle that declares the intent (the app, or the widget extension for the shared intents), not
+in ABSUI's package bundle, so `L10n` can't serve them. Their keys start with `Intent` and live in
+`Localization/intents/en-us.json` (translations in `<file>.json` beside it); `mise run strings`
+writes them to `AudiobookshelfShared/Intents/AppIntents.xcstrings`, which both targets compile.
+Use them as `LocalizedStringResource("IntentPauseTitle", table: "AppIntents")`.
+
+App Shortcut phrases are the exception: Apple requires them to be English literals in the
+`AppShortcutsProvider`, with translations in an `AppShortcuts.xcstrings` catalog keyed by the
+English phrase. None are translated yet.
+
 Translations arrive through the upstream sync ([upstream-sync.md](upstream-sync.md)), not
 through Weblate commits to this repository; rerun `mise run strings` after syncing
 `strings/`. If upstream adds a locale, the importer either maps it or fails with a message
 asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
 `CFBundleLocalizations` in `Audiobookshelf/Info.plist` (`strings:check` prints the list).
+That plist is shared by the iOS and macOS app (one multiplatform target), and `strings:check`
+fails unless it lists exactly the imported locales. The widget extension's plist has no
+`CFBundleLocalizations` because the widget shows no localized text yet; add the list there,
+and to the check, when it does.
 
 ## Using strings in Swift
 
@@ -97,14 +114,27 @@ asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
 - **Unused keys warn.** A key in either `en-us.json` that no Swift literal names is listed,
   separately for native and legacy keys. Many legacy keys are kept for features not ported yet,
   so this never fails.
-- **Hard-coded strings in `Audiobookshelf/Features/` fail.** A literal with a letter (outside its
+- **Hard-coded strings in `Audiobookshelf/Features/` and ABSUI fail.** A literal with a letter (outside its
   interpolations) passed straight to `Text`, `Text(verbatim:)`, `Button`, `Label`, `Toggle`,
   `Picker`, `Section`, `Menu`, `TextField`, `SecureField`, `Link`, `LabeledContent`,
   `ContentUnavailableView`, `ProgressView`, `GroupBox`, `DisclosureGroup`, `Tab`,
   `.navigationTitle`, `.navigationSubtitle`, `.accessibilityLabel`, `.accessibilityHint`,
   `.accessibilityValue`, `.help`, `.alert`, `.confirmationDialog`, or a `prompt:` argument is
   reported with `file:line`, unless it is a key. Symbols and numbers (`Text(verbatim: "•")`) pass.
-  Only single-line literals on the call's line are seen.
+  Only single-line literals on the call's line are seen. Previews (`#Preview { … }` and types or
+  extensions whose inheritance clause lists `PreviewProvider`, even on a later header line; a
+  generic constraint or `where` clause naming it doesn't count) and the branch of a conditional
+  that is exactly `#if DEBUG` are skipped; `#elseif DEBUG` and compound conditions such as
+  `#if DEBUG || os(macOS)` are checked.
+- **The baseline only shrinks.** `Localization/hardcoded-strings-baseline.txt` lists strings
+  accepted until they're localized, one per line as `<file path><TAB><trimmed source line>`,
+  matched by file and source rather than line number. A string with no entry fails, and so does
+  an entry that no longer matches one: localize the string, then delete its entry. It was empty
+  when introduced; don't add entries for new code. An entry that the target branch's baseline
+  doesn't have (counting duplicates) fails too. That base is `--baseline-base <ref>`, else
+  `STRINGS_BASELINE_BASE` (CI sets the commit before a push to main), else
+  `origin/<GITHUB_BASE_REF>` (a pull request's target, which CI fetches), else `origin/main`. If
+  that ref can't be read (not fetched), the check warns and skips this comparison.
 
 To opt a line out of both checks (an example URL, a literal that only looks like a key), put
 `l10n-ignore` and the reason in a comment on that line or on a comment line just above it:

@@ -1488,8 +1488,7 @@ import Testing
         let counter = PathCounter()
         let isInlineRetryLaunch = scenario == .inlineRetryLaunch
         let isReplaySiblingLaunch = scenario == .replaySiblingLaunch
-        let customHeaders = isInlineRetryLaunch ? ["CF-Access-Client-Secret": "secret"] : [:]
-        let harness = try await DownloadHarness(customHeaders: customHeaders) { request in
+        let harness = try await DownloadHarness { request in
             let count = counter.next(request)
             if request.url?.path().contains("/file/1/") == true {
                 let status = isReplaySiblingLaunch ? 404 : 500
@@ -1519,6 +1518,11 @@ import Testing
             adoptionStarted: { partID in
                 adoptingContinuation.yield(partID)
                 await withCheckedContinuation { continuation in proceed.run { continuation.resume() } }
+            },
+            // The inline retry's launch fails for good before its transfer.
+            preflight: StubPreflight { request, _ throws(DownloadRedirectPreflightError) in
+                guard isInlineRetryLaunch else { return request }
+                throw .offOrigin(URL(string: "https://elsewhere.example/1.mp3")!)
             },
             prepare: { stub in
                 let url = URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!

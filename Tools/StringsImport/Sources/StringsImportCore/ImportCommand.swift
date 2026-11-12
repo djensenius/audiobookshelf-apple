@@ -1,12 +1,16 @@
 import Foundation
 
-/// The `import-strings` command: `import-strings [--check] [--root <repository root>]`.
+/// The `import-strings` command:
+/// `import-strings [--check] [--root <repository root>] [--baseline-base <git ref>]`.
 ///
 /// Reads `strings/*.json` and `Localization/native/*.json` under the root, writes ABSUI's
 /// `Localizable.xcstrings`, and verifies the app's `CFBundleLocalizations`. With `--check`
 /// it writes nothing and fails if either is out of date. Both modes also check the Swift
 /// sources (``SourceScanner``): they fail on a key missing from `en-us.json` or a hard-coded
-/// user-facing string in `Features/`, and warn about keys no longer used.
+/// user-facing string in `Features/` or ABSUI that ``HardCodedBaseline`` doesn't list (or an
+/// entry there that no longer matches, or that the `--baseline-base` ref's baseline doesn't have;
+/// see ``HardCodedBaseline/baseRef(environment:)`` for the default), and warn about keys no
+/// longer used.
 public enum ImportCommand {
     public static let catalogPath = "Packages/AudiobookshelfKit/Sources/ABSUI/Resources/Localizable.xcstrings"
     public static let infoPlistPath = "Audiobookshelf/Info.plist"
@@ -17,6 +21,7 @@ public enum ImportCommand {
     public static func run(arguments: [String], root defaultRoot: URL, log: (String) -> Void = { print($0) }) -> Int32 {
         var check = false
         var root = defaultRoot
+        var baseRef = HardCodedBaseline.baseRef(environment: ProcessInfo.processInfo.environment)
         var remaining = arguments[...]
         while let argument = remaining.popFirst() {
             switch argument {
@@ -28,8 +33,16 @@ public enum ImportCommand {
                     return 1
                 }
                 root = URL(filePath: path)
+            case "--baseline-base":
+                guard let ref = remaining.popFirst() else {
+                    log("error: --baseline-base needs a git ref")
+                    return 1
+                }
+                baseRef = ref
             default:
-                log("error: unknown argument \(argument); usage: import-strings [--check] [--root <path>]")
+                log(
+                    "error: unknown argument \(argument); "
+                        + "usage: import-strings [--check] [--root <path>] [--baseline-base <ref>]")
                 return 1
             }
         }
@@ -69,6 +82,10 @@ public enum ImportCommand {
             }
         }
 
+        if !IntentsCatalog.sync(root: root, check: check, log: log) {
+            outOfDate = true
+        }
+
         // Info.plist is hand-edited (rewriting it would reformat the file), so only verify it.
         if declaredLocalizations(at: root.appending(path: infoPlistPath)) != result.locales {
             let items = result.locales.map { "\t\t<string>\($0)</string>" }.joined(separator: "\n")
@@ -87,7 +104,9 @@ public enum ImportCommand {
         let sourceKeys = files.first { $0.name == CatalogBuilder.sourceFileName }?.keys ?? []
         let nativeKeys = native.first { $0.name == CatalogBuilder.sourceFileName }?.keys ?? []
         do {
-            if try !checkSources(root: root, sourceKeys: sourceKeys, nativeKeys: nativeKeys, log: log) {
+            if try !checkSources(
+                root: root, sourceKeys: sourceKeys, nativeKeys: nativeKeys, baseRef: baseRef, log: log)
+            {
                 outOfDate = true
             }
         } catch {
@@ -107,7 +126,7 @@ public enum ImportCommand {
     /// hard-code user-facing strings. Keys no longer used are only warned about,
     /// because many legacy keys are kept for features not ported yet.
     static func checkSources(
-        root: URL, sourceKeys: Set<String>, nativeKeys: Set<String>, log: (String) -> Void
+        root: URL, sourceKeys: Set<String>, nativeKeys: Set<String>, baseRef: String, log: (String) -> Void
     ) throws -> Bool {
         var passed = true
         let sources = try SourceScanner.load(root: root, paths: SourceScanner.keyPaths)
@@ -129,13 +148,33 @@ public enum ImportCommand {
                     + keys.sorted().joined(separator: ", "))
         }
 
-        for file in sources where file.path.hasPrefix(SourceScanner.featuresPath + "/") {
-            for string in SourceScanner.hardCodedStrings(in: file, keys: sourceKeys) {
+        let hardCoded = sources.filter { SourceScanner.scansForHardCodedStrings($0.path) }
+            .flatMap { SourceScanner.hardCodedStrings(in: $0, keys: sourceKeys) }
+        let baseline = try HardCodedBaseline.load(root: root)
+        let (new, stale) = baseline.match(hardCoded)
+        for string in new {
+            log(
+                "error: \(string): hard-coded user-facing string; use an L10n key "
+                    + "(or mark the line \(SourceScanner.ignoreMarker) if it isn't prose)")
+            passed = false
+        }
+        for (line, entry) in stale {
+            log(
+                "error: \(HardCodedBaseline.path):\(line): \(entry.path): no longer hard-coded "
+                    + "(or the line changed); remove the entry")
+            passed = false
+        }
+        if let base = try HardCodedBaseline.load(root: root, ref: baseRef) {
+            for (line, entry) in baseline.additions(over: base) {
                 log(
-                    "error: \(string): hard-coded user-facing string; use an L10n key "
-                        + "(or mark the line \(SourceScanner.ignoreMarker) if it isn't prose)")
+                    "error: \(HardCodedBaseline.path):\(line): \(entry.path): not in \(baseRef)'s baseline; "
+                        + "the baseline only shrinks, so localize the string instead of listing it")
                 passed = false
             }
+        } else {
+            log(
+                "warning: can't read \(HardCodedBaseline.path) at \(baseRef) (fetch it, or pass "
+                    + "--baseline-base <ref>), so baseline additions weren't checked")
         }
         return passed
     }
