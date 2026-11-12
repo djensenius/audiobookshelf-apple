@@ -322,11 +322,14 @@ struct ProgressSyncState: Sendable, Equatable {
     // MARK: - Merging server progress
 
     /// Merges server progress, group by group, except the `excluded` groups (those carried by a
-    /// PATCH in flight). Returns `false` when the values are older than the baseline and were
-    /// dropped. The caller has already dropped values captured before the row's last local edit or
-    /// settlement.
+    /// PATCH in flight) and the `skipped` ones (a socket's ebook values, which only prompt a fetch).
+    /// Groups not merged keep their baseline. Returns `false` when the values are older than the
+    /// baseline and were dropped. The caller has already dropped values captured before the row's
+    /// last local edit or settlement.
     @discardableResult
-    mutating func merge(_ server: ProgressBaseline, excluding excluded: ProgressGroups = []) -> Bool {
+    mutating func merge(
+        _ server: ProgressBaseline, excluding excluded: ProgressGroups = [], skipping skipped: ProgressGroups = []
+    ) -> Bool {
         if let baseline = serverBaseline, server.lastUpdate < baseline.lastUpdate { return false }
         // A PATCH in flight may already have changed the other group as a side effect (#53).
         shieldSideEffects(of: excluded)
@@ -342,14 +345,21 @@ struct ProgressSyncState: Sendable, Equatable {
                 shieldSideEffects(of: group)
             }
         }
-        for group in ProgressGroups.each where !excluded.contains(group) {
+        for group in ProgressGroups.each where !excluded.contains(group) && !skipped.contains(group) {
             resolve(group, server: server)
         }
         var baseline = server
         if let old = serverBaseline {
             // Groups not merged keep their old baseline values.
-            for group in ProgressGroups.each where excluded.contains(group) {
+            for group in ProgressGroups.each where excluded.contains(group) || skipped.contains(group) {
                 baseline.copy(group, from: old)
+            }
+        } else if !skipped.isEmpty {
+            // A skipped group was never seen from the server: it can't take these values.
+            var unseen = currentValues(lastUpdate: .distantPast)
+            unseen.ebookLocationIsUnknown = true
+            for group in ProgressGroups.each where skipped.contains(group) {
+                baseline.copy(group, from: unseen)
             }
         }
         serverBaseline = baseline
@@ -362,6 +372,10 @@ struct ProgressSyncState: Sendable, Equatable {
             take(group, from: server)
             return
         }
+        // Ebook progress is local-authoritative while dirty (ADR 0003, #101): no echo matching or
+        // conflict dating. Only the acknowledgement of a send with this edit's identity
+        // (`ebookEditedAt`) settles it.
+        if group == .ebook { return }
         // The server hasn't changed the group since we last saw it: keep the local edit.
         if serverUnchanged(group, in: server) { return }
         // The server value may be one of our dropped sends, or a side effect of our PATCH. Even
