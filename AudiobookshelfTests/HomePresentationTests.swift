@@ -295,6 +295,27 @@ private let account = LibraryConnectionKey(
         #expect(withoutPlayer == [.markFinished, .hideFromContinueListening, .openDetails])
     }
 
+    @Test func openInNewWindowIsOfferedOnlyWithWindows() async {
+        let book = ItemSummary(item: SampleLibrary.frankenstein)
+        let withWindows = ItemCardActions.actionContext(canPlay: false, canOpenInNewWindow: true)
+        #expect(
+            ItemAction.available(for: book, progress: nil, context: withWindows).map(\.kind) == [
+                .markFinished, .openDetails, .openInNewWindow,
+            ])
+        let withoutWindows = ItemCardActions.actionContext(canPlay: false)
+        #expect(
+            !ItemAction.available(for: book, progress: nil, context: withoutWindows).contains {
+                $0.kind == .openInNewWindow
+            })
+
+        // Opening is navigation, which the screens do: the item actions aren't called, nothing fails.
+        let actions = RecordingItemActions()
+        actions.fails = true
+        #expect(await ItemCardActions.perform(.openInNewWindow, on: book, actions: actions, play: nil) == nil)
+        #expect(ItemCardActions.failureMessageKey(for: .openInNewWindow) == nil)
+        #expect(actions.calls.isEmpty)
+    }
+
     @Test func progressActionsGoToTheItemActions() async {
         let actions = RecordingItemActions()
         let episode = ItemSummary(item: SampleLibrary.episodeItems[0])

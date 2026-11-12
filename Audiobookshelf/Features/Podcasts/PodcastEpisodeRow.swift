@@ -43,6 +43,7 @@ struct PodcastEpisodeRow: View {
                 details(published: published, summary: summary, badges: badges)
             }
             .buttonStyle(.plain)
+            .itemHover()
             .accessibilityLabel(Text(verbatim: episode.title))
             // The date, badges and the start of the summary, after the title.
             .accessibilityValue(
