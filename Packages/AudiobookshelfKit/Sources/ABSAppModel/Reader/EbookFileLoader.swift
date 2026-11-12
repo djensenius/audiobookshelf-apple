@@ -304,9 +304,11 @@ public actor EbookFileLoader {
     }
 
     /// Lets the cache delete a copy ``load(_:)`` returned, once its reader is done with it. Once per
-    /// load; a downloaded copy, which isn't the cache's, isn't pinned.
+    /// load; a downloaded copy, which isn't the cache's, isn't pinned. When no reader has the copy
+    /// open any more, the cache is pruned, so open books don't keep it over its budget.
     public nonisolated func release(_ url: URL) {
-        Self.pins.release(url)
+        guard Self.pins.release(url) else { return }
+        Task { await self.prune(keeping: nil) }
     }
 
     /// The cached copies open in this process, by every loader, with how many times each is open.
@@ -314,7 +316,7 @@ public actor EbookFileLoader {
 
     /// Deletes the least recently used copies, other than `kept` and pinned ones, until the cache
     /// fits.
-    private func prune(keeping kept: URL) {
+    private func prune(keeping kept: URL?) {
         let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
         // Skips the hidden partial folder, whose files are still being written.
         guard
@@ -328,10 +330,8 @@ public actor EbookFileLoader {
         }
         var total = files.reduce(0) { $0 + $1.size }
         for file in files.sorted(by: { $0.date < $1.date }) where total > maxTotalBytes {
-            guard file.url.standardizedFileURL != kept.standardizedFileURL, !Self.pins.isPinned(file.url) else {
-                continue
-            }
-            try? FileManager.default.removeItem(at: file.url)
+            guard file.url.standardizedFileURL != kept?.standardizedFileURL, Self.pins.removeIfUnpinned(file.url)
+            else { continue }
             total -= file.size
         }
     }
@@ -373,11 +373,23 @@ final class EbookCachePins: Sendable {
         counts.withLock { $0[Self.key(url), default: 0] += 1 }
     }
 
-    func release(_ url: URL) {
+    /// Returns whether that was the copy's last pin.
+    @discardableResult
+    func release(_ url: URL) -> Bool {
         counts.withLock { counts in
             let key = Self.key(url)
-            guard let count = counts[key] else { return }
+            guard let count = counts[key] else { return false }
             counts[key] = count > 1 ? count - 1 : nil
+            return count == 1
+        }
+    }
+
+    /// Deletes the copy unless it's pinned, under the lock ``pin(_:)`` takes, so a loader can't
+    /// pin and return it between the check and the deletion. Returns whether it was deleted.
+    func removeIfUnpinned(_ url: URL) -> Bool {
+        counts.withLock { counts in
+            guard counts[Self.key(url)] == nil else { return false }
+            return (try? FileManager.default.removeItem(at: url)) != nil
         }
     }
 

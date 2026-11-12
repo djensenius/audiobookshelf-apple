@@ -342,6 +342,49 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
         #expect(!EbookFileLoader.pins.isPinned(b.url))
     }
 
+    @Test func aCachedCopyOpenedBeforeEvictionSurvivesIt() async throws {
+        let directory = readerTemporaryDirectory()
+        let fetcher = FakeEbookFetcher(body: Data(count: 8))
+        let first = EbookFileLoader(directory: directory, fetcher: fetcher, maxTotalBytes: 10)
+        let second = EbookFileLoader(directory: directory, fetcher: fetcher, maxTotalBytes: 10)
+        let a = try await first.load(request("li_1"))
+        first.release(a.url)
+
+        // Another reader opens the cached copy, then a fetch evicts over the budget.
+        #expect(try await second.load(request("li_1")) == (a.url, .cached))
+        let b = try await first.load(request("li_2"))
+
+        #expect(FileManager.default.fileExists(atPath: a.url.path))
+        #expect(FileManager.default.fileExists(atPath: b.url.path))
+        // Deleting checks the pin under the lock pinning takes.
+        #expect(!EbookFileLoader.pins.removeIfUnpinned(a.url))
+        second.release(a.url)
+        first.release(b.url)
+    }
+
+    @Test func closingTheLastReaderPrunesBackToTheBudget() async throws {
+        let directory = readerTemporaryDirectory()
+        let fetcher = FakeEbookFetcher(body: Data(count: 8))
+        let first = EbookFileLoader(directory: directory, fetcher: fetcher, maxTotalBytes: 10)
+        let second = EbookFileLoader(directory: directory, fetcher: fetcher, maxTotalBytes: 10)
+        let a = try await first.load(request("li_1"))
+        let b = try await second.load(request("li_2"))
+        #expect(FileManager.default.fileExists(atPath: a.url.path))
+        #expect(FileManager.default.fileExists(atPath: b.url.path))
+
+        first.release(a.url)
+        second.release(b.url)
+
+        // The prune runs after the release returns.
+        var remaining = 2
+        for _ in 0..<200 {
+            remaining = [a.url, b.url].filter { FileManager.default.fileExists(atPath: $0.path) }.count
+            if remaining <= 1 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(remaining == 1)
+    }
+
     @Test func partialsFromEarlierLaunchesAreReclaimed() async throws {
         let directory = readerTemporaryDirectory()
         let partials = directory.appending(path: ".partial")
