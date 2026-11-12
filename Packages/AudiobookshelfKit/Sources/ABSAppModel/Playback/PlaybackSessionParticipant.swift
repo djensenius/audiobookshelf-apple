@@ -173,6 +173,8 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         self.scope = nil
         scopeSessionID = nil
         latestEndedSessionID = sessionID
+        // The previous session's result no longer describes the latest end.
+        lastEnd = nil
         playItem = nil
         scope.onSessionRejected = nil
         scope.retire(reason: reason)

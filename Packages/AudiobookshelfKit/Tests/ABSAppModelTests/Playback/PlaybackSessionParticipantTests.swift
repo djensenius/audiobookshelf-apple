@@ -350,6 +350,7 @@ private struct Harness {
         #expect(await eventually { harness.log.entries.contains("b.restore") })
         harness.socket.endGate = nil
         socketGate.open()
+        #expect(harness.participant.lastEnd == nil)
 
         await harness.lifecycle.signOut()
         #expect(await eventually { harness.log.entries.contains("b.finished") })
@@ -380,5 +381,36 @@ private struct Harness {
         let scopeB = try #require(harness.scopes.last)
         #expect(scopeB !== scopeA)
         #expect(harness.current.current === scopeB.control)
+    }
+
+    /// `lastEnd` describes only the latest ended session: cleared when a scope starts retiring,
+    /// set when its close finishes.
+    @Test func lastEndIsClearedWhileTheLatestCloseIsHeld() async throws {
+        let harness = try Harness()
+        try await harness.started()
+        try #require(harness.scopes.last).finishResult = .failure(PlaybackCloseError.timedOut)
+        let finishGate = Gate()
+        harness.scopes.finishGate = finishGate
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("b.restore") })
+        harness.scopes.finishGate = nil
+        if case .failure(PlaybackCloseError.timedOut) = harness.participant.lastEnd {
+        } else {
+            Issue.record("Expected A's end")
+        }
+
+        // B's close is held: A's result must not stand in for it.
+        let switching = Task { try await harness.lifecycle.switchAccount(to: identityA.connectionID) }
+        #expect(await eventually { harness.log.entries.contains("b.finish") })
+        #expect(harness.participant.lastEnd == nil)
+        for _ in 0..<50 { await Task.yield() }
+        #expect(harness.participant.lastEnd == nil)
+
+        finishGate.open()
+        try await switching.value
+        #expect(await eventually { harness.log.entries.contains("b.finished") })
+        #expect(await eventually { harness.participant.lastEnd != nil })
+        if case .success = harness.participant.lastEnd {} else { Issue.record("Expected B's end") }
     }
 }
