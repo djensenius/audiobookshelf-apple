@@ -13,6 +13,7 @@ struct ItemDetailTables: View {
     /// Chapters can be played now: the book has audio, there's a `playItem` action, and the item
     /// isn't gone or starting.
     let canPlayChapters: Bool
+    /// The chapter, and the confirmation for its ``ItemDetailModel/startTime(for:)``.
     let selectChapter: (ItemDetailModel.ChapterRow, ItemDetailChapterPresentation) -> Void
     @Environment(\.locale) private var locale
 
@@ -24,7 +25,8 @@ struct ItemDetailTables: View {
                     // Row IDs are positions, since the server's IDs may repeat.
                     ForEach(model.chapters) { chapter in
                         let presentation = ItemDetailChapterPresentation(
-                            chapter: chapter, position: chapter.id + 1, bookTitle: bookTitle, locale: locale)
+                            chapter: chapter, position: chapter.id + 1, bookTitle: bookTitle,
+                            playbackStart: model.startTime(for: chapter), locale: locale)
                         ItemDetailChapterRow(presentation: presentation, isEnabled: canPlayChapters) {
                             selectChapter(chapter, presentation)
                         }

@@ -284,8 +284,7 @@ import Testing
     @Test func chapterTimestampsUnderAndOverOneHour() {
         let short = ItemDetailChapterPresentation(
             chapter: .init(id: 1, chapterID: 1, title: "Intro", start: 245.9, duration: 59), position: 1,
-            bookTitle: "Book",
-            locale: locale)
+            bookTitle: "Book", playbackStart: 245.9, locale: locale)
         #expect(short.title == "Intro")
         #expect(short.startText == "4:05")
         #expect(short.durationText == "0:59")
@@ -293,8 +292,7 @@ import Testing
 
         let long = ItemDetailChapterPresentation(
             chapter: .init(id: 2, chapterID: 2, title: "Late", start: 3_723, duration: 3_600), position: 2,
-            bookTitle: "Book",
-            locale: locale)
+            bookTitle: "Book", playbackStart: 3_723, locale: locale)
         #expect(long.startText == "1:02:03")
         #expect(long.durationText == "1:00:00")
         #expect(long.accessibilityLabel == "Late, starts at 1 hour, 2 minutes, 3 seconds, duration 1 hour")
@@ -303,7 +301,7 @@ import Testing
     @Test func untitledChapterUsesNumber() async throws {
         let blank = ItemDetailChapterPresentation(
             chapter: .init(id: 7, chapterID: 7, title: " \n", start: 0, duration: 10), position: 5, bookTitle: "Book",
-            locale: locale)
+            playbackStart: 0, locale: locale)
         #expect(blank.title == "Chapter 5")
         #expect(blank.accessibilityLabel.hasPrefix("Chapter 5, "))
 
@@ -312,8 +310,10 @@ import Testing
         let chapter = try #require(model.chapters.dropFirst(4).first)
         #expect(chapter.title.isEmpty)
         #expect(
-            ItemDetailChapterPresentation(chapter: chapter, position: 5, bookTitle: "B", locale: locale).title
-                == "Chapter 5")
+            ItemDetailChapterPresentation(
+                chapter: chapter, position: 5, bookTitle: "B", playbackStart: model.startTime(for: chapter),
+                locale: locale
+            ).title == "Chapter 5")
     }
 
     @Test func confirmMessageHasBookTitleAndStart() async throws {
@@ -321,12 +321,26 @@ import Testing
         let details = try #require(model.details)
         let chapter = try #require(model.chapters.dropFirst(2).first)
         let presentation = ItemDetailChapterPresentation(
-            chapter: chapter, position: 3, bookTitle: details.title, locale: locale)
+            chapter: chapter, position: 3, bookTitle: details.title, playbackStart: model.startTime(for: chapter),
+            locale: locale)
 
         #expect(presentation.title == "My Advent on Mars")
         #expect(presentation.startText == "39:00")
         #expect(presentation.confirmMessage == "Start playback for \"A Princess of Mars\" at 39:00?")
         #expect(model.startTime(for: chapter) == 2_340)
+    }
+
+    @Test func confirmMessageShowsTheClampedPlaybackStart() async throws {
+        // A chapter starting at 15:00 in a 10-minute book plays from just before the end.
+        let model = await loadedModel(ItemDetailPreviewData.makeBook(duration: 600))
+        let chapter = ItemDetailModel.ChapterRow(id: 0, chapterID: 0, title: "Late", start: 900, duration: 60)
+        let playbackStart = model.startTime(for: chapter)
+        #expect(playbackStart < 600)
+        let presentation = ItemDetailChapterPresentation(
+            chapter: chapter, position: 1, bookTitle: "Book", playbackStart: playbackStart, locale: locale)
+
+        #expect(presentation.startText == "15:00")
+        #expect(presentation.confirmMessage == "Start playback for \"Book\" at 9:59?")
     }
 }
 

@@ -173,13 +173,19 @@ struct ItemDetailChapterPresentation: Equatable {
     let durationText: String
     /// The title with the start and duration spoken in full.
     let accessibilityLabel: String
-    /// "Start playback for "{book}" at {start}?"
+    /// "Start playback for "{book}" at {start}?", with the time playback will actually start.
     let confirmMessage: String
 
     /// - Parameters:
     ///   - position: The chapter's 1-based place in the list, to number an untitled chapter.
     ///   - bookTitle: For the confirmation, as legacy.
-    init(chapter: ItemDetailModel.ChapterRow, position: Int, bookTitle: String, locale: Locale) {
+    ///   - playbackStart: Where playing the chapter starts, ``ItemDetailModel/startTime(for:)``,
+    ///     which can differ from its start (past the end of the book, say). The confirmation shows
+    ///     it, so the user confirms the time that plays; the row shows the chapter's own start.
+    init(
+        chapter: ItemDetailModel.ChapterRow, position: Int, bookTitle: String, playbackStart: TimeInterval,
+        locale: Locale
+    ) {
         title =
             chapter.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? L10n.string(
@@ -191,6 +197,8 @@ struct ItemDetailChapterPresentation: Equatable {
             "LabelItemDetailChapterAccessibility", title,
             DurationStyle.timestamp.accessibilityString(chapter.start, locale: locale),
             DurationStyle.timestamp.accessibilityString(chapter.duration, locale: locale), locale: locale)
-        confirmMessage = L10n.string("MessageConfirmPlaybackTime", bookTitle, startText, locale: locale)
+        confirmMessage = L10n.string(
+            "MessageConfirmPlaybackTime", bookTitle, DurationStyle.timestamp.string(playbackStart, locale: locale),
+            locale: locale)
     }
 }

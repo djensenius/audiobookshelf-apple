@@ -72,7 +72,9 @@ struct ItemDetailContent: View {
                 ItemDetailTables(
                     model: model, bookTitle: details.title, canPlayChapters: model.canPlayChapters && canPlay
                 ) { chapter, presentation in
-                    pendingChapter = PendingChapter(chapter: chapter, message: presentation.confirmMessage)
+                    pendingChapter = PendingChapter(
+                        chapter: chapter, startTime: model.startTime(for: chapter),
+                        message: presentation.confirmMessage)
                 }
             }
             .padding(ItemDetailLayout.padding)
@@ -116,8 +118,10 @@ struct ItemDetailContent: View {
             presenting: pendingChapter
         ) { pending in
             Button {
-                // The item may have changed while the alert was up.
-                guard canPlay, let startTime = model.chapterToPlay(confirming: pending.chapter) else { return }
+                // The item may have changed while the alert was up; play only the confirmed time.
+                guard canPlay, let startTime = model.chapterToPlay(confirming: pending.chapter),
+                    startTime == pending.startTime
+                else { return }
                 play(startTime: startTime)
             } label: {
                 Text(verbatim: L10n.string("ButtonPlay"))
@@ -250,6 +254,8 @@ private struct ItemDetailHeader: View {
 /// A chapter waiting for the user to confirm playing it.
 private struct PendingChapter {
     let chapter: ItemDetailModel.ChapterRow
+    /// ``ItemDetailModel/startTime(for:)`` when asked, which `message` shows.
+    let startTime: TimeInterval
     /// The confirmation's question.
     let message: String
 }
