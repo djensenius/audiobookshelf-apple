@@ -90,6 +90,8 @@ struct AddToPlaylistSheet: View {
             }
             .onSubmit(create)
             .submitLabel(.done)
+            // Locked while creating; `create()` also clears the field only if it still holds the name it sent.
+            .disabled(model.isCreating)
             if model.isCreating {
                 ProgressView()
                     .accessibilityLabel(Text(verbatim: L10n.string("MessageLoading")))
@@ -103,8 +105,9 @@ struct AddToPlaylistSheet: View {
     }
 
     private func create() {
+        let name = newName
         Task {
-            if await model.create(name: newName) { newName = "" }
+            if await model.create(name: name), newName == name { newName = "" }
         }
     }
 
@@ -146,8 +149,11 @@ private struct AddToPlaylistRow: View {
         .disabled(row.isUpdating)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(
-            Text(verbatim: [row.name, GroupPresentation.itemCount(row.itemCount)].joined(separator: ", "))
+            Text(
+                verbatim: GroupPresentation.cardAccessibilityLabel(
+                    GroupSummary(id: row.id, kind: .playlist, name: row.name, itemCount: row.itemCount)))
         )
+        .accessibilityValue(Text(verbatim: row.isUpdating ? L10n.string("MessageLoading") : ""))
         .accessibilityAddTraits(row.isChecked ? [.isButton, .isSelected] : .isButton)
         .accessibilityHint(
             Text(verbatim: L10n.string(row.isChecked ? "LabelRemoveFromPlaylist" : "LabelAddToPlaylist")))
