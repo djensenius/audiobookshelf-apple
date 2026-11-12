@@ -36,7 +36,6 @@ import Testing
                     "-webkit-text-stroke": "0px \(color)!important",
                 ],
                 "a": ["color": "\(color)!important"],
-                "body": ["font-family": "serif!important"],
             ])
     }
 
@@ -50,12 +49,22 @@ import Testing
                 == ReaderTheme.themeRules(for: ReaderSettings(theme: .light), resolvedAppearance: .dark))
     }
 
-    @Test func rulesCarryLineSpacingStrokeAndFont() {
+    @Test func rulesCarryLineSpacingAndStroke() {
         let settings = ReaderSettings(theme: .dark, fontFamily: .sansSerif, lineSpacing: 200, textStroke: 150)
         let rules = ReaderTheme.themeRules(for: settings, resolvedAppearance: .light)
         #expect(rules["*"]?["line-height"] == "200%!important")
         #expect(rules["*"]?["-webkit-text-stroke"] == "1.5px #fff!important")
-        #expect(rules["body"]?["font-family"] == "sans-serif!important")
+    }
+
+    /// A book's `body.reader { font-family: X !important }` beats any `body` theme rule on
+    /// specificity, so the font goes in the payload for `rendition.themes.font` (an inline
+    /// `!important` override, as in the legacy reader) and no theme rule sets it.
+    @Test(arguments: ReaderSettings.FontFamily.allCases)
+    func theFontIsAnOverrideNotARule(fontFamily: ReaderSettings.FontFamily) {
+        let settings = ReaderSettings(fontFamily: fontFamily)
+        let payload = ReaderSettingsPayload(settings: settings, resolvedAppearance: .light)
+        #expect(payload.fontFamily == fontFamily)
+        #expect(payload.themeRules.values.allSatisfy { $0["font-family"] == nil })
     }
 
     /// `textStroke / 100` as JavaScript prints it.

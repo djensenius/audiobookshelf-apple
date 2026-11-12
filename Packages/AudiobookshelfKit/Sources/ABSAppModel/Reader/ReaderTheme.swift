@@ -48,9 +48,11 @@ public enum ReaderTheme: String, CaseIterable, Sendable, Hashable, Encodable {
     /// port of legacy `EpubReader.vue` `themeRules`: every element gets the theme's colours,
     /// line height and text stroke, and links get the text colour.
     ///
-    /// The legacy reader set the font with `rendition.themes.font(…)`, which the bridge doesn't
-    /// call, so `body` carries the same `font-family` override here. Font size isn't a rule:
-    /// the bridge applies `fontScale` with `rendition.themes.fontSize`.
+    /// The font isn't a rule: a book's own `!important` rule with a more specific selector (for
+    /// example `body.reader`) would beat it. The bridge applies ``ReaderSettingsPayload/fontFamily``
+    /// with `rendition.themes.font`, as the legacy reader did, which sets it inline and
+    /// `!important` on each section's `body`, so no stylesheet rule overrides it. Font size isn't
+    /// a rule either: the bridge applies `fontScale` with `rendition.themes.fontSize`.
     public static func themeRules(
         for settings: ReaderSettings, resolvedAppearance: ReaderAppearance
     ) -> [String: [String: String]] {
@@ -64,7 +66,6 @@ public enum ReaderTheme: String, CaseIterable, Sendable, Hashable, Encodable {
                 "-webkit-text-stroke": "\(pixels(hundredths: settings.textStroke))px \(color)!important",
             ],
             "a": ["color": "\(color)!important"],
-            "body": ["font-family": "\(settings.fontFamily.rawValue)!important"],
         ]
     }
 
@@ -83,6 +84,8 @@ public enum ReaderTheme: String, CaseIterable, Sendable, Hashable, Encodable {
 /// The reader settings sent to the EPUB page with `open` and `applySettings`. This is the
 /// bridge contract's `ReaderSettingsPayload`:
 /// - the theme, already resolved;
+/// - the font family, for `rendition.themes.font` (an inline `!important` override on `body`,
+///   as in the legacy reader, so a book's own font rules can't win);
 /// - the numbers as stored;
 /// - the column `gap` in CSS pixels (`0` is epub.js's default; the Duo hinge width when spanned);
 /// - the precomputed ``ReaderTheme/themeRules(for:resolvedAppearance:)``.
