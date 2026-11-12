@@ -76,6 +76,7 @@ public struct ItemCard: View {
         .itemHover()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: ItemPresentation.accessibilityLabel(item)))
+        .cardInputLabels(title: item.title, label: ItemPresentation.accessibilityLabel(item))
         .accessibilityValue(
             Text(verbatim: ItemPresentation.accessibilityValue(item, progress: progress, locale: locale))
         )
