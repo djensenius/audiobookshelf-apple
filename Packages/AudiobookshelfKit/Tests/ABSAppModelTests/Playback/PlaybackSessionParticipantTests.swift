@@ -40,6 +40,7 @@ private final class FakeScope: PlaybackScopeHandle {
 
     var playback: any PlayerPlaybackControlling { control }
     var queue: (any PlaybackQueueReading)? { nil }
+    private(set) lazy var sleepTimer: SleepTimer? = SleepTimer(control: control)
     func editQueue(_ edit: (PlaybackQueue) -> Void) {}
 
     func start() -> Bool {
@@ -383,6 +384,61 @@ private struct Harness {
         let scopeB = try #require(harness.scopes.last)
         #expect(scopeB !== scopeA)
         #expect(harness.current.current === scopeB.control)
+    }
+
+    /// The player reads the current scope's timer from the participant.
+    @Test func theSleepTimerFollowsTheCurrentScope() async throws {
+        let harness = try Harness()
+        try await harness.started()
+        let scopeA = try #require(harness.scopes.last)
+        #expect(harness.participant.sleepTimer === scopeA.sleepTimer)
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("b.restore") })
+        let scopeB = try #require(harness.scopes.last)
+        #expect(harness.participant.sleepTimer === scopeB.sleepTimer)
+        #expect(harness.participant.sleepTimer !== scopeA.sleepTimer)
+
+        await harness.lifecycle.signOut()
+        #expect(harness.participant.sleepTimer == nil)
+    }
+
+    /// Each session gets a bookmark store of its own, connected to its client, and the last
+    /// session's is ended: emptied and disconnected.
+    @Test func eachSessionHasItsOwnBookmarkStore() async throws {
+        let harness = try Harness(restoredClient: try makeClient())
+        try await harness.started()
+        let storeA = try #require(harness.participant.bookmarks)
+        #expect(await eventually { storeA.isAvailable })
+        storeA.replaceAll(from: bookmarkUser([bookmark("item", 10)]))
+        #expect(storeA.bookmarks(itemID: "item").count == 1)
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("b.restore") })
+        let storeB = try #require(harness.participant.bookmarks)
+        #expect(storeB !== storeA)
+        #expect(await eventually { storeB.isAvailable })
+        #expect(storeB.bookmarks(itemID: "item").isEmpty)
+        #expect(await eventually { !storeA.isAvailable })
+        #expect(storeA.bookmarks(itemID: "item").isEmpty)
+
+        await harness.lifecycle.signOut()
+        #expect(harness.participant.bookmarks == nil)
+        #expect(await eventually { !storeB.isAvailable })
+    }
+
+    /// A reconnect connects the same bookmark store; nothing is rebuilt.
+    @Test func reconnectConnectsTheSameBookmarkStore() async throws {
+        let harness = try Harness(restoredPhase: .active(identityA, isOffline: true))
+        try await harness.started()
+        let store = try #require(harness.participant.bookmarks)
+        #expect(!store.isAvailable)
+
+        await harness.source.reconnect(client: try makeClient())
+        #expect(await eventually { harness.log.entries.contains("a.reconnect") })
+
+        #expect(harness.participant.bookmarks === store)
+        #expect(await eventually { store.isAvailable })
     }
 
     /// `lastEnd` describes only the latest ended session: cleared when a scope starts retiring,
