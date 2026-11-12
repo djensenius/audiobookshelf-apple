@@ -77,6 +77,7 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             #expect(settings.streamingUsingCellular == .always)
             #expect(settings.playbackRate == 1.0)
             #expect(settings.chapterTrack == true)
+            #expect(settings.collapseBookSeries == false)
             #expect(settings.lastLibraryIDs.isEmpty)
             // Defaults are not written back.
             #expect(defaults.persistentDomain(forName: suiteName)?.isEmpty ?? true)
@@ -188,6 +189,7 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             settings.streamingUsingCellular = .ask
             settings.playbackRate = 1.75
             settings.chapterTrack = false
+            settings.collapseBookSeries = true
             settings.setLastLibraryID("lib-1", serverID: "server-a", userID: "user-1")
 
             let reloaded = AppSettings(defaults: defaults)
@@ -214,6 +216,7 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             #expect(reloaded.streamingUsingCellular == .ask)
             #expect(reloaded.playbackRate == 1.75)
             #expect(reloaded.chapterTrack == false)
+            #expect(reloaded.collapseBookSeries == true)
             #expect(reloaded.lastLibraryID(serverID: "server-a", userID: "user-1") == "lib-1")
 
             // Stored as plain property-list values so @AppStorage can bind to them.
@@ -223,6 +226,8 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             #expect(defaults.object(forKey: AppSettings.Key.jumpForwardTime.rawValue) as? Int == 30)
             #expect(defaults.object(forKey: AppSettings.Key.playbackRate.rawValue) as? Double == 1.75)
             #expect(defaults.object(forKey: AppSettings.Key.chapterTrack.rawValue) as? Bool == false)
+            #expect(defaults.object(forKey: AppSettings.Key.collapseBookSeries.rawValue) as? Bool == true)
+            #expect(AppSettings.snapshot(from: defaults).collapseBookSeries == true)
         }
     }
 

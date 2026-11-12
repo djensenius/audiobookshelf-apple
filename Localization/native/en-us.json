@@ -92,7 +92,6 @@
   "LabelRemoveCustomHeader": "Remove {0}",
   "LabelRemoveUnnamedCustomHeader": "Remove header",
   "LabelSearchClearRecentsAccessibility": "Clear Recent Searches",
-  "LabelSearchOneBook": "1 book",
   "LabelSearchResultBook": "Book",
   "LabelSeriesBookNumber": "{0}, #{1}",
   "LabelServerVersion": "Server version",
@@ -193,7 +192,10 @@
   "MessageSwitchServerFailed": "Couldn't switch servers. Check that the server is reachable, then try again.",
   "MessageSwitchServerForLink": "This link is for {0} on {1}. Switch to that server to open it?",
   "MessageSwitchServerSignedOut": "The server signed you out while switching. Sign in to it again, or choose another server.",
-  "SharedBookCount": "{0} books",
+  "SharedBookCount": {
+    "one": "{0} book",
+    "other": "{0} books"
+  },
   "SharedHideFromContinueListening": "Hide from Continue Listening",
   "SharedMarkAsNotFinished": "Mark as Not Finished",
   "SharedOpenDetailsHint": "Opens the details."

@@ -46,7 +46,7 @@ enum AuthorsPresentation {
 
     /// "12 books": the books filter's `total` once known, else the author's own count; `nil` when neither is.
     static func bookCount(total: Int?, author: AuthorSummary) -> String? {
-        (total ?? author.bookCount).map { L10n.string("SharedBookCount", $0.formatted()) }
+        (total ?? author.bookCount).map { L10n.plural("SharedBookCount", count: $0) }
     }
 
     /// Refreshes the author and their books for the user (pull to refresh, Refresh, Retry); `true` if either failed.

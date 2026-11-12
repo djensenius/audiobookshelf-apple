@@ -15,7 +15,7 @@ public struct AuthorCard: View {
     }
 
     public var body: some View {
-        let count = author.bookCount.map(ItemPresentation.bookCount)
+        let count = author.bookCount.map { ItemPresentation.bookCount($0) }
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: ABSSpacing.xSmall) {
                 AuthorImageView(key: serverID.flatMap { author.imageKey(serverID: $0) }, name: author.name)

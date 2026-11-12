@@ -136,11 +136,9 @@ enum SearchPresentation {
         router[path: .search].append(route)
     }
 
-    /// "1 book" or "3 books". The catalog has no plural variations, so one is its own key.
+    /// "1 book" or "3 books".
     static func bookCount(_ count: Int, locale: Locale? = nil) -> String {
-        count == 1
-            ? L10n.string("LabelSearchOneBook", locale: locale)
-            : L10n.string("SharedBookCount", count.formatted(.number.locale(locale ?? .current)), locale: locale)
+        L10n.plural("SharedBookCount", count: count, locale: locale)
     }
 }
 
