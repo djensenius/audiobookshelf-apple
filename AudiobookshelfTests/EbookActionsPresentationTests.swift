@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSUI
+import Foundation
 import Testing
 
 @testable import Audiobookshelf
@@ -66,5 +67,32 @@ import Testing
         ] {
             #expect(L10n.string(key) != key, "\(key)")
         }
+    }
+
+    // MARK: Feedback lifetime
+
+    @Test func feedbackIsShownWhileTheLifetimeAndAccountLast() {
+        let lifetime = EbookFeedbackLifetime()
+        let account = UUID()
+        let ticket = lifetime.ticket(accountID: account)
+        #expect(lifetime.accepts(ticket, accountID: account))
+    }
+
+    /// The menu disappeared, or now shows another item model or account.
+    @Test func endedLifetimeDropsEarlierFeedback() {
+        let lifetime = EbookFeedbackLifetime()
+        let account = UUID()
+        let ticket = lifetime.ticket(accountID: account)
+        lifetime.end()
+        #expect(!lifetime.accepts(ticket, accountID: account))
+        #expect(lifetime.accepts(lifetime.ticket(accountID: account), accountID: account))
+    }
+
+    /// The signed-in connection changed, even if the lifetime wasn't ended.
+    @Test func anotherAccountDropsFeedback() {
+        let lifetime = EbookFeedbackLifetime()
+        let ticket = lifetime.ticket(accountID: UUID())
+        #expect(!lifetime.accepts(ticket, accountID: UUID()))
+        #expect(!lifetime.accepts(ticket, accountID: nil))
     }
 }

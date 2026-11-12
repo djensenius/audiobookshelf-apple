@@ -90,6 +90,8 @@ private func auth(
 
 private let twoFiles = item(primary: "a", files: [ebook("a", supplementary: false), ebook("b", supplementary: true)])
 private let makeB = EbookActionsModel.StatusChange(id: "b", filename: "b.epub", makesPrimary: true)
+/// The devices the menu offers when tapped.
+private let offered = ["Kindle", "Kobo", "K"].map { EReaderDevice(name: $0) }
 
 @MainActor
 @Suite(.timeLimit(.minutes(1)))
@@ -181,34 +183,57 @@ struct EbookActionsModelTests {
     @Test func sendSucceeds() async {
         let service = FakeEbookActionsService()
         let model = EbookActionsModel(itemID: "li1", service: service)
-        #expect(await model.send(to: "Kindle") == .sent(deviceName: "Kindle"))
+        #expect(await model.send(to: "Kindle", offered: offered) == .sent(deviceName: "Kindle"))
         #expect(service.calls == ["send li1 Kindle"])
         #expect(!model.isBusy)
+    }
+
+    /// The tap is checked against what would be offered now: nothing is sent once the account
+    /// lost its devices or authorization, or the item its primary ebook.
+    @Test func sendNoLongerOfferedIsIgnored() async {
+        let service = FakeEbookActionsService()
+        let model = EbookActionsModel(itemID: "li1", service: service)
+        let noPrimary = item(primary: nil, files: [ebook("b", supplementary: true)])
+        for now in [
+            EbookActionsModel.devices(authorization: nil, item: twoFiles, isGone: false),
+            EbookActionsModel.devices(authorization: auth(), item: noPrimary, isGone: false),
+            EbookActionsModel.devices(authorization: auth(), item: twoFiles, isGone: true),
+            EbookActionsModel.devices(
+                authorization: auth(devices: [EReaderDevice(name: "Kobo")]), item: twoFiles, isGone: false),
+        ] {
+            #expect(!model.canSend(to: "Kindle", offered: now))
+            #expect(await model.send(to: "Kindle", offered: now) == .ignored)
+        }
+        #expect(service.calls.isEmpty)
+        let current = EbookActionsModel.devices(authorization: auth(), item: twoFiles, isGone: false)
+        #expect(model.canSend(to: "Kindle", offered: current))
     }
 
     @Test func sendFailureKeepsShortPlainText400() async {
         let service = FakeEbookActionsService(error: APIError.http(status: 400, message: "Invalid login"))
         let model = EbookActionsModel(itemID: "li1", service: service)
-        #expect(await model.send(to: "Kindle") == .sendFailed(deviceName: "Kindle", message: "Invalid login"))
+        #expect(
+            await model.send(to: "Kindle", offered: offered)
+                == .sendFailed(deviceName: "Kindle", message: "Invalid login"))
         #expect(!model.isBusy)
     }
 
     @Test func sendFailureWithoutTextHasNoMessage() async {
         let model = EbookActionsModel(itemID: "li1", service: FakeEbookActionsService(error: APIError.notFound))
-        #expect(await model.send(to: "Kindle") == .sendFailed(deviceName: "Kindle", message: nil))
+        #expect(await model.send(to: "Kindle", offered: offered) == .sendFailed(deviceName: "Kindle", message: nil))
         let offline = EbookActionsModel(
             itemID: "li1", service: FakeEbookActionsService(error: URLError(.notConnectedToInternet)))
-        #expect(await offline.send(to: "Kindle") == .sendFailed(deviceName: "Kindle", message: nil))
+        #expect(await offline.send(to: "Kindle", offered: offered) == .sendFailed(deviceName: "Kindle", message: nil))
     }
 
     @Test func sendFailureHidesHTMLAndForbiddenBodies() async {
         let html = EbookActionsModel(
             itemID: "li1",
             service: FakeEbookActionsService(error: APIError.http(status: 502, message: "<html>Bad Gateway</html>")))
-        #expect(await html.send(to: "K") == .sendFailed(deviceName: "K", message: nil))
+        #expect(await html.send(to: "K", offered: offered) == .sendFailed(deviceName: "K", message: nil))
         let forbidden = EbookActionsModel(
             itemID: "li1", service: FakeEbookActionsService(error: APIError.forbidden(message: "Forbidden")))
-        #expect(await forbidden.send(to: "K") == .sendFailed(deviceName: "K", message: nil))
+        #expect(await forbidden.send(to: "K", offered: offered) == .sendFailed(deviceName: "K", message: nil))
     }
 
     // MARK: Server messages
@@ -343,7 +368,7 @@ struct EbookActionsModelTests {
         #expect(model.offeredStatusChanges(authorization: auth(update: true), item: twoFiles, isGone: false).isEmpty)
 
         // An action in flight on the old client still blocks one on the new client.
-        let sending = Task { await model.send(to: "Kindle") }
+        let sending = Task { await model.send(to: "Kindle", offered: offered) }
         var yields = 0
         while !model.isBusy, yields < 1_000 {
             await Task.yield()
@@ -358,11 +383,11 @@ struct EbookActionsModelTests {
         let third = FakeEbookActionsService()
         model.replaceService(third)
         #expect(model.isBusy)
-        #expect(await model.send(to: "Kobo") == .ignored)
+        #expect(await model.send(to: "Kobo", offered: offered) == .ignored)
         second.release()
         #expect(await sending.value == .sent(deviceName: "Kindle"))
 
-        #expect(await model.send(to: "Kobo") == .sent(deviceName: "Kobo"))
+        #expect(await model.send(to: "Kobo", offered: offered) == .sent(deviceName: "Kobo"))
         #expect(first.calls == ["toggle li1 b"])
         #expect(second.calls == ["send li1 Kindle"])
         #expect(third.calls == ["send li1 Kobo"])
@@ -373,7 +398,7 @@ struct EbookActionsModelTests {
     @Test func oneActionAtATime() async {
         let service = FakeEbookActionsService(holdsFirstCall: true)
         let model = EbookActionsModel(itemID: "li1", service: service)
-        let first = Task { await model.send(to: "Kindle") }
+        let first = Task { await model.send(to: "Kindle", offered: offered) }
         var yields = 0
         while !model.isBusy, yields < 1_000 {
             await Task.yield()
@@ -386,7 +411,7 @@ struct EbookActionsModelTests {
             return
         }
         #expect(await model.apply(makeB, offered: [makeB]) { true } == .ignored)
-        #expect(await model.send(to: "Kobo") == .ignored)
+        #expect(await model.send(to: "Kobo", offered: offered) == .ignored)
         service.release()
         #expect(await first.value == .sent(deviceName: "Kindle"))
         #expect(!model.isBusy)

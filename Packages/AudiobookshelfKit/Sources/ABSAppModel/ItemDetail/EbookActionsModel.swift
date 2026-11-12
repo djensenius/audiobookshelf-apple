@@ -39,7 +39,7 @@ extension APIClient: EbookActionsService {
 /// - Neither is offered once the item is gone from the server.
 ///
 /// One action runs at a time (``isBusy``), a status change through its reload. A tap is checked
-/// against the changes offered at that moment and dropped if the item changed meanwhile. Each
+/// against the devices or changes offered at that moment and dropped if the item changed meanwhile. Each
 /// action returns an ``Outcome`` for the view to show and announce.
 ///
 /// The model belongs to one item model, not one client: a reconnect to the same account swaps
@@ -144,9 +144,16 @@ public final class EbookActionsModel {
 
     // MARK: Actions
 
-    /// Sends the primary ebook to `deviceName`.
-    public func send(to deviceName: String) async -> Outcome {
-        guard !isBusy else { return .ignored }
+    /// No action is running and `offered` has `deviceName`; checked before announcing a send.
+    public func canSend(to deviceName: String, offered: [EReaderDevice]) -> Bool {
+        !isBusy && offered.contains { $0.name == deviceName }
+    }
+
+    /// Sends the primary ebook to `deviceName` if `offered` (the devices the menu would offer now,
+    /// ``devices(authorization:item:isGone:)``) still has it: the account may have lost its
+    /// authorization, or a refresh removed the primary ebook, since the menu opened.
+    public func send(to deviceName: String, offered: [EReaderDevice]) async -> Outcome {
+        guard canSend(to: deviceName, offered: offered) else { return .ignored }
         isBusy = true
         defer { isBusy = false }
         do {

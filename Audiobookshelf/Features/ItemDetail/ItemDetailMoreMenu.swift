@@ -37,6 +37,9 @@ private struct ItemDetailMoreMenu: ViewModifier {
     /// The last ebook action's alert, kept while it's dismissed.
     @State private var ebookFeedback: EbookActionsPresentation.Feedback?
     @State private var showsEbookFeedback = false
+    /// Ended when the menu disappears or shows another item model or account, so a late result
+    /// isn't shown there.
+    @State private var feedbackLifetime = EbookFeedbackLifetime()
 
     /// The playlist editor doesn't exist yet.
     private static let canEditPlaylists = false
@@ -83,6 +86,9 @@ private struct ItemDetailMoreMenu: ViewModifier {
                     self.ebookActions = EbookActionsModel(itemID: model.itemID, service: client)
                 }
             }
+            .onChange(of: ObjectIdentifier(model)) { feedbackLifetime.end() }
+            .onChange(of: accounts?.activeConnection?.id) { feedbackLifetime.end() }
+            .onDisappear { feedbackLifetime.end() }
             .onChange(of: model.loadedRevision) {
                 // Only a load that installed an item makes the files current after a failed
                 // reload; a cancelled or superseded one leaves them as they were.
@@ -108,13 +114,24 @@ private struct ItemDetailMoreMenu: ViewModifier {
                 authorization: authorization, item: model.item, isGone: isGone),
             isBusy: ebookActions.isBusy,
             send: { deviceName in
-                guard !ebookActions.isBusy else { return }
+                // What would be offered now: the account or item may have changed since the menu
+                // opened.
+                let offered = EbookActionsModel.devices(
+                    authorization: accounts?.authorization, item: model.item,
+                    isGone: isGone || (model.error as? APIError) == .notFound)
+                guard ebookActions.canSend(to: deviceName, offered: offered) else { return }
                 AccessibilityNotification.Announcement(
                     EbookActionsPresentation.sendingAnnouncement(deviceName: deviceName)
                 ).post()
-                Task { show(await ebookActions.send(to: deviceName)) }
+                let lifetime = feedbackLifetime
+                let ticket = lifetime.ticket(accountID: accounts?.activeConnection?.id)
+                Task {
+                    show(await ebookActions.send(to: deviceName, offered: offered), lifetime: lifetime, ticket: ticket)
+                }
             },
             apply: { change in
+                let lifetime = feedbackLifetime
+                let ticket = lifetime.ticket(accountID: accounts?.activeConnection?.id)
                 Task {
                     // What would be offered now: the item may have changed since the menu opened.
                     let offered = ebookActions.offeredStatusChanges(
@@ -125,14 +142,19 @@ private struct ItemDetailMoreMenu: ViewModifier {
                         // the old files in place.
                         await model.reload()
                     }
-                    show(outcome)
+                    show(outcome, lifetime: lifetime, ticket: ticket)
                 }
             })
     }
 
-    /// Shows an alert, which VoiceOver reads, or else announces the outcome.
-    private func show(_ outcome: EbookActionsModel.Outcome) {
-        guard let feedback = EbookActionsPresentation.feedback(for: outcome) else { return }
+    /// Shows an alert, which VoiceOver reads, or else announces the outcome; nothing if the menu
+    /// that started the action is gone or shows another item model or account.
+    private func show(
+        _ outcome: EbookActionsModel.Outcome, lifetime: EbookFeedbackLifetime, ticket: EbookFeedbackLifetime.Ticket
+    ) {
+        guard lifetime.accepts(ticket, accountID: accounts?.activeConnection?.id),
+            let feedback = EbookActionsPresentation.feedback(for: outcome)
+        else { return }
         if feedback.alertTitle != nil {
             ebookFeedback = feedback
             showsEbookFeedback = true

@@ -49,6 +49,36 @@ enum EbookActionsPresentation {
     }
 }
 
+/// How long an ebook action's feedback may still be shown. An action takes a ``Ticket`` when it
+/// starts; its result is shown only if the ticket is still ``accepts(_:accountID:)``: the menu
+/// hasn't ended the lifetime (it disappeared, or shows another item model or account) and the
+/// signed-in connection is the one that started it. So a late reply never shows one account's
+/// filename or device under another, or on a screen that's gone.
+///
+/// A class, so a task that outlives the view still sees it ended.
+@MainActor
+final class EbookFeedbackLifetime {
+    struct Ticket: Equatable {
+        fileprivate let generation: Int
+        let accountID: UUID?
+    }
+
+    private var generation = 0
+
+    func ticket(accountID: UUID?) -> Ticket {
+        Ticket(generation: generation, accountID: accountID)
+    }
+
+    /// Ends every ticket handed out so far.
+    func end() {
+        generation += 1
+    }
+
+    func accepts(_ ticket: Ticket, accountID: UUID?) -> Bool {
+        ticket.generation == generation && ticket.accountID == accountID
+    }
+}
+
 /// The book More menu's ebook entries, in a section headed Ebook: Send ebook to device, a submenu
 /// of the user's e-readers, and Set as primary / Set as supplementary for each ebook file, with
 /// its filename. Disabled while one runs; Send's icon shows progress meanwhile.
