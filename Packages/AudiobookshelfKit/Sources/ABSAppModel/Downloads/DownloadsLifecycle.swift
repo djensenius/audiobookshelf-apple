@@ -15,8 +15,6 @@ public protocol DownloadsLifecycleEngine: Sendable {
     func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void) async -> Bool
     /// See ``DownloadEngine/quiesceGeneration()``.
     func quiesceGeneration() async -> Int
-    /// See ``DownloadEngine/resume(recordID:unlessQuiescedSince:)``.
-    func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool
 }
 
 extension DownloadEngine: DownloadsLifecycleEngine {}
@@ -28,6 +26,8 @@ public protocol DownloadsLifecycleManager: Sendable {
     func start() async throws
     /// See ``DownloadManager/pause(recordID:)``.
     func pause(recordID: UUID) async throws(DownloadManagerError) -> Bool
+    /// See ``DownloadManager/resume(recordID:unlessQuiescedSince:)``.
+    func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws(DownloadManagerError) -> Bool
 }
 
 extension DownloadManager: DownloadsLifecycleManager {}
@@ -243,7 +243,7 @@ public final class DownloadsLifecycle: SessionParticipant {
         do {
             for record in try await records(id) where record.isCoverOnly && record.state == .paused {
                 do {
-                    _ = try await engine.resume(recordID: record.id, unlessQuiescedSince: generation)
+                    _ = try await manager.resume(recordID: record.id, unlessQuiescedSince: generation)
                 } catch {
                     Log.downloads.error(
                         "Couldn't resume a cover download: \(Log.redact(String(describing: error)), privacy: .public)")

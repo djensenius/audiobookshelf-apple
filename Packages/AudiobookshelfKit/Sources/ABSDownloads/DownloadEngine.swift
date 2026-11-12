@@ -1104,6 +1104,8 @@ public actor DownloadEngine {
                 accessToken: credentials.accessToken)
             fresh.apply(await networkAccess())
             unchecked = fresh
+            // Stopped while the credentials were read: no check is sent with them.
+            guard launching[partID] == token else { return }
             let check = Task { [preflight] in try await preflight.check(fresh) }
             preflights[partID] = check
             defer { if preflights[partID] == check { preflights[partID] = nil } }

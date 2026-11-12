@@ -46,6 +46,7 @@ import Testing
         for record in [queued, downloading] {
             #expect(try await manager.resume(recordID: record.id) == false)
             #expect(try await manager.retry(recordID: record.id) == false)
+            #expect(try await manager.resume(recordID: record.id, unlessQuiescedSince: 0) == false)
         }
         try await manager.restartActiveTransfers()
 

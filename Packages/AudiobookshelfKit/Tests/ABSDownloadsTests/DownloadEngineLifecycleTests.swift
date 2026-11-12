@@ -898,6 +898,24 @@ import Testing
         #expect(harness.requests.isEmpty)
     }
 
+    /// A quiesce while a launch reads its credentials, before its check exists to cancel: the
+    /// launch sends no check with the old token once the read returns.
+    @Test func quiesceDuringACredentialsReadSendsNoCheck() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let preflight = StubPreflight()
+        let engine = harness.makeEngine(preflight: preflight)
+        let connectionID = harness.connectionID
+        harness.credentials.hook.withLock { $0 = { _ = await engine.quiesce(connectionID: connectionID) } }
+
+        await engine.start(partIDs: [partID])
+
+        #expect(harness.credentials.calls == [nil])
+        #expect(preflight.requests.isEmpty)
+        #expect(harness.requests.isEmpty)
+    }
+
     /// A pause whose seal failed, and whose previous blob couldn't be deleted, leaves a blob
     /// with the old credentials on an unflagged part: the discard deletes it too.
     @Test func discardResumeDataDeletesAnUnflaggedBlob() async throws {

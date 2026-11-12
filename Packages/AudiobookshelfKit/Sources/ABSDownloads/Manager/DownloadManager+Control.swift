@@ -29,6 +29,16 @@ extension DownloadManager {
         try await control(recordID, from: [.paused, .failed]) { try await $0.resume(recordID: $1) }
     }
 
+    /// Resumes a paused download, as ``resume(recordID:)`` does, unless a quiesce of its server
+    /// is under way or began since `generation`, as
+    /// ``DownloadEngine/resume(recordID:unlessQuiescedSince:)`` does.
+    @discardableResult
+    public func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws(DownloadManagerError) -> Bool {
+        try await control(recordID, from: [.paused]) {
+            try await $0.resume(recordID: $1, unlessQuiescedSince: generation)
+        }
+    }
+
     /// Retries a download that failed for good (or is paused), as ``resume(recordID:)`` does:
     /// its parts that haven't completed start again with a fresh retry budget.
     ///

@@ -81,15 +81,6 @@ private actor FakeEngine: DownloadsLifecycleEngine {
     }
 
     func quiesceGeneration() -> Int { 7 }
-
-    /// Each resume, in order, once recorded.
-    nonisolated let resumes = AsyncStream<Void>.makeStream()
-
-    func resume(recordID: UUID, unlessQuiescedSince generation: Int) -> Bool {
-        calls.append("resume \(recordID) since \(generation)")
-        resumes.continuation.yield()
-        return true
-    }
 }
 
 /// A manager that records its calls.
@@ -154,6 +145,15 @@ private actor FakeManager: DownloadsLifecycleManager {
             failingPauses -= 1
             throw .storeFailure
         }
+        return true
+    }
+
+    /// Each resume, in order, once recorded.
+    nonisolated let resumes = AsyncStream<Void>.makeStream()
+
+    func resume(recordID: UUID, unlessQuiescedSince generation: Int) -> Bool {
+        calls.append("resume \(recordID) since \(generation)")
+        resumes.continuation.yield()
         return true
     }
 }
@@ -354,7 +354,7 @@ struct DownloadsLifecycleTests {
         await lifecycle.handle(scenePhase: .active).value
 
         await lifecycle.sessionDidStart(context(connectionA))
-        for await _ in engine.resumes.stream { break }
+        for await _ in manager.resumes.stream { break }
 
         #expect(calls.all.last == "resume \(paused.id) since 7")
     }
