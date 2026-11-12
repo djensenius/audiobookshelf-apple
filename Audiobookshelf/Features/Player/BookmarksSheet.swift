@@ -111,18 +111,93 @@ enum BookmarkFailure {
 struct BookmarksSheet: View {
     let model: PlayerViewModel
     let close: () -> Void
-    @Environment(\.bookmarkStore) private var store
 
     var body: some View {
-        Group {
-            if let store {
-                BookmarksContent(
-                    bookmarks: PlayerBookmarksModel(player: model, store: store), rate: model.rate, close: close)
+        BookmarksPane(model: model, onSelect: close)
+            .playerSheetStyle(title: L10n.string("LabelYourBookmarks"), onDone: close)
+    }
+}
+
+/// The bookmarks without the sheet's frame, for the sheet and for the full player's details pane
+/// on a large display (#84). Choosing a bookmark seeks to it, then calls `onSelect`. Its form opens
+/// in the enclosing `NavigationStack`.
+struct BookmarksPane: View {
+    let model: PlayerViewModel
+    /// The form's target when a host outside the pane presents the form with
+    /// `bookmarkEditor(model:target:)`, so an edit outlives the pane; `nil` to
+    /// present it from the pane.
+    var editor: Binding<BookmarkEditorTarget?>?
+    let onSelect: () -> Void
+    @Environment(\.bookmarkStore) private var store
+    @State private var ownEditor: BookmarkEditorTarget?
+
+    var body: some View {
+        if let store {
+            let bookmarks = PlayerBookmarksModel(player: model, store: store)
+            if let editor {
+                BookmarksContent(bookmarks: bookmarks, rate: model.rate, editor: editor, close: onSelect)
             } else {
-                NoBookmarksView()
+                BookmarksContent(bookmarks: bookmarks, rate: model.rate, editor: $ownEditor, close: onSelect)
+                    .bookmarkEditor(model: model, target: $ownEditor)
+            }
+        } else {
+            NoBookmarksView()
+        }
+    }
+}
+
+extension View {
+    /// Pushes the bookmark form for `target` onto the enclosing `NavigationStack`, saves what it
+    /// submits and reports a failure in an alert. Applied to a view that stays put, the form and
+    /// its unsaved note survive the view that opened it going away.
+    func bookmarkEditor(model: PlayerViewModel, target: Binding<BookmarkEditorTarget?>) -> some View {
+        modifier(BookmarkEditorHost(model: model, target: target))
+    }
+}
+
+private struct BookmarkEditorHost: ViewModifier {
+    let model: PlayerViewModel
+    @Binding var target: BookmarkEditorTarget?
+    @Environment(\.bookmarkStore) private var store
+    /// The last failure; kept while the alert closes so its title doesn't go blank.
+    @State private var failure: BookmarkFailure?
+    @State private var isShowingFailure = false
+
+    func body(content: Content) -> some View {
+        content
+            .navigationDestination(item: $target) { target in
+                BookmarkEditor(target: target, rate: model.rate, placeholder: target.placeholder) { title in
+                    submit(title, for: target)
+                }
+            }
+            .alert(
+                Text(verbatim: failure.map { L10n.string($0.messageKey) } ?? ""), isPresented: $isShowingFailure,
+                presenting: failure
+            ) { _ in
+                Button {
+                } label: {
+                    Text(verbatim: L10n.string("ButtonOk"))
+                }
+            }
+    }
+
+    private func submit(_ title: String, for target: BookmarkEditorTarget) {
+        self.target = nil
+        guard let store else { return }
+        let bookmarks = PlayerBookmarksModel(player: model, store: store)
+        Task {
+            do {
+                switch target {
+                case .create(let itemID, let time, let defaultTitle):
+                    try await bookmarks.create(title: title, itemID: itemID, at: time, defaultTitle: defaultTitle)
+                case .edit(let bookmark): try await bookmarks.rename(bookmark, to: title)
+                }
+            } catch is CancellationError {
+            } catch {
+                failure = target.isCreate ? .create : .update
+                isShowingFailure = true
             }
         }
-        .playerSheetStyle(title: L10n.string("LabelYourBookmarks"), onDone: close)
     }
 }
 
@@ -138,19 +213,28 @@ enum BookmarkEditorTarget: Hashable, Identifiable {
     var isCreate: Bool {
         if case .create = self { true } else { false }
     }
+
+    /// The field's placeholder: the default title, or the current one, which an empty field keeps.
+    var placeholder: String {
+        switch self {
+        case .create(_, _, let defaultTitle): defaultTitle
+        case .edit(let bookmark): bookmark.title
+        }
+    }
 }
 
 /// The sheet's body when there is a store: the list (or a spinner during the first load, or the
-/// empty state), the create bar, the form, the delete confirmation and the error alert.
+/// empty state), the create bar, the delete confirmation and the error alert. It opens the form
+/// by setting `editor`; `bookmarkEditor(model:target:)` presents it.
 ///
 /// Writes run in unstructured tasks, so they finish after the sheet closes; a failure then only
 /// rolls the store back, silently, as the alert has nowhere to show.
 private struct BookmarksContent: View {
     let bookmarks: PlayerBookmarksModel
     let rate: Double
+    @Binding var editor: BookmarkEditorTarget?
     let close: () -> Void
     @Environment(\.locale) private var locale
-    @State private var editor: BookmarkEditorTarget?
     @State private var pendingDelete: AudioBookmark?
     /// The last failure; kept while the alert closes so its title doesn't go blank.
     @State private var failure: BookmarkFailure?
@@ -176,11 +260,6 @@ private struct BookmarksContent: View {
             CreateBookmarkBar(bookmarks: bookmarks, rate: rate) { time in
                 guard let itemID = bookmarks.currentItemID else { return }
                 editor = .create(itemID: itemID, time: time, defaultTitle: bookmarks.defaultTitle(locale: locale))
-            }
-        }
-        .navigationDestination(item: $editor) { target in
-            BookmarkEditor(target: target, rate: rate, placeholder: placeholder(for: target)) { title in
-                submit(title, for: target)
             }
         }
         .confirmationDialog(
@@ -210,34 +289,9 @@ private struct BookmarksContent: View {
         .task { await bookmarks.onAppear() }
     }
 
-    private func placeholder(for target: BookmarkEditorTarget) -> String {
-        switch target {
-        case .create(_, _, let defaultTitle): defaultTitle
-        // An empty title keeps the current one.
-        case .edit(let bookmark): bookmark.title
-        }
-    }
-
     private func select(_ bookmark: AudioBookmark) {
         Task { await bookmarks.select(bookmark) }
         close()
-    }
-
-    private func submit(_ title: String, for target: BookmarkEditorTarget) {
-        editor = nil
-        let bookmarks = bookmarks
-        Task {
-            do {
-                switch target {
-                case .create(let itemID, let time, let defaultTitle):
-                    try await bookmarks.create(title: title, itemID: itemID, at: time, defaultTitle: defaultTitle)
-                case .edit(let bookmark): try await bookmarks.rename(bookmark, to: title)
-                }
-            } catch is CancellationError {
-            } catch {
-                show(target.isCreate ? .create : .update)
-            }
-        }
     }
 
     private func remove(_ bookmark: AudioBookmark) {
