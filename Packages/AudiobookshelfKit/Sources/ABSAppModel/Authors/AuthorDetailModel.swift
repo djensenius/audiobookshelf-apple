@@ -65,11 +65,12 @@ public final class AuthorDetailModel {
     public private(set) var isNotFound = false
     /// ``refresh()`` calls whose books loaded, whatever the author's result; views re-check visible cards on each.
     public private(set) var booksRefreshes = 0
+    /// The library ``books`` load from: ``libraryID`` until the author's own arrives. Actions on a book, such as adding
+    /// it to a playlist, belong there, not in the library the screen was opened in.
+    public private(set) var booksLibraryID: String
 
     @ObservationIgnored private let service: any SeriesAuthorsService
     @ObservationIgnored private var sequence = 0
-    /// The library ``books`` load from.
-    @ObservationIgnored private var booksLibraryID: String
 
     /// - Parameter query: The books' sort and `collapseseries`; its filter is replaced with the
     ///   author's, and its page and limit are set by ``books``.

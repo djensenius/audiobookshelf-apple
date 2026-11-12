@@ -136,7 +136,8 @@ struct BrowsePagingFooter: View {
 
 /// Item cards in a grid that open their screen and perform their context-menu actions through
 /// ``ItemCardActionsHost``. `badge` puts a label (a sequence) on a card's cover; VoiceOver skips it and reads the
-/// series from the card's label (``SeriesPresentation/card(for:in:)``).
+/// series from the card's label (``SeriesPresentation/card(for:in:)``). `libraryID` is the library the items are in,
+/// when it can differ from the scene's (an author's or series' own library).
 struct BrowseItemGrid<Element: Identifiable>: View {
     let elements: [Element]
     let item: (Element) -> ItemSummary
@@ -144,11 +145,12 @@ struct BrowseItemGrid<Element: Identifiable>: View {
     var onAppear: (Element) -> Void = { _ in }
     /// Cards call `onAppear` again when this changes, as cards a refresh kept don't appear again to page on.
     var appearanceID = 0
+    var libraryID: String?
     @Environment(\.serverID) private var serverID
     private var libraries = LibraryCoverSettings()
 
     var body: some View {
-        ItemCardActionsHost { context, perform in
+        ItemCardActionsHost(libraryID: libraryID) { context, perform in
             ItemGrid(elements: elements) { element in
                 let summary = item(element)
                 ItemCard(
@@ -173,7 +175,9 @@ struct BrowseItemGrid<Element: Identifiable>: View {
 
 /// Item cards or rows that open their screen and perform their context-menu actions through the environment
 /// (``ItemCardActions``), with an alert when an action fails. `content` gets the actions to offer and the handler.
+/// Add to playlist opens in `libraryID`, the items' library, or the scene's when `nil`.
 struct ItemCardActionsHost<Content: View>: View {
+    var libraryID: String?
     @ViewBuilder let content:
         (_ context: ItemActionContext, _ perform: @escaping (ItemActionKind, ItemSummary) -> Void) -> Content
     @Environment(Router.self) private var router: Router?
@@ -212,7 +216,7 @@ struct ItemCardActionsHost<Content: View>: View {
             return
         }
         guard kind != .addToPlaylist else {
-            addToPlaylist?(item)
+            addToPlaylist?(item, libraryID: libraryID)
             return
         }
         let actions = itemActions

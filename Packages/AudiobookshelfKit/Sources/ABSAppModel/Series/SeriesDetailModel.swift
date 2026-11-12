@@ -47,6 +47,8 @@ public struct SeriesDetail: Sendable, Hashable, Identifiable {
     public let progress: SeriesProgress?
     /// In the order the server sent them; see ``SeriesDetailModel``.
     public let books: [SeriesBook]
+    /// The series' own library, when the server names it: its books load from there.
+    public let libraryID: String?
 
     public init(response: SeriesDetailResponse, items: [LibraryItem]) {
         id = response.series.id
@@ -57,6 +59,7 @@ public struct SeriesDetail: Sendable, Hashable, Identifiable {
         progress = response.progress
         let seriesID = response.series.id
         books = items.map { SeriesBook(item: $0, seriesID: seriesID) }
+        libraryID = response.series.libraryId
     }
 }
 
@@ -137,6 +140,10 @@ public final class SeriesDetailModel {
     }
 
     public var hasLoaded: Bool { detail != nil }
+
+    /// The library the loaded books are in: the series' own when the server names it, else ``libraryID``. Actions
+    /// on a book, such as adding it to a playlist, belong there, not in the library the screen was opened in.
+    public var booksLibraryID: String { detail?.libraryID ?? libraryID }
 
     /// The books query: the series filter, no sort (the server's sequence order) and no paging.
     public var booksQuery: LibraryQuery {
