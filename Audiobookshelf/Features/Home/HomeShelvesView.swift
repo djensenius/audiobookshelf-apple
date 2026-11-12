@@ -55,7 +55,7 @@ struct HomeSectionRow: View {
         case .item(let item):
             ItemCard(item: item, serverID: serverID, context: context) { kind in
                 if kind == .openDetails {
-                    open(HomePresentation.route(for: item))
+                    open(ItemCardActions.route(for: item))
                 } else {
                     perform(kind, item)
                 }
@@ -105,7 +105,7 @@ private struct HomeRefreshFailedRow: View {
     #Preview("Shelves") {
         NavigationStack {
             HomeShelvesView(
-                sections: HomePreviewData.sections, context: HomePresentation.actionContext(canPlay: true),
+                sections: HomePreviewData.sections, context: ItemCardActions.actionContext(canPlay: true),
                 open: { _ in }, perform: { _, _ in }, retry: {}
             )
             .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
@@ -119,7 +119,7 @@ private struct HomeRefreshFailedRow: View {
         NavigationStack {
             HomeShelvesView(
                 sections: HomePreviewData.sections, refreshFailed: true,
-                context: HomePresentation.actionContext(canPlay: false), open: { _ in }, perform: { _, _ in },
+                context: ItemCardActions.actionContext(canPlay: false), open: { _ in }, perform: { _, _ in },
                 retry: {}
             )
         }
