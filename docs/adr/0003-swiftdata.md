@@ -192,7 +192,8 @@ Model notes:
   local item's cover while it has none. The UI doesn't list it, and it links no
   progress. Deleting its local item cancels it, as cancelling an episode does (#367),
   and hands its cover on to an episode queued meanwhile without one, or keeps it for
-  the next completion (`refusedCovers`); with no record left, nothing is kept.
+  the next completion (`refusedCovers`); with no record left, nothing is kept. One
+  that the deletion paused but failed to delete is cancelled at the next start.
   If it completed just before, the engine deletes it and reports
   `DownloadUpdate.recordDiscarded`, and the manager hands the cover on or removes it.
   A refetch that fails for good is deleted, including one found failed at start. Its

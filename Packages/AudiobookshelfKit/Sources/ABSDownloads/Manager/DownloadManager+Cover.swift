@@ -187,6 +187,35 @@ extension DownloadManager {
         return (deleted.parts.map(\.destinationRelativePath), cover)
     }
 
+    /// A cover-only record found paused at ``start()`` while its item has no local item: the
+    /// local item was deleted, but cancelling the record (``cancelRefetch(of:)``) failed after
+    /// pausing it. Hidden as it is, the user can't resume or cancel it, and nothing else would
+    /// unless a later episode completion of the item resumed it (``refetchCover(_:for:)``), so
+    /// it is cancelled now, while its item is held, and its cover handed on and its files removed
+    /// as the deletion would have (``cleanUp(after:removing:folder:cover:)``). Best effort:
+    /// failures are logged, and leave it for the next start.
+    func cancelOrphanedRefetch(_ recordID: UUID) async {
+        do throws(DownloadManagerError) {
+            guard let first = try await read({ try await self.store.record(id: recordID) }) else { return }
+            try await holdingItem(first.key) { () async throws(DownloadManagerError) in
+                // Read again: an episode may have completed into a new local item meanwhile.
+                guard let record = try await read({ try await self.store.record(id: recordID) }),
+                    record.isCoverOnly, record.state == .paused,
+                    try await read({
+                        try await self.localItems.item(
+                            serverConnectionID: record.key.serverConnectionID,
+                            libraryItemId: record.key.libraryItemId)
+                    }) == nil
+                else { return }
+                let cancelled = try await cancelRefetch(of: record.key)
+                guard !cancelled.paths.isEmpty else { return }
+                await cleanUp(after: record.key, removing: cancelled.paths, folder: nil, cover: cancelled.cover)
+            }
+        } catch {
+            logError("Couldn't cancel a deleted item's cover download", error)
+        }
+    }
+
     /// Stops and deletes the unfinished cover-only `record`, then reports it removed.
     /// - Returns: the deleted record, or `nil` when it had completed or was gone.
     private func deleteRefetch(_ record: DownloadRecordDTO) async throws(DownloadManagerError) -> DownloadRecordDTO? {

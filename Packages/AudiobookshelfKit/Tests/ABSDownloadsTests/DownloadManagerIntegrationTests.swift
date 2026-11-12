@@ -97,8 +97,9 @@ import Testing
     }
 
     /// Deleting a podcast while its cover is fetched again (a cover-only record) cancels that
-    /// transfer: the record goes with its transfer marker and resume data, the request stays
-    /// the only one, and no cover file is ever written for the deleted podcast.
+    /// transfer: its task completes cancelled, the record goes with its transfer marker and
+    /// resume data, the request stays the only one, and no cover file is ever written for the
+    /// deleted podcast.
     @Test func deletingAPodcastCancelsItsCoverRefetch() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { request in
@@ -143,11 +144,15 @@ import Testing
 
         #expect(try await manager.deleteLocalItem(id: local.id))
 
+        // Waits for the task's completion, with the reply let through, so a transfer left
+        // running would finish rather than stay pending, then for the engine to handle it.
+        gate.open()
+        await harness.waitForCompletions(1)
+        await engine.processPendingEvents()
+        #expect(harness.completionErrors.withLock { $0 } == [.cancelled])
         #expect(try await harness.store.record(id: refetch.id) == nil)
         #expect(harness.locations.transferStart(partID: partID) == nil)
         #expect(!FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path()))
-        gate.open()
-        await engine.processPendingEvents()
         #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
         #expect(harness.requests.count == 1)
         #expect(!harness.fileExists(destination))

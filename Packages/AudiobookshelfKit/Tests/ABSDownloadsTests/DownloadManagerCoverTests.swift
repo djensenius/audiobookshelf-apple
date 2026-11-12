@@ -367,6 +367,40 @@ import Testing
         #expect(await fixture.engine.started.last == [handed.id])
     }
 
+    /// A deletion of the local item whose store write fails leaves the refetch paused and
+    /// hidden: the next start cancels it, and hands its cover to the episode queued meanwhile.
+    @Test func aRefetchLeftPausedByAFailedDeletionIsCancelledAtStart() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        let cover = try #require(refetch.parts.first)
+        let queued = try await Self.enqueue("ep_3", fixture, manager)
+        try #require(!queued.parts.contains { $0.kind == .cover })
+        // The refetch's deletion, the store write after its transfer stops, fails.
+        await fixture.engine.onStop { [store = fixture.store] partIDs in
+            if partIDs == [cover.id] { await store.failNextCommit(with: CocoaError(.fileWriteNoPermission)) }
+        }
+        #expect(try await manager.deleteLocalItem(id: local.id))
+        try #require(try await fixture.store.record(id: refetch.id)?.state == .paused)
+        try #require(try await fixture.store.record(id: queued.id)?.parts.contains { $0.kind == .cover } == false)
+
+        // A relaunch: a new engine, over the same store.
+        let engine = FakeDownloadEngine(store: fixture.store, localItems: fixture.localItems)
+        let relaunched = DownloadManager(
+            store: fixture.store, localItems: fixture.localItems, engine: engine, locations: fixture.locations,
+            capacity: fixture.capacity, clock: fixture.clock)
+        try await relaunched.start()
+
+        #expect(try await fixture.store.record(id: refetch.id) == nil)
+        #expect(await engine.stopped.contains(.init(partIDs: [cover.id], keepingResumeData: false)))
+        let handed = try #require(try await fixture.store.record(id: queued.id)?.parts.last)
+        #expect(handed.kind == .cover)
+        #expect(handed.serverPath == cover.serverPath)
+        #expect(handed.destinationRelativePath == cover.destinationRelativePath)
+        #expect(await engine.started.last == [handed.id])
+    }
+
     /// The local item was deleted just after its cover was fetched again, so the deletion
     /// couldn't cancel the refetch: once the engine discards it, its cover goes to an episode
     /// queued without one, completed, or else is removed.

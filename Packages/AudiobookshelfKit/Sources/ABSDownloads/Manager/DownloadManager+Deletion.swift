@@ -102,7 +102,8 @@ extension DownloadManager {
         do throws(DownloadManagerError) {
             refetched = try await cancelRefetch(of: Self.key(of: item))
         } catch {
-            // The engine discards it once it completes.
+            // The engine discards it once it completes; left paused, the next start cancels it
+            // (`cancelOrphanedRefetch(_:)`).
             logError("Couldn't cancel a deleted item's cover download", error)
         }
         let paths =
