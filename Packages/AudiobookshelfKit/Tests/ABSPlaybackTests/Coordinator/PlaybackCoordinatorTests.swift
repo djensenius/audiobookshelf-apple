@@ -631,6 +631,68 @@ struct PlaybackCoordinatorTests {
         await coordinator.waitForPendingCloses()
     }
 
+    @Test func aSwitchCancelledDuringTheCloseWaitReleasesTheKeptAudioSession() async {
+        await coordinator.play(itemID: "A")
+        let gate = Gate()
+        service.state.withLock { $0.closeGates["A-1"] = gate }
+        h.sleep.isManual = true
+
+        let playB = Task { await coordinator.play(itemID: "B") }
+        await yieldUntil { h.sleep.waitingCount == 1 }
+        playB.cancel()
+        h.sleep.fireOldest()
+        await playB.value
+
+        #expect(service.starts == ["A"])
+        #expect(coordinator.error == nil)
+        #expect(engine.unloadCount == 1)
+        #expect(engine.stopCount == 1)
+        gate.open()
+        await coordinator.waitForPendingCloses()
+    }
+
+    @Test func aSwitchCancelledDuringStreamResolutionReleasesTheKeptAudioSession() async {
+        await coordinator.play(itemID: "A")
+        service.state.withLock { $0.resolveError = CancellationError() }
+
+        await coordinator.play(itemID: "B")
+
+        #expect(coordinator.error == nil)
+        #expect(coordinator.phase == .unloaded)
+        #expect(engine.unloadCount == 1)
+        #expect(engine.stopCount == 1)
+        await coordinator.waitForPendingCloses()
+    }
+
+    @Test func eachCloseIsWaitedForOnlyUntilItsOwnTimeLimit() async {
+        await coordinator.play(itemID: "A")
+        let gateA = Gate()
+        service.state.withLock { $0.closeGates["A-1"] = gateA }
+        coordinator.stop()
+        await yieldUntil { service.closes == ["A-1"] }
+        h.clock.advance(by: 1.5)
+        h.sleep.elapsesImmediately = true
+        await coordinator.play(itemID: "B")
+        h.sleep.elapsesImmediately = false
+        h.sleep.isManual = true
+        let gateB = Gate()
+        service.state.withLock { $0.closeGates["B-2"] = gateB }
+
+        // A's close has 0.5 s left and B's a full 2 s; B's finishing ends its own wait only.
+        let playC = Task { await coordinator.play(itemID: "C") }
+        await yieldUntil { h.sleep.waitingCount == 2 }
+        gateB.open()
+        await yieldUntil { h.sleep.waitingCount == 1 }
+        h.sleep.fireOldest()
+        await playC.value
+
+        #expect(Array(h.sleep.durations.suffix(2)).sorted() == [.seconds(0.5), PlaybackCoordinator.closeWaitTimeout])
+        #expect(service.starts == ["A", "B", "C"])
+        #expect(!service.log.contains("close A-1 done"))
+        gateA.open()
+        await coordinator.waitForPendingCloses()
+    }
+
     @Test func aHangingCloseDelaysOnlyThePlayRightAfterIt() async {
         await coordinator.play(itemID: "A")
         let gate = Gate()

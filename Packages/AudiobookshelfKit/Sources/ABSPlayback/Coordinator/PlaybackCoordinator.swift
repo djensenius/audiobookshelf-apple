@@ -390,6 +390,7 @@ public final class PlaybackCoordinator {
         } catch is CancellationError {
             // A cancelled caller abandons the start; that isn't a failure. No session was opened.
             if current == generation, phase == .starting { phase = .unloaded }
+            if current == generation { releaseKeptAudioSession() }
             return
         } catch {
             return fail(Self.sessionError(error), generation: current)
@@ -406,6 +407,7 @@ public final class PlaybackCoordinator {
             // A cancelled caller abandons the start; that isn't a failure.
             if error is CancellationError {
                 if current == generation, phase == .starting { phase = .unloaded }
+                if current == generation { releaseKeptAudioSession() }
                 return
             }
             return fail(Self.streamError(error), generation: current)
@@ -999,12 +1001,16 @@ public final class PlaybackCoordinator {
         self.error = error
         pendingJumpOffset = 0
         if phase == .starting { phase = .unloaded }
-        // The item that was to follow a switch failed: release the session the switch kept.
-        if keepsAudioSession, phase != .loaded {
-            keepsAudioSession = false
-            engine.stop()
-        }
+        releaseKeptAudioSession()
         emit(.failed(error))
+    }
+
+    /// The item that was to follow a switch failed or was abandoned: release the audio session the
+    /// switch kept, so other apps' audio can resume.
+    private func releaseKeptAudioSession() {
+        guard keepsAudioSession, phase != .loaded else { return }
+        keepsAudioSession = false
+        engine.stop()
     }
 
     /// A streaming-policy block: the current item, and anything in flight for it, carries on.
@@ -1161,28 +1167,29 @@ public final class PlaybackCoordinator {
         let now = now()
         let (seconds, attoseconds) = Self.closeWaitTimeout.components
         let limit = Double(seconds) + Double(attoseconds) / 1e18
-        var closes: [Task<Void, Never>] = []
-        var remaining: TimeInterval = 0
+        let sleep = self.sleep
+        var waits: [Task<Void, Never>] = []
         for (id, close) in closeTasks {
             // Clamped, so a clock set back never stretches the wait past the limit.
             let left = min(limit, limit - now.timeIntervalSince(closeSentAt[id] ?? now))
             guard left > 0 else { continue }
-            closes.append(close)
-            remaining = max(remaining, left)
+            // Each close races its own remaining time, so a newer close never extends an older one's.
+            waits.append(
+                Task {
+                    let first = FirstFinish()
+                    let timer = Task {
+                        await sleep(.seconds(left))
+                        first.finish()
+                    }
+                    Task {
+                        await close.value
+                        first.finish()
+                    }
+                    await first.wait()
+                    timer.cancel()
+                })
         }
-        guard !closes.isEmpty else { return }
-        let first = FirstFinish()
-        let sleep = self.sleep
-        let timer = Task {
-            await sleep(.seconds(remaining))
-            first.finish()
-        }
-        Task {
-            for close in closes { await close.value }
-            first.finish()
-        }
-        await first.wait()
-        timer.cancel()
+        for wait in waits { await wait.value }
     }
 
     /// Takes this start's turn (see the class doc): the previous start has returned and the closes
