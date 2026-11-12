@@ -3,8 +3,9 @@ import ABSUI
 import SwiftUI
 
 /// What the signed-in shell injects for one account session: the shared library store, the
-/// progress reader for item cards and rows, and the one ``ProgressItemActions`` every screen
-/// shares (its per-item queue only orders actions within one instance).
+/// progress reader for item cards and rows, and item actions that run on the store's one
+/// ``ProgressItemActions`` for the session (``LibraryStore/itemActions(for:)``), so every screen
+/// and every window shares its per-item queue, and a restarted session gets fresh actions.
 @MainActor
 final class AccountShellValues {
     let store: LibraryStore
@@ -14,7 +15,7 @@ final class AccountShellValues {
     init(store: LibraryStore) {
         self.store = store
         progressReader = BrowsePresentation.progressReader(store.progress)
-        itemActions = store.makeItemActions() ?? NoOpItemActions()
+        itemActions = store.sessionItemActions() ?? NoOpItemActions()
     }
 }
 

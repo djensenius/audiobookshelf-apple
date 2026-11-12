@@ -90,7 +90,8 @@ private func withStore(_ body: (LibraryStore) async throws -> Void) async throws
             render(AccountShell(store: store) { ShellProbe(sighting: sighting) })
 
             #expect(sighting.store === store)
-            #expect(sighting.itemActions is ProgressItemActions)
+            let actions = try #require(sighting.itemActions as? SessionItemActions)
+            #expect(actions.connectionKey == account)
             #expect(sighting.progress?.isFinished == true)
         }
     }
@@ -114,11 +115,22 @@ private func withStore(_ body: (LibraryStore) async throws -> Void) async throws
             #expect(cache.values(for: nil) == nil)
             let values = try #require(cache.values(for: store))
             #expect(cache.values(for: store) === values)
-            #expect(cache.values(for: store)?.itemActions as AnyObject === values.itemActions as AnyObject)
 
             try await withStore { other in
                 #expect(cache.values(for: other)?.store === other)
             }
+        }
+    }
+
+    /// Two windows of one account (each with its own shell and cache) act through the store's one
+    /// shared actions instance, so their actions on an item share one queue.
+    @Test func windowsOfOneAccountShareTheSessionsActions() async throws {
+        try await withStore { store in
+            let windows = [AccountShellValuesCache(), AccountShellValuesCache()]
+            let actions = try windows.map { try #require($0.values(for: store)?.itemActions as? SessionItemActions) }
+            #expect(actions.allSatisfy { $0.connectionKey == account })
+            let shared = try #require(store.itemActions(for: account))
+            #expect(store.itemActions(for: account) === shared)
         }
     }
 }

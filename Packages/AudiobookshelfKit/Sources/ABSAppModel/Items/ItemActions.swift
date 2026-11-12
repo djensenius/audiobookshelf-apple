@@ -90,8 +90,8 @@ extension APIClient: ProgressWriting {
 /// - Optimistic ordering is tracked separately from server timestamps. A full progress seed
 ///   requested after a successful action reconciles its authoritative row, even with clock skew.
 /// - The per-key queue belongs to this instance: inject one instance per account and share it
-///   between screens (``LibraryStore/makeItemActions(localSync:)``; the app shell does), or
-///   actions from two instances on the same key can interleave.
+///   between screens and windows (``LibraryStore/itemActions(for:)``, which the app shell
+///   injects), or actions from two instances on the same key can interleave.
 /// - After the server accepted marking finished or not finished, or discarding, and the change
 ///   was committed, `localSync` (``ItemActionLocalSync``) updates the local playback database,
 ///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
@@ -121,6 +121,10 @@ public final class ProgressItemActions: ItemActionPerforming {
         self.now = now
         self.sessionToken = cache.sessionToken()
     }
+
+    /// Whether the progress session the actions were built in is still the cache's: `false`
+    /// after a ``ProgressCache/clear()`` (sign-out, account switch, or a failed switch's restart).
+    var isCurrentSession: Bool { cache.isCurrent(sessionToken) }
 
     public func markFinished(_ target: ItemActionTarget) async throws {
         try await run(target, update: .finished(true, at: now()), local: { try await $0.didMarkFinished(target) }) {

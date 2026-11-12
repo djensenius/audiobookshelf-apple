@@ -285,4 +285,59 @@ private let forwardings: [StoreServiceForwarding] = [
             #expect(writes.value.count == 2)
         }
     }
+
+    /// Every window's session actions run on the account session's one shared instance, which
+    /// an ordinary reconnect keeps.
+    @Test func windowsShareTheSessionsItemActions() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            #expect(store.sessionItemActions() == nil)
+            let writes = Locked<[String]>([])
+            await store.connect(client: WritingClient(name: "a", writes: writes), connectionKey: serverA)
+            let shared = try #require(store.itemActions(for: serverA))
+            #expect(store.itemActions(for: serverA) === shared)
+            #expect(store.itemActions(for: serverB) == nil)
+
+            await store.connect(client: WritingClient(name: "b", writes: writes), connectionKey: serverA)
+            #expect(store.itemActions(for: serverA) === shared)
+
+            let windows = try [#require(store.sessionItemActions()), #require(store.sessionItemActions())]
+            try await windows[0].markFinished(ItemActionTarget(libraryItemID: "li"))
+            try await windows[1].discardProgress(ItemActionTarget(libraryItemID: "li"))
+            #expect(writes.value == ["b:li", "b:delete:progress-li"])
+            #expect(store.itemActions(for: serverA) === shared)
+        }
+    }
+
+    /// A failed switch clears the store and restarts the same account's session: the windows'
+    /// actions then act through a fresh instance, not the dead session's stale token.
+    @Test func aRestartedSessionGetsFreshItemActions() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let writes = Locked<[String]>([])
+            await store.connect(client: WritingClient(name: "old", writes: writes), connectionKey: serverA)
+            let window = try #require(store.sessionItemActions())
+            let dead = try #require(store.itemActions(for: serverA))
+            try await window.markFinished(ItemActionTarget(libraryItemID: "li"))
+
+            // The failed switch: the participant clears the store, then the account restarts.
+            store.clear()
+            await #expect(throws: CancellationError.self) {
+                try await window.markFinished(ItemActionTarget(libraryItemID: "li"))
+            }
+            await store.connect(client: WritingClient(name: "new", writes: writes), connectionKey: serverA)
+
+            try await window.markFinished(ItemActionTarget(libraryItemID: "li"))
+            #expect(store.itemActions(for: serverA) !== dead)
+            #expect(store.progress.progress(libraryItemID: "li")?.isFinished == true)
+            #expect(writes.value == ["old:li", "new:li"])
+
+            // Another account: the window's actions stop.
+            await store.connect(client: WritingClient(name: "other", writes: writes), connectionKey: serverB)
+            await #expect(throws: CancellationError.self) {
+                try await window.markFinished(ItemActionTarget(libraryItemID: "li"))
+            }
+            #expect(writes.value == ["old:li", "new:li"])
+        }
+    }
 }
