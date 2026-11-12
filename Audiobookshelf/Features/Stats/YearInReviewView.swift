@@ -41,6 +41,8 @@ private struct YearInReviewContentView: View {
     @Environment(\.displayScale) private var displayScale
     @Environment(\.locale) private var locale
     @State private var shareImage: YearInReviewShareImage?
+    /// Whether the last render of the loaded stats produced no image.
+    @State private var renderFailed = false
 
     /// What the rendered image depends on.
     private struct RenderKey: Equatable {
@@ -55,6 +57,9 @@ private struct YearInReviewContentView: View {
         ScrollView {
             VStack(spacing: ABSSpacing.large) {
                 controls
+                if model.error != nil, model.content != nil, !model.isLoading {
+                    RefreshFailedRow { Task { await model.load() } }
+                }
                 card
             }
             .padding(ABSSpacing.large)
@@ -78,6 +83,22 @@ private struct YearInReviewContentView: View {
                     }
                 }
             }
+            #if os(macOS)
+                // No pull to refresh on macOS.
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        Task { await model.load() }
+                    } label: {
+                        Label {
+                            Text(verbatim: L10n.string("ButtonRefresh"))
+                        } icon: {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .keyboardShortcut("r", modifiers: .command)
+                    .disabled(model.isLoading)
+                }
+            #endif
         }
         .refreshable { await model.load() }
         .task(
@@ -129,6 +150,10 @@ private struct YearInReviewContentView: View {
             ErrorStateView(title: L10n.string("MessageYearInReviewLoadFailed")) {
                 Task { await model.load() }
             }
+        } else if renderFailed, model.content != nil {
+            ErrorStateView(title: L10n.string("MessageYearInReviewLoadFailed")) {
+                Task { await render() }
+            }
         } else {
             ProgressView()
                 .frame(maxWidth: .infinity, minHeight: 300)
@@ -154,6 +179,7 @@ private struct YearInReviewContentView: View {
     private func render() async {
         // Never show or share the previous year's or variant's image while this one renders.
         shareImage = nil
+        renderFailed = false
         guard let content = model.content else { return }
         let year = model.year
         let variant = model.variant
@@ -161,5 +187,6 @@ private struct YearInReviewContentView: View {
         guard !Task.isCancelled else { return }
         let card = YearInReviewCard(content: content, year: year, covers: covers, locale: locale)
         shareImage = YearInReviewShareImage.render(card, variant: variant, scale: renderScale)
+        renderFailed = shareImage == nil
     }
 }

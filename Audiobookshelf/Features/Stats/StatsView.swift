@@ -128,8 +128,8 @@ private struct YearInReviewSheet: View {
     }
 }
 
-/// Shown above the retained stats when a reload fails.
-private struct RefreshFailedRow: View {
+/// Shown above the retained stats when a reload fails; also used by the year in review.
+struct RefreshFailedRow: View {
     let retry: () -> Void
 
     var body: some View {
