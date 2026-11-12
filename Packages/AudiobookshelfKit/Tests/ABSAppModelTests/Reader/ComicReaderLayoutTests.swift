@@ -137,6 +137,23 @@ import Testing
         #expect(clamp([narrow, wide], 300, 1.125) == -62.5)
     }
 
+    @Test func aDoubleTapShowsAWholeOffCentreSpreadThatFits() {
+        let viewport = CGSize(width: 1000, height: 800)
+        let content = ComicReaderLayout.fittedRect(
+            of: [CGSize(width: 100, height: 800), CGSize(width: 300, height: 800)], gap: 0, in: viewport)
+        #expect(content == CGRect(x: 400, y: 0, width: 400, height: 800))
+        let zoomIn = ComicReaderLayout.doubleTapTarget(from: 1, content: content, viewport: viewport)
+        #expect(zoomIn.scale == 2)
+        #expect(zoomIn.offset == CGSize(width: -100, height: 0))
+        // The zoomed spread, 300...1100 about the centre, moves to 200...1000: all of it on screen.
+        let left = viewport.width / 2 + (content.minX - viewport.width / 2) * zoomIn.scale + zoomIn.offset.width
+        let right = viewport.width / 2 + (content.maxX - viewport.width / 2) * zoomIn.scale + zoomIn.offset.width
+        #expect(left >= 0 && right <= viewport.width)
+        let zoomOut = ComicReaderLayout.doubleTapTarget(from: 2, content: content, viewport: viewport)
+        #expect(zoomOut.scale == 1)
+        #expect(zoomOut.offset == .zero)
+    }
+
     @Test func aSpreadFitsItsPagesSideBySide() {
         let viewport = CGSize(width: 1000, height: 800)
         let portrait = CGSize(width: 400, height: 800)

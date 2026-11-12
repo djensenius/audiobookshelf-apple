@@ -98,6 +98,19 @@ public enum ComicReaderLayout {
     /// The zoom a pinch may reach.
     public static let zoomRange: ClosedRange<CGFloat> = 1...5
 
+    /// The zoom a double-tap goes to from `1×`.
+    public static let doubleTapScale: CGFloat = 2
+
+    /// A double-tap's zoom and pan: unzoomed goes to ``doubleTapScale``, zoomed goes back to `1×`.
+    /// The pan is the centred one clamped for the new zoom, so an off-centre spread that fits
+    /// shows all of itself.
+    public static func doubleTapTarget(
+        from scale: CGFloat, content: CGRect, viewport: CGSize
+    ) -> (scale: CGFloat, offset: CGSize) {
+        let target = scale > 1 ? 1 : doubleTapScale
+        return (target, clampedOffset(.zero, scale: target, content: content, viewport: viewport))
+    }
+
     /// Where a spread's pages land aspect-fitted side by side in `viewport`, `gap` apart, in
     /// display order (left to right): each page fits its half of the width and sits against the
     /// gutter, so pages of unequal widths make an off-centre spread. A page alone is centred, and

@@ -288,9 +288,10 @@ private struct ComicZoom: ViewModifier {
                 isEnabled: scale > 1
             )
             .onTapGesture(count: 2) {
+                let target = ComicReaderLayout.doubleTapTarget(from: scale, content: fittedContent, viewport: size)
                 withAnimation {
-                    scale = scale > 1 ? 1 : 2
-                    offset = .zero
+                    scale = target.scale
+                    offset = target.offset
                 }
                 settle()
             }
@@ -304,9 +305,10 @@ private struct ComicZoom: ViewModifier {
             }
     }
 
+    private var fittedContent: CGRect { ComicReaderLayout.fittedRect(of: pages, gap: gap, in: size) }
+
     private func clamped(_ offset: CGSize) -> CGSize {
-        let content = ComicReaderLayout.fittedRect(of: pages, gap: gap, in: size)
-        return ComicReaderLayout.clampedOffset(offset, scale: scale, content: content, viewport: size)
+        ComicReaderLayout.clampedOffset(offset, scale: scale, content: fittedContent, viewport: size)
     }
 
     /// Keeps the pan inside the content after the viewport or the pages' sizes change.
