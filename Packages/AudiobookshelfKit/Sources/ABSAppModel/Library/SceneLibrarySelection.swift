@@ -10,8 +10,8 @@ import Foundation
 /// - Once ``LibraryStore/hasLoaded`` is set the library is checked again: one that no longer
 ///   exists falls back to the initial library, and one that does gets its kind and sections.
 ///   With no libraries at all the selection and library-scoped paths are cleared.
-///   Replacing a library that was never checked (restored or guessed) keeps the paths, such as
-///   a launch or deep link's, opened before then.
+///   Checking a library that was never checked (restored or guessed), whether it is kept or
+///   replaced, keeps the paths, such as a launch or deep link's, opened before then.
 /// - A deep link's ``Router/pendingLibraryID`` is opened once loaded, or dropped when the user
 ///   has no such library.
 /// - Only a user's pick is saved as the account's last library.
@@ -59,7 +59,13 @@ public enum SceneLibrarySelection {
             router.cancelLibraryRequest()
         }
         if let current = router.libraryID, let library = store.libraries.first(where: { $0.id == current }) {
-            show(library, in: router)
+            // An unchecked library that still exists may have had a launch or deep link opened
+            // in a section its kind lacks; keep the paths as for a replaced guess.
+            if !router.isLibraryChecked {
+                adopt(library, in: router)
+            } else {
+                show(library, in: router)
+            }
         } else if let initial = store.initialLibraryID,
             let library = store.libraries.first(where: { $0.id == initial })
         {
