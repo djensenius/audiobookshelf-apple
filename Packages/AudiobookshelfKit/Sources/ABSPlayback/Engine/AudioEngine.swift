@@ -25,6 +25,7 @@ public final class AudioEngine: AudioEngineProtocol {
     /// Output volume, `0...1` (the sleep timer fade). A replacement player gets it too.
     public private(set) var volume: Float = 1
     public private(set) var isPlaybackRequested = false
+    public private(set) var wasPlaybackRequestedAtFailure = false
     public private(set) var pendingSeekTarget: Double?
     public private(set) var isAudioSessionActive = false
     public private(set) var timeline: PlaybackTimeline?
@@ -73,6 +74,10 @@ public final class AudioEngine: AudioEngineProtocol {
     /// Incremented whenever the queue is cleared, so a delayed failure for an old item is dropped.
     @ObservationIgnored private var queueGeneration = 0
     @ObservationIgnored private var readyWaiters: [ObjectIdentifier: [CheckedContinuation<Void, Never>]] = [:]
+    /// How long a seek (or load) waits for its item to leave `.unknown` before failing it.
+    nonisolated static let readinessTimeout: Duration = .seconds(30)
+    /// Waits out ``readinessTimeout``; replaced in tests. Cancelled once the item is ready.
+    @ObservationIgnored var readinessWait: @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
     @ObservationIgnored private var seekGeneration = 0
     @ObservationIgnored private var loadGeneration = 0
     @ObservationIgnored private var isSeeking = false
@@ -171,6 +176,11 @@ public final class AudioEngine: AudioEngineProtocol {
         isPlaybackRequested = false
         player.pause()
         refreshState()
+    }
+
+    public func pauseForOutputLoss() {
+        pause()
+        onEvent?(.outputLost)
     }
 
     public func stop() {
@@ -373,11 +383,28 @@ public final class AudioEngine: AudioEngineProtocol {
 
     // MARK: - Seeking
 
-    /// Returns once `item` is no longer `.unknown`, or it was removed from the queue.
+    /// Returns once `item` is no longer `.unknown`, it was removed from the queue, or it failed for
+    /// staying `.unknown` past ``readinessTimeout``.
     private func waitUntilReady(_ item: AVPlayerItem) async {
         let id = ObjectIdentifier(item)
         guard item.status == .unknown, queued[id] != nil else { return }
+        let deadline = Task { [weak self, readinessWait] in
+            await readinessWait(Self.readinessTimeout)
+            guard !Task.isCancelled else { return }
+            self?.readinessTimedOut(id)
+        }
+        defer { deadline.cancel() }
         await withCheckedContinuation { readyWaiters[id, default: []].append($0) }
+    }
+
+    /// An item still `.unknown` at its deadline (a server that never answers) fails like a stall
+    /// with no error, so recovery counts the attempt; its asset is evicted so a retry makes a new
+    /// one, and its waiters resume (their seek then fails).
+    private func readinessTimedOut(_ id: ObjectIdentifier) {
+        guard let entry = queued[id], entry.item.status == .unknown, readyWaiters[id] != nil else { return }
+        assets[entry.trackIndex] = nil
+        fail(.itemFailed(trackIndex: entry.trackIndex, .readinessTimedOut))
+        for waiter in readyWaiters.removeValue(forKey: id) ?? [] { waiter.resume() }
     }
 
     private func resumeReadyWaiters() {
@@ -497,6 +524,7 @@ public final class AudioEngine: AudioEngineProtocol {
         guard failure == nil else { return }
         logger.error("Playback failed: \(String(describing: error), privacy: .public)")
         failure = error
+        wasPlaybackRequestedAtFailure = isPlaybackRequested
         isPlaybackRequested = false
         player.pause()
         refreshState()

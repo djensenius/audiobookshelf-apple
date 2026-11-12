@@ -41,6 +41,8 @@ final class AppEnvironment {
     /// The download stack, or `nil` when the store couldn't be opened. Its lifecycle is
     /// launched here, so a launch without a window (CarPlay, a background wake) has an engine.
     let downloads: AppDownloads?
+    /// The shared library and its session participant (#181), or `nil` without ``accounts``.
+    let library: LibraryParticipant?
     /// The cover image pipeline and its session participant (#182).
     let images: ImageServices
 
@@ -104,6 +106,7 @@ final class AppEnvironment {
         self.player = PlaceholderPlayerState()
         self.downloads = downloads
         downloads?.lifecycle.launch()
+        self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
 
         // Images (#182).
         let images = ImageServices(accounts: accounts, covers: covers)

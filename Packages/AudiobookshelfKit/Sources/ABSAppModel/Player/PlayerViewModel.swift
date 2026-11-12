@@ -17,6 +17,11 @@ public enum PlayerErrorMessage: Sendable, Hashable {
     case streamUnavailable
     /// The media couldn't be loaded or stopped playing.
     case playbackFailed
+    /// Recovery gave up: "Can't continue streaming. Check your connection or server." with Retry
+    /// (ADR 0007).
+    case streamingInterrupted
+    /// "The server or a proxy in front of it rejected the stream." (ADR 0007's 401 path).
+    case streamRejected
 
     init(_ error: PlaybackCoordinatorError) {
         switch error {
@@ -24,6 +29,8 @@ public enum PlayerErrorMessage: Sendable, Hashable {
         case .streamingNotAllowed: self = .streamingNotAllowed
         case .sessionStartFailed: self = .sessionStartFailed
         case .streamUnavailable: self = .streamUnavailable
+        case .recoveryExhausted: self = .streamingInterrupted
+        case .streamRejected: self = .streamRejected
         case .engine, .playback, .unexpected: self = .playbackFailed
         }
     }

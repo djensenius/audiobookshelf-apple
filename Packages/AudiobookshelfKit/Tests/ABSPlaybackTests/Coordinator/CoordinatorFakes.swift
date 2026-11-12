@@ -52,6 +52,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     var defaultRate: Float = 1
     var volume: Float = 1
     var isPlaybackRequested = false
+    var wasPlaybackRequestedAtFailure = false
     var pendingSeekTarget: Double?
     var isAudioSessionActive = false
     var timeline: PlaybackTimeline?
@@ -119,6 +120,8 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     /// As the real engine does, defers playing (shown as buffering) while a seek is in flight.
     func play() {
         playCount += 1
+        // As the real engine does, a sticky failure refuses play until a seek or load.
+        if case .failed = state { return }
         if silentlyRefusingPlays > 0 {
             silentlyRefusingPlays -= 1
             isPlaybackRequested = false
@@ -141,6 +144,11 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         volumeAtPause = volume
         isPlaybackRequested = false
         state = .paused
+    }
+
+    func pauseForOutputLoss() {
+        pause()
+        onEvent?(.outputLost)
     }
 
     func stop() {
@@ -173,6 +181,8 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         let current = generation
         seeks.append(time)
         pendingSeekTarget = time
+        // As the real engine does, a seek clears a failure (rebuilding the item).
+        if case .failed = state { state = .paused }
         let result = seekResults.isEmpty ? SeekResult.completed : seekResults.removeFirst()
         if !seekGates.isEmpty { await seekGates.removeFirst().wait() }
         // A late seek never overwrites a newer seek, load or stop (including the same target).
@@ -197,6 +207,15 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         currentTime = target
         if isPlaybackRequested { startPlayer() } else { state = .paused }
         onEvent?(.tick(target))
+    }
+
+    /// Fails as the real engine does: play is no longer requested and the state is sticky until a
+    /// seek or load.
+    func fail(_ error: AudioEngineError) {
+        wasPlaybackRequestedAtFailure = isPlaybackRequested
+        isPlaybackRequested = false
+        state = .failed(error)
+        onEvent?(.failed(error))
     }
 
     /// Plays to the end, as the real engine does: play is no longer requested.
@@ -239,6 +258,10 @@ final class StubSessionService: PlaybackSessionService {
         var resolutions = 0
         var canceledResolutions = 0
         var closeError: APIError?
+        var refreshes = 0
+        /// The `rejected` token of each refresh.
+        var refreshedTokens: [String?] = []
+        var refreshError: APIError?
         var starts: [String] = []
         var closes: [String] = []
         var canceledCloses: [String] = []
@@ -336,7 +359,8 @@ final class StubSessionService: PlaybackSessionService {
                 startOffset: track.startOffset ?? 0, duration: track.duration, authentication: .session)
         }
         return ResolvedStream(
-            plan: StreamPlan(kind: .directPlay, transport: .urlAsset, tracks: tracks), urls: tracks.map(\.url))
+            plan: StreamPlan(kind: .directPlay, transport: .urlAsset, tracks: tracks), urls: tracks.map(\.url),
+            accessToken: "token-\(session.id)")
     }
 
     func closeSession(id: String, report: PlaybackSyncReport?) async throws {
@@ -356,6 +380,16 @@ final class StubSessionService: PlaybackSessionService {
         state.withLock { state in
             state.openSessions.removeAll { $0 == id }
             state.log.append("close \(id) done")
+        }
+        if let error { throw error }
+    }
+
+    func refreshStreamAccess(replacing rejected: String?) async throws {
+        let error = state.withLock {
+            $0.refreshes += 1
+            $0.refreshedTokens.append(rejected)
+            $0.log.append("refresh")
+            return $0.refreshError
         }
         if let error { throw error }
     }
