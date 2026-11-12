@@ -78,6 +78,22 @@ struct TestDownloads {
         }
     }
 
+    /// The app test host's environment: no download stack, so its real downloads stay as they are.
+    @Test func withoutADownloadsRootLeavesOutTheDownloadStack() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil,
+                makeDownloadSession: downloads.makeSession)
+
+            #expect(environment.accounts != nil)
+            #expect(environment.downloads == nil)
+
+            await environment.lifecycle.start()
+
+            #expect(environment.lifecycle.gate == .connect)
+        }
+    }
+
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
         try await withSettings { settings in
             let keychain = ConnectTestKeychain()

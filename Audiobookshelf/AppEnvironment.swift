@@ -15,8 +15,12 @@ import Observation
 /// participant before ``SessionLifecycle/start()``, so build them here, in `init`.
 @MainActor
 final class AppEnvironment {
-    /// Built on first use, so a process that never asks for it opens no store.
-    static let shared = AppEnvironment()
+    /// Built on first use, so a process that never asks for it opens no store. The app test
+    /// host (`mise run test:app`) leaves out the download stack: its store holds the app's real
+    /// downloads, which it mustn't restart or sweep, and tests build their own.
+    static let shared = AppEnvironment(
+        downloadsRoot: ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+            ? .applicationSupportDirectory : nil)
 
     let settings: AppSettings
     /// The on-device store, or `nil` when it couldn't be opened. ``lifecycle`` then shows
@@ -36,13 +40,13 @@ final class AppEnvironment {
     ///   - settings: The settings every scene shares.
     ///   - storeLocation: Where the store lives; tests and previews pass `.inMemory`.
     ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:)``);
-    ///     tests pass a temporary directory.
+    ///     tests pass a temporary directory, and `nil` leaves out the download stack.
     ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
     init(
         settings: AppSettings = AppSettings(), storeLocation: DataStack.Location = .appGroup,
         keychain: any KeychainStoring = KeychainStore(),
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
-        downloadsRoot: URL = .applicationSupportDirectory,
+        downloadsRoot: URL? = .applicationSupportDirectory,
         makeDownloadSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession()
     ) {
         let dataStack: DataStack?
@@ -56,15 +60,17 @@ final class AppEnvironment {
                 validator: ServerValidator(sessionConfiguration: sessionConfiguration),
                 openID: OIDCLoginService(sessionConfiguration: sessionConfiguration),
                 sessionConfiguration: sessionConfiguration)
-            let built = AppDownloads.make(
-                dataStack: stack, accounts: manager, settings: settings, root: downloadsRoot,
-                makeSession: makeDownloadSession)
+            downloads = downloadsRoot.map {
+                AppDownloads.make(
+                    dataStack: stack, accounts: manager, settings: settings, root: $0, makeSession: makeDownloadSession)
+            }
             dataStack = stack
             accounts = manager
             lifecycle = SessionLifecycle(
-                source: AccountSessionAdapter(accounts: manager) { await built.lifecycle.connectionRemoved($0) })
-            lifecycle.register(built.lifecycle, stage: .connect)
-            downloads = built
+                source: AccountSessionAdapter(accounts: manager) { [downloads] in
+                    await downloads?.lifecycle.connectionRemoved($0)
+                })
+            if let downloads { lifecycle.register(downloads.lifecycle, stage: .connect) }
         } catch {
             let reason = Log.redact(String(describing: error))
             Log.data.fault("The on-device store couldn't be opened: \(reason, privacy: .public)")
