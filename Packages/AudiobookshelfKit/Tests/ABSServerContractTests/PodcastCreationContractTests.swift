@@ -69,10 +69,8 @@ struct PodcastCreationContractTests {
         let (seed, folder, admin) = try await seededFolder()
         let title = "Contract Cast " + UUID().uuidString.prefix(8).lowercased()
         let body = request(seed, folder, title: title)
-        var created: [String] = []
-        do {
-            let item = try await admin.client.send(PodcastEndpoints.create(body))
-            created.append(item.id)
+        try await withCreatedPodcasts(admin) { created in
+            let (item, raw) = try await create(body, as: admin, registering: created)
             #expect(item.libraryId == seed.podcastLibraryID && item.folderId == folder.id)
             #expect(item.path == body.path)
             // 2.26.0 strips `folder.fullPath`, which its LibraryFolder model doesn't have, so
@@ -89,21 +87,19 @@ struct PodcastCreationContractTests {
             #expect(podcast.metadata.genres == ["Contract"] && podcast.metadata.type == "episodic")
             #expect(podcast.autoDownloadEpisodes == false && podcast.episodes?.isEmpty == true)
             #expect(podcast.coverPath == nil)
+            // `Podcast.episodes` decodes lossily, so check the wire: present and empty.
+            let media = try #require(raw["media"] as? [String: Any])
+            let episodes = try #require(media["episodes"] as? [Any], "The created podcast has an episodes array")
+            #expect(episodes.isEmpty)
 
             let fetched = try await admin.client.send(ItemEndpoints.item(id: item.id))
             #expect(fetched.path == body.path && fetched.podcast?.metadata.title == title)
 
             // `libraryItemModel.count({ where: { path } })`: refused before anything is written.
             await expectStatus(400, "Podcast already exists") {
-                let again = try await admin.client.send(PodcastEndpoints.create(body))
-                created.append(again.id)
+                try await create(body, as: admin, registering: created)
             }
-        } catch {
-            for id in created { _ = try? await admin.client.send(deleteHard(id)) }
-            throw error
         }
-        for id in created { _ = try await admin.client.send(deleteHard(id)) }
-        for id in created { await expectNotFound { try await admin.client.send(ItemEndpoints.item(id: id)) } }
         #expect(try await admin.client.send(LibraryEndpoints.items(libraryID: seed.podcastLibraryID)).total == 1)
     }
 
@@ -112,21 +108,27 @@ struct PodcastCreationContractTests {
         let (seed, folder, admin) = try await seededFolder()
         let good = request(seed, folder, title: "Contract Cast " + UUID().uuidString.prefix(8).lowercased())
         let body = NewPodcastRequest(libraryID: good.libraryID, folderID: "missing", path: good.path, media: good.media)
-        await expectStatus(404) { try await admin.client.send(PodcastEndpoints.create(body)) }
+        try await withCreatedPodcasts(admin) { created in
+            await expectStatus(404) { try await create(body, as: admin, registering: created) }
+        }
         #expect(try await admin.client.send(LibraryEndpoints.items(libraryID: seed.podcastLibraryID)).total == 1)
     }
 
     @Test("a user who isn't an admin gets 403 Forbidden from create and from feed lookup")
     func nonAdminIsForbidden() async throws {
-        let (seed, folder, _) = try await seededFolder()
+        let (seed, folder, admin) = try await seededFolder()
         let body = request(seed, folder, title: "Contract Cast " + UUID().uuidString.prefix(8).lowercased())
-        try await ContractServer.require().withUser { user in
-            #expect(user.user.type == .user)
-            await expectStatus(403, "Forbidden") { try await user.client.send(PodcastEndpoints.create(body)) }
-            await expectStatus(403, "Forbidden") {
-                try await user.client.send(PodcastEndpoints.feed(rssFeed: "https://example.com/contract.xml"))
+        // Deleting the user doesn't delete podcasts it created, so the admin cleans those up.
+        try await withCreatedPodcasts(admin) { created in
+            try await ContractServer.require().withUser { user in
+                #expect(user.user.type == .user)
+                await expectStatus(403, "Forbidden") { try await create(body, as: user, registering: created) }
+                await expectStatus(403, "Forbidden") {
+                    try await user.client.send(PodcastEndpoints.feed(rssFeed: "https://example.com/contract.xml"))
+                }
             }
         }
+        #expect(try await admin.client.send(LibraryEndpoints.items(libraryID: seed.podcastLibraryID)).total == 1)
     }
 
     @Test("feed lookup: an invalid URL is a 400 with a message; an unusable feed is a 404")
@@ -141,6 +143,44 @@ struct PodcastCreationContractTests {
             try await admin.client.send(PodcastEndpoints.feed(rssFeed: "http://127.0.0.1:9/contract.xml"))
         }
     }
+}
+
+/// The exact IDs of the podcasts a test created, including ones a request was expected to refuse.
+private actor CreatedPodcasts {
+    private(set) var ids: [String] = []
+    func add(_ id: String) { ids.append(id) }
+}
+
+/// `POST /api/podcasts` read as raw JSON, so a created item's ID is registered before decoding
+/// or any expectation can fail (as `CollectionContractFixture.send`). Returns the item and the raw object.
+@discardableResult
+private func create(
+    _ body: NewPodcastRequest, as session: ContractSession, registering created: CreatedPodcasts
+) async throws -> (LibraryItem, [String: Any]) {
+    let endpoint = PodcastEndpoints.create(body)
+    let rawEndpoint = Endpoint<Data>(
+        endpoint.method, endpoint.path, body: endpoint.body, staysOnOrigin: endpoint.staysOnOrigin)
+    let data = try await session.client.send(rawEndpoint)
+    let raw = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    await created.add(try #require(raw["id"] as? String, "The created podcast has an id"))
+    return (try JSONDecoder().decode(LibraryItem.self, from: data), raw)
+}
+
+/// Runs `body`, then hard-deletes every podcast it registered with the admin session, on success
+/// and on failure, and checks each is gone.
+private func withCreatedPodcasts(
+    _ admin: ContractSession, _ body: (CreatedPodcasts) async throws -> Void
+) async throws {
+    let created = CreatedPodcasts()
+    do {
+        try await body(created)
+    } catch {
+        for id in await created.ids { _ = try? await admin.client.send(deleteHard(id)) }
+        throw error
+    }
+    let ids = await created.ids
+    for id in ids { _ = try await admin.client.send(deleteHard(id)) }
+    for id in ids { await expectNotFound { try await admin.client.send(ItemEndpoints.item(id: id)) } }
 }
 
 /// `DELETE /api/items/:id?hard=1`: removes the item and its folder on disk; answers `OK`.
