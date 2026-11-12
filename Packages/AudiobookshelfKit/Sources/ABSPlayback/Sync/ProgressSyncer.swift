@@ -929,11 +929,15 @@ public final class ProgressSyncer {
                 return
             }
         }
-        // Socket ebook values are a hint to fetch, never merged themselves (ADR 0003).
-        let ebookFetches = await store.needsEbookFetch
-            .filter { $0.serverConnectionID == service.serverConnectionID && !attemptedKeys.contains($0) }
-            .sorted { $0.rawValue < $1.rawValue }
-        for key in ebookFetches {
+        // Socket ebook values are a hint to fetch, never merged themselves (ADR 0003). A fetch issued
+        // after a request answers it, so one still outstanding arrived during an earlier GET of
+        // this drain and is fetched again, at most twice per key per drain.
+        var ebookFetches: [MediaKey: Int] = [:]
+        while let key = await store.needsEbookFetch
+            .filter({ $0.serverConnectionID == service.serverConnectionID && ebookFetches[$0, default: 0] < 2 })
+            .min(by: { $0.rawValue < $1.rawValue })
+        {
+            ebookFetches[key, default: 0] += 1
             await waitForPendingWrites()
             guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
             do {

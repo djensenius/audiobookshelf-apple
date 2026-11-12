@@ -71,11 +71,18 @@ final class FakeProgressServer: ProgressSyncService, EbookProgressService {
     }
 
     let fetches = Locked(0)
+    /// Runs once, during the first GET after a PATCH (its confirmation), before that GET answers.
+    let duringConfirmation = Locked<(@Sendable () async throws -> Void)?>(nil)
 
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
         fetches.value += 1
         if fetchFails.value { throw Failure() }
-        return server.value
+        let answer = server.value
+        if !writes.value.isEmpty, let during = duringConfirmation.value {
+            duringConfirmation.value = nil
+            try await during()
+        }
+        return answer
     }
 
     func syncSession(id: String, report: PlaybackSyncReport) async throws {}
@@ -572,6 +579,43 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(service.fetches.value == fetches)
     }
 
+    /// A socket update received during a drain's last GET of the row makes a request that GET
+    /// can't answer: the drain fetches the row again.
+    @Test func aSocketUpdateDuringAConfirmationIsFetchedInTheSameDrain() async throws {
+        try await store.recordEdit(ProgressEdit(ebook: .init(location: "3", progress: 0.2)), for: key, now: t0)
+        let (store, server) = (store, service.server)
+        let later = serverProgress("9", progress: 0.8, at: t0.addingTimeInterval(60))
+        service.duringConfirmation.value = {
+            server.value = later
+            let socket = ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "9",
+                ebookProgress: 0.8, lastUpdate: t0.addingTimeInterval(60))
+            try await store.applyServerProgress(
+                [key: socket], capturedAt: await store.captureGeneration(), source: .socket)
+        }
+
+        await syncer.drainPendingProgress()
+        #expect(service.duringConfirmation.value == nil)
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3"])
+        #expect(try await row().ebookLocation == "9")
+        #expect(await store.needsEbookFetch.isEmpty)
+    }
+
+    /// A request no GET answers (here the server answers for another item) is fetched at most
+    /// twice in one drain, so the drain ends.
+    @Test func anUnansweredEbookFetchRequestIsBounded() async throws {
+        try await cleanRow("2")
+        try await apply(serverProgress("9", progress: 0.8, at: t0.addingTimeInterval(20)), source: .socket)
+        var other = serverProgress("9", progress: 0.8, at: t0.addingTimeInterval(20))
+        other.libraryItemId = "another-book"
+        service.server.value = other
+        let fetches = service.fetches.value
+
+        await syncer.drainPendingProgress()
+        #expect(service.fetches.value - fetches == 2)
+        #expect(await store.needsEbookFetch == [key])
+    }
+
     // MARK: - Resume
 
     /// Dirty: the row's unsent page wins over a newer server page, without a fetch.
@@ -656,6 +700,21 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         model.record(.page(3), progress: 0.2)
         await model.saveTail?.value
         #expect(try await row().currentTime == 0)
+    }
+
+    /// A resume that finds no progress on the server (404) answers a socket's request to fetch
+    /// the row, so the next drain doesn't fetch it again.
+    @Test func resumeFindingNoProgressAnswersAnEbookFetchRequest() async throws {
+        try await cleanRow("2")
+        try await apply(serverProgress("9", progress: 0.8, at: t0.addingTimeInterval(20)), source: .socket)
+        #expect(await store.needsEbookFetch == [key])
+
+        service.server.value = nil
+        await makeModel().resume()
+        #expect(await store.needsEbookFetch.isEmpty)
+        let fetches = service.fetches.value
+        await syncer.drainPendingProgress()
+        #expect(service.fetches.value == fetches)
     }
 
     @Test func resumeDoesNotMoveAnAlreadyTurnedPage() async throws {

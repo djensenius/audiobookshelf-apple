@@ -198,8 +198,10 @@ public final class EbookProgressModel {
             let capture = try await store.captureStartProgress(for: key)
             let fetched = try await service.mediaProgress(itemID: key.libraryItemId, episodeID: key.episodeId)
             guard let fetched else {
-                // The server has no progress: the known one is stale, to open at or to seed from.
+                // The server has no progress: the known one is stale, to open at or to seed from,
+                // and a socket's request to fetch the row is answered.
                 knownServerProgress = nil
+                await store.answerEbookFetch(captured: capture)
                 return
             }
             guard let matching = Self.matching(fetched, key) else { return }

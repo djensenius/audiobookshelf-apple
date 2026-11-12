@@ -188,6 +188,12 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
     }
 
+    /// The start GET `captured` was taken for found no progress on the server: answers a
+    /// ``needsEbookFetch`` request made before it was issued.
+    public func answerEbookFetch(captured: PlaybackStartProgressCapture) {
+        answerEbookFetch(for: captured.key, capturedAt: captured.generation)
+    }
+
     /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
     public func captureGeneration() -> ProgressGeneration {
         ProgressGeneration(value: generation)
