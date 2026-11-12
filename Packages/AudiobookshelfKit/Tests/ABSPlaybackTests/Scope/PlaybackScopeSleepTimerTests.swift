@@ -105,13 +105,30 @@ struct PlaybackScopeSleepTimerTests {
         #expect(t.timer.remaining == 1600)
     }
 
-    /// Retirement leaves the timer to the release, which detaches and cancels it.
-    @Test func releaseDetachesAndCancelsTheTimer() async throws {
+    /// Retirement cancels a running timer and hands back `willResume` at once, before the close
+    /// wait: nothing the timer does can reach the stopped coordinator.
+    @Test func retireCancelsTheTimerBeforeTheCloseWait() async throws {
         let t = try TimedScope()
         await t.scope.play(itemID: "a", episodeID: nil, startTime: 1000)
         #expect(t.timer.start(.duration(600)))
 
         t.scope.retire(reason: .accountSwitch)
+
+        #expect(!t.scope.isReleased)
+        #expect(!t.timer.isRunning)
+        #expect(t.coordinator.willResume == nil)
+        _ = await t.scope.finishRetirement()
+        #expect(t.scope.isReleased)
+        #expect(!t.timer.isRunning)
+    }
+
+    /// The release detaches the timer again, as a backstop: a scope released without retiring
+    /// still cancels it.
+    @Test func releaseDetachesAndCancelsTheTimer() async throws {
+        let t = try TimedScope()
+        await t.scope.play(itemID: "a", episodeID: nil, startTime: 1000)
+        #expect(t.timer.start(.duration(600)))
+
         _ = await t.scope.finishRetirement()
 
         #expect(t.scope.isReleased)

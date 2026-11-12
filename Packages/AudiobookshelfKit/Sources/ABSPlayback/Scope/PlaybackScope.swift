@@ -40,8 +40,8 @@ extension NowPlayingBridge: NowPlayingHandle {
 /// - **Reconnect.** ``reconnect(client:features:)`` swaps the client and features behind the
 ///   coordinator (``AccountPlaybackServices``); the scope and its playback carry on.
 /// - **Sleep timer.** The configured ``sleepTimer`` (#185) is attached to the coordinator, which
-///   asks it before playback starts and tells it of item changes and seeks, until the release
-///   detaches and cancels it.
+///   asks it before playback starts and tells it of item changes and seeks, until the scope
+///   retires, which detaches and cancels it. The release detaches it again, as a backstop.
 /// - **End.** ``retire(reason:)`` runs synchronously, before the session's teardown suspends: it
 ///   stops the coordinator for good and captures the final position.
 ///   ``finishRetirement(timeout:)`` then waits for the close, within a bound, and releases the
@@ -121,7 +121,7 @@ public final class PlaybackScope {
     /// ``retire(reason:)``. `nil` only for a scope built without a queue (tests).
     let advancer: PlaybackQueueAdvancer?
     /// The sleep timer, for the player; `nil` for a scope built without one. Its attachment is
-    /// detached, cancelling it, when the scope is released.
+    /// detached, cancelling it, when the scope retires, and again when it's released.
     public var sleepTimer: SleepTimer? { sleepTimerAttachment?.timer }
     private let sleepTimerAttachment: SleepTimerAttachment?
     private let nowPlaying: any NowPlayingHandle
@@ -176,7 +176,7 @@ public final class PlaybackScope {
 
     /// Test seam: a scope over a coordinator and a syncer already attached to it, an advancer
     /// over `queue`, when one is given, attached to the coordinator, and `sleepTimer`, detached
-    /// when the scope is released.
+    /// when the scope retires, and again when it's released.
     init(
         coordinator: PlaybackCoordinator, syncer: ProgressSyncer, services: AccountPlaybackServices?,
         nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil,
@@ -311,22 +311,26 @@ public final class PlaybackScope {
     }
 
     /// Adds work to run when the scope is released, after the bridge is invalidated (the sleep
-    /// timer's detach, #185). Runs at once if the scope was already released.
+    /// timer's detach, #185, a backstop: retirement already cancelled the timer). Runs at once if
+    /// the scope was already released.
     public func onRelease(_ body: @escaping @MainActor () -> Void) {
         guard !isReleased else { return body() }
         releaseHooks.append(body)
     }
 
-    /// Stops the coordinator for good, synchronously: call it before the teardown first suspends.
-    /// It captures the final position; expiry, sign-out and removal also drop the client, so
-    /// nothing reaches the server after. Pass an account-ending reason, never `.user`.
+    /// Cancels the sleep timer and stops the coordinator for good, synchronously: call it before
+    /// the teardown first suspends. It captures the final position; expiry, sign-out and removal
+    /// also drop the client, so nothing reaches the server after. Pass an account-ending reason,
+    /// never `.user`.
     public func retire(reason: PlaybackStopReason) {
         assert(reason != .user, "A scope retires only for an account-ending reason")
         revokePrimaryClaim()
-        // Detached before the stop, so nothing it triggers can advance or change the queue.
+        // Detached before the stop, so nothing it triggers can advance or change the queue, and
+        // the sleep timer can't act on the stopped coordinator during the close wait.
         isRetired = true
         advancer?.detach(from: coordinator)
         advancer?.queue.retire()
+        sleepTimerAttachment?.detach()
         coordinator.stop(reason: reason)
         switch reason {
         case .expired, .signOut, .accountRemoved: services?.invalidate()

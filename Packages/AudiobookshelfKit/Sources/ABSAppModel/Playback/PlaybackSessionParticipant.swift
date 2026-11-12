@@ -18,7 +18,7 @@ public protocol PlaybackScopeHandle: AnyObject, Sendable {
     func play(itemID: String, episodeID: String?, startTime: Double?) async
     /// The account's play queue, read-only; `nil` when the scope has none.
     var queue: (any PlaybackQueueReading)? { get }
-    /// The sleep timer, detached when the scope is released; `nil` when the scope has none.
+    /// The sleep timer, cancelled when the scope retires; `nil` when the scope has none.
     var sleepTimer: SleepTimer? { get }
     /// Changes the queue, unless the scope has retired.
     func editQueue(_ edit: (PlaybackQueue) -> Void)
