@@ -511,7 +511,8 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.seek).map(\.position) == (superseded ? [5] : []))
     }
 
-    @Test func retryingAnInterruptedResumeRewindIsNotASeek() async throws {
+    @Test(arguments: [SeekResult.interrupted, .failed])
+    func retryingAnInterruptedResumeRewindIsNotASeek(result: SeekResult) async throws {
         let (s, spy) = try Self.harness()
         s.h.settings.disableAutoRewind = false
         await s.coordinator.play(itemID: "a")
@@ -519,8 +520,9 @@ struct PlaybackHistoryReportingTests {
         s.coordinator.pause()
         await s.settle()
         s.h.clock.advance(by: 120)
-        // The rewind's seek is interrupted; pausing and resuming again retries it, and it lands.
-        s.h.engine.seekResults = [.interrupted]
+        // The rewind's seek is interrupted or fails, leaving its target pending; pausing and
+        // resuming again retries it, and it lands.
+        s.h.engine.seekResults = [result]
         await s.coordinator.resume()
         s.coordinator.pause()
         await s.coordinator.resume()

@@ -701,7 +701,8 @@ public final class PlaybackCoordinator {
             guard result != .superseded else { return .deferred }
             guard result == .completed else {
                 awaitingSeekLanding = isFinishingLoad || engine.pendingSeekTarget != nil
-                rewindAwaitsLanding = isResumeRewind && result == .interrupted
+                // The engine keeps an interrupted or failed target pending; a retry is still the rewind.
+                rewindAwaitsLanding = isResumeRewind && engine.pendingSeekTarget != nil
                 return result == .failed ? .failed : .deferred
             }
             let landed = engine.currentTime
