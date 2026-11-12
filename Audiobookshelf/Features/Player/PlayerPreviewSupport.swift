@@ -20,7 +20,6 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
     var isPlaying = false
     var isBuffering = false
     var isPlaybackRequested = false
-    let lastSeekFailed = false
     var timeline: PlaybackTimeline?
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
@@ -67,6 +66,10 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
 
     func jump(by offset: Double) async -> Double? {
         await seek(to: currentTime + offset)
+    }
+
+    func jumpOutcome(by offset: Double) async -> JumpOutcome {
+        await jump(by: offset).map(JumpOutcome.landed) ?? .deferred
     }
 
     func setRate(_ rate: Double) {

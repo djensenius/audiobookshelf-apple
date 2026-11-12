@@ -47,7 +47,6 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
     public var isPlaying: Bool { bound?.isPlaying ?? false }
     public var isBuffering: Bool { bound?.isBuffering ?? false }
     public var isPlaybackRequested: Bool { bound?.isPlaybackRequested ?? false }
-    public var lastSeekFailed: Bool { bound?.lastSeekFailed ?? false }
     public var timeline: PlaybackTimeline? { bound?.timeline }
     public var chapterIndex: Int? { bound?.chapterIndex }
     public var chapter: Chapter? { bound?.chapter }
@@ -69,6 +68,10 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
 
     @discardableResult public func jump(by offset: Double) async -> Double? {
         await current?.jump(by: offset)
+    }
+
+    @discardableResult public func jumpOutcome(by offset: Double) async -> JumpOutcome {
+        await current?.jumpOutcome(by: offset) ?? .deferred
     }
 
     public func setRate(_ rate: Double) {

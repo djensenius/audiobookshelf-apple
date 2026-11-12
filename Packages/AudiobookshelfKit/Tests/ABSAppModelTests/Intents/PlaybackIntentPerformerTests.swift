@@ -192,7 +192,7 @@ private let restored = LastPlayedRecord(
     @Test func jumpWhoseTrackDoesNotLoadFails() async throws {
         try await withPerformer { performer, playback, _ in
             playback.load(FakePlaybackControl.bookSession(), at: 50)
-            playback.jumpOutcome = .fails
+            playback.jumpBehavior = .fails
             await #expect(throws: PlaybackIntentFailure.jumpFailed) {
                 try await performer.jump(forward: true, seconds: 30)
             }
@@ -204,7 +204,7 @@ private let restored = LastPlayedRecord(
         try await withPerformer { performer, playback, _ in
             // Queued while starting, or superseded by a later seek: `nil`, but not a failure.
             playback.start(FakePlaybackControl.bookSession())
-            playback.jumpOutcome = .superseded
+            playback.jumpBehavior = .superseded
             let interval = try await performer.jump(forward: false, seconds: 10)
             #expect(interval == 10)
             #expect(playback.calls == [.jump(-10)])

@@ -31,34 +31,46 @@ struct PlaybackCoordinatorJumpTests {
 
     // MARK: - Jumps
 
-    @Test func aJumpWhoseTargetFailsToLoadIsReportedUntilTheNextJump() async throws {
+    @Test func aJumpWhoseTargetFailsToLoadReportsFailure() async throws {
         await coordinator.play(itemID: "a")
         #expect(coordinator.phase == .loaded)
         engine.seekResults = [.failed]
-        #expect(await coordinator.jump(by: 30) == nil)
-        #expect(coordinator.lastSeekFailed)
-        #expect(await coordinator.jump(by: 30) != nil)
-        #expect(!coordinator.lastSeekFailed)
+        #expect(await coordinator.jumpOutcome(by: 30) == .failed)
+        #expect(await coordinator.jumpOutcome(by: 30).landedTime != nil)
     }
 
     @Test(arguments: [SeekResult.superseded, .interrupted])
-    func aJumpThatLandsLaterIsNotAFailure(result: SeekResult) async throws {
+    func aJumpThatLandsLaterIsDeferred(result: SeekResult) async throws {
         await coordinator.play(itemID: "a")
-        engine.seekResults = [.failed, result]
-        await coordinator.jump(by: 30)
-        #expect(await coordinator.jump(by: 30) == nil)
-        #expect(!coordinator.lastSeekFailed)
+        engine.seekResults = [result]
+        #expect(await coordinator.jumpOutcome(by: 30) == .deferred)
     }
 
-    @Test func aJumpQueuedWhileStartingIsNotAFailure() async throws {
-        await coordinator.play(itemID: "a")
-        engine.seekResults = [.failed]
-        await coordinator.jump(by: 30)
-        let (play, gate) = await playHeld("b")
-        #expect(await coordinator.jump(by: 30) == nil)
-        #expect(!coordinator.lastSeekFailed)
+    @Test func aJumpQueuedWhileStartingIsDeferred() async throws {
+        let (play, gate) = await playHeld("a")
+        #expect(await coordinator.jumpOutcome(by: 30) == .deferred)
         gate.open()
         await play.value
+    }
+
+    /// An old jump that returns after a newer item's jump failed reports its own outcome, not the
+    /// newer failure.
+    @Test func aJumpSupersededByAnotherItemIgnoresThatItemsFailedJump() async throws {
+        await coordinator.play(itemID: "a")
+        let gate = Gate()
+        engine.seekGates = [gate]
+        engine.seekResults = [.failed]
+        let coordinator = coordinator
+        let old = Task { await coordinator.jumpOutcome(by: 30) }
+        await yieldUntil { engine.seeks.last == 30 }
+
+        await coordinator.play(itemID: "b")
+        #expect(coordinator.mediaKey == h.key("b"))
+        engine.seekResults = [.failed]
+        #expect(await coordinator.jumpOutcome(by: 30) == .failed)
+
+        gate.open()
+        #expect(await old.value == .deferred)
     }
 
     @Test func jumpAfterAnUnloadedSeekMovesTheChosenPosition() async throws {

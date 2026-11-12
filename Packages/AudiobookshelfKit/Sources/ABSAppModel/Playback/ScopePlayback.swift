@@ -30,7 +30,6 @@ final class ScopePlayback: PlayerPlaybackControlling {
     var isPlaying: Bool { coordinator.isPlaying }
     var isBuffering: Bool { coordinator.isBuffering }
     var isPlaybackRequested: Bool { coordinator.isPlaybackRequested }
-    var lastSeekFailed: Bool { coordinator.lastSeekFailed }
     var timeline: PlaybackTimeline? { coordinator.timeline }
     var chapterIndex: Int? { coordinator.chapterIndex }
     var chapter: Chapter? { coordinator.chapter }
@@ -56,6 +55,10 @@ final class ScopePlayback: PlayerPlaybackControlling {
 
     @discardableResult func jump(by offset: Double) async -> Double? {
         await coordinator.jump(by: offset)
+    }
+
+    @discardableResult func jumpOutcome(by offset: Double) async -> JumpOutcome {
+        await coordinator.jumpOutcome(by: offset)
     }
 
     func setRate(_ rate: Double) {

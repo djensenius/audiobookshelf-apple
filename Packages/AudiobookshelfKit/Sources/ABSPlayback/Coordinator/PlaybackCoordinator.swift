@@ -75,10 +75,6 @@ public final class PlaybackCoordinator {
     public private(set) var restoredRecord: LastPlayedRecord?
     /// The media a play is checking the streaming policy for, before it commits (a loading hint).
     public private(set) var pendingPlayKey: MediaKey?
-    /// Whether the latest ``seek(to:)`` or ``jump(by:)`` failed because its target couldn't load
-    /// (the engine's ``SeekResult/failed``). Each seek and jump resets it, so a `nil` from a jump
-    /// queued while starting, or from a seek a later one superseded, leaves it `false`.
-    @ObservationIgnored public private(set) var lastSeekFailed = false
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
     /// Where playback is or is going. An interrupted seek leaves the engine's own time behind
@@ -656,8 +652,9 @@ public final class PlaybackCoordinator {
     /// unless server or local progress from elsewhere is newer than the last-played record (see
     /// `otherProgressDateTolerance`).
     @discardableResult
-    public func seek(to time: Double) async -> Double? {
-        lastSeekFailed = false
+    public func seek(to time: Double) async -> Double? { await seekOutcome(to: time).landedTime }
+
+    private func seekOutcome(to time: Double) async -> JumpOutcome {
         switch phase {
         case .loaded:
             let current = generation
@@ -665,11 +662,10 @@ public final class PlaybackCoordinator {
             reachedEnd = false
             awaitingSeekLanding = true
             let result = await engine.seek(to: target)
-            guard current == generation, phase == .loaded else { return nil }
+            guard current == generation, phase == .loaded else { return .deferred }
             guard result == .completed else {
-                lastSeekFailed = result == .failed
                 awaitingSeekLanding = isFinishingLoad || engine.pendingSeekTarget != nil
-                return nil
+                return result == .failed ? .failed : .deferred
             }
             let landed = engine.currentTime
             if awaitingSeekLanding, !isFinishingLoad {
@@ -677,19 +673,19 @@ public final class PlaybackCoordinator {
                 emit(.didSeek(time: landed))
                 saveLastPlayed()
             }
-            return landed
+            return .landed(landed)
         case .unloaded:
             let finite = time.isFinite ? max(time, 0) : 0
             unloadedPosition = unloadedDuration > 0 ? min(finite, unloadedDuration) : finite
             pendingStartTime = unloadedPosition
             pendingJumpOffset = 0
-            return unloadedPosition
+            return .landed(unloadedPosition)
         case .starting:
             pendingStartTime = time
             pendingJumpOffset = 0
-            return nil
+            return .deferred
         case .idle:
-            return nil
+            return .deferred
         }
     }
 
@@ -700,24 +696,28 @@ public final class PlaybackCoordinator {
     /// moves a chosen position (after a ``seek(to:)``), or else moves the position shown and
     /// applies after the resume position is resolved, keeping the progress-from-elsewhere rule.
     @discardableResult
-    public func jump(by offset: Double) async -> Double? {
-        lastSeekFailed = false
-        guard offset.isFinite, offset != 0 else { return nil }
+    public func jump(by offset: Double) async -> Double? { await jumpOutcome(by: offset).landedTime }
+
+    /// Jumps as ``jump(by:)`` does and reports how this jump ended, telling a target that failed to
+    /// load apart from one queued while starting or superseded by a later seek or item.
+    @discardableResult
+    public func jumpOutcome(by offset: Double) async -> JumpOutcome {
+        guard offset.isFinite, offset != 0 else { return .deferred }
         switch phase {
         case .loaded:
-            return await seek(to: (engine.pendingSeekTarget ?? engine.currentTime) + offset)
+            return await seekOutcome(to: (engine.pendingSeekTarget ?? engine.currentTime) + offset)
         case .starting:
             // Clamped like an unloaded jump once the item's duration is known.
             if isResolvingStart || unloadedDuration == 0 { pendingJumpOffset += offset } else { addClampedJump(offset) }
-            return nil
+            return .deferred
         case .unloaded:
             if let pendingStartTime {
-                return await seek(to: Self.clamp(pendingStartTime, to: unloadedDuration) + offset)
+                return await seekOutcome(to: Self.clamp(pendingStartTime, to: unloadedDuration) + offset)
             }
             addClampedJump(offset)
-            return unloadedPositionAfterJumps
+            return .landed(unloadedPositionAfterJumps)
         case .idle:
-            return nil
+            return .deferred
         }
     }
 

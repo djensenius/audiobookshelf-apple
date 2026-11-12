@@ -103,8 +103,8 @@ public struct PlaybackIntentPerformer {
         } else {
             interval = forward ? settings.jumpForwardTime : settings.jumpBackwardsTime
         }
-        let landed = await playback.jump(by: Double(forward ? interval : -interval))
-        guard landed != nil || !playback.lastSeekFailed else { throw .jumpFailed }
+        let outcome = await playback.jumpOutcome(by: Double(forward ? interval : -interval))
+        guard outcome != .failed else { throw .jumpFailed }
         return interval
     }
 

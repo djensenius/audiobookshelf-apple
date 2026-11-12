@@ -31,7 +31,6 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var isPlaying = false
     var isBuffering = false
     var isPlaybackRequested = false
-    private(set) var lastSeekFailed = false
     var timeline: PlaybackTimeline?
     /// Whether seeks land; one that doesn't returns `nil` and leaves playback where it was.
     var seeksLand = true
@@ -41,11 +40,10 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     /// Makes ``resume(rewindingBy:)`` fail as the coordinator's does when the streaming policy blocks
     /// it or the audio session won't activate: it sets ``error`` and leaves play unrequested.
     var resumeFailure: PlaybackCoordinatorError?
-    /// How ``jump(by:)`` ends, as the coordinator's can: landing, returning `nil` because it was
-    /// queued or superseded, or returning `nil` with ``lastSeekFailed`` because the target track
-    /// wouldn't load.
-    enum JumpOutcome { case lands, superseded, fails }
-    var jumpOutcome = JumpOutcome.lands
+    /// How a jump ends, as the coordinator's can: landing, deferred because it was queued or
+    /// superseded, or failed because the target track wouldn't load.
+    enum JumpBehavior { case lands, superseded, fails }
+    var jumpBehavior = JumpBehavior.lands
     private(set) var calls: [Call] = []
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
@@ -80,11 +78,18 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     }
 
     func jump(by offset: Double) async -> Double? {
+        await jumpOutcome(by: offset).landedTime
+    }
+
+    func jumpOutcome(by offset: Double) async -> JumpOutcome {
         calls.append(.jump(offset))
-        lastSeekFailed = jumpOutcome == .fails
-        guard jumpOutcome == .lands else { return nil }
-        currentTime = timeline?.clamp(currentTime + offset) ?? max(currentTime + offset, 0)
-        return currentTime
+        switch jumpBehavior {
+        case .superseded: return .deferred
+        case .fails: return .failed
+        case .lands:
+            currentTime = timeline?.clamp(currentTime + offset) ?? max(currentTime + offset, 0)
+            return .landed(currentTime)
+        }
     }
 
     func setRate(_ rate: Double) {
