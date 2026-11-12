@@ -25,7 +25,7 @@ public enum PlayerBookmarksError: Error, Sendable, Hashable {
 ///   connection (no client, or offline).
 /// - **Order (D8).** ``rows`` are sorted by time, as ``BookmarkStore/bookmarks(itemID:)`` returns them.
 /// - **Time (D10).** A new bookmark is at a whole second, ``creationTime``, and can't be created
-///   where one already exists, nor before the first load says whether one does; edit that one
+///   where one already exists, nor before a load says whether one does; edit that one
 ///   instead. Bookmarks are stored and sought in media time, whatever the playback rate.
 /// - **Writes.** ``create(title:itemID:at:defaultTitle:locale:)``, ``rename(_:to:)`` and ``delete(_:)`` go through the
 ///   store, which applies them at once and rolls them back if the server rejects them.
@@ -76,10 +76,11 @@ public final class PlayerBookmarksModel {
     }
 
     /// Whether a bookmark can be created at ``creationTime``: bookmarks are enabled and visible,
-    /// the first load isn't running, and none is at that second. Reads the playback time, like
-    /// ``creationTime``.
+    /// a load has filled the list, and none is at that second. Until a load succeeds, an existing
+    /// bookmark would look new and the server would rename it; reopening the sheet retries a
+    /// failed load. Reads the playback time, like ``creationTime``.
     public var canCreate: Bool {
-        guard isVisible, isEnabled, !isFirstLoadInProgress else { return false }
+        guard isVisible, isEnabled, store.hasLoaded else { return false }
         return !isBookmarked(at: creationTime)
     }
 
@@ -112,8 +113,8 @@ public final class PlayerBookmarksModel {
     /// Throws ``BookmarkStoreError/unavailable`` without an item that supports bookmarks,
     /// ``PlayerBookmarksError/itemChanged`` when `itemID` isn't the current item any more,
     /// ``PlayerBookmarksError/alreadyBookmarked`` when a bookmark is at that second (one may have
-    /// arrived since the form opened), and whatever ``BookmarkStore/create(itemID:time:title:)``
-    /// throws.
+    /// arrived since the form opened, or another window's create is queued ahead), and whatever
+    /// ``BookmarkStore/add(itemID:time:title:)`` throws.
     public func create(
         title: String, itemID: String, at time: Double, defaultTitle: String? = nil,
         locale: Locale = .autoupdatingCurrent
@@ -121,10 +122,15 @@ public final class PlayerBookmarksModel {
         guard let current = self.itemID else { throw BookmarkStoreError.unavailable }
         guard current == itemID else { throw PlayerBookmarksError.itemChanged }
         let second = Self.wholeSecond(time)
+        // A quick check; the store's queue repeats it after earlier writes, authoritatively.
         guard !isBookmarked(at: second) else { throw PlayerBookmarksError.alreadyBookmarked }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = trimmed.isEmpty ? (defaultTitle ?? self.defaultTitle(locale: locale)) : trimmed
-        try await store.create(itemID: itemID, time: second, title: title)
+        do {
+            try await store.add(itemID: itemID, time: second, title: title)
+        } catch BookmarkStoreError.alreadyExists {
+            throw PlayerBookmarksError.alreadyBookmarked
+        }
     }
 
     /// Renames the bookmark; an empty or blank `title` keeps the current one and does nothing.

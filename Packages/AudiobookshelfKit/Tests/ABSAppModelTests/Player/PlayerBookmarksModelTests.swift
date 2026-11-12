@@ -78,6 +78,8 @@ struct PlayerBookmarksModelTests {
 
             await store.sessionDidReconnect(bookmarkContext(client: try makeClient()))
             #expect(model.isEnabled)
+            #expect(!model.canCreate)
+            store.replaceAll(from: bookmarkUser([]))
             #expect(model.canCreate)
         }
     }
@@ -232,7 +234,7 @@ struct PlayerBookmarksModelTests {
         let service = FakeBookmarkService()
         try await withBookmarks(service: service) { model, playback, _ in
             playback.load(FakePlaybackControl.bookSession(), at: 30)
-            #expect(model.canCreate)
+            #expect(!model.canCreate)
             var loads = service.loads.calls.makeAsyncIterator()
 
             let appear = Task { await model.onAppear() }
@@ -247,6 +249,58 @@ struct PlayerBookmarksModelTests {
             #expect(!model.canCreate)
             playback.currentTime = 31
             #expect(model.canCreate)
+        }
+    }
+
+    @Test func cannotCreateAfterFailedLoadUntilALoadSucceeds() async throws {
+        let service = FakeBookmarkService()
+        try await withBookmarks(service: service) { model, playback, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 30)
+            var loads = service.loads.calls.makeAsyncIterator()
+
+            let appear = Task { await model.onAppear() }
+            try #require(await loads.next()).reply.resume(throwing: BookmarkTestError.rejected)
+            await appear.value
+            // Not loading any more, but the list is unknown: a server bookmark at 30 would look new.
+            #expect(!model.isFirstLoadInProgress)
+            #expect(!model.canCreate)
+
+            // Reopening the sheet retries.
+            let retry = Task { await model.onAppear() }
+            try #require(await loads.next()).reply.resume(returning: [])
+            await retry.value
+            #expect(service.sentLoads == 2)
+            #expect(model.canCreate)
+        }
+    }
+
+    @Test func createRejectsDuplicateQueuedBehindAnotherWrite() async throws {
+        let service = FakeBookmarkService()
+        try await withBookmarks(service: service) { model, playback, store in
+            let existing = bookmark("li_book", 10, "Old")
+            store.replaceAll(from: bookmarkUser([existing]))
+            playback.load(FakePlaybackControl.bookSession(), at: 30)
+            var writes = service.writes.calls.makeAsyncIterator()
+
+            // An earlier write holds the book's queue.
+            let rename = Task { try await store.rename(existing, to: "Older") }
+            let held = try #require(await writes.next())
+            // Two windows submit at the same second; neither row is there yet, so both pass the
+            // model's own check.
+            let first = Task { try await model.create(title: "A", itemID: "li_book", at: 30) }
+            for _ in 0..<10 { await Task.yield() }
+            let second = Task { try await model.create(title: "B", itemID: "li_book", at: 30) }
+            for _ in 0..<10 { await Task.yield() }
+            #expect(model.rows.map(\.time) == [10])
+
+            let responder = answeringWrites(service)
+            defer { responder.cancel() }
+            held.reply.resume(returning: nil)
+            try await rename.value
+            try await first.value
+            await #expect(throws: PlayerBookmarksError.alreadyBookmarked) { try await second.value }
+            #expect(service.sentWrites == 2)
+            #expect(model.rows.map(\.title) == ["Older", "A"])
         }
     }
 
