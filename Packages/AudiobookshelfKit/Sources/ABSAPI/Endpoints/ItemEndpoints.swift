@@ -20,8 +20,12 @@ public enum ItemEndpoints {
     /// `PATCH /api/items/:id/ebook/:fileID/status`: makes the ebook file with inode `fileID` the
     /// primary ebook if it's supplementary, else makes it supplementary (leaving the book without
     /// a primary ebook). No body; needs the user's update permission (403 without it).
+    ///
+    /// Only redirects on the server's origin are followed (``Endpoint/staysOnOrigin``): a 307 or
+    /// 308 elsewhere would re-send the toggle to another host and report its reply as a
+    /// successful change.
     public static func toggleEbookFileStatus(itemID: String, fileID: String) -> Endpoint<EmptyResponse> {
-        Endpoint(.patch, "\(ebookPath(itemID: itemID, fileID: fileID))/status")
+        Endpoint(.patch, "\(ebookPath(itemID: itemID, fileID: fileID))/status", staysOnOrigin: true)
     }
 
     /// `GET /api/series/:id`.

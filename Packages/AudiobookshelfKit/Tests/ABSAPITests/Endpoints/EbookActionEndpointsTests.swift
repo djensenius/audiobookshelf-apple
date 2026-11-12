@@ -48,6 +48,7 @@ private let server = "https://abs.example/abs"
         #expect(endpoint.method == .patch)
         #expect(endpoint.requiresAuthentication)
         #expect(endpoint.body == nil)
+        #expect(endpoint.followsRedirects && endpoint.staysOnOrigin)
         #expect(try url(endpoint) == "\(server)/api/items/li1/ebook/12345/status")
     }
 
@@ -106,6 +107,25 @@ private let server = "https://abs.example/abs"
         #expect(request.httpMethod == "PATCH")
         #expect(request.url?.path() == "/abs/api/items/li1/ebook/42/status")
         #expect(request.httpBody == nil)
+    }
+
+    /// A 307 or 308 to another origin isn't followed, so the toggle isn't re-sent there and its
+    /// reply isn't taken for a change; one on the server's origin still is.
+    @Test(arguments: [307, 308]) func clientRefusesCrossOriginToggleRedirect(status: Int) async throws {
+        let other = StubServer { _ in .text("OK", status: 200) }
+        let origin = StubServer { _ in .redirect(to: "https://\(other.host)/x", status: status) }
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await makeClient(origin).send(ItemEndpoints.toggleEbookFileStatus(itemID: "li1", fileID: "42"))
+        }
+        #expect(other.requests.isEmpty)
+
+        let sameOrigin = StubServer { request in
+            request.url?.path() == "/abs/api/items/li1/ebook/42/status"
+                ? .redirect(to: "https://\(request.url?.host() ?? "")/abs/moved", status: status)
+                : .text("OK", status: 200)
+        }
+        _ = try await makeClient(sameOrigin).send(ItemEndpoints.toggleEbookFileStatus(itemID: "li1", fileID: "42"))
+        #expect(sameOrigin.requests(path: "/abs/moved").first?.httpMethod == "PATCH")
     }
 
     @Test func clientToggleWithoutUpdatePermissionIsForbidden() async throws {
