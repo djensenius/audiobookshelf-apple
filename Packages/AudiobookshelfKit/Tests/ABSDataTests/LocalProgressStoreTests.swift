@@ -632,6 +632,56 @@ import Testing
         #expect(row.audioDirty)
     }
 
+    // MARK: - Permanent rejection
+
+    /// A rejected PATCH applied nothing: the group is clean with the baseline unchanged, the
+    /// send leaves the history, and only a later edit makes the row pending again.
+    @Test func rejectedSendCleansTheRowUntilTheNextEdit() async throws {
+        let (store, container) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key, now: Self.at(2)))
+        #expect(try await store.rejectSend(patch, error: "rejected 404"))
+        #expect(try await store.rejectSend(patch, error: "again") == false)
+
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.dirtyGroups.isEmpty && !row.needsServerSync)
+        #expect(row.currentTime == 200)
+        #expect(row.serverBaseline == Self.server(lastUpdate: Self.t0))
+        #expect(row.unacknowledgedSends.isEmpty)
+        #expect(row.lastSyncError == "rejected 404")
+        #expect(try await store.pendingSync(for: Fixtures.connectionID).isEmpty)
+        #expect(await store.needsConfirmationFetch.isEmpty)
+        // The predicate ServerConnectionStore uses to keep a removed connection (ADR 0003).
+        let connection = Fixtures.connectionID
+        let retained = FetchDescriptor<LocalMediaProgress>(
+            predicate: #Predicate { $0.serverConnectionID == connection && $0.needsServerSync })
+        #expect(try ModelContext(container).fetchCount(retained) == 0)
+
+        // A later edit, even one dated before the attempt by a clock stepped back, sends again.
+        try await store.recordEdit(Self.seek(250), for: key, now: Self.at(0))
+        #expect(try await store.progress(for: key)?.needsServerSync == true)
+        #expect(try await store.beginSend(for: key)?.values.audio?.currentTime == 250)
+    }
+
+    /// Edit identity, not the clock, decides: an edit during the flight with the same or an
+    /// earlier clock reading keeps the row dirty.
+    @Test(arguments: [1.0, 0.5])
+    func editDuringRejectedSendStaysDirty(editAt: TimeInterval) async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key, now: Self.at(2)))
+        try await store.recordEdit(Self.seek(300), for: key, now: Self.at(editAt))
+        #expect(try await store.rejectSend(patch, error: "rejected 400"))
+
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.audioDirty && row.needsServerSync)
+        #expect(row.currentTime == 300)
+        #expect(row.unacknowledgedSends.isEmpty)
+        #expect(try await store.beginSend(for: key)?.values.audio?.currentTime == 300)
+    }
+
     /// A socket value equal to the acknowledged one doesn't prove it was emitted after the PATCH:
     /// queued pre-PATCH events of 200 and then 100 leave the row at 200 until a fetch.
     @Test func equalSocketValueDoesNotReleaseTheHold() async throws {

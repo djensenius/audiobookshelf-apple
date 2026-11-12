@@ -177,7 +177,10 @@ struct SyncHarness {
     let service: StubProgressSyncService
     let syncer: ProgressSyncer
 
-    init(progressStore: LocalProgressStore? = nil, connectionID: UUID = UUID()) throws {
+    init(
+        progressStore: LocalProgressStore? = nil, connectionID: UUID = UUID(),
+        paths: (any NetworkPathSource)? = nil
+    ) throws {
         h = try CoordinatorHarness(progressStore: progressStore, connectionID: connectionID)
         h.settings.disableAutoRewind = true
         service = StubProgressSyncService(serverConnectionID: connectionID)
@@ -185,7 +188,7 @@ struct SyncHarness {
         syncer = ProgressSyncer(
             source: h.coordinator, service: service, store: h.progressStore,
             clock: ProgressSyncClock(now: { clock.now }, uptime: { clock.now.timeIntervalSince1970 }),
-            tickInterval: 0.5)
+            tickInterval: 0.5, paths: paths)
     }
 
     var coordinator: PlaybackCoordinator { h.coordinator }
@@ -211,4 +214,24 @@ struct SyncHarness {
     static func audio(_ time: Double) -> MediaProgressUpdate {
         .audio(currentTime: time, duration: 3600, progress: time / 3600)
     }
+}
+
+/// One path stream that tests feed by hand; the syncer opens it once. Like
+/// `SystemNetworkPathSource`, it keeps only the newest path while its consumer is busy.
+final class StubNetworkPathSource: NetworkPathSource, Sendable {
+    private let stream: AsyncStream<NetworkPath>
+    private let continuation: AsyncStream<NetworkPath>.Continuation
+    private let terminated = Mutex(false)
+
+    init() {
+        (stream, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+        continuation.onTermination = { [weak self] _ in self?.terminated.withLock { $0 = true } }
+    }
+
+    /// Whether the stream's consumer stopped (its task was cancelled).
+    var isTerminated: Bool { terminated.withLock { $0 } }
+
+    func paths() -> AsyncStream<NetworkPath> { stream }
+
+    func send(_ path: NetworkPath) { continuation.yield(path) }
 }

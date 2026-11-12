@@ -122,6 +122,11 @@ struct ItemDetailScreen: View {
     ItemDetailPreview(item: ItemDetailPreviewData.book, progress: ItemDetailPreviewData.finished)
 }
 
+#Preview("Accessibility text size") {
+    ItemDetailPreview(item: ItemDetailPreviewData.book, progress: ItemDetailPreviewData.inProgress)
+        .environment(\.dynamicTypeSize, .accessibility3)
+}
+
 #Preview("Signed out player") {
     ItemDetailPreview(item: ItemDetailPreviewData.book, canPlay: false)
 }
