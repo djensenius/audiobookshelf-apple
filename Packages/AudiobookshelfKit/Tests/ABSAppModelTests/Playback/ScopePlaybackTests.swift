@@ -122,16 +122,21 @@ private struct Device: DeviceIdentifying {
     func deviceIdentifier() async -> String { "device" }
 }
 
-/// A participant building real scopes over fakes, with A's last-played item restored.
+/// A participant building real scopes over fakes, with A's last-played item restored, and each
+/// connection's queue saved in ``queueStore``.
 @MainActor
 private struct ScopeHarness {
     let lifecycle: SessionLifecycle
     let current = CurrentPlayback()
     let policy = Policy()
     let primary = PrimaryRequests()
+    let queueStore: UserDefaultsPlaybackQueueStore
     let participant: PlaybackSessionParticipant
 
     init() throws {
+        let queueStore = UserDefaultsPlaybackQueueStore(
+            defaults: try #require(UserDefaults(suiteName: UUID().uuidString)))
+        self.queueStore = queueStore
         let source = FakeAccountSource(log: CallLog())
         source.restoredPhase = .active(identityA, isOffline: false)
         lifecycle = SessionLifecycle(source: source, clock: ManualClock())
@@ -155,7 +160,9 @@ private struct ScopeHarness {
                             position: 42, duration: 3600, timestamp: Date(timeIntervalSince1970: 1_800_000_000),
                             title: "Title a")))
                 let syncer = ProgressSyncer(source: coordinator, service: server, store: writer)
-                return PlaybackScope(coordinator: coordinator, syncer: syncer, services: nil, nowPlaying: primary)
+                return PlaybackScope(
+                    coordinator: coordinator, syncer: syncer, services: nil, nowPlaying: primary,
+                    queue: PlaybackQueue(serverConnectionID: request.connectionID, store: queueStore))
             })
         lifecycle.register(participant, stage: .progressSource)
     }
@@ -222,5 +229,35 @@ private struct ScopeHarness {
         #expect(coordinator.rate == 1.5 && playback.rate == 1.5)
         #expect(playback.mediaKey == coordinator.mediaKey && playback.session?.id == "s-a")
         #expect(harness.primary.count == 1)
+    }
+
+    // MARK: Queue
+
+    /// Each session publishes its own connection's queue, and none between sessions; a control
+    /// kept from an ended session changes nothing, neither its own account's queue nor the next's.
+    @Test func eachSessionHasItsOwnConnectionsQueue() async throws {
+        let harness = try ScopeHarness()
+        harness.queueStore.save(
+            [QueueItem(libraryItemID: "b1", title: "B1")], serverConnectionID: identityB.connectionID)
+        try await harness.started()
+        let queueA = try #require(harness.participant.queue)
+        #expect(queueA.serverConnectionID == identityA.connectionID)
+        queueA.addToEnd(QueueItem(libraryItemID: "x", title: "X"))
+        #expect(queueA.items.map(\.libraryItemID) == ["x"])
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        let queueB = try #require(harness.participant.queue)
+        queueA.playNext(QueueItem(libraryItemID: "y", title: "Y"))
+        queueA.clear()
+
+        #expect(queueB !== queueA)
+        #expect(queueB.serverConnectionID == identityB.connectionID)
+        #expect(queueB.items.map(\.libraryItemID) == ["b1"])
+        #expect(queueA.items.map(\.libraryItemID) == ["x"])
+        #expect(harness.queueStore.load(serverConnectionID: identityA.connectionID).map(\.libraryItemID) == ["x"])
+        #expect(harness.queueStore.load(serverConnectionID: identityB.connectionID).map(\.libraryItemID) == ["b1"])
+
+        await harness.lifecycle.signOut()
+        #expect(harness.participant.queue == nil)
     }
 }
