@@ -7,6 +7,15 @@
 ;(function () {
   const BOOK_URL_PREFIX = 'absreader://book/'
   const MIN_SPREAD_WIDTH = 800
+  // What a book may inflate to (a zip bomb guard), per entry and in total. Every entry is inflated
+  // once and its actual output counted, since a ZIP's size fields can lie.
+  const MAX_ENTRY_BYTES = 64 * 1024 * 1024
+  const MAX_BOOK_BYTES = 512 * 1024 * 1024
+  // How long the table of contents may take once the book is open; it comes from the archive
+  // already in memory, so only a missing navigation document takes this long.
+  const NAVIGATION_TIMEOUT_MS = 10000
+  // The fonts the reader can override the book's with (ReaderSettings.FontFamily's raw values).
+  const FONT_FAMILIES = ['serif', 'sans-serif']
 
   /** @type {any} */ let book = null
   /** @type {any} */ let rendition = null
@@ -16,6 +25,8 @@
   // Until the first display lands, relocations are epub.js settling on the start, not the reader.
   let displaying = false
   let lastRelocation = null
+  // Displays a command is awaiting: their failures reach that command, not the `displayerror` post.
+  let pendingDisplays = 0
 
   function post(event) {
     const handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.absReader
@@ -67,6 +78,9 @@
     if (!next || typeof next !== 'object' || !next.themeRules || typeof next.themeRules !== 'object') {
       throw new Error('Invalid settings')
     }
+    if (next.fontFamily !== undefined && FONT_FAMILIES.indexOf(next.fontFamily) === -1) {
+      throw new Error('Invalid settings: fontFamily')
+    }
     return next
   }
 
@@ -83,6 +97,9 @@
     rendition.themes.register('abs', settings.themeRules)
     rendition.themes.select('abs')
     rendition.themes.fontSize((Number(settings.fontScale) || 100) + '%')
+    // As the legacy reader does: the font overrides the book's own (`!important`).
+    if (settings.fontFamily) rendition.themes.font(settings.fontFamily)
+    else rendition.themes.removeOverride('font-family')
     const gap = columnGap(settings)
     rendition.settings.gap = gap
     if (rendition.manager) rendition.manager.settings.gap = gap
@@ -117,18 +134,105 @@
     })
   }
 
-  async function open(command) {
+  // How many bytes `entry` inflates to, failing once that passes `limit`.
+  function inflatedSize(entry, limit) {
+    return new Promise(function (resolve, reject) {
+      let size = 0
+      let settled = false
+      const stream = entry.internalStream('uint8array')
+      stream
+        .on('data', function (chunk) {
+          if (settled) return
+          size += chunk.length
+          if (size <= limit) return
+          settled = true
+          stream.pause()
+          reject(new Error('The book expands beyond what the reader can open'))
+        })
+        .on('error', function (error) {
+          if (!settled) reject(error)
+          settled = true
+        })
+        .on('end', function () {
+          if (!settled) resolve(size)
+          settled = true
+        })
+        .resume()
+    })
+  }
+
+  // Fails when the archive inflates past the limits, before epub.js inflates any of it.
+  async function checkExpansion(data) {
+    const zip = await window.JSZip.loadAsync(data)
+    let total = 0
+    for (const entry of Object.values(zip.files)) {
+      if (entry.dir) continue
+      total += await inflatedSize(entry, Math.min(MAX_ENTRY_BYTES, MAX_BOOK_BYTES - total))
+    }
+  }
+
+  async function fetchBook(url) {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error('The book could not be loaded (HTTP ' + response.status + ')')
+    return response.arrayBuffer()
+  }
+
+  function withDeadline(promise, milliseconds, message) {
+    let timer
+    const deadline = new Promise(function (resolve, reject) {
+      timer = setTimeout(function () {
+        reject(new Error(message))
+      }, milliseconds)
+    })
+    return Promise.race([promise, deadline]).finally(function () {
+      clearTimeout(timer)
+    })
+  }
+
+  // Displays `target`. epub.js reports a section it can't render only as `displayerror` and leaves
+  // `display`'s promise pending, so this settles on either.
+  async function display(shown, target) {
+    let onError
+    const failed = new Promise(function (resolve, reject) {
+      onError = reject
+    })
+    shown.on('displayerror', onError)
+    pendingDisplays += 1
+    try {
+      return await Promise.race([shown.display(target), failed])
+    } finally {
+      pendingDisplays -= 1
+      shown.off('displayerror', onError)
+    }
+  }
+
+  async function open(command, context) {
     const url = String(command.url || '')
     if (url.indexOf(BOOK_URL_PREFIX) !== 0) throw new Error('Not a book URL')
     const opening = validSettings(command.settings)
     closeBook()
     settings = opening
     const current = ++generation
+    context.generation = current
     const isCurrent = function () {
       return current === generation
     }
 
-    book = window.ePub(url, { openAs: 'epub' })
+    let data
+    try {
+      data = await fetchBook(url)
+      if (!isCurrent()) return
+      await checkExpansion(data)
+    } catch (error) {
+      throw Object.assign(asError(error), { phase: 'open' })
+    }
+    if (!isCurrent()) return
+
+    book = window.ePub(data, { openAs: 'binary' })
+    // A book that fails to load leaves `opened` pending for good; epub.js only says `openFailed`.
+    const failed = new Promise(function (resolve, reject) {
+      book.on('openFailed', reject)
+    })
     rendition = book.renderTo('viewer', {
       width: '100%',
       height: '100%',
@@ -161,11 +265,15 @@
     shown.on('click', function (event) {
       if (isCurrent()) onClick(event)
     })
-    shown.on('displayError', function (error) {
-      if (isCurrent()) postError('display', error)
+    shown.on('displayerror', function (error) {
+      // One of epub.js's own displays (a command's display reports its failure itself).
+      if (isCurrent() && pendingDisplays === 0) postError('display', error)
     })
 
-    opened.loaded.navigation
+    // epub.js never settles the table of contents when the book's navigation document is missing.
+    // Tests shorten the deadline: WebKit throttles the timers of a page that isn't on screen.
+    const navigationTimeout = Number(window.absReaderNavigationTimeoutMs) || NAVIGATION_TIMEOUT_MS
+    withDeadline(opened.loaded.navigation, navigationTimeout, 'The table of contents did not load')
       .then(function (navigation) {
         if (isCurrent()) post({ type: 'toc', items: tocItems(navigation && navigation.toc) })
       })
@@ -174,13 +282,8 @@
       })
 
     try {
-      // A book that fails to load leaves `ready` pending for good; epub.js only says `openFailed`.
-      await Promise.race([
-        opened.ready,
-        new Promise(function (resolve, reject) {
-          opened.on('openFailed', reject)
-        })
-      ])
+      // Not `ready`: that also waits for the table of contents.
+      await Promise.race([opened.opened, failed])
     } catch (error) {
       throw Object.assign(asError(error), { phase: 'open' })
     }
@@ -208,8 +311,8 @@
     displaying = true
     try {
       // As the legacy reader does: the first display can land a page off, the second settles it.
-      await shown.display(target)
-      if (isCurrent()) await shown.display(target)
+      await display(shown, target)
+      if (isCurrent()) await display(shown, target)
     } catch (error) {
       throw Object.assign(asError(error), { phase: 'display' })
     } finally {
@@ -242,12 +345,12 @@
     return rendition
   }
 
-  async function run(command) {
+  async function run(command, context) {
     switch (command.type) {
       case 'open':
-        return open(command)
+        return open(command, context)
       case 'display':
-        return requireRendition().display(String(command.target || ''))
+        return display(requireRendition(), String(command.target || ''))
       case 'next':
         return requireRendition().next()
       case 'prev':
@@ -263,11 +366,14 @@
     /** Runs one command; resolves with nothing once it's done. */
     handle: async function (command) {
       if (!command || typeof command !== 'object') throw new Error('Invalid command')
+      // The book this command belongs to; `open` moves it to the new one. A failure a later `open`
+      // has superseded still rejects its command but posts nothing into the new book's events.
+      const context = { generation: generation }
       try {
-        await run(command)
+        await run(command, context)
       } catch (error) {
         const failure = asError(error)
-        postError(failure.phase || String(command.type), failure)
+        if (context.generation === generation) postError(failure.phase || String(command.type), failure)
         throw failure
       }
     }

@@ -1,12 +1,26 @@
 import Foundation
 
-/// A tiny EPUB 3 book, built in memory as an uncompressed ZIP, for the reader page's tests: one
-/// chapter and a navigation document with one entry, "Chapter One".
+/// A tiny EPUB 3 book, built in memory as a ZIP, for the reader page's tests: one chapter and a
+/// navigation document with one entry, "Chapter One".
 enum TinyEPUB {
     static let chapterTitle = "Chapter One"
 
-    static var data: Data {
-        storedZIP([
+    /// A file in the archive. `claimedSize` and `claimedCRC` are what its headers state (by
+    /// default the truth); `deflated` compresses it rather than storing it.
+    struct Entry {
+        var name: String
+        var body: Data
+        var deflated = false
+        var claimedSize: UInt32?
+        var claimedCRC: UInt32?
+    }
+
+    static var data: Data { data() }
+
+    /// The book, with `extra` entries after its own, and without its navigation document (though
+    /// the package still lists it) when `navigation` is false.
+    static func data(extra: [Entry] = [], navigation: Bool = true) -> Data {
+        let files: [(name: String, text: String)] = [
             ("mimetype", "application/epub+zip"),
             (
                 "META-INF/container.xml",
@@ -49,18 +63,28 @@ enum TinyEPUB {
                 <body><h1>\(chapterTitle)</h1><p>\(String(repeating: "Lorem ipsum dolor sit amet. ", count: 40))</p></body></html>
                 """
             ),
-        ])
+        ]
+        let entries =
+            files.filter { navigation || $0.name != "OEBPS/nav.xhtml" }.map {
+                Entry(name: $0.name, body: Data($0.text.utf8))
+            }
+            + extra
+        return zip(entries)
     }
 
-    /// A ZIP of `files`, in order, each stored without compression.
-    private static func storedZIP(_ files: [(name: String, text: String)]) -> Data {
+    /// A ZIP of `entries`, in order.
+    private static func zip(_ entries: [Entry]) -> Data {
         var archive = Data()
         var directory = Data()
-        for file in files {
-            let name = Data(file.name.utf8)
-            let body = Data(file.text.utf8)
+        for entry in entries {
+            let name = Data(entry.name.utf8)
+            // Foundation's `.zlib` is raw DEFLATE, as ZIP's method 8 is.
+            let body = entry.deflated ? try! (entry.body as NSData).compressed(using: .zlib) as Data : entry.body
             let offset = UInt32(archive.count)
-            let shared = header(crc: crc32(body), size: UInt32(body.count), nameLength: UInt16(name.count))
+            let shared = header(
+                method: entry.deflated ? 8 : 0, crc: entry.claimedCRC ?? crc32(entry.body),
+                compressedSize: UInt32(body.count),
+                size: entry.claimedSize ?? UInt32(entry.body.count), nameLength: UInt16(name.count))
             archive.append(le32(0x0403_4b50))
             archive.append(le16(20))
             archive.append(shared)
@@ -81,17 +105,23 @@ enum TinyEPUB {
         let directoryOffset = UInt32(archive.count)
         archive.append(directory)
         archive.append(le32(0x0605_4b50))
-        archive.append(contentsOf: [le16(0), le16(0), le16(UInt16(files.count)), le16(UInt16(files.count))].joined())
+        archive.append(
+            contentsOf: [le16(0), le16(0), le16(UInt16(entries.count)), le16(UInt16(entries.count))].joined())
         archive.append(le32(UInt32(directory.count)))
         archive.append(le32(directoryOffset))
         archive.append(le16(0))  // comment length
         return archive
     }
 
-    /// Flags, method (stored), time, date, CRC, sizes and name length: the part of a ZIP entry's
-    /// local and central headers they share.
-    private static func header(crc: UInt32, size: UInt32, nameLength: UInt16) -> Data {
-        [le16(0), le16(0), le16(0), le16(0x21), le32(crc), le32(size), le32(size), le16(nameLength)].reduce(Data(), +)
+    /// Flags, method, time, date, CRC, sizes and name length: the part of a ZIP entry's local and
+    /// central headers they share.
+    private static func header(
+        method: UInt16, crc: UInt32, compressedSize: UInt32, size: UInt32, nameLength: UInt16
+    ) -> Data {
+        [
+            le16(0), le16(method), le16(0), le16(0x21), le32(crc), le32(compressedSize), le32(size),
+            le16(nameLength),
+        ].reduce(Data(), +)
     }
 
     private static func le16(_ value: UInt16) -> Data { withUnsafeBytes(of: value.littleEndian) { Data($0) } }

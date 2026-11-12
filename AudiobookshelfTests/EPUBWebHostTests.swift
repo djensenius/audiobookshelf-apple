@@ -67,6 +67,111 @@ private actor BookGate {
 
 private struct LoadFailed: Error {}
 
+/// The reader page in a web view, with the events it posts.
+@MainActor
+private final class ReaderPage {
+    let controller: EPUBReaderController
+    private(set) var events: [[String: Any]] = []
+
+    /// A page whose books come from `loadBook`, once it's `ready`.
+    init(loadBook: @escaping EPUBSchemeHandler.BookLoader) async throws {
+        controller = EPUBReaderController(loadBook: loadBook)
+        controller.onEvent = { [weak self] data in
+            if let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                self?.events.append(event)
+            }
+        }
+        _ = try await next("ready")
+    }
+
+    func last(_ type: String) -> [String: Any]? { events.last { $0["type"] as? String == type } }
+
+    /// The first `type` event, waiting for it if need be.
+    func next(_ type: String) async throws -> [String: Any] {
+        while true {
+            if let event = events.first(where: { $0["type"] as? String == type }) { return event }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    /// Opens `absreader://book/<id>.epub`.
+    func open(_ id: String, settings: [String: Any] = [:]) async throws {
+        let command: [String: Any] = [
+            "type": "open", "url": "absreader://book/\(id).epub",
+            "settings": settings.merging(["themeRules": [:] as [String: Any]]) { mine, _ in mine },
+        ]
+        try await controller.send(JSONSerialization.data(withJSONObject: command))
+    }
+
+    /// Gives up on a table of contents after 100 ms rather than the page's 10 s, which WebKit's
+    /// throttling of an off-screen page's timers stretches past the tests' time limit.
+    func shortenNavigationDeadline() async throws {
+        _ = try await controller.webView.evaluateJavaScript("window.absReaderNavigationTimeoutMs = 100; 1")
+    }
+
+    /// The JSON of what `expression` evaluates to in the page.
+    func evaluate(_ expression: String) async throws -> String? {
+        try await controller.webView.evaluateJavaScript("JSON.stringify(\(expression))") as? String
+    }
+
+    /// Replaces epub.js with a stand-in whose sections fail to display with `displayError`, if
+    /// given, and whose table of contents never loads unless `navigation`.
+    func fakeEPUBJS(displayError: String? = nil, navigation: Bool = true) async throws {
+        let options = try JSONSerialization.data(withJSONObject: [
+            "displayError": displayError ?? "", "navigation": navigation,
+        ])
+        _ = try await controller.webView.evaluateJavaScript(
+            "window.fakeOptions = \(String(decoding: options, as: UTF8.self));\n\(Self.fakeEPUBJS)")
+    }
+
+    private static let fakeEPUBJS = """
+        window.ePub = function () {
+          const options = window.fakeOptions
+          const never = new Promise(function () {})
+          function emitter(target) {
+            const listeners = {}
+            target.on = function (type, f) { (listeners[type] = listeners[type] || []).push(f) }
+            target.off = function (type, f) {
+              listeners[type] = (listeners[type] || []).filter(function (g) { return g !== f })
+            }
+            target.emit = function (type, value) {
+              (listeners[type] || []).slice().forEach(function (f) { f(value) })
+            }
+            return target
+          }
+          window.fakeOverrides = {}
+          const rendition = emitter({
+            settings: {},
+            themes: {
+              register: function () {}, select: function () {}, fontSize: function () {},
+              font: function (family) { window.fakeOverrides['font-family'] = family },
+              removeOverride: function (name) { delete window.fakeOverrides[name] }
+            },
+            spread: function () {},
+            currentLocation: function () { return null },
+            display: function () {
+              if (!options.displayError) return Promise.resolve()
+              setTimeout(function () { rendition.emit('displayerror', new Error(options.displayError)) }, 0)
+              return never
+            }
+          })
+          return emitter({
+            opened: Promise.resolve(),
+            ready: never,
+            loaded: { navigation: options.navigation ? Promise.resolve({ toc: [] }) : never },
+            spine: { get: function () { return null } },
+            locations: {
+              load: function () {}, length: function () { return 0 },
+              generate: function () { return never }, save: function () { return '' }
+            },
+            renderTo: function () { return rendition },
+            destroy: function () {}
+          })
+        }
+        1
+        """
+}
+
 @MainActor
 @Suite struct EPUBWebHostTests {
     private let webView = WKWebView()
@@ -298,6 +403,116 @@ private struct LoadFailed: Error {}
         let error = events.last { $0["type"] as? String == "error" }
         #expect(error?["phase"] as? String == "open")
         #expect((error?["message"] as? String)?.isEmpty == false)
+    }
+
+    /// A book whose entries inflate past the limit is refused before epub.js inflates any of it,
+    /// counting what an entry actually inflates to rather than the size its header claims.
+    @Test(.timeLimit(.minutes(1))) func aBookThatInflatesTooFarIsRefused() async throws {
+        let filler = TinyEPUB.Entry(
+            name: "OEBPS/filler.bin", body: Data(count: 64 * 1024 * 1024 + 1), deflated: true, claimedSize: 1024,
+            claimedCRC: 0)
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(extra: [filler]) })
+
+        await #expect(throws: (any Error).self) { try await page.open("bomb") }
+
+        let error = try #require(page.last("error"))
+        #expect(error["phase"] as? String == "open")
+        #expect((error["message"] as? String)?.contains("expands beyond") == true)
+        #expect(page.last("toc") == nil)
+    }
+
+    /// epub.js only says `displayerror` when a section won't display; `open` and `display` fail.
+    @Test(.timeLimit(.minutes(1))) func aSectionThatWontDisplayFailsTheCommand() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(displayError: "No such section")
+
+        await #expect(throws: (any Error).self) { try await page.open("tiny") }
+        await #expect(throws: (any Error).self) {
+            try await page.controller.send(Data(#"{"type":"display","target":"c1.xhtml"}"#.utf8))
+        }
+
+        let errors = page.events.filter { $0["type"] as? String == "error" }
+        #expect(errors.map { $0["phase"] as? String } == ["display", "display"])
+        #expect(errors.map { $0["message"] as? String } == ["No such section", "No such section"])
+    }
+
+    /// `open` doesn't wait for the table of contents, which epub.js never settles for a missing
+    /// navigation document; the page reports it once its deadline passes.
+    @Test(.timeLimit(.minutes(1))) func openDoesNotWaitForTheTableOfContents() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(navigation: false)
+        try await page.shortenNavigationDeadline()
+
+        try await page.open("tiny")
+        let error = try await page.next("error")
+
+        #expect(error["phase"] as? String == "toc")
+        #expect(page.last("toc") == nil)
+    }
+
+    /// With the real epub.js, a book missing its navigation document still opens, and says the
+    /// table of contents didn't load.
+    @Test(.timeLimit(.minutes(1))) func aMissingNavigationDocumentIsReported() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(navigation: false) })
+        try await page.shortenNavigationDeadline()
+        let opening = Task { try await page.open("tiny") }
+        defer { opening.cancel() }
+
+        let error = try await page.next("error")
+
+        #expect(error["phase"] as? String == "toc")
+        #expect(page.events.filter { $0["type"] as? String == "error" }.count == 1)
+    }
+
+    /// When a book is opened while an earlier one is still loading, the earlier one's failure
+    /// fails its own command and posts nothing into the new book's events.
+    @Test(.timeLimit(.minutes(1))) func aSupersededOpensFailureStaysQuiet() async throws {
+        let gate = BookGate()
+        let page = try await ReaderPage(loadBook: { id in
+            guard id == "slow" else { return TinyEPUB.data }
+            _ = await gate.load(id)
+            throw LoadFailed()
+        })
+
+        let first = Task { try await page.open("slow") }
+        while await gate.requested.isEmpty { await Task.yield() }
+        let second = Task { try await page.open("tiny") }
+        defer { second.cancel() }
+        _ = try await page.next("toc")
+        await gate.open()
+
+        await #expect(throws: (any Error).self) { try await first.value }
+        #expect(page.last("error") == nil)
+    }
+
+    /// The font family overrides the book's, as the legacy reader's does; without one, the book's
+    /// own font comes back.
+    @Test(.timeLimit(.minutes(1))) func theFontFamilyOverridesTheBooks() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+
+        try await page.open("tiny", settings: ["fontFamily": "sans-serif"])
+        #expect(try await page.evaluate("window.fakeOverrides") == #"{"font-family":"sans-serif"}"#)
+
+        let serif = #"{"type":"applySettings","settings":{"themeRules":{},"fontFamily":"serif"}}"#
+        try await page.controller.send(Data(serif.utf8))
+        #expect(try await page.evaluate("window.fakeOverrides") == #"{"font-family":"serif"}"#)
+
+        try await page.controller.send(Data(#"{"type":"applySettings","settings":{"themeRules":{}}}"#.utf8))
+        #expect(try await page.evaluate("window.fakeOverrides") == "{}")
+    }
+
+    /// Only the reader's two font families are accepted.
+    @Test(.timeLimit(.minutes(1))) func anUnknownFontFamilyIsRefused() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+        try await page.open("tiny", settings: ["fontFamily": "serif"])
+
+        let comic = #"{"type":"applySettings","settings":{"themeRules":{},"fontFamily":"Comic Sans MS"}}"#
+        await #expect(throws: (any Error).self) { try await page.controller.send(Data(comic.utf8)) }
+
+        #expect(page.last("error")?["phase"] as? String == "applySettings")
+        #expect(try await page.evaluate("window.fakeOverrides") == #"{"font-family":"serif"}"#)
     }
 
     @Test func aCommandMustBeAJSONObject() async {
