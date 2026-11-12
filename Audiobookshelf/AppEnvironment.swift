@@ -78,7 +78,8 @@ final class AppEnvironment {
         self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
 
         // Images (#182).
-        let images = ImageServices(accounts: accounts, covers: covers)
+        let images = ImageServices(
+            accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup, covers: covers)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
     }

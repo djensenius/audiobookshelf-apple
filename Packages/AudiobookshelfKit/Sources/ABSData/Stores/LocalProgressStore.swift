@@ -25,6 +25,14 @@ public enum PlaybackPositionCommitError: Error, Sendable, Equatable {
     case tokenAlreadyCommitted
 }
 
+/// In-process order of a reader's ebook edit for one key, reserved when the page is turned (#101),
+/// so a retried older edit can't replace a newer one saved meanwhile. Not persisted.
+public struct EbookEditToken: Sendable, Equatable {
+    fileprivate let writer: UUID
+    fileprivate let key: MediaKey
+    fileprivate let sequence: UInt64
+}
+
 /// A point in `LocalProgressStore`'s edit history, captured when a progress fetch is issued or a
 /// socket progress event is received. Server values are dropped for rows edited or settled since.
 public struct ProgressGeneration: Sendable, Hashable, Comparable {
@@ -103,6 +111,9 @@ public enum SessionUploadResult: Sendable, Equatable {
 @ModelActor public actor LocalProgressStore: StoreActor {
     private nonisolated let playbackWriterID = UUID()
     private nonisolated let playbackSequence = Mutex<UInt64>(0)
+    private nonisolated let ebookEditSequence = Mutex<UInt64>(0)
+    /// The latest committed ``EbookEditToken`` sequence per key.
+    private var committedEbookEdits: [MediaKey: UInt64] = [:]
     /// Each row's latest committed change (``rowChangeStamp(for:)``), by key; a deleted key keeps
     /// its stamp, so one entry per key changed in this process.
     private nonisolated let rowChanges = Mutex<(last: UInt64, byKey: [String: UInt64])>((0, [:]))
@@ -147,6 +158,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// acknowledgement, with the latest socket value received meanwhile and its capture.
     /// Rows whose latest send was an ebook one: their next send goes back to audio or finished.
     private var ebookSentLast: Set<String> = []
+    /// Rows a socket event reported another ebook position for (``needsEbookFetch``), with the
+    /// generation a fetch must be captured at to answer the request.
+    private var ebookFetchRequests: [String: (key: MediaKey, generation: UInt64)] = [:]
     private var awaitingFetch:
         [String: (key: MediaKey, acknowledgement: UUID, latest: (server: ProgressBaseline, capturedAt: UInt64)?)] = [:]
 
@@ -160,6 +174,27 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// the acknowledged values, which the server holds unless it normalized them.
     public var needsConfirmationFetch: Set<MediaKey> {
         Set(awaitingFetch.values.map(\.key))
+    }
+
+    /// Rows a socket event reported a different ebook position for. Socket ebook values are never
+    /// merged (ADR 0003, #101): fetch each row like ``needsConfirmationFetch`` and apply it with
+    /// `source: .fetch`, which clears the request.
+    public var needsEbookFetch: Set<MediaKey> {
+        Set(ebookFetchRequests.values.map(\.key))
+    }
+
+    /// A fetch captured at `capturedAt` found no progress on the server for `key`. Like a fetch
+    /// that found some, it answers a ``needsEbookFetch`` request made before it was issued.
+    public func answerEbookFetch(for key: MediaKey, capturedAt: ProgressGeneration) {
+        if let request = ebookFetchRequests[key.rawValue], capturedAt.value >= request.generation {
+            ebookFetchRequests[key.rawValue] = nil
+        }
+    }
+
+    /// The start GET `captured` was taken for found no progress on the server: answers a
+    /// ``needsEbookFetch`` request made before it was issued.
+    public func answerEbookFetch(captured: PlaybackStartProgressCapture) {
+        answerEbookFetch(for: captured.key, capturedAt: captured.generation)
     }
 
     /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
@@ -260,6 +295,34 @@ public enum SessionUploadResult: Sendable, Equatable {
             ProgressEdit(audio: audio), for: key, serverProgress: nil, localLibraryItemID: nil,
             now: now, playbackToken: token)
         return .committed
+    }
+
+    /// Reserves an ebook edit's order synchronously, when the page is turned, not when its write
+    /// reaches the actor.
+    public nonisolated func reserveEbookEdit(for key: MediaKey) -> EbookEditToken {
+        let sequence = ebookEditSequence.withLock {
+            $0 += 1
+            return $0
+        }
+        return EbookEditToken(writer: playbackWriterID, key: key, sequence: sequence)
+    }
+
+    /// ``recordEdit(_:for:serverProgress:localLibraryItemID:now:)`` for an ebook edit, unless an
+    /// edit for the key reserved at or after `token` already committed: then it writes nothing and
+    /// returns `nil`. The check and the write are one actor step. A failed write supersedes nothing.
+    @discardableResult
+    public func recordEbookEdit(
+        _ ebook: ProgressEdit.Ebook, for key: MediaKey, token: EbookEditToken,
+        serverProgress: ProgressBaseline? = nil, localLibraryItemID: UUID? = nil, now: Date = .now
+    ) throws -> LocalMediaProgressDTO? {
+        guard token.writer == playbackWriterID else { throw PlaybackPositionCommitError.wrongWriter }
+        guard token.key == key else { throw PlaybackPositionCommitError.wrongKey }
+        if let committed = committedEbookEdits[key], token.sequence <= committed { return nil }
+        let row = try recordEdit(
+            ProgressEdit(ebook: ebook), for: key, serverProgress: serverProgress,
+            localLibraryItemID: localLibraryItemID, now: now, playbackToken: nil)
+        committedEbookEdits[key] = token.sequence
+        return row
     }
 
     /// The audio edit time `token`'s position committed with, while it is still this writer's
@@ -427,6 +490,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// after the acknowledgement is applied (``needsConfirmationFetch``), socket values for the
     /// row aren't merged; the latest is kept and merged after that fetch only if its `lastUpdate`
     /// is strictly later than the fetch's (on a tie the fetch wins).
+    ///
+    /// A socket event's ebook values are never merged: one that differs from the row's ebook
+    /// position requests a fetch instead (``needsEbookFetch``).
     @discardableResult
     public func applyServerProgress(
         _ updates: [MediaKey: ProgressBaseline],
@@ -435,6 +501,7 @@ public enum SessionUploadResult: Sendable, Equatable {
     ) throws -> Set<MediaKey> {
         var recorded: [String: ProgressBaseline] = [:]
         var confirmed: Set<String> = []
+        var ebookFetches: [String: MediaKey] = [:]
         let merged = try commit {
             var merged: Set<MediaKey> = []
             let rows = try fetchRows(of: Set(updates.keys.map(\.serverConnectionID)))
@@ -442,9 +509,14 @@ public enum SessionUploadResult: Sendable, Equatable {
                 let raw = key.rawValue
                 guard let row = rows[raw] else { continue }
                 if hasChanged(key, since: capturedAt) { continue }
+                if source == .socket,
+                    row.ebookLocation != server.ebookLocation || row.ebookProgress != server.ebookProgress
+                {
+                    ebookFetches[raw] = key
+                }
                 let takingTies = source == .fetch && capturedAt.value >= mergedAt[raw] ?? 0
                 guard let awaiting = awaitingFetch[raw] else {
-                    if merge(server, into: row, takingTies: takingTies) { merged.insert(key) }
+                    if merge(server, into: row, takingTies: takingTies, source: source) { merged.insert(key) }
                     continue
                 }
                 guard source == .fetch else {
@@ -453,14 +525,20 @@ public enum SessionUploadResult: Sendable, Equatable {
                 }
                 // Passing the generation check, the fetch was issued after the acknowledgement.
                 confirmed.insert(raw)
-                if merge(server, into: row, takingTies: takingTies) { merged.insert(key) }
+                if merge(server, into: row, takingTies: takingTies, source: source) { merged.insert(key) }
                 // Server times are milliseconds, so a pre-PATCH snapshot can tie the fetch; only a
                 // strictly newer one can have been emitted after it.
                 if let latest = awaiting.latest, rowGenerations[raw] ?? 0 <= latest.capturedAt,
-                    latest.server.lastUpdate > server.lastUpdate,
-                    merge(latest.server, into: row)
+                    latest.server.lastUpdate > server.lastUpdate
                 {
-                    merged.insert(key)
+                    if merge(latest.server, into: row, source: .socket) { merged.insert(key) }
+                    // The replay skips ebook values: one that differs from the confirmed row
+                    // requests a fetch, even if it matched the row when it arrived.
+                    if row.ebookLocation != latest.server.ebookLocation
+                        || row.ebookProgress != latest.server.ebookProgress
+                    {
+                        ebookFetches[raw] = key
+                    }
                 }
             }
             return merged
@@ -470,6 +548,15 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         for raw in confirmed {
             awaitingFetch[raw] = nil
+        }
+        // A fetch issued after a request answers it, whatever happens to its values.
+        if source == .fetch {
+            for key in updates.keys { answerEbookFetch(for: key, capturedAt: capturedAt) }
+        }
+        if !ebookFetches.isEmpty {
+            // Fetches already issued may predate the socket's value: only later ones answer it.
+            generation += 1
+            for (raw, key) in ebookFetches { ebookFetchRequests[raw] = (key, generation) }
         }
         if !merged.isEmpty {
             generation += 1
@@ -628,6 +715,8 @@ public enum SessionUploadResult: Sendable, Equatable {
             mergedAt[key.rawValue] = nil
             awaitingFetch[key.rawValue] = nil
             ebookSentLast.remove(key.rawValue)
+            // Ebook edits reserved before the deletion are discarded with the row; later ones stay.
+            committedEbookEdits[key] = ebookEditSequence.withLock { $0 }
         }
         return deleted
     }
@@ -799,12 +888,19 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// the baseline's time may hold another write made before the one the baseline holds (an
     /// earlier event, or a fetch read before it); it counts as stale unless `takingTies` (a fetch
     /// issued after the baseline's values were merged, so read after the server held them).
-    private func merge(_ server: ProgressBaseline, into row: LocalMediaProgress, takingTies: Bool = false) -> Bool {
+    private func merge(
+        _ server: ProgressBaseline, into row: LocalMediaProgress, takingTies: Bool = false,
+        source: ServerProgressSource
+    ) -> Bool {
         if !takingTies, let baseline = row.serverBaseline, server.lastUpdate <= baseline.lastUpdate {
             return false
         }
         var state = ProgressSyncState(row)
-        guard state.merge(server, excluding: inFlight[row.key]?.groups ?? []) else { return false }
+        // A socket's ebook values only prompt a fetch (``needsEbookFetch``).
+        guard
+            state.merge(
+                server, excluding: inFlight[row.key]?.groups ?? [], skipping: source == .socket ? .ebook : [])
+        else { return false }
         state.write(to: row)
         return true
     }

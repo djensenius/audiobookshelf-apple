@@ -14,12 +14,28 @@ import Synchronization
 /// builder, removes it when the session ends, and deletes a server's covers once the server is
 /// removed. ``trimmer`` trims the memory cache on memory warnings (iOS) or memory pressure
 /// (macOS), and when the app enters the background on iOS.
+///
+/// Disk maintenance (#143, #421) runs at `.background` priority, so it doesn't hold up the
+/// first frame: at launch it deletes the covers of connections removed in an earlier launch,
+/// then runs a full pass of the cover file store, and every time the app enters the
+/// background it runs another pass. The app registers no `BGTaskScheduler` tasks, so this
+/// doesn't add one: on iOS the background pass asks for a little background time instead. At
+/// most one maintenance run is in flight, and the store joins concurrent passes into one.
 @MainActor
 final class ImageServices {
     let pipeline: ImagePipeline
     let participant: ImageParticipant
     /// Called by the system's memory events, on whatever thread they arrive.
     nonisolated let trimmer: MemoryTrimmer
+    private let fileStore: CoverFileStore
+    /// Whether the launch maintenance deletes the covers of connections the store no longer
+    /// saves; see ``init(accounts:sweepsRemovedConnections:trim:notifications:)``.
+    let sweepsRemovedConnections: Bool
+    /// The running disk maintenance, so another isn't started meanwhile.
+    private var maintenance: Task<Void, Never>?
+    #if os(iOS)
+        private var maintenanceTime = UIBackgroundTaskIdentifier.invalid
+    #endif
     private let network = NetworkMonitor()
     private let online = OnlineFlag()
     private var networkTask: Task<Void, Never>?
@@ -30,6 +46,11 @@ final class ImageServices {
         private var memoryPressure: (any DispatchSourceMemoryPressure)?
     #endif
 
+    /// - Parameter sweepsRemovedConnections: Whether `accounts` reads the App Group store, which
+    ///   lists every connection whose covers share ``CoverFileStore/defaultDirectory(appGroup:)``.
+    ///   Only then are the covers of connections it doesn't save deleted at launch: an in-memory
+    ///   store (tests, previews) or a private fallback store (a build without the App Group
+    ///   entitlement) may not list them, as `DownloadJanitor` skips such stores too.
     /// - Parameter trim: Trims the memory cache to a fraction of its cap; tests record it. By
     ///   default, ``pipeline``'s ``ImagePipeline/trimMemory(toFraction:)``.
     /// - Parameter notifications: Where memory warnings arrive on iOS; tests pass their own, so
@@ -37,16 +58,20 @@ final class ImageServices {
     /// - Parameter covers: Where covers are fetched and cached; ``CoverSource/app`` by default.
     init(
         accounts: AccountManager?,
+        sweepsRemovedConnections: Bool = false,
         covers: CoverSource = .app,
         trim: (@Sendable (_ fraction: Double) async -> Void)? = nil,
         notifications: NotificationCenter = .default
     ) {
         let limits = Self.limits
         let online = self.online
+        let fileStore = CoverFileStore(
+            directory: covers.directory ?? CoverFileStore.defaultDirectory(), limit: limits.diskBytes)
+        self.fileStore = fileStore
+        self.sweepsRemovedConnections = sweepsRemovedConnections
         let pipeline = ImagePipeline(
             limits: limits,
-            fileStore: CoverFileStore(
-                directory: covers.directory ?? CoverFileStore.defaultDirectory(), limit: limits.diskBytes),
+            fileStore: fileStore,
             // TODO(#143): pass the downloads' `DownloadedCoverLookup`, so downloaded items' covers
             // load from their files.
             downloadedCovers: nil, sessionConfiguration: covers.sessionConfiguration,
@@ -66,6 +91,7 @@ final class ImageServices {
         #elseif os(macOS)
             memoryPressure = Self.observeMemoryPressure(calling: trimmer)
         #endif
+        maintainDisk(sweepingRemovalsOf: sweepsRemovedConnections ? accounts : nil, inBackground: false)
     }
 
     isolated deinit {
@@ -82,6 +108,40 @@ final class ImageServices {
     func didEnterBackground() {
         #if os(iOS)
             trimmer.didEnterBackground()
+        #endif
+        maintainDisk(sweepingRemovalsOf: nil, inBackground: true)
+    }
+
+    /// Runs a full pass of the cover file store at `.background` priority, after deleting the
+    /// covers of connections `accounts` no longer saves, unless a run is already in flight.
+    private func maintainDisk(sweepingRemovalsOf accounts: AccountManager?, inBackground: Bool) {
+        #if os(iOS)
+            // Background time, so the run (this one, or the launch run still in flight) can
+            // finish once the app is in the background; it is redone by the next launch or
+            // background entry if the system suspends it anyway. Ended when the run finishes.
+            if inBackground, maintenanceTime == .invalid {
+                maintenanceTime = UIApplication.shared.beginBackgroundTask(withName: "Cover cache maintenance") {
+                    [weak self] in self?.endMaintenanceTime()
+                }
+            }
+        #endif
+        guard maintenance == nil else { return }
+        let (participant, fileStore) = (self.participant, self.fileStore)
+        maintenance = Task(priority: .background) { [weak self] in
+            if let accounts {
+                await participant.sweepRemovedConnections { await accounts.savedConnectionIDs() }
+            }
+            await fileStore.fullPass()
+            self?.maintenance = nil
+            self?.endMaintenanceTime()
+        }
+    }
+
+    private func endMaintenanceTime() {
+        #if os(iOS)
+            guard maintenanceTime != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(maintenanceTime)
+            maintenanceTime = .invalid
         #endif
     }
 
