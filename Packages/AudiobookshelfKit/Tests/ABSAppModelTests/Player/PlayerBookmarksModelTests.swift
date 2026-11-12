@@ -274,6 +274,34 @@ struct PlayerBookmarksModelTests {
         }
     }
 
+    @Test func closingOneSheetDuringFirstLoadStillLoadsTheOther() async throws {
+        let service = FakeBookmarkService()
+        try await withBookmarks(service: service) { model, playback, store in
+            playback.load(FakePlaybackControl.bookSession(), at: 30)
+            // The model holds no state, so both sheets can share it; each runs its own `.task`.
+            var loads = service.loads.calls.makeAsyncIterator()
+
+            // Two windows open the sheet during the first load.
+            let firstSheet = Task { await model.onAppear() }
+            let firstLoad = try #require(await loads.next())
+            let secondSheet = Task { await model.onAppear() }
+            for _ in 0..<10 { await Task.yield() }
+            try #require(service.sentLoads == 2, "the second sheet must run its own load")
+            let secondLoad = try #require(await loads.next())
+
+            // The first window closes its sheet, cancelling its load.
+            firstSheet.cancel()
+            firstLoad.reply.resume(throwing: CancellationError())
+            await firstSheet.value
+            #expect(model.isFirstLoadInProgress)
+
+            secondLoad.reply.resume(returning: [])
+            await secondSheet.value
+            #expect(store.hasLoaded)
+            #expect(model.canCreate)
+        }
+    }
+
     @Test func createRejectsDuplicateQueuedBehindAnotherWrite() async throws {
         let service = FakeBookmarkService()
         try await withBookmarks(service: service) { model, playback, store in

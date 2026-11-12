@@ -148,8 +148,12 @@ public final class PlayerBookmarksModel {
 
     /// Loads the bookmarks the first time the sheet opens in a session (D13). A failure leaves the
     /// list as it is; the socket's `user_updated` fills it in later.
+    ///
+    /// Each sheet runs its own load, even while another sheet's is in flight: closing that sheet
+    /// cancels its load, which mustn't leave this one empty. The store keeps whichever response
+    /// is newest.
     public func onAppear() async {
-        guard isEnabled, !store.hasLoaded, !store.isLoading else { return }
+        guard isEnabled, !store.hasLoaded else { return }
         try? await store.refresh()
     }
 
