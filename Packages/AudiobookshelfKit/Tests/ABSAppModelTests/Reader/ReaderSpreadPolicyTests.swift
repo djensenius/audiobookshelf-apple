@@ -47,6 +47,10 @@ import Testing
         Case(
             name: "spanned Duo, regular", setting: .auto, platform: .iOS, sizeClass: .regular,
             size: CGSize(width: 1200, height: 900), hinge: 18.5, expected: .twoUp(gap: 18.5)),
+        // The hinge splits the screen, so even a square spanned Duo shows a page on each side.
+        Case(
+            name: "spanned Duo, square", setting: .auto, platform: .iOS, sizeClass: .regular,
+            size: CGSize(width: 800, height: 800), hinge: 24, expected: .twoUp(gap: 24)),
         Case(
             name: "folded Duo", setting: .auto, platform: .iOS, sizeClass: .compact,
             size: CGSize(width: 400, height: 900), hinge: nil, expected: .single),
