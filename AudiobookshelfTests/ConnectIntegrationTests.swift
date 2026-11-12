@@ -158,9 +158,12 @@ final class ConnectTestProtocol: URLProtocol {
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
         let keychain = ConnectTestKeychain()
+        let downloads = TestDownloads()
+        defer { downloads.cleanUp() }
         let environment = AppEnvironment(
             settings: AppSettings(defaults: defaults), storeLocation: .inMemory, keychain: keychain,
-            sessionConfiguration: ConnectTestProtocol.configuration)
+            sessionConfiguration: ConnectTestProtocol.configuration, downloadsRoot: downloads.root,
+            makeDownloadSession: downloads.makeSession)
         let accounts = try #require(environment.accounts)
         await environment.lifecycle.start()
         #expect(environment.lifecycle.gate == .connect)

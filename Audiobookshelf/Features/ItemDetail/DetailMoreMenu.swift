@@ -30,13 +30,16 @@ extension EpisodeDetailModel: DetailMoreMenuModel {}
 /// cache at once and roll back on failure; a failure shows an alert. Marking finished over
 /// progress and discarding ask first, in a centred alert as legacy `Dialog.confirm` did. One
 /// progress action runs at a time, and one is performed only while still offered. Every other
-/// entry is the screen's own, from `entry`.
-struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View>: ViewModifier {
+/// entry is the screen's own, from `entry`, and `extra` adds entries after the actions (shown
+/// only while there are actions).
+struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View, Extra: View>: ViewModifier {
     let model: Model
     /// The entries to offer, given whether the item is gone from the server.
     let actions: @MainActor (_ isGone: Bool) -> [ItemDetailMenuAction]
     /// The screen's own entry for an action other than a progress action.
     let entry: @MainActor (ItemDetailMenuAction) -> Entry
+    /// The screen's entries after the actions, given whether the item is gone from the server.
+    let extra: @MainActor (_ isGone: Bool) -> Extra
     @Environment(\.itemActions) private var itemActions
     /// The action waiting for confirmation, kept while the alert is dismissed.
     @State private var pendingAction: ItemDetailMenuAction?
@@ -50,15 +53,21 @@ struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View>: ViewModifier {
 
     init(
         model: Model, actions: @escaping @MainActor (_ isGone: Bool) -> [ItemDetailMenuAction],
-        @ViewBuilder entry: @escaping @MainActor (ItemDetailMenuAction) -> Entry
+        @ViewBuilder entry: @escaping @MainActor (ItemDetailMenuAction) -> Entry,
+        @ViewBuilder extra: @escaping @MainActor (_ isGone: Bool) -> Extra
     ) {
         self.model = model
         self.actions = actions
         self.entry = entry
+        self.extra = extra
+    }
+
+    private var isGone: Bool {
+        goneState.isGone(ItemDetailGoneState.Snapshot(model: model.detail))
     }
 
     private var offered: [ItemDetailMenuAction] {
-        actions(goneState.isGone(ItemDetailGoneState.Snapshot(model: model.detail)))
+        actions(isGone)
     }
 
     func body(content: Content) -> some View {
@@ -113,6 +122,7 @@ struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View>: ViewModifier {
                     entry(action)
                 }
             }
+            extra(isGone)
         } label: {
             Label {
                 Text(verbatim: L10n.string("LabelMore"))
@@ -146,6 +156,15 @@ struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View>: ViewModifier {
                 showsFailure = true
             }
         }
+    }
+}
+
+extension DetailMoreMenu where Extra == EmptyView {
+    init(
+        model: Model, actions: @escaping @MainActor (_ isGone: Bool) -> [ItemDetailMenuAction],
+        @ViewBuilder entry: @escaping @MainActor (ItemDetailMenuAction) -> Entry
+    ) {
+        self.init(model: model, actions: actions, entry: entry) { _ in EmptyView() }
     }
 }
 
