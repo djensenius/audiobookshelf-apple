@@ -29,6 +29,8 @@ final class AppEnvironment {
     let player: any PlayerSlotState
     /// The cover image pipeline and its session participant (#182).
     let images: ImageServices
+    /// Writes the Continue Listening widget's snapshot (#89).
+    let widgetSnapshots: WidgetSnapshotWriter
 
     /// - Parameters:
     ///   - settings: The settings every scene shares.
@@ -70,6 +72,11 @@ final class AppEnvironment {
         let images = ImageServices(accounts: accounts)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
+
+        // Widgets (#89).
+        let widgetSnapshots = Self.makeWidgetSnapshotWriter(accounts: accounts)
+        lifecycle.register(widgetSnapshots, stage: .connect)
+        self.widgetSnapshots = widgetSnapshots
     }
 }
 
