@@ -30,13 +30,15 @@ public enum SourceScanner {
         }
 
         /// The 1-based numbers of the opted-out lines: those containing ``ignoreMarker``, and the
-        /// line after a comment-only line that does. Found before comments are blanked.
+        /// line after a comment-only line that does. A line is comment-only when it has no code once
+        /// comments are blanked, so `/* l10n-ignore */ Text(…)` opts out only its own line.
         var ignoredLines: Set<Int> {
             var result: Set<Int> = []
             var ignoreNext = false
-            for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
-                let trimmed = line.drop { $0.isWhitespace }
-                let isComment = trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("*")
+            let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+            let codeLines = codeText.split(separator: "\n", omittingEmptySubsequences: false)
+            for (index, line) in lines.enumerated() {
+                let isComment = index < codeLines.count && codeLines[index].allSatisfy(\.isWhitespace)
                 if ignoreNext || line.contains(ignoreMarker) { result.insert(index + 1) }
                 ignoreNext = isComment && line.contains(ignoreMarker)
             }
@@ -220,7 +222,8 @@ public enum SourceScanner {
         (?:
             (?:^|[^\w.])
             (?:Text|Button|Label|Toggle|Picker|Section|Menu|TextField|SecureField|Link|LabeledContent
-            |ContentUnavailableView|ProgressView|GroupBox|DisclosureGroup|Tab)
+            |ContentUnavailableView|ProgressView|GroupBox|DisclosureGroup|Tab|NavigationLink|ShareLink
+            |DatePicker|Stepper)
           | \.(?:navigationTitle|navigationSubtitle|accessibilityLabel|accessibilityHint|accessibilityValue|help
             |alert|confirmationDialog)
         ) \( \s* (?:verbatim: \s*)? (?="[^"])

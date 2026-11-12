@@ -591,6 +591,28 @@ import Testing
         #expect(SourceScanner.hardCodedStrings(in: source, keys: []).map(\.line) == [4])
     }
 
+    /// An opt-out in a comment before code on the same line covers only that line; in a comment on
+    /// a line of its own it also covers the next one.
+    @Test func inlineOptOutDoesNotCoverTheNextLine() {
+        let source = file(
+            """
+            /* l10n-ignore: an example URL */ Text(verbatim: "https://abs.example.com")
+            Text("Hello")
+            /* l10n-ignore: an example */
+            Text("Skipped")
+            // l10n-ignore: an example
+            Text("Skipped too")
+            Text("Shown")
+            """)
+        #expect(SourceScanner.hardCodedStrings(in: source, keys: []).map(\.line) == [2, 7])
+        let keys = file(
+            """
+            /* l10n-ignore */ let a = "LabelOptedOut"
+            let b = "LabelAfterInline"
+            """)
+        #expect(SourceScanner.keyReferences(in: [keys]).required.map(\.key) == ["LabelAfterInline"])
+    }
+
     @Test(arguments: [
         #"Text("Hello")"#,
         #"Text("Hello") // a trailing comment"#,
@@ -605,6 +627,10 @@ import Testing
         #"Text("\(count) books")"#,
         #"Section("Recent") {"#,
         #"x.alert("Error", isPresented: $shown) {"#,
+        #"NavigationLink("Settings", value: route)"#,
+        #"ShareLink("Share", item: url)"#,
+        #"DatePicker("Date", selection: $date)"#,
+        #"Stepper("Speed", value: $speed)"#,
         // Escaped letters are letters.
         #"Text("\u{65}")"#,
         #"Text(verbatim: "\u{48}\u{69}")"#,
