@@ -341,4 +341,29 @@ private final class TokenServer: Sendable {
         #expect(reported.withLock { $0 } == 0)
         #expect(try await store.connection(id: idA) != nil)
     }
+
+    /// An expiry during a removal whose Keychain delete then fails is still reported, so the
+    /// connection's downloads are cleaned up although ``AccountManager/credentialsRemoved`` isn't
+    /// called.
+    @Test func expiryDuringAFailedRemovalIsReported() async throws {
+        let serverA = TokenServer(userId: "usr-a")
+        let idA = try await signIn(to: serverA)
+        _ = try await signIn(to: TokenServer(userId: "usr-b"))
+        let client = try #require(await manager.downloadClient(for: idA))
+        let expired = Mutex<[UUID]>([])
+        let removed = Mutex(0)
+        manager.credentialsExpired = { id in expired.withLock { $0.append(id) } }
+        manager.credentialsRemoved = { _ in removed.withLock { $0 += 1 } }
+        let keychain = keychain
+        manager.willDeleteRemovedSession = {
+            serverA.rejectRefreshes()
+            _ = try? await client.accessToken(replacing: "usr-a-access-1")
+            keychain.failWrites(with: errSecInteractionNotAllowed)
+        }
+
+        await #expect(throws: KeychainError.self) { try await manager.remove(idA) }
+
+        #expect(expired.withLock { $0 } == [idA])
+        #expect(removed.withLock { $0 } == 0)
+    }
 }

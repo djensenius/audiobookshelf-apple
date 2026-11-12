@@ -133,10 +133,10 @@ public final class DownloadsLifecycle: SessionParticipant {
             // Outside the chain, so a background phase deactivates without waiting for a retry or
             // the sweep, which only follow an activation that succeeded.
             guard await phase.value else { return }
-            // Checked again for each, in case a session of it started meanwhile.
-            for id in self.unfinishedCleanups where self.unfinishedCleanups.contains(id) {
-                await self.stopDownloads(of: id)
-            }
+            // Each after its connection's previous cleanup but alongside the others', so a stuck one
+            // doesn't hold up theirs; the sweep waits for them all.
+            let retries = self.unfinishedCleanups.map { self.startCleanup(of: $0) }
+            for retry in retries { await Self.wait(for: retry) }
             await sweep()
         }
     }

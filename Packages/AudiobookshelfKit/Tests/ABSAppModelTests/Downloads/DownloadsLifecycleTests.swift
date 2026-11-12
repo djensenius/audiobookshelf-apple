@@ -399,6 +399,38 @@ struct DownloadsLifecycleTests {
                 + ["sweep", "activate", "activated", "sweep"])
     }
 
+    /// Each connection's retry runs alongside the others': whichever reads its records first
+    /// waits there for the other's read, which a retry stuck behind it would never reach.
+    @Test func stuckRetryDoesNotHoldUpAnotherConnections() async {
+        let holding = Mutex(false)
+        let gate = StubGate()
+        let reads = Mutex(0)
+        let stored = recordsA + recordsB
+        let lifecycle = makeLifecycle(records: { id in
+            if holding.withLock({ $0 }) {
+                if reads.withLock({
+                    $0 += 1; return $0
+                }) == 1 {
+                    await gate.pass()
+                } else {
+                    gate.open()
+                }
+            }
+            return stored.filter { $0.key.serverConnectionID == id }
+        })
+        await lifecycle.launch().value
+        await engine.failQuiesces(2)
+        await lifecycle.connectionRemoved(connectionA)
+        await lifecycle.connectionRemoved(connectionB)
+        holding.withLock { $0 = true }
+
+        await lifecycle.handle(scenePhase: .active).value
+
+        #expect(reads.withLock { $0 } == 2)
+        #expect(calls.all.filter { $0.hasPrefix("quiesce") }.count == 4)
+        #expect(calls.all.last == "sweep")
+    }
+
     /// A retry runs outside the phase chain: one that is stuck doesn't keep a background
     /// phase from deactivating.
     @Test func stuckRetryDoesNotHoldUpABackground() async {
