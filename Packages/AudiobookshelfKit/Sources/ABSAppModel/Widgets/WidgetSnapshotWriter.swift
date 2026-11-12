@@ -20,16 +20,17 @@ public protocol WidgetTimelineReloading: AnyObject {
 ///   active account or the server rejects the session (``SessionParticipant``), and when the
 ///   snapshot's connection is removed while another one is active (``followRemovals(of:)``). A
 ///   switch keeps it: the widget still opens that item, asking to switch back. It also clears
-///   it when the launch's restore ends signed out (``followLaunch(of:)``), since then no session
-///   starts or ends.
+///   it when the launch's restore ends signed out (``followLaunch(of:)``), or a switch to its
+///   connection does (``followRejectedSwitches(of:)``), since then no session starts or ends.
 /// - It ignores snapshots for any connection but the running session's, so a tick from the
 ///   ending session can't write the snapshot back after a sign-out cleared it.
 @MainActor
 public final class WidgetSnapshotWriter: SessionParticipant {
     /// The shortest time between two writes that only move the position.
     public let minimumInterval: TimeInterval
-    private let fileURL: URL?
-    private let reloader: any WidgetTimelineReloading
+    /// Where the snapshot goes; `nil` when nothing is written.
+    public let fileURL: URL?
+    public let reloader: any WidgetTimelineReloading
     private let now: () -> Date
     private let sleep: @Sendable (TimeInterval) async throws -> Void
     /// The running session's connection; `nil` when none runs.
@@ -43,6 +44,7 @@ public final class WidgetSnapshotWriter: SessionParticipant {
     private var following: Task<Void, Never>?
     private var removals: Task<Void, Never>?
     private var launch: Task<Void, Never>?
+    private var rejectedSwitches: Task<Void, Never>?
 
     /// - Parameter fileURL: Where the snapshot goes (``WidgetSnapshot/defaultFileURL(appGroup:)``);
     ///   `nil` without an App Group, when nothing is written but the session is still followed.
@@ -67,6 +69,7 @@ public final class WidgetSnapshotWriter: SessionParticipant {
         following?.cancel()
         removals?.cancel()
         launch?.cancel()
+        rejectedSwitches?.cancel()
         trailing?.cancel()
     }
 
@@ -143,6 +146,28 @@ public final class WidgetSnapshotWriter: SessionParticipant {
                 if current == .launching { continue }
                 if current == .connect, self.written != nil { self.clear() }
                 return
+            }
+        }
+    }
+
+    /// Clears the snapshot when a switch to its connection ends signed out (the saved session was
+    /// rejected or unreadable). The switch ended the running session with
+    /// ``SessionEndReason/switch``, which keeps the snapshot, and no session of that connection
+    /// starts to expire. `rejected` reads ``SessionLifecycle/signedOutSwitches`` and
+    /// ``SessionLifecycle/signedOutSwitchConnectionID``; a switch to another connection keeps it.
+    /// Follows until the writer is released or this is called again.
+    public func followRejectedSwitches(
+        of rejected: @escaping @MainActor @Sendable () -> (count: Int, connectionID: UUID?)
+    ) {
+        rejectedSwitches?.cancel()
+        let initial = rejected().count
+        rejectedSwitches = Task { [weak self] in
+            var seen = initial
+            for await (count, connectionID) in Observations({ @MainActor in rejected() }) {
+                guard !Task.isCancelled, let self else { return }
+                guard count != seen else { continue }
+                seen = count
+                if let written = self.written, written.serverID == connectionID { self.clear() }
             }
         }
     }

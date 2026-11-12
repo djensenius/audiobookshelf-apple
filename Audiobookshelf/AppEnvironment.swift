@@ -82,7 +82,8 @@ final class AppEnvironment {
         self.images = images
 
         // Widgets (#89).
-        let widgetSnapshots = Self.makeWidgetSnapshotWriter(accounts: accounts, lifecycle: lifecycle)
+        let widgetSnapshots = Self.makeWidgetSnapshotWriter(
+            accounts: accounts, lifecycle: lifecycle, storeLocation: storeLocation)
         lifecycle.register(widgetSnapshots, stage: .connect)
         self.widgetSnapshots = widgetSnapshots
     }

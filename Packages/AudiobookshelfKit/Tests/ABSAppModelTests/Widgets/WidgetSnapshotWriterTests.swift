@@ -36,6 +36,14 @@ private final class FakeGate {
     var gate = AuthGate.launching
 }
 
+/// ``SessionLifecycle/signedOutSwitches`` and the connection the last of them tried.
+@MainActor
+@Observable
+private final class FakeRejectedSwitches {
+    var count = 0
+    var connectionID: UUID?
+}
+
 /// The writer's trailing-write timer: it waits until the test wakes it, or it's cancelled.
 @MainActor
 private final class FakeSleeper {
@@ -345,6 +353,31 @@ private func context(_ server: UUID) -> SessionContext {
         relaunched.followLaunch { launch.gate }
 
         launch.gate = .connect
+
+        #expect(await eventually { reloader.kinds.count == 2 })
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+    }
+
+    /// A → B → A, and A's saved session is rejected: B's session ended with `.switch` and no A
+    /// session starts, so only the rejected switch can clear A's snapshot.
+    @Test func aRejectedSwitchBackToTheSnapshotsConnectionClearsIt() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let rejected = FakeRejectedSwitches()
+        let writer = await writer()
+        writer.followRejectedSwitches { (rejected.count, rejected.connectionID) }
+        writer.update(snapshot())
+        await writer.sessionWillEnd(.switch)
+        await writer.sessionDidStart(context(serverB))
+        await writer.sessionWillEnd(.switch)
+
+        // A rejected switch to another connection keeps it.
+        rejected.connectionID = serverB
+        rejected.count = 1
+        for _ in 0..<100 { await Task.yield() }
+        #expect(onDisk == snapshot())
+
+        rejected.connectionID = serverA
+        rejected.count = 2
 
         #expect(await eventually { reloader.kinds.count == 2 })
         #expect(!FileManager.default.fileExists(atPath: file.path))

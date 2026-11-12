@@ -39,6 +39,18 @@ import Testing
         }
     }
 
+    /// A test or fixture environment settles signed out, which clears the widget's snapshot; only
+    /// the App Group store's may touch the shared snapshot and the user's widget.
+    @Test func anInMemoryEnvironmentLeavesTheWidgetAlone() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain())
+
+            #expect(environment.widgetSnapshots.fileURL == nil)
+            #expect(environment.widgetSnapshots.reloader is NoWidgetReloads)
+        }
+    }
+
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
         try await withSettings { settings in
             let keychain = ConnectTestKeychain()
