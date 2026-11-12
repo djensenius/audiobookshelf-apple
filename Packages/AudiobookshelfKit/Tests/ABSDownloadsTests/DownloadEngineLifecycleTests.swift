@@ -60,6 +60,24 @@ import Testing
         #expect(try await harness.store.record(id: record.id) == nil)
     }
 
+    /// Adopting a survivor of a queued record (one a restart couldn't resume, say) starts it.
+    @Test func adoptingASurvivorReportsItsRecordStarted() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let base = harness.base
+        let engine = harness.makeEngine(prepare: { stub in
+            let url = URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!
+            stub.leaveTask(URLRequest(url: url), description: partID.uuidString)
+        })
+
+        #expect(await engine.attachSurvivingTransfers())
+
+        #expect(await engine.next { _ in true } == .recordStarted(recordID: record.id))
+        #expect(try await harness.store.record(id: record.id)?.state == .downloading)
+    }
+
     @Test func failedReadCreatesNoSessionAndRetries() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
@@ -104,7 +122,10 @@ import Testing
         #expect(await engine.activate())
 
         let update = await engine.next {
-            if case .partCompleted = $0 { false } else { true }
+            switch $0 {
+            case .partCompleted, .recordStarted: false
+            default: true
+            }
         }
         guard case .recordComplete = update else {
             Issue.record("Unexpected \(String(describing: update))")
