@@ -168,7 +168,9 @@ the app › Xcode Cloud):
       Xcode Cloud uses its cloud-managed distribution certificates and creates the
       profiles. The profiles must contain the entitlements from ADR 0002: App Group
       and keychain access group on both platforms, plus App Sandbox and network client
-      on macOS. Don't upload certificates or profiles.
+      on macOS. The embedded widget extension (`org.davidjensenius.Audiobookshelf.Widgets`)
+      gets its own profiles with the same App Group and keychain group (plus App Sandbox
+      on macOS). Don't upload certificates or profiles.
 - [ ] Export compliance: no prompt is expected, because
       `ITSAppUsesNonExemptEncryption = NO` is set.
 - [ ] Start a build on `main`. Check:
