@@ -24,6 +24,11 @@ public struct NetworkPath: Sendable, Hashable {
     public var isConstrained: Bool
     /// The primary interface, or `nil` when offline.
     public var interface: NetworkInterface?
+    /// How many times the source's path came back online after being offline. Path streams
+    /// keep only the newest unread path, so a consumer may never see the offline path between
+    /// two online ones; this still grows. `SystemNetworkPathSource` counts per stream; other
+    /// paths leave it at 0.
+    public var onlineEpoch: UInt64 = 0
 
     public init(isOnline: Bool, isExpensive: Bool = false, isConstrained: Bool = false, interface: NetworkInterface?) {
         self.isOnline = isOnline
