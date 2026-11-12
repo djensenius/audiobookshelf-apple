@@ -163,6 +163,53 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
         }
     }
 
+    @Test func readerSettingsAreStoredAsJSONAndSurviveReload() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            let key = AppSettings.Key.readerSettings.rawValue
+            let settings = AppSettings(defaults: defaults)
+            // A store from before reader settings existed reads as the defaults, unwritten.
+            #expect(settings.readerSettings == ReaderSettings())
+            #expect(AppSettings.snapshot(from: defaults).readerSettings == ReaderSettings())
+            #expect(defaults.persistentDomain(forName: suiteName)?.isEmpty ?? true)
+
+            let changed = ReaderSettings(theme: .sepia, fontFamily: .sansSerif, fontScale: 150, spread: .none)
+            settings.readerSettings = changed
+            let stored = try #require(defaults.string(forKey: key))
+            #expect(
+                stored
+                    == #"{"fontFamily":"sans-serif","fontScale":150,"lineSpacing":115,"spread":"none","textStroke":0,"theme":"sepia"}"#
+            )
+            #expect(AppSettings(defaults: defaults).readerSettings == changed)
+            #expect(AppSettings.snapshot(from: defaults).readerSettings == changed)
+
+            settings.resetAll()
+            #expect(settings.readerSettings == ReaderSettings())
+            #expect(defaults.object(forKey: key) == nil)
+        }
+    }
+
+    @Test func unreadableReaderSettingsFallBackToDefaults() async throws {
+        try await withIsolatedDefaults { defaults, _ in
+            let key = AppSettings.Key.readerSettings.rawValue
+            defaults.set(3, forKey: key)
+            #expect(AppSettings(defaults: defaults).readerSettings == ReaderSettings())
+            defaults.set("not json", forKey: key)
+            #expect(AppSettings(defaults: defaults).readerSettings == ReaderSettings())
+            // An older or partial value keeps what it has.
+            defaults.set(#"{"theme":"black","fontScale":1000}"#, forKey: key)
+            #expect(AppSettings(defaults: defaults).readerSettings == ReaderSettings(theme: .black, fontScale: 300))
+        }
+    }
+
+    @Test func externalReaderSettingsWritesReload() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            let settings = AppSettings(defaults: defaults)
+            let external = try #require(UserDefaults(suiteName: suiteName))
+            external.set(#"{"theme":"dark"}"#, forKey: AppSettings.Key.readerSettings.rawValue)
+            #expect(await eventually { settings.readerSettings.theme == .dark })
+        }
+    }
+
     @Test func valuesRoundTripAsPropertyListTypes() async throws {
         try await withIsolatedDefaults { defaults, _ in
             let settings = AppSettings(defaults: defaults)

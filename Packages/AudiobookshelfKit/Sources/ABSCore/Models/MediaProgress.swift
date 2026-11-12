@@ -43,7 +43,10 @@ public struct MediaProgress: Sendable, Hashable, Codable, Identifiable {
     public var currentTime: Double
     public var isFinished: Bool
     public var hideFromContinueListening: Bool
-    /// EPUB CFI or page reference, depending on the ebook format.
+    /// EPUB CFI or page reference, depending on the ebook format. The server stores what clients
+    /// send, so a page can arrive as a JSON number (ADR 0008 §2): a whole number decodes to its
+    /// string form (`5` as `"5"`); a fractional or non-finite one, or any other non-string, decodes
+    /// as `nil` (no location) rather than failing the whole progress.
     public var ebookLocation: String?
     /// `0...1`.
     public var ebookProgress: Double?
@@ -99,7 +102,7 @@ public struct MediaProgress: Sendable, Hashable, Codable, Identifiable {
         isFinished = try container.decodeIfPresent(Bool.self, forKey: .isFinished) ?? false
         hideFromContinueListening =
             try container.decodeIfPresent(Bool.self, forKey: .hideFromContinueListening) ?? false
-        ebookLocation = try container.decodeIfPresent(String.self, forKey: .ebookLocation)
+        ebookLocation = container.decodeEbookLocation(forKey: .ebookLocation)
         ebookProgress = container.decodeLenientDouble(forKey: .ebookProgress)
         lastUpdate = try container.decodeIfPresent(Int.self, forKey: .lastUpdate)
         startedAt = try container.decodeIfPresent(Int.self, forKey: .startedAt)
@@ -116,5 +119,16 @@ public struct MediaProgress: Sendable, Hashable, Codable, Identifiable {
     public static func key(libraryItemID: String, episodeID: String?) -> String {
         guard let episodeID, !episodeID.isEmpty else { return libraryItemID }
         return "\(libraryItemID)-\(episodeID)"
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// A string as is, or a whole JSON number as its string form; `nil` otherwise.
+    fileprivate func decodeEbookLocation(forKey key: Key) -> String? {
+        if let string = try? decodeIfPresent(String.self, forKey: key) { return string }
+        guard let number = try? decodeIfPresent(Double.self, forKey: key), number.rounded() == number,
+            let whole = Int(exactly: number)
+        else { return nil }
+        return String(whole)
     }
 }

@@ -956,7 +956,31 @@ public final class ProgressSyncer {
                 return
             }
         }
+        // Socket ebook values are a hint to fetch, never merged themselves (ADR 0003). A fetch issued
+        // after a request answers it, so one still outstanding arrived during an earlier GET of
+        // this drain and is fetched again, at most twice per key per drain.
+        var ebookFetches: [MediaKey: Int] = [:]
+        while let key = await store.needsEbookFetch
+            .filter({ $0.serverConnectionID == service.serverConnectionID && ebookFetches[$0, default: 0] < 2 })
+            .min(by: { $0.rawValue < $1.rawValue })
+        {
+            ebookFetches[key, default: 0] += 1
+            await waitForPendingWrites()
+            guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
+            do {
+                _ = try await fetchProgress(for: key, attempted: &attemptedConfirmations, attemptedKeys: &attemptedKeys)
+            } catch {
+                logger.error("Fetching ebook progress failed: \(Self.caseName(error), privacy: .public)")
+                drainOutcome.failed = true
+                return
+            }
+        }
         guard await retryRetainedCloses() else { return }
+        // Updates during both GETs leave a request the bound skipped: drain again after a backoff.
+        if await store.needsEbookFetch.contains(where: { $0.serverConnectionID == service.serverConnectionID }) {
+            drainOutcome.failed = true
+            return
+        }
         drainOutcome.completed = true
         await refreshActiveProgress(unlessAttempted: attemptedKeys)
     }
@@ -1017,7 +1041,9 @@ public final class ProgressSyncer {
         guard let progress else {
             // Both pinned servers return 404 for absent user progress; the canonical API maps
             // only that error to nil. Permit first-progress creation without inventing a dated
-            // zero baseline or releasing post-ACK socket suppression.
+            // zero baseline or releasing post-ACK socket suppression. It does answer an ebook
+            // fetch request: there's no other position to fetch.
+            await store.answerEbookFetch(for: key, capturedAt: capturedAt)
             return !(await store.hasChanged(key, since: capturedAt))
         }
         guard progress.libraryItemId == key.libraryItemId,

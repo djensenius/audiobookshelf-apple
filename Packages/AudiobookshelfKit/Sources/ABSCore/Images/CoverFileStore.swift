@@ -20,6 +20,13 @@ private final class LeaseCounts: Sendable {
     private struct State {
         var counts: [String: Int] = [:]
         var pendingDeletion: Set<String> = []
+        /// Callers of ``waitUntilUnleased(under:)``, by id, with the path prefix they wait for.
+        var waiters: [Int: (prefix: String, continuation: CheckedContinuation<Void, Never>)] = [:]
+        var nextWaiter = 0
+
+        func isLeased(under prefix: String) -> Bool {
+            counts.keys.contains { $0.hasPrefix(prefix) }
+        }
     }
 
     private let state = Mutex(State())
@@ -30,16 +37,50 @@ private final class LeaseCounts: Sendable {
         state.withLock { $0.pendingDeletion.contains(path) }
     }
 
+    func isLeased(under prefix: String) -> Bool {
+        state.withLock { $0.isLeased(under: prefix) }
+    }
+
+    /// The files under `prefix` waiting for their last lease before they are deleted.
+    func pendingDeletions(under prefix: String) -> Set<String> {
+        state.withLock { $0.pendingDeletion.filter { $0.hasPrefix(prefix) } }
+    }
+
     func lease(_ path: String) -> FileLease {
         state.withLock { $0.counts[path, default: 0] += 1 }
         return FileLease { [self] in
-            state.withLock { state in
+            let ready = state.withLock { state -> [CheckedContinuation<Void, Never>] in
                 state.counts[path, default: 1] -= 1
-                guard state.counts[path] == 0 else { return }
+                guard state.counts[path] == 0 else { return [] }
                 state.counts.removeValue(forKey: path)
                 // Deleted under the lock, so an insert can't publish a new file here first.
                 if state.pendingDeletion.remove(path) != nil { try? FileManager.default.removeItem(atPath: path) }
+                let done = state.waiters.filter { !state.isLeased(under: $0.value.prefix) }
+                for id in done.keys { state.waiters[id] = nil }
+                return done.values.map(\.continuation)
             }
+            for waiter in ready { waiter.resume() }
+        }
+    }
+
+    /// Returns once no file under `prefix` is leased, or when the task is cancelled.
+    func waitUntilUnleased(under prefix: String) async {
+        let id = state.withLock { state in
+            defer { state.nextWaiter += 1 }
+            return state.nextWaiter
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let resumesNow = state.withLock { state in
+                    // Checked under the lock the cancellation handler takes, so one of them resumes.
+                    guard !Task.isCancelled, state.isLeased(under: prefix) else { return true }
+                    state.waiters[id] = (prefix, continuation)
+                    return false
+                }
+                if resumesNow { continuation.resume() }
+            }
+        } onCancel: {
+            state.withLock { $0.waiters.removeValue(forKey: id) }?.continuation.resume()
         }
     }
 
@@ -94,6 +135,11 @@ public actor CoverFileStore {
     private var touchedDuringListing: Set<String> = []
     /// Bumped by ``removeServer(_:)``, so fetches started before it can't write.
     private var serverGenerations: [UUID: Int] = [:]
+    /// Bumped by ``removeServer(_:)`` once it has moved the server's folder aside. Until then
+    /// (through the lease wait) the folder's files stay counted, so a pass drops a server's files
+    /// only if its folder moved while the pass ran, and ``retire(_:)`` subtracts a file exactly
+    /// once whenever it runs.
+    private var folderMoves: [UUID: Int] = [:]
     /// The write each path holds, by lease key; absent (`0`) for files from an earlier launch.
     private var versions: [String: Int] = [:]
     private var nextVersion = 1
@@ -101,8 +147,22 @@ public actor CoverFileStore {
     private(set) var evictionCount = 0
     /// The number of folder listings, for tests.
     private(set) var listingCount = 0
+    /// The ``folderMoves`` the last pass to set the size finished with (it dropped the files of
+    /// each server whose count changed while it listed). A removal subtracts its folder only if
+    /// it moved it after that pass finished.
+    private var lastPassMoves: [UUID: Int]?
+    /// Folders moved aside by ``removeServer(_:)`` and still being deleted, which a pass leaves
+    /// alone; any other is left over from a removal the app was terminated in.
+    private var removingFolders: Set<String> = []
     /// Runs on the listing's thread once it has read the folder, for tests.
     private let listingHook: (@Sendable () -> Void)?
+    /// Runs on the deleting thread before a removed server's folder is measured, for tests.
+    private let deletionHook: (@Sendable () -> Void)?
+    /// Awaited at the start of every ``insert(moving:for:pathExtension:generation:)``, for tests.
+    private let insertHook: (@Sendable () async -> Void)?
+    /// How long ``removeServer(_:)`` waits for the server's leases: it returns when the leases
+    /// are released or this returns, whichever comes first.
+    private let leaseTimeout: @Sendable () async throws -> Void
 
     static let extensions = ["webp", "jpg", "png", "heic", "gif", "img"]
 
@@ -110,12 +170,19 @@ public actor CoverFileStore {
         self.init(directory: directory, limit: limit, now: now, listingHook: nil)
     }
 
-    init(directory: URL, limit: Int, now: @escaping @Sendable () -> Date, listingHook: (@Sendable () -> Void)?) {
+    init(
+        directory: URL, limit: Int, now: @escaping @Sendable () -> Date, listingHook: (@Sendable () -> Void)?,
+        deletionHook: (@Sendable () -> Void)? = nil, insertHook: (@Sendable () async -> Void)? = nil,
+        leaseTimeout: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(5)) }
+    ) {
         self.directory = directory
         root = directory.standardizedFileURL.path
         self.limit = limit
         self.now = now
         self.listingHook = listingHook
+        self.deletionHook = deletionHook
+        self.insertHook = insertHook
+        self.leaseTimeout = leaseTimeout
     }
 
     /// `Library/Caches/Images` in the App Group container, so the widget can read it, or the
@@ -146,7 +213,6 @@ public actor CoverFileStore {
     ///
     /// The folder is listed off the actor, so lookups and inserts aren't blocked meanwhile. If a
     /// pass is already running, this waits for it instead of starting another.
-    // TODO(#143): call at launch and from a background maintenance task.
     public func fullPass() async {
         if let passTask { return await passTask.value }
         let task = Task {
@@ -190,6 +256,7 @@ public actor CoverFileStore {
     func insert(
         moving file: URL, for key: ImageKey, pathExtension: String, generation: Int
     ) async throws -> LeasedFile {
+        await insertHook?()
         await scanIfNeeded()
         // Checked after the scan, which may have let a removal of the server run.
         guard generation == self.generation(for: key.serverID) else { throw CancellationError() }
@@ -236,15 +303,67 @@ public actor CoverFileStore {
     }
 
     /// Deletes one server's files, for example when its connection is removed.
-    public func removeServer(_ serverID: UUID) {
+    ///
+    /// Writes started before this call are refused at once. It then waits for the server's
+    /// leases (decodes reading its files) to be released, for at most a few seconds, so a decode
+    /// in progress isn't left without its input; past that the files are deleted anyway, which
+    /// open readers survive. The folder is then moved aside, so later lookups miss and later
+    /// writes start a fresh folder, and is measured and deleted off the actor. A folder that
+    /// can't be moved aside isn't deleted.
+    public func removeServer(_ serverID: UUID) async {
         serverGenerations[serverID, default: 0] += 1
-        let folder = folder(for: serverID)
-        let removed = Self.listing(of: folder, root: root, leases: leases).files.reduce(0) { $0 + $1.size }
-        try? FileManager.default.removeItem(at: folder)
-        // A pass listing the folder meanwhile drops these files itself, by their generation.
-        if isScanned { totalBytes = max(0, totalBytes - removed) }
         let prefix = "\(root)/\(serverID.uuidString)/"
+        await waitForLeases(under: prefix)
+        let folder = folder(for: serverID)
+        let removing = directory.appending(path: ".\(serverID.uuidString).\(UUID().uuidString).removing")
+        // Read before the move: `retire` has already subtracted these, and a lease released
+        // after the move would forget them while the file is still in the moved folder.
+        let retired = leases.pendingDeletions(under: prefix)
+        let isMoved = rename(folder.path, removing.path) == 0
+        // Refuses writes whose generation was read during the lease wait.
+        serverGenerations[serverID, default: 0] += 1
         versions = versions.filter { !$0.key.hasPrefix(prefix) }
+        // Only a folder moved aside is deleted. If the move failed (no folder, or refused), the
+        // path is still the live one, which a fresh-generation write may recreate and lease while
+        // a deletion is suspended. Files left behind stay counted, and `removeServers(keepingOnly:)`
+        // sweeps them in a later launch.
+        guard isMoved else { return }
+        // A pass listing the folder meanwhile drops these files itself, by their move count.
+        folderMoves[serverID, default: 0] += 1
+        let moved = folderMoves[serverID, default: 0]
+        removingFolders.insert(removing.lastPathComponent)
+        let removed = await Self.deleteFolder(
+            removing, as: serverID, root: root, excluding: retired, hook: deletionHook)
+        removingFolders.remove(removing.lastPathComponent)
+        // Only if the size still counts these files: the last pass finished before this move
+        // (even during the lease wait). A pass that finished after it dropped them for the move,
+        // or never listed them. One that spanned an earlier move dropped only that folder's
+        // files; those written since are counted.
+        if let lastPassMoves, lastPassMoves[serverID, default: 0] < moved {
+            totalBytes = max(0, totalBytes - removed)
+        }
+    }
+
+    /// Deletes the folder of every server not in `kept`, for example of connections removed in
+    /// an earlier launch whose covers weren't deleted then (#421). Lists the folder off the actor
+    /// first; `willRemove` is asked about each server just before its folder is deleted, and
+    /// keeps it by returning `false`. Returns the servers removed.
+    @discardableResult
+    public func removeServers(
+        keepingOnly kept: Set<UUID>, willRemove: @Sendable (UUID) async -> Bool = { _ in true }
+    ) async -> Set<UUID> {
+        var removed: Set<UUID> = []
+        for serverID in await servers(notIn: kept) {
+            guard await willRemove(serverID) else { continue }
+            await removeServer(serverID)
+            removed.insert(serverID)
+        }
+        return removed
+    }
+
+    /// The servers with a folder here that aren't in `kept`, listed off the actor.
+    public func servers(notIn kept: Set<UUID>) async -> Set<UUID> {
+        await Self.serverFolders(in: directory, hook: listingHook).subtracting(kept)
     }
 
     /// Deletes a stored file that turned out not to decode, once its readers are done, but only
@@ -271,7 +390,7 @@ public actor CoverFileStore {
     /// Resyncs the size with the folder, which the OS may have purged since the last pass, and
     /// evicts down to 90 % of the cap if it is over. Only ``fullPass()`` runs it, one at a time.
     private func runPass() async {
-        let generations = serverGenerations
+        let moves = folderMoves
         isListing = true
         listingCount += 1
         let listing = await Self.listFolder(directory, root: root, leases: leases, hook: listingHook)
@@ -283,22 +402,27 @@ public actor CoverFileStore {
         for (url, modified) in listing.partials where now().timeIntervalSince(modified) > 600 {
             try? FileManager.default.removeItem(at: url)
         }
-        // Servers removed while the folder was listed have no files left to count.
+        // Servers whose folder was moved aside while the folder was listed have no files left to
+        // count; a path touched before the move no longer exists, so it isn't measured again.
         var files = listing.files.filter { file in
-            let server = UUID(uuidString: file.url.deletingLastPathComponent().lastPathComponent)
-            let wasRemoved = server.map { serverGenerations[$0, default: 0] != generations[$0, default: 0] } ?? false
-            return !wasRemoved && !touched.contains(file.key)
+            moveCount(of: file.key) == moveCount(of: file.key, in: moves) && !touched.contains(file.key)
         }
         files += touched.compactMap { Self.file(at: URL(filePath: $0), root: root, leases: leases) }
         isScanned = true
         totalBytes = files.reduce(0) { $0 + $1.size }
-        guard totalBytes > limit else { return }
-        // Read after the listing, so leases taken while it ran are kept.
-        let leased = leases.leasedPaths
-        for file in files.sorted(by: { $0.modified < $1.modified }) where totalBytes > limit * 9 / 10 {
-            guard !leased.contains(file.key) else { continue }
-            remove(file)
+        lastPassMoves = folderMoves
+        if totalBytes > limit {
+            // Read after the listing, so leases taken while it ran are kept.
+            let leased = leases.leasedPaths
+            for file in files.sorted(by: { $0.modified < $1.modified }) where totalBytes > limit * 9 / 10 {
+                guard !leased.contains(file.key) else { continue }
+                remove(file)
+            }
         }
+        // Folders a removal moved aside but was terminated before deleting. Last, so nothing
+        // waits between the listing and the size.
+        let leftovers = listing.removing.filter { !removingFolders.contains($0.lastPathComponent) }
+        if !leftovers.isEmpty { await Self.deleteFolders(leftovers) }
     }
 
     /// Deletes `url` now, or once its last lease is released. Lookups skip it meanwhile, and it
@@ -327,8 +451,28 @@ public actor CoverFileStore {
         if isListing { touchedDuringListing.insert(file.key) }
     }
 
+    /// Waits until no file under `prefix` is leased, or until ``leaseTimeout`` returns.
+    private func waitForLeases(under prefix: String) async {
+        guard leases.isLeased(under: prefix) else { return }
+        let (leases, timeout) = (self.leases, leaseTimeout)
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await leases.waitUntilUnleased(under: prefix) }
+            group.addTask { try? await timeout() }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
     private func touch(_ url: URL) {
         if isListing { touchedDuringListing.insert(leaseKey(url)) }
+    }
+
+    /// The ``folderMoves`` count (or `moves`') of the server whose folder holds the file at
+    /// lease key `path`; `0` for a file outside a server folder.
+    private func moveCount(of path: String, in moves: [UUID: Int]? = nil) -> Int {
+        let folder = URL(filePath: path).deletingLastPathComponent().lastPathComponent
+        guard let server = UUID(uuidString: folder) else { return 0 }
+        return (moves ?? folderMoves)[server, default: 0]
     }
 
     private func lease(_ url: URL) -> FileLease {
@@ -350,10 +494,12 @@ public actor CoverFileStore {
         var modified: Date
     }
 
-    /// The files under a folder, and the staging files of writes, which don't count.
+    /// The files under a folder, the staging files of writes, which don't count, and the folders
+    /// of removed servers moved aside for deletion.
     private struct Listing: Sendable {
         var files: [File] = []
         var partials: [(url: URL, modified: Date)] = []
+        var removing: [URL] = []
     }
 
     /// The whole cache, listed off the actor.
@@ -366,8 +512,49 @@ public actor CoverFileStore {
         return listing
     }
 
+    /// The servers with a folder in the cache, listed off the actor.
+    @concurrent
+    private static func serverFolders(in directory: URL, hook: (@Sendable () -> Void)?) async -> Set<UUID> {
+        let urls =
+            (try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles)) ?? []
+        hook?()
+        return Set(
+            urls.compactMap { url in
+                guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return nil }
+                return UUID(uuidString: url.lastPathComponent)
+            })
+    }
+
+    /// Measures and deletes a removed server's folder off the actor. The `retired` files, waiting
+    /// for their lease, aren't counted: ``retire(_:)`` has already taken them out of `totalBytes`.
+    @concurrent
+    private static func deleteFolder(
+        _ folder: URL, as serverID: UUID, root: String, excluding retired: Set<String>,
+        hook: (@Sendable () -> Void)?
+    ) async -> Int {
+        hook?()
+        let urls =
+            (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: fileKeys)) ?? []
+        let size = urls.reduce(0) { total, url in
+            // Keyed by the server's own folder, where its leases were taken.
+            let key = "\(root)/\(serverID.uuidString)/\(url.lastPathComponent)"
+            guard !url.lastPathComponent.hasPrefix("."), !retired.contains(key),
+                let values = try? url.resourceValues(forKeys: Set(fileKeys)), values.isRegularFile == true
+            else { return total }
+            return total + (values.totalFileAllocatedSize ?? 0)
+        }
+        try? FileManager.default.removeItem(at: folder)
+        return size
+    }
+
+    @concurrent
+    private static func deleteFolders(_ folders: [URL]) async {
+        for folder in folders { try? FileManager.default.removeItem(at: folder) }
+    }
+
     /// The cache files, without those retired and waiting for their lease to be released, which
-    /// ``retire(_:)`` has already taken out of `totalBytes`, and without hidden files.
+    /// ``retire(_:)`` has already taken out of `totalBytes`, and without hidden files or folders.
     private static func listing(of folder: URL, root: String, leases: LeaseCounts) -> Listing {
         var listing = Listing()
         guard let enumerator = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: fileKeys)
@@ -375,10 +562,14 @@ public actor CoverFileStore {
         for case let url as URL in enumerator {
             let name = url.lastPathComponent
             if name.hasPrefix(".") {
+                // A removed server's folder, moved aside, is deleted whole and never counted.
+                enumerator.skipDescendants()
                 if name.hasSuffix(".partial") {
                     let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey])
                         .contentModificationDate
                     listing.partials.append((url, modified ?? .distantPast))
+                } else if name.hasSuffix(".removing") {
+                    listing.removing.append(url)
                 }
             } else if let file = file(at: url, root: root, leases: leases) {
                 listing.files.append(file)

@@ -132,7 +132,7 @@ private struct AuthorBooksSection: View {
         case .loaded:
             BrowseItemGrid(
                 elements: model.books.items, item: { $0 }, onAppear: { model.books.itemAppeared(id: $0.id) },
-                appearanceID: model.booksRefreshes)
+                appearanceID: model.booksRefreshes, libraryID: model.booksLibraryID)
             BrowsePagingFooter(
                 isLoading: model.books.isLoading, failed: failed, messageKey: failedMessage,
                 retry: { BrowsePresentation.retry(model.books) })
