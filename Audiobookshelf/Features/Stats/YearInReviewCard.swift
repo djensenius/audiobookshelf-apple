@@ -49,48 +49,129 @@ struct YearInReviewCovers {
     }
 }
 
+/// The shapes the year in review card is shared in.
+enum YearInReviewLayout: String, CaseIterable, Identifiable, Hashable {
+    /// The full portrait card (legacy `YearInReview.vue` and `YearInReviewServer.vue`).
+    case card
+    /// Two totals on a 600 × 200 pt strip (legacy `YearInReviewShort.vue`).
+    case short
+    /// The full card's contents laid out wide, for headers and link previews. Legacy has no
+    /// such canvas.
+    case banner
+
+    var id: Self { self }
+
+    /// The card's size in points; the shared image is this times the render scale.
+    var size: CGSize {
+        switch self {
+        case .card: CGSize(width: 400, height: 600)
+        case .short: CGSize(width: 600, height: 200)
+        case .banner: CGSize(width: 800, height: 420)
+        }
+    }
+
+    /// Tiles per side of the backdrop's wall of 108 pt covers: enough to cover the card's
+    /// corners once the wall is tilted by 25°.
+    var wallSide: Int {
+        switch self {
+        case .card, .short: 7
+        case .banner: 9
+        }
+    }
+
+    /// Appended to the image's file name, like legacy's `audiobookshelf_my_<year>_short.png`.
+    var filenameSuffix: String {
+        switch self {
+        case .card: ""
+        case .short: "_short"
+        case .banner: "_banner"
+        }
+    }
+
+    var labelKey: String {
+        switch self {
+        case .card: "LabelYearInReviewLayoutCard"
+        case .short: "LabelYearInReviewLayoutShort"
+        case .banner: "LabelYearInReviewLayoutBanner"
+        }
+    }
+}
+
 /// The shareable year in review card, a port of the legacy canvas in
 /// `components/stats/YearInReview.vue` and `YearInReviewServer.vue`: totals, the top authors and
 /// genres, and the covers of the books finished (or added, for the server) over a tilted
-/// wall of covers. It has a fixed size and fixed text sizes, because it is shared as an image.
+/// wall of covers. The short layout ports `YearInReviewShort.vue`. It has a fixed size and fixed
+/// text sizes, because it is shared as an image.
 struct YearInReviewCard: View {
-    static let size = CGSize(width: 400, height: 600)
     nonisolated static let tileSide: Double = 108
     /// The server lists up to 25 books with covers, plus 5 finished ones for the user.
     nonisolated static let maxCovers = 30
-    /// Tiles per side of the backdrop's wall: 7 × 108 pt covers the 400 × 600 pt card tilted
-    /// by 25°.
-    private static let wallSide = 7
 
     let content: YearInReviewContent
     let year: Int
     let covers: YearInReviewCovers
     var locale = Locale.autoupdatingCurrent
+    var layout = YearInReviewLayout.card
 
     fileprivate static let tan = Color(.sRGB, red: 1, green: 219 / 255, blue: 112 / 255)
     private static let background = Color(.sRGB, red: 35 / 255, green: 35 / 255, blue: 35 / 255)
     private static let gold = Color(.sRGB, red: 205 / 255, green: 157 / 255, blue: 73 / 255)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            header
-            tiles
-            HStack(alignment: .top, spacing: 20) {
-                topList(titleKey: "LabelYearInReviewTopAuthors", names: topAuthors)
-                topList(titleKey: "LabelYearInReviewTopGenres", names: topGenres)
+        layoutBody
+            .frame(width: layout.size.width, height: layout.size.height, alignment: .topLeading)
+            .background { backdrop }
+            .clipped()
+            .foregroundStyle(.white)
+            .environment(\.colorScheme, .dark)
+    }
+
+    @ViewBuilder private var layoutBody: some View {
+        switch layout {
+        case .card:
+            VStack(alignment: .leading, spacing: 20) {
+                header
+                tiles
+                topLists
+                Spacer(minLength: 0)
+                coverRow
             }
-            Spacer(minLength: 0)
-            coverRow
+            .padding(24)
+        case .short:
+            // Like legacy: the first and last totals (books finished and listened to; for the
+            // server, books and authors added).
+            let stats = Self.tiles(for: content, locale: locale)
+            VStack(alignment: .leading, spacing: 16) {
+                header
+                HStack(spacing: 12) {
+                    StatTile(stat: stats[0])
+                    StatTile(stat: stats[3])
+                }
+            }
+            .padding(20)
+        case .banner:
+            VStack(alignment: .leading, spacing: 20) {
+                header
+                HStack(spacing: 12) {
+                    ForEach(Self.tiles(for: content, locale: locale), id: \.self) { StatTile(stat: $0) }
+                }
+                HStack(alignment: .bottom, spacing: 20) {
+                    topLists
+                    coverRow.frame(width: 352)
+                }
+            }
+            .padding(24)
         }
-        .padding(24)
-        .frame(width: Self.size.width, height: Self.size.height, alignment: .topLeading)
-        .background { backdrop }
-        .clipped()
-        .foregroundStyle(.white)
-        .environment(\.colorScheme, .dark)
     }
 
     // MARK: Parts
+
+    private var topLists: some View {
+        HStack(alignment: .top, spacing: 20) {
+            topList(titleKey: "LabelYearInReviewTopAuthors", names: topAuthors)
+            topList(titleKey: "LabelYearInReviewTopGenres", names: topGenres)
+        }
+    }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -166,10 +247,10 @@ struct YearInReviewCard: View {
                     // enough to cover the card's corners once tilted. An overlay, so its overflow
                     // doesn't grow the card.
                     Grid(horizontalSpacing: 0, verticalSpacing: 0) {
-                        ForEach(0..<Self.wallSide, id: \.self) { row in
+                        ForEach(0..<layout.wallSide, id: \.self) { row in
                             GridRow {
-                                ForEach(0..<Self.wallSide, id: \.self) { column in
-                                    if let image = covers.images[ids[(row * Self.wallSide + column) % ids.count]] {
+                                ForEach(0..<layout.wallSide, id: \.self) { column in
+                                    if let image = covers.images[ids[(row * layout.wallSide + column) % ids.count]] {
                                         CoverTile(image: image, side: Self.tileSide)
                                     }
                                 }
@@ -290,10 +371,15 @@ struct YearInReviewCard: View {
             Duration.UnitsFormatStyle(allowedUnits: [.minutes], width: spoken ? .wide : .narrow).locale(locale))
     }
 
-    /// What VoiceOver reads for the rendered card: the title, the totals and the top lists.
-    static func summary(for content: YearInReviewContent, year: Int, locale: Locale) -> String {
+    /// What VoiceOver reads for the rendered card: the title, the totals and the top lists, or
+    /// for the short layout only the title and the two totals it shows.
+    static func summary(
+        for content: YearInReviewContent, year: Int, locale: Locale, layout: YearInReviewLayout = .card
+    ) -> String {
         var parts = [L10n.string("HeaderYearInReviewYear", String(year))]
-        parts += tiles(for: content, locale: locale).map(\.spoken)
+        let stats = tiles(for: content, locale: locale)
+        guard layout != .short else { return (parts + [stats[0].spoken, stats[3].spoken]).joined(separator: ", ") }
+        parts += stats.map(\.spoken)
         let (authors, genres): ([String], [String]) =
             switch content {
             case .user(let stats): (stats.topAuthors.map(\.name), stats.topGenres.map(\.genre))

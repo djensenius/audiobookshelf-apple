@@ -2,7 +2,8 @@ import ABSCore
 import SwiftUI
 
 /// One item as a list row: a small cover, title, subtitle, series and duration, and a progress
-/// badge. Use it in a `List` (port of the legacy list-style item card).
+/// badge. Use it in a `List` (port of the legacy list-style item card). At accessibility text
+/// sizes the cover sits above the text (``AdaptiveStack``) so the text keeps the full width.
 public struct ItemRow: View {
     private let item: ItemSummary
     private let serverID: UUID?
@@ -33,7 +34,7 @@ public struct ItemRow: View {
         Button {
             perform(.openDetails)
         } label: {
-            HStack(spacing: ABSSpacing.medium) {
+            AdaptiveStack(spacing: ABSSpacing.medium) {
                 CoverView(
                     key: serverID.flatMap { item.coverKey(serverID: $0, bucket: .small) }, title: item.title,
                     shape: shape, accessibility: .hidden
@@ -70,6 +71,7 @@ public struct ItemRow: View {
         .itemHover()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: ItemPresentation.rowAccessibilityLabel(item, locale: locale)))
+        .cardInputLabels(title: item.title, label: ItemPresentation.rowAccessibilityLabel(item, locale: locale))
         .accessibilityValue(
             Text(verbatim: ItemPresentation.accessibilityValue(item, progress: progress, locale: locale))
         )

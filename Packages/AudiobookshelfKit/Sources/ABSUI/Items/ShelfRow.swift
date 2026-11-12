@@ -2,7 +2,8 @@ import ABSCore
 import SwiftUI
 
 /// A titled horizontal shelf of cards (port of legacy `Shelf.vue`): a header with an optional
-/// "show all" action, lazily created cards, and a message when it's empty.
+/// "show all" action, lazily created cards, and a message when it's empty. The title is a
+/// VoiceOver heading and the shelf a container named after it.
 public struct ShelfRow<Element: Identifiable, Card: View>: View {
     private let title: String
     private let elements: [Element]
@@ -35,6 +36,8 @@ public struct ShelfRow<Element: Identifiable, Card: View>: View {
                 if let onShowAll {
                     Button(L10n.string("LabelShowAll"), action: onShowAll)
                         .font(.subheadline)
+                        .accessibilityLabel(
+                            Text(verbatim: ItemPresentation.showAllAccessibilityLabel(shelfTitle: title)))
                 }
             }
             .padding(.horizontal, ABSSpacing.large)
@@ -55,6 +58,9 @@ public struct ShelfRow<Element: Identifiable, Card: View>: View {
                 .scrollIndicators(.hidden)
             }
         }
+        // One container per shelf, entered from its heading on the rotor.
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(verbatim: title))
     }
 }
 

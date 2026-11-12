@@ -5,7 +5,8 @@ import SwiftUI
 /// legacy `LazyBookCard.vue`). The width comes from the parent.
 ///
 /// The card is one VoiceOver element: the label speaks title, subtitle and series, the value
-/// the progress, and the actions mirror the context menu. A tap performs ``ItemActionKind/openDetails``.
+/// the progress and the badges, and the actions mirror the context menu. A tap performs
+/// ``ItemActionKind/openDetails``. With Differentiate Without Color, a finished card adds a check.
 public struct ItemCard: View {
     private let item: ItemSummary
     private let serverID: UUID?
@@ -15,6 +16,7 @@ public struct ItemCard: View {
     private let perform: (ItemActionKind) -> Void
     @Environment(\.itemProgressReader) private var progressReader
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
     /// - Parameters:
     ///   - serverID: The connection the cover loads from; `nil` shows the placeholder.
@@ -48,6 +50,14 @@ public struct ItemCard: View {
                     .lineLimit(2, reservesSpace: true)
                     .foregroundStyle(ABSColor.foreground)
                 HStack(spacing: ABSSpacing.xxSmall) {
+                    if ItemPresentation.showsFinishedCheck(
+                        progress, differentiateWithoutColor: differentiateWithoutColor)
+                    {
+                        // The cover's finished bar differs from an in-progress one by colour only.
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(ABSColor.success)
+                            .accessibilityHidden(true)
+                    }
                     if item.isExplicit { ExplicitBadge() }
                     if item.isAbridged { AbridgedBadge() }
                     if let subtitle = ItemPresentation.subtitle(item) {
@@ -66,6 +76,7 @@ public struct ItemCard: View {
         .itemHover()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: ItemPresentation.accessibilityLabel(item)))
+        .cardInputLabels(title: item.title, label: ItemPresentation.accessibilityLabel(item))
         .accessibilityValue(
             Text(verbatim: ItemPresentation.accessibilityValue(item, progress: progress, locale: locale))
         )
