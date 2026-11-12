@@ -602,6 +602,23 @@ struct PlaybackScopeTests {
         #expect(t.scope.queue?.items.map(\.libraryItemID) == ["b"])
     }
 
+    /// A queue kept from an edit before retirement can't change the connection's saved queue
+    /// afterwards.
+    @Test func aQueueKeptPastRetirementDoesNotChange() throws {
+        let store = AdvanceQueueStore()
+        let id = UUID()
+        store.saved[id] = [QueueItem(libraryItemID: "b", title: "B")]
+        let scope = try madeScope(connectionID: id, queueStore: store)
+        var kept: PlaybackQueue?
+        scope.editQueue { kept = $0 }
+
+        scope.retire(reason: .accountSwitch)
+        kept?.clear()
+
+        #expect(kept?.items.map(\.libraryItemID) == ["b"])
+        #expect(store.saved[id]?.map(\.libraryItemID) == ["b"])
+    }
+
     // MARK: Shared writer
 
     /// A retired scope's delayed final write can't replace the newer scope's committed seek, as

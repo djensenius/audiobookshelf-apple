@@ -34,8 +34,9 @@ extension NowPlayingBridge: NowPlayingHandle {
 ///   connection's ``queue``. ``start()`` restores the account's last-played item, paused.
 /// - **Queue.** The scope owns its connection's one live ``PlaybackQueue`` (loaded from the
 ///   store when the scope is made) and the ``PlaybackQueueAdvancer`` that plays it.
-///   ``editQueue(_:)`` changes it until retirement, which detaches the advancer, so a retired
-///   scope's queue never changes again and the connection's next scope loads what it saved.
+///   ``editQueue(_:)`` changes it until retirement, which detaches the advancer and freezes the
+///   queue, so a retired scope's queue never changes again, even through a reference kept from
+///   an edit, and the connection's next scope loads what it saved.
 /// - **Reconnect.** ``reconnect(client:features:)`` swaps the client and features behind the
 ///   coordinator (``AccountPlaybackServices``); the scope and its playback carry on.
 /// - **End.** ``retire(reason:)`` runs synchronously, before the session's teardown suspends: it
@@ -306,6 +307,7 @@ public final class PlaybackScope {
         // Detached before the stop, so nothing it triggers can advance or change the queue.
         isRetired = true
         advancer?.detach(from: coordinator)
+        advancer?.queue.retire()
         coordinator.stop(reason: reason)
         switch reason {
         case .expired, .signOut, .accountRemoved: services?.invalidate()
