@@ -71,6 +71,8 @@ public final class YearInReviewModel {
 
     @ObservationIgnored private let service: any StatsService
     @ObservationIgnored private var hasCheckedUserType = false
+    /// The user-type check in flight, or the one that succeeded.
+    @ObservationIgnored private var userTypeCheck: Task<UserTypeResponse, any Error>?
     @ObservationIgnored private var sequence = 0
 
     /// - Parameters:
@@ -130,10 +132,15 @@ public final class YearInReviewModel {
         let sequence = sequence
         isLoading = true
         if !hasCheckedUserType {
-            // A failed check leaves the user's year only; the next load asks again.
-            if let type = try? await service.userType() {
+            // Overlapping loads share one `GET /api/me`.
+            let check = userTypeCheck ?? Task { [service] in try await service.userType() }
+            userTypeCheck = check
+            if let type = try? await check.value {
                 hasCheckedUserType = true
                 isAdminOrUp = type.isAdminOrUp
+            } else if userTypeCheck == check {
+                // A failed check leaves the user's year only; the next load asks again.
+                userTypeCheck = nil
             }
             guard sequence == self.sequence else { return }
         }

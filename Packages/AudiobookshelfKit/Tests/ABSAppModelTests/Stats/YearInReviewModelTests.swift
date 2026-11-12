@@ -13,10 +13,18 @@ private final class FakeYearService: StatsService {
     let type: UserType?
     let calls = Mutex<[String]>([])
     let failsYearStats = Mutex(false)
+    /// When set, the user-type check and the user's year stats wait for the test to answer them.
+    let typeGate: GatedCalls<Void, UserTypeResponse>?
+    let yearGate: GatedCalls<Int, UserYearStats>?
 
     /// `type` `nil` fails the user-type check.
-    init(type: UserType?) {
+    init(
+        type: UserType?, typeGate: GatedCalls<Void, UserTypeResponse>? = nil,
+        yearGate: GatedCalls<Int, UserYearStats>? = nil
+    ) {
         self.type = type
+        self.typeGate = typeGate
+        self.yearGate = yearGate
     }
 
     func listeningStats() async throws -> ListeningStatsResponse { ListeningStatsResponse(stats: ListeningStats()) }
@@ -24,12 +32,14 @@ private final class FakeYearService: StatsService {
 
     func userType() async throws -> UserTypeResponse {
         calls.withLock { $0.append("me") }
+        if let typeGate { return try await typeGate.call(()) }
         guard let type else { throw Offline() }
         return UserTypeResponse(type: type)
     }
 
     func userYearStats(year: Int) async throws -> UserYearStats {
         calls.withLock { $0.append("user/\(year)") }
+        if let yearGate { return try await yearGate.call(year) }
         if failsYearStats.withLock({ $0 }) { throw Offline() }
         return UserYearStats(
             totalListeningTime: Double(year), numBooksFinished: 2, booksWithCovers: ["li-2", "li-1", ""],
@@ -173,6 +183,75 @@ private func date(_ iso: String) throws -> Date {
         await model.select(year: 2023)
         #expect(model.content == nil)
         #expect(model.error != nil)
+    }
+
+    /// A year's stats arriving after another year was picked are dropped.
+    @Test func staleYearStatsAreDropped() async throws {
+        let gate = GatedCalls<Int, UserYearStats>()
+        var calls = gate.calls.makeAsyncIterator()
+        let model = try model(FakeYearService(type: .user, yearGate: gate))
+
+        let first = Task { await model.load() }
+        let stale = try #require(await calls.next())
+        #expect(stale.request == 2024)
+        let second = Task { await model.select(year: 2023) }
+        let current = try #require(await calls.next())
+        #expect(current.request == 2023)
+        current.reply.resume(returning: UserYearStats(totalListeningTime: 2023))
+        await second.value
+        stale.reply.resume(returning: UserYearStats(totalListeningTime: 2024))
+        await first.value
+
+        #expect(model.year == 2023)
+        #expect(model.content == .user(UserYearStats(totalListeningTime: 2023)))
+        #expect(!model.isLoading)
+    }
+
+    /// A load overtaken while checking the user type stops there, and both loads share one check.
+    @Test func staleLoadStopsAfterTheUserTypeCheck() async throws {
+        let gate = GatedCalls<Void, UserTypeResponse>()
+        var calls = gate.calls.makeAsyncIterator()
+        let service = FakeYearService(type: .user, typeGate: gate)
+        let model = try model(service)
+
+        let first = Task { await model.load() }
+        let check = try #require(await calls.next())
+        let second = Task { await model.select(year: 2023) }
+        // `select(year:)` sets the year and starts its load in one step on the main actor.
+        while model.year != 2023 { await Task.yield() }
+        check.reply.resume(returning: UserTypeResponse(type: .user))
+        await first.value
+        await second.value
+
+        #expect(service.calls.withLock { $0 } == ["me", "user/2023"])
+        guard case .user(let stats) = model.content else { Issue.record("no user stats"); return }
+        #expect(stats.totalListeningTime == 2023)
+        #expect(!model.isLoading)
+    }
+
+    /// The view's task is cancelled when it disappears mid-load: no error, nothing loaded, and
+    /// the next appearance loads again.
+    @Test func cancelledLoadIsRetriedOnReappearance() async throws {
+        let gate = GatedCalls<Int, UserYearStats>()
+        var calls = gate.calls.makeAsyncIterator()
+        let model = try model(FakeYearService(type: .user, yearGate: gate))
+
+        let firstAppearance = Task { await model.loadIfNeeded() }
+        let first = try #require(await calls.next())
+        firstAppearance.cancel()
+        first.reply.resume(throwing: CancellationError())
+        await firstAppearance.value
+        #expect(model.error == nil)
+        #expect(model.content == nil)
+        #expect(!model.isLoading)
+
+        let secondAppearance = Task { await model.loadIfNeeded() }
+        let second = try #require(await calls.next())
+        #expect(model.isLoading)
+        second.reply.resume(returning: UserYearStats(totalListeningTime: 60))
+        await secondAppearance.value
+        #expect(model.content == .user(UserYearStats(totalListeningTime: 60)))
+        #expect(!model.isLoading)
     }
 
     // MARK: Covers
