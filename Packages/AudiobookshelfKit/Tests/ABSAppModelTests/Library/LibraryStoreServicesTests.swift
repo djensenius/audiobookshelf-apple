@@ -19,7 +19,7 @@ private struct Reached: Error, Equatable {
 /// A client implementing every feature service. ``item(id:)`` answers through `itemHandler`;
 /// the other feature calls throw ``Reached``.
 private struct FeatureClient: LibraryService, ItemDetailService, SearchService, SeriesAuthorsService, GroupsService,
-    LatestEpisodesService
+    LatestEpisodesService, PlaylistEditingService
 {
     var name = "client"
     var library = FakeLibraryService()
@@ -51,6 +51,15 @@ private struct FeatureClient: LibraryService, ItemDetailService, SearchService, 
     func recentEpisodes(libraryID: String, page: Int, limit: Int) async throws -> RecentEpisodesPage {
         throw reached()
     }
+    func allPlaylists(libraryID: String) async throws -> [Playlist] { throw reached() }
+    func createPlaylist(name: String, libraryID: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        throw reached()
+    }
+    func addToPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw reached() }
+    func removeFromPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw reached() }
+    func removeFromPlaylist(id: String, item: PlaylistItemReference) async throws -> Playlist { throw reached() }
+    func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw reached() }
+    func deletePlaylist(id: String) async throws { throw reached() }
 }
 
 /// A client that knows its server address.
@@ -104,6 +113,21 @@ private let forwardings: [StoreServiceForwarding] = [
     StoreServiceForwarding(method: "recentEpisodes(libraryID:page:limit:)") {
         _ = try await $0.recentEpisodes(libraryID: "l", page: 0, limit: 50)
     },
+    StoreServiceForwarding(method: "allPlaylists(libraryID:)") { _ = try await $0.allPlaylists(libraryID: "l") },
+    StoreServiceForwarding(method: "createPlaylist(name:libraryID:items:)") {
+        _ = try await $0.createPlaylist(name: "n", libraryID: "l", items: [])
+    },
+    StoreServiceForwarding(method: "addToPlaylist(id:items:)") { _ = try await $0.addToPlaylist(id: "p", items: []) },
+    StoreServiceForwarding(method: "removeFromPlaylist(id:items:)") {
+        _ = try await $0.removeFromPlaylist(id: "p", items: [])
+    },
+    StoreServiceForwarding(method: "removeFromPlaylist(id:item:)") {
+        _ = try await $0.removeFromPlaylist(id: "p", item: PlaylistItemReference(libraryItemID: "i"))
+    },
+    StoreServiceForwarding(method: "reorderPlaylist(id:items:)") {
+        _ = try await $0.reorderPlaylist(id: "p", items: [])
+    },
+    StoreServiceForwarding(method: "deletePlaylist(id:)") { try await $0.deletePlaylist(id: "p") },
 ]
 
 @MainActor
