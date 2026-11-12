@@ -118,6 +118,31 @@ struct PlaybackCommandsModelTests {
         #expect(harness.playback.calls == [.seek(250), .seek(100)])
     }
 
+    @Test func previousChapterNeedsSomewhereToGo() async throws {
+        let harness = try Harness()
+        let model = harness.model()
+        // At the start of the first chapter it would seek to where playback is.
+        harness.load(at: 0)
+        #expect(!model.isEnabled(.previousChapter))
+        await model.perform(.previousChapter)
+        #expect(harness.playback.calls.isEmpty)
+
+        // Anywhere else in the first chapter, even within the restart threshold, it restarts it.
+        harness.load(at: 2)
+        #expect(model.isEnabled(.previousChapter))
+        harness.load(at: 50)
+        #expect(model.isEnabled(.previousChapter))
+        await model.perform(.previousChapter)
+        #expect(harness.playback.calls == [.seek(0)])
+        #expect(!model.isEnabled(.previousChapter), "Back at the start")
+
+        // At the start of a later chapter it goes to the previous one.
+        harness.load(at: 100)
+        #expect(model.isEnabled(.previousChapter))
+        await model.perform(.previousChapter)
+        #expect(harness.playback.calls == [.seek(0), .seek(0)])
+    }
+
     @Test func speedStopsAtRangeEnds() async throws {
         let harness = try Harness()
         let model = harness.model()

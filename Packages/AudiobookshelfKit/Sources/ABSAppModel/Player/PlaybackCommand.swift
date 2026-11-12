@@ -46,14 +46,15 @@ public enum SleepTimerCommand: Hashable, Sendable {
 /// - Nothing is enabled without a ``PlayerViewModel``, nor without an item
 ///   (``PlayerViewModel/hasSession``) but Cancel Timer; signing out leaves the account's playback
 ///   idle, so it's covered too.
-/// - Otherwise each command is enabled when its control in the player is: the chapter and speed
-///   commands when they would move, and Add Bookmark when the bookmarks sheet's Create Bookmark
-///   would be enabled (``PlayerBookmarksModel/canCreate``).
+/// - Otherwise each command is enabled when its control in the player is, and the chapter and speed
+///   commands only when they would move: at the start of the first chapter Previous Chapter would
+///   seek to where playback is, so it's disabled, though the player's button isn't. Add Bookmark is
+///   enabled when the bookmarks sheet's Create Bookmark would be (``PlayerBookmarksModel/canCreate``).
 /// - ``perform(_:)`` does nothing when the command isn't enabled, so a shortcut that fires before
 ///   the menu has updated can't act on a state the menu didn't offer. It returns a failed Add
 ///   Bookmark, for the menu to report as the bookmarks sheet does.
 ///
-/// The next chapter, End of Chapter and Add Bookmark rules read the playback time, so read them only
+/// The chapter, End of Chapter and Add Bookmark rules read the playback time, so read them only
 /// in small leaf views.
 @MainActor
 public struct PlaybackCommandsModel {
@@ -83,7 +84,7 @@ public struct PlaybackCommandsModel {
         guard let player = activePlayer else { return false }
         switch command {
         case .playPause, .jumpBackward, .jumpForward: return true
-        case .previousChapter: return player.hasPreviousChapter
+        case .previousChapter: return hasPreviousChapterTarget(player)
         case .nextChapter: return player.hasNextChapter
         case .speedUp: return player.canStepRate(up: true)
         case .speedDown: return player.canStepRate(up: false)
@@ -119,6 +120,16 @@ public struct PlaybackCommandsModel {
 
     private func bookmarksModel(_ player: PlayerViewModel) -> PlayerBookmarksModel? {
         bookmarks.map { PlayerBookmarksModel(player: player, store: $0) }
+    }
+
+    /// Whether Previous Chapter would move: ``PlayerViewModel/previousChapter()`` seeks to
+    /// ``ABSPlayback/PlaybackTimeline/previousChapterStart(from:)`` of the playback time, which at
+    /// the start of the first chapter (or of an item without chapters) is that time. Needs loaded
+    /// media, as ``PlayerViewModel/hasPreviousChapter`` does. Reads the playback time.
+    private func hasPreviousChapterTarget(_ player: PlayerViewModel) -> Bool {
+        guard let timeline = player.playback.timeline else { return false }
+        let time = player.playback.currentTime
+        return timeline.previousChapterStart(from: time) != time
     }
 
     // MARK: Sleep timer

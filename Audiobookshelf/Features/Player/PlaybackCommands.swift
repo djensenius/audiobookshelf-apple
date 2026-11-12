@@ -39,7 +39,8 @@ struct PlaybackCommands: Commands {
 }
 
 /// The menu's items. Each is its own view, so it updates as the player changes, and the ones that
-/// read the playback time (next chapter, Create Bookmark, End of Chapter) redraw alone every tick.
+/// read the playback time (the chapter commands, Create Bookmark, End of Chapter) redraw alone
+/// every tick.
 private struct PlaybackMenu: View {
     let model: PlaybackCommandsModel
     let alert: PlaybackCommandAlert?
