@@ -141,7 +141,13 @@ public final class BookmarkStore: SessionParticipant {
                 isLoading = loads > 0
             }
         }
-        let bookmarks = try await service.allBookmarks()
+        let bookmarks: [AudioBookmark]
+        do {
+            bookmarks = try await service.allBookmarks()
+        } catch {
+            guard token.generation == generation else { throw CancellationError() }
+            throw error
+        }
         guard seed(bookmarks, token: token) || token.generation == generation else { throw CancellationError() }
     }
 

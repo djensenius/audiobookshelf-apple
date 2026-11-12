@@ -320,6 +320,29 @@ extension BookmarkStoreTests {
         #expect(!store.isLoading)
     }
 
+    @Test func loadFailingAfterTeardownThrowsCancellation() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        var loads = service.loads.calls.makeAsyncIterator()
+
+        let load = Task { try await store.refresh() }
+        let pending = try #require(await loads.next())
+        await store.sessionWillEnd(.signOut)
+        pending.reply.resume(throwing: BookmarkTestError.rejected)
+        await #expect(throws: CancellationError.self) { try await load.value }
+    }
+
+    @Test func loadFailingInSameSessionThrowsItsError() async throws {
+        let service = FakeBookmarkService()
+        let store = try await makeBookmarkStore(service)
+        var loads = service.loads.calls.makeAsyncIterator()
+
+        let load = Task { try await store.refresh() }
+        try #require(await loads.next()).reply.resume(throwing: BookmarkTestError.rejected)
+        await #expect(throws: BookmarkTestError.rejected) { try await load.value }
+        #expect(!store.isLoading)
+    }
+
     @Test func laterLoadDoesNotReapplySupersededWrite() async throws {
         let service = FakeBookmarkService()
         let store = try await makeBookmarkStore(service)
