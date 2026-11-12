@@ -102,7 +102,9 @@ extension ProgressSyncer {
             let settlement = await Self.settleClose(
                 close, after: result, store: store, now: clock.now(), stored: stored)
             // A close kept to retry, or one whose settlement couldn't be saved, waits for a drain.
+            // A drain running now would end as completed and cancel that retry: mark it failed.
             if settlement != .finished, let self, !self.isDetached, !self.isTransportQuiesced {
+                self.drainOutcome.failed = true
                 self.scheduleDrainRetry()
             }
         }
@@ -182,11 +184,13 @@ extension ProgressSyncer {
 
     /// Saves a resend's attempt time before it goes out, as the coordinator's attempt is saved,
     /// so a relaunch while it is out waits ``reconcileDelay`` for it. The save suspends, so
-    /// admission's checks run again after it, with nothing after them before the send. Returns
-    /// the verdict that stands, or `nil` when the save failed and nothing may be sent. A skip
-    /// after the save leaves that attempt time, which can only delay the close's next resend.
+    /// admission's checks run again after it, with nothing after them before the send; the mark
+    /// is taken in the same turn as admission's last check, so a reset or discard of the row
+    /// meanwhile skips it. Returns the verdict that stands, or `nil` when the save failed and
+    /// nothing may be sent. A skip after the save leaves that attempt time, which can only delay
+    /// the close's next resend.
     private func recordCloseAttempt(_ close: PendingSessionCloseDTO) async -> DeferredReportAdmission? {
-        let revision = positionRevision
+        let mark = deferredReportMark(for: close.key)
         var attempt = close
         attempt.lastAttemptAt = clock.now()
         do {
@@ -196,7 +200,7 @@ extension ProgressSyncer {
             return nil
         }
         await closeQueue.reached?(.attemptSaved)
-        return deferredReportSkip(sessionID: close.sessionID, key: close.key, since: revision).map { .skip($0) }
+        return deferredReportSkip(sessionID: close.sessionID, key: close.key, since: mark).map { .skip($0) }
             ?? .send
     }
 

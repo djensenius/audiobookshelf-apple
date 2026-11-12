@@ -90,4 +90,38 @@ struct SessionCloseQueueTests {
         #expect(isLatest == (change == nil || change == "older server"))
         #expect(try await !store.isLatestPlaybackPosition(currentTime: 21, editedAt: t0, for: key))
     }
+
+    /// The row's change stamp, read without awaiting the store, moves with a generic edit
+    /// (marking not finished), a merged server value and a deletion, and never back; another
+    /// row's edit and a saved close leave it.
+    @Test(arguments: [nil, "edit", "merge", "delete", "other row", "close"])
+    func rowChangeStampMovesOnlyWithItsRow(change: String?) async throws {
+        let store = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
+        #expect(store.rowChangeStamp(for: key) == 0)
+        _ = try await commit(20, to: store, at: t0)
+        let stamp = store.rowChangeStamp(for: key)
+        #expect(stamp > 0)
+        switch change {
+        case "edit":
+            try await store.recordEdit(ProgressEdit(audio: audio(0), isFinished: false), for: key, now: t0 + 1)
+        case "merge":
+            let generation = await store.captureGeneration()
+            let server = ProgressBaseline(
+                currentTime: 900, progress: 0.25, duration: 3600, isFinished: false, ebookProgress: 0,
+                lastUpdate: t0 + 2)
+            #expect(try await store.applyServerProgress([key: server], capturedAt: generation, source: .fetch) == [key])
+        case "delete":
+            #expect(try await store.deleteProgress(for: key))
+        case "other row":
+            let other = MediaKey(serverConnectionID: key.serverConnectionID, libraryItemId: "b")
+            try await store.recordEdit(ProgressEdit(audio: audio(5)), for: other, now: t0 + 1)
+        case "close":
+            try await store.saveSessionClose(close("s-1", at: t0))
+        default:
+            break
+        }
+        let moved = store.rowChangeStamp(for: key)
+        #expect((moved > stamp) == ["edit", "merge", "delete"].contains(change))
+        #expect(moved >= stamp)
+    }
 }

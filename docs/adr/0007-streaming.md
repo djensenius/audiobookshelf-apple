@@ -387,7 +387,7 @@ Cons:
        4. If the row's audio is no longer the report's own position (a later local edit, or another device's newer progress merged over it), it skips.
        5. A reply the merge didn't take (another item's, undated, or older than the stored server progress) decided nothing, so it skips like a failed read.
 
-       Checks 1 and 2, and that no position was queued since the read, run again after every later store call up to the send, so a syncer that ended, a newer session for the media, or a position saved meanwhile still skips.
+       Checks 1 and 2, that no position was queued since the read, and that the row hasn't changed in the store since then, run again after every later store call up to the send. The row check uses `LocalProgressStore.rowChangeStamp(for:)`, a per-row stamp the store moves on every committed edit, merge or deletion, readable without suspending. So a syncer that ended, a newer session for the media, a position saved meanwhile, or the row reset (marked not finished) or deleted (progress discarded) still skips.
 
        The position is identified by the audio edit time it committed with, which survives a relaunch, not by its in-process token. A skip never loses the position: the row stays dirty and the drain PATCHes it. A skip for a newer session or position removes the close and logs its listening time; carrying that time is #383 (`DeferredReportAdmissionTests`). The only other resend is #381's once-only `/sync` for a still-open session whose lookup showed the earlier report unapplied.
      - **Remaining limits**, accepted:

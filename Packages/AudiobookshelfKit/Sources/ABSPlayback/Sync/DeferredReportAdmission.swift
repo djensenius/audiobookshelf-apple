@@ -13,8 +13,8 @@ enum DeferredReportAdmission: Equatable, Sendable {
         /// Another session for the same media is current: its reports are newer.
         case newerSessionForMedia
         /// The server's progress couldn't be read and merged (offline, a failed lookup or store
-        /// read, a reply the merge didn't take, or a position saved or still being saved since
-        /// the lookup): never send blind.
+        /// read, a reply the merge didn't take, a position saved or still being saved since the
+        /// lookup, or a stored change to the row since its position was read): never send blind.
         case lookupFailed
         /// The stored position is no longer the report's own: a later local edit, another
         /// device's newer progress merged over it, or a position that never committed.
@@ -23,6 +23,13 @@ enum DeferredReportAdmission: Equatable, Sendable {
 
     case send
     case skip(Reason)
+}
+
+/// The state ``ProgressSyncer/deferredReportSkip(sessionID:key:since:)`` compares after each
+/// suspension: the syncer's position revision and the store's change stamp for the key.
+struct DeferredReportMark: Equatable {
+    fileprivate let positionRevision: UInt64
+    fileprivate let rowChange: UInt64
 }
 
 extension ProgressSyncer {
@@ -35,8 +42,9 @@ extension ProgressSyncer {
     /// 5. a reply the merge didn't take (step 3) decided nothing: skip;
     /// 6. otherwise send.
     ///
-    /// Steps 1 and 2, and that no position was queued since the lookup, are checked again after
-    /// each suspension (``deferredReportSkip(sessionID:key:since:)``).
+    /// Steps 1 and 2, that no position was queued since the lookup and that the store didn't
+    /// change the row since (a reset or discard, say), are checked again after each suspension
+    /// (``deferredReportSkip(sessionID:key:since:)``).
     ///
     /// The report's position is identified by the audio edit time it committed with
     /// (`editedAt`), not by its `PlaybackPositionToken`, which doesn't survive a relaunch. A
@@ -60,8 +68,9 @@ extension ProgressSyncer {
         }
         // A session may have started while the lookup was in flight. A position queued meanwhile
         // kept the merge from running (`fetchProgress` checks it), so there is nothing to compare.
-        let revision = positionRevision
-        if let reason = deferredReportSkip(sessionID: sessionID, key: key, since: revision) { return .skip(reason) }
+        // The mark is taken before the position read, so any change after that read moves it.
+        let mark = deferredReportMark(for: key)
+        if let reason = deferredReportSkip(sessionID: sessionID, key: key, since: mark) { return .skip(reason) }
         guard let editedAt else { return .skip(.positionSuperseded) }
         let isLatest: Bool
         do {
@@ -72,22 +81,29 @@ extension ProgressSyncer {
         }
         await closeQueue.reached?(.positionRead)
         // The read suspended too: check again, with nothing after this before the caller acts.
-        if let reason = deferredReportSkip(sessionID: sessionID, key: key, since: revision) { return .skip(reason) }
+        if let reason = deferredReportSkip(sessionID: sessionID, key: key, since: mark) { return .skip(reason) }
         guard isLatest else { return .skip(.positionSuperseded) }
         // A reply that wasn't merged (another item's, undated, or older than the stored server
         // progress) decided nothing: never send blind.
         return merged ? .send : .skip(.lookupFailed)
     }
 
-    /// Steps 1 and 2 of the rule, and a position queued since `revision`: checked again after
-    /// each suspension, so the verdict holds when the caller acts on it without suspending.
+    /// Steps 1 and 2 of the rule, a position queued since `mark`, and a stored change to the row
+    /// since `mark` (any edit, merge or deletion, through the store's own stamp): checked again
+    /// after each suspension, so the verdict holds when the caller acts on it without suspending.
     func deferredReportSkip(
-        sessionID: String, key: MediaKey, since revision: UInt64
+        sessionID: String, key: MediaKey, since mark: DeferredReportMark
     ) -> DeferredReportAdmission.Reason? {
         if isDetached || isTransportQuiesced { return .quiesced }
         if hasNewerSession(than: sessionID, for: key) { return .newerSessionForMedia }
-        guard pendingPositions.isEmpty, positionRevision == revision else { return .lookupFailed }
+        guard pendingPositions.isEmpty, deferredReportMark(for: key) == mark else { return .lookupFailed }
         return nil
+    }
+
+    /// Where admission's re-checks start from: the syncer's position revision and the store's
+    /// change stamp for `key`, both read without suspending.
+    func deferredReportMark(for key: MediaKey) -> DeferredReportMark {
+        DeferredReportMark(positionRevision: positionRevision, rowChange: store.rowChangeStamp(for: key))
     }
 
     private func hasNewerSession(than sessionID: String, for key: MediaKey) -> Bool {

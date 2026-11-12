@@ -143,9 +143,10 @@ struct DeferredReportAdmissionTests {
     }
 
     /// Admission reads the stored position last, and that read suspends: an account that ended,
-    /// a newer session of the same media, or a position saved meanwhile (even another item's)
-    /// skips, though the position read said send.
-    @Test(arguments: [nil, "quiesce", "newer session", "saved position"])
+    /// a newer session of the same media, a position saved meanwhile (even another item's), or
+    /// the row reset (marked not finished) or deleted (progress discarded) in the store skips,
+    /// though the position read said send.
+    @Test(arguments: [nil, "quiesce", "newer session", "saved position", "mark not finished", "discard"])
     func aChangeDuringThePositionReadSkips(change: String?) async throws {
         let (f, close) = try await Self.retained()
         let read = Gate()
@@ -161,6 +162,8 @@ struct DeferredReportAdmissionTests {
                 await f.s.coordinator.play(itemID: "b")
                 await f.s.play(for: 20)
                 #expect(f.s.syncer.pendingPositions.isEmpty)
+            case "mark not finished", "discard":
+                await f.applyItemAction(discard: change == "discard")
             default:
                 break
             }
@@ -170,10 +173,10 @@ struct DeferredReportAdmissionTests {
 
         await read.wait()
         switch change {
+        case nil: #expect(verdict == .send)
         case "quiesce": #expect(verdict == .skip(.quiesced))
         case "newer session": #expect(verdict == .skip(.newerSessionForMedia))
-        case "saved position": #expect(verdict == .skip(.lookupFailed))
-        default: #expect(verdict == .send)
+        default: #expect(verdict == .skip(.lookupFailed))
         }
         #expect(f.s.service.closes.isEmpty)
     }

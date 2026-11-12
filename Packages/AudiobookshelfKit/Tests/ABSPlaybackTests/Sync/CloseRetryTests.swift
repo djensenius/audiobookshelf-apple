@@ -67,6 +67,25 @@ struct CloseRetryFixture {
         await s.syncer.drainPendingProgress()
     }
 
+    /// What `LocalProgressItemActionSync` (ABSAppModel) does to "a"'s row once the server took
+    /// the action: discarding its progress deletes the row, marking it not finished resets it to 0.
+    func applyItemAction(discard: Bool) async {
+        do {
+            if discard {
+                #expect(try await s.store.deleteProgress(for: key))
+                return
+            }
+            guard let row = try await s.store.progress(for: key) else {
+                Issue.record("No row to mark not finished")
+                return
+            }
+            let audio = ProgressEdit.Audio(currentTime: 0, duration: row.duration, progress: 0)
+            try await s.store.recordEdit(ProgressEdit(audio: audio, isFinished: false), for: key)
+        } catch {
+            Issue.record(error)
+        }
+    }
+
     var verdicts: [DeferredReportAdmission] { s.syncer.closeQueue.verdicts.map(\.verdict) }
 }
 
@@ -230,8 +249,10 @@ struct CloseRetryTests {
 
     /// Saving the attempt suspends, so admission's checks run again before the resend: an
     /// account that ended meanwhile keeps the close, and a newer session of the same media
-    /// removes it.
-    @Test(arguments: [nil, "quiesce", "newer session"])
+    /// removes it. Marking the item not finished or discarding its progress changes the row in
+    /// the store without queuing a position: the close is kept unsent, and the next drain finds
+    /// its position gone and removes it, still unsent.
+    @Test(arguments: [nil, "quiesce", "newer session", "mark not finished", "discard"])
     func aChangeWhileSavingTheAttemptSkipsTheResend(change: String?) async throws {
         let f = try CloseRetryFixture()
         try await f.stopSessionOne(.unapplied)
@@ -239,20 +260,36 @@ struct CloseRetryTests {
         f.s.syncer.closeQueue.reached = { step in
             guard step == .attemptSaved else { return }
             saved.open()
-            if change == "quiesce" { f.s.syncer.quiesceTransport() }
-            if change == "newer session" { await f.s.coordinator.play(itemID: "a") }
+            switch change {
+            case "quiesce": f.s.syncer.quiesceTransport()
+            case "newer session": await f.s.coordinator.play(itemID: "a")
+            case "mark not finished", "discard": await f.applyItemAction(discard: change == "discard")
+            default: break
+            }
         }
 
         await f.drainWhenDue()
 
         await saved.wait()
+        let itemAction = change == "mark not finished" || change == "discard"
         switch change {
+        case nil: #expect(f.verdicts == [.send])
         case "quiesce": #expect(f.verdicts == [.skip(.quiesced)])
         case "newer session": #expect(f.verdicts == [.skip(.newerSessionForMedia)])
-        default: #expect(f.verdicts == [.send])
+        default: #expect(f.verdicts == [.skip(.lookupFailed)])
         }
         #expect(f.s.service.closes.map(\.id) == (change == nil ? ["session-1"] : []))
-        #expect(try await f.queued().count == (change == "quiesce" ? 1 : 0))
+        #expect(try await f.queued().count == (change == "quiesce" || itemAction ? 1 : 0))
+        guard itemAction else { return }
+
+        f.s.syncer.closeQueue.reached = nil
+        await f.drainWhenDue()
+
+        #expect(f.verdicts == [.skip(.lookupFailed), .skip(.positionSuperseded)])
+        #expect(f.s.service.closes.isEmpty)
+        #expect(try await f.queued().isEmpty)
+        #expect(try await f.s.store.progress(for: f.key)?.currentTime == (change == "discard" ? nil : 0))
+        #expect(try await f.listened("session-1") == 15)
     }
 
     /// A captured close whose settlement couldn't be saved (here, removing it once the
@@ -282,5 +319,46 @@ struct CloseRetryTests {
         #expect(try await f.listened("session-1") == 20)
         #expect(try await f.queued().count == (removalFails ? 1 : 0))
         #expect((f.s.syncer.drainWake != nil) == removalFails)
+    }
+
+    /// A captured close kept to retry, or whose settlement couldn't be saved, while a drain is
+    /// refreshing the current session's progress marks that drain failed, so the drain's end keeps
+    /// the retry instead of cancelling it as a completed drain does. One acknowledged meanwhile
+    /// leaves the drain completed, with no retry.
+    @Test(arguments: ["kept", "store failed", "acknowledged"])
+    func aCaptureSettlingDuringADrainKeepsItsRetry(settlement: String) async throws {
+        let f = try CloseRetryFixture()
+        await f.s.coordinator.play(itemID: "a")
+        await f.s.play(for: 20)
+        let close = CloseRetryFixture.Request(settlement == "kept" ? .unapplied : .acknowledged)
+        defer { close.release() }
+        await f.model.enqueue(close, for: .close)
+        let stored = Gate()
+        f.s.syncer.closeQueue.reached = { if $0 == .captureSaved { stored.open() } }
+        f.s.coordinator.stop()
+        await stored.wait()
+        // Another item loads paused, with no position to send, so the drain ends refreshing it.
+        let coordinator = f.s.coordinator
+        let observer = coordinator.addObserver { if case .sessionStarted = $0 { coordinator.pause() } }
+        await coordinator.play(itemID: "b")
+        coordinator.removeObserver(observer)
+        await f.s.settle()
+        let refreshing = Gate()
+        f.s.syncer.beforeActiveProgressCapture = {
+            refreshing.open()
+            // Removing the acknowledged close is the store's next commit.
+            if settlement == "store failed" {
+                await f.s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+            }
+            close.release()
+            await f.s.coordinator.waitForPendingCloses()
+            await f.s.syncer.closeQueue.waitForCaptures()
+        }
+
+        await f.s.syncer.drainPendingProgress()
+
+        await refreshing.wait()
+        #expect(try await f.queued().count == (settlement == "acknowledged" ? 0 : 1))
+        #expect((f.s.syncer.drainWake != nil) == (settlement != "acknowledged"))
     }
 }
