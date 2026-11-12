@@ -8,7 +8,7 @@ import SwiftUI
 /// progress bar.
 ///
 /// Play and the finished toggle are also in a context menu and the VoiceOver actions of the
-/// link, as ``PodcastEpisodeActions/available(for:progress:context:isGone:)`` offers them; when
+/// link, with Add to playlist, as ``PodcastEpisodeActions/available(for:progress:context:isGone:)`` offers them; when
 /// the podcast is gone from the server only the link, which opens the episode, still works.
 /// VoiceOver reads the start of the summary, with the rest under More Content.
 struct PodcastEpisodeRow: View {

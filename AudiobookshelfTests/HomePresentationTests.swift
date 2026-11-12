@@ -57,6 +57,21 @@ private struct FakeLibraryService: LibraryService {
     func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Failure() }
 }
 
+/// Playlist writes the card tests never make: they only build the add-to-playlist sheet's model.
+private struct UnusedPlaylistService: PlaylistEditingService {
+    struct Unused: Error {}
+
+    func allPlaylists(libraryID: String) async throws -> [Playlist] { throw Unused() }
+    func createPlaylist(name: String, libraryID: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        throw Unused()
+    }
+    func addToPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw Unused() }
+    func removeFromPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw Unused() }
+    func removeFromPlaylist(id: String, item: PlaylistItemReference) async throws -> Playlist { throw Unused() }
+    func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw Unused() }
+    func deletePlaylist(id: String) async throws { throw Unused() }
+}
+
 private let account = LibraryConnectionKey(
     connectionID: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA") ?? UUID(), userID: "user-1")
 
@@ -314,6 +329,59 @@ private let account = LibraryConnectionKey(
         #expect(await ItemCardActions.perform(.openInNewWindow, on: book, actions: actions, play: nil) == nil)
         #expect(ItemCardActions.failureMessageKey(for: .openInNewWindow) == nil)
         #expect(actions.calls.isEmpty)
+    }
+
+    @Test func addToPlaylistIsOfferedOnlyForPresentBooksAndEpisodesWithPlaylists() {
+        let book = ItemSummary(item: SampleLibrary.frankenstein)
+        let episode = ItemSummary(item: SampleLibrary.episodeItems[0])
+        let collapsed = ItemSummary(
+            id: "series-ser_1", itemID: "li_first", seriesID: "ser_1", kind: .series, title: "Series")
+        let podcast = ItemSummary(id: "li_pod", itemID: "li_pod", kind: .podcast, title: "Podcast")
+        let missing = ItemSummary(id: "li_gone", itemID: "li_gone", kind: .book, title: "Gone", isMissing: true)
+        func offers(_ item: ItemSummary, canEditPlaylists: Bool) -> Bool {
+            let context = ItemCardActions.actionContext(canPlay: true, canEditPlaylists: canEditPlaylists)
+            return ItemAction.available(for: item, progress: nil, context: context).contains {
+                $0.kind == .addToPlaylist
+            }
+        }
+
+        #expect(offers(book, canEditPlaylists: true))
+        #expect(offers(episode, canEditPlaylists: true))
+        #expect(!offers(collapsed, canEditPlaylists: true))
+        #expect(!offers(podcast, canEditPlaylists: true))
+        #expect(!offers(missing, canEditPlaylists: true))
+        // Without the account's playlist writes (signed out, previews) no card offers it.
+        #expect(!offers(book, canEditPlaylists: false))
+        #expect(!offers(episode, canEditPlaylists: false))
+        #expect(ItemCardActions.actionContext(canPlay: true).canEditPlaylists == false)
+    }
+
+    @Test func addToPlaylistOpensTheSheetForTheBookOrTheExactEpisode() throws {
+        let service = UnusedPlaylistService()
+        let book = ItemSummary(item: SampleLibrary.frankenstein)
+        let episode = ItemSummary(item: SampleLibrary.episodeItems[0])
+        let episodeID = try #require(episode.episodeID)
+
+        let bookModel = try #require(
+            ItemCardActions.addToPlaylistModel(for: book, libraryID: "lib_1", playlists: service))
+        #expect(bookModel.entries == [PlaylistEntryKey(itemID: book.itemID)])
+        #expect(bookModel.libraryID == "lib_1")
+        let episodeModel = try #require(
+            ItemCardActions.addToPlaylistModel(for: episode, libraryID: "lib_2", playlists: service))
+        #expect(episodeModel.entries == [PlaylistEntryKey(itemID: episode.itemID, episodeID: episodeID)])
+        #expect(episodeModel.libraryID == "lib_2")
+
+        // No library, or nothing a playlist can hold: no sheet.
+        #expect(ItemCardActions.addToPlaylistModel(for: book, libraryID: nil, playlists: service) == nil)
+        let collapsed = ItemSummary(
+            id: "series-ser_1", itemID: "li_first", seriesID: "ser_1", kind: .series, title: "Series")
+        let podcast = ItemSummary(id: "li_pod", itemID: "li_pod", kind: .podcast, title: "Podcast")
+        let bareEpisode = ItemSummary(id: "li_pod", itemID: "li_pod", kind: .episode, title: "Episode")
+        let missing = ItemSummary(id: "li_gone", itemID: "li_gone", kind: .book, title: "Gone", isMissing: true)
+        for item in [collapsed, podcast, bareEpisode, missing] {
+            #expect(ItemCardActions.playlistEntry(for: item) == nil)
+            #expect(ItemCardActions.addToPlaylistModel(for: item, libraryID: "lib_1", playlists: service) == nil)
+        }
     }
 
     @Test func progressActionsGoToTheItemActions() async {

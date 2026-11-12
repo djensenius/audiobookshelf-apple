@@ -53,9 +53,12 @@ struct MainTabView<Root: View>: View {
             .tabBarMinimizeBehavior(.onScrollDown)
         #endif
         .modifier(PlayerSlot(router: router, player: player))
+        .modifier(SceneLibrarySync(router: router))
         .onChange(of: horizontalSizeClass) { _, sizeClass in
             router.normalize(isCompact: sizeClass == .compact)
         }
+        // Add to playlist on the item cards and episode rows of every tab and pushed screen.
+        .modifier(ItemCardPlaylists(router: router))
         // Keep this the outermost modifier, so every tab stack, pushed `RouteDestination`, the
         // sidebar header and `PlayerSlot`'s presentations inherit the scene's router.
         .environment(router)
@@ -67,6 +70,12 @@ struct MainTabView<Root: View>: View {
                 root(tab, router.librarySection)
                     .navigationDestination(for: Route.self) { route in
                         RouteDestination(route: route)
+                    }
+                    .toolbar {
+                        // The sidebar header picks the library in regular width.
+                        if horizontalSizeClass == .compact, tab.isLibraryScoped, tab != .search {
+                            LibraryPickerToolbar()
+                        }
                     }
             }
             // Screens and their pushed routes know which tab's stack they're on, so a hidden tab's copy of the same

@@ -7,8 +7,8 @@ import SwiftUI
 /// episode was published, its title, summary and badges, which open the episode; then Play with the time left,
 /// the finished toggle and the progress bar, as on the podcast screen (``PodcastEpisodeRow``).
 ///
-/// Play, the finished toggle and Go to Podcast (legacy's podcast title link) are also in the context menu and the
-/// VoiceOver actions of the link. VoiceOver reads the start of the summary, with the rest under More Content.
+/// Play, the finished toggle, Add to playlist and Go to Podcast (legacy's podcast title link) are also in the context
+/// menu and the VoiceOver actions of the link. VoiceOver reads the start of the summary, with the rest under More Content.
 struct LatestEpisodeRow: View {
     let model: LatestEpisodesModel
     let row: LatestEpisode

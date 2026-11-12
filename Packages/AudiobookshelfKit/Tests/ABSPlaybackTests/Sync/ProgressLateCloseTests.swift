@@ -116,11 +116,14 @@ struct ProgressLateCloseTests {
         #expect(stored.first { $0.id == "session-1" }?.timeListening == 15)
     }
 
-    /// Tripwire: a `/close` goes out once per session, whatever became of it: never applied,
-    /// applied with its response lost, or answered 404 after a server restart. #158-d2 (deferred
-    /// reports) must update this test if it starts resending closes through its admission rule.
+    /// A `/close` goes out from the coordinator once per session. The syncer resends one the
+    /// server may not have applied once, after the reconcile delay and through the admission rule
+    /// (#382), and its listening time counts once: never applied, the resend is acknowledged;
+    /// applied with its response lost, the resend meets the closed session's 404 and is dropped.
+    /// One answered 404 after a server restart is never resent. TODO(#382): on 404, decide from
+    /// the item's listening sessions instead (ADR 0007).
     @Test(arguments: [nil, Request.Outcome.unapplied, .appliedResponseLost])
-    func noCloseIsEverResent(outcome: Request.Outcome?) async throws {
+    func aCloseIsResentOnlyWhileItCanStillCount(outcome: Request.Outcome?) async throws {
         let (s, model, _) = try Self.modelHarness()
         await s.coordinator.play(itemID: "a")
         await s.play(for: 20)
@@ -134,17 +137,26 @@ struct ProgressLateCloseTests {
         s.coordinator.stop()
         await s.coordinator.waitForPendingCloses()
         await s.settle()
+        await s.syncer.closeQueue.waitForCaptures()
 
-        // Every later chance to resend: a drain, the next session, its reports and its close.
+        // Every later chance to resend: drains past the retry delay, the next session, its
+        // reports and its close.
+        s.h.clock.advance(by: s.syncer.reconcileDelay)
         await s.syncer.drainPendingProgress()
         await s.coordinator.play(itemID: "a")
         await s.play(for: 20)
         s.coordinator.stop()
         await s.coordinator.waitForPendingCloses()
         await s.settle()
+        await s.syncer.closeQueue.waitForCaptures()
+        s.h.clock.advance(by: s.syncer.reconcileDelay)
         await s.syncer.drainPendingProgress()
 
         #expect(s.h.service.closes == ["session-1", "session-2"])
+        #expect(s.service.closes.map(\.id) == (outcome == nil ? [] : ["session-1"]))
+        let stored = try await s.h.service.listeningSessions(itemID: "a").sessions
+        #expect(stored.first { $0.id == "session-1" }?.timeListening == (outcome == nil ? 15 : 20))
+        #expect(try await s.store.sessionCloses(for: s.h.connectionID).isEmpty)
     }
 
     /// Characterization of a documented limit: the tablet's sessions aren't retired by the phone's
