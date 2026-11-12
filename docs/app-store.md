@@ -26,12 +26,10 @@ Store Connect's.
 ### Description
 
 > Audiobookshelf plays the audiobooks and podcasts on your own Audiobookshelf server.
-> It's a native app for iPhone, iPad and Mac, with CarPlay and widgets.
+> It's a native app for iPhone, iPad and Mac.
 >
 > - Browse your libraries, series, authors, collections and playlists.
-> - Pick up where you left off: your progress syncs with your server, and listening
->   offline is kept and sent when you're back online.
-> - Download books and episodes to listen without a connection.
+> - Pick up where you left off: your progress syncs with your server.
 > - Sleep timer, playback speed, chapters and a listening queue.
 > - Sign in with a username and password or your server's single sign-on (OpenID
 >   Connect).
@@ -40,7 +38,14 @@ Store Connect's.
 > only to the servers you add. It has no account of its own, no analytics and no ads.
 
 Check the feature list against the build being submitted, and drop anything that isn't
-in it yet.
+in it yet. These claims are left out until their features ship, so add each one only
+when the submitted build has it:
+
+| Claim | Add to | Ships with |
+| --- | --- | --- |
+| "with CarPlay" (after "iPhone, iPad and Mac") | Description, review notes | The CarPlay audio entitlement (#77) and the CarPlay scene (#79) |
+| "and widgets" | Description, review notes | Continue-listening widgets (#89) |
+| "- Download books and episodes to listen without a connection." and "listening offline is kept and sent when you're back online" | Description, review notes | Downloads wiring and UI (#194, #75) |
 
 ## App privacy (nutrition label)
 
@@ -96,10 +101,14 @@ the export compliance questions for each build.
 
 - HTTPS and secure WebSockets through `URLSession`;
 - the Keychain for tokens and the device identifier;
+- AES-GCM through CryptoKit (`AES.GCM.seal` and `AES.GCM.open` in
+  `ABSDownloads/ResumeDataVault.swift`) to protect download resume data on the device,
+  with a key kept in the Keychain;
 - SHA-256 (CryptoKit) to name cached files, which is hashing, not encryption.
 
-The app contains no encryption code of its own. If that changes, the key and the
-answer have to be reviewed.
+All of these are the operating system's own cryptography. The app implements no
+encryption algorithm itself and bundles no cryptographic library. If that changes, the
+key and the answer have to be reviewed.
 
 ## Review notes
 
@@ -116,8 +125,7 @@ Information › Notes, filled in:
 > - Username and password: in the Sign-In Information fields.
 >
 > On the first screen, enter the server address, then sign in. The demo library has
-> public-domain audiobooks and a podcast. Playback, downloads, CarPlay and the widgets
-> work with it.
+> public-domain audiobooks and a podcast to browse and play.
 
 Put the username and password in App Review Information › Sign-In Information, not in
 the notes and never in this repository.
