@@ -48,6 +48,8 @@ public struct SweepReport: Sendable, Equatable {
     public var removedFolders: [String] = []
     /// Parts whose orphaned resume data was deleted.
     public var removedResumeData: [UUID] = []
+    /// Parts whose orphaned `Transfers/` marker was deleted.
+    public var removedTransferMarkers: [UUID] = []
     /// Download records of connections that no longer exist.
     public var removedRecords: [UUID] = []
     /// Local items of connections that no longer exist.
@@ -60,12 +62,12 @@ public struct SweepReport: Sendable, Equatable {
     }
 }
 
-/// Removes what downloads leave behind: files nothing refers to, empty folders, resume data of
-/// parts that are gone, media of connections that are gone, and disconnected connections with
+/// Removes what downloads leave behind: files nothing refers to, empty folders, resume data and
+/// transfer markers of parts that are gone, media of connections that are gone, and disconnected connections with
 /// nothing left. Run it when the app becomes active, after the engine's `activate()`.
 ///
 /// A sweep:
-/// 1. lists the files, folders and resume-data blobs first, then reads the records, the local
+/// 1. lists the files, folders, resume-data blobs and transfer markers first, then reads the records, the local
 ///    items and the connections, in that order. A file only appears after its record is saved,
 ///    and the engine finalises a record into a local item before it deletes the record, so
 ///    every listed file in use is referred to by at least one of the reads;
@@ -83,9 +85,12 @@ public struct SweepReport: Sendable, Equatable {
 ///    or local item refers to: the engine creates a destination's folder, then moves the file
 ///    in. An item's folders (with orphaned files or not) are removed in the same hold as its
 ///    files, from the paths read again in it, so a download of it enqueued after the snapshot
-///    keeps its folder;
-/// 4. deletes `ResumeData/<part id>.bin` blobs whose part no record has (and that are older
-///    than ``recentInterval``);
+///    keeps its folder. A connection's own folder (`<connection id>/`) stays while the
+///    connection exists, so a download creating an item's folder in it can't lose it midway;
+/// 4. deletes `ResumeData/<part id>.bin` blobs and `Transfers/<part id>` markers whose part no
+///    record has (and that are older than ``recentInterval``). A part's marker is written only
+///    once its record is saved, so a listed marker of a part in use is in the read; a part that
+///    exists in any state keeps its marker, which the engine reads to tell its transfer's files;
 /// 5. deletes the records, then the local items, of connections that no longer exist, with
 ///    their files, through the ``DownloadManager``;
 /// 6. calls `ServerConnectionStore.removeIfDisconnected(id:disconnectedAt:)` for each
@@ -225,16 +230,24 @@ public actor DownloadJanitor {
             Self.addFolders(holding: result.used, to: &protected)
         }
 
-        // 3. Empty folders outside item folders (an item's went with its files).
+        // 3. Empty folders outside item folders (an item's went with its files). A connection's
+        // own folder stays while the connection exists: the engine creates it, then the item's
+        // folder in it, outside any hold.
+        let connectionFolders = Set(connections.map { DownloadLayout.collisionKey($0.id.uuidString) })
         report.removedFolders += Self.removeEmptyFolders(
             otherFolders, emptied: report.removedFiles + report.removedFolders, protecting: protected,
-            before: cutoff, locations: locations)
+            alsoProtecting: connectionFolders, before: cutoff, locations: locations)
 
         // 4. Resume data of parts that are gone.
         let parts = Set(records.flatMap(\.parts).map(\.id))
         for blob in listing.blobs where !parts.contains(blob.partID) {
             guard let modified = blob.modified, modified < cutoff else { continue }
             if Self.remove(blob.url) { report.removedResumeData.append(blob.partID) }
+        }
+        // Transfer markers of parts that are gone, by the same rule.
+        for marker in listing.markers where !parts.contains(marker.partID) {
+            guard let modified = marker.modified, modified < cutoff else { continue }
+            if Self.remove(marker.url) { report.removedTransferMarkers.append(marker.partID) }
         }
 
         // 5. Media of connections that are gone: records first, so a deleted item's cover isn't
@@ -295,6 +308,7 @@ public actor DownloadJanitor {
         var modified: Date?
     }
 
+    /// A resume-data blob or a transfer marker, named for its part.
     private struct Blob: Sendable {
         var partID: UUID
         var url: URL
@@ -305,10 +319,12 @@ public actor DownloadJanitor {
         var files: [Entry] = []
         var directories: [Entry] = []
         var blobs: [Blob] = []
+        /// `Transfers/<part id>` markers (see ``DownloadLocations/markTransferStart(partID:)``).
+        var markers: [Blob] = []
     }
 
-    /// Everything below the downloads root, and the resume-data blobs. A root that doesn't exist
-    /// is empty; any other error throws.
+    /// Everything below the downloads root, the resume-data blobs and the transfer markers. A root
+    /// that doesn't exist is empty; any other error throws.
     private static func list(_ locations: DownloadLocations) throws -> Listing {
         var listing = Listing()
         let keys: [URLResourceKey] = [.isDirectoryKey, .contentModificationDateKey]
@@ -329,6 +345,11 @@ public actor DownloadJanitor {
         where values.isDirectory != true && url.pathExtension == "bin" {
             guard let partID = UUID(uuidString: url.deletingPathExtension().lastPathComponent) else { continue }
             listing.blobs.append(Blob(partID: partID, url: url, modified: values.contentModificationDate))
+        }
+        for (url, values) in try contents(of: locations.transfersRoot, recursive: false, keys: keys)
+        where values.isDirectory != true {
+            guard let partID = UUID(uuidString: url.lastPathComponent) else { continue }
+            listing.markers.append(Blob(partID: partID, url: url, modified: values.contentModificationDate))
         }
         return listing
     }

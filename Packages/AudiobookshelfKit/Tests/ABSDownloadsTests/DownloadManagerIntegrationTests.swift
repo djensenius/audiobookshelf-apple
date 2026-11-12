@@ -65,4 +65,33 @@ import Testing
         let coverRequest = try #require(harness.requests.first { $0.url?.path().hasSuffix("/cover") == true })
         #expect(coverRequest.url?.query() == "width=1200&format=jpeg&ts=1700000000123")
     }
+
+    /// Once a transfer starts, the record is reported downloading, before any part completes.
+    @Test func aStartedTransferIsReportedDownloading() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
+        let manager = DownloadManager(
+            store: harness.store, localItems: harness.localItems, engine: harness.makeEngine(),
+            locations: harness.locations, capacity: FakeCapacity(), clock: harness.clock)
+        try await manager.start()
+        let events = await manager.events()
+
+        let result = try await manager.enqueue(
+            item: LibraryItemFixtures.book(), episodeID: nil, connectionID: harness.connectionID)
+
+        guard case .started(let recordID) = result else {
+            Issue.record("Unexpected \(result)")
+            return
+        }
+        let started = await events.next {
+            if case .recordChanged(let record) = $0 { record.state == .downloading } else { false }
+        }
+        guard case .recordChanged(let record) = started else {
+            Issue.record("Unexpected \(String(describing: started))")
+            return
+        }
+        #expect(record.id == recordID)
+        #expect(record.parts.allSatisfy { $0.state != .completed })
+        gate.open()
+    }
 }

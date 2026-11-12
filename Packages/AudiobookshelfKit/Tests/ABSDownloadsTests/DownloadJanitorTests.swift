@@ -48,6 +48,8 @@ import Testing
         let orphan = "\(fixture.connectionID.uuidString)/li_gone/old.mp3"
         try write(orphan, fixture)
         let blob = try writeBlob(UUID(), fixture)
+        let markerID = UUID()
+        try fixture.locations.markTransferStart(partID: markerID)
         try age(fixture)
 
         let report = await janitor(fixture, failing: step).sweep()
@@ -56,8 +58,10 @@ import Testing
         #expect(report.removedFiles.isEmpty)
         #expect(report.removedFolders.isEmpty)
         #expect(report.removedResumeData.isEmpty)
+        #expect(report.removedTransferMarkers.isEmpty)
         #expect(exists(orphan, fixture))
         #expect(FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(fixture.locations.transferStart(partID: markerID) != nil)
         #expect(setup.referenced.allSatisfy { exists($0, fixture) })
     }
 
@@ -100,6 +104,55 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: gone.path(percentEncoded: false)))
         for url in [live, recent, other] {
             #expect(FileManager.default.fileExists(atPath: url.path(percentEncoded: false)))
+        }
+    }
+
+    /// Only markers of parts no record has go; a recent one stays until a later sweep, and a
+    /// file that isn't named for a part is left alone.
+    @Test func removesTransferMarkersOfPartsThatAreGone() async throws {
+        let fixture = try await ManagerFixture()
+        _ = try await Setup(fixture)
+        let goneID = UUID()
+        let recentID = UUID()
+        for id in [goneID, recentID] { try fixture.locations.markTransferStart(partID: id) }
+        let other = fixture.locations.transfersRoot.appending(path: "notes.txt")
+        try Data().write(to: other)
+        try age(fixture)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Self.now.addingTimeInterval(-60)],
+            ofItemAtPath: fixture.locations.transfersRoot.appending(path: recentID.uuidString).path(
+                percentEncoded: false))
+
+        let report = await janitor(fixture).sweep()
+
+        #expect(report.outcome == .completed)
+        #expect(report.removedTransferMarkers == [goneID])
+        #expect(fixture.locations.transferStart(partID: goneID) == nil)
+        #expect(fixture.locations.transferStart(partID: recentID) != nil)
+        #expect(FileManager.default.fileExists(atPath: other.path(percentEncoded: false)))
+    }
+
+    /// A part that exists, in any state, keeps its marker however old: the engine reads it to
+    /// tell whether a file at the part's destination was moved there by its current transfer.
+    @Test(arguments: [DownloadPartState.queued, .running, .failed, .completed])
+    func keepsTheTransferMarkersOfPartsThatExist(state: DownloadPartState) async throws {
+        let fixture = try await ManagerFixture()
+        let setup = try await Setup(fixture)
+        let partID = setup.record.parts[0].id
+        if state == .completed {
+            #expect(try await fixture.store.completePart(partID: partID, finalBytes: 1))
+        } else {
+            #expect(try await fixture.store.setPartState(state, partID: partID, taskIdentifier: nil))
+        }
+        for part in setup.record.parts { try fixture.locations.markTransferStart(partID: part.id) }
+        try age(fixture)
+
+        let report = await janitor(fixture).sweep()
+
+        #expect(report.outcome == .completed)
+        #expect(report.removedTransferMarkers.isEmpty)
+        for part in setup.record.parts {
+            #expect(fixture.locations.transferStart(partID: part.id) != nil)
         }
     }
 
@@ -380,6 +433,26 @@ import Testing
         #expect(exists(pendingFolder, fixture))
     }
 
+    /// An old empty folder of a connection that exists stays: the engine creates it, then an
+    /// item's folder in it, outside any hold. One of a connection that's gone still goes.
+    @Test func keepsTheEmptyFolderOfAConnectionThatExists() async throws {
+        let fixture = try await ManagerFixture()
+        let existing = fixture.connectionID.uuidString
+        let gone = UUID().uuidString
+        for folder in [existing, gone] {
+            try FileManager.default.createDirectory(
+                at: fixture.locations.downloadsRoot.appending(path: folder), withIntermediateDirectories: true)
+        }
+        try age(fixture)
+
+        let report = await janitor(fixture).sweep()
+
+        #expect(report.outcome == .completed)
+        #expect(report.removedFolders == [gone])
+        #expect(exists(existing, fixture))
+        #expect(!exists(gone, fixture))
+    }
+
     // MARK: - Paths
 
     /// A name starting with a combining mark: as Characters, the `/` before it and the mark are
@@ -510,7 +583,9 @@ import Testing
     /// Dates everything under the fixture's root an hour before ``now``.
     private func age(_ fixture: ManagerFixture) throws {
         let manager = FileManager.default
-        for root in [fixture.locations.downloadsRoot, fixture.locations.resumeDataRoot]
+        for root in [
+            fixture.locations.downloadsRoot, fixture.locations.resumeDataRoot, fixture.locations.transfersRoot,
+        ]
         where manager.fileExists(atPath: root.path(percentEncoded: false)) {
             for case let url as URL in manager.enumerator(at: root, includingPropertiesForKeys: nil)! {
                 try manager.setAttributes([.modificationDate: Self.old], ofItemAtPath: url.path(percentEncoded: false))
