@@ -23,6 +23,8 @@
   "ButtonSleepTimerSubtract": "Subtract {0}",
   "ButtonSwitchServer": "Switch Server",
   "ButtonUpdate": "Update",
+  "ButtonYearInReviewCopyImage": "Copy Image",
+  "ButtonYearInReviewSaveToPhotos": "Save to Photos",
   "HeaderAddServer": "Add Server",
   "HeaderBrowse": "Browse",
   "HeaderCustomHeaders": "Custom Headers",
@@ -38,6 +40,7 @@
   "HeaderSearchRecents": "Recent Searches",
   "HeaderServers": "Servers",
   "HeaderYearInReview": "Year in Review",
+  "HeaderYearInReviewPhotosFailed": "Couldn't Save to Photos",
   "HeaderYearInReviewYear": "{0} Year in Review",
   "LabelAbridged": "Abridged",
   "LabelAllowSeekingOnMediaControlsHelp": "Lets you change the playback position from the Lock Screen, Control Center and other system media controls.",
@@ -134,6 +137,9 @@
     "other": "{0} books listened to"
   },
   "LabelYearInReviewFinishedBooks": "Some books finished this year...",
+  "LabelYearInReviewLayoutBanner": "Banner",
+  "LabelYearInReviewLayoutCard": "Card",
+  "LabelYearInReviewLayoutShort": "Short",
   "LabelYearInReviewServer": "Server",
   "LabelYearInReviewSessionCount": {
     "one": "{0} listening session",
@@ -258,7 +264,12 @@
   "MessageSwitchServerFailed": "Couldn't switch servers. Check that the server is reachable, then try again.",
   "MessageSwitchServerForLink": "This link is for {0} on {1}. Switch to that server to open it?",
   "MessageSwitchServerSignedOut": "The server signed you out while switching. Sign in to it again, or choose another server.",
+  "MessageYearInReviewImageCopied": "Copied the image",
   "MessageYearInReviewLoadFailed": "Couldn't load the year in review.",
+  "MessageYearInReviewPhotosDenied": "Allow Audiobookshelf to add photos in Settings to save the image.",
+  "MessageYearInReviewPhotosRestricted": "Adding photos is restricted on this device. You may be able to change this in Settings, under Screen Time.",
+  "MessageYearInReviewPhotosSaveFailed": "The image couldn't be added to your photo library. Try again.",
+  "MessageYearInReviewSavedToPhotos": "Saved to Photos",
   "SharedBookCount": {
     "one": "{0} book",
     "other": "{0} books"
