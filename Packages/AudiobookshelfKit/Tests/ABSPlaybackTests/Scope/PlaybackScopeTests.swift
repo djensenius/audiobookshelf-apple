@@ -14,7 +14,51 @@ final class RecordingNowPlaying: NowPlayingHandle {
     weak var coordinator: PlaybackCoordinator?
 
     func invalidate() { log.append("invalidate") }
-    func claimSystemPrimary() async { log.append("primary") }
+    func claimSystemPrimary(while isStillWanted: @MainActor () -> Bool) async {
+        if isStillWanted() { log.append("primary") }
+    }
+}
+
+/// A scope over a ``SyncHarness`` and a real Now Playing bridge, whose first application-primary
+/// activation is held at ``gate``.
+@MainActor
+private struct BridgedScope {
+    let gate = Gate()
+    let s: SyncHarness
+    let sessions = NowPlayingHarness.SessionLog()
+    let scope: PlaybackScope
+
+    init() throws {
+        s = try SyncHarness()
+        let gate = gate
+        let sessions = sessions
+        let bridge = NowPlayingBridge(
+            coordinator: s.coordinator,
+            settings: { NowPlayingSettings(jumpForwardTime: 30, jumpBackwardsTime: 15, chapterTrack: false) },
+            coverProvider: { _ in nil }, entityIdentifiers: { _ in [] }, now: { Date() },
+            makeSession: {
+                let session = FakeNowPlayingSession()
+                session.applicationPrimaryGate = gate
+                sessions.made.append(session)
+                return session
+            })
+        scope = PlaybackScope(coordinator: s.coordinator, syncer: s.syncer, services: nil, nowPlaying: bridge)
+    }
+
+    /// Plays for the user; returns once the application-primary activation is held.
+    func playHoldingActivation() async throws -> Task<Void, Never> {
+        let scope = scope
+        let play = Task { await scope.play(itemID: "a", episodeID: nil, startTime: 50) }
+        try #require(await eventually { sessions.made.last?.applicationPrimaryRequests == 1 })
+        return play
+    }
+
+    /// Lets the activation finish, then waits for the play and its claim.
+    func finish(_ play: Task<Void, Never>) async {
+        gate.open()
+        await play.value
+        await scope.waitForPrimaryClaim()
+    }
 }
 
 /// A scope over a ``SyncHarness``: the coordinator's fakes and an attached syncer.
@@ -276,6 +320,33 @@ struct PlaybackScopeTests {
         #expect(h.coordinator.error == nil)
         #expect(!h.coordinator.isPlaybackRequested)
         #expect(h.nowPlaying.log.isEmpty)
+    }
+
+    /// A pause while the application-primary activation is in flight revokes the claim: once the
+    /// activation finishes, system primary isn't requested.
+    @Test(arguments: [false, true])
+    func revokingDuringActivationNeverRequestsSystemPrimary(retire: Bool) async throws {
+        let b = try BridgedScope()
+
+        let play = try await b.playHoldingActivation()
+        if retire {
+            b.scope.retire(reason: .accountSwitch)
+        } else {
+            b.s.coordinator.pause()
+        }
+        await b.finish(play)
+
+        #expect(try #require(b.sessions.made.last).systemPrimaryRequests == 0)
+    }
+
+    /// Without a pause, the same held activation ends in exactly one system-primary request.
+    @Test func aHeldActivationStillEndsInOneSystemPrimaryRequest() async throws {
+        let b = try BridgedScope()
+
+        let play = try await b.playHoldingActivation()
+        await b.finish(play)
+
+        #expect(try #require(b.sessions.made.last).primaryRequests == ["application", "system"])
     }
 
     // MARK: Retire
