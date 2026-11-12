@@ -130,6 +130,7 @@ erDiagram
     ServerConnectionRecord ||..o{ DownloadRecord : "serverConnectionID"
     ServerConnectionRecord ||..o{ PendingLocalSession : "serverConnectionID"
     ServerConnectionRecord ||..o{ PlaybackHistoryEvent : "serverConnectionID"
+    ServerConnectionRecord ||..o{ PendingSessionClose : "serverConnectionID"
     LocalLibraryItem ||--o{ LocalFile : "files (cascade)"
     LocalLibraryItem ||..o{ LocalMediaProgress : "localLibraryItemID"
     DownloadRecord ||--o{ DownloadPart : "parts (cascade)"
@@ -143,7 +144,8 @@ connection or deleting a download never cascades into progress or history.
 General rules:
 
 - Every model has a primary key in a `#Unique`: `id`, or `key` for
-  `LocalMediaProgress`.
+  `LocalMediaProgress`, or `[serverConnectionID, sessionID]` for
+  `PendingSessionClose` (a session id is the server's, unique only there).
 - Fields in a `#Unique` are **never optional**, because `#Unique` treats `nil` as
   distinct. Where the natural key has an optional part (the episode), the model
   stores a derived `key: String`.
@@ -169,6 +171,7 @@ General rules:
 | `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `hasResumeData: Bool` (flag only; the sealed blob lives outside the store), `retryCount: Int`, `lastError: String?` | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
 | `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?`, `lastUploadFailureAt: Date?`, `missingUploadResults: Int` (default 0) | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
 | `PlaybackHistoryEvent` | `id: UUID` | `serverConnectionID: UUID?`, `mediaKey`, `libraryItemId`, `episodeId: String?`, `mediaDisplayTitle`, `name` (`Play`/`Pause`/`Stop`/`Seek`/`Save`/`Finished`/`Sync`), `type` (`Playback`/`Sync`), `details: String?`, `currentTime: Double?`, `serverSyncAttempted: Bool`, `serverSyncSuccess: Bool?`, `serverSyncMessage: String?`, `timestamp: Date` | `#Unique([\.id])`; `#Index([\.mediaKey, \.timestamp])` |
+| `PendingSessionClose` | `serverConnectionID: UUID`, `sessionID: String` (the server's session id) | `libraryItemId`, `episodeId: String?`, `currentTime`, `timeListened` (listening no acknowledged report carried), `duration`, `positionEditedAt: Date?` (the audio edit time the close's position committed with), `capturedAt`, `lastAttemptAt: Date?` (the latest attempt that may have reached the server), `attempts: Int` | `#Unique([\.serverConnectionID, \.sessionID])`; `#Index([\.serverConnectionID, \.capturedAt])` |
 
 Model notes:
 
@@ -667,14 +670,16 @@ Model notes:
   - `ServerConnectionStore`;
   - `LocalItemStore` (local items and files);
   - `LocalProgressStore` (progress with `pendingSync(for:)`, covering audio and
-    ebook fields, plus `PendingLocalSession`s);
+    ebook fields, plus `PendingLocalSession`s and the `PendingSessionClose` retry
+    queue);
   - `DownloadStore` (records and parts);
   - `PlaybackHistoryStore`.
 - **One writer per model.** Each model type is inserted, updated and deleted by
   exactly one store: connections by `ServerConnectionStore`; `LocalLibraryItem`
-  and `LocalFile` only by `LocalItemStore`; `LocalMediaProgress` and
-  `PendingLocalSession` by `LocalProgressStore`; `DownloadRecord` and
-  `DownloadPart` by `DownloadStore`; history by `PlaybackHistoryStore`. Other
+  and `LocalFile` only by `LocalItemStore`; `LocalMediaProgress`,
+  `PendingLocalSession` and `PendingSessionClose` by `LocalProgressStore`;
+  `DownloadRecord` and `DownloadPart` by `DownloadStore`; history by
+  `PlaybackHistoryStore`. Other
   stores and services may read through their own context, but they delegate every
   write to the owner. `DataStack` creates one instance of each store and shares
   it, and each fetch-by-natural-key-then-insert runs inside one synchronous actor

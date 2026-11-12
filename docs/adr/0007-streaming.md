@@ -289,7 +289,7 @@ Cons:
      - **Final sync before close.** Before step 2 of a rebuild, the old session gets one `POST /api/session/{old}/close` with `{currentTime: savedPosition, timeListened: unsyncedDelta, duration}`.
        - The server applies that body through `syncSession` before removing the session (`PlaybackSessionManager.js:421-426`).
        - Doing this first also moves the user's progress forward. A new HLS `Stream` starts transcoding at the user's progress (`PlaybackSessionManager.js:345`, `Stream.js:241-263`), so this avoids a needless transcode reset.
-       - If the device is offline or the `/close` gets no response, the delta goes into the persisted sync queue, tagged with the old session id. A replay must first pass the admission rule from #158-d2 (point 8, "Stale writes"); until that lands, no `/close` is ever resent (`ProgressLateCloseTests.noCloseIsEverResent`).
+       - If the device is offline or the `/close` gets no response, the close goes into the persisted close queue (`PendingSessionClose` in `LocalProgressStore`, #382), tagged with the old session id: its report and the edit time its position committed with. It is stored while the attempt is still out, so a relaunch finds it. The drain resends it once `reconcileDelay` has passed since an attempt that may have reached the server (backed off like `/sync`), and only if the admission rule admits it (point 8, "Stale writes"). An acknowledged close is removed, and so is one the account's end suppressed or the server rejected for good (400, 404, 410, 422), with its listening time logged as dropped. Until the stored-record reconciliation below lands (#382), a 404 is never decided from the listening sessions (`CloseRetryTests`, `ProgressLateCloseTests.aCloseIsResentOnlyWhileItCanStillCount`).
      - **Restoring the position.** The new item seeks to the saved position **before** playing.
        - Use `seek(to:toleranceBefore:toleranceAfter:)` with a small tolerance: 0 for direct play, ≤ 0.5 s for HLS.
        - Set `AVPlayer.defaultRate` to the saved rate before `play()`.
@@ -379,13 +379,20 @@ Cons:
    - **Stale writes (#195, #380).** What keeps an old write from overwriting a newer position:
      - **Deferred PATCHes are fetched first.** The drain reads each dirty row's `GET /api/me/progress/:id` and merges it by ADR 0003 (#146) before sending. In a real conflict, a group whose server value is newer than its edit takes the server's value and sends nothing; a failed read sends nothing and leaves the row dirty for the drain's backed-off retry (`ProgressStaleDrainTests`).
      - **A late same-device request is neutralized by the server's takeover.** `/play` retires every open session of the same user and device, so a held `/sync` or `/close` for a session this device has moved on from answers 404 if the server looks the session up after the takeover. One the server applied before the takeover only set the position the newer session started from, and its lost response resends nothing (`ProgressLateCloseTests`).
-     - **Resends must pass the admission rule from #158-d2.** A deferred report or close (offline listening, point 3's queued delta) is replayed only if that rule admits it. Today nothing resends a `/close`; the only resend is #381's once-only `/sync` for a still-open session whose lookup showed the earlier report unapplied.
+     - **Resends must pass the admission rule (#195, #382).** A deferred report (today, point 3's queued `/close`) goes out again only if `ProgressSyncer.admitDeferredReport` admits it. The checks run in order before every resend:
+       1. A detached or quiesced syncer skips.
+       2. A different current session for the same media skips: its reports are newer.
+       3. The server's progress is read and merged by ADR 0003, like the drain's pre-PATCH read. A failed read, offline included, skips without sending anything and keeps the close for a later drain.
+       4. If the row's audio is no longer the report's own position (a later local edit, or another device's newer progress merged over it), it skips.
+
+       The position is identified by the audio edit time it committed with, which survives a relaunch, not by its in-process token. A skip never loses the position: the row stays dirty and the drain PATCHes it. A skip for a newer session or position removes the close and logs its listening time; carrying that time is #383 (`DeferredReportAdmissionTests`). The only other resend is #381's once-only `/sync` for a still-open session whose lookup showed the earlier report unapplied.
      - **Remaining limits**, accepted:
-       - Another device can write between the drain's GET and its PATCH (the server has no conditional write).
+       - Another device can write between the drain's GET and its PATCH or resent `/close` (the server has no conditional write).
        - The merge compares the device's edit time with the server's `lastUpdate`, so clock skew larger than the gap between two edits picks the wrong one (`clockSkewCanLoseANewerEdit`).
        - A group ADR 0003 shields because the server's value may be this device's own send or a side effect of one (a truncation flag, or audio matching an unacknowledged session report) keeps its edit without comparing times, so its PATCH can overwrite a newer value another device wrote meanwhile.
        - A `/sync` or `/close` whose session lookup passed before the takeover can still write after it: the server's `syncSession` awaits database reads between the lookup and the progress write without checking the session again. The test model looks up and writes atomically, so it can't show this.
        - Another device's sessions aren't retired by this device's `/play`, so a slow `/close` the server applies after the other device's newer report sets its position back (`aSlowCloseCanOverwriteAnotherDevice`).
+       - A `/close` the server applied but answered with an error before removing the session (a 5xx after `syncSession`) is applied again by its resend, counting its listening time twice. One the server removed answers the resend with 404.
 
 ## Consequences
 

@@ -92,7 +92,7 @@ public enum SessionUploadResult: Sendable, Equatable {
     case failure(String?)
 }
 
-/// The only writer of `LocalMediaProgress` and `PendingLocalSession` (ADR 0003).
+/// The only writer of `LocalMediaProgress`, `PendingLocalSession` and `PendingSessionClose` (ADR 0003).
 ///
 /// Progress follows the ADR 0003 sync rules: local edits mark only the field groups they touch,
 /// each PATCH carries one dirty group (audio, then finished, then ebook; #53), at most one PATCH
@@ -256,6 +256,24 @@ public enum SessionUploadResult: Sendable, Equatable {
             ProgressEdit(audio: audio), for: key, serverProgress: nil, localLibraryItemID: nil,
             now: now, playbackToken: token)
         return .committed
+    }
+
+    /// The audio edit time `token`'s position committed with, while it is still this writer's
+    /// latest committed playback position for `key`; otherwise `nil`. Unlike the token, the time
+    /// survives a relaunch: ``isLatestPlaybackPosition(currentTime:editedAt:for:)`` checks it.
+    public func committedPlaybackEdit(_ token: PlaybackPositionToken, for key: MediaKey) -> Date? {
+        guard token.writer == playbackWriterID, token.key == key,
+            let committed = committedPlaybackPositions[key], committed.sequence == token.sequence
+        else { return nil }
+        return committed.audio.editedAt
+    }
+
+    /// Whether the row's audio is still the position committed at `editedAt` (#382): no later
+    /// local edit (each one moves the edit time forward) and no server value merged over it.
+    /// The duration isn't compared, because the server may report the session's own.
+    public func isLatestPlaybackPosition(currentTime: Double, editedAt: Date, for key: MediaKey) throws -> Bool {
+        guard let row = try fetchRow(key) else { return false }
+        return row.audioEditedAt == editedAt && row.currentTime == currentTime
     }
 
     /// Records a local change, creating the row when needed.
