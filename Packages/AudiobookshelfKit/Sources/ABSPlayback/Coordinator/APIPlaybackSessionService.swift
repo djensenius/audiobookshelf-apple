@@ -33,7 +33,7 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
         try await client.mediaProgress(itemID: itemID, episodeID: episodeID)
     }
 
-    /// A token-fallback track (``TrackAuthentication/accessTokenQuery``) gets its access token from
+    /// Token-fallback tracks (``TrackAuthentication/accessTokenQuery``) share one access token from
     /// ``APIClient/accessToken(replacing:)``, so one that is about to expire is refreshed first.
     /// On a connection with custom headers the stream carries a new ``HeaderStreamingTransport``
     /// with those headers (ADR 0007 §6); a transcode session there fails to resolve.
@@ -55,7 +55,13 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
         var streamToken: String?
         for track in plan.tracks {
             if track.authentication == .accessTokenQuery {
-                let token = try await accessToken()
+                // One token for every track, so the recorded token is the one each URL carries.
+                let token: String
+                if let streamToken {
+                    token = streamToken
+                } else {
+                    token = try await accessToken()
+                }
                 streamToken = token
                 guard let url = track.authorizedURL(accessToken: token) else {
                     throw StreamResolutionError.missingAccessToken

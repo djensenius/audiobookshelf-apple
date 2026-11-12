@@ -329,6 +329,11 @@ public final class PlaybackCoordinator {
                     pendingJumpOffset = 0
                 }
                 return
+            case .unloaded where recovery.isRecovering(at: generation):
+                // Between failed rebuilds: recovery's next one plays it, within its budget.
+                recovery.notePlayIntent(true)
+                if let startTime { await seek(to: startTime) }
+                return
             case .idle, .unloaded:
                 break
             }
@@ -948,6 +953,11 @@ public final class PlaybackCoordinator {
     /// The engine paused for a lost output: plays held outside it (recovery's, a resume awaiting
     /// its seek, a start's) must not restart on the speaker.
     private func outputLost() {
+        // As a pause does: a play awaiting its streaming check doesn't start.
+        if pendingPlayKey != nil {
+            policyCheck += 1
+            pendingPlayKey = nil
+        }
         recovery.notePlayIntent(false)
         resumeIntent += 1
         resumingIntent = nil

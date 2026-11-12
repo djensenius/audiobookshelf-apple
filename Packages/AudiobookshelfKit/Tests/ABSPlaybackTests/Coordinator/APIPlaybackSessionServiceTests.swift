@@ -14,6 +14,23 @@ private struct StaticTokens: TokenProvider {
     func expireSession(ifCurrent rejected: ABSAPI.AuthTokens) async -> Bool { false }
 }
 
+/// Another request's refresh between reads: each read returns the next token (the last repeats).
+private final class RotatingTokens: TokenProvider {
+    private let remaining: Mutex<[String]>
+
+    init(_ tokens: [String]) {
+        remaining = Mutex(tokens)
+    }
+
+    func tokens() async -> ABSAPI.AuthTokens? {
+        let token = remaining.withLock { $0.count > 1 ? $0.removeFirst() : $0.first }
+        return token.map { ABSAPI.AuthTokens(accessToken: $0, refreshToken: "r") }
+    }
+
+    func replaceTokens(expected: ABSAPI.AuthTokens, with new: ABSAPI.AuthTokens) async -> Bool { false }
+    func expireSession(ifCurrent rejected: ABSAPI.AuthTokens) async -> Bool { false }
+}
+
 private struct StaticDevice: DeviceIdentifying {
     func deviceIdentifier() async -> String { "device" }
 }
@@ -69,6 +86,35 @@ struct APIPlaybackSessionServiceTests {
         let stream = try await service().resolveStream(for: episodeSession(index: nil))
         #expect(stream.urls.map(\.absoluteString) == ["https://abs.example/abs/api/items/li-9/file/77?token=a%2Bb"])
         #expect(stream.accessToken == "a+b")
+    }
+
+    @Test func tokenFallbackTracksShareOneToken() async throws {
+        let configuration = try APIClientConfiguration(baseURL: try #require(URL(string: "https://abs.example/abs")))
+        let service = APIPlaybackSessionService(
+            serverConnectionID: UUID(),
+            client: APIClient(configuration: configuration, tokenProvider: RotatingTokens(["one", "two", "three"])),
+            features: ServerFeatures(version: ServerVersion(2, 26, 2)), deviceIdentifiers: StaticDevice())
+        let session = PlaybackSession(
+            id: "sess", libraryItemId: "li-9", episodeId: "ep-1", mediaType: .podcast, duration: 200,
+            playMethod: .directPlay,
+            audioTracks: [
+                AudioTrack(
+                    index: nil, startOffset: 0, duration: 100, contentUrl: "/api/items/li-9/file/1",
+                    mimeType: "audio/mpeg"),
+                AudioTrack(
+                    index: nil, startOffset: 100, duration: 100, contentUrl: "/api/items/li-9/file/2",
+                    mimeType: "audio/mpeg"),
+            ])
+
+        let stream = try await service.resolveStream(for: session)
+
+        // Every URL carries the token recorded for a 401 refresh.
+        let token = try #require(stream.accessToken)
+        #expect(
+            stream.urls.map(\.absoluteString) == [
+                "https://abs.example/abs/api/items/li-9/file/1?token=\(token)",
+                "https://abs.example/abs/api/items/li-9/file/2?token=\(token)",
+            ])
     }
 
     @Test func tokenFallbackWithoutTokensFails() async throws {

@@ -539,6 +539,44 @@ struct PlaybackRecoveryTests {
     }
 
     @Test(arguments: [false, true])
+    func aPlayOfTheSameItemBetweenFailedRebuildsKeepsTheEpisode(startsElsewhere: Bool) async {
+        let gate = await holdFirstRebuild(failing: .load)
+        gate.open()
+        await settle { coordinator.phase == .unloaded && h.recoverySleep.waitingCount == 1 }
+        engine.loadError = nil
+        coordinator.pause()
+
+        // Play from the item's page: recovery's next rebuild plays it, at the start time if given.
+        await coordinator.play(itemID: "A", startTime: startsElsewhere ? 900 : nil)
+        #expect(coordinator.isPlaybackRequested)
+        #expect(service.starts.count == 2)
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 3 && coordinator.phase == .loaded }
+        await settle { engine.isPlaybackRequested }
+
+        let target: Double = startsElsewhere ? 900 : 600
+        #expect(engine.loads.last?.time == target)
+        #expect(coordinator.currentTime == target)
+        #expect(coordinator.error == nil)
+        #expect(h.recoverySleep.durations == [.seconds(1), .seconds(2)])
+    }
+
+    @Test func aLostOutputDiscardsAPlayAwaitingItsStreamingCheck() async {
+        let gate = Gate()
+        h.policy.gate = gate
+        let play = Task { await coordinator.play(itemID: "A") }
+        await settle { h.policy.checks == 1 }
+
+        engine.pauseForOutputLoss()
+        #expect(!coordinator.isPlaybackRequested)
+        gate.open()
+        await play.value
+
+        #expect(service.starts.isEmpty)
+        #expect(!engine.isPlaybackRequested)
+    }
+
+    @Test(arguments: [false, true])
     func aPauseDuringASeekThatTookOverRecoveryKeepsItPaused(outputLost: Bool) async {
         h.recoverySleep.isManual = true
         await playAt600()
