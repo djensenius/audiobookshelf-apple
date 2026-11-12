@@ -70,6 +70,22 @@ import Testing
         #expect(await reopened.lookup(key("a")) == nil)
     }
 
+    @Test func cachedFileFindsTheKeysFileWithoutTouchingIt() async throws {
+        let images = directory.url.appending(path: "Images")
+        let store = CoverFileStore(directory: images, limit: 1 << 20)
+        let inserted = try await store.insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "jpg", generation: 0)
+        let old = Date(timeIntervalSince1970: 1_000)
+        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: inserted.url.path)
+
+        let found = CoverFileStore.cachedFile(for: key("a"), in: images)
+        #expect(found?.standardizedFileURL.path == inserted.url.standardizedFileURL.path)
+        #expect(CoverFileStore.cachedFile(for: key("a").with(bucket: .small), in: images) == nil)
+        #expect(CoverFileStore.cachedFile(for: key("b"), in: images) == nil)
+        let modified = try FileManager.default.attributesOfItem(atPath: inserted.url.path)[.modificationDate] as? Date
+        #expect(modified == old)
+    }
+
     @Test func writesStartedBeforeAServerRemovalAreRefused() async throws {
         let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
         let generation = await store.generation(for: serverID)

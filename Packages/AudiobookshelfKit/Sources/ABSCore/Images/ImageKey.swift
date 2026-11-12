@@ -4,8 +4,8 @@ import Foundation
 /// Identifies one version of one server image at one width bucket (ADR 0005).
 ///
 /// A changed `updatedAt` produces a new key, so cached files and bitmaps never go stale; old
-/// entries simply age out.
-public struct ImageKey: Sendable, Hashable {
+/// entries simply age out. Codable so the widget snapshot can carry it (#89).
+public struct ImageKey: Sendable, Hashable, Codable {
     /// The server connection's stable local UUID (not its address).
     public var serverID: UUID
     public var kind: ImageKind
