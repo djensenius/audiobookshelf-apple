@@ -315,6 +315,18 @@ public actor DownloadEngine {
         return true
     }
 
+    /// Creates the session if needed, reattaching to the transfers that survived a relaunch,
+    /// without restarting queued parts or changing what ``activate()`` and ``deactivate()``
+    /// set. A ``pause(recordID:)`` before the session exists can't stop a surviving transfer,
+    /// and a resume after it lets activation adopt that transfer as it is, so
+    /// ``DownloadManager/restartActiveTransfers()`` calls this first.
+    ///
+    /// - Returns: `false` when there is no session: the downloads couldn't be read, or another
+    ///   process holds it.
+    public func attachSurvivingTransfers() async -> Bool {
+        await ensureSession()
+    }
+
     /// Call when the app goes to the background: until the next ``activate()``, parts the
     /// system cancels are queued, not restarted, because a background wake can't start
     /// transfers reliably, and a retry's transfer is created at once, to begin after its delay.

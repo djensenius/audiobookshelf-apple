@@ -1,3 +1,4 @@
+import ABSCore
 import ABSData
 import Foundation
 
@@ -45,12 +46,20 @@ extension DownloadManager {
     /// Records that are queued, paused or failed are left alone, as is one paused or cancelled
     /// meanwhile; each restart is reported with ``DownloadManagerEvent/recordChanged(_:)``.
     ///
+    /// The engine first reattaches to the transfers that survived a relaunch
+    /// (``DownloadEngineControlling/attachSurvivingTransfers()``), so the pauses stop them too.
+    ///
     /// A resume that fails is tried once more. If that fails too, the record is queued again,
     /// so it doesn't look paused by the user, and the engine starts it at its next activation.
     ///
-    /// - Throws: the first ``DownloadManagerError/storeFailure``, once every record was tried:
-    ///   the records couldn't be read, or one couldn't be paused or resumed.
+    /// - Throws: ``DownloadManagerError/storeFailure`` at once when the engine has no session
+    ///   (nothing is paused); otherwise the first one once every record was tried: the records
+    ///   couldn't be read, or one couldn't be paused or resumed.
     public func restartActiveTransfers() async throws(DownloadManagerError) {
+        guard await engine.attachSurvivingTransfers() else {
+            Log.downloads.error("Couldn't restart downloads: the download session isn't available")
+            throw .storeFailure
+        }
         var firstError: DownloadManagerError?
         for record in try await read({ try await self.store.records(state: .downloading) }) {
             do throws(DownloadManagerError) {

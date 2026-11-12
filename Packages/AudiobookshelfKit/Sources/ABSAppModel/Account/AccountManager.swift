@@ -415,7 +415,9 @@ public final class AccountManager {
         var logoutClient = activeClient
         if logoutClient == nil { logoutClient = await makeLogoutClient(for: id, credentials: credentials) }
         guard let logoutClient else { return nil }
-        return await serverLogout(ended, client: logoutClient)
+        let url = await serverLogout(ended, client: logoutClient)
+        // Not once a sign-in has begun: the shared browser would end or interrupt it.
+        return isCurrent(operation) ? url : nil
     }
 
     /// Forgets a saved connection: deletes its Keychain items and removes it from the store, then
@@ -495,6 +497,22 @@ public final class AccountManager {
     public func customHeaders(for id: UUID) async throws -> [String: String] {
         try await credentials(for: id).load().customHeaders
     }
+
+    /// Whether ``switch(to:)`` has a saved session to use for a connection: it isn't signed out
+    /// and its tokens are saved. An expiry can delete the tokens without setting `signedOutAt`.
+    /// A Keychain that can't be read counts as a session, so the switch says why it failed.
+    public func hasSession(_ id: UUID) async -> Bool {
+        guard connections.contains(where: { $0.id == id && $0.signedOutAt == nil }) else { return false }
+        do {
+            return try await credentials(for: id).load().session != nil
+        } catch {
+            return true
+        }
+    }
+
+    /// Whether a sign-in, restore or switch began since the last ``logout()``: its end-session URL
+    /// would then end or interrupt that in the shared browser.
+    public var hasBegunSinceLogout: Bool { operation != latestLogout }
 
     // MARK: - Private
 
@@ -796,14 +814,16 @@ public final class AccountManager {
     }
 
     /// `POST /logout`, best effort, in its own task so that cancelling the caller, such as a
-    /// sign-in, doesn't stop the revoke. Returns the end-session URL if it's `http` or `https`.
+    /// sign-in, doesn't stop the revoke. Returns the end-session URL if
+    /// ``isAllowedEndSessionURL(_:server:)``.
     private func serverLogout(_ session: StoredSession, client: APIClient) async -> URL? {
         await Task {
             do {
+                let server = await client.configuration.baseURL
                 let response = try await client.send(
                     AuthEndpoints.logout(refreshToken: session.refreshToken, openIDSession: session.openIDSession))
                 guard let string = response.redirectURL, let url = URL(string: string),
-                    ["https", "http"].contains(url.scheme?.lowercased())
+                    Self.isAllowedEndSessionURL(url, server: server)
                 else { return nil }
                 return url
             } catch {
@@ -811,6 +831,17 @@ public final class AccountManager {
                 return nil
             }
         }.value
+    }
+
+    /// Whether to open `url`, an end-session URL the server at `server` returned: `https`, or
+    /// `http` only from an `http` server. It can carry an OpenID `id_token_hint`, which an `https`
+    /// account must not send in cleartext.
+    static func isAllowedEndSessionURL(_ url: URL, server: URL) -> Bool {
+        switch url.scheme?.lowercased() {
+        case "https": true
+        case "http": server.scheme?.lowercased() == "http"
+        default: false
+        }
     }
 }
 
