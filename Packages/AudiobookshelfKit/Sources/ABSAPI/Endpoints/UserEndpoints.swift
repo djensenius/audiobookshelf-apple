@@ -8,4 +8,9 @@ public enum UserEndpoints {
     public static func me() -> Endpoint<UserFinishedMediaResponse> {
         Endpoint(.get, "/api/me")
     }
+
+    /// `GET /api/me`, decoded only for the user's bookmarks.
+    public static func meBookmarks() -> Endpoint<UserBookmarksResponse> {
+        Endpoint(.get, "/api/me")
+    }
 }
