@@ -167,6 +167,14 @@ public final class PlayerViewModel {
     /// episodes, and books have no episode ID. `false` without an item.
     public var isPodcastEpisode: Bool { playback.mediaKey?.episodeId != nil }
 
+    /// The library of the current item, from its session; `nil` without a session for the item (such as a record
+    /// restored at launch, before its session starts).
+    public var libraryID: String? {
+        guard let key = playback.mediaKey, let session = playback.session, session.libraryItemId == key.libraryItemId
+        else { return nil }
+        return session.libraryId ?? session.libraryItem?.libraryId
+    }
+
     /// The item's cover; `nil` when it has none.
     public var coverKey: ImageKey? { display?.coverKey }
 

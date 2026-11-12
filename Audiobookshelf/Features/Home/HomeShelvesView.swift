@@ -40,6 +40,7 @@ struct HomeSectionRow: View {
     let perform: (ItemActionKind, ItemSummary) -> Void
     @Environment(\.serverID) private var serverID
     @Environment(\.locale) private var locale
+    private var libraries = LibraryCoverSettings()
 
     var body: some View {
         ShelfRow(
@@ -53,7 +54,7 @@ struct HomeSectionRow: View {
     @ViewBuilder private func card(for entry: HomeEntry) -> some View {
         switch entry {
         case .item(let item):
-            ItemCard(item: item, serverID: serverID, context: context) { kind in
+            ItemCard(item: item, serverID: serverID, librarySettings: libraries.current, context: context) { kind in
                 if kind == .openDetails {
                     open(ItemCardActions.route(for: item))
                 } else {
