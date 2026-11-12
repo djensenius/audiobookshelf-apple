@@ -20,18 +20,21 @@ private func playlist(_ id: String, name: String? = nil, owner: String = identit
 }
 
 /// A collections list of library `lib` whose pages come from `server`, which the test changes; `requests` logs
-/// the pages asked for, and a page fails while `fails` is true.
+/// the pages asked for, a page fails while `fails` is true, and rows with an ID in `malformed` count
+/// toward the page but fail to decode.
 @MainActor
 private func collectionList(
     server: Locked<[LibraryCollection]>, requests: Locked<[Int]>, pageSize: Int = 20,
-    fails: Locked<Bool> = Locked(false)
+    fails: Locked<Bool> = Locked(false), malformed: Set<String> = []
 ) async -> ItemListModel<String, GroupSummary> {
     let service = FakeGroupsService(collectionsHandler: { _, page, limit in
         requests.value.append(page)
         if fails.value { throw TestError.offline }
         let all = server.value
         let rows = Array(all.dropFirst(page * limit).prefix(limit))
-        return PagedResults(results: rows, total: all.count, limit: limit, page: page)
+        return PagedResults(
+            results: rows.filter { !malformed.contains($0.id) }, total: all.count, limit: limit, page: page,
+            rawCount: rows.count)
     })
     let list = ItemListModel.collections(
         service: service, libraryID: "lib", pageSize: pageSize, connectionKey: accountA)
@@ -66,6 +69,29 @@ private func playlistList(_ playlists: [Playlist], requests: Locked<[Int]>) asyn
         #expect(list.items.map(\.id) == ["c0", "c1", "c2"])
         #expect(list.total == 3)
         #expect(requests.value == [0, 0])
+    }
+
+    @Test func aFailedAdditionRefreshRetriesFromTheFirstPage() async throws {
+        let server = Locked((1...4).map { collection("c\($0)") })
+        let requests = Locked<[Int]>([])
+        let fails = Locked(false)
+        let list = await collectionList(server: server, requests: requests, pageSize: 2, fails: fails)
+
+        server.value.insert(collection("c0"), at: 0)
+        fails.value = true
+        list.apply(.collection(.added(collection("c0"), libraryID: "lib")), kind: .collection)
+        await list.loadNextPage()?.value
+        #expect(list.error != nil)
+        #expect(list.items.map(\.id) == ["c1", "c2"])
+
+        // Retry: page 1 of the old offsets would return c2 and c3 and never show c0.
+        fails.value = false
+        await list.loadNextPage()?.value
+        #expect(list.items.map(\.id) == ["c0", "c1"])
+        for _ in 0..<3 where !list.reachedEnd { await list.loadNextPage()?.value }
+        #expect(list.items.map(\.id) == ["c0", "c1", "c2", "c3", "c4"])
+        #expect(list.reachedEnd)
+        #expect(requests.value == [0, 0, 0, 1, 2])
     }
 
     @Test func anUpdateReplacesTheLoadedGroup() async throws {
@@ -137,6 +163,22 @@ private func playlistList(_ playlists: [Playlist], requests: Locked<[Int]>) asyn
         #expect(list.items.map(\.id) == ["c2", "c3", "c4"])
         #expect(list.reachedEnd)
         #expect(requests.value == [0, 0, 0, 1])
+    }
+
+    @Test func removingARowThatFailedToDecodeStillReloads() async throws {
+        let server = Locked((1...4).map { collection("c\($0)") })
+        let requests = Locked<[Int]>([])
+        let list = await collectionList(server: server, requests: requests, pageSize: 2, malformed: ["c1"])
+        #expect(list.items.map(\.id) == ["c2"])
+
+        // c1 isn't loaded but counted toward the offsets, so page 1 would now skip c3.
+        server.value.removeFirst()
+        list.apply(.collection(.removed(id: "c1", libraryID: "lib")), kind: .collection)
+        await list.loadNextPage()?.value
+        await list.loadNextPage()?.value
+        #expect(list.items.map(\.id) == ["c2", "c3", "c4"])
+        #expect(list.reachedEnd)
+        #expect(requests.value == [0, 0, 1])
     }
 
     @Test func eachSuccessfulRefreshAdvancesTheRevision() async throws {

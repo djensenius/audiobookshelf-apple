@@ -185,7 +185,8 @@ extension ItemListModel where Query == String, Item == GroupSummary {
     }
 
     /// Applies a change the server pushed to this list of `kind`, like the web client's bookshelf:
-    /// an addition reloads the list, as the new group's place in the server's order is unknown;
+    /// an addition reloads the list (``refreshAfterServerChange()``), as the new group's place in
+    /// the server's order is unknown;
     /// an update replaces the loaded group; a removal drops it. Changes to another library or kind,
     /// and other users' playlists, are ignored.
     public func apply(_ change: LibraryChange, kind: GroupSummary.Kind) {
@@ -201,7 +202,7 @@ extension ItemListModel where Query == String, Item == GroupSummary {
         }
         guard groupChange.libraryID == query else { return }
         switch groupChange {
-        case .added: refresh()
+        case .added: refreshAfterServerChange()
         case .updated(let group, _): replaceItem(group)
         case .removed(let id, _): removeItem(id: id)
         }

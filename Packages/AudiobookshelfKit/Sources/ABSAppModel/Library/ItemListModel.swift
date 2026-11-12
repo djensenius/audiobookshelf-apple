@@ -22,8 +22,9 @@ import Observation
 /// response from an earlier generation is never applied. If the refresh's first page fails or is
 /// cancelled, the list rolls back to where it was before the refresh: scrolling continues with the
 /// old list's next page, and retrying the refresh means calling ``refresh()`` again. A refresh
-/// started by ``removeItem(id:)`` can't roll back, as the removal moved the server's offsets: after
-/// a failure, the next page loads from the first page again and replaces the list.
+/// started by ``removeItem(id:)`` or ``refreshAfterServerChange()`` can't roll back, as the change
+/// moved the server's offsets: after a failure, the next page loads from the first page again and
+/// replaces the list.
 ///
 /// A model belongs to one client and account: views create it per account identity (with
 /// `LibraryStore.makeItemList(libraryID:query:)`) and recreate it when the store's
@@ -143,6 +144,16 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
         return loadNextPage()
     }
 
+    /// Reloads like ``refresh()`` after the server's list changed, for example a group was added
+    /// before the loaded pages. The old offsets are wrong now, so a failed reload doesn't roll back:
+    /// the next page loads from the first page again and replaces the list.
+    @discardableResult
+    public func refreshAfterServerChange() -> Task<Void, Never>? {
+        let load = refresh()
+        refreshRollback?.isRestorable = false
+        return load
+    }
+
     /// Changes the paging, for example when a wider window shows more columns. The threshold
     /// applies to the next appearing item. The page size applies right away if no page was
     /// requested yet, and otherwise from the next first page (``reset()``, ``refresh()`` or
@@ -223,22 +234,22 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     }
 
     /// Removes the loaded item with `id`, for a removal the server pushed, and lowers ``total``.
-    /// The server's later rows move up a place, so a list that hasn't reached its end refreshes:
-    /// its next page would otherwise skip one. Returns whether the item was loaded.
+    /// The server's later rows move up a place, so a list that hasn't reached its end refreshes
+    /// (``refreshAfterServerChange()``): its next page would otherwise skip one. It refreshes even
+    /// when `id` isn't loaded, as a row that failed to decode still counted toward the offsets.
+    /// Returns whether the item was loaded.
     @discardableResult
     public func removeItem(id: Item.ID) -> Bool {
-        guard let index = indexByID.removeValue(forKey: id) else { return false }
-        items.remove(at: index)
-        for (later, item) in items[index...].enumerated() {
-            indexByID[item.id] = index + later
+        let index = indexByID.removeValue(forKey: id)
+        if let index {
+            items.remove(at: index)
+            for (later, item) in items[index...].enumerated() {
+                indexByID[item.id] = index + later
+            }
+            total = total.map { max($0 - 1, 0) }
         }
-        total = total.map { max($0 - 1, 0) }
-        if !reachedEnd {
-            refresh()
-            // The old offsets would skip a row now, even if this refresh fails.
-            refreshRollback?.isRestorable = false
-        }
-        return true
+        if !reachedEnd { refreshAfterServerChange() }
+        return index != nil
     }
 
     private func finish(_ result: Result<PagedResults<Item>, any Error>, generation: Int) {
