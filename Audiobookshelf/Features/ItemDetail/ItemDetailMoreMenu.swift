@@ -73,9 +73,10 @@ private struct ItemDetailMoreMenu: ViewModifier {
             ) {
                 self.ebookActions = accounts?.client.map { EbookActionsModel(itemID: model.itemID, service: $0) }
             }
-            .onChange(of: model.isLoading) { _, isLoading in
-                // A load that succeeded makes the files current after a failed reload.
-                if !isLoading, model.hasLoaded, model.error == nil { ebookActions?.itemDidLoad() }
+            .onChange(of: model.loadedRevision) {
+                // Only a load that installed an item makes the files current after a failed
+                // reload; a cancelled or superseded one leaves them as they were.
+                ebookActions?.itemDidLoad()
             }
             .alert(
                 Text(verbatim: ebookFeedback?.alertTitle ?? ""), isPresented: $showsEbookFeedback,
@@ -110,8 +111,9 @@ private struct ItemDetailMoreMenu: ViewModifier {
                         authorization: accounts?.authorization, item: model.item,
                         isGone: isGone || (model.error as? APIError) == .notFound)
                     let outcome = await ebookActions.apply(change, offered: offered) {
-                        await model.load()
-                        return model.error == nil
+                        // Not `error == nil`: a cancelled or superseded reload leaves it nil and
+                        // the old files in place.
+                        await model.reload()
                     }
                     show(outcome)
                 }
