@@ -115,6 +115,32 @@ private typealias F = SeriesAuthorsFixtures
         #expect(model.continueBook?.id == "b3")
     }
 
+    /// The collapse setting changing reloads a loaded series with the new query, and only then (#319).
+    @Test func reloadsWhenTheCollapseSettingChanges() async throws {
+        let requests = Locked<[LibraryQuery]>([])
+        let service = FakeSeriesAuthorsService(
+            seriesDetailHandler: { id in F.seriesResponse(id) },
+            booksHandler: { _, query in
+                requests.value.append(query)
+                return F.page([F.book("b1", seriesID: "s1", sequence: "1")])
+            })
+        let model = SeriesDetailModel(seriesID: "s1", libraryID: "lib", service: service, cache: ProgressCache())
+
+        // Not loaded: no request, but the next load uses the new value.
+        await model.setCollapseSeries(true)
+        #expect(requests.value.isEmpty)
+        await model.loadIfNeeded()
+        #expect(requests.value.map(\.collapseSeries) == [true])
+
+        // Unchanged: no reload.
+        await model.setCollapseSeries(true)
+        #expect(requests.value.count == 1)
+
+        await model.setCollapseSeries(false)
+        #expect(model.collapseSeries == false)
+        #expect(requests.value.map(\.collapseSeries) == [true, false])
+    }
+
     @Test func continuesWithTheFirstUnfinishedBookInTheCache() async throws {
         let cache = ProgressCache()
         let service = FakeSeriesAuthorsService(

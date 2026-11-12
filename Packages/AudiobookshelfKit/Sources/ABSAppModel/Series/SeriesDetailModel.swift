@@ -103,8 +103,8 @@ public final class SeriesDetailModel {
     public let seriesID: String
     public let libraryID: String
     /// Sends `collapseseries=1`, so sub-series show as one entry (the legacy
-    /// `collapseBookSeries` setting).
-    public let collapseSeries: Bool
+    /// `collapseBookSeries` setting); change it with ``setCollapseSeries(_:)``.
+    public private(set) var collapseSeries: Bool
 
     /// The last loaded series; kept while reloading and after a failed reload, dropped on 404.
     public private(set) var detail: SeriesDetail?
@@ -141,6 +141,15 @@ public final class SeriesDetailModel {
     /// The books query: the series filter, no sort (the server's sequence order) and no paging.
     public var booksQuery: LibraryQuery {
         LibraryQuery(filter: .series(id: seriesID), collapseSeries: collapseSeries)
+    }
+
+    /// Changes ``collapseSeries``. When it changed and the series has loaded or is loading, loads
+    /// again with the new query (a load still running with the old one is then dropped).
+    public func setCollapseSeries(_ collapse: Bool) async {
+        guard collapse != collapseSeries else { return }
+        collapseSeries = collapse
+        guard hasLoaded || isLoading else { return }
+        await load()
     }
 
     /// Loads unless the series has already loaded. Views call it each time they appear, so a

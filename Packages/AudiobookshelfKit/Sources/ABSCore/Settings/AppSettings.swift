@@ -61,6 +61,7 @@ public final class AppSettings {
         case streamingUsingCellular = "settings_streamingUsingCellular"
         case playbackRate = "settings_playbackRate"
         case chapterTrack = "settings_chapterTrack"
+        case collapseBookSeries = "settings_collapseBookSeries"
         /// A `[String: String]` dictionary from ``AppSettings/accountKey(serverID:userID:)``
         /// to library ID.
         case lastLibraryIDs = "settings_lastLibraryIDs"
@@ -100,6 +101,7 @@ public final class AppSettings {
         public static let streamingUsingCellular = CellularPolicy.always
         public static let playbackRate = 1.0
         public static let chapterTrack = true
+        public static let collapseBookSeries = false
     }
 
     /// The store the settings read from and write to.
@@ -189,6 +191,14 @@ public final class AppSettings {
         didSet { persist(.playbackRate, \.playbackRate, oldValue, isValid: Self.isPlaybackRate) }
     }
     public var chapterTrack = Default.chapterTrack { didSet { persist(.chapterTrack, chapterTrack) } }
+
+    // MARK: Browsing
+
+    /// Collapses sub-series into one entry on a series page (legacy `collapseBookSeries`, toggled
+    /// from the series page, not from Settings).
+    public var collapseBookSeries = Default.collapseBookSeries {
+        didSet { persist(.collapseBookSeries, collapseBookSeries) }
+    }
 
     // MARK: Navigation
 
@@ -429,6 +439,7 @@ public final class AppSettings {
         update(\.streamingUsingCellular, snapshot.streamingUsingCellular)
         update(\.playbackRate, snapshot.playbackRate)
         update(\.chapterTrack, snapshot.chapterTrack)
+        update(\.collapseBookSeries, snapshot.collapseBookSeries)
         update(\.lastLibraryIDs, snapshot.lastLibraryIDs)
         update(\.libraryViewPreferences, snapshot.libraryViewPreferences)
         update(\.recentSearches, snapshot.recentSearches)
@@ -472,6 +483,7 @@ extension AppSettings {
         public let streamingUsingCellular: CellularPolicy
         public let playbackRate: Double
         public let chapterTrack: Bool
+        public let collapseBookSeries: Bool
         public let lastLibraryIDs: [String: String]
         public let libraryViewPreferences: [String: String]
         public let recentSearches: [String: String]
@@ -509,6 +521,7 @@ extension AppSettings {
             streamingUsingCellular = store.enumValue(.streamingUsingCellular, Default.streamingUsingCellular)
             playbackRate = store.double(.playbackRate, Default.playbackRate, where: isPlaybackRate)
             chapterTrack = store.bool(.chapterTrack, Default.chapterTrack)
+            collapseBookSeries = store.bool(.collapseBookSeries, Default.collapseBookSeries)
             lastLibraryIDs = store.stringDictionary(.lastLibraryIDs)
             libraryViewPreferences = store.stringDictionary(.libraryViewPreferences)
             recentSearches = store.stringDictionary(.recentSearches)
