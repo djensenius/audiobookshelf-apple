@@ -73,11 +73,13 @@ struct AddPodcastView: View {
         store?.libraries.first { $0.id == id }
     }
 
+    /// Calls `onCreated`, or pushes the new podcast on the selected tab's stack. In compact width the Add podcast
+    /// section lives in Library, which is then the selected tab, so this is the stack showing this screen.
     private func open(_ itemID: String) {
         if let onCreated {
             onCreated(itemID)
-        } else if let router {
-            router[path: router.selectedTab].append(.item(id: itemID))
+        } else {
+            BrowsePresentation.open(.item(id: itemID), in: router)
         }
     }
 }
