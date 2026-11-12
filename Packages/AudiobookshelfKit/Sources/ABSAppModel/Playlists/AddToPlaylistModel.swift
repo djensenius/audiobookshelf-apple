@@ -86,6 +86,10 @@ public final class AddToPlaylistModel {
         self.service = service
     }
 
+    /// No toggle or create is in flight, so the sheet may close: one closed mid-write would drop
+    /// this model and the write's failure alert, and a reopened sheet could start an overlapping write.
+    public var canDismiss: Bool { !isCreating && updatingIDs.isEmpty }
+
     public var rows: [Row] {
         playlists.map { playlist in
             Row(
