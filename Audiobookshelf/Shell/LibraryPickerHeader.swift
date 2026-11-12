@@ -35,6 +35,7 @@ private struct LibraryPicker<Placeholder: View>: View {
     @ViewBuilder let placeholder: Placeholder
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
+    @Environment(AccountManager.self) private var accounts: AccountManager?
 
     var body: some View {
         if let store, let router, SceneLibrarySelection.isServing(router: router, store: store),
@@ -45,7 +46,11 @@ private struct LibraryPicker<Placeholder: View>: View {
                 Picker(
                     selection: Binding(
                         get: { router.libraryID },
-                        set: { id in if let id { SceneLibrarySelection.select(id, router: router, store: store) } })
+                        set: { id in
+                            guard let id else { return }
+                            SceneLibrarySelection.select(
+                                id, router: router, store: store, canAddPodcast: accounts?.canAddPodcast)
+                        })
                 ) {
                     ForEach(store.libraries) { library in
                         Label {
@@ -81,16 +86,27 @@ private struct LibraryPicker<Placeholder: View>: View {
 }
 
 /// Keeps the scene's library in step with the shared store (``SceneLibrarySelection``): the
-/// initial library, its check once the libraries load, and deep-link library requests.
+/// initial library, its check once the libraries load, and deep-link library requests, with
+/// Add podcast shown only to users who can add podcasts.
 struct SceneLibrarySync: ViewModifier {
     let router: Router
     @Environment(\.libraryStore) private var store
+    @Environment(AccountManager.self) private var accounts: AccountManager?
 
     func body(content: Content) -> some View {
-        content.onChange(of: store.map { SceneLibrarySelection.trigger(router, store: $0) }, initial: true) {
-            if let store { SceneLibrarySelection.reconcile(router, store: store) }
+        let canAddPodcast = accounts?.canAddPodcast
+        content.onChange(
+            of: store.map { SceneLibrarySelection.trigger(router, store: $0, canAddPodcast: canAddPodcast) },
+            initial: true
+        ) {
+            if let store { SceneLibrarySelection.reconcile(router, store: store, canAddPodcast: canAddPodcast) }
         }
     }
+}
+
+extension AccountManager {
+    /// Whether the signed-in user may add podcasts, or `nil` while unknown (offline or authorizing).
+    fileprivate var canAddPodcast: Bool? { authorization?.user.canAddPodcasts }
 }
 
 #Preview {
