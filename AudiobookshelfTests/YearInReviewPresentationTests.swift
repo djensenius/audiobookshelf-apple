@@ -54,7 +54,12 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
             "LabelYearInReviewFinishedBooks", "LabelYearInReviewServer", "LabelYearInReviewSessions",
             "LabelYearInReviewSpentListening", "LabelYearInReviewTopAuthors", "LabelYearInReviewTopGenres",
             "LabelYearInReviewUser", "LabelYearInReviewVariant", "LabelYearInReviewYear",
-            "MessageYearInReviewLoadFailed", "LabelYearReviewShow",
+            "MessageYearInReviewLoadFailed", "LabelYearReviewShow", "LabelYearInReviewLayoutCard",
+            "LabelYearInReviewLayoutShort", "LabelYearInReviewLayoutBanner", "ButtonYearInReviewCopyImage",
+            "ButtonYearInReviewSaveToPhotos", "HeaderYearInReviewPhotosFailed", "MessageYearInReviewImageCopied",
+            "MessageYearInReviewSavedToPhotos", "MessageYearInReviewPhotosDenied",
+            "MessageYearInReviewPhotosRestricted", "MessageYearInReviewPhotosSaveFailed", "LabelLayout",
+            "LabelMore",
         ]
         for key in keys {
             #expect(L10n.string(key) != key, "\(key)")
@@ -72,6 +77,42 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
         #expect(image.cgImage.height == Int(600 * scale))
         #expect(!image.png.isEmpty)
         #expect(image.filename == "audiobookshelf_my_2025.png")
+    }
+
+    /// The short and banner layouts render at their own point size times the scale, and are
+    /// named apart from the full card.
+    @Test(arguments: [YearInReviewLayout.short, .banner], [2.0, 3.0])
+    func layoutImagesHaveTheExpectedPixelSize(layout: YearInReviewLayout, scale: Double) throws {
+        let card = YearInReviewCard(
+            content: .user(userStats), year: 2025, covers: YearInReviewCovers(), locale: english, layout: layout)
+        let image = try #require(YearInReviewShareImage.render(card, variant: .user, scale: scale))
+        let points: (Int, Int) = layout == .short ? (600, 200) : (800, 420)
+        #expect(image.cgImage.width == Int(Double(points.0) * scale))
+        #expect(image.cgImage.height == Int(Double(points.1) * scale))
+        #expect(image.filename == "audiobookshelf_my_2025_\(layout.rawValue).png")
+        #expect(!image.png.isEmpty)
+    }
+
+    /// The banner draws the finished books' covers like the full card; the short layout, like
+    /// legacy, has no cover row. Negative control: without covers the banner draws none.
+    @Test func bannerDrawsTheFinishedCovers() throws {
+        func render(_ layout: YearInReviewLayout, _ covers: YearInReviewCovers) throws -> CGImage {
+            let card = YearInReviewCard(
+                content: .user(userStats), year: 2025, covers: covers, locale: english, layout: layout)
+            return try #require(YearInReviewShareImage.render(card, variant: .user, scale: 2)).cgImage
+        }
+        let covers = YearInReviewCovers(images: ["li-1": try solidImage(red: 1, green: 0, blue: 0)])
+        #expect(try redPixelCount(render(.banner, covers)) >= 120 * 120)
+        #expect(try redPixelCount(render(.banner, YearInReviewCovers())) == 0)
+        #expect(try redPixelCount(render(.short, covers)) == 0)
+    }
+
+    /// VoiceOver reads only what the short layout shows.
+    @Test func shortSummaryReadsItsTwoTotals() {
+        let short = YearInReviewCard.summary(for: .user(userStats), year: 2025, locale: english, layout: .short)
+        #expect(short == "2025 Year in Review, 7 books finished, 9 books listened to")
+        let banner = YearInReviewCard.summary(for: .user(userStats), year: 2025, locale: english, layout: .banner)
+        #expect(banner == YearInReviewCard.summary(for: .user(userStats), year: 2025, locale: english))
     }
 
     @Test func serverImageIsNamedForTheServer() throws {
@@ -218,8 +259,11 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
         let withCovers = slot.finish("covers", for: refreshed, current: refreshed)
         #expect(withCovers)
         #expect(slot.image == "covers")
-        // Another selection still clears the image while it renders.
-        slot.begin(key(year: 2025, revision: 2))
+        // Another selection still clears the image while it renders, and so does another layout.
+        var otherLayout = refreshed
+        otherLayout.layout = .short
+        #expect(!otherLayout.isSameSelection(as: refreshed))
+        slot.begin(otherLayout)
         #expect(slot.image == nil)
     }
 }
