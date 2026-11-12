@@ -3,11 +3,13 @@ import ABSCore
 import Foundation
 import Observation
 
-/// A loaded author: name and image (``summary``) and bio.
+/// A loaded author: name and image (``summary``), bio and library.
 public struct AuthorDetail: Sendable, Hashable, Identifiable {
     public let summary: AuthorSummary
     /// The author's description; `nil` when blank.
     public let bio: String?
+    /// The author's library, when sent: their books are only there, maybe not where the screen was opened.
+    public let libraryID: String?
 
     public var id: String { summary.id }
     public var name: String { summary.name }
@@ -15,6 +17,7 @@ public struct AuthorDetail: Sendable, Hashable, Identifiable {
     public init(author: Author) {
         summary = AuthorSummary(author: author)
         bio = author.description.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+        libraryID = author.libraryId
     }
 }
 
@@ -25,12 +28,12 @@ public struct AuthorDetail: Sendable, Hashable, Identifiable {
 ///   overlap, only the last one started is applied. A 404 (``APIError/notFound``) drops the
 ///   author and ``phase`` becomes ``Phase/notFound`` for the view to pop.
 /// - ``books`` is an ``ItemListModel`` and pages, refreshes and drops stale pages on its own. It
-///   loads from ``libraryID``, which the caller must set to the author's library: the books
-///   start loading before the author (and its `libraryId`) arrives.
+///   starts in ``libraryID``, as the books load before the author's `libraryId` arrives; when the loaded
+///   ``AuthorDetail/libraryID`` differs, it's replaced by a list there (releasing the old one cancels its page).
 /// - ``books`` keeps its items on 404, so views must not show them in ``Phase/notFound``.
 ///
-/// A model belongs to one author, library, client and account: views recreate it per author ID
-/// and under the session's `.id(identity)` (ADR 0004), so a server or user switch never reuses it.
+/// A model belongs to one author, client and account: views recreate it per author ID and under
+/// the session's `.id(identity)` (ADR 0004), so a server or user switch never reuses it.
 @MainActor
 @Observable
 public final class AuthorDetailModel {
@@ -48,9 +51,10 @@ public final class AuthorDetailModel {
     }
 
     public let authorID: String
+    /// The library the screen was opened in, where ``books`` load until the author's arrives.
     public let libraryID: String
     /// The author's books. Nothing loads until ``loadIfNeeded()`` or `books.loadNextPage()`.
-    public let books: ItemListModel<LibraryQuery, ItemSummary>
+    public private(set) var books: ItemListModel<LibraryQuery, ItemSummary>
 
     /// The last loaded author; kept while reloading and after a failed reload, dropped on 404.
     public private(set) var detail: AuthorDetail?
@@ -59,9 +63,13 @@ public final class AuthorDetailModel {
     public private(set) var error: (any Error)?
     /// A load answered 404 and no load has succeeded since.
     public private(set) var isNotFound = false
+    /// ``refresh()`` calls whose books loaded, whatever the author's result; views re-check visible cards on each.
+    public private(set) var booksRefreshes = 0
 
     @ObservationIgnored private let service: any SeriesAuthorsService
     @ObservationIgnored private var sequence = 0
+    /// The library ``books`` load from.
+    @ObservationIgnored private var booksLibraryID: String
 
     /// - Parameter query: The books' sort and `collapseseries`; its filter is replaced with the
     ///   author's, and its page and limit are set by ``books``.
@@ -74,6 +82,7 @@ public final class AuthorDetailModel {
         self.service = service
         var query = query
         query.filter = .authors(id: authorID)
+        booksLibraryID = libraryID
         books = .filteredBooks(
             service: service, libraryID: libraryID, query: query, pageSize: pageSize,
             prefetchThreshold: prefetchThreshold, connectionKey: connectionKey)
@@ -102,10 +111,11 @@ public final class AuthorDetailModel {
         let booksLoad = books.refresh()
         await load()
         await booksLoad?.value
+        if books.error == nil { booksRefreshes += 1 }
     }
 
-    /// Loads the author. A response to an older call that arrives after a newer one started is
-    /// dropped.
+    /// Loads the author; when they're in another library than ``books``, moves the books there and loads their
+    /// first page. A response to an older call that arrives after a newer one started is dropped.
     public func load() async {
         sequence += 1
         let sequence = sequence
@@ -123,6 +133,13 @@ public final class AuthorDetailModel {
             detail = AuthorDetail(author: response.author)
             error = nil
             isNotFound = false
+            if let libraryID = detail?.libraryID, libraryID != booksLibraryID {
+                booksLibraryID = libraryID
+                books = .filteredBooks(
+                    service: service, libraryID: libraryID, query: books.query, pageSize: books.pageSize,
+                    prefetchThreshold: books.prefetchThreshold, connectionKey: books.connectionKey)
+                await books.loadNextPage()?.value
+            }
         case .failure(let error):
             if error is CancellationError { return }
             self.error = error

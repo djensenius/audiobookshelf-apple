@@ -156,7 +156,7 @@ enum PodcastEpisodeActions {
     }
 
     static func context(canPlay: Bool) -> ItemActionContext {
-        HomePresentation.actionContext(canPlay: canPlay)
+        ItemCardActions.actionContext(canPlay: canPlay)
     }
 
     /// Performs `kind` on the episode `summary` stands for. A finished episode plays from the
@@ -174,6 +174,6 @@ enum PodcastEpisodeActions {
                     try await play(itemID: itemID, episodeID: episodeID, startTime: 0)
                 } : play
         }
-        return await HomePresentation.perform(kind, on: summary, actions: actions, play: play)
+        return await ItemCardActions.perform(kind, on: summary, actions: actions, play: play)
     }
 }
