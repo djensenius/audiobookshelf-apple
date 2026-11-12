@@ -102,16 +102,17 @@ final class ImageServices {
     /// Runs a full pass of the cover file store at `.background` priority, after deleting the
     /// covers of connections `accounts` no longer saves, unless a run is already in flight.
     private func maintainDisk(sweepingRemovalsOf accounts: AccountManager?, inBackground: Bool) {
-        guard maintenance == nil else { return }
         #if os(iOS)
-            // Background time, so the pass can finish once the app is in the background; it
-            // is redone by the next launch or background entry if the system suspends it anyway.
-            if inBackground {
+            // Background time, so the run (this one, or the launch run still in flight) can
+            // finish once the app is in the background; it is redone by the next launch or
+            // background entry if the system suspends it anyway. Ended when the run finishes.
+            if inBackground, maintenanceTime == .invalid {
                 maintenanceTime = UIApplication.shared.beginBackgroundTask(withName: "Cover cache maintenance") {
                     [weak self] in self?.endMaintenanceTime()
                 }
             }
         #endif
+        guard maintenance == nil else { return }
         let (participant, fileStore) = (self.participant, self.fileStore)
         maintenance = Task(priority: .background) { [weak self] in
             if let accounts {
