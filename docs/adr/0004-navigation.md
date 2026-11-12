@@ -404,6 +404,8 @@ ArrangementView { primary } secondary: { secondary }
 - The player shows primary-only, because the area is taller than wide.
 - Now Playing lines up the boundary between artwork and controls with the active `.division` region that is wider than tall. Artwork and title go above the fold, and the scrubber and transport go on the stable lower half.
 - This follows the HIG laptop guidance through a reserved region, not a pose check.
+- *Amended by #84:* the player does this with an `ArrangementView` in the `.overlay` style, not `.split`. The controls are the primary, with `overlayArrangementEdge(.bottom)`. The artwork and title are the secondary. Folded, the overlay puts the secondary on the top half and the primary on the bottom half, clear of the hinge. `.split` would put the primary (the controls) on top.
+- Until the first geometry arrives, the player keeps the column layout, so laptop pose doesn't flash the split first.
 
 **Grids**
 
@@ -424,6 +426,7 @@ ArrangementView { primary } secondary: { secondary }
 - A small `ABSUI` wrapper (`DuoArrangement`) uses `ArrangementView` under `if #available(iOS 27.1, macOS 27.1, *)`.
 - Below 27.1 it falls back to `ViewThatFits`: an `HStack` of both panes when wide, otherwise primary-only.
 - 27.1 toolbar modifiers are gated inside `@ToolbarContentBuilder` with `if #available`.
+- *Amended by #84 for the player:* the player's arrangements stay in the app (`PlayerLayout`, `DuoPlayerLayouts.swift`), not in an ABSUI `DuoArrangement`, and have **no** 27.0 `ViewThatFits` fallback. #84 requires the player on iOS 27.0 (and on macOS) to stay exactly as it was, a single column, so below 27.1 there is nothing to fall back to. The 27.1 toolbar pieces are gated by `if #available` in the view rather than in the toolbar builder.
 
 #### Sketches
 
