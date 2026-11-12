@@ -20,7 +20,10 @@ struct AudiobookshelfApp: App {
             .environment(settings)
             .modifier(AppThemeModifier(settings: settings))
         }
-        .commands { SearchCommands() }
+        .commands {
+            SearchCommands()
+            RefreshCommands()
+        }
         // The system relaunches the app for finished background downloads; this waits until
         // the download engine has processed every event before the system suspends it again.
         .backgroundTask(.urlSession(DownloadEngine.sessionIdentifier)) {
