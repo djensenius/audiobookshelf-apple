@@ -269,6 +269,32 @@ private func loadedModel(
         #expect(!model.isCreating)
     }
 
+    /// The sheet can't close while a toggle or create is in flight.
+    @Test func theSheetCanCloseOnlyBetweenWrites() async throws {
+        let gate = CancellableGatedCalls<PlaylistWrite, Playlist>()
+        let model = await loadedModel(
+            [book1], playlists: [playlist("p", [])],
+            service: FakePlaylistEditingService(
+                create: { try await gate.call($0) }, add: { try await gate.call($0) },
+                remove: { try await gate.call($0) }))
+        var calls = gate.calls.makeAsyncIterator()
+        #expect(model.canDismiss)
+
+        async let toggled: Void = model.toggle(playlistID: "p")
+        var call = try #require(await calls.next())
+        #expect(!model.canDismiss)
+        call.reply.resume(throwing: TestError.offline)
+        await toggled
+        #expect(model.canDismiss)
+
+        async let created = model.create(name: "New")
+        call = try #require(await calls.next())
+        #expect(!model.canDismiss)
+        call.reply.resume(returning: playlist("new", [book1]))
+        #expect(await created == true)
+        #expect(model.canDismiss)
+    }
+
     @Test func aNewerLoadWinsOverAnOlderResponse() async throws {
         let gate = CancellableGatedCalls<Int, [Playlist]>()
         let counter = KeyedCallCounter()

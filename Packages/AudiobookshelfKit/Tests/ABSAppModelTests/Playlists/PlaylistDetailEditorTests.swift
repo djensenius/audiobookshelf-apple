@@ -164,6 +164,60 @@ private func memberIDs(_ editor: PlaylistDetailEditor) -> [String]? {
         #expect(editor.canEdit)
     }
 
+    /// A playlist update the server pushed while a reorder was in flight may predate or follow the
+    /// reorder's commit, so a successful reorder reloads instead of showing its own response.
+    @Test func aSuccessfulMoveReloadsAfterAnUpdatePushedMeanwhile() async throws {
+        let gate = CancellableGatedCalls<EditCall, Playlist?>()
+        var editing = FakeEditing()
+        editing.answer = { call in try await gate.call(call) }
+        let editor = await loadedEditor(editing) { playlist([b2, b1, e1, b3]) }
+        var calls = gate.calls.makeAsyncIterator()
+
+        async let moved: Void = editor.move(fromOffsets: [2], toOffset: 0)
+        let call = try #require(await calls.next())
+        editor.model.apply(.playlist(.updated(playlist([b2, b1, e1, b3]), libraryID: "lib"), userID: "u1"))
+        call.reply.resume(returning: playlist([b2, b1, e1]))
+        await moved
+        #expect(memberIDs(editor) == ["b2", "b1", "pod-e1", "b3"])
+        #expect(editor.failure == nil)
+        #expect(editor.canEdit)
+    }
+
+    /// The reload after a pushed update fails: the write succeeded, so the pushed state stays and
+    /// nothing is reported.
+    @Test func aFailedReloadAfterASuccessfulMoveKeepsThePushedUpdate() async throws {
+        let gate = CancellableGatedCalls<EditCall, Playlist?>()
+        var editing = FakeEditing()
+        editing.answer = { call in try await gate.call(call) }
+        let editor = await loadedEditor(editing) { throw TestError.offline }
+        var calls = gate.calls.makeAsyncIterator()
+
+        async let moved: Void = editor.move(fromOffsets: [2], toOffset: 0)
+        let call = try #require(await calls.next())
+        editor.model.apply(.playlist(.updated(playlist([b1, e1, b2, b3]), libraryID: "lib"), userID: "u1"))
+        call.reply.resume(returning: playlist([b2, b1, e1]))
+        await moved
+        #expect(memberIDs(editor) == ["b1", "pod-e1", "b2", "b3"])
+        #expect(editor.failure == nil)
+    }
+
+    /// An empty answer confirms the playlist is deleted, whatever was pushed meanwhile.
+    @Test func anEmptyAnswerDeletesEvenAfterAnUpdatePushedMeanwhile() async throws {
+        let gate = CancellableGatedCalls<EditCall, Playlist?>()
+        var editing = FakeEditing()
+        editing.answer = { call in try await gate.call(call) }
+        let editor = await loadedEditor(editing)
+        var calls = gate.calls.makeAsyncIterator()
+
+        async let removed: Void = editor.remove(memberIDs: ["b1", "pod-e1", "b2"])
+        let call = try #require(await calls.next())
+        editor.model.apply(.playlist(.updated(playlist([b1, e1, b2]), libraryID: "lib"), userID: "u1"))
+        call.reply.resume(returning: playlist([]))
+        await removed
+        #expect(editor.isDeleted)
+        #expect(editor.model.phase == .notFound)
+    }
+
     @Test(arguments: [
         (IndexSet([0]), 0), (IndexSet([0]), 1), (IndexSet([2]), 3), (IndexSet([3]), 0), (IndexSet([0]), 4),
         (IndexSet(), 1),

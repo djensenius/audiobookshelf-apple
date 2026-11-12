@@ -13,8 +13,9 @@ import Observation
 ///   was and ``failure`` is set. A 404 means the playlist (or the member) is already gone, so the
 ///   model reloads instead, which shows the playlist as not found or the server's members; if that
 ///   reload fails, it goes back and ``failure`` is set too.
-/// - Going back never undoes a newer state: when the server pushed the playlist (or a load
-///   answered) after the edit showed, the model keeps that instead.
+/// - Neither going back nor a success undoes a newer state: when the server pushed the playlist
+///   (or a load answered) after the edit showed, a failure keeps that state and a success reloads
+///   instead of showing its response, which may predate it. An empty response still deletes.
 /// - One write runs at a time: edits while one is in flight are ignored (``canEdit``).
 /// - A reorder sends every member once, in the new order (`PATCH /api/playlists/:id`); the server
 ///   rejects any other count with 400. One member is removed with
@@ -131,8 +132,13 @@ public final class PlaylistDetailEditor {
             let playlist = try await request(service)
             if playlist.items.isEmpty {
                 showDeleted()
-            } else {
+            } else if model.revision == edit {
                 model.showEdited(GroupDetail(playlist: playlist))
+            } else {
+                // The server pushed the playlist (or a load answered) while the request ran, so
+                // the response may be older than what shows: reload rather than undo the newer
+                // state. The write succeeded, so a failed reload keeps the newer state quietly.
+                await model.loadReportingFailure()
             }
         } catch  where error as? APIError == .notFound {
             let reloadError = await model.loadReportingFailure()

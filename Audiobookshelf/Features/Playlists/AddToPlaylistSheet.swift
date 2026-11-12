@@ -17,7 +17,7 @@ extension View {
 
 /// The add-to-playlist sheet (legacy `components/modals/playlists/AddCreateModal.vue`): the user's playlists in the
 /// library, checked when they contain every entry, and a field to create a playlist with the entries. Tapping a row
-/// adds the entries or, when checked, removes them.
+/// adds the entries or, when checked, removes them. It can't be closed while a toggle or create is in flight.
 struct AddToPlaylistSheet: View {
     let model: AddToPlaylistModel
     @Environment(\.dismiss) private var dismiss
@@ -37,12 +37,15 @@ struct AddToPlaylistSheet: View {
                         } label: {
                             Text(verbatim: L10n.string("ButtonDone"))
                         }
+                        .disabled(!model.canDismiss)
                     }
                 }
         }
         #if os(macOS)
             .frame(minWidth: 360, idealWidth: 420, minHeight: 420, idealHeight: 520)
         #endif
+        // Held open while a write runs, so its failure alert still shows (``AddToPlaylistModel/canDismiss``).
+        .interactiveDismissDisabled(!model.canDismiss)
         .task {
             if !model.hasLoaded { await model.load() }
         }
