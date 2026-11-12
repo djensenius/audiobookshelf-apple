@@ -331,6 +331,58 @@ import Testing
         defer { try? FileManager.default.removeItem(at: root) }
         #expect(run("--bogus").status == 1)
     }
+
+    @Test func checkFailsOnKeyMissingFromSource() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(run().status == 0)
+        try write(
+            """
+            let cancel = L10n.string("ButtonCancel")
+            let title = isOn ? "LabelMissing" : "ButtonCancel"
+            let other = L10n.string("NotAPrefix")
+            """, to: "Packages/AudiobookshelfKit/Sources/ABSUI/View.swift")
+        let checked = run("--check")
+        #expect(checked.status == 1)
+        #expect(
+            checked.log.filter { $0.hasPrefix("error:") }.map { String($0.prefix { $0 != ";" }) } == [
+                "error: Packages/AudiobookshelfKit/Sources/ABSUI/View.swift:2: LabelMissing is not in "
+                    + "strings/en-us.json or Localization/native/en-us.json",
+                "error: Packages/AudiobookshelfKit/Sources/ABSUI/View.swift:3: NotAPrefix is not in "
+                    + "strings/en-us.json or Localization/native/en-us.json",
+            ])
+        // Adding the keys to the native source file fixes it.
+        try write(#"{"LabelMissing": "Missing", "NotAPrefix": "Not a prefix"}"#, to: "Localization/native/en-us.json")
+        #expect(run().status == 0)
+        #expect(run("--check").status == 0)
+    }
+
+    @Test func unusedKeysOnlyWarn() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write(#"{"ButtonCancel": "Cancel", "ButtonLater": "Later"}"#, to: "strings/en-us.json")
+        try write(#"{"NativeOld": "Old", "NativeUsed": "Used"}"#, to: "Localization/native/en-us.json")
+        try write(
+            #"let used = [L10n.string("ButtonCancel"), L10n.string("NativeUsed")]"#, to: "Audiobookshelf/App.swift")
+        #expect(run().status == 0)
+        let checked = run("--check")
+        #expect(checked.status == 0)
+        #expect(checked.log.contains("warning: keys in strings/en-us.json not used from Swift (1): ButtonLater"))
+        #expect(
+            checked.log.contains("warning: keys in Localization/native/en-us.json not used from Swift (1): NativeOld"))
+    }
+
+    @Test func checkFailsOnHardCodedStringInFeatures() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        #expect(run().status == 0)
+        try write(#"Text("Hello")"#, to: "Audiobookshelf/Shell/Root.swift")
+        #expect(run("--check").status == 0)
+        try write("\n" + #"Button("Play") {}"#, to: "Audiobookshelf/Features/Player/Player.swift")
+        let checked = run("--check")
+        #expect(checked.status == 1)
+        #expect(
+            checked.log.contains {
+                $0.hasPrefix(#"error: Audiobookshelf/Features/Player/Player.swift:2: "Play": hard-coded"#)
+            })
+    }
 }
 
 @Suite struct PluralTests {
@@ -406,6 +458,19 @@ import Testing
         #expect(try plural(result.json, "SharedBookCount", "fr") == nil)
     }
 
+    @Test func warnsButKeepsPluralThatDropsAPlaceholder() throws {
+        let files = [
+            LocaleFile(
+                name: "en-us", strings: [:],
+                plurals: ["SharedBookCountBy": ["one": "{0} book by {1}", "other": "{0} books by {1}"]]),
+            LocaleFile(
+                name: "fr", strings: [:], plurals: ["SharedBookCountBy": ["one": "{0} livre", "other": "{0} livres"]]),
+        ]
+        let result = try CatalogBuilder.build(files: files)
+        #expect(result.warnings == ["fr: SharedBookCountBy drops {1}"])
+        #expect(try plural(result.json, "SharedBookCountBy", "fr")?["other"]?["value"] == "%1$lld livres")
+    }
+
     @Test func loadsAndMergesNativePlurals() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "PluralTests-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -422,5 +487,108 @@ import Testing
             try LocaleFile.merging(
                 legacy: merged, native: [LocaleFile(name: "en-us", strings: [:], plurals: files[0].plurals)])
         }
+    }
+}
+
+@Suite struct SourceScannerTests {
+    func file(_ text: String) -> SourceScanner.SourceFile {
+        SourceScanner.SourceFile(path: "Audiobookshelf/Features/A/A.swift", text: text)
+    }
+
+    @Test func findsKeysPassedDirectlyOrThroughLiterals() {
+        let source = file(
+            """
+            Text(verbatim: L10n.string("ButtonCancel", name))
+            let key = done ? "SharedMarkAsNotFinished" : "MessageMarkAsFinished"
+            case .title: "LabelTitle"
+            let label = L10n.plural( "SharedBookCount", count: 2)
+            let text = "\\(L10n.string("HeaderWelcome"))!"
+            let notKeys = ["Labels", "Labeled", "connect.address", "LabelWith Space", "Label"]
+            // L10n.string("ButtonInComment")
+            /// "LabelInDocComment"
+            let opted = "LabelOptedOut" // l10n-ignore: not a key
+            // l10n-ignore: the next line isn't a key
+            let next = "HeaderNotAKey"
+            """)
+        let (required, mentioned) = SourceScanner.keyReferences(in: [source])
+        #expect(
+            required.map(\.description) == [
+                "Audiobookshelf/Features/A/A.swift:1: ButtonCancel",
+                "Audiobookshelf/Features/A/A.swift:2: MessageMarkAsFinished",
+                "Audiobookshelf/Features/A/A.swift:2: SharedMarkAsNotFinished",
+                "Audiobookshelf/Features/A/A.swift:3: LabelTitle",
+                "Audiobookshelf/Features/A/A.swift:4: SharedBookCount",
+                "Audiobookshelf/Features/A/A.swift:5: HeaderWelcome",
+            ])
+        #expect(mentioned.isSuperset(of: ["ButtonCancel", "LabelTitle", "Labels", "Label"]))
+        #expect(mentioned.isDisjoint(with: ["ButtonInComment", "LabelInDocComment", "LabelOptedOut", "HeaderNotAKey"]))
+    }
+
+    @Test(arguments: [
+        #"Text("Hello")"#,
+        #"Text(verbatim: "Hello")"#,
+        #"Button("Play") { play() }"#,
+        #"Label("Downloads", systemImage: "arrow.down")"#,
+        #".navigationTitle("Library")"#,
+        #"    .accessibilityLabel("Close")"#,
+        #"Toggle("Shuffle", isOn: $on)"#,
+        #".searchable(text: $query, prompt: "Search")"#,
+        #"Text("\(count) books")"#,
+        #"Section("Recent") {"#,
+        #"x.alert("Error", isPresented: $shown) {"#,
+    ])
+    func flagsHardCodedStrings(line: String) {
+        let found = SourceScanner.hardCodedStrings(in: file("\n" + line), keys: [])
+        #expect(found.count == 1)
+        #expect(found.first?.line == 2)
+    }
+
+    @Test(arguments: [
+        #"Text(verbatim: L10n.string("ButtonCancel"))"#,
+        #"Text(verbatim: "•")"#,
+        #"Text(verbatim: "+" + count.formatted())"#,
+        #"Text("\(a) – \(b)")"#,
+        #"Text("\(L10n.string("LabelTitle")): \(title)")"#,
+        #"Text("ButtonCancel")"#,
+        #"Text(title)"#,
+        #"Text("")"#,
+        #"SettingToggle("LabelTitle", isOn: $on)"#,
+        #"Log.ui.notice("Didn't switch servers")"#,
+        #".accessibilityIdentifier("connect.address")"#,
+        #"Image(systemName: "play.fill")"#,
+        #"MyText("Hello")"#,
+        #"// Text("Hello") in a comment"#,
+        #"Text(verbatim: "https://abs.example.com") // l10n-ignore: an example"#,
+    ])
+    func allowsKeysSymbolsAndOptOuts(line: String) {
+        #expect(SourceScanner.hardCodedStrings(in: file(line), keys: ["ButtonCancel"]).isEmpty)
+    }
+
+    @Test func loadsSwiftFilesWithRelativePaths() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "SourceScannerTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appending(path: "Audiobookshelf/Features/A")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try "b".write(to: directory.appending(path: "B.swift"), atomically: true, encoding: .utf8)
+        try "a".write(to: directory.appending(path: "A.swift"), atomically: true, encoding: .utf8)
+        try "x".write(to: directory.appending(path: "notes.md"), atomically: true, encoding: .utf8)
+        let files = try SourceScanner.load(root: root, paths: ["Audiobookshelf", "Missing"])
+        #expect(files.map(\.path) == ["Audiobookshelf/Features/A/A.swift", "Audiobookshelf/Features/A/B.swift"])
+    }
+
+    /// Every key the app uses exists, and Features/ has no hard-coded strings (what `strings:check` enforces).
+    @Test func repositorySourcesPass() throws {
+        let root = URL(filePath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let files = try LocaleFile.merging(
+            legacy: LocaleFile.load(directory: root.appending(path: ImportCommand.legacyPath)),
+            native: LocaleFile.load(directory: root.appending(path: ImportCommand.nativePath)))
+        let keys = Set(files.first { $0.name == "en-us" }.map { Array($0.strings.keys) + Array($0.plurals.keys) } ?? [])
+        let sources = try SourceScanner.load(root: root, paths: SourceScanner.keyPaths)
+        #expect(sources.count > 100)
+        #expect(SourceScanner.keyReferences(in: sources).required.filter { !keys.contains($0.key) } == [])
+        let features = sources.filter { $0.path.hasPrefix(SourceScanner.featuresPath + "/") }
+        #expect(features.flatMap { SourceScanner.hardCodedStrings(in: $0, keys: keys) } == [])
     }
 }
