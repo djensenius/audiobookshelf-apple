@@ -327,6 +327,32 @@ import Testing
         #expect(run("--check").status == 1)
     }
 
+    @Test func intentsCatalogIsWrittenAndChecked() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write(#"{"IntentPauseTitle": "Pause"}"#, to: "Localization/intents/en-us.json")
+        try FileManager.default.createDirectory(
+            at: root.appending(path: IntentsCatalog.catalogPath).deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        #expect(run().status == 0)
+        #expect(run("--check").status == 0)
+        let catalog = try String(contentsOf: root.appending(path: IntentsCatalog.catalogPath), encoding: .utf8)
+        #expect(catalog.contains(#""IntentPauseTitle""#))
+
+        try write(#"{"IntentPauseTitle": "Pause", "IntentPlayTitle": "Play"}"#, to: "Localization/intents/en-us.json")
+        let stale = run("--check")
+        #expect(stale.status == 1)
+        #expect(stale.log.contains { $0.contains(IntentsCatalog.catalogPath) })
+    }
+
+    @Test func intentsKeysMustStartWithIntent() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        try write(#"{"ButtonPause": "Pause"}"#, to: "Localization/intents/en-us.json")
+        let result = run()
+        #expect(result.status == 1)
+        #expect(result.log.contains { $0.contains("ButtonPause must start with Intent") })
+    }
+
     @Test func rejectsUnknownArguments() {
         defer { try? FileManager.default.removeItem(at: root) }
         #expect(run("--bogus").status == 1)

@@ -35,6 +35,9 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     func pause()
     @discardableResult func seek(to time: Double) async -> Double?
     @discardableResult func jump(by offset: Double) async -> Double?
+    /// Jumps and reports how this jump ended, telling a target that failed to load apart from a
+    /// queued or superseded jump.
+    @discardableResult func jumpOutcome(by offset: Double) async -> JumpOutcome
     func setRate(_ rate: Double)
     func stop(reason: PlaybackStopReason)
 }
