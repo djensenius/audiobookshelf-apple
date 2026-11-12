@@ -16,6 +16,7 @@ struct AudiobookshelfApp: App {
         WindowGroup(for: WindowRoute.self) { $windowRoute in
             RootView(
                 lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts,
+                library: environment.library,
                 imagePipeline: environment.images.pipeline
             )
             .environment(settings)

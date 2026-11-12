@@ -64,6 +64,11 @@ public enum PlaybackCoordinatorError: Error, Sendable, Equatable {
     case engine(AudioEngineError)
     /// An item or the player failed while loading or playing.
     case playback(PlaybackFailure)
+    /// Recovery (ADR 0007) spent its retry and rebuild budgets; the position is kept for a retry.
+    case recoveryExhausted
+    /// The stream was rejected with 401 again after a token refresh: the server or a proxy in
+    /// front of it rejects it (ADR 0007's 401 path).
+    case streamRejected
     /// Any other error, by description.
     case unexpected(String)
 
