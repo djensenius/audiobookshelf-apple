@@ -80,6 +80,54 @@ private let pods = makeLibrary("pods", mediaType: .podcast)
         }
     }
 
+    /// A new scene of a user with no libraries shows no sections once they load, not every
+    /// section as before a library is chosen.
+    @Test func newSceneWithoutLibrariesShowsNoSections() async throws {
+        try await withLibrarySettings { settings in
+            let store = await loadedStore(settings, libraries: [])
+            let router = Router(identity: identityA)
+            #expect(router.visibleSections == AppTab.sections)
+
+            SceneLibrarySelection.reconcile(router, store: store)
+
+            #expect(router.libraryID == nil)
+            #expect(router.visibleSections.isEmpty)
+        }
+    }
+
+    /// A restored library, kind included, isn't checked yet: when it's gone, the fallback keeps
+    /// the launch link opened over it. Once a library is checked, its removal resets the paths.
+    @Test func fallbackFromARestoredLibraryKeepsALaunchLink() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let libraries = Locked([books])
+            var service = FakeLibraryService()
+            service.librariesHandler = { libraries.value }
+            store.attach(client: service, connectionKey: key, defaultLibraryID: "books")
+            let router = Router(identity: identityA)
+            router.restoreLibrary(id: "gone", kind: .podcast)
+            let play = PlayLink(itemID: "li_1")
+            router.open(DeepLink(.play(play)))
+            let opened = router[path: .library]
+            #expect(!opened.isEmpty)
+
+            await store.refresh()
+            SceneLibrarySelection.reconcile(router, store: store)
+
+            #expect(router.libraryID == "books")
+            #expect(router.libraryKind == .book)
+            #expect(router[path: .library] == opened)
+            #expect(router.pendingPlayLink == play)
+
+            // Removed after it was checked: its paths go.
+            libraries.value = [pods]
+            await store.refresh()
+            SceneLibrarySelection.reconcile(router, store: store)
+            #expect(router.libraryID == "pods")
+            #expect(router[path: .library].isEmpty)
+        }
+    }
+
     /// A user with no libraries: a saved or previous library is dropped with its library-scoped
     /// paths, other tabs are kept, and a library link has nothing to open.
     @Test func loadedWithoutLibraries() async throws {
@@ -100,6 +148,7 @@ private let pods = makeLibrary("pods", mediaType: .podcast)
             #expect(router.libraryID == nil)
             #expect(router.libraryKind == nil)
             #expect(router.supportedSections.isEmpty)
+            #expect(router.visibleSections.isEmpty)
             #expect(router.pendingLibraryID == nil)
             #expect(router.selectedTab == .library)
             #expect(router[path: .home].isEmpty)

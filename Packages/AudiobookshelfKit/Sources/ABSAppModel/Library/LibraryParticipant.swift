@@ -9,12 +9,13 @@ import Foundation
 ///   refreshes the libraries in a task the participant owns, so the hook returns promptly.
 /// - The seed boundary is ``ProgressCache/beginSeed()``; the seed fetches `GET /api/me`
 ///   (``UserEndpoints/progress()``) with the client of the seed's context and seeds the cache
-///   with its full list. Nothing else ever seeds it. A transient failure (offline, timeout, 408,
-///   429, 5xx) is retried within the seed after a short backoff (2, 5 and 10 seconds), so a
-///   flaky sign-in still seeds the cache this session. A seed whose session ended, reconnected
-///   or reseeded since its boundary is dropped by the participant's generation and the token,
-///   not only by cancellation. An offline session or one without a client doesn't seed; its
-///   reconnect does.
+///   with its full list. Nothing else ever seeds it. When rows couldn't be decoded the list is
+///   incomplete, and seeding it would remove their progress, so the cache is kept as it is.
+///   A transient failure (offline, timeout, 408, 429, 5xx) is retried within the seed after a
+///   short backoff (2, 5 and 10 seconds), so a flaky sign-in still seeds the cache this session.
+///   A seed whose session ended, reconnected or reseeded since its boundary is dropped by the
+///   participant's generation and the token, not only by cancellation. An offline session or
+///   one without a client doesn't seed; its reconnect does.
 /// - A reconnect attaches the new client from its context, keeping the account's data, and
 ///   refreshes again.
 /// - End cancels the refresh and clears the store synchronously, so the clear always runs,
@@ -25,7 +26,7 @@ import Foundation
 @MainActor
 public final class LibraryParticipant: SessionSeeding {
     /// Fetches the user's full progress list (`GET /api/me`) through a client.
-    public typealias FetchProgress = @Sendable (APIClient) async throws -> [MediaProgress]
+    public typealias FetchProgress = @Sendable (APIClient) async throws -> UserProgressResponse
     /// Waits out a retry's backoff; throws when cancelled.
     public typealias Sleep = @Sendable (Duration) async throws -> Void
 
@@ -57,7 +58,7 @@ public final class LibraryParticipant: SessionSeeding {
     public init(
         store: LibraryStore, defaultLibraryID: @escaping @MainActor () -> String? = { nil },
         service: @escaping @MainActor (APIClient) -> any LibraryService = { $0 },
-        fetchProgress: @escaping FetchProgress = { try await $0.send(UserEndpoints.progress()).mediaProgress },
+        fetchProgress: @escaping FetchProgress = { try await $0.send(UserEndpoints.progress()) },
         retryDelays: [Duration] = LibraryParticipant.defaultRetryDelays,
         sleep: @escaping Sleep = { try await Task.sleep(for: $0) }
     ) {
@@ -109,10 +110,18 @@ public final class LibraryParticipant: SessionSeeding {
         var retries = retryDelays[...]
         while true {
             do {
-                let progress = try await fetchProgress(client)
+                let response = try await fetchProgress(client)
                 // The session ended, reconnected or reseeded while the request ran.
                 guard isCurrent(generation, context, token) else { return }
-                store.progress.seed(progress, token: token)
+                guard response.skippedRows == 0 else {
+                    // An incomplete list would remove the skipped rows' progress as if the
+                    // server had deleted it.
+                    Log.api.error(
+                        "Skipped \(response.skippedRows, privacy: .public) malformed progress rows; keeping the cache"
+                    )
+                    return
+                }
+                store.progress.seed(response.mediaProgress, token: token)
                 return
             } catch let error as APIError where error.isTransient && !retries.isEmpty {
                 Log.api.info(

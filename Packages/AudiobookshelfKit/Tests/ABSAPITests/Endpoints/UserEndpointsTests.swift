@@ -57,6 +57,7 @@ import Testing
 
         #expect(response.mediaProgress.map(\.id) == ["p1"])
         #expect(response.mediaProgress.first?.currentTime == 12)
+        #expect(response.skippedRows == 1)
         let request = try #require(stub.requests.first)
         #expect(request.httpMethod == "GET")
         #expect(request.url?.path() == "/abs/api/me")

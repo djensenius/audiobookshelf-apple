@@ -30,6 +30,8 @@ private struct Harness {
     let libraryRequests = Locked(0)
     /// The backoffs the participant waited out.
     let sleeps = Locked<[Duration]>([])
+    /// The malformed rows every `/api/me` response reports.
+    let skippedRows = Locked(0)
 
     /// - Parameter gatesLibraries: whether libraries requests wait on ``libraries``; otherwise
     ///   they answer with none.
@@ -47,13 +49,17 @@ private struct Harness {
         let me = me
         let meRequests = meRequests
         let sleeps = sleeps
+        let skippedRows = skippedRows
         participant = LibraryParticipant(
             store: store, defaultLibraryID: { defaultLibraryID }, service: { _ in service },
             fetchProgress: { client in
                 let id = ObjectIdentifier(client)
                 meRequests.value.append(id)
-                if let answer = try answer?(id, meRequests.value.count) { return answer }
-                return try await me.call(id)
+                let skipped = skippedRows.value
+                if let answer = try answer?(id, meRequests.value.count) {
+                    return UserProgressResponse(mediaProgress: answer, skippedRows: skipped)
+                }
+                return UserProgressResponse(mediaProgress: try await me.call(id), skippedRows: skipped)
             },
             sleep: { sleeps.value.append($0) })
     }
@@ -202,6 +208,28 @@ private struct Harness {
             try #require(await me.next()).reply.resume(throwing: TestError.offline)
             await failed.value
             #expect(harness.cached == ["a"])
+        }
+    }
+
+    /// A list with malformed rows is incomplete: the cache is kept instead of losing the
+    /// skipped rows' progress as if the server had deleted it.
+    @Test func incompleteSeedKeepsCachedProgress() async throws {
+        try await withLibrarySettings { settings in
+            let harness = Harness(
+                settings: settings,
+                answer: { _, n in n == 1 ? [progress("a"), progress("b")] : [progress("b", at: 5)] })
+            let context = harness.context(client: try makeClient())
+            await harness.participant.sessionDidStart(context)
+            await harness.participant.beginSeed(context)
+            await harness.participant.seed(context)
+            #expect(harness.cached == ["a", "b"])
+
+            harness.skippedRows.value = 1
+            await harness.participant.beginSeed(context)
+            await harness.participant.seed(context)
+            #expect(harness.cached == ["a", "b"])
+            #expect(harness.store.progress.progress(libraryItemID: "b")?.currentTime == 1)
+            #expect(harness.sleeps.value.isEmpty)
         }
     }
 

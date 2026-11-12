@@ -10,7 +10,8 @@ import Foundation
 /// - Once ``LibraryStore/hasLoaded`` is set the library is checked again: one that no longer
 ///   exists falls back to the initial library, and one that does gets its kind and sections.
 ///   With no libraries at all the selection and library-scoped paths are cleared.
-///   Replacing an unchecked guess keeps the paths, such as a deep link's, opened before then.
+///   Replacing a library that was never checked (restored or guessed) keeps the paths, such as
+///   a launch or deep link's, opened before then.
 /// - A deep link's ``Router/pendingLibraryID`` is opened once loaded, or dropped when the user
 ///   has no such library.
 /// - Only a user's pick is saved as the account's last library.
@@ -62,15 +63,15 @@ public enum SceneLibrarySelection {
         } else if let initial = store.initialLibraryID,
             let library = store.libraries.first(where: { $0.id == initial })
         {
-            if router.libraryKind == nil {
-                // The gone library was only an unchecked guess (no kind yet), so the paths
-                // weren't opened in it, for example a deep link before the libraries loaded.
-                // Replace it without resetting them.
+            if !router.isLibraryChecked {
+                // The gone library was only restored or guessed, never checked, so the paths
+                // weren't opened in it: for example a launch or deep link before the libraries
+                // loaded. Replace it without resetting them.
                 adopt(library, in: router)
             } else {
                 show(library, in: router)
             }
-        } else if router.libraryID != nil {
+        } else if router.libraryID != nil || !router.isLibraryChecked {
             // The user has no libraries: drop the stale selection so screens reach their
             // empty state.
             router.clearLibrary()
@@ -110,7 +111,10 @@ public enum SceneLibrarySelection {
         guard
             router.libraryID != library.id || router.libraryKind != kind || router.supportedSections != sections
                 || router.pendingLibraryID == library.id
-        else { return }
+        else {
+            if !router.isLibraryChecked { router.isLibraryChecked = true }
+            return
+        }
         router.selectLibrary(id: library.id, kind: kind, supportedSections: sections)
     }
 
@@ -119,5 +123,6 @@ public enum SceneLibrarySelection {
     private static func adopt(_ library: Library, in router: Router) {
         router.restoreLibrary(id: library.id, kind: LibraryKind(library.mediaType))
         router.repairSections(supported: router.supportedSections)
+        router.isLibraryChecked = true
     }
 }
