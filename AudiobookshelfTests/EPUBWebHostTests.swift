@@ -724,16 +724,15 @@ private final class ReaderPage {
         #expect(error["message"] as? String == "The book lists a file more than once")
     }
 
-    /// Each asset's URL is swapped for its blob URL once, in style sheets and sections alike, not
-    /// again inside the blob URLs the earlier swaps put in.
-    @Test(.timeLimit(.minutes(1))) func assetURLsAreSubstitutedOnce() async throws {
-        let names = ["a", "b", "c", "d"]
+    /// How the real epub.js, once the book opens, rewrites `text` as a style sheet and as a
+    /// section, for a book listing the assets `listed` and containing only `present`.
+    private func rewritten(_ text: String, listed: [String], present: [String]) async throws -> [String] {
         let manifest =
-            names.map { #"<item id="\#($0)" href="\#($0)" media-type="image/png"/>"# }.joined()
+            listed.map { #"<item id="i\#($0)" href="\#($0)" media-type="image/png"/>"# }.joined()
             + #"<item id="css" href="style.css" media-type="text/css"/>"#
         let extra =
-            names.map { TinyEPUB.Entry(name: "OEBPS/\($0)", body: Data(count: 16)) }
-            + [TinyEPUB.Entry(name: "OEBPS/style.css", body: Data("a b c d".utf8))]
+            present.map { TinyEPUB.Entry(name: "OEBPS/\($0)", body: Data(count: 16)) }
+            + [TinyEPUB.Entry(name: "OEBPS/style.css", body: Data(text.utf8))]
         let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(extra: extra, manifest: manifest) })
         // Keeps the real book, and the blobs epub.js makes, where the test can read them.
         _ = try await page.controller.webView.evaluateJavaScript(
@@ -751,15 +750,52 @@ private final class ReaderPage {
             try await Task.sleep(for: .milliseconds(20))
         }
 
-        let counts = try await page.controller.webView.callAsyncJavaScript(
+        let texts = try await page.controller.webView.callAsyncJavaScript(
             """
             await window.testBook.opened
             const resources = window.testBook.resources
             const css = resources.replacementUrls[resources.urls.indexOf('style.css')]
-            const section = resources.substitute('a b c d', '/OEBPS/c1.xhtml')
-            return [await window.testBlobs[css].text(), section].map((text) => text.split('blob:').length - 1)
-            """, contentWorld: .page)
-        #expect(counts as? [Int] == [4, 4])
+            return [await window.testBlobs[css].text(), resources.substitute(text, '/OEBPS/c1.xhtml')]
+            """, arguments: ["text": text], contentWorld: .page)
+        return try #require(texts as? [String])
+    }
+
+    /// Each asset's URL is swapped for its blob URL once, in style sheets and sections alike, not
+    /// again inside the blob URLs the earlier swaps put in.
+    @Test(.timeLimit(.minutes(1))) func assetURLsAreSubstitutedOnce() async throws {
+        let names = ["a", "b", "c", "d"]
+        let texts = try await rewritten("a b c d", listed: names, present: names)
+
+        #expect(texts.map { $0.components(separatedBy: "blob:").count - 1 } == [4, 4])
+    }
+
+    /// An asset missing from the archive stays unresolved without shifting the others onto the
+    /// wrong blob URLs, as epub.js's own list of replacements does.
+    @Test(.timeLimit(.minutes(1))) func aMissingAssetLeavesTheOthersMapped() async throws {
+        let texts = try await rewritten("a.png b.png", listed: ["a.png", "b.png"], present: ["b.png"])
+
+        let blob = try Regex("blob:[^ ]+")
+        #expect(texts.map { $0.replacing(blob, with: "BLOB") } == ["a.png BLOB", "a.png BLOB"])
+    }
+
+    /// A relocation is posted whenever any of its fields changes, not only its start.
+    @Test(.timeLimit(.minutes(1))) func aRelocationWithANewEndIsPosted() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+        try await page.open("tiny")
+
+        for (end, atEnd) in [("e1", false), ("e2", true), ("e2", true)] {
+            _ = try await page.evaluate(
+                """
+                window.fakeRendition.emit('relocated', {
+                  start: { cfi: 's', href: 'c1.xhtml' }, end: { cfi: '\(end)', percentage: 0 }, atEnd: \(atEnd)
+                })
+                """)
+        }
+
+        let relocations = page.events.filter { $0["type"] as? String == "relocated" }
+        #expect(relocations.map { $0["endCfi"] as? String } == ["e1", "e2"])
+        #expect(relocations.map { $0["atEnd"] as? Bool } == [false, true])
     }
 
     @Test func aCommandMustBeAJSONObject() async {

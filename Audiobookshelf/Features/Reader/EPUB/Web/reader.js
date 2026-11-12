@@ -92,9 +92,10 @@
       atStart: Boolean(location.atStart),
       atEnd: Boolean(location.atEnd)
     }
-    if (lastRelocation && lastRelocation.startCfi === event.startCfi && lastRelocation.progress === event.progress) {
-      return
+    const same = function (key) {
+      return lastRelocation[key] === event[key]
     }
+    if (lastRelocation && Object.keys(event).every(same)) return
     lastRelocation = event
     post(event)
   }
@@ -310,7 +311,9 @@
 
   // Wraps the book's unpacking, which epub.js does once the package loads: refuses an asset listed
   // twice (epub.js copies each listing out of the archive at once, past the size limits), and
-  // swaps epub.js's sections' and style sheets' URL substitution for `substituteOnce`.
+  // swaps epub.js's sections' and style sheets' URL substitution for `substituteOnce`. epub.js
+  // drops an asset that failed to load from `replacementUrls`, shifting the later ones onto the
+  // wrong URLs, so the replacements come from the archive's cache and the rewritten style sheets.
   function guardResources(opening) {
     const unpack = opening.unpack
     opening.unpack = function (packaging) {
@@ -327,8 +330,14 @@
       }
       const unpacked = unpack.call(this, packaging)
       const resources = this.resources
+      const sheets = new Map()
+      const replacements = function () {
+        return resources.urls.map(function (href) {
+          return sheets.get(href) || resources.settings.archive.urlCache[resources.settings.resolver(href)]
+        })
+      }
       resources.substitute = function (content, url) {
-        return substituteOnce(content, url ? this.relativeTo(url) : this.urls, this.replacementUrls)
+        return substituteOnce(content, url ? this.relativeTo(url) : this.urls, replacements())
       }
       // As epub.js's own, which `replaceCss` calls once the assets' blob URLs exist.
       resources.createCssFile = function (href) {
@@ -338,8 +347,10 @@
         if (!text) return Promise.resolve()
         return text.then(
           function (css) {
-            const replaced = substituteOnce(css, this.relativeTo(absolute), this.replacementUrls)
-            return URL.createObjectURL(new Blob([replaced], { type: 'text/css' }))
+            const replaced = substituteOnce(css, this.relativeTo(absolute), replacements())
+            const sheet = URL.createObjectURL(new Blob([replaced], { type: 'text/css' }))
+            sheets.set(href, sheet)
+            return sheet
           }.bind(this),
           function () {
             return undefined
