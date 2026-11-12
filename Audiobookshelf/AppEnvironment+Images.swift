@@ -11,43 +11,55 @@ import Synchronization
 /// and the system (#182, ADR 0005).
 ///
 /// ``participant`` is a ``SessionStage/connect`` participant: it installs the session's request
-/// builder, rebuilds it when the active connection changes, removes it when the session ends, and
-/// deletes a server's covers once the server is removed. The pipeline trims its memory cache on
-/// memory warnings (iOS) or memory pressure (macOS), and ``didEnterBackground()`` trims it on iOS.
+/// builder, removes it when the session ends, and deletes a server's covers once the server is
+/// removed. ``trimmer`` trims the memory cache on memory warnings (iOS) or memory pressure
+/// (macOS), and when the app enters the background on iOS.
 @MainActor
 final class ImageServices {
     let pipeline: ImagePipeline
     let participant: ImageParticipant
+    /// Called by the system's memory events, on whatever thread they arrive.
+    nonisolated let trimmer: MemoryTrimmer
     private let network = NetworkMonitor()
     private let online = OnlineFlag()
     private var networkTask: Task<Void, Never>?
-    private var memoryWarnings: (any NSObjectProtocol)?
-    #if os(macOS)
+    #if os(iOS)
+        private var memoryWarnings: (any NSObjectProtocol)?
+    #elseif os(macOS)
         private var memoryPressure: (any DispatchSourceMemoryPressure)?
     #endif
 
-    init(accounts: AccountManager?) {
+    /// - Parameter trim: Trims the memory cache to a fraction of its cap; tests record it. By
+    ///   default, ``pipeline``'s ``ImagePipeline/trimMemory(toFraction:)``.
+    init(accounts: AccountManager?, trim: (@Sendable (_ fraction: Double) async -> Void)? = nil) {
         let limits = Self.limits
         let online = self.online
-        pipeline = ImagePipeline(
+        let pipeline = ImagePipeline(
             limits: limits,
             fileStore: CoverFileStore(directory: CoverFileStore.defaultDirectory(), limit: limits.diskBytes),
             // TODO(#143): pass the downloads' `DownloadedCoverLookup`, so downloaded items' covers
             // load from their files.
             downloadedCovers: nil,
             isOnline: { online.isOnline })
-        participant = ImageParticipant(sink: pipeline, activeConnection: { accounts?.activeConnection })
+        self.pipeline = pipeline
+        participant = ImageParticipant(sink: pipeline)
+        trimmer = MemoryTrimmer(trim: trim ?? { await pipeline.trimMemory(toFraction: $0) })
         if let accounts {
             participant.followRemovals { Set(accounts.connections.map(\.id)) }
         }
         followNetwork()
-        trimOnMemoryWarnings()
+        #if os(iOS)
+            memoryWarnings = Self.observeMemoryWarnings(calling: trimmer)
+        #elseif os(macOS)
+            memoryPressure = Self.observeMemoryPressure(calling: trimmer)
+        #endif
     }
 
     isolated deinit {
         networkTask?.cancel()
-        if let memoryWarnings { NotificationCenter.default.removeObserver(memoryWarnings) }
-        #if os(macOS)
+        #if os(iOS)
+            if let memoryWarnings { NotificationCenter.default.removeObserver(memoryWarnings) }
+        #elseif os(macOS)
             memoryPressure?.cancel()
         #endif
     }
@@ -56,7 +68,7 @@ final class ImageServices {
     /// where apps keep running in the background and memory pressure trims instead.
     func didEnterBackground() {
         #if os(iOS)
-            Task { [pipeline] in await pipeline.trimMemory(toFraction: 0.25) }
+            trimmer.didEnterBackground()
         #endif
     }
 
@@ -78,23 +90,56 @@ final class ImageServices {
         network.start()
     }
 
-    private func trimOnMemoryWarnings() {
-        let pipeline = self.pipeline
-        #if os(iOS)
-            memoryWarnings = NotificationCenter.default.addObserver(
+    // Not isolated, so the handlers they make don't inherit the main actor: the system calls them
+    // on other threads, where Swift 6's isolation check would trap.
+
+    #if os(iOS)
+        private nonisolated static func observeMemoryWarnings(calling trimmer: MemoryTrimmer) -> any NSObjectProtocol {
+            NotificationCenter.default.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: nil
-            ) { _ in
-                Task { await pipeline.trimMemory(toFraction: 0) }
-            }
-        #elseif os(macOS)
-            let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical])
-            source.setEventHandler { [weak source] in
-                let fraction = source?.data.contains(.critical) == true ? 0 : 0.5
-                Task { await pipeline.trimMemory(toFraction: fraction) }
-            }
+            ) { _ in trimmer.memoryWarning() }
+        }
+    #elseif os(macOS)
+        private nonisolated static func observeMemoryPressure(
+            calling trimmer: MemoryTrimmer
+        ) -> any DispatchSourceMemoryPressure {
+            let source = DispatchSource.makeMemoryPressureSource(
+                eventMask: [.warning, .critical], queue: .global(qos: .utility))
+            source.setEventHandler(
+                handler: memoryPressureHandler(event: { [weak source] in source?.data }, calling: trimmer))
             source.activate()
-            memoryPressure = source
-        #endif
+            return source
+        }
+
+        /// The pressure source's event handler, which runs on the source's queue.
+        nonisolated static func memoryPressureHandler(
+            event: @escaping @Sendable () -> DispatchSource.MemoryPressureEvent?, calling trimmer: MemoryTrimmer
+        ) -> @Sendable () -> Void {
+            {
+                guard let event = event() else { return }
+                trimmer.memoryPressure(event)
+            }
+        }
+    #endif
+}
+
+/// Trims the cover memory cache for the system's memory events, from any thread: 0 on a memory
+/// warning or critical pressure, 0.5 on a pressure warning, 0.25 in the background (the fractions
+/// `ImagePipeline.trimMemory(toFraction:)` documents).
+struct MemoryTrimmer: Sendable {
+    let trim: @Sendable (_ fraction: Double) async -> Void
+
+    func memoryWarning() {
+        Task { await trim(0) }
+    }
+
+    func memoryPressure(_ event: DispatchSource.MemoryPressureEvent) {
+        let fraction = event.contains(.critical) ? 0 : 0.5
+        Task { await trim(fraction) }
+    }
+
+    func didEnterBackground() {
+        Task { await trim(0.25) }
     }
 }
 
