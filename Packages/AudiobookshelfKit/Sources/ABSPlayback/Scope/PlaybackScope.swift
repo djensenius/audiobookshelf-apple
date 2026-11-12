@@ -30,8 +30,13 @@ extension NowPlayingBridge: NowPlayingHandle {
 /// and Now Playing bridge, built together and torn down together.
 ///
 /// - **Start.** ``make(_:makeNowPlaying:)`` attaches the syncer before anything can play, so
-///   every loaded session has a final-position reporter. ``start()`` restores the account's
-///   last-played item, paused.
+///   every loaded session has a final-position reporter, and the auto-advance over the
+///   connection's ``queue``. ``start()`` restores the account's last-played item, paused.
+/// - **Queue.** The scope owns its connection's one live ``PlaybackQueue`` (loaded from the
+///   store when the scope is made) and the ``PlaybackQueueAdvancer`` that plays it.
+///   ``editQueue(_:)`` changes it until retirement, which detaches the advancer and freezes the
+///   queue, so a retired scope's queue never changes again, even through a reference kept from
+///   an edit, and the connection's next scope loads what it saved.
 /// - **Reconnect.** ``reconnect(client:features:)`` swaps the client and features behind the
 ///   coordinator (``AccountPlaybackServices``); the scope and its playback carry on.
 /// - **End.** ``retire(reason:)`` runs synchronously, before the session's teardown suspends: it
@@ -66,6 +71,8 @@ public final class PlaybackScope {
         /// The connection's last-played store. Each connection has its own, so one account's
         /// record survives another account playing.
         public var lastPlayed: @MainActor (UUID) -> any LastPlayedStoring
+        /// Where the connection's play queue is saved, under a key of its own.
+        public var queueStore: any PlaybackQueueStoring
 
         public init(
             connectionID: UUID, client: APIClient?, features: ServerFeatures?,
@@ -75,7 +82,8 @@ public final class PlaybackScope {
             backgroundActivity: any BackgroundActivity = NoBackgroundActivity(),
             lastPlayed: @escaping @MainActor (UUID) -> any LastPlayedStoring = {
                 PlaybackScope.lastPlayedStore(for: $0)
-            }
+            },
+            queueStore: (any PlaybackQueueStoring)? = nil
         ) {
             self.connectionID = connectionID
             self.client = client
@@ -88,6 +96,7 @@ public final class PlaybackScope {
             self.tickInterval = tickInterval
             self.backgroundActivity = backgroundActivity
             self.lastPlayed = lastPlayed
+            self.queueStore = queueStore ?? UserDefaultsPlaybackQueueStore()
         }
     }
 
@@ -99,7 +108,11 @@ public final class PlaybackScope {
     /// Called once, the first time the server rejects a session start as expired.
     public var onSessionRejected: (@MainActor () -> Void)?
 
+    /// Auto-advance over the connection's queue, attached to the coordinator until
+    /// ``retire(reason:)``. `nil` only for a scope built without a queue (tests).
+    let advancer: PlaybackQueueAdvancer?
     private let nowPlaying: any NowPlayingHandle
+    private var isRetired = false
     private var observer: PlaybackObserverToken?
     private var releaseHooks: [@MainActor () -> Void] = []
     private var hasRaisedRejection = false
@@ -120,7 +133,8 @@ public final class PlaybackScope {
     }
 
     /// Builds the services, then the coordinator, then the syncer (attached before any play),
-    /// then the Now Playing bridge, which the scope holds strongly.
+    /// then the Now Playing bridge, which the scope holds strongly, and the queue's advancer,
+    /// whose podcast fallback reads episodes through the services' current client.
     public static func make(
         _ configuration: Configuration, makeNowPlaying: (PlaybackCoordinator) -> any NowPlayingHandle
     ) -> PlaybackScope {
@@ -135,19 +149,28 @@ public final class PlaybackScope {
         let syncer = ProgressSyncer(
             source: coordinator, service: services, store: configuration.writer,
             tickInterval: configuration.tickInterval, paths: nil)
+        let queue = PlaybackQueue(serverConnectionID: configuration.connectionID, store: configuration.queueStore)
+        let episodes = APIPodcastEpisodeSource(
+            serverConnectionID: configuration.connectionID, localProgress: configuration.writer,
+            fetchItem: { try await services.client().send(ItemEndpoints.item(id: $0)) },
+            fetchFinished: { try await services.client().send(UserEndpoints.me()) })
         return PlaybackScope(
-            coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator))
+            coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator),
+            queue: queue, episodes: episodes)
     }
 
-    /// Test seam: a scope over a coordinator and a syncer already attached to it.
+    /// Test seam: a scope over a coordinator and a syncer already attached to it, and an
+    /// advancer over `queue`, when one is given, attached to the coordinator.
     init(
         coordinator: PlaybackCoordinator, syncer: ProgressSyncer, services: AccountPlaybackServices?,
-        nowPlaying: any NowPlayingHandle
+        nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil
     ) {
         self.coordinator = coordinator
         self.syncer = syncer
         self.services = services
         self.nowPlaying = nowPlaying
+        advancer = queue.map { PlaybackQueueAdvancer(queue: $0, episodes: episodes) }
+        advancer?.attach(to: coordinator)
         observer = coordinator.addObserver { [weak self] event in
             guard case .failed(.sessionStartFailed(.sessionExpired)) = event else { return }
             self?.sessionRejected()
@@ -246,6 +269,18 @@ public final class PlaybackScope {
         await pendingPrimaryClaim?.value
     }
 
+    // MARK: Queue
+
+    /// The connection's play queue, read-only; `nil` only for a scope built without one (tests).
+    public var queue: (any PlaybackQueueReading)? { advancer?.queue }
+
+    /// Changes the queue, unless the scope has retired: from then on its queue stays as saved,
+    /// for the connection's next scope to load.
+    public func editQueue(_ edit: (PlaybackQueue) -> Void) {
+        guard !isRetired, let queue = advancer?.queue else { return }
+        edit(queue)
+    }
+
     /// Swaps the account's client and features after a reconnect, without rebuilding anything.
     public func reconnect(client: APIClient?, features: ServerFeatures?) {
         services?.update(client: client, features: features)
@@ -269,6 +304,10 @@ public final class PlaybackScope {
     public func retire(reason: PlaybackStopReason) {
         assert(reason != .user, "A scope retires only for an account-ending reason")
         revokePrimaryClaim()
+        // Detached before the stop, so nothing it triggers can advance or change the queue.
+        isRetired = true
+        advancer?.detach(from: coordinator)
+        advancer?.queue.retire()
         coordinator.stop(reason: reason)
         switch reason {
         case .expired, .signOut, .accountRemoved: services?.invalidate()
