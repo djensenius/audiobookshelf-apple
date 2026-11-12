@@ -46,7 +46,7 @@ public final class WidgetSnapshotWriter: SessionParticipant {
     private var launch: Task<Void, Never>?
     private var rejectedSwitches: Task<Void, Never>?
 
-    /// - Parameter fileURL: Where the snapshot goes (``WidgetSnapshot/defaultFileURL(appGroup:)``);
+    /// - Parameter fileURL: Where the snapshot goes (``WidgetSnapshot/defaultFileURL(appGroup:isAppGroupAvailable:)``);
     ///   `nil` without an App Group, when nothing is written but the session is still followed.
     /// - Parameters:
     ///   - now: The clock the interval is measured with.

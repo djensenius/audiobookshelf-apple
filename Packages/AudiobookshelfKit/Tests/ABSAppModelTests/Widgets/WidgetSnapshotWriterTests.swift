@@ -154,6 +154,17 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(onDisk?.cover != CoverLocator(route))
     }
 
+    /// On macOS the container URL comes back without the entitlement, so only an available App
+    /// Group gives the snapshot a file.
+    @Test func theSnapshotFileNeedsAnAvailableAppGroup() {
+        let group = AppSettings.appGroupIdentifier
+        #expect(WidgetSnapshot.defaultFileURL(appGroup: group, isAppGroupAvailable: { _ in false }) == nil)
+        #expect(
+            WidgetSnapshot.defaultFileURL(appGroup: group, isAppGroupAvailable: { $0 == group })
+                == FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group)?
+                .appending(path: "Library/Application Support/Widgets/continue-listening.json"))
+    }
+
     @Test func deepLinkOpensTheItemOnItsServer() throws {
         var podcast = snapshot(item: "li/1+a&b%")
         podcast.episodeID = "ep 1+2"

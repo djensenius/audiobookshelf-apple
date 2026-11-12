@@ -72,8 +72,15 @@ public struct WidgetSnapshot: Codable, Sendable, Hashable {
 
     /// `Library/Application Support/Widgets/continue-listening.json` in the App Group container,
     /// or `nil` without one: the widget couldn't read anything else.
-    public static func defaultFileURL(appGroup: String = AppSettings.appGroupIdentifier) -> URL? {
-        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
+    ///
+    /// The container counts only if this process may use it (``AppSettings/isAppGroupAvailable(_:)``,
+    /// as `DataStack` checks): on macOS the container URL comes back without the entitlement too.
+    public static func defaultFileURL(
+        appGroup: String = AppSettings.appGroupIdentifier,
+        isAppGroupAvailable: (String) -> Bool = AppSettings.isAppGroupAvailable
+    ) -> URL? {
+        guard isAppGroupAvailable(appGroup) else { return nil }
+        return FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)?
             .appending(path: "Library/Application Support/Widgets/continue-listening.json")
     }
 
