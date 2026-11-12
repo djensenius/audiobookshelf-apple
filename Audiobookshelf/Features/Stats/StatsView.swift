@@ -12,17 +12,18 @@ extension EnvironmentValues {
 
 /// The listening stats page (`Route.stats`), a port of `pages/stats.vue`: summary tiles, the
 /// last 7 days as a bar chart and the recent sessions. Sessions open their item through the
-/// router's typed path.
+/// router's typed path. The year in review opens in a sheet, as legacy's banner expands in place.
 struct StatsView: View {
     @Environment(\.statsService) private var service
     @State private var model: StatsModel?
-
-    /// The Year in review entry point stays hidden until #98 adds the screen.
-    private static let showsYearInReview = false
+    @State private var showsYearInReview = false
 
     var body: some View {
         content
             .navigationTitle(Text(verbatim: L10n.string("HeaderYourStats")))
+            .sheet(isPresented: $showsYearInReview) {
+                YearInReviewSheet()
+            }
             .task {
                 guard let service else { return }
                 let model = model ?? StatsModel(service: service)
@@ -34,7 +35,7 @@ struct StatsView: View {
 
     @ViewBuilder private var content: some View {
         if let model, model.hasLoaded {
-            StatsContent(model: model, showsYearInReview: Self.showsYearInReview)
+            StatsContent(model: model) { showsYearInReview = true }
         } else if let model, model.error != nil, !model.isLoading {
             ErrorStateView(title: L10n.string("MessageStatsLoadFailed")) {
                 Task { await model.load() }
@@ -49,7 +50,7 @@ struct StatsView: View {
 
 private struct StatsContent: View {
     let model: StatsModel
-    let showsYearInReview: Bool
+    let showYearInReview: () -> Void
 
     var body: some View {
         List {
@@ -90,13 +91,40 @@ private struct StatsContent: View {
                     Text(verbatim: L10n.string("HeaderStatsRecentSessions"))
                 }
             }
-            if showsYearInReview {
-                Section {
-                    Text(verbatim: L10n.string("LabelYearReviewShow"))
+            Section {
+                Button(action: showYearInReview) {
+                    Label {
+                        Text(verbatim: L10n.string("LabelYearReviewShow"))
+                    } icon: {
+                        Image(systemName: "calendar")
+                    }
                 }
             }
         }
         .refreshable { await model.load() }
+    }
+}
+
+/// The year in review in its own navigation stack, with a Done button.
+private struct YearInReviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            YearInReviewView()
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button {
+                            dismiss()
+                        } label: {
+                            Text(verbatim: L10n.string("ButtonDone"))
+                        }
+                    }
+                }
+        }
+        #if os(macOS)
+            .frame(minWidth: 480, minHeight: 640)
+        #endif
     }
 }
 
