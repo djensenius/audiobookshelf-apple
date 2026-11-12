@@ -12,6 +12,9 @@ private struct FakeStatsService: StatsService {
 
     func listeningStats() async throws -> ListeningStatsResponse { try await statsHandler() }
     func finishedItemCount() async throws -> Int { try await finishedHandler() }
+    func userType() async throws -> UserTypeResponse { UserTypeResponse(type: .user) }
+    func userYearStats(year: Int) async throws -> UserYearStats { UserYearStats() }
+    func serverYearStats(year: Int) async throws -> ServerYearStats { ServerYearStats() }
 }
 
 /// `GET /api/me/listening-stats`, the same JSON as `UserFixtures.listeningStats` in
