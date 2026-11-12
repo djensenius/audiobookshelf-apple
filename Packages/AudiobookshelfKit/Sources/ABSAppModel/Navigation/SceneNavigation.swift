@@ -4,7 +4,7 @@ import Observation
 /// One window scene's ``Router`` and the rules for when the scene may open a link and save its
 /// state (ADR 0004). The scene's host view owns one and keeps only the SwiftUI plumbing.
 ///
-/// A scene starts unrestored. Until ``restoreOnce(from:isCompact:opening:)`` has applied the
+/// A scene starts unrestored. Until ``restoreOnce(from:window:isCompact:opening:)`` has applied the
 /// saved snapshot it shows no tabs, opens no link and saves nothing, because saving earlier
 /// would replace the saved snapshot with the defaults.
 @MainActor
@@ -18,14 +18,16 @@ public final class SceneNavigation {
         router = Router(identity: identity)
     }
 
-    /// Starts the scene with ``Router/restoreScene(from:isCompact:opening:)``, the first time
-    /// only.
+    /// Starts the scene with ``Router/restoreScene(from:window:isCompact:opening:)``, the first
+    /// time only.
     /// - Returns: `true` if this call restored the scene, and opened `link`; `false` if the
     ///   scene was restored already, and nothing changed.
     @discardableResult
-    public func restoreOnce(from data: Data?, isCompact: Bool, opening link: DeepLink?) -> Bool {
+    public func restoreOnce(
+        from data: Data?, window: WindowRoute? = nil, isCompact: Bool, opening link: DeepLink?
+    ) -> Bool {
         guard !isRestored else { return false }
-        router.restoreScene(from: data, isCompact: isCompact, opening: link)
+        router.restoreScene(from: data, window: window, isCompact: isCompact, opening: link)
         isRestored = true
         return true
     }

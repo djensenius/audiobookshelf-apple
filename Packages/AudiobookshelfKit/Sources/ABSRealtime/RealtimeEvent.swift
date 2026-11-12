@@ -66,6 +66,19 @@ public enum LibraryEntityChange<Entity: Sendable & Hashable>: Sendable, Hashable
     }
 }
 
+/// An RSS feed was opened or closed. The server sends both to every user, with the feed as
+/// `Feed.toOldJSONMinified`.
+public enum RssFeedChange: Sendable, Hashable {
+    case opened(RssFeed)
+    case closed(RssFeed)
+
+    public var feed: RssFeed {
+        switch self {
+        case .opened(let feed), .closed(let feed): feed
+        }
+    }
+}
+
 public enum RealtimeEvent: Sendable, Equatable {
     /// The Socket.IO namespace connection was accepted. Not yet authenticated.
     case connected
@@ -83,6 +96,8 @@ public enum RealtimeEvent: Sendable, Equatable {
     case playlistChanged(LibraryEntityChange<Playlist>, userID: String)
     /// `author_added`, `author_updated` or `author_removed`.
     case authorChanged(LibraryEntityChange<Author>)
+    /// `rss_feed_open` or `rss_feed_closed`.
+    case rssFeedChanged(RssFeedChange)
 }
 
 extension RealtimeEvent {
@@ -132,6 +147,10 @@ extension RealtimeEvent {
         case "author_removed":
             let removed = try argument(LibraryScoped<EntityID>.self, from: arguments)
             return .authorChanged(.removed(id: removed.value.id, libraryID: removed.libraryID))
+        case "rss_feed_open":
+            return .rssFeedChanged(.opened(try argument(RssFeed.self, from: arguments)))
+        case "rss_feed_closed":
+            return .rssFeedChanged(.closed(try argument(RssFeed.self, from: arguments)))
         default:
             return nil
         }
