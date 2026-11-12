@@ -115,8 +115,8 @@ struct TabRoot: View {
     }
 }
 
-/// Opens Logs and, on iOS, Settings (a Mac has the Settings window). Temporary: the Account
-/// screen (S6) pushes both. Needs the stack's `Route` destination.
+/// Opens Logs and, on iOS, Settings (a Mac has the Settings window), for the connect screen
+/// and its signed-out stand-in, which have no Account tab. Needs the stack's `Route` destination.
 struct DiagnosticsToolbar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem(placement: .secondaryAction) {

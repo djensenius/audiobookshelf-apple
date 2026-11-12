@@ -21,7 +21,7 @@ public enum AccountSessionPhase: Sendable, Hashable {
 /// A session whose identity disappears without a ``SessionLifecycle`` transition is treated as
 /// expired on the server. Sign out, switch and remove through ``SessionLifecycle``, not the
 /// source, so the session is flushed and ended first; before signing in to another account
-/// while signed in, run the sign-in inside ``SessionLifecycle/performAccountChange(_:)``.
+/// while signed in, run the sign-in inside ``SessionLifecycle/performAccountChange(from:_:)``.
 @MainActor
 public protocol AccountSessionSource: AnyObject, Observable, Sendable {
     var phase: AccountSessionPhase { get }

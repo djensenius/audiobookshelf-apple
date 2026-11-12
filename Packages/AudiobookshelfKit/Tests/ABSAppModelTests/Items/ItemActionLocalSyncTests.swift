@@ -1,0 +1,193 @@
+import ABSAPI
+import ABSCore
+import ABSData
+import Foundation
+import Testing
+
+@testable import ABSAppModel
+
+/// Accepts every request, or fails them all while `fails` is set.
+private struct ScriptedWriter: ProgressWriting {
+    struct Failure: Error {}
+
+    let fails = Locked(false)
+    let deletes = Locked<[String]>([])
+
+    func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        if fails.value { throw Failure() }
+    }
+
+    func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        if fails.value { throw Failure() }
+        return "mp-\(itemID)"
+    }
+
+    func deleteProgress(id: String) async throws {
+        if fails.value { throw Failure() }
+        deletes.value.append(id)
+    }
+}
+
+/// Records the hook's calls; throws after recording while `fails` is set.
+private struct RecordingSync: ItemActionLocalSync {
+    struct Failure: Error {}
+
+    let calls = Locked<[String]>([])
+    let fails = Locked(false)
+
+    func didMarkFinished(_ target: ItemActionTarget) async throws { try record("finished \(target.libraryItemID)") }
+    func didMarkNotFinished(_ target: ItemActionTarget) async throws {
+        try record("notFinished \(target.libraryItemID)")
+    }
+    func didDiscard(_ target: ItemActionTarget) async throws { try record("discard \(target.libraryItemID)") }
+
+    private func record(_ call: String) throws {
+        calls.value.append(call)
+        if fails.value { throw Failure() }
+    }
+}
+
+private let connection = UUID()
+private let key = MediaKey(serverConnectionID: connection, libraryItemId: "item")
+private let target = ItemActionTarget(libraryItemID: "item", duration: 600)
+private let edited = Date(timeIntervalSince1970: 1_000)
+
+private func cachedProgress(finished: Bool = false) -> MediaProgress {
+    MediaProgress(
+        id: "mp-item", libraryItemId: "item", duration: 600, progress: finished ? 1 : 0.5,
+        currentTime: finished ? 600 : 300, isFinished: finished, lastUpdate: 1_000)
+}
+
+@MainActor
+@Suite struct ItemActionLocalSyncTests {
+    private let store: LocalProgressStore
+    private let cache = ProgressCache()
+    private let writer = ScriptedWriter()
+
+    init() throws {
+        store = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
+    }
+
+    private func actions(_ localSync: (any ItemActionLocalSync)? = nil) -> ProgressItemActions {
+        ProgressItemActions(
+            cache: cache, writer: writer,
+            localSync: localSync ?? LocalProgressItemActionSync(store: store, connectionID: connection))
+    }
+
+    /// A row with an unsent position, as playback leaves it.
+    private func playedRow(at currentTime: Double = 120) async throws {
+        let audio = ProgressEdit.Audio(currentTime: currentTime, duration: 600, progress: currentTime / 600)
+        try await store.recordEdit(ProgressEdit(audio: audio), for: key, now: edited)
+    }
+
+    @Test func finishedEditOnlyWhenRowExists() async throws {
+        cache.apply(cachedProgress())
+        try await actions().markFinished(target)
+        #expect(try await store.progress(for: key) == nil)
+
+        try await playedRow()
+        try await actions().markFinished(target)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.isFinished)
+        #expect(row.finishedDirty)
+        // The position is still sent, before finished.
+        #expect(row.audioDirty)
+        #expect(row.currentTime == 120)
+    }
+
+    @Test func discardDeletesRow() async throws {
+        cache.apply(cachedProgress())
+        try await playedRow()
+        try await actions().discardProgress(target)
+        #expect(writer.deletes.value == ["mp-item"])
+        #expect(try await store.progress(for: key) == nil)
+        #expect(try await store.pendingSync(for: connection).isEmpty)
+    }
+
+    @Test func notFinishedResetsAudioAndFinished() async throws {
+        cache.apply(cachedProgress(finished: true))
+        try await playedRow(at: 595)
+        try await store.recordEdit(ProgressEdit(isFinished: true), for: key, now: edited)
+
+        try await actions().markNotFinished(target)
+        let row = try #require(try await store.progress(for: key))
+        #expect(!row.isFinished)
+        #expect(row.currentTime == 0)
+        #expect(row.progress == 0)
+        #expect(row.duration == 600)
+        #expect(row.audioDirty && row.finishedDirty)
+
+        // Nothing to reset without a row.
+        try await store.deleteProgress(for: key)
+        cache.apply(cachedProgress(finished: true))
+        try await actions().markNotFinished(target)
+        #expect(try await store.progress(for: key) == nil)
+    }
+
+    /// Negative control: the local row changes only after the server accepted the action.
+    @Test func failedServerCallLeavesRowUntouched() async throws {
+        cache.apply(cachedProgress())
+        try await playedRow()
+        let before = try await store.progress(for: key)
+        writer.fails.value = true
+        let actions = actions()
+
+        await #expect(throws: ScriptedWriter.Failure.self) { try await actions.markFinished(target) }
+        await #expect(throws: ScriptedWriter.Failure.self) { try await actions.markNotFinished(target) }
+        await #expect(throws: ScriptedWriter.Failure.self) { try await actions.discardProgress(target) }
+        #expect(try await store.progress(for: key) == before)
+    }
+
+    @Test func rolledBackActionDoesNotCallHook() async throws {
+        let sync = RecordingSync()
+        cache.apply(cachedProgress(finished: true))
+        writer.fails.value = true
+        let actions = actions(sync)
+
+        await #expect(throws: ScriptedWriter.Failure.self) { try await actions.markFinished(target) }
+        await #expect(throws: ScriptedWriter.Failure.self) { try await actions.markNotFinished(target) }
+        await #expect(throws: ScriptedWriter.Failure.self) { try await actions.discardProgress(target) }
+        #expect(cache.progress(libraryItemID: "item") == cachedProgress(finished: true))
+        #expect(sync.calls.value.isEmpty)
+
+        // Hiding isn't synced locally, and discarding without progress sends nothing.
+        writer.fails.value = false
+        try await actions.hideFromContinueListening(target)
+        cache.clear()
+        let empty = ProgressItemActions(cache: cache, writer: writer, localSync: sync)
+        try await empty.discardProgress(target)
+        #expect(sync.calls.value.isEmpty)
+    }
+
+    @Test func hookFailureDoesNotRethrow() async throws {
+        let sync = RecordingSync()
+        sync.fails.value = true
+        cache.apply(cachedProgress())
+        let actions = actions(sync)
+
+        try await actions.markFinished(target)
+        #expect(cache.progress(libraryItemID: "item")?.isFinished == true)
+        try await actions.markNotFinished(target)
+        try await actions.discardProgress(target)
+        #expect(cache.progress(libraryItemID: "item") == nil)
+        #expect(sync.calls.value == ["finished item", "notFinished item", "discard item"])
+    }
+
+    /// The drain sends the old position before finished, so the server ends up finished.
+    @Test func drainSendsAudioThenFinishedAfterMarkFinished() async throws {
+        cache.apply(cachedProgress())
+        try await playedRow()
+        try await actions().markFinished(target)
+
+        let audio = try #require(try await store.beginSend(for: key))
+        #expect(audio.values.audio?.currentTime == 120)
+        #expect(audio.values.finished == nil)
+        #expect(try await store.completeSend(audio, serverLastUpdate: nil))
+
+        let finished = try #require(try await store.beginSend(for: key))
+        #expect(finished.values.audio == nil)
+        #expect(finished.values.finished?.isFinished == true)
+        #expect(try await store.completeSend(finished, serverLastUpdate: nil))
+        #expect(try await store.beginSend(for: key) == nil)
+    }
+}
