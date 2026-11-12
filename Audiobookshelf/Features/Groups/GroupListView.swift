@@ -108,6 +108,7 @@ struct GroupCard: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .itemHover()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: GroupPresentation.cardAccessibilityLabel(group, locale: locale)))
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))

@@ -6,8 +6,7 @@ import SwiftUI
 /// One collection or playlist (legacy `pages/collection/_id.vue` and `pages/playlist/_id.vue`): its cover, Play, its
 /// description and its members in order with their progress; a playlist's members mix books and podcast episodes.
 /// Builds one ``GroupDetailModel`` per store, account, library and group.
-struct GroupDetailView<Kind: GroupDetailKind>: View {
-    let kind: GroupSummary.Kind
+struct GroupDetailView<Kind: GroupScreenKind>: View {
     let groupID: String
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
@@ -18,12 +17,12 @@ struct GroupDetailView<Kind: GroupDetailKind>: View {
         let key = BrowseModelKey(store: store, libraryID: libraryID, entityID: groupID)
         Group {
             if let host, let model = host.model(for: key) {
-                GroupDetailContent(kind: kind, model: model)
+                GroupDetailContent(model: model, libraryID: host.key.libraryID)
                     // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
                     .environment(\.itemProgressReader, host.progressReader)
             } else {
-                BrowsePlaceholder(libraryID: libraryID, messages: GroupPresentation.detailMessages(kind))
-                    .navigationTitle(Text(verbatim: L10n.string(GroupPresentation.detailTitleKey(kind))))
+                BrowsePlaceholder(libraryID: libraryID, messages: GroupPresentation.detailMessages(Kind.summaryKind))
+                    .navigationTitle(Text(verbatim: L10n.string(GroupPresentation.detailTitleKey(Kind.summaryKind))))
             }
         }
         .task(id: key) {
@@ -35,16 +34,19 @@ struct GroupDetailView<Kind: GroupDetailKind>: View {
     }
 }
 
-/// The group screen for one model; previews give it a fixture service.
-struct GroupDetailContent<Kind: GroupDetailKind>: View {
-    let kind: GroupSummary.Kind
+/// The group screen for one model in the library `libraryID`; previews give it a fixture service. It doesn't follow
+/// the server's updates to the group yet (#355); pull to refresh or ⌘R reloads it.
+struct GroupDetailContent<Kind: GroupScreenKind>: View {
     let model: GroupDetailModel<Kind>
+    let libraryID: String
 
     var body: some View {
+        let kind = Kind.summaryKind
         let messages = GroupPresentation.detailMessages(kind)
-        BrowseStateView(state: GroupPresentation.state(of: model), messages: messages, retry: { reload() }) {
-            failed in
-            if let detail = model.detail {
+        let detail = GroupPresentation.detail(of: model, libraryID: libraryID)
+        let state = GroupPresentation.state(of: model, libraryID: libraryID)
+        BrowseStateView(state: state, messages: messages, retry: { reload() }) { failed in
+            if let detail {
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: ABSSpacing.large) {
                         if failed {
@@ -60,6 +62,7 @@ struct GroupDetailContent<Kind: GroupDetailKind>: View {
                                 .foregroundStyle(ABSColor.mutedForeground)
                                 .padding(.horizontal, ABSSpacing.large)
                         } else {
+                            // A playlist entry whose item the server didn't expand is titled with its ID (`GroupMember`).
                             BrowseItemGrid(elements: detail.members, item: \.summary)
                         }
                     }
@@ -67,9 +70,11 @@ struct GroupDetailContent<Kind: GroupDetailKind>: View {
                 }
             }
         }
-        .navigationTitle(Text(verbatim: model.detail?.name ?? L10n.string(GroupPresentation.detailTitleKey(kind))))
+        .navigationTitle(Text(verbatim: detail?.name ?? L10n.string(GroupPresentation.detailTitleKey(kind))))
         .refreshable { await model.load() }
-        .refreshCommand(.pushed(GroupPresentation.route(kind, id: model.groupID)), isDisabled: model.isLoading) {
+        .refreshCommand(
+            .pushed(GroupPresentation.route(Kind.summaryKind, id: model.groupID)), isDisabled: model.isLoading
+        ) {
             reload()
         }
     }
@@ -80,7 +85,7 @@ struct GroupDetailContent<Kind: GroupDetailKind>: View {
 }
 
 /// The group cover, Play (shown while a member is playable) and the description.
-private struct GroupDetailHeader<Kind: GroupDetailKind>: View {
+private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
     let detail: GroupDetail
     let model: GroupDetailModel<Kind>
     @Environment(\.serverID) private var serverID
@@ -95,6 +100,8 @@ private struct GroupDetailHeader<Kind: GroupDetailKind>: View {
             GroupCover(name: detail.name, covers: detail.covers, serverID: serverID)
                 .frame(maxWidth: 240)
                 .frame(maxWidth: .infinity)
+                // The navigation title names the group.
+                .accessibilityHidden(true)
             if let playAll = GroupPresentation.playAll(of: model, canPlay: playItem != nil && !isStarting) {
                 Button {
                     start(playAll)
@@ -109,6 +116,7 @@ private struct GroupDetailHeader<Kind: GroupDetailKind>: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!playAll.isEnabled)
                 .accessibilityLabel(Text(verbatim: GroupPresentation.playAllAccessibilityLabel(playAll)))
+                .accessibilityHint(Text(verbatim: playAll.hintKey.map { L10n.string($0) } ?? ""))
             }
             if let description = detail.description {
                 ExpandableText(description, collapsedLineLimit: 4)
@@ -140,7 +148,7 @@ private struct GroupDetailHeader<Kind: GroupDetailKind>: View {
     #Preview("Collection") {
         @Previewable @State var model = GroupsPreviewData.collection()
         NavigationStack {
-            GroupDetailContent(kind: .collection, model: model)
+            GroupDetailContent(model: model, libraryID: SampleLibrary.libraryID)
         }
         .task { await model.load() }
         .environment(\.serverID, UUID())
@@ -152,7 +160,7 @@ private struct GroupDetailHeader<Kind: GroupDetailKind>: View {
     #Preview("Playlist, largest text, dark") {
         @Previewable @State var model = GroupsPreviewData.playlist()
         NavigationStack {
-            GroupDetailContent(kind: .playlist, model: model)
+            GroupDetailContent(model: model, libraryID: SampleLibrary.libraryID)
         }
         .task { await model.load() }
         .environment(\.itemProgressReader, GroupsPreviewData.progressReader)
@@ -164,7 +172,7 @@ private struct GroupDetailHeader<Kind: GroupDetailKind>: View {
     #Preview("Playlist, failed") {
         @Previewable @State var model = GroupsPreviewData.playlist(fails: true)
         NavigationStack {
-            GroupDetailContent(kind: .playlist, model: model)
+            GroupDetailContent(model: model, libraryID: SampleLibrary.libraryID)
         }
         .task { await model.load() }
         .absBackground()

@@ -131,6 +131,7 @@
   "MessageCustomHeaderInvalid": "Enter a header name without spaces or special characters, and a value on one line.",
   "MessageCustomHeaderReserved": "{0} can't be a custom header.",
   "MessageCustomHeadersHelp": "Custom headers are sent with every request to this server, for example to get through a reverse proxy or Cloudflare Access. They can't include Authorization or Cookie.",
+  "MessageGroupAllFinished": "Every item is finished.",
   "MessageHideFromContinueListeningFailed": "Couldn't hide the item from Continue Listening.",
   "MessageHistoryLoadFailed": "Couldn't load the history.",
   "MessageHomeLoadFailed": "Couldn't load your shelves.",

@@ -6,13 +6,31 @@ import Foundation
 /// A library's collections or the user's playlists in it, a page at a time.
 typealias GroupListModel = ItemListModel<String, GroupSummary>
 
+/// A group the detail screens show: ``GroupDetailKind`` with the list kind it belongs to, so a screen's messages and
+/// routes always match the group it loads.
+protocol GroupScreenKind: GroupDetailKind {
+    static var summaryKind: GroupSummary.Kind { get }
+}
+
+extension CollectionGroupKind: GroupScreenKind {
+    static var summaryKind: GroupSummary.Kind { .collection }
+}
+
+extension PlaylistGroupKind: GroupScreenKind {
+    static var summaryKind: GroupSummary.Kind { .playlist }
+}
+
 /// What play-all offers on a collection or playlist: legacy shows Play while any member is playable, and plays the
 /// first playable member that isn't finished.
 struct GroupPlayAll: Hashable {
-    /// The member Play starts; `nil` when every playable member is finished, so Play does nothing.
+    /// The member Play starts; `nil` when every playable member is finished. Legacy's Play then does nothing; here
+    /// it is disabled and its hint says why (``hintKey``).
     let next: GroupMember?
     /// There is a member to play and a player to play it.
     let isEnabled: Bool
+
+    /// The hint of a Play disabled because every playable member is finished.
+    var hintKey: String? { next == nil ? "MessageGroupAllFinished" : nil }
 }
 
 /// What the collection and playlist screens decide, kept out of the views so app tests cover it.
@@ -73,16 +91,28 @@ enum GroupPresentation {
         }
     }
 
-    /// The detail screen's state; loaded is never empty, as the header shows and a group without members says so.
+    /// The model's group if it belongs to the library `libraryID`. A deep link can name another library's group,
+    /// which is shown as not found: legacy leaves a group's page when the library changes (`libraryChanged()`).
     @MainActor
-    static func state<Kind>(of model: GroupDetailModel<Kind>) -> BrowseScreenState {
-        .resolve(
+    static func detail<Kind>(of model: GroupDetailModel<Kind>, libraryID: String) -> GroupDetail? {
+        model.detail.flatMap { $0.libraryID == libraryID ? $0 : nil }
+    }
+
+    /// The detail screen's state in the library `libraryID`; loaded is never empty, as the header shows and a group
+    /// without members says so.
+    @MainActor
+    static func state<Kind>(of model: GroupDetailModel<Kind>, libraryID: String) -> BrowseScreenState {
+        let isElsewhere = model.detail != nil && detail(of: model, libraryID: libraryID) == nil
+        return .resolve(
             .init(
                 hasLoaded: model.hasLoaded, hasContent: true, isLoading: model.isLoading,
-                hasError: model.error != nil, isNotFound: model.isNotFound))
+                hasError: model.error != nil, isNotFound: model.isNotFound || isElsewhere))
     }
 
     /// "1 item" or "3 items". The catalog has no plural variations, so one is its own key.
+    ///
+    /// A list card counts the server's entries, so a member listed twice counts twice; the detail screen shows it
+    /// once (``GroupDetail/members``).
     static func itemCount(_ count: Int, locale: Locale? = nil) -> String {
         count == 1
             ? L10n.string("LabelGroupOneItem", locale: locale)
@@ -109,8 +139,9 @@ enum GroupPresentation {
 
     /// Plays the member play-all starts through `play`, like a card's Play.
     ///
-    /// Legacy plays only that member. TODO(#156): queue the playable members after it once the app shell has a
-    /// `PlaybackQueue` to add them to.
+    /// Legacy plays only that member, and Play becomes Pause while one of the group's members plays.
+    /// TODO(#354): queue the playable members after it, and show Pause, once the app has a `PlaybackQueue` and the
+    /// player's state.
     ///
     /// - Returns: The failure message's key; `nil` when it started, was cancelled or had nothing to play.
     @MainActor

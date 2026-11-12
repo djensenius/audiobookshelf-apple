@@ -13,7 +13,7 @@ struct CollectionDetailView: View {
     let collectionID: String
 
     var body: some View {
-        GroupDetailView<CollectionGroupKind>(kind: .collection, groupID: collectionID)
+        GroupDetailView<CollectionGroupKind>(groupID: collectionID)
     }
 }
 

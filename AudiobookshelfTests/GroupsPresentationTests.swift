@@ -190,27 +190,27 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
         let client = FakeGroupsClient()
         try await withStore(client) { store, services in
             let gone = CollectionDetailModel(id: "col_gone", service: services, cache: store.progress)
-            #expect(GroupPresentation.state(of: gone) == .loading)
+            #expect(GroupPresentation.state(of: gone, libraryID: "lib_a") == .loading)
             await gone.loadIfNeeded()
-            #expect(GroupPresentation.state(of: gone) == .notFound)
+            #expect(GroupPresentation.state(of: gone, libraryID: "lib_a") == .notFound)
             #expect(GroupPresentation.detailMessages(.collection).notFound == "MessageCollectionDetailNotFound")
 
             let empty = CollectionDetailModel(id: "col_empty", service: services, cache: store.progress)
             await empty.loadIfNeeded()
             // The header still shows; the members say there are none.
-            #expect(GroupPresentation.state(of: empty) == .loaded(failed: false))
+            #expect(GroupPresentation.state(of: empty, libraryID: "lib_a") == .loaded(failed: false))
             #expect(empty.isEmpty)
             #expect(GroupPresentation.playAll(of: empty, canPlay: true) == nil)
 
             let playlist = PlaylistDetailModel(id: "pl_commute", service: services, cache: store.progress)
             client.fails.withLock { $0 = true }
             await playlist.loadIfNeeded()
-            #expect(GroupPresentation.state(of: playlist) == .failed)
+            #expect(GroupPresentation.state(of: playlist, libraryID: "lib_a") == .failed)
             client.fails.withLock { $0 = false }
             await playlist.loadIfNeeded()
             client.fails.withLock { $0 = true }
             await playlist.load()
-            #expect(GroupPresentation.state(of: playlist) == .loaded(failed: true))
+            #expect(GroupPresentation.state(of: playlist, libraryID: "lib_a") == .loaded(failed: true))
             #expect(playlist.detail?.name == "Commute")
         }
     }
@@ -241,14 +241,54 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
             #expect(await GroupPresentation.performPlayAll(playAll, play: play) == nil)
             #expect(played.withLock { $0 } == [GroupPlayTarget(itemID: SampleLibrary.podcast.id, episodeID: "ep_1")])
 
-            // Every playable member is finished: Play stays, and plays nothing.
+            #expect(playAll.hintKey == nil)
+
+            // Every playable member is finished: Play stays, disabled with a hint, as legacy's does nothing.
             store.progress.apply(finished(SampleLibrary.podcast.id, episodeID: "ep_1"))
             playAll = try #require(GroupPresentation.playAll(of: model, canPlay: true))
             #expect(playAll == GroupPlayAll(next: nil, isEnabled: false))
+            #expect(playAll.hintKey == "MessageGroupAllFinished")
             #expect(GroupPresentation.playAllAccessibilityLabel(playAll) == L10n.string("ButtonPlay"))
             #expect(await GroupPresentation.performPlayAll(playAll, play: play) == nil)
             #expect(played.withLock { $0.count } == 1)
         }
+    }
+
+    @Test func groupWithNothingPlayableHasNoPlay() async throws {
+        // Members, but only a missing book and an episode without audio.
+        let unplayable = Playlist(
+            id: "pl_unplayable", libraryId: "lib_a", name: "Unplayable",
+            items: [commute.items[0], commute.items[1]])
+        try await withStore(FakeGroupsClient(playlists: [unplayable])) { store, services in
+            let model = PlaylistDetailModel(id: "pl_unplayable", service: services, cache: store.progress)
+            await model.loadIfNeeded()
+            #expect(model.detail?.members.count == 2)
+            #expect(GroupPresentation.state(of: model, libraryID: "lib_a") == .loaded(failed: false))
+            #expect(GroupPresentation.playAll(of: model, canPlay: true) == nil)
+        }
+    }
+
+    @Test func anotherLibrarysGroupIsNotFound() async throws {
+        // A deep link to a collection of another library than the scene's.
+        let elsewhere = LibraryCollection(
+            id: "col_elsewhere", libraryId: "lib_b", name: "Elsewhere", books: [SampleLibrary.emma])
+        try await withStore(FakeGroupsClient(collections: [classics, elsewhere])) { store, services in
+            let model = CollectionDetailModel(id: "col_elsewhere", service: services, cache: store.progress)
+            await model.loadIfNeeded()
+            #expect(GroupPresentation.state(of: model, libraryID: "lib_a") == .notFound)
+            #expect(GroupPresentation.detail(of: model, libraryID: "lib_a") == nil)
+            #expect(GroupPresentation.state(of: model, libraryID: "lib_b") == .loaded(failed: false))
+            #expect(GroupPresentation.detail(of: model, libraryID: "lib_b")?.name == "Elsewhere")
+
+            let classics = CollectionDetailModel(id: "col_classics", service: services, cache: store.progress)
+            await classics.loadIfNeeded()
+            #expect(GroupPresentation.detail(of: classics, libraryID: "lib_a")?.name == "Classics")
+        }
+    }
+
+    @Test func screenKindsMatchTheirGroups() {
+        #expect(CollectionGroupKind.summaryKind == .collection)
+        #expect(PlaylistGroupKind.summaryKind == .playlist)
     }
 
     @Test func failedPlayAllReportsAndCancelledDoesNot() async throws {
@@ -275,7 +315,7 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
                     GroupPresentation.detailTitleKey(kind), GroupPresentation.membersHeaderKey(kind),
                     GroupPresentation.tab(kind).titleKey,
                 ]
-            } + ["LabelGroupOneItem", "LabelGroupItemCount", "ButtonPlay"]
+            } + ["LabelGroupOneItem", "LabelGroupItemCount", "ButtonPlay", "MessageGroupAllFinished"]
         for key in keys {
             #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
         }

@@ -13,7 +13,7 @@ struct PlaylistDetailView: View {
     let playlistID: String
 
     var body: some View {
-        GroupDetailView<PlaylistGroupKind>(kind: .playlist, groupID: playlistID)
+        GroupDetailView<PlaylistGroupKind>(groupID: playlistID)
     }
 }
 
