@@ -540,8 +540,9 @@ public final class AccountManager {
 
     /// Called when a connection's session expires (its tokens are deleted, or a sign-out is
     /// saved), active or not, and even before its session is restored: the app stops that
-    /// connection's downloads and discards their resume data there, unless its running session's
-    /// end does. Not for a connection being removed (``credentialsRemoved`` covers it).
+    /// connection's downloads and discards their resume data there, even when its running
+    /// session's end may be a switch. Not for a connection being removed (``credentialsRemoved``
+    /// covers it).
     @ObservationIgnored public var credentialsExpired: (@MainActor (UUID) -> Void)?
 
     /// Clients for download credentials of saved connections that aren't active, so a
