@@ -127,4 +127,8 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
         try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
             .openSession(id: id)
     }
+
+    public func sessionStatus(id: String) async -> PlaybackSessionStatus {
+        await .checking { try await openSession(id: id) }
+    }
 }

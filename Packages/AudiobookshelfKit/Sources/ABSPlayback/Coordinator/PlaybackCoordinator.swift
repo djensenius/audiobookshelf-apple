@@ -195,6 +195,8 @@ public final class PlaybackCoordinator {
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
     private var resumingIntent: Int?
+    /// The ``resumingIntent`` of a user seek that took over recovery's play.
+    @ObservationIgnored private var recoverySeekIntent: Int?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
     /// When each close in ``closeTasks`` was sent, so a hanging one holds back only the first play
@@ -238,13 +240,16 @@ public final class PlaybackCoordinator {
     ///   - sleep: Times the wait for closes in flight (tests replace it).
     ///   - backgroundActivity: Held while an auto-advance starts the next item with no audio playing.
     ///   - recoveryWait: Times recovery's backoff (tests replace it).
+    ///   - networkPaths: The network path recovery waits on (`SystemNetworkPathSource`); `nil`
+    ///     treats it as always satisfied.
     public init(
         engine: any AudioEngineProtocol, sessions: any PlaybackSessionService, progressStore: any LocalProgressReading,
         settings: any PlaybackSettingsProviding, policy: any StreamingPolicyChecking,
         lastPlayedStore: any LastPlayedStoring, now: @escaping @Sendable () -> Date = { .now },
         sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
         backgroundActivity: any BackgroundActivity = NoBackgroundActivity(),
-        recoveryWait: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+        recoveryWait: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+        networkPaths: (any NetworkPathSource)? = nil
     ) {
         self.backgroundActivity = backgroundActivity
         self.engine = engine
@@ -255,7 +260,7 @@ public final class PlaybackCoordinator {
         self.lastPlayedStore = lastPlayedStore
         self.now = now
         self.sleep = sleep
-        recovery = PlaybackRecovery(wait: recoveryWait)
+        recovery = PlaybackRecovery(wait: recoveryWait, paths: networkPaths)
         engine.onEvent = { [weak self] event in self?.handle(event) }
         recovery.host = makeRecoveryHost()
     }
@@ -692,10 +697,13 @@ public final class PlaybackCoordinator {
             // resume intent, so a pause (or lost output) meanwhile cancels it. A rebuild finishing
             // its load stays in charge: the load path plays it.
             var resume: Int?
-            if !isFinishingLoad, recovery.yieldToSeek() {
+            // One replacing such a seek in flight takes over its play.
+            let replacesRecoverySeek = resumingIntent != nil && resumingIntent == recoverySeekIntent
+            if !isFinishingLoad, recovery.yieldToSeek() || replacesRecoverySeek {
                 resumeIntent += 1
                 resume = resumeIntent
                 resumingIntent = resume
+                recoverySeekIntent = resume
             }
             defer { if let resume, resumingIntent == resume { resumingIntent = nil } }
             let result = await engine.seek(to: target)
@@ -939,8 +947,10 @@ public final class PlaybackCoordinator {
             emit(.ended)
             if let key { beginAdvance(after: key, ended) }
         case .failed(.itemFailed(_, let failure)), .failed(.playerFailed(let failure)):
+            // A resume awaiting its seek (a user's, or one that took over recovery) wants play too.
             recovery.recover(
-                from: failure, generation: generation, wasPlaying: engine.wasPlaybackRequestedAtFailure)
+                from: failure, generation: generation,
+                wasPlaying: engine.wasPlaybackRequestedAtFailure || resumingIntent != nil)
         case .failed(let failure):
             let error = PlaybackCoordinatorError(engineError: failure)
             self.error = error
@@ -964,6 +974,21 @@ public final class PlaybackCoordinator {
         resumeIntent += 1
         resumingIntent = nil
         playWhenLoaded = false
+    }
+
+    /// An interruption (a call) began: drops a play held outside the engine, which the engine's
+    /// pause can't reach, as a lost output does, so recovery never restarts audio during the call.
+    /// Returns whether there was one.
+    public func cancelHeldPlayIntent() -> Bool {
+        guard isPlaybackRequested, !engine.isPlaybackRequested else { return false }
+        outputLost()
+        return true
+    }
+
+    /// The interruption ended with a resumption recommended: plays as ``resume(rewindingBy:)``
+    /// does, so recovery's next attempt plays again.
+    public func resumeHeldPlayIntent() {
+        Task { await resume() }
     }
 
     // MARK: Auto-advance
@@ -1121,6 +1146,10 @@ public final class PlaybackCoordinator {
                 } catch {
                     return .unexpected(String(describing: error))
                 }
+            },
+            checkSession: { [weak self, sessions] in
+                guard let id = self?.session?.id, self?.phase == .loaded else { return .unknown }
+                return await sessions.sessionStatus(id: id)
             },
             giveUp: { [weak self] error in
                 guard let self else { return }

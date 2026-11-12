@@ -270,6 +270,9 @@ final class StubSessionService: PlaybackSessionService {
         var count = 0
         var openSessions: [String] = []
         var takenOver: [String] = []
+        /// What `GET /api/session/{id}` answers, and the ids looked up.
+        var sessionStatus = PlaybackSessionStatus.unknown
+        var sessionLookups: [String] = []
     }
 
     let serverConnectionID: UUID
@@ -286,6 +289,13 @@ final class StubSessionService: PlaybackSessionService {
     var openSessions: [String] { state.withLock { $0.openSessions } }
     /// The sessions the server closed because another start took over.
     var takenOver: [String] { state.withLock { $0.takenOver } }
+
+    func sessionStatus(id: String) async -> PlaybackSessionStatus {
+        state.withLock {
+            $0.sessionLookups.append(id)
+            return $0.sessionStatus
+        }
+    }
 
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
         // As the API client's request does, a start for a cancelled caller sends nothing and throws.

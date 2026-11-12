@@ -6,15 +6,13 @@ import Observation
 private let logger = Log.playback
 
 /// What ADR 0007 Decision 3 does about an item or player failure. The HTTP status is only a hint:
-/// until the session check (`GET /api/session/{id}`) exists, a failure that might mean "session
-/// gone" spends the readiness retries first and then escalates to a rebuild, as the ADR does
-/// when that budget runs out.
+/// the session check (``PlaybackSessionStatus``) before an attempt can turn a re-seek into a
+/// rebuild (session gone), a rebuild into a re-seek (session alive), or either into the 401 path.
 enum PlaybackRecoveryAction: Sendable, Hashable {
     /// Segment-readiness retries: re-seek the same item (the engine recreates a failed item or
     /// player), then escalate to rebuilds.
     case retry
-    /// Session rebuilds only. Network loss, until the network wait exists: the ADR's "path
-    /// satisfied, still failing" rule.
+    /// Network loss: once the path is satisfied, a re-seek if the session is alive, else rebuilds.
     case rebuild
     /// The 401 path: one token refresh, then a rebuild.
     case refresh
@@ -64,6 +62,9 @@ struct PlaybackRecoveryHost {
     var rebuild: (_ target: Double, _ playing: Bool) async -> PlaybackRecoveryRebuild
     /// Refreshes the access token once; returns the error that stops recovery, if any.
     var refresh: () async -> PlaybackCoordinatorError?
+    /// Looks up the loaded session (`GET /api/session/{id}`); ``PlaybackSessionStatus/unknown``
+    /// with none.
+    var checkSession: () async -> PlaybackSessionStatus
     /// Surfaces `error` and ends recovery.
     var giveUp: (PlaybackCoordinatorError) -> Void
 }
@@ -80,6 +81,11 @@ struct PlaybackRecoveryHost {
 /// - **401.** The first one in an episode refreshes the token, then rebuilds (counted against the
 ///   rebuild budget). A second one stops with ``PlaybackCoordinatorError/streamRejected``; there is
 ///   never a second refresh.
+/// - **Network and session.** Before each attempt, recovery waits while the network path is
+///   unsatisfied (no budget is spent offline) for up to ``networkWaitLimit``, then gives up with
+///   ``PlaybackCoordinatorError/recoveryExhausted``; once the path returns it skips that attempt's
+///   backoff. Before a re-seek, and after the path returns, it checks the session (see
+///   ``PlaybackRecoveryAction``).
 /// - **One run at a time.** A failure while a run is in flight only updates its cause.
 /// - **Supersession.** Each await rechecks the generation and the run's token: a stopped, replaced
 ///   or restarted item is never recovered. A user seek while loaded takes over
@@ -95,6 +101,8 @@ final class PlaybackRecovery {
     static let rebuildDelays: [Duration] = [.seconds(1), .seconds(2), .seconds(4)]
     /// Confirmed playback that ends an episode.
     static let episodeReset: TimeInterval = 30
+    /// The longest wait for an unsatisfied network path.
+    static let networkWaitLimit: Duration = .seconds(300)
 
     private enum Cause: Equatable {
         case failure(PlaybackFailure)
@@ -116,6 +124,7 @@ final class PlaybackRecovery {
 
     @ObservationIgnored var host: PlaybackRecoveryHost?
     private let wait: @Sendable (Duration) async -> Void
+    private let paths: (any NetworkPathSource)?
     // Observed, as ``wantsPlay(at:)`` feeds the coordinator's play intent.
     private var episode: Episode?
     private var isRunning = false
@@ -123,8 +132,10 @@ final class PlaybackRecovery {
     /// The generation of the rebuild in flight: failures at it are its new item's.
     @ObservationIgnored private var attemptGeneration: Int?
 
-    init(wait: @escaping @Sendable (Duration) async -> Void) {
+    /// - Parameter paths: The network path; `nil` treats it as always satisfied.
+    init(wait: @escaping @Sendable (Duration) async -> Void, paths: (any NetworkPathSource)? = nil) {
         self.wait = wait
+        self.paths = paths
     }
 
     /// Recovers from `failure` of the item loaded at `generation`. `wasPlaying` is whether play was
@@ -205,15 +216,27 @@ final class PlaybackRecovery {
 
     private func run(_ run: Int, host: PlaybackRecoveryHost) async {
         defer { if run == token { isRunning = false } }
-        while isCurrent(run, host), var episode {
-            switch step(for: episode) {
+        while isCurrent(run, host), let current = episode {
+            if case .surface(let error) = step(for: current) { return giveUp(error, host) }
+            let network = await waitForNetwork()
+            guard isCurrent(run, host) else { return }
+            if network == .timedOut { return giveUp(.recoveryExhausted, host) }
+            var session = PlaybackSessionStatus.unknown
+            if network == .returned || needsSessionCheck(current) {
+                session = await host.checkSession()
+                guard isCurrent(run, host) else { return }
+            }
+            guard var episode = self.episode else { return }
+            // Back online: retry at once.
+            let backoff = network != .returned
+            switch step(for: episode, session: session) {
             case .surface(let error):
                 return giveUp(error, host)
             case .reseek:
                 let delay = Self.retryDelays[episode.retries]
                 episode.retries += 1
                 self.episode = episode
-                await wait(delay)
+                if backoff { await wait(delay) }
                 guard isCurrent(run, host) else { return }
                 self.episode?.failedDuringAttempt = false
                 let result = await host.reseek(host.target())
@@ -229,36 +252,90 @@ final class PlaybackRecovery {
                 let error = await host.refresh()
                 guard isCurrent(run, host) else { return }
                 if let error { return giveUp(error, host) }
-                guard await rebuild(run, host) else { return }
+                guard await rebuild(run, host, backoff: backoff) else { return }
             case .rebuild:
                 guard episode.rebuilds < Self.rebuildDelays.count else { return giveUp(.recoveryExhausted, host) }
-                guard await rebuild(run, host) else { return }
+                guard await rebuild(run, host, backoff: backoff) else { return }
             }
         }
     }
 
-    private enum Step {
+    private enum Step: Equatable {
         case reseek, rebuild, refresh
         case surface(PlaybackCoordinatorError)
     }
 
-    private func step(for episode: Episode) -> Step {
+    /// The next attempt for `episode`, given what the session check found.
+    private func step(for episode: Episode, session: PlaybackSessionStatus = .unknown) -> Step {
         guard case .failure(let failure) = episode.cause else { return .rebuild }
-        switch failure.recoveryAction {
-        case .fatal: return .surface(.playback(failure))
-        case .refresh: return episode.refreshed ? .surface(.streamRejected) : .refresh
-        case .retry where episode.rebuilds == 0 && episode.retries < Self.retryDelays.count: return .reseek
-        case .retry, .rebuild: return .rebuild
+        let action = failure.recoveryAction
+        if action == .fatal { return .surface(.playback(failure)) }
+        if action == .refresh || session == .unauthorized {
+            return episode.refreshed ? .surface(.streamRejected) : .refresh
+        }
+        // A gone session is never re-seeked: a rebuild starts a new one.
+        let canReseek = episode.rebuilds == 0 && episode.retries < Self.retryDelays.count && session != .gone
+        switch action {
+        case .retry where canReseek: return .reseek
+        case .rebuild where canReseek && session == .alive: return .reseek
+        default: return .rebuild
         }
     }
 
+    /// Whether the session decides the next attempt: before a re-seek, or one that could be.
+    private func needsSessionCheck(_ episode: Episode) -> Bool {
+        guard episode.rebuilds == 0, case .failure(let failure) = episode.cause else { return false }
+        return step(for: episode) == .reseek || failure.recoveryAction == .rebuild
+    }
+
+    private enum NetworkWait {
+        /// Satisfied without waiting.
+        case online
+        /// Satisfied after waiting.
+        case returned
+        case timedOut
+    }
+
+    /// Waits while the network path is unsatisfied, up to ``networkWaitLimit``.
+    private func waitForNetwork() async -> NetworkWait {
+        guard let paths else { return .online }
+        enum Event { case path(online: Bool), timedOut }
+        let (events, sink) = AsyncStream<Event>.makeStream()
+        let forward = Task {
+            for await path in paths.paths() { sink.yield(.path(online: path.isOnline)) }
+            sink.finish()
+        }
+        var timer: Task<Void, Never>?
+        defer {
+            forward.cancel()
+            timer?.cancel()
+        }
+        for await event in events {
+            switch event {
+            case .path(online: true):
+                return timer == nil ? .online : .returned
+            case .path(online: false):
+                guard timer == nil else { continue }
+                logger.info("Recovery is waiting for the network")
+                timer = Task { [wait] in
+                    await wait(Self.networkWaitLimit)
+                    if !Task.isCancelled { sink.yield(.timedOut) }
+                }
+            case .timedOut:
+                return .timedOut
+            }
+        }
+        // The path source ended: don't wait on it.
+        return timer == nil ? .online : .returned
+    }
+
     /// One rebuild attempt; returns whether the run goes on (the attempt failed recoverably).
-    private func rebuild(_ run: Int, _ host: PlaybackRecoveryHost) async -> Bool {
+    private func rebuild(_ run: Int, _ host: PlaybackRecoveryHost, backoff: Bool) async -> Bool {
         guard var episode else { return false }
         let delay = Self.rebuildDelays[episode.rebuilds]
         episode.rebuilds += 1
         self.episode = episode
-        await wait(delay)
+        if backoff { await wait(delay) }
         guard isCurrent(run, host) else { return false }
         self.episode?.failedDuringAttempt = false
         let attempt = host.generation() + 1

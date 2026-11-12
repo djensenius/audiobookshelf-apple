@@ -28,6 +28,9 @@ public protocol PlaybackSessionService: Sendable {
     /// another caller has replaced it, its replacement is kept. `nil` replaces the stored token.
     /// Throws the ``APIError``: ``APIError/sessionExpired`` leads to sign-in.
     func refreshStreamAccess(replacing rejected: String?) async throws
+    /// Whether the server still has session `id` open (`GET /api/session/{id}`): recovery's check
+    /// before an attempt (ADR 0007). Defaults to ``PlaybackSessionStatus/unknown``.
+    func sessionStatus(id: String) async -> PlaybackSessionStatus
 }
 
 /// A session's stream plan with the URL to load for each of its tracks.
