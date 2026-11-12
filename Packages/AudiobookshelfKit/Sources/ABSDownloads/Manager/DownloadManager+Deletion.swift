@@ -193,7 +193,7 @@ extension DownloadManager {
     /// The paths the connection's records and the item's local item still use. The records are
     /// read first: the engine finalises a download into the local item before it deletes the
     /// record, so one finalised between the two reads is in at least one of them.
-    private func usedPaths(of key: MediaKey) async throws(DownloadManagerError) -> Set<String> {
+    func usedPaths(of key: MediaKey) async throws(DownloadManagerError) -> Set<String> {
         let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
         await usedPathsReading?()
         let localItem = try await read {
