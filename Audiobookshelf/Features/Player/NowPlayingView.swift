@@ -11,45 +11,44 @@ import SwiftUI
 /// iOS presents it as a full-screen cover on every size (ADR 0004); ``PlayerSlot`` closes it
 /// when playback closes.
 ///
+/// From iOS 27.1 it follows the display (#84, ``PlayerLayout``): a split with the details on a
+/// regular display, the controls on the bottom half in laptop pose, and the transport in the
+/// toolbar's vertical bar. Before that and on macOS it's always the column.
+///
 /// Everything that follows the playback time (the scrubber, the titles' chapter and the transport's
 /// next-chapter state) lives in child views, so a playback tick doesn't re-render the cover, the
 /// menus or the AirPlay picker.
 struct NowPlayingView: View {
     let model: PlayerViewModel
+    /// The layout to use instead of reading it from the display, for previews.
+    private let forcedLayout: PlayerLayout?
     @Environment(\.dismiss) private var dismiss
     @State private var sheet: PlayerSheet?
     private var libraries = LibraryCoverSettings()
 
+    init(model: PlayerViewModel, forcedLayout: PlayerLayout? = nil) {
+        self.model = model
+        self.forcedLayout = forcedLayout
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: 20) {
-                    cover
-                    NowPlayingTitles(model: model)
-                    NowPlayingScrubber(model: model)
-                    NowPlayingTransport(model: model)
-                    secondaryControls
-                }
-                .padding(.horizontal, 24)
-                .padding(.vertical)
-                .frame(maxWidth: 600)
-                .frame(maxWidth: .infinity)
-            }
-            .scrollBounceBehavior(.basedOnSize)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button {
-                        dismiss()
-                    } label: {
-                        Label {
-                            Text(verbatim: L10n.string("LabelMinimizePlayer"))
-                        } icon: {
-                            Image(systemName: "chevron.down")
+            PlayerLayoutReader(forcedLayout: forcedLayout) { layout in
+                actionsToolbar(content(layout), layout: layout)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button {
+                                dismiss()
+                            } label: {
+                                Label {
+                                    Text(verbatim: L10n.string("LabelMinimizePlayer"))
+                                } icon: {
+                                    Image(systemName: "chevron.down")
+                                }
+                                .labelStyle(.iconOnly)
+                            }
                         }
-                        .labelStyle(.iconOnly)
                     }
-                }
-                PlayerActionsBar(model: model, sheet: $sheet)
             }
         }
         .sheet(item: $sheet) { sheet in
@@ -57,13 +56,79 @@ struct NowPlayingView: View {
         }
     }
 
-    private var cover: some View {
+    @ViewBuilder
+    private func content(_ layout: PlayerLayout) -> some View {
+        #if os(iOS)
+            if #available(iOS 27.1, *) {
+                if layout.arrangement == .column {
+                    column(layout)
+                } else {
+                    PlayerArrangement(arrangement: layout.arrangement) {
+                        artwork
+                    } titles: {
+                        NowPlayingTitles(model: model)
+                    } controls: {
+                        NowPlayingScrubber(model: model)
+                        NowPlayingTransport(model: model)
+                        secondaryControls
+                    } details: {
+                        PlayerDetailsPane(model: model)
+                    }
+                }
+            } else {
+                column(layout)
+            }
+        #else
+            column(layout)
+        #endif
+    }
+
+    /// The column layout. With the transport in the toolbar's vertical bar, the column leaves it out.
+    private func column(_ layout: PlayerLayout) -> some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                artwork
+                    .containerRelativeFrame(.vertical) { height, _ in height * 0.45 }
+                NowPlayingTitles(model: model)
+                NowPlayingScrubber(model: model)
+                if !layout.transportInToolbar {
+                    NowPlayingTransport(model: model)
+                }
+                secondaryControls
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical)
+            .frame(maxWidth: 600)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollBounceBehavior(.basedOnSize)
+    }
+
+    /// ``PlayerActionsBar`` in the bottom toolbar, or, with the transport in the toolbar's
+    /// vertical bar, ``PlayerVerticalToolbar``.
+    @ViewBuilder
+    private func actionsToolbar(_ content: some View, layout: PlayerLayout) -> some View {
+        #if os(iOS)
+            if #available(iOS 27.1, *) {
+                if layout.transportInToolbar {
+                    content.toolbar { PlayerVerticalToolbar(model: model, sheet: $sheet) }
+                } else {
+                    content.toolbar { PlayerActionsBar(model: model, sheet: $sheet) }
+                }
+            } else {
+                content.toolbar { PlayerActionsBar(model: model, sheet: $sheet) }
+            }
+        #else
+            content.toolbar { PlayerActionsBar(model: model, sheet: $sheet) }
+        #endif
+    }
+
+    private var artwork: some View {
         CoverView(
             key: model.coverKey, title: model.title, author: model.author, shape: model.coverShape(in: libraries)
         )
         .clipShape(.rect(cornerRadius: 8))
         .shadow(radius: 8, y: 4)
-        .containerRelativeFrame(.vertical) { height, _ in height * 0.45 }
         .accessibilityHidden(true)
     }
 
@@ -88,6 +153,52 @@ struct NowPlayingView: View {
         .buttonStyle(.borderless)
     }
 }
+
+/// Reads the full player's ``PlayerLayout`` from the size classes, the display's fold and the
+/// toolbar's vertical bar (iOS 27.1 and later); before that and on macOS, the fallback column.
+private struct PlayerLayoutReader<Content: View>: View {
+    let forcedLayout: PlayerLayout?
+    @ViewBuilder let content: (PlayerLayout) -> Content
+
+    var body: some View {
+        if let forcedLayout {
+            content(forcedLayout)
+        } else {
+            #if os(iOS)
+                if #available(iOS 27.1, *) {
+                    DisplayLayoutReader(content: content)
+                } else {
+                    content(.fallback)
+                }
+            #else
+                content(.fallback)
+            #endif
+        }
+    }
+}
+
+#if os(iOS)
+    @available(iOS 27.1, *)
+    private struct DisplayLayoutReader<Content: View>: View {
+        @ViewBuilder let content: (PlayerLayout) -> Content
+        @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+        @Environment(\.verticalSizeClass) private var verticalSizeClass
+        @Environment(\.toolbarVerticalEdge) private var toolbarVerticalEdge
+        @State private var fold = PlayerFold.none
+
+        var body: some View {
+            let layout = PlayerLayout.resolve(
+                supportsArrangements: true, regularWidth: horizontalSizeClass == .regular,
+                regularHeight: verticalSizeClass == .regular, fold: fold, verticalToolbar: toolbarVerticalEdge != nil)
+            content(layout)
+                .onGeometryChange(for: PlayerFold.self) { proxy in
+                    PlayerFold(divisions: proxy.reservedRegions(kind: .division).filter(\.isActive).map(\.frame))
+                } action: {
+                    fold = $0
+                }
+        }
+    }
+#endif
 
 /// The chapter, title and author. Its own view: the chapter title can follow the playback time.
 private struct NowPlayingTitles: View {

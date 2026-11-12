@@ -59,7 +59,7 @@ public struct TransportControls: View {
     nonisolated static let numberedJumpSymbols: Set<Int> = [5, 10, 15, 30, 45, 60, 75, 90]
 
     /// The jump button's symbol: numbered when SF Symbols has one for `seconds`, else plain.
-    nonisolated static func jumpSymbol(forward: Bool, seconds: Int) -> String {
+    public nonisolated static func jumpSymbol(forward: Bool, seconds: Int) -> String {
         let base = forward ? "goforward" : "gobackward"
         return numberedJumpSymbols.contains(seconds) ? "\(base).\(seconds)" : base
     }
@@ -77,13 +77,13 @@ public struct TransportControls: View {
     }
 
     /// The VoiceOver label of a jump button, for example "Jump forward 30 seconds".
-    nonisolated static func jumpLabel(forward: Bool, seconds: Int, locale: Locale) -> String {
+    public nonisolated static func jumpLabel(forward: Bool, seconds: Int, locale: Locale) -> String {
         let interval = DurationStyle.timestamp.accessibilityString(Double(seconds), locale: locale)
         return L10n.string(forward ? "LabelJumpForwardBy" : "LabelJumpBackwardBy", interval)
     }
 
     /// The play/pause button's VoiceOver label.
-    nonisolated static func playPauseLabel(showsPause: Bool) -> String {
+    public nonisolated static func playPauseLabel(showsPause: Bool) -> String {
         L10n.string(showsPause ? "ButtonPause" : "ButtonPlay")
     }
 
