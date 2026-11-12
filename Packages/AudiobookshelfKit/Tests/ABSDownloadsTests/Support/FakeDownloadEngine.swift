@@ -257,6 +257,9 @@ final class ManagerFixture: Sendable {
         /// The first clean-up after ``holdUsedPaths()`` read one of the two sources of the paths
         /// still in use; it waits until ``releaseUsedPaths()`` before reading the other.
         case usedPathsReading
+        /// The first cover hand-off after ``holdCoverHandOff()`` read the local item; it waits
+        /// until ``releaseCoverHandOff()`` before reading the records.
+        case coverHandOffReading
     }
 
     let root = FileManager.default.temporaryDirectory.appending(path: "manager-\(UUID().uuidString)")
@@ -274,6 +277,8 @@ final class ManagerFixture: Sendable {
     private let heldRead = Mutex<StubGate?>(nil)
     private let pathsGate = Mutex<StubGate?>(nil)
     private let heldPaths = Mutex<StubGate?>(nil)
+    private let handOffGate = Mutex<StubGate?>(nil)
+    private let heldHandOff = Mutex<StubGate?>(nil)
     let checkpoints: AsyncStream<Checkpoint>
     private let checkpoint: AsyncStream<Checkpoint>.Continuation
 
@@ -321,7 +326,28 @@ final class ManagerFixture: Sendable {
                 guard let gate = takePathsGate() else { return }
                 checkpoint.yield(.usedPathsReading)
                 await withCheckedContinuation { continuation in gate.run { continuation.resume() } }
+            },
+            coverHandOffReading: { [checkpoint, self] in
+                guard
+                    let gate = handOffGate.withLock({ gate in
+                        defer { gate = nil }; return gate
+                    })
+                else { return }
+                checkpoint.yield(.coverHandOffReading)
+                await withCheckedContinuation { continuation in gate.run { continuation.resume() } }
             })
+    }
+
+    /// Holds the next cover hand-off between its reads of the local item and the records, until
+    /// ``releaseCoverHandOff()``.
+    func holdCoverHandOff() {
+        let gate = StubGate()
+        handOffGate.withLock { $0 = gate }
+        heldHandOff.withLock { $0 = gate }
+    }
+
+    func releaseCoverHandOff() {
+        heldHandOff.withLock { $0 }?.open()
     }
 
     /// Holds the next clean-up between its reads of the paths still in use, until

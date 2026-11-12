@@ -19,6 +19,9 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     case unexpectedContent
     /// The body's size isn't the file's size.
     case sizeMismatch
+    /// The file is larger than its kind allows (a cover over
+    /// ``DownloadEngine/maxCoverBytes``); the transfer was stopped.
+    case tooLarge
     /// The file couldn't be moved into place.
     case fileSystem
     /// The device is out of space.
@@ -50,6 +53,9 @@ public enum DownloadUpdate: Sendable, Equatable {
     case partFailed(partID: UUID, recordID: UUID, code: DownloadFailureCode, message: String, willRetry: Bool)
     /// Every part completed: the record is now the local item `itemID` and was deleted.
     case recordComplete(recordID: UUID, itemID: UUID)
+    /// A cover-only record (`DownloadRecordDTO.isCoverOnly`) completed after its local item
+    /// was deleted: it was deleted as it was then, and its cover file is left on disk.
+    case recordDiscarded(DownloadRecordDTO)
     /// The engine has no working session (`sessionInUse` or `sessionLost`); the affected
     /// parts are queued.
     case sessionUnavailable(code: DownloadFailureCode, message: String)
@@ -109,6 +115,11 @@ public actor DownloadEngine {
     /// Attempts, a second apart, to save failed writes before a background wake is released.
     static let maxWakeSaveAttempts = 3
 
+    /// The most a cover part may download. A cover's size is never known in advance, so a
+    /// transfer, or a declared length, over this fails the part for good with
+    /// ``DownloadFailureCode/tooLarge``, as it goes rather than once the body is on disk.
+    static let maxCoverBytes: Int64 = 20 * 1024 * 1024
+
     private struct PartContext {
         var recordID: UUID
         var connectionID: UUID
@@ -116,6 +127,7 @@ public actor DownloadEngine {
         var destination: URL?
         var expectedBytes: Int64
         var hasResumeData: Bool
+        var maxBytes: Int64?
     }
 
     /// Durable changes, for one consumer. Nothing is dropped.
@@ -806,10 +818,13 @@ public actor DownloadEngine {
                 let destination = try? locations.fileURL(forRelativePath: part.destinationRelativePath)
                 contexts[part.id] = PartContext(
                     recordID: record.id, connectionID: record.key.serverConnectionID, serverPath: part.serverPath,
-                    destination: destination, expectedBytes: part.expectedBytes, hasResumeData: part.hasResumeData)
+                    destination: destination, expectedBytes: part.expectedBytes, hasResumeData: part.hasResumeData,
+                    maxBytes: part.kind == .cover ? Self.maxCoverBytes : nil)
                 failures[part.id] = part.retryCount > 0 ? part.retryCount : nil
                 delegate.setTarget(
-                    destination.map { .init(destination: $0, expectedBytes: part.expectedBytes) }, for: part.id)
+                    destination.map {
+                        .init(destination: $0, expectedBytes: part.expectedBytes, maxBytes: contexts[part.id]?.maxBytes)
+                    }, for: part.id)
             }
         }
         return records
@@ -943,7 +958,9 @@ public actor DownloadEngine {
         task.taskDescription = partID.uuidString
         if let notBefore { task.earliestBeginDate = notBefore }
         tasks[partID] = task
-        delegate.setTarget(.init(destination: destination, expectedBytes: context.expectedBytes), for: partID)
+        delegate.setTarget(
+            .init(destination: destination, expectedBytes: context.expectedBytes, maxBytes: context.maxBytes),
+            for: partID)
         throttle.reset(partID)
         let recorded: Bool
         do {
@@ -1032,11 +1049,31 @@ public actor DownloadEngine {
         await restart?.value
     }
 
+    private static let tooLargePrefix = "The file is larger than "
+
+    static func tooLargeMessage(_ limit: Int64) -> String {
+        "\(tooLargePrefix)\(limit) bytes."
+    }
+
+    /// Whether a part's saved `lastError` is that of a ``DownloadFailureCode/tooLarge`` failure:
+    /// the store keeps only the message, not the code.
+    static func failedAsTooLarge(_ lastError: String?) -> Bool {
+        lastError?.hasPrefix(tooLargePrefix) == true
+    }
+
     private func handleProgress(_ task: URLSessionTask, bytesWritten: Int64, expectedBytes: Int64) async {
         // An error body (a 401 page, say) also reports progress.
         guard let partID = task.partID, let context = contexts[partID],
             tasks[partID]?.taskIdentifier == task.taskIdentifier
         else { return }
+        // Before the check below: an error body over the limit (a large 404 page, say) is
+        // stopped too, rather than written in full to temporary storage.
+        if let limit = context.maxBytes, bytesWritten > limit || expectedBytes > limit {
+            ignoredTasks.insert(task.taskIdentifier)
+            task.cancel()
+            await failPermanently(partID, code: .tooLarge, message: Self.tooLargeMessage(limit))
+            return
+        }
         guard DownloadSessionDelegate.classify(response: task.response, task: task) == nil else { return }
         authRetried.remove(partID)
         let expected = expectedBytes > 0 ? expectedBytes : context.expectedBytes
@@ -1123,6 +1160,10 @@ public actor DownloadEngine {
                 ? "The file has \(actual) bytes instead of \(expected)."
                 : "The server didn't send the whole file (\(actual) bytes)."
             await retry(partID, code: .sizeMismatch, message: message, activationOwnsSession: activationOwnsSession)
+        case .tooLarge(let limit):
+            await failPermanently(
+                partID, code: .tooLarge, message: Self.tooLargeMessage(limit),
+                activationOwnsSession: activationOwnsSession)
         case .moveFailed(let message, let isOutOfSpace):
             if isOutOfSpace {
                 await failPermanently(
@@ -1308,7 +1349,8 @@ public actor DownloadEngine {
         }
     }
 
-    /// Makes a complete record a local item, then deletes it. A failure is logged; the next
+    /// Makes a complete record a local item, then deletes it. A cover-only record whose local
+    /// item is gone is deleted and reported discarded instead. A failure is logged; the next
     /// activation repeats it.
     private func finalise(_ record: DownloadRecordDTO) async {
         guard finalising.insert(record.id).inserted else { return }
@@ -1317,6 +1359,14 @@ public actor DownloadEngine {
             let item = try await localItems.upsertFromDownload(record, now: now())
             try await store.deleteRecord(record.id)
             updateContinuation.yield(.recordComplete(recordID: record.id, itemID: item.id))
+        } catch LocalItemStore.StoreError.itemNotFound {
+            do {
+                if try await store.deleteRecord(record.id) != nil {
+                    updateContinuation.yield(.recordDiscarded(record))
+                }
+            } catch {
+                logError("Couldn't discard a cover download", error)
+            }
         } catch {
             logError("Couldn't finalise a download", error)
         }

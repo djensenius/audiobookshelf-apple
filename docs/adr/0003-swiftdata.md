@@ -184,6 +184,23 @@ Model notes:
 - **`coverUpdatedAt`** is the server's cover timestamp at download time (the
   item's `updatedAt` when no separate cover time exists). ADR 0005 uses it in the
   `ImageKey` and to decide when to refresh the downloaded cover.
+- **Cover-only download records** (#326). A podcast's `DownloadRecord` is keyed to
+  an episode, except one keyed to the item (no `episodeId`) whose only part is the
+  cover (`DownloadRecordDTO.isCoverOnly`). The download manager saves it when a
+  cancelled or deleted download held the podcast's only cover and no other record
+  can take it, so the local item gets its cover back. Finishing it only sets the
+  local item's cover while it has none. The UI doesn't list it, and it links no
+  progress. If its local item was deleted before it finishes, the engine deletes it
+  and reports `DownloadUpdate.recordDiscarded`, and the manager hands the cover on or
+  removes it. A refetch that fails for good is deleted, including one found failed
+  at start. Its cover is fetched again
+  at the item's next episode completion, as is a cover refused while the item had
+  no local item yet. Those covers are kept in memory only (`refusedCovers`): a
+  relaunch loses them, and the podcast then stays without a cover until another
+  download brings one. A refetch saves to a file of its own (`cover-<part id>.jpg`),
+  so it never replaces a cover fetched meanwhile, and is removed if unused. Every
+  cover part is capped at 20 MB (`DownloadEngine.maxCoverBytes`); a larger one fails
+  for good (`.tooLarge`) and isn't fetched again.
 - **`LocalMediaSnapshot`** is a `Codable, Sendable, Hashable` struct owned by
   `ABSData`, not an `ABSCore` API model, so API changes can't break stored blobs.
   It holds `snapshotVersion: Int` (2), metadata (title, subtitle, authors,
