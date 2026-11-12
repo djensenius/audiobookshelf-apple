@@ -290,4 +290,51 @@ private let pods = makeLibrary("pods", mediaType: .podcast)
             #expect(SceneLibrarySelection.isServing(router: Router(identity: identityA), store: store))
         }
     }
+
+    /// Add podcast, as legacy `BookshelfNavBar.vue`: hidden from users known not to be allowed,
+    /// kept for those who are and while the user is unknown (offline or authorizing).
+    @Test(arguments: [(true, true), (false, false), (nil, true)] as [(Bool?, Bool)])
+    func addPodcastFollowsThePermission(canAddPodcast: Bool?, shown: Bool) async throws {
+        try await withLibrarySettings { settings in
+            let store = await loadedStore(settings, libraries: [books, pods], defaultLibraryID: "pods")
+            let router = Router(identity: identityA)
+
+            SceneLibrarySelection.reconcile(router, store: store, canAddPodcast: canAddPodcast)
+            #expect(router.libraryID == "pods")
+            #expect(router.visibleSections.contains(.addPodcast) == shown)
+            #expect(router.visibleSections.contains(.latest))
+
+            // A pick and an unchecked guess's check apply it too.
+            SceneLibrarySelection.select("books", router: router, store: store, canAddPodcast: canAddPodcast)
+            SceneLibrarySelection.select("pods", router: router, store: store, canAddPodcast: canAddPodcast)
+            #expect(router.visibleSections.contains(.addPodcast) == shown)
+            let guessed = Router(identity: identityA)
+            guessed.restoreLibrary(id: "pods", kind: nil)
+            SceneLibrarySelection.reconcile(guessed, store: store, canAddPodcast: canAddPodcast)
+            #expect(guessed.isLibraryChecked && guessed.visibleSections.contains(.addPodcast) == shown)
+        }
+    }
+
+    /// Losing the permission (a refreshed user, another account's role) while on Add podcast
+    /// falls back to Library and drops the section's screens.
+    @Test func losingThePermissionLeavesAddPodcast() async throws {
+        try await withLibrarySettings { settings in
+            let store = await loadedStore(settings, libraries: [pods], defaultLibraryID: "pods")
+            let router = Router(identity: identityA)
+            SceneLibrarySelection.reconcile(router, store: store, canAddPodcast: true)
+            router.selectedTab = .addPodcast
+            router.librarySection = .addPodcast
+            router[path: .addPodcast] = [.item(id: "li_new")]
+            #expect(
+                SceneLibrarySelection.trigger(router, store: store, canAddPodcast: true)
+                    != SceneLibrarySelection.trigger(router, store: store, canAddPodcast: false))
+
+            SceneLibrarySelection.reconcile(router, store: store, canAddPodcast: false)
+
+            #expect(router.selectedTab == .library)
+            #expect(router.librarySection == nil)
+            #expect(router[path: .addPodcast].isEmpty)
+            #expect(!router.visibleSections.contains(.addPodcast))
+        }
+    }
 }

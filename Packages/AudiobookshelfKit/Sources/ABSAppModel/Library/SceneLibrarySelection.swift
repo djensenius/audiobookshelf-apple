@@ -15,6 +15,9 @@ import Foundation
 /// - A deep link's ``Router/pendingLibraryID`` is opened once loaded, or dropped when the user
 ///   has no such library.
 /// - Only a user's pick is saved as the account's last library.
+/// - Add podcast is hidden once the user is known not to be allowed to add podcasts
+///   (`canAddPodcast` is `false`, see `User.canAddPodcasts`), as legacy `BookshelfNavBar.vue`
+///   does; while the user is unknown (`nil`, such as offline) the section is kept.
 ///
 /// Nothing happens while the store serves another account than the router's.
 @MainActor
@@ -26,6 +29,7 @@ public enum SceneLibrarySelection {
         let libraries: [LibraryEntry]
         let libraryID: String?
         let pendingLibraryID: String?
+        let canAddPodcast: Bool?
     }
 
     struct LibraryEntry: Hashable, Sendable {
@@ -33,16 +37,16 @@ public enum SceneLibrarySelection {
         let mediaType: MediaType
     }
 
-    public static func trigger(_ router: Router, store: LibraryStore) -> Trigger {
+    public static func trigger(_ router: Router, store: LibraryStore, canAddPodcast: Bool? = nil) -> Trigger {
         Trigger(
             connectionKey: store.connectionKey, hasLoaded: store.hasLoaded,
             libraries: store.libraries.map { LibraryEntry(id: $0.id, mediaType: $0.mediaType) },
             libraryID: router.libraryID,
-            pendingLibraryID: router.pendingLibraryID)
+            pendingLibraryID: router.pendingLibraryID, canAddPodcast: canAddPodcast)
     }
 
     /// Applies the store's libraries to the router; see ``SceneLibrarySelection``.
-    public static func reconcile(_ router: Router, store: LibraryStore) {
+    public static func reconcile(_ router: Router, store: LibraryStore, canAddPodcast: Bool? = nil) {
         guard isServing(router: router, store: store) else { return }
         guard store.hasLoaded else {
             // Unchecked until the libraries load: keep every section of the library's kind.
@@ -53,7 +57,7 @@ public enum SceneLibrarySelection {
         }
         if let pending = router.pendingLibraryID {
             if let library = store.libraries.first(where: { $0.id == pending }) {
-                show(library, in: router)
+                show(library, in: router, canAddPodcast: canAddPodcast)
                 return
             }
             router.cancelLibraryRequest()
@@ -62,9 +66,9 @@ public enum SceneLibrarySelection {
             // An unchecked library that still exists may have had a launch or deep link opened
             // in a section its kind lacks; keep the paths as for a replaced guess.
             if !router.isLibraryChecked {
-                adopt(library, in: router)
+                adopt(library, in: router, canAddPodcast: canAddPodcast)
             } else {
-                show(library, in: router)
+                show(library, in: router, canAddPodcast: canAddPodcast)
             }
         } else if let initial = store.initialLibraryID,
             let library = store.libraries.first(where: { $0.id == initial })
@@ -73,9 +77,9 @@ public enum SceneLibrarySelection {
                 // The gone library was only restored or guessed, never checked, so the paths
                 // weren't opened in it: for example a launch or deep link before the libraries
                 // loaded. Replace it without resetting them.
-                adopt(library, in: router)
+                adopt(library, in: router, canAddPodcast: canAddPodcast)
             } else {
-                show(library, in: router)
+                show(library, in: router, canAddPodcast: canAddPodcast)
             }
         } else if router.libraryID != nil || !router.isLibraryChecked {
             // The user has no libraries: drop the stale selection so screens reach their
@@ -93,25 +97,25 @@ public enum SceneLibrarySelection {
     }
 
     /// The user picked `libraryID`: shows it and saves it as the account's last library.
-    public static func select(_ libraryID: String, router: Router, store: LibraryStore) {
+    public static func select(_ libraryID: String, router: Router, store: LibraryStore, canAddPodcast: Bool? = nil) {
         guard isServing(router: router, store: store),
             let library = store.libraries.first(where: { $0.id == libraryID })
         else {
             return
         }
-        show(library, in: router)
+        show(library, in: router, canAddPodcast: canAddPodcast)
         store.saveLastLibraryID(libraryID)
     }
 
-    /// The sections `library` shows. Add podcast and Playlists are kept until the shell knows
-    /// the user's permissions and playlists.
-    static func sections(for library: Library) -> Set<AppTab> {
-        AppTab.sections(for: LibraryKind(library.mediaType))
+    /// The sections `library` shows: Add podcast only unless the user is known not to be allowed
+    /// to add podcasts. Playlists is kept until the shell knows the user's playlists.
+    static func sections(for library: Library, canAddPodcast: Bool?) -> Set<AppTab> {
+        AppTab.sections(for: LibraryKind(library.mediaType), canAddPodcast: canAddPodcast ?? true, hasPlaylists: true)
     }
 
-    private static func show(_ library: Library, in router: Router) {
+    private static func show(_ library: Library, in router: Router, canAddPodcast: Bool?) {
         let kind = LibraryKind(library.mediaType)
-        let sections = sections(for: library)
+        let sections = sections(for: library, canAddPodcast: canAddPodcast)
         // Only on a change: the router is observed, and this runs on its changes. A request for
         // the library already shown is a change too: selecting it is what drops the request.
         guard
@@ -127,8 +131,10 @@ public enum SceneLibrarySelection {
     /// Shows `library` in place of an unchecked guess, keeping the paths; sections it doesn't
     /// support are still repaired, but an unsupported Library section falls back to the default
     /// grid with its path, which may hold a launch link's screens.
-    private static func adopt(_ library: Library, in router: Router) {
-        router.restoreLibrary(id: library.id, kind: LibraryKind(library.mediaType))
+    private static func adopt(_ library: Library, in router: Router, canAddPodcast: Bool?) {
+        router.restoreLibrary(
+            id: library.id, kind: LibraryKind(library.mediaType),
+            supportedSections: sections(for: library, canAddPodcast: canAddPodcast))
         router.repairSections(supported: router.supportedSections, keepsLibraryPath: true)
         router.isLibraryChecked = true
     }

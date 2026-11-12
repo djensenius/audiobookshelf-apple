@@ -207,12 +207,13 @@ public final class Router {
     }
 
     /// Restores the library and its kind without resetting paths; used by snapshot restore.
-    /// Until the scene confirms the library, it shows every section of its kind, or every
-    /// section when the kind is unknown.
-    func restoreLibrary(id: String?, kind: LibraryKind?) {
+    /// Until the scene confirms the library, it shows `supportedSections`, by default every
+    /// section of its kind, or every section when the kind is unknown.
+    func restoreLibrary(id: String?, kind: LibraryKind?, supportedSections: Set<AppTab>? = nil) {
         libraryID = id
         libraryKind = kind
-        supportedSections = kind == nil ? Set(AppTab.sections) : AppTab.sections(for: kind)
+        self.supportedSections =
+            supportedSections ?? (kind == nil ? Set(AppTab.sections) : AppTab.sections(for: kind))
         isLibraryChecked = false
     }
 
