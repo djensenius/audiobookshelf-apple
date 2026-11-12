@@ -8,14 +8,20 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
     private let client: APIClient
     private let features: ServerFeatures
     private let deviceIdentifiers: any DeviceIdentifying
+    private let streamingConfiguration: @Sendable () -> URLSessionConfiguration
 
+    /// - Parameter streamingConfiguration: The base session configuration for a
+    ///   ``HeaderStreamingTransport``, used when the connection has custom headers. Tests pass one
+    ///   with a stub `URLProtocol`.
     public init(
-        serverConnectionID: UUID, client: APIClient, features: ServerFeatures, deviceIdentifiers: any DeviceIdentifying
+        serverConnectionID: UUID, client: APIClient, features: ServerFeatures, deviceIdentifiers: any DeviceIdentifying,
+        streamingConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .ephemeral }
     ) {
         self.serverConnectionID = serverConnectionID
         self.client = client
         self.features = features
         self.deviceIdentifiers = deviceIdentifiers
+        self.streamingConfiguration = streamingConfiguration
     }
 
     public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
@@ -29,6 +35,8 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
 
     /// A token-fallback track (``TrackAuthentication/accessTokenQuery``) gets its access token from
     /// ``APIClient/accessToken(replacing:)``, so one that is about to expire is refreshed first.
+    /// On a connection with custom headers the stream carries a new ``HeaderStreamingTransport``
+    /// with those headers (ADR 0007 §6); a transcode session there fails to resolve.
     ///
     /// - Throws: ``StreamResolutionError``, with ``StreamResolutionError/missingAccessToken`` when
     ///   the connection is signed out or the server ended its session; `CancellationError` when the
@@ -37,13 +45,12 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
     ///   server is unreachable).
     public func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
         let plan: StreamPlan
+        let configuration = await client.configuration
         do {
-            plan = try TrackURLResolver.resolve(
-                session: session, features: features, configuration: await client.configuration)
+            plan = try TrackURLResolver.resolve(session: session, features: features, configuration: configuration)
         } catch {
             throw StreamResolutionError.resolution(error)
         }
-        guard plan.transport == .urlAsset else { throw StreamResolutionError.customHeaderTransportUnavailable }
         var urls: [URL] = []
         for track in plan.tracks {
             if track.authentication == .accessTokenQuery {
@@ -56,7 +63,14 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
                 urls.append(track.url)
             }
         }
-        return ResolvedStream(plan: plan, urls: urls)
+        let transport: HeaderStreamingTransport? =
+            switch plan.transport {
+            case .urlAsset: nil
+            case .customHeaderResourceLoader:
+                HeaderStreamingTransport(
+                    customHeaders: configuration.customHeaders, configuration: streamingConfiguration())
+            }
+        return ResolvedStream(plan: plan, urls: urls, transport: transport)
     }
 
     /// A token for a URL the player loads outside the client; no tokens, or a session the server
