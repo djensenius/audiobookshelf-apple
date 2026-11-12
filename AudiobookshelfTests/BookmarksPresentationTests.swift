@@ -50,6 +50,8 @@ import Testing
 
         #expect(BookmarkEditorTarget.create(itemID: "li_preview", time: 42, defaultTitle: "Now").isCreate)
         #expect(!BookmarkEditorTarget.edit(mark("Old", at: 30)).isCreate)
+        #expect(BookmarkEditorTarget.create(itemID: "li_preview", time: 42, defaultTitle: "Now").placeholder == "Now")
+        #expect(BookmarkEditorTarget.edit(mark("Old", at: 30)).placeholder == "Old")
     }
 
     @Test func slotDisabledWithoutStore() {

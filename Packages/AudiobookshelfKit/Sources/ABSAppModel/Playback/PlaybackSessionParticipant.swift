@@ -16,6 +16,10 @@ public protocol PlaybackScopeHandle: AnyObject, Sendable {
     /// Restores the account's last-played item, paused.
     @discardableResult func start() -> Bool
     func play(itemID: String, episodeID: String?, startTime: Double?) async
+    /// The account's play queue, read-only; `nil` when the scope has none.
+    var queue: (any PlaybackQueueReading)? { get }
+    /// Changes the queue, unless the scope has retired.
+    func editQueue(_ edit: (PlaybackQueue) -> Void)
     func reconnect(client: APIClient?, features: ServerFeatures?)
     /// Saves the last-played record; local only.
     func saveLocally()
@@ -58,8 +62,8 @@ public struct PlaybackScopeRequest: Sendable {
 /// Gives each account session its own playback scope (#183). Register it at
 /// ``SessionStage/progressSource``: its coordinator and syncer write progress.
 ///
-/// - **Start** builds the scope, binds ``CurrentPlayback`` to its coordinator, restores the
-///   account's last-played item and publishes ``playItem``.
+/// - **Start** builds the scope, binds ``CurrentPlayback`` to its coordinator, publishes its
+///   ``queue``, restores the account's last-played item and publishes ``playItem``.
 /// - **Reconnect** swaps the client and features into the same scope; playback carries on.
 /// - **End** retires the scope before its first `await`: playback stops for good and the final
 ///   position is captured, before the next account can begin. It then waits, within
@@ -73,6 +77,8 @@ public final class PlaybackSessionParticipant: SessionParticipant {
 
     /// Plays an item in the current account's scope; `nil` between sessions.
     public private(set) var playItem: PlayItemAction?
+    /// The current account's play queue; `nil` between sessions.
+    public private(set) var queue: PlaybackQueueControl?
     /// The latest ended session's close outcome, or why it isn't durable; `nil` until it finishes.
     /// A retirement the lifecycle cancelled can finish after a later session ended; its result is
     /// dropped rather than replacing that session's.
@@ -148,6 +154,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
             self.requestSignOut(context)
         }
         current.bind(scope.playback)
+        queue = PlaybackQueueControl(scope: scope)
         scope.start()
         playItem = PlayItemAction { [weak scope] itemID, episodeID, startTime in
             await scope?.play(itemID: itemID, episodeID: episodeID, startTime: startTime)
@@ -178,6 +185,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         // The previous session's result no longer describes the latest end.
         lastEnd = nil
         playItem = nil
+        queue = nil
         scope.onSessionRejected = nil
         scope.retire(reason: reason)
         current.bind(nil)
