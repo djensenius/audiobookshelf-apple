@@ -551,8 +551,8 @@ static, unauthenticated remote images (none are planned).
     ([0007](0007-streaming.md)): it keeps the Audiobookshelf bearer header.
     `URLSession` drops `Authorization` on a redirect; foreground hops that leave
     the origin are refused, and a background session's off-origin response is
-    discarded. Like every download, it is refused for connections with custom
-    headers until #145.
+    discarded. Like every download, its redirects are checked in the foreground
+    first, so a hop off the origin is refused before custom headers reach it (#145).
   - It stores the result as `cover.jpg` in the item's download folder, which is
     not a cache directory. It records the relative path and
     `LocalLibraryItem.coverUpdatedAt` in ABSData, which is what

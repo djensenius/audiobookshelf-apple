@@ -163,24 +163,80 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
-    @Test func customHeadersFailWithoutARequest() async throws {
+    /// A connection's custom headers are checked by the redirect preflight and sent with the
+    /// transfer, which starts at the URL the preflight cleared (#145).
+    @Test func startsAtThePreflightsClearedURLWithCustomHeaders() async throws {
         let harness = try await DownloadHarness(customHeaders: ["CF-Access-Client-Secret": "secret"]) { _ in
             .status(200)
         }
+        let final = URL(string: "\(harness.base)/media/1.mp3")!
+        let preflight = StubPreflight { request, _ in
+            var cleared = request
+            cleared.url = final
+            return cleared
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine(preflight: preflight)
+
+        await engine.start(partIDs: [partID])
+
+        #expect(await engine.nextRecordComplete() != nil)
+        let checked = try #require(preflight.requests.first)
+        #expect(preflight.requests.count == 1)
+        #expect(checked.url?.absoluteString == "\(harness.base)/api/items/li_1/file/1/download")
+        #expect(checked.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
+        let request = try #require(harness.requests.first)
+        #expect(harness.requests.count == 1)
+        #expect(request.url == final)
+        #expect(request.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
+        #expect(request.authorization == "Bearer token-1")
+    }
+
+    /// A download the preflight finds redirected off the server fails for good without a
+    /// transfer, so its headers never reach the other server.
+    @Test func anOffOriginPreflightFailsWithoutATransfer() async throws {
+        let harness = try await DownloadHarness(customHeaders: ["CF-Access-Client-Secret": "secret"]) { _ in
+            .status(200)
+        }
+        let preflight = StubPreflight { _, _ throws(DownloadRedirectPreflightError) in
+            throw .offOrigin(URL(string: "https://elsewhere.example/1.mp3")!)
+        }
         let partID = UUID()
         let record = try await harness.addRecord(parts: [partID])
-        let engine = harness.makeEngine()
+        let engine = harness.makeEngine(preflight: preflight)
 
         await engine.start(partIDs: [partID])
 
         #expect(
             await engine.nextPermanentFailure()
                 == .partFailed(
-                    partID: partID, recordID: record.id, code: .customHeadersUnsupported,
-                    message: "Downloads from a server that needs custom headers aren't supported yet.",
-                    willRetry: false))
+                    partID: partID, recordID: record.id, code: .offOrigin,
+                    message: "The download is redirected to another server.", willRetry: false))
         #expect(harness.requests.isEmpty)
         #expect(try await harness.store.record(id: record.id)?.state == .failed)
+    }
+
+    /// A preflight that can't reach the server is retried, then the transfer runs.
+    @Test func anUnreachablePreflightIsRetried() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let preflight = StubPreflight { request, attempt throws(DownloadRedirectPreflightError) in
+            if attempt == 0 { throw .unreachable(.notConnectedToInternet) }
+            return request
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine(preflight: preflight)
+
+        await engine.start(partIDs: [partID])
+
+        guard case .partFailed(partID, _, .transfer, _, true) = await engine.nextFailure(willRetry: true) else {
+            Issue.record("Expected a retried transfer failure")
+            return
+        }
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(preflight.requests.count == 2)
+        #expect(harness.requests.count == 1)
     }
 
     @Test(arguments: [408, 429, 500, 503])

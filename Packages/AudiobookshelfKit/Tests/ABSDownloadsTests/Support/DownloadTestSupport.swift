@@ -331,6 +331,7 @@ final class DownloadHarness: Sendable {
         startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
         adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
         listing: (@Sendable () async -> Void)? = nil,
+        preflight: any DownloadRedirectPreflighting = StubPreflight(),
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
         let stubFactory = sessionFactory(prepare: prepare)
@@ -347,7 +348,7 @@ final class DownloadHarness: Sendable {
             cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() },
             beforeStoppingSiblings: beforeStoppingSiblings, afterPermanentFailure: afterPermanentFailure,
             beforeReplayStart: beforeReplayStart, startFoundSettling: startFoundSettling,
-            adoptionStarted: adoptionStarted)
+            adoptionStarted: adoptionStarted, preflight: preflight)
     }
 
     func sessionFactory(
@@ -443,5 +444,29 @@ extension DownloadEngine {
 
     nonisolated func nextPermanentFailure() async -> DownloadUpdate? {
         await nextFailure(willRetry: false)
+    }
+}
+
+/// A redirect check that records each request and answers with `answer` (the request itself by
+/// default), without a network request. `answer` gets the request and its zero-based attempt.
+final class StubPreflight: DownloadRedirectPreflighting {
+    typealias Answer = @Sendable (URLRequest, Int) throws(DownloadRedirectPreflightError) -> URLRequest
+
+    private let answer: Answer
+    private let checked = Mutex<[URLRequest]>([])
+
+    init(answer: @escaping Answer = { request, _ in request }) {
+        self.answer = answer
+    }
+
+    /// Each request checked, in order.
+    var requests: [URLRequest] { checked.withLock { $0 } }
+
+    func check(_ request: URLRequest) async throws(DownloadRedirectPreflightError) -> URLRequest {
+        let attempt = checked.withLock { checked in
+            defer { checked.append(request) }
+            return checked.count
+        }
+        return try answer(request, attempt)
     }
 }
