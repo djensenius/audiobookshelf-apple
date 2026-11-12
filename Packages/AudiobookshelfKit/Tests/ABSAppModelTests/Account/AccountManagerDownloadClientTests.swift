@@ -69,9 +69,9 @@ private final class TokenServer: Sendable {
             sessionConfiguration: { StubURLProtocol.sessionConfiguration() })
     }
 
-    private func signIn(to server: TokenServer) async throws -> UUID {
+    private func signIn(to server: TokenServer, customHeaders: [String: String] = [:]) async throws -> UUID {
         let validated = try await ServerValidator(sessionConfiguration: { StubURLProtocol.sessionConfiguration() })
-            .validate(address: server.address, customHeaders: [:])
+            .validate(address: server.address, customHeaders: customHeaders)
         try await manager.connect(local: validated, username: "david", password: "pw")
         return try #require(manager.activeConnection?.id)
     }
@@ -194,5 +194,25 @@ private final class TokenServer: Sendable {
 
         let second = try #require(await manager.downloadClient(for: id))
         #expect(second !== first && second === manager.client)
+    }
+
+    /// A client kept from before a new sign-in to the connection (which may change its custom
+    /// headers) isn't used once the connection is no longer active.
+    @Test func signingInAgainReplacesAKeptClientWithTheNewHeaders() async throws {
+        let serverA = TokenServer(userId: "usr-a")
+        let idA = try await signIn(to: serverA)
+        let serverB = TokenServer(userId: "usr-b")
+        _ = try await signIn(to: serverB)
+        let kept = try #require(await manager.downloadClient(for: idA))
+        #expect(await kept.configuration.customHeaders.isEmpty)
+
+        // Signed into again with new headers, then switched away without a lookup while active.
+        #expect(try await signIn(to: serverA, customHeaders: ["X-Proxy": "1"]) == idA)
+        _ = try await signIn(to: serverB)
+
+        let client = try #require(await manager.downloadClient(for: idA))
+        #expect(client !== kept)
+        #expect(await client.configuration.customHeaders == ["X-Proxy": "1"])
+        #expect(await manager.downloadClient(for: idA) === client)
     }
 }

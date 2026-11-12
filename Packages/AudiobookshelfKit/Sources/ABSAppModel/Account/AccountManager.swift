@@ -519,8 +519,10 @@ public final class AccountManager {
     // MARK: - Downloads
 
     /// Clients for download credentials of saved connections that aren't active, so a
-    /// connection's download parts share one client and join its single refresh.
-    @ObservationIgnored private var downloadClients: [UUID: APIClient] = [:]
+    /// connection's download parts share one client, with the credentials' generation they were
+    /// made for: every sign-in, sign-out, expiry and removal bumps it, so a client made before
+    /// a new session (whose custom headers may differ) isn't used after it.
+    @ObservationIgnored private var downloadClients: [UUID: (client: APIClient, generation: Int)] = [:]
     /// Counts ``logout()``, ``remove(_:)`` and expiries per connection, so a lookup that
     /// overlapped one doesn't keep a client.
     @ObservationIgnored private var downloadClientResets: [UUID: Int] = [:]
@@ -528,15 +530,11 @@ public final class AccountManager {
     /// The client for a connection's download credentials (`AccountDownloadCredentials`): the
     /// active client, or for another saved connection that is connected, not signed out, not
     /// being removed and has a saved session, a client over its credentials (shared with the
-    /// app's own clients, so a refresh is saved and joined), kept until ``logout()``,
-    /// ``remove(_:)`` or expiry of it. Reads the store, not ``connections``, so it works in a background
-    /// wake before the session is restored. `nil` otherwise.
+    /// app's own clients, so a refresh is saved and joined), kept until that connection's next
+    /// sign-in, ``logout()``, ``remove(_:)`` or expiry. Reads the store, not ``connections``, so
+    /// it works in a background wake before the session is restored. `nil` otherwise.
     public func downloadClient(for id: UUID) async -> APIClient? {
-        if activeConnection?.id == id, let client {
-            // Kept, so a sign-in's new custom headers are used once another connection is active.
-            downloadClients[id] = client
-            return client
-        }
+        if activeConnection?.id == id, let client { return client }
         guard !removing.contains(id) else { return nil }
         let reset = downloadClientResets[id, default: 0]
         // Read each time: an expiry whose delete failed saves a sign-out without a logout.
@@ -544,17 +542,23 @@ public final class AccountManager {
             connection.signedOutAt == nil, downloadClientResets[id, default: 0] == reset, !removing.contains(id)
         else { return nil }
         if activeConnection?.id == id, let client { return client }
-        if let cached = downloadClients[id] { return cached }
         let credentials = self.credentials(for: id)
+        // The generation first: headers a newer sign-in saved meanwhile are kept under the older
+        // generation, so the next lookup makes a client again rather than keeping stale ones.
+        guard let read = try? await credentials.loadSession(), read.session != nil,
+            downloadClientResets[id, default: 0] == reset, !removing.contains(id)
+        else { return nil }
+        if activeConnection?.id == id, let client { return client }
+        if let cached = downloadClients[id], cached.generation == read.generation { return cached.client }
         guard let saved = try? await credentials.load(), saved.session != nil,
             downloadClientResets[id, default: 0] == reset, !removing.contains(id)
         else { return nil }
         if activeConnection?.id == id, let client { return client }
-        if let cached = downloadClients[id] { return cached }
+        if let cached = downloadClients[id], cached.generation == read.generation { return cached.client }
         guard let created = makeClient(connection, customHeaders: saved.customHeaders, credentials: credentials) else {
             return nil
         }
-        downloadClients[id] = created
+        downloadClients[id] = (created, read.generation)
         return created
     }
 
