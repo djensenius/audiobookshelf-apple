@@ -1,6 +1,6 @@
 import ABSAppModel
 import ABSCore
-import Foundation
+import SwiftUI
 
 /// What an item card does on the library screens (Home, series, authors): the screen it opens and its context-menu
 /// actions. App code rather than ABSUI, which can't see `Route` or the actions' types.
@@ -19,15 +19,41 @@ enum ItemCardActions {
     }
 
     /// The actions a card offers: Play only while there is a player to call, Open in New Window only where the
-    /// device has windows (``OpenInNewWindow``); no sharing or playlists yet.
-    static func actionContext(canPlay: Bool, canOpenInNewWindow: Bool = false) -> ItemActionContext {
+    /// device has windows (``OpenInNewWindow``), Add to playlist only while the account can edit playlists
+    /// (`\.addToPlaylist`); no sharing yet.
+    static func actionContext(
+        canPlay: Bool, canOpenInNewWindow: Bool = false, canEditPlaylists: Bool = false
+    ) -> ItemActionContext {
         ItemActionContext(
-            canEditPlaylists: false, canPlay: canPlay, canShare: false, canOpenInNewWindow: canOpenInNewWindow
+            canEditPlaylists: canEditPlaylists, canPlay: canPlay, canShare: false,
+            canOpenInNewWindow: canOpenInNewWindow
         )
     }
 
+    /// What Add to playlist adds for `item`, as the More menus do: the book, or this exact episode. `nil` for a
+    /// podcast, a collapsed series, an episode without its ID or a missing item, which the cards don't offer it for.
+    static func playlistEntry(for item: ItemSummary) -> PlaylistEntryKey? {
+        guard !item.isMissing else { return nil }
+        switch item.kind {
+        case .book: return PlaylistEntryKey(itemID: item.itemID)
+        case .episode: return item.episodeID.map { PlaylistEntryKey(itemID: item.itemID, episodeID: $0) }
+        case .podcast, .series: return nil
+        }
+    }
+
+    /// The add-to-playlist sheet's model for `item` in the library `libraryID`; `nil` without a library or for an
+    /// item that has no ``playlistEntry(for:)``.
+    @MainActor
+    static func addToPlaylistModel(
+        for item: ItemSummary, libraryID: String?, playlists: any PlaylistEditingService
+    ) -> AddToPlaylistModel? {
+        guard let libraryID, let entry = playlistEntry(for: item) else { return nil }
+        return AddToPlaylistModel(entries: [entry], libraryID: libraryID, service: playlists)
+    }
+
     /// Performs a context-menu action on `item`: Play through `play`, the progress actions through `actions`.
-    /// Opening is navigation and isn't handled here; neither are actions the cards don't offer.
+    /// Opening is navigation and isn't handled here, nor is Add to playlist, which the hosts open through
+    /// `\.addToPlaylist`; neither are actions the cards don't offer.
     ///
     /// - Returns: The failure message's key; `nil` when the action succeeded, was cancelled or did nothing.
     @MainActor
@@ -61,6 +87,49 @@ enum ItemCardActions {
         case .markNotFinished: "ToastItemMarkedAsNotFinishedFailed"
         case .hideFromContinueListening: "MessageHideFromContinueListeningFailed"
         case .addToPlaylist, .share, .openDetails, .openInNewWindow: nil
+        }
+    }
+}
+
+extension EnvironmentValues {
+    /// Opens ``AddToPlaylistSheet`` for an item card's or episode row's book or episode; `nil` while the account
+    /// can't edit playlists (signed out, previews), so the cards don't offer Add to playlist. Set by
+    /// ``ItemCardPlaylists``.
+    @Entry var addToPlaylist: AddToPlaylistAction?
+}
+
+/// Add to playlist from an item card or episode row, as the book and episode More menus offer it: opens
+/// ``AddToPlaylistSheet`` for the item (``ItemCardActions/playlistEntry(for:)``) in its library.
+struct AddToPlaylistAction: Sendable {
+    let open: @MainActor @Sendable (_ item: ItemSummary, _ libraryID: String?) -> Void
+
+    /// Opens the sheet for `item` in `libraryID`, or the scene's library when `nil`.
+    @MainActor
+    func callAsFunction(_ item: ItemSummary, libraryID: String? = nil) {
+        open(item, libraryID)
+    }
+}
+
+/// Puts ``AddToPlaylistAction`` in the environment of the scene's screens while the environment's `libraryStore` has
+/// an account, and presents the sheet it opens; ``MainTabView`` applies it once, so every card host shares it.
+struct ItemCardPlaylists: ViewModifier {
+    let router: Router
+    @Environment(\.libraryStore) private var store
+    @State private var model: AddToPlaylistModel?
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.addToPlaylist, action)
+            .addToPlaylistSheet($model)
+    }
+
+    private var action: AddToPlaylistAction? {
+        guard let playlists = store?.makeServices() else { return nil }
+        let sceneLibraryID = router.libraryID
+        let model = $model
+        return AddToPlaylistAction { item, libraryID in
+            model.wrappedValue = ItemCardActions.addToPlaylistModel(
+                for: item, libraryID: libraryID ?? sceneLibraryID, playlists: playlists)
         }
     }
 }

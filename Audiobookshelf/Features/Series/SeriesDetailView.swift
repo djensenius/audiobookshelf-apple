@@ -67,7 +67,8 @@ struct SeriesDetailContent: View {
                         } else {
                             BrowseItemGrid(
                                 elements: detail.books, item: { SeriesPresentation.card(for: $0, in: detail.name) },
-                                badge: { SeriesPresentation.sequenceBadge($0.sequence) })
+                                badge: { SeriesPresentation.sequenceBadge($0.sequence) },
+                                libraryID: model.booksLibraryID)
                         }
                     }
                     .padding(.vertical, ABSSpacing.large)
