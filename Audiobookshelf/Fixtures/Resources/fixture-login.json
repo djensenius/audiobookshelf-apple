@@ -1,0 +1,48 @@
+{
+  "user": {
+    "id": "usr_fixture",
+    "username": "fixture",
+    "email": null,
+    "type": "admin",
+    "token": null,
+    "accessToken": "fixture-access-token",
+    "refreshToken": "fixture-refresh-token",
+    "mediaProgress": [],
+    "seriesHideFromContinueListening": [],
+    "bookmarks": [],
+    "isActive": true,
+    "isLocked": false,
+    "lastSeen": 1700000000000,
+    "createdAt": 1700000000000,
+    "permissions": {
+      "download": true,
+      "update": true,
+      "delete": true,
+      "upload": true,
+      "createEreader": true,
+      "accessAllLibraries": true,
+      "accessAllTags": true,
+      "accessExplicitContent": true,
+      "selectedTagsNotAccessible": false
+    },
+    "librariesAccessible": [],
+    "itemTagsSelected": [],
+    "hasOpenIDLink": false
+  },
+  "userDefaultLibraryId": "lib_sample",
+  "serverSettings": {
+    "id": "server-settings",
+    "version": "2.26.0",
+    "buildNumber": 1,
+    "language": "en-us",
+    "sortingIgnorePrefix": true,
+    "sortingPrefixes": [
+      "the",
+      "a"
+    ],
+    "dateFormat": "MM/dd/yyyy",
+    "timeFormat": "HH:mm"
+  },
+  "ereaderDevices": [],
+  "Source": "docker"
+}

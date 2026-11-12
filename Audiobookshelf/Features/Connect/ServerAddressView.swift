@@ -46,6 +46,7 @@ struct ServerAddressView: View {
                 Button(action: connect) {
                     ConnectButtonLabel(title: L10n.string("ButtonConnect"), isRunning: model.isBusy)
                 }
+                .accessibilityIdentifier("connect.submit")
                 .disabled(model.isBusy || model.address.trimmingCharacters(in: .whitespaces).isEmpty)
             } footer: {
                 Text(L10n.attributed("MessageAudiobookshelfServerRequired"))
