@@ -388,4 +388,55 @@ import Testing
         #expect(kept.updatedAt == later)
         #expect(try await store.setCoverIfMissing(itemID: UUID(), relativePath: "x.jpg", updatedAt: nil) == false)
     }
+
+    /// Every write sends the observed connection's items again, most recently added first.
+    @Test(.timeLimit(.minutes(1))) func updatesSendTheCurrentItemsThenEveryChange() async throws {
+        let (store, _) = try makeStore()
+        let book = try await store.upsertFromDownload(bookDownload(parts: bookParts), now: now)
+        var updates = try await store.updates(serverConnectionID: Fixtures.connectionID).makeAsyncIterator()
+        #expect(await updates.next()?.map(\.id) == [book.id])
+
+        let episode = LocalMediaSnapshot.Episode(id: "ep_1", title: "Episode 1")
+        let podcast = try await store.upsertFromDownload(episodeDownload(episode), now: now.addingTimeInterval(5))
+        #expect(await updates.next()?.map(\.id) == [podcast.id, book.id])
+
+        try await store.updateCover(itemID: book.id, relativePath: nil, updatedAt: nil, now: now)
+        #expect(await updates.next()?.last?.coverRelativePath == nil)
+
+        try await store.deleteEpisode(itemID: podcast.id, episodeId: "ep_1", deletingEmptyItem: true)
+        #expect(await updates.next()?.map(\.id) == [book.id])
+
+        try await store.deleteItem(id: book.id)
+        #expect(await updates.next() == [])
+    }
+
+    /// Another connection's stream never carries this connection's items.
+    @Test func updatesListOnlyTheirConnection() async throws {
+        let (store, container) = try makeStore()
+        let otherID = UUID()
+        let context = ModelContext(container)
+        context.insert(Fixtures.connection(id: otherID, address: "https://other.example.com"))
+        try context.save()
+        var other = try await store.updates(serverConnectionID: otherID).makeAsyncIterator()
+        #expect(await other.next() == [])
+
+        try await store.upsertFromDownload(bookDownload(parts: bookParts), now: now)
+        #expect(await other.next() == [])
+    }
+
+    @Test(.timeLimit(.minutes(1))) func updatesStopWhenTheConsumerGoesAway() async throws {
+        let (store, _) = try makeStore()
+        let task = Task {
+            for await _ in try await store.updates(serverConnectionID: Fixtures.connectionID) {}
+        }
+        while await store.observerCount == 0 {
+            await Task.yield()
+        }
+        task.cancel()
+        _ = await task.result
+        while await store.observerCount > 0 {
+            await Task.yield()
+        }
+        #expect(await store.observerCount == 0)
+    }
 }
