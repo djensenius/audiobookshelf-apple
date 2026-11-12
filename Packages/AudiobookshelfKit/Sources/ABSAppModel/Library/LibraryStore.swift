@@ -528,3 +528,33 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
         try await send((any ServerURLProviding).self) { await $0.serverURL() }
     }
 }
+
+// MARK: PlaylistEditingService
+
+extension LibraryStoreServices: PlaylistEditingService {
+    public func allPlaylists(libraryID: String) async throws -> [Playlist] {
+        try await send((any PlaylistEditingService).self) { try await $0.allPlaylists(libraryID: libraryID) }
+    }
+    public func createPlaylist(
+        name: String, libraryID: String, items: [PlaylistItemReference]
+    ) async throws -> Playlist {
+        try await send((any PlaylistEditingService).self) {
+            try await $0.createPlaylist(name: name, libraryID: libraryID, items: items)
+        }
+    }
+    public func addToPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        try await send((any PlaylistEditingService).self) { try await $0.addToPlaylist(id: id, items: items) }
+    }
+    public func removeFromPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        try await send((any PlaylistEditingService).self) { try await $0.removeFromPlaylist(id: id, items: items) }
+    }
+    public func removeFromPlaylist(id: String, item: PlaylistItemReference) async throws -> Playlist {
+        try await send((any PlaylistEditingService).self) { try await $0.removeFromPlaylist(id: id, item: item) }
+    }
+    public func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        try await send((any PlaylistEditingService).self) { try await $0.reorderPlaylist(id: id, items: items) }
+    }
+    public func deletePlaylist(id: String) async throws {
+        try await send((any PlaylistEditingService).self) { try await $0.deletePlaylist(id: id) }
+    }
+}
