@@ -54,6 +54,11 @@ struct LibraryView: View {
             filterHost = BrowseModelHost.updated(filterHost, for: key, store: store) { key, services, _ in
                 LibraryFilterModel(client: services, connectionKey: key.connection)
             }
+            if let filterModel = filterHost?.model, let model = host?.model,
+                LibraryPresentation.loadsFilterChoicesEarly(for: model.preferences.filter)
+            {
+                filterModel.load(libraryID: model.libraryID)
+            }
             guard let model = host?.model, width != nil else { return }
             LibraryPresentation.paging(
                 width: width, dynamicTypeSize: dynamicTypeSize, viewMode: model.preferences.viewMode
@@ -79,6 +84,9 @@ struct LibraryContent: View {
     /// The filter sheet's choices; without it there is no filter button.
     var filterModel: LibraryFilterModel?
     @State private var showsFilter = false
+    @Environment(Router.self) private var router: Router?
+    /// Between `onAppear` and `onDisappear`, which a covered stack screen or hidden tab isn't (as in `RefreshCommand`).
+    @State private var isVisible = false
     /// The last user refresh failed and nothing loaded since.
     @State private var refreshFailed = false
     /// Successful user refreshes; cards report appearing again after each (as in ``BrowseItemGrid``).
@@ -114,7 +122,13 @@ struct LibraryContent: View {
         .navigationSubtitle(
             Text(verbatim: LibraryPresentation.countText(total: model.total, mediaType: model.mediaType) ?? "")
         )
-        .toolbar { LibraryToolbar(model: model, filterModel: filterModel, showsFilter: $showsFilter) }
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false }
+        .toolbar {
+            LibraryToolbar(
+                model: model, filterModel: filterModel, showsFilter: $showsFilter,
+                isFrontmost: RefreshCommandPlacement.root(.library).isFrontmost(in: router, isVisible: isVisible))
+        }
         .sheet(isPresented: $showsFilter) {
             if let filterModel {
                 LibraryFilterSheet(
@@ -122,6 +136,10 @@ struct LibraryContent: View {
                     selection: model.preferences.filter
                 ) { filter in model.update { $0.filter = filter } }
             }
+        }
+        // An account switch takes the filter model away: the sheet would show another account's choices.
+        .onChange(of: filterModel == nil) { _, isGone in
+            if isGone { showsFilter = false }
         }
         .refreshable { await refresh() }
         .refreshCommand(.root(.library), isDisabled: model.isLoading) { Task { await refresh() } }
@@ -131,6 +149,8 @@ struct LibraryContent: View {
     }
 
     private func refresh() async {
+        // New genres, authors and series appear in the filter sheet too, once it has loaded them.
+        if let filterModel, filterModel.choices != nil { filterModel.reload() }
         refreshFailed = await BrowsePresentation.refresh(model.list)
         if !refreshFailed { refreshes += 1 }
     }

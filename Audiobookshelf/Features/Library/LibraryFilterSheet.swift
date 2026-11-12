@@ -128,6 +128,7 @@ private struct LibraryFilterValueList: View {
                 }
             } else {
                 ProgressView()
+                    .accessibilityLabel(Text(verbatim: L10n.string("MessageLoading")))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }

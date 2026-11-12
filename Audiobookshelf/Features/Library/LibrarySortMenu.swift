@@ -42,9 +42,10 @@ struct LibrarySortMenu: View {
                     .tag(descending)
                 }
             } label: {
-                Text(verbatim: direction)
+                Text(verbatim: title)
             }
             .pickerStyle(.inline)
+            .labelsHidden()
         } label: {
             Label {
                 Text(verbatim: title)

@@ -205,6 +205,22 @@ extension LibraryPresentation {
         mediaType != .podcast
     }
 
+    /// Collapse Series is off while filtering by series, where the server ignores it.
+    static func isCollapseSeriesDisabled(_ preferences: LibraryViewPreferences) -> Bool {
+        preferences.filter?.group == .series
+    }
+
+    /// Whether the screen loads the filter choices before the sheet opens: the filter in use is an author or series
+    /// (other than "No series"), whose name only the choices have, so VoiceOver can read it.
+    static func loadsFilterChoicesEarly(for filter: LibraryViewPreferences.Filter?) -> Bool {
+        guard let filter, let value = filter.value else { return false }
+        switch filter.group {
+        case .authors: return true
+        case .series: return value != LibraryFilterModel.Choice.noSeries.id
+        default: return false
+        }
+    }
+
     /// The values `group` offers, localized for progress and ebooks, with "No series" first in series; `nil` while the
     /// library's filter data is needed and not loaded. Groups that take no value have none.
     static func filterValues(

@@ -472,6 +472,13 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
                 == "Narrator, Stephen Fry")
         #expect(
             LibraryPresentation.filterSummary(.init(group: .explicit), choices: nil, locale: english) == "Explicit")
+
+        // Only an author's or series' name needs the choices before the sheet opens.
+        #expect(LibraryPresentation.loadsFilterChoicesEarly(for: .init(group: .authors, value: "aut_1")))
+        #expect(LibraryPresentation.loadsFilterChoicesEarly(for: .init(group: .series, value: "ser_1")))
+        #expect(!LibraryPresentation.loadsFilterChoicesEarly(for: .init(group: .series, value: "no-series")))
+        #expect(!LibraryPresentation.loadsFilterChoicesEarly(for: .init(group: .genres, value: "Fantasy")))
+        #expect(!LibraryPresentation.loadsFilterChoicesEarly(for: nil))
     }
 
     @Test func choosingAFilterViewOrCollapseSavesIt() async throws {
@@ -480,14 +487,28 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
             let model = try makeHost(store, "lib_a").host.model
             await model.update { $0.filter = .init(group: .feedOpen) }?.value
             #expect(await client.requests.last?.query.filter == LibraryFilter(group: "feed-open"))
+            // The filter in use again is the same query: nothing reloads (`update` returns no load).
+            #expect(model.update { $0.filter = .init(group: .feedOpen) } == nil)
             await model.update { $0.collapseSeries = true }?.value
             #expect(await client.requests.last?.query.collapseSeries == true)
-            let requests = await client.requests.count
             // Grid or list is the same query: nothing reloads.
-            model.update { $0.viewMode = .list }
-            #expect(await client.requests.count == requests)
+            #expect(model.update { $0.viewMode = .list } == nil)
             let saved = try #require(store.viewPreferences(libraryID: "lib_a"))
             #expect(saved.filter == .init(group: .feedOpen) && saved.collapseSeries && saved.viewMode == .list)
+
+            await model.update { $0.filter = .init(group: .authors, value: "aut_1") }?.value
+            #expect(await client.requests.last?.query.filter == LibraryFilter(group: "authors", value: "aut_1"))
+            #expect(!LibraryPresentation.isCollapseSeriesDisabled(model.preferences))
+
+            // The server ignores collapsing while filtering by series: the toggle is off and changes no query.
+            await model.update { $0.filter = .init(group: .series, value: "ser_1") }?.value
+            #expect(await client.requests.last?.query.collapseSeries == false)
+            #expect(LibraryPresentation.isCollapseSeriesDisabled(model.preferences))
+            #expect(model.update { $0.collapseSeries = false } == nil)
+
+            await model.update { $0.filter = nil }?.value
+            #expect(await client.requests.last?.query.filter == nil)
+            #expect(store.viewPreferences(libraryID: "lib_a")?.filter == nil)
         }
         #expect(LibraryPresentation.showsCollapseSeries(for: .book))
         #expect(!LibraryPresentation.showsCollapseSeries(for: .podcast))
@@ -504,7 +525,7 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
             + [
                 "HeaderLibrarySort", "HeaderLibraryFilter", "ButtonLibraryFilterDone", "ButtonClearFilter",
                 "LabelLibraryViewOptions", "LabelCollapseSeries", "LabelAll", "MessageNoSeries",
-                "MessageLibraryFilterLoadFailed", "MessageLibraryFilterNoValues", "ButtonRetry",
+                "MessageLibraryFilterLoadFailed", "MessageLibraryFilterNoValues", "ButtonRetry", "MessageLoading",
             ]
         for key in keys {
             #expect(L10n.string(key) != key, "\(key) isn't in the catalog")

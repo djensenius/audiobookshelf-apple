@@ -11,6 +11,9 @@ struct LibraryToolbar: ToolbarContent {
     /// The filter sheet's choices; without it there is no filter button.
     let filterModel: LibraryFilterModel?
     @Binding var showsFilter: Bool
+    /// The screen is visible and tops the selected tab's stack (``RefreshCommandPlacement/isFrontmost(in:isVisible:)``),
+    /// so a hidden tab or covered screen never takes ⌥⌘F.
+    let isFrontmost: Bool
 
     var body: some ToolbarContent {
         ToolbarItemGroup(placement: .primaryAction) {
@@ -39,7 +42,7 @@ struct LibraryToolbar: ToolbarContent {
                         ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
             }
         }
-        .keyboardShortcut("f", modifiers: [.command, .option])
+        .keyboardShortcut(isFrontmost ? KeyboardShortcut("f", modifiers: [.command, .option]) : nil)
         // A screen pinned to one filter (a narrator's, say) can't change it.
         .disabled(model.pinnedFilter != nil)
         .accessibilityLabel(Text(verbatim: title))
@@ -87,6 +90,8 @@ private struct LibraryViewOptionsMenu: View {
                         Image(systemName: "square.stack")
                     }
                 }
+                // The server ignores collapsing while filtering by series.
+                .disabled(LibraryPresentation.isCollapseSeriesDisabled(preferences))
             }
         } label: {
             Label {
