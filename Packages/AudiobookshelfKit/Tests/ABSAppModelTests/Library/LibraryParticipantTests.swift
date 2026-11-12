@@ -233,6 +233,26 @@ private struct Harness {
         }
     }
 
+    /// An old row with `libraryItemId: null` doesn't stop the account's other rows seeding.
+    @Test func nullItemRowStillSeedsValidRows() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let payload = Data(
+                (#"{"mediaProgress":[{"id":"p-old","libraryItemId":null,"currentTime":3,"duration":10,"progress":0.3},"#
+                    + #"{"id":"p-a","libraryItemId":"a","currentTime":12,"duration":100,"progress":0.12}]}"#).utf8)
+            let participant = LibraryParticipant(
+                store: store, service: { _ in FakeLibraryService() },
+                fetchProgress: { _ in try JSONDecoder().decode(UserProgressResponse.self, from: payload) },
+                sleep: { _ in })
+            let context = SessionContext(identity: identityA, client: try makeClient(), isOffline: false, sessionID: 1)
+            await participant.sessionDidStart(context)
+            await participant.beginSeed(context)
+            await participant.seed(context)
+
+            #expect(store.progress.progress(libraryItemID: "a")?.currentTime == 12)
+        }
+    }
+
     @Test func staleSeedAfterReconnectIsDropped() async throws {
         try await withLibrarySettings { settings in
             let harness = Harness(settings: settings)

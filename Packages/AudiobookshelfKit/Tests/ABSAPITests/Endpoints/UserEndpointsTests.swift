@@ -63,6 +63,23 @@ import Testing
         #expect(request.url?.path() == "/abs/api/me")
     }
 
+    /// A row with `libraryItemId: null` (an old row whose item is gone) is dropped without making
+    /// the list incomplete; any other malformed row, even one missing the key, still does.
+    @Test func progressNullItemRowsDontMakeTheListIncomplete() throws {
+        let valid = #"{"id":"p1","libraryItemId":"A","currentTime":12,"duration":100,"progress":0.12}"#
+        let nullItem = #"{"id":"p2","libraryItemId":null,"currentTime":3,"duration":100,"progress":0.03}"#
+        let complete = try JSONDecoder().decode(
+            UserProgressResponse.self, from: Data(#"{"mediaProgress":[\#(nullItem),\#(valid)]}"#.utf8))
+        #expect(complete.mediaProgress.map(\.id) == ["p1"])
+        #expect(complete.skippedRows == 0)
+
+        let incomplete = try JSONDecoder().decode(
+            UserProgressResponse.self,
+            from: Data(#"{"mediaProgress":[\#(nullItem),\#(valid),{"id":"p3"},null,"oops"]}"#.utf8))
+        #expect(incomplete.mediaProgress.map(\.id) == ["p1"])
+        #expect(incomplete.skippedRows == 3)
+    }
+
     /// A seed replaces the cache, so a payload without the list must not read as "no progress".
     @Test func progressWithoutListThrows() {
         #expect(throws: DecodingError.self) {
