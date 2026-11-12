@@ -54,30 +54,36 @@ import Testing
     }
 
     /// A central-directory record of ``makeRawZip(files:records:)``: `name` for the stored data of
-    /// `files[file]`, optionally claiming a ZIP64 size or local-header offset, or a data descriptor.
+    /// `files[file]`, optionally claiming a ZIP64 size or local-header offset, a data descriptor or
+    /// encryption.
     private struct Record {
         var name: String
         var file = 0
         var claimedSize: UInt64?
         var claimedOffset: UInt64?
         var hasDataDescriptor = false
+        var isEncrypted = false
     }
 
     /// Writes a ZIP of stored `files` by hand, with `records` in its central directory, which may
     /// share local headers or forge sizes. Each local header has `localExtra` bytes of extra field.
+    /// With `inflated`, `files` hold DEFLATE streams that inflate to `inflated`.
     private func makeRawZip(
-        files: [(String, Data)], records: [Record], localExtra: Int = 0, name: String = "raw.cbz"
+        files: [(String, Data)], records: [Record], localExtra: Int = 0, inflated: [Data]? = nil,
+        name: String = "raw.cbz"
     ) throws -> URL {
         var bytes = Data()
         func put<T: FixedWidthInteger>(_ value: T) {
             withUnsafeBytes(of: value.littleEndian) { bytes.append(contentsOf: $0) }
         }
+        let method = UInt16(inflated == nil ? 0 : 8)
+        func contents(_ file: Int) -> Data { inflated?[file] ?? files[file].1 }
         var offsets: [UInt32] = []
-        for (path, data) in files {
+        for (index, (path, data)) in files.enumerated() {
             offsets.append(UInt32(bytes.count))
             put(UInt32(0x0403_4B50))
-            put(UInt16(20)); put(UInt16(0)); put(UInt16(0)); put(UInt16(0)); put(UInt16(0x21))
-            put(data.crc32(checksum: 0)); put(UInt32(data.count)); put(UInt32(data.count))
+            put(UInt16(20)); put(UInt16(0)); put(method); put(UInt16(0)); put(UInt16(0x21))
+            put(contents(index).crc32(checksum: 0)); put(UInt32(data.count)); put(UInt32(contents(index).count))
             put(UInt16(path.utf8.count)); put(UInt16(localExtra))
             bytes.append(contentsOf: path.utf8)
             bytes.append(Data(count: localExtra))
@@ -87,11 +93,15 @@ import Testing
         for record in records {
             let data = files[record.file].1
             put(UInt32(0x0201_4B50))
-            put(UInt16(45)); put(UInt16(45)); put(UInt16(record.hasDataDescriptor ? 8 : 0)); put(UInt16(0))
+            put(UInt16(45)); put(UInt16(45))
+            put(UInt16((record.hasDataDescriptor ? 8 : 0) | (record.isEncrypted ? 1 : 0))); put(method)
             put(UInt16(0)); put(UInt16(0x21))
-            put(data.crc32(checksum: 0))
-            let size: UInt32 = record.claimedSize == nil ? UInt32(data.count) : .max
-            put(size); put(size)
+            put(contents(record.file).crc32(checksum: 0))
+            if record.claimedSize == nil {
+                put(UInt32(data.count)); put(UInt32(contents(record.file).count))
+            } else {
+                put(UInt32.max); put(UInt32.max)
+            }
             let zip64 = (record.claimedSize.map { [$0, $0] } ?? []) + (record.claimedOffset.map { [$0] } ?? [])
             put(UInt16(record.name.utf8.count)); put(UInt16(zip64.isEmpty ? 0 : 4 + 8 * zip64.count)); put(UInt16(0))
             put(UInt16(0)); put(UInt16(0)); put(UInt32(0))
@@ -308,6 +318,17 @@ import Testing
         }
     }
 
+    @Test func anEncryptedEntryThrowsRatherThanHidingLaterPages() throws {
+        let files = pages("1.jpg", "notes.txt", "2.jpg")
+        let records = [Record(name: "1.jpg"), Record(name: "notes.txt", file: 1), Record(name: "2.jpg", file: 2)]
+        #expect(
+            try ComicArchive(url: try makeRawZip(files: files, records: records), cacheDirectory: cache).pageCount == 2)
+        var encrypted = records
+        encrypted[1].isEncrypted = true
+        let url = try makeRawZip(files: files, records: encrypted, name: "encrypted.cbz")
+        #expect(throws: ComicArchiveError.notAZip) { try ComicArchive(url: url, cacheDirectory: cache) }
+    }
+
     @Test func anEndRecordMustBeInTheLastBytes() throws {
         for (padding, opens) in [(0xFFFF, true), (0x1_0000, false)] {
             let url = try makeZip(pages("1.jpg"), name: "padded-\(padding).cbz")
@@ -504,6 +525,23 @@ import Testing
             let comic = try ComicArchive(url: url, cacheDirectory: cache)
             #expect(try Data(contentsOf: try await comic.page(1)).isEmpty)
         }
+    }
+
+    @Test func deflatedEntriesMayInflateToNothingForManyChunks() async throws {
+        // 7,000 empty stored blocks (35,000 bytes, over two 16 KiB input chunks), then the contents.
+        func deflated(_ contents: Data) -> Data {
+            let empty = Data(repeating: 0, count: 1) + Data([0, 0, 0xFF, 0xFF])
+            let length = UInt16(contents.count)
+            let final = Data([1, UInt8(length & 0xFF), UInt8(length >> 8), UInt8(~length & 0xFF), UInt8(~length >> 8)])
+            return Data((0..<7_000).map { _ in empty }.joined()) + final + contents
+        }
+        let contents = [Data("image".utf8), Data("<ComicInfo><Title>T</Title></ComicInfo>".utf8)]
+        let files = [("1.jpg", deflated(contents[0])), ("ComicInfo.xml", deflated(contents[1]))]
+        let records = [Record(name: "1.jpg"), Record(name: "ComicInfo.xml", file: 1)]
+        let url = try makeRawZip(files: files, records: records, inflated: contents)
+        let comic = try ComicArchive(url: url, cacheDirectory: cache)
+        #expect(comic.comicInfo?.title == "T")
+        #expect(try Data(contentsOf: try await comic.page(1)) == contents[0])
     }
 
     /// The entry of `claimedSize` bytes, read from `Archive` without the preflight.

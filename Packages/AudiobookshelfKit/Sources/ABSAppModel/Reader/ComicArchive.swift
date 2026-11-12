@@ -175,13 +175,15 @@ public actor ComicArchive {
         // ZIPFoundation 0.9.20 converts these sizes to `Int64` unchecked, which traps.
         let limit = UInt64(Int64.max)
         guard entry.compressedSize <= limit, entry.uncompressedSize <= limit else { throw .unreadable }
-        // Past the end of a truncated stored entry, ZIPFoundation passes empty chunks until it has
-        // counted the claimed size. Only an empty entry has an empty chunk, and only one.
-        var emptyChunks = 0
+        // Past the end of a truncated entry, ZIPFoundation passes empty chunks until it has counted
+        // the claimed size. A stored entry has at most one, when it's empty. A deflated one has one
+        // per input chunk that inflates to nothing (such as empty blocks), plus one at the end.
+        let maxEmptyChunks = entry.isCompressed ? entry.compressedSize / UInt64(defaultReadChunkSize) + 2 : 1
+        var emptyChunks: UInt64 = 0
         do {
             return try archive.extract(entry, skipCRC32: false) { chunk in
                 emptyChunks = chunk.isEmpty ? emptyChunks + 1 : 0
-                guard emptyChunks < 2 else { throw ExtractionError.unreadable }
+                guard emptyChunks <= maxEmptyChunks else { throw ExtractionError.unreadable }
                 try consumer(chunk)
             }
         } catch ExtractionError.tooLarge {

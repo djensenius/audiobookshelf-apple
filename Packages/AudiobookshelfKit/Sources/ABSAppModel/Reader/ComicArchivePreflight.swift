@@ -10,6 +10,7 @@ import Foundation
 /// file: the compressed data, and the uncompressed size too when stored, which is what
 /// ZIPFoundation reads. That also bounds the data-descriptor position. A malformed ZIP64 field
 /// leaves ZIPFoundation with the `0xFFFFFFFF` placeholder, which is checked like any other value.
+/// An encrypted record is rejected: ZIPFoundation would silently stop listing entries there.
 ///
 /// ZIPFoundation's entries keep their headers (path, extra field, comment, and the local header's
 /// path and extra field, read again for every record that shares it). Those must total at most
@@ -31,9 +32,9 @@ enum ComicArchivePreflight {
         var position = end.offset
         var headerBytes = 0
         for _ in 0..<end.count {
-            guard let record = file.bytes(at: position, count: 46), record.uint32(at: 0) == 0x0201_4B50 else {
-                throw .notAZip
-            }
+            guard let record = file.bytes(at: position, count: 46), record.uint32(at: 0) == 0x0201_4B50,
+                record.uint16(at: 8) & 1 == 0
+            else { throw .notAZip }
             let lengths = [28, 30, 32].map { Int(record.uint16(at: $0)) }
             let extraOffset = position + 46 + UInt64(lengths[0])
             guard let extra = file.bytes(at: extraOffset, count: lengths[1]),
