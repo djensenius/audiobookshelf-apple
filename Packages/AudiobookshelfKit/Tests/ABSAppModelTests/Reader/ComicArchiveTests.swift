@@ -67,10 +67,12 @@ import Testing
 
     /// Writes a ZIP of stored `files` by hand, with `records` in its central directory, which may
     /// share local headers or forge sizes. Each local header has `localExtra` bytes of extra field.
-    /// With `inflated`, `files` hold DEFLATE streams that inflate to `inflated`.
+    /// With `inflated`, `files` hold DEFLATE streams that inflate to `inflated`. With `zip64End`,
+    /// a ZIP64 end record and locator precede the end record, whose own count and offset are then
+    /// wrong; the ZIP64 record's are real unless `zip64End` forges them.
     private func makeRawZip(
         files: [(String, Data)], records: [Record], localExtra: Int = 0, inflated: [Data]? = nil,
-        name: String = "raw.cbz"
+        zip64End: (count: UInt64?, offset: UInt64?)? = nil, name: String = "raw.cbz"
     ) throws -> URL {
         var bytes = Data()
         func put<T: FixedWidthInteger>(_ value: T) {
@@ -113,9 +115,17 @@ import Testing
             }
         }
         let directorySize = bytes.count - directoryOffset
+        if let zip64End {
+            let recordOffset = UInt64(bytes.count)
+            let count = zip64End.count ?? UInt64(records.count)
+            put(UInt32(0x0606_4B50)); put(UInt64(44)); put(UInt16(45)); put(UInt16(45)); put(UInt32(0)); put(UInt32(0))
+            put(count); put(count); put(UInt64(directorySize)); put(zip64End.offset ?? UInt64(directoryOffset))
+            put(UInt32(0x0706_4B50)); put(UInt32(0)); put(recordOffset); put(UInt32(1))
+        }
         put(UInt32(0x0605_4B50))
-        put(UInt16(0)); put(UInt16(0)); put(UInt16(records.count)); put(UInt16(records.count))
-        put(UInt32(directorySize)); put(UInt32(directoryOffset)); put(UInt16(0))
+        let count = zip64End == nil ? UInt16(records.count) : .max
+        put(UInt16(0)); put(UInt16(0)); put(count); put(count)
+        put(UInt32(directorySize)); put(zip64End == nil ? UInt32(directoryOffset) : .max); put(UInt16(0))
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let url = root.appending(path: name)
         try bytes.write(to: url)
@@ -329,6 +339,17 @@ import Testing
         #expect(throws: ComicArchiveError.notAZip) { try ComicArchive(url: url, cacheDirectory: cache) }
     }
 
+    @Test func theZIP64EndRecordIsCheckedInsteadOfTheEndRecord() throws {
+        let files = pages("1.jpg", "2.jpg")
+        let records = [Record(name: "1.jpg"), Record(name: "2.jpg", file: 1)]
+        let url = try makeRawZip(files: files, records: records, zip64End: (nil, nil))
+        #expect(try ComicArchive(url: url, cacheDirectory: cache).pagePaths == ["1.jpg", "2.jpg"])
+        let tooMany = try makeRawZip(files: files, records: records, zip64End: (1 << 40, nil), name: "many.cbz")
+        #expect(throws: ComicArchiveError.tooManyEntries) { try ComicArchive(url: tooMany, cacheDirectory: cache) }
+        let pastEnd = try makeRawZip(files: files, records: records, zip64End: (nil, 1 << 20), name: "past.cbz")
+        #expect(throws: ComicArchiveError.notAZip) { try ComicArchive(url: pastEnd, cacheDirectory: cache) }
+    }
+
     @Test func anEndRecordMustBeInTheLastBytes() throws {
         for (padding, opens) in [(0xFFFF, true), (0x1_0000, false)] {
             let url = try makeZip(pages("1.jpg"), name: "padded-\(padding).cbz")
@@ -427,8 +448,9 @@ import Testing
     @Test func openingEmptiesTheCacheDirectory() throws {
         try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
         try Data("stale".utf8).write(to: cache.appending(path: "page-1.jpg"))
-        _ = try ComicArchive(url: try makeZip(pages("1.jpg")), cacheDirectory: cache)
-        #expect(cachedFiles().isEmpty)
+        let comic = try ComicArchive(url: try makeZip(pages("1.jpg")), cacheDirectory: cache)
+        // Kept alive, as releasing it deletes the directory too.
+        withExtendedLifetime(comic) { #expect(cachedFiles().isEmpty) }
     }
 
     // MARK: Pages
