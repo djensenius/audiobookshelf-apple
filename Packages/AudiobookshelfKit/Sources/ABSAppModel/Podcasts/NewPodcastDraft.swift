@@ -161,11 +161,13 @@ public final class NewPodcastDraft: Identifiable {
 
     /// The longest file name legacy keeps, in UTF-16 code units.
     nonisolated static let maxFilenameLength = 240
+    /// The longest directory name common server filesystems accept, in UTF-8 bytes.
+    nonisolated static let maxFilenameBytes = 255
 
     /// A port of legacy `$sanitizeFilename` (`plugins/init.client.js`): the first `:` becomes ` - `; `/ ? < > \ : * |
     /// "`, control characters and line breaks are removed; a name of only dots or a reserved Windows device name
-    /// becomes empty; trailing dots and spaces are removed; and a name over 240 UTF-16 code units is shortened before
-    /// its extension.
+    /// becomes empty; trailing dots and spaces are removed; and a name over 240 UTF-16 code units (or, unlike legacy,
+    /// 255 UTF-8 bytes) is shortened by whole characters before its extension.
     public nonisolated static func sanitizedFilename(_ input: String) -> String {
         var name = input
         if let colon = name.firstIndex(of: ":") { name.replaceSubrange(colon...colon, with: " - ") }
@@ -180,12 +182,16 @@ public final class NewPodcastDraft: Identifiable {
         if name.allSatisfy({ $0 == "." }) { name = "" }
         if name.wholeMatch(of: /(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?/) != nil { name = "" }
         while let last = name.last, last == "." || last == " " { name.removeLast() }
-        if name.utf16.count > maxFilenameLength {
-            let excess = name.utf16.count - maxFilenameLength
+        let fits = { (name: String) in name.utf16.count <= maxFilenameLength && name.utf8.count <= maxFilenameBytes }
+        if !fits(name) {
             let (base, ext) = splitExtension(name)
             var shortened = base
-            while !shortened.isEmpty, base.utf16.count - shortened.utf16.count < excess { shortened.removeLast() }
-            name = shortened + ext
+            while !shortened.isEmpty, !fits(shortened + ext) { shortened.removeLast() }
+            if fits(shortened + ext) {
+                name = shortened + ext
+            } else {
+                while !fits(name) { name.removeLast() }
+            }
         }
         return name
     }

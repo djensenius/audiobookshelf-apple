@@ -183,6 +183,7 @@ public final class AddPodcastModel {
     private func search(_ term: String) {
         let generation = supersede()
         isSearching = true
+        searchError = nil
         let (service, country) = (service, country)
         task = Task { [weak self] in
             let result: Result<[PodcastDirectoryResult], any Error>

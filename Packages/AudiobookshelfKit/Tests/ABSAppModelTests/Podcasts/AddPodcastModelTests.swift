@@ -151,6 +151,13 @@ let podcastFolders = [
         await model.task?.value
         #expect(model.results.isEmpty && model.searchedTerm == nil)
         #expect(model.searchError is TestError && !model.isSearching)
+
+        // A retry clears the error, so a second failure is announced again.
+        model.submit()
+        #expect(model.searchError == nil)
+        try #require(await calls.next()).reply.resume(throwing: TestError.offline)
+        await model.task?.value
+        #expect(model.searchError is TestError)
     }
 
     @Test func aFeedURLIsLookedUpAndOpensTheForm() async throws {
