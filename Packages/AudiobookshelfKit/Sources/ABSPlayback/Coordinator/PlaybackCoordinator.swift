@@ -195,6 +195,10 @@ public final class PlaybackCoordinator {
     /// What an interruption cancelled (``cancelHeldPlayIntent()``): the generation and play check
     /// it happened at.
     @ObservationIgnored private var heldPlay: (generation: Int, policyCheck: Int)?
+    /// A restore of ``heldPlay`` queued when the interruption ended, cancelled like a play: by a
+    /// pause, lost output, stop or another interruption (which holds it again).
+    @ObservationIgnored private var queuedRestore: (token: Int, held: (generation: Int, policyCheck: Int))?
+    @ObservationIgnored private var restoreTokens = 0
     /// The ``resumingIntent`` of a user seek that took over recovery's play.
     @ObservationIgnored private var recoverySeekIntent: Int?
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
@@ -662,7 +666,7 @@ public final class PlaybackCoordinator {
     /// Always emits `paused`, even when already paused, so a sleep timer's pending resume can be cancelled.
     public func pause() {
         defer { emit(.paused(time: currentTime)) }
-        heldPlay = nil
+        dropHeldPlay()
         recovery.notePlayIntent(false)
         if pendingPlayKey != nil {
             policyCheck += 1
@@ -820,6 +824,7 @@ public final class PlaybackCoordinator {
         generation += 1
         policyCheck += 1
         pendingPlayKey = nil
+        dropHeldPlay()
         let hadItem = mediaKey != nil
         tearDown(reason: .stopped)
         mediaKey = nil
@@ -969,7 +974,7 @@ public final class PlaybackCoordinator {
     /// even when already paused, so a sleep timer's pending resume is cancelled too.
     private func outputLost() {
         defer { emit(.paused(time: currentTime)) }
-        heldPlay = nil
+        dropHeldPlay()
         // As a pause does: a play awaiting its streaming check doesn't start.
         if pendingPlayKey != nil {
             policyCheck += 1
@@ -985,14 +990,20 @@ public final class PlaybackCoordinator {
     /// pause can't reach, as a lost output does, so recovery never restarts audio during the call.
     /// Returns whether there was one.
     public func cancelHeldPlayIntent() -> Bool {
-        heldPlay = nil
         // A play awaiting its streaming check never starts during the call, even beside a playing
         // item; it isn't restored.
         if pendingPlayKey != nil {
             policyCheck += 1
             pendingPlayKey = nil
         }
-        guard isPlaybackRequested, !engine.isPlaybackRequested else { return false }
+        // The last call's restore hasn't run yet: held again, for this call's end.
+        if let restore = queuedRestore {
+            queuedRestore = nil
+            heldPlay = restore.held
+            return true
+        }
+        // Nothing new to cancel (a repeated begin): what an earlier one held stays held.
+        guard isPlaybackRequested, !engine.isPlaybackRequested else { return heldPlay != nil }
         if phase == .starting || (phase == .loaded && isFinishingLoad) {
             // Keeps the load's resume token, so restoring `playWhenLoaded` plays it.
             pause()
@@ -1019,16 +1030,25 @@ public final class PlaybackCoordinator {
             recovery.notePlayIntent(true)
         case .loaded:
             let intent = resumeIntent
+            restoreTokens += 1
+            let token = restoreTokens
+            queuedRestore = (token, held)
             Task { [weak self] in
-                guard let self, held == (generation, policyCheck), phase == .loaded, intent == resumeIntent,
-                    heldPlay == nil
-                else { return }
+                guard let self, queuedRestore?.token == token else { return }
+                queuedRestore = nil
+                guard held == (generation, policyCheck), phase == .loaded, intent == resumeIntent else { return }
                 if recovery.isRecovering(at: generation) { return recovery.notePlayIntent(true) }
                 await resume()
             }
         case .idle, .unloaded:
             break
         }
+    }
+
+    /// A user pause, lost output or stop: nothing an interruption cancelled is restored.
+    private func dropHeldPlay() {
+        heldPlay = nil
+        queuedRestore = nil
     }
 
     // MARK: Auto-advance
@@ -1214,6 +1234,8 @@ public final class PlaybackCoordinator {
         let attempt = generation + 1
         recoveryAttempt = attempt
         recoveryAttemptError = nil
+        // A call that held this item's play still holds it on the rebuilt one.
+        if heldPlay?.generation == generation { heldPlay?.generation = attempt }
         defer {
             if recoveryAttempt == attempt {
                 recoveryAttempt = nil

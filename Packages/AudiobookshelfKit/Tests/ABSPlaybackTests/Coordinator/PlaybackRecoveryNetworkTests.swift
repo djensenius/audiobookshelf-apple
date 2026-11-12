@@ -463,6 +463,106 @@ struct PlaybackRecoveryNetworkTests {
         #expect(Array(engine.seeks.dropFirst(seeks)) == [600])
         #expect(coordinator.currentTime == 600)
     }
+
+    /// A repeated begin with nothing new to cancel keeps what the first one held.
+    @Test func aRepeatedCallBeginKeepsTheHeldPlay() async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        h.recoverySleep.isManual = true
+        await playAt600()
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        handler.handle(.interruptionBegan)
+        handler.handle(.interruptionBegan)
+        handler.handle(.interruptionEnded(shouldResume: true))
+        h.recoverySleep.fireOldest()
+        await settle { engine.isPlaybackRequested }
+        #expect(coordinator.currentTime == 600)
+    }
+
+    /// A call spanning a recovery rebuild (the session is gone): its end plays the rebuilt item,
+    /// whether it ends while the rebuild starts or after it loaded.
+    @Test(arguments: [false, true])
+    func aCallSpanningARecoveryRebuildPlaysItOnceItEnds(endsAfterTheRebuild: Bool) async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        h.recoverySleep.isManual = true
+        setSession(.gone)
+        await playAt600()
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 404))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        handler.handle(.interruptionBegan)
+        let gate = Gate()
+        service.state.withLock { $0.startGates["A"] = gate }
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 2 }
+        if endsAfterTheRebuild {
+            gate.open()
+            await settle { engine.loads.count == 2 }
+            await drain()
+            #expect(!engine.isPlaybackRequested)
+            handler.handle(.interruptionEnded(shouldResume: true))
+        } else {
+            handler.handle(.interruptionEnded(shouldResume: true))
+            gate.open()
+        }
+        await settle { engine.isPlaybackRequested }
+
+        #expect(coordinator.session?.id == "A-2")
+        #expect(coordinator.currentTime == 600)
+        #expect(coordinator.error == nil)
+    }
+
+    /// A call that ends and another that begins before the restore runs: nothing plays during the
+    /// second call, and its end restores the play.
+    @Test func aCallBeginningBeforeTheRestoreRunsCancelsIt() async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let seeks = engine.seeks.count
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        handler.handle(.interruptionBegan)
+        // Recovery succeeds, paused, during the call.
+        h.recoverySleep.fireOldest()
+        await settle { engine.seeks.count > seeks }
+        await drain()
+
+        handler.handle(.interruptionEnded(shouldResume: true))
+        handler.handle(.interruptionBegan)
+        await drain()
+        #expect(!engine.isPlaybackRequested)
+        #expect(!coordinator.isPlaybackRequested)
+
+        handler.handle(.interruptionEnded(shouldResume: true))
+        await settle { engine.isPlaybackRequested }
+    }
+
+    /// A stop right after the call ends cancels the queued restore.
+    @Test func aStopAfterTheCallEndsCancelsTheRestore() async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let seeks = engine.seeks.count
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        handler.handle(.interruptionBegan)
+        h.recoverySleep.fireOldest()
+        await settle { engine.seeks.count > seeks }
+        await drain()
+        let plays = engine.playCount
+
+        handler.handle(.interruptionEnded(shouldResume: true))
+        coordinator.stop()
+        await drain()
+
+        #expect(engine.playCount == plays)
+        #expect(coordinator.mediaKey == nil)
+    }
 }
 
 /// Paths that tests switch by hand; each stream yields the current path first, as
