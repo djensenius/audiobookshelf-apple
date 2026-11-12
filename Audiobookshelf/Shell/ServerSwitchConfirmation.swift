@@ -23,7 +23,7 @@ struct SceneLinks {
         }
     }
 
-    /// Keeps `link`, the confirmed one, until ``finishSwitch(succeeded:gate:epoch:)``.
+    /// Keeps `link`, the confirmed one, until ``finishSwitch(_:gate:epoch:)``.
     /// - Returns: `false`, changing nothing, when a newer link waits for `epoch` (it wins); one
     ///   waiting for an older epoch goes.
     mutating func beginSwitch(with link: DeepLink, epoch: UInt64) -> Bool {
@@ -35,12 +35,15 @@ struct SceneLinks {
         return true
     }
 
-    mutating func finishSwitch(succeeded: Bool, gate: AuthGate, epoch: UInt64) {
+    /// After a success, the link waits for the switch's epoch, so a later change drops it.
+    mutating func finishSwitch(_ outcome: SwitchOutcome, gate: AuthGate, epoch: UInt64) {
         guard isSwitching else { return }
         isSwitching = false
         defer { afterSwitch = nil }
         guard let link = afterSwitch else { return }
-        if succeeded || replacedConfirmed {
+        if case .switched(let switched) = outcome {
+            pending = PendingLink(link, arrivingAt: gate, epoch: switched)
+        } else if replacedConfirmed {
             pending = PendingLink(link, arrivingAt: gate, epoch: epoch)
         } else {
             Log.ui.notice("Dropped a link: the server switch failed")
@@ -66,7 +69,7 @@ struct SceneLinks {
 struct LinkReopener {
     /// Whether the root took the link; not when a newer one waits.
     var beginSwitch: @MainActor (DeepLink) -> Bool = { _ in true }
-    var finishSwitch: @MainActor (_ succeeded: Bool) -> Void = { _ in }
+    var finishSwitch: @MainActor (SwitchOutcome) -> Void = { _ in }
 }
 
 /// The link the confirmation dialog asks about, for a saved server with a session.
@@ -151,12 +154,12 @@ struct ServerSwitchConfirmation {
             let switching = AccountActions(lifecycle: lifecycle, accounts: accounts)
                 .switchAccount(to: request.connection.id)
         else {
-            reopen.finishSwitch(false)
+            reopen.finishSwitch(.failed(.other))
             return nil
         }
         return Task {
             let outcome = await switching.value
-            reopen.finishSwitch(outcome.succeeded)
+            reopen.finishSwitch(outcome)
             return outcome
         }
     }

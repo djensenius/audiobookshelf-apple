@@ -28,7 +28,10 @@ struct AccountView: View {
                 }
                 if let lifecycle {
                     Button(role: .destructive) {
-                        guard let task = AccountActions(lifecycle: lifecycle).signOut(openURL: { openURL($0) })
+                        guard
+                            let task = AccountActions(lifecycle: lifecycle, accounts: accounts).signOut(openURL: {
+                                openURL($0)
+                            })
                         else { return }
                         isSigningOut = true
                         // Only while it runs: the lifecycle can refuse it (another window's change

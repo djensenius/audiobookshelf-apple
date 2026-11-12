@@ -99,7 +99,7 @@ struct RootView: View {
                 reopen: LinkReopener(
                     beginSwitch: { links.beginSwitch(with: $0, epoch: lifecycle.linkEpoch) },
                     finishSwitch: {
-                        links.finishSwitch(succeeded: $0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
+                        links.finishSwitch($0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
                     })
             )
             .id(identity)

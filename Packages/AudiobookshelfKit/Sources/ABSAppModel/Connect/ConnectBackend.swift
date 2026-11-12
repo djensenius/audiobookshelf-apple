@@ -2,6 +2,7 @@ import ABSAPI
 import ABSCore
 import ABSData
 import Foundation
+import Observation
 
 /// A server whose `/status` was read, ready to sign in to.
 public struct ConnectServer: Sendable {
@@ -59,12 +60,14 @@ extension ConnectBackend {
 /// a removal goes through ``SessionLifecycle/removeAccount(_:)``. Resuming the active connection
 /// or a signed-out one ends nothing. The change starts before the server checks the credentials,
 /// so a wrong password still restarts the running session; checking first is a follow-up.
-final class AccountConnectBackend: ConnectBackend {
+@Observable final class AccountConnectBackend: ConnectBackend {
     let accounts: AccountManager
     private let validator: ServerValidator
     private let lifecycle: SessionLifecycle?
     /// The session the sheet was opened from; after a change of its own, the one it left running.
     private var origin: ReadySession?
+    /// Whether a change of its own runs, until its transition ends, even if the flow cancelled it.
+    private var isChanging = false
 
     init(accounts: AccountManager, validator: ServerValidator = ServerValidator(), lifecycle: SessionLifecycle? = nil) {
         self.accounts = accounts
@@ -74,7 +77,7 @@ final class AccountConnectBackend: ConnectBackend {
     }
 
     var connections: [ServerConnectionDTO] { accounts.connections }
-    var originHasEnded: Bool { lifecycle.map { $0.readySession != origin } ?? false }
+    var originHasEnded: Bool { !isChanging && lifecycle.map { $0.readySession != origin } ?? false }
 
     func validate(address: String, customHeaders: [String: String]) async throws -> ConnectServer {
         ConnectServer(try await validator.validate(address: address, customHeaders: customHeaders))
@@ -127,7 +130,11 @@ final class AccountConnectBackend: ConnectBackend {
         // running at the change's turn: another window may have switched since the sheet opened.
         guard let origin, lifecycle.readySession == origin else { throw CancellationError() }
         var ran = true  // Unless refused; `body` may throw.
-        defer { if ran { self.origin = lifecycle.readySession } }
+        isChanging = true
+        defer {
+            if ran { self.origin = lifecycle.readySession }
+            isChanging = false
+        }
         ran = try await lifecycle.performAccountChange(from: origin, body)
         guard ran else { throw CancellationError() }
     }

@@ -25,7 +25,13 @@ struct AccountActions {
 
     /// The sign-out, chosen from `origin`.
     func signOut(from origin: ReadySession, openURL: @MainActor (URL) -> Void) async {
-        if let endSession = await lifecycle.signOut(of: origin) { openURL(endSession) }
+        open(await lifecycle.signOut(of: origin), with: openURL)
+    }
+
+    /// Opens `endSession` right away, unless a sign-in has begun since the sign-out.
+    func open(_ endSession: URL?, with openURL: @MainActor (URL) -> Void) {
+        guard let endSession, accounts?.hasBegunSinceLogout != true else { return }
+        openURL(endSession)
     }
 
     /// Switches to another saved connection.
@@ -53,16 +59,17 @@ struct AccountActions {
             Log.ui.notice("A server switch didn't reach the server's session")
             return .failed(.other)
         }
-        return .switched
+        return .switched(epoch: lifecycle.linkEpoch)
     }
 }
 
 /// How ``AccountActions/switchAccount(to:)`` ended.
 enum SwitchOutcome: Equatable {
-    case switched
+    /// With the new account's link epoch, which a later change, say from another window, moves on.
+    case switched(epoch: UInt64)
     case failed(SwitchFailure)
 
-    var succeeded: Bool { self == .switched }
+    var succeeded: Bool { if case .switched = self { true } else { false } }
 }
 
 /// Why a switch failed, for the alert the view shows.

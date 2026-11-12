@@ -510,6 +510,10 @@ public final class AccountManager {
         }
     }
 
+    /// Whether a sign-in, restore or switch began since the last ``logout()``: its end-session URL
+    /// would then end or interrupt that in the shared browser.
+    public var hasBegunSinceLogout: Bool { operation != latestLogout }
+
     // MARK: - Private
 
     private func begin() -> Int {

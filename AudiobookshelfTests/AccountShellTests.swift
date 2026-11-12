@@ -30,7 +30,7 @@ private final class Recorder: SessionParticipant {
         LinkReopener(
             beginSwitch: { self.links.beginSwitch(with: $0, epoch: lifecycle.linkEpoch) },
             finishSwitch: {
-                self.links.finishSwitch(succeeded: $0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
+                self.links.finishSwitch($0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
             })
     }
 
@@ -90,6 +90,21 @@ private final class Recorder: SessionParticipant {
         try #require(model.phase == .done)
         let saved = try #require(accounts.activeConnection)
         return SessionIdentity(connectionID: saved.id, userID: saved.userId)
+    }
+
+    /// Starts an OpenID sign-in in `model` whose browser stays open until it's cancelled.
+    private func heldOpenID(_ model: ConnectViewModel) async -> Task<Void, Never> {
+        let (opened, browser) = AsyncStream<Void>.makeStream()
+        let task = Task {
+            await model.signInWithOpenID(
+                using: WebAuthenticationSessionAuthenticator { _, _ in
+                    browser.finish()
+                    try await Task.sleep(for: .seconds(600))  // Until cancelled.
+                    throw CancellationError()
+                })
+        }
+        for await _ in opened {}
+        return task
     }
 
     private func connectModel(_ accounts: AccountManager, lifecycle: SessionLifecycle? = nil) -> ConnectViewModel {
@@ -233,6 +248,32 @@ private final class Recorder: SessionParticipant {
         #expect(recorder.opened.map(\.gate) == [.connect])
     }
 
+    /// A sign-in begun after the sign-out keeps its end-session page closed.
+    @Test func aSignInAfterSigningOutKeepsTheEndSessionPageClosed() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let accounts = try #require(environment.accounts)
+        await lifecycle.start()
+        let host = Self.host("oidc-")
+        defer { cleanUp([host]) }
+        let identity = try await signIn(accounts, to: host, openID: true)
+        await waitFor(.ready(identity, isOffline: false), in: lifecycle)
+        let endSession = try #require(await lifecycle.signOut())
+        let actions = AccountActions(lifecycle: lifecycle, accounts: accounts)
+        var opened: [URL] = []
+        actions.open(endSession) { opened.append($0) }
+
+        let model = connectModel(accounts)
+        model.addServer()
+        model.address = "https://\(host)"
+        await model.submitAddress()
+        let signingIn = await heldOpenID(model)
+        actions.open(endSession) { opened.append($0) }
+        model.cancel()
+        await signingIn.value
+        #expect(opened == [endSession])
+    }
+
     /// While a switch runs, nothing in the old shell, in any window, may start another change.
     @Test func accountChangesAreRefusedWhileSwitching() async throws {
         let environment = try makeEnvironment()
@@ -290,7 +331,7 @@ private final class Recorder: SessionParticipant {
             AccountActions(lifecycle: environment.lifecycle).switchAccount(to: a.connectionID)
         ).value
 
-        #expect(switched == .switched)
+        #expect(switched.succeeded)
         #expect(environment.lifecycle.gate == .ready(a, isOffline: false))
         #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
     }
@@ -447,6 +488,29 @@ private final class Recorder: SessionParticipant {
         #expect(!model.isStale)
         await model.signIn()
         #expect(Array(recorder.events.dropFirst(before)).count == 6)
+    }
+
+    /// Cancelling the sheet's own sign-in, while its change unwinds, keeps the sheet open.
+    @Test func cancellingTheSheetsSignInKeepsItOpen() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let accounts = try #require(environment.accounts)
+        await lifecycle.start()
+        let hosts = [Self.host(), Self.host()]
+        defer { cleanUp(hosts) }
+        let a = try await signIn(accounts, to: hosts[0])
+        await waitFor(.ready(a, isOffline: false), in: lifecycle)
+        let model = connectModel(accounts, lifecycle: lifecycle)
+        model.startAddingServer()
+        model.address = "https://\(hosts[1])"
+        await model.submitAddress()
+        let signingIn = await heldOpenID(model)
+
+        model.cancel()
+        #expect(model.phase == .login && lifecycle.readySession == nil && !model.isStale)
+        await signingIn.value
+        await waitFor(.ready(a, isOffline: false), in: lifecycle)
+        #expect(!model.isStale)
     }
 
     /// Another window's failed switch restarts B; the sheet opened before it closes.
@@ -684,10 +748,19 @@ private final class Recorder: SessionParticipant {
         let began = links.beginSwitch(with: confirmed, epoch: 1)
         #expect(began)
         if replaced { links.receive(newer, gate: .switching(from: identity), epoch: 1) }
-        links.finishSwitch(succeeded: false, gate: .ready(identity, isOffline: false), epoch: 2)
+        links.finishSwitch(.failed(.other), gate: .ready(identity, isOffline: false), epoch: 2)
 
         #expect(!links.isSwitching)
         #expect(links.link(atEpoch: 2) == (replaced ? newer : nil))
+    }
+
+    /// Another change after the switch, before its link is handed over, moves the epoch on.
+    @Test func aSwitchsLinkWaitsForTheSwitchsEpoch() {
+        let identity = SessionIdentity(connectionID: UUID(), userID: "c")
+        var links = SceneLinks()
+        let began = links.beginSwitch(with: DeepLink(.downloads, serverID: nil), epoch: 1)
+        links.finishSwitch(.switched(epoch: 2), gate: .ready(identity, isOffline: false), epoch: 3)
+        #expect(began && links.link(atEpoch: 3) == nil && links.link(atEpoch: 2) != nil)
     }
 
     /// Every newer link replaces the dialog's: this server's, an unknown or a signed-out one's.
