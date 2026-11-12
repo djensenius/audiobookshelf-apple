@@ -2,7 +2,7 @@ import ABSAPI
 import ABSCore
 import Foundation
 
-/// The playlist writes of ``AddToPlaylistModel`` and, later, the playlist detail screen's editing.
+/// The playlist writes of ``AddToPlaylistModel`` and ``PlaylistDetailEditor``.
 /// `APIClient` conforms; tests and previews use fakes.
 ///
 /// Playlists belong to the signed-in user; the server rejects another user's playlist with 403.
@@ -20,6 +20,9 @@ public protocol PlaylistEditingService: Sendable {
     func removeFromPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist
     /// `DELETE /api/playlists/:id/item/:itemId[/:episodeId]`: one member; 404 when it isn't one.
     func removeFromPlaylist(id: String, item: PlaylistItemReference) async throws -> Playlist
+    /// `PATCH /api/playlists/:id` with only `items`: every member exactly once, in the new order.
+    /// The server answers 400 when the count differs from its members'.
+    func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist
     /// `DELETE /api/playlists/:id`.
     func deletePlaylist(id: String) async throws
 }
@@ -46,6 +49,10 @@ extension APIClient: PlaylistEditingService {
     public func removeFromPlaylist(id: String, item: PlaylistItemReference) async throws -> Playlist {
         try await send(
             PlaylistEndpoints.removeItem(id: id, libraryItemID: item.libraryItemID, episodeID: item.episodeID))
+    }
+
+    public func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        try await send(PlaylistEndpoints.update(id: id, PlaylistUpdateRequest(itemsInOrder: items)))
     }
 
     public func deletePlaylist(id: String) async throws {
