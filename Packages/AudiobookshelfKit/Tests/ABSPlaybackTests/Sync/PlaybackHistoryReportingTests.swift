@@ -606,6 +606,35 @@ struct PlaybackHistoryReportingTests {
     }
 
     @Test(arguments: [false, true])
+    func aUserSeekToAnInterruptedLoadsOwnTargetIsASeek(interrupted: Bool) async throws {
+        let (s, spy) = try Self.harness()
+        s.h.engine.interruptedLoads = 1
+        await s.coordinator.play(itemID: "a", startTime: 120)
+        // Before the load lands, the user seeks to its very target: at once, or landing later.
+        if interrupted { s.h.engine.seekResults = [.interrupted] }
+        await s.coordinator.seek(to: 120)
+        s.h.engine.landPendingSeek()
+        await Self.settle(s)
+
+        #expect(s.h.engine.seeks == [120])
+        #expect(spy.entries(.seek).map(\.position) == [120])
+    }
+
+    @Test func resumingAnInterruptedLoadIsNotASeek() async throws {
+        let (s, spy) = try Self.harness()
+        s.h.engine.interruptedLoads = 1
+        await s.coordinator.play(itemID: "a", startTime: 120)
+        // Pausing and resuming retries the load's own pending target.
+        s.coordinator.pause()
+        await s.coordinator.resume()
+        await Self.settle(s)
+
+        #expect(s.h.engine.seeks == [120])
+        #expect(s.coordinator.currentTime == 120)
+        #expect(spy.entries(.seek).isEmpty)
+    }
+
+    @Test(arguments: [false, true])
     func aLoadLandingOnItsOwnTargetIsNotASeek(interrupted: Bool) async throws {
         let (s, spy) = try Self.harness()
         if interrupted { s.h.engine.interruptedLoads = 1 }
