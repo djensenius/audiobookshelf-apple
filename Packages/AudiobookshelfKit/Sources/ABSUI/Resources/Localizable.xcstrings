@@ -143464,6 +143464,741 @@
         }
       }
     },
+    "MessagePlaybackStreamRejected" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The server or a proxy in front of it rejected the stream."
+          }
+        }
+      }
+    },
+    "MessagePlaybackStreamUnavailable" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't find audio to stream for this item."
+          }
+        }
+      }
+    },
+    "MessagePlaybackStreamingInterrupted" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't continue streaming. Check your connection or server."
+          }
+        }
+      }
+    },
     "MessagePlaylistAddFailed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -155220,6 +155955,251 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Quit and reopen Audiobookshelf. If this keeps happening, make sure your device has free storage space."
+          }
+        }
+      }
+    },
+    "MessageStreamingNeedsConfirmation" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
           }
         }
       }

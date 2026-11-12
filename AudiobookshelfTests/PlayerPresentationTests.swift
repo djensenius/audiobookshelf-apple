@@ -47,4 +47,21 @@ import Testing
         #expect(!PlayerSlot.presentsWithoutSession(isPresented: false, hasSession: false))
         #expect(!PlayerSlot.presentsWithoutSession(isPresented: false, hasSession: true))
     }
+
+    @Test(arguments: [
+        PlayerErrorMessage.streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed,
+        .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed,
+    ])
+    func everyPlayerErrorHasAResolvableMessage(_ error: PlayerErrorMessage) {
+        let key = PlayerSlot.messageKey(for: error)
+        #expect(L10n.string(key) != key)
+    }
+
+    /// A scene shows a failure until it's dismissed there, and a different failure after that.
+    @Test func anErrorShowsUntilItsSceneDismissesIt() {
+        #expect(PlayerSlot.shownError(current: .playbackFailed, dismissed: nil) == .playbackFailed)
+        #expect(PlayerSlot.shownError(current: .playbackFailed, dismissed: .playbackFailed) == nil)
+        #expect(PlayerSlot.shownError(current: .streamRejected, dismissed: .playbackFailed) == .streamRejected)
+        #expect(PlayerSlot.shownError(current: nil, dismissed: nil) == nil)
+    }
 }
