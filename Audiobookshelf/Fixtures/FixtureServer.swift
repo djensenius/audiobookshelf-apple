@@ -31,14 +31,16 @@
             return configuration
         }
 
-        /// The environment for a fixture launch: an in-memory store, Keychain and settings.
+        /// The environment for a fixture launch: an in-memory store, Keychain and settings, and no
+        /// download stack, whose sweep would otherwise check the app's real downloads against the
+        /// empty store.
         @MainActor static func environment() -> AppEnvironment {
             let suite = "org.davidjensenius.Audiobookshelf.fixtures"
             let defaults = UserDefaults(suiteName: suite) ?? .standard
             defaults.removePersistentDomain(forName: suite)
             return AppEnvironment(
                 settings: AppSettings(defaults: defaults), storeLocation: .inMemory, keychain: FixtureKeychain(),
-                sessionConfiguration: sessionConfiguration, covers: coverSource())
+                sessionConfiguration: sessionConfiguration, downloadsRoot: nil, covers: coverSource())
         }
 
         /// A fixture launch's covers: answered by ``FixtureURLProtocol``, so they never wait for

@@ -347,6 +347,9 @@ import Testing
         #expect(throws: DownloadPlanError.missingFileMetadata) { try plan(Fixtures.book(tracks: false)) }
         let nameless = Fixtures.book(files: [], ebook: EbookFile(ino: "201"))
         #expect(throws: DownloadPlanError.missingFileMetadata) { try plan(nameless) }
+        // A legacy `ino: null` ebook has no `/file/<ino>` to fetch.
+        let blankInode = Fixtures.book(files: [], ebook: EbookFile(ino: "", ebookFormat: .epub))
+        #expect(throws: DownloadPlanError.missingFileMetadata) { try plan(blankInode) }
     }
 
     @Test func refusesMinifiedItems() {

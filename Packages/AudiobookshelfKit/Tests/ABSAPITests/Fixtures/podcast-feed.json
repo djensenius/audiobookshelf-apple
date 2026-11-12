@@ -1,0 +1,56 @@
+{
+  "podcast": {
+    "metadata": {
+      "image": "https://feeds.example.com/synthetic.jpg",
+      "categories": [
+        "Arts",
+        "Arts:Books"
+      ],
+      "feedUrl": "https://feeds.example.com/synthetic.xml",
+      "description": "<p>A synthetic show.</p>",
+      "descriptionPlain": "A synthetic show.",
+      "type": "episodic",
+      "title": "Synthetic Cast",
+      "language": "en",
+      "explicit": "yes",
+      "author": "Example Studio",
+      "pubDate": "Wed, 07 Oct 2026 12:00:00 GMT",
+      "link": "https://example.com/synthetic"
+    },
+    "episodes": [
+      {
+        "enclosure": {
+          "url": "https://feeds.example.com/ep2.mp3",
+          "type": "audio/mpeg",
+          "length": "1000"
+        },
+        "description": "<p>Two</p>",
+        "descriptionPlain": "Two",
+        "pubDate": "Wed, 07 Oct 2026 12:00:00 GMT",
+        "title": "Episode Two",
+        "episodeType": "full",
+        "season": "",
+        "episode": "2",
+        "author": "",
+        "duration": "00:30:00",
+        "durationSeconds": 1800,
+        "explicit": "",
+        "publishedAt": 1791374400000,
+        "guid": "ep2",
+        "chaptersUrl": null,
+        "chaptersType": null,
+        "chapters": []
+      },
+      {
+        "enclosure": {
+          "url": "https://feeds.example.com/ep1.mp3"
+        },
+        "title": "Episode One",
+        "durationSeconds": null,
+        "publishedAt": 1790769600000
+      },
+      "not an episode"
+    ],
+    "numEpisodes": 3
+  }
+}
