@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSUI
@@ -45,7 +46,7 @@ struct SeriesDetailView: View {
 }
 
 /// The series screen for one model; previews give it a fixture service. Collapse Series shows when the
-/// environment has `AppSettings`.
+/// environment has `AppSettings`, and RSS Feed for admins.
 struct SeriesDetailContent: View {
     let model: SeriesDetailModel
     @Environment(AppSettings.self) private var settings: AppSettings?
@@ -85,6 +86,7 @@ struct SeriesDetailContent: View {
                 }
             }
         }
+        .rssFeedEntry(RssFeedTarget(.series, id: model.seriesID))
     }
 
     private func reload() {
