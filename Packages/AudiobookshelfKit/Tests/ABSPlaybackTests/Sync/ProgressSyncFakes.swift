@@ -44,8 +44,8 @@ final class StubProgressSyncService: ProgressSyncService {
         var fetches: [MediaKey] = []
         var fetchGates: [Gate] = []
         var fetchErrors: [APIError?] = []
-        /// Explicit sequential canonical replies, including post-PATCH values. PATCH itself
-        /// remains recording-only; an empty queue falls back to serverProgress.
+        /// Explicit sequential canonical replies, including post-PATCH values. Without a session
+        /// client PATCH is recording-only; an empty queue falls back to serverProgress.
         var fetchReplies: [MediaProgress?] = []
         var fetchStarted: Gate?
         var patchGates: [Gate] = []
@@ -73,10 +73,13 @@ final class StubProgressSyncService: ProgressSyncService {
         let key = MediaKey(
             serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
         if let client = state.withLock({ $0.sessionClient }) {
-            state.withLock {
-                $0.fetches.append(key)
-                $0.log.append("get \(itemID)")
+            let error = state.withLock { state in
+                state.fetches.append(key)
+                state.log.append("get \(itemID)")
+                return state.fetchErrors.isEmpty ? nil : state.fetchErrors.removeFirst()
             }
+            // A queued error never reaches the model, like a failed connection.
+            if let error { throw error }
             return try await client.model.fetchProgress(client, itemID: itemID, episodeID: episodeID)
         }
         let (progress, gate, error, started) = state.withLock { state in
@@ -190,6 +193,10 @@ final class StubProgressSyncService: ProgressSyncService {
         await gate?.wait()
         if Task.isCancelled { state.withLock { $0.canceledCalls.append("patch") } }
         if let error { throw error }
+        // A queued error above never reaches the shared model, like a failed connection.
+        if let client = state.withLock({ $0.sessionClient }) {
+            try await client.model.update(client, itemID: itemID, episodeID: episodeID, update)
+        }
     }
 }
 

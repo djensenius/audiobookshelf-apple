@@ -15,7 +15,6 @@ public struct SeriesCard: View {
     }
 
     public var body: some View {
-        let count = ItemPresentation.bookCount(series.bookCount)
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: ABSSpacing.xSmall) {
                 GroupCoverView(
@@ -27,7 +26,7 @@ public struct SeriesCard: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(2, reservesSpace: true)
                     .foregroundStyle(ABSColor.foreground)
-                Text(verbatim: count)
+                Text(verbatim: ItemPresentation.bookCount(series.bookCount))
                     .font(.caption)
                     .foregroundStyle(ABSColor.mutedForeground)
             }
@@ -37,7 +36,7 @@ public struct SeriesCard: View {
         .buttonStyle(.plain)
         .itemHover()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(verbatim: "\(series.name), \(count)"))
+        .accessibilityLabel(Text(verbatim: ItemPresentation.accessibilityLabel(series)))
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
         .accessibilityAddTraits(.isButton)
     }

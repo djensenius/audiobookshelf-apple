@@ -36,7 +36,7 @@ public struct AuthorCard: View {
         .buttonStyle(.plain)
         .itemHover()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(verbatim: [author.name, count].compactMap(\.self).joined(separator: ", ")))
+        .accessibilityLabel(Text(verbatim: ItemPresentation.accessibilityLabel(author)))
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
         .accessibilityAddTraits(.isButton)
     }
