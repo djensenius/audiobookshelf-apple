@@ -116,6 +116,32 @@ enum PlaylistWriteOperation: CaseIterable, Sendable {
         #expect(request.httpBody == nil)
     }
 
+    /// A reorder sends only `items`, in the new order, each with its episode identity.
+    @Test func reorderSendsOnlyTheItemsInTheirNewOrder() async throws {
+        let data = try playlistWriteFixture("2.26.0")
+        let stub = StubServer { _ in StubResponse(status: 200, body: data) }
+        let client = APIClient(
+            configuration: try APIClientConfiguration(baseURL: stub.baseURL),
+            tokenProvider: InMemoryTokenProvider(), sessionConfiguration: stub.sessionConfiguration())
+        let order = [
+            PlaylistItemReference(libraryItemID: "podcast", episodeID: "e2"),
+            PlaylistItemReference(libraryItemID: "book"),
+            PlaylistItemReference(libraryItemID: "podcast", episodeID: "e1"),
+        ]
+        _ = try await client.send(PlaylistEndpoints.update(id: "p", PlaylistUpdateRequest(itemsInOrder: order)))
+        let request = try #require(stub.requests.first)
+        #expect(request.httpMethod == "PATCH")
+        #expect(request.url?.absoluteString == stub.baseURL.absoluteString + "/api/playlists/p")
+        let body = try #require(request.httpBody)
+        let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(Set(object.keys) == ["items"])
+        #expect(
+            object["items"] as? [[String: String]] == [
+                ["libraryItemId": "podcast", "episodeId": "e2"], ["libraryItemId": "book"],
+                ["libraryItemId": "podcast", "episodeId": "e1"],
+            ])
+    }
+
     @Test func optionalAndEmptyBodiesAreNotNormalized() async throws {
         let data = try playlistWriteFixture("2.26.0")
         let stub = StubServer { _ in StubResponse(status: 200, body: data) }
