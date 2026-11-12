@@ -227,16 +227,23 @@ struct DownloadsLifecycleTests {
         #expect(await !engine.isActive)
     }
 
-    @Test func failedFolderPreparationIsRetriedAtTheNextActivation() async {
-        await manager.failStarts(1)
+    /// Until the folders are prepared, nothing starts a transfer: no activation, no controller.
+    @Test func failedFolderPreparationActivatesNothingUntilARetrySucceeds() async {
+        await manager.failStarts(2)
         let lifecycle = makeLifecycle()
 
+        await lifecycle.launch().value
+        #expect(calls.all == ["start manager"])
         await lifecycle.handle(scenePhase: .active).value
+        #expect(calls.all == ["start manager", "start manager"])
         await lifecycle.handle(scenePhase: .active).value
         await lifecycle.handle(scenePhase: .active).value
 
-        #expect(calls.all.filter { $0 == "start manager" }.count == 2)
-        #expect(calls.all.filter { $0 == "start controller" }.count == 1)
+        #expect(
+            calls.all == [
+                "start manager", "start manager", "start manager", "start controller", "activate", "activated",
+                "sweep", "activate", "activated", "sweep",
+            ])
     }
 
     // MARK: - Connections

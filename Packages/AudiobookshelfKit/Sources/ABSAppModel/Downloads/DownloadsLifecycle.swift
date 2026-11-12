@@ -31,11 +31,13 @@ extension DownloadManager: DownloadsLifecycleManager {}
 /// account's session.
 ///
 /// - ``launch()`` starts the manager (before the engine's first activation, as
-///   ``DownloadManager/start()`` asks) and then the controller, once. It doesn't activate the
-///   engine, so a launch without a window (CarPlay, a background wake) restarts nothing.
+///   ``DownloadManager/start()`` asks) and then, once the download folders are prepared, the
+///   controller, once. It doesn't activate the engine, so a launch without a window (CarPlay, a
+///   background wake) restarts nothing.
 /// - ``handle(scenePhase:)`` runs the phases one after another, in call order. Each
-///   ``SessionScenePhase/active`` launches if needed, then activates the engine, then, if
-///   that succeeded, sweeps what downloads left behind (``DownloadJanitor``) without holding up
+///   ``SessionScenePhase/active`` launches if needed, prepares the folders again if that failed
+///   (starting the controller once they are), then activates the engine only if the folders are
+///   prepared, then, if that succeeded, sweeps what downloads left behind (``DownloadJanitor``) without holding up
 ///   the next phase. ``SessionScenePhase/background`` deactivates the engine, after any
 ///   activation called before it, so the app never stays activated in the background.
 /// - As a ``SessionParticipant``, a sign-out, expiry or removal of the session's connection
@@ -54,8 +56,11 @@ public final class DownloadsLifecycle: SessionParticipant {
     private let sweep: @Sendable () async -> Void
 
     private var launching: Task<Void, Never>?
-    /// Whether the manager couldn't prepare the download folders; the next activation tries again.
-    private var needsFolders = false
+    /// Whether the manager has prepared the download folders. Until then nothing starts a
+    /// transfer: the engine isn't activated and the controller (whose network policy restarts
+    /// transfers) isn't started. The next activation tries again.
+    private var isPrepared = false
+    private var controllerStarted = false
     /// The last phase handled; the next one waits for it. Its value is whether it activated.
     private var lastPhase: Task<Bool, Never>?
     /// The connection of the running session.
@@ -89,10 +94,7 @@ public final class DownloadsLifecycle: SessionParticipant {
     @discardableResult
     public func launch() -> Task<Void, Never> {
         if let launching { return launching }
-        let launching = Task {
-            await self.startManager()
-            await self.startController()
-        }
+        let launching = Task { _ = await self.prepare() }
         self.launching = launching
         return launching
     }
@@ -119,7 +121,7 @@ public final class DownloadsLifecycle: SessionParticipant {
         switch phase {
         case .active:
             await launch().value
-            if needsFolders { await startManager() }
+            guard await prepare() else { return false }
             return await engine.activate()
         case .background:
             await engine.deactivate()
@@ -129,15 +131,25 @@ public final class DownloadsLifecycle: SessionParticipant {
         }
     }
 
-    private func startManager() async {
-        do {
-            try await manager.start()
-            needsFolders = false
-        } catch {
-            needsFolders = true
-            Log.downloads.error(
-                "Couldn't prepare the download folders: \(Log.redact(String(describing: error)), privacy: .public)")
+    /// Starts the manager until it has prepared the folders, then the controller once.
+    ///
+    /// - Returns: whether the folders are prepared.
+    private func prepare() async -> Bool {
+        if !isPrepared {
+            do {
+                try await manager.start()
+                isPrepared = true
+            } catch {
+                Log.downloads.error(
+                    "Couldn't prepare the download folders: \(Log.redact(String(describing: error)), privacy: .public)")
+                return false
+            }
         }
+        if !controllerStarted {
+            controllerStarted = true
+            await startController()
+        }
+        return true
     }
 
     // MARK: - Connections
