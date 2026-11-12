@@ -147,9 +147,10 @@ public actor CoverFileStore {
     private(set) var evictionCount = 0
     /// The number of folder listings, for tests.
     private(set) var listingCount = 0
-    /// The ``folderMoves`` the last pass to set the size started and finished with: it dropped
-    /// the files of each server whose count differs between the two.
-    private var lastPass: (listed: [UUID: Int], finished: [UUID: Int])?
+    /// The ``folderMoves`` the last pass to set the size finished with (it dropped the files of
+    /// each server whose count changed while it listed). A removal subtracts its folder only if
+    /// it moved it after that pass finished.
+    private var lastPassMoves: [UUID: Int]?
     /// Folders moved aside by ``removeServer(_:)`` and still being deleted, which a pass leaves
     /// alone; any other is left over from a removal the app was terminated in.
     private var removingFolders: Set<String> = []
@@ -330,11 +331,11 @@ public actor CoverFileStore {
         let removed = await Self.deleteFolder(
             removing, as: serverID, root: root, excluding: retired, hook: deletionHook)
         removingFolders.remove(removing.lastPathComponent)
-        // Only if the size still counts these files: the last pass finished before the move
-        // (even during the lease wait) and didn't drop the server for a move while it listed.
-        if let lastPass, lastPass.listed[serverID, default: 0] == lastPass.finished[serverID, default: 0],
-            lastPass.finished[serverID, default: 0] < moved
-        {
+        // Only if the size still counts these files: the last pass finished before this move
+        // (even during the lease wait). A pass that finished after it dropped them for the move,
+        // or never listed them. One that spanned an earlier move dropped only that folder's
+        // files; those written since are counted.
+        if let lastPassMoves, lastPassMoves[serverID, default: 0] < moved {
             totalBytes = max(0, totalBytes - removed)
         }
     }
@@ -405,7 +406,7 @@ public actor CoverFileStore {
         files += touched.compactMap { Self.file(at: URL(filePath: $0), root: root, leases: leases) }
         isScanned = true
         totalBytes = files.reduce(0) { $0 + $1.size }
-        lastPass = (moves, folderMoves)
+        lastPassMoves = folderMoves
         if totalBytes > limit {
             // Read after the listing, so leases taken while it ran are kept.
             let leased = leases.leasedPaths

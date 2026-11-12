@@ -176,6 +176,35 @@ import Testing
         #expect(await store.size == 16_384)
     }
 
+    /// A pass that spanned one of a server's folder moves dropped that folder's files itself, but
+    /// counts the covers written after it, so the next removal subtracts them.
+    @Test func recreatedFolderRemovedAfterAPassSpanningAnEarlierMoveIsSubtracted() async throws {
+        try await seed([serverID, otherServerID])
+        let listing = ListingGate()
+        listing.release()
+        let store = store(listing: listing)
+        #expect(await store.size == 32_768)
+
+        // The folder moves while a pass lists it.
+        listing.blocksAgain()
+        let pass = Task { await store.fullPass() }
+        #expect(await listing.waitForEntries(2))
+        await store.removeServer(serverID)
+        listing.release()
+        await pass.value
+        #expect(await store.size == 16_384)
+
+        // Recreated by a fresh-generation write, then removed before another pass.
+        let held = try await store.insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "webp",
+            generation: await store.generation(for: serverID))
+        #expect(await store.size == 32_768)
+        withExtendedLifetime(held) {}
+        await store.removeServer(serverID)
+        #expect(files(serverID).isEmpty)
+        #expect(await store.size == 16_384)
+    }
+
     @Test func fileDiscardedDuringTheLeaseWaitAfterAPassIsSubtractedOnce() async throws {
         try await seed([serverID, otherServerID])
         let listing = ListingGate()
