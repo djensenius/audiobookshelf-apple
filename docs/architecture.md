@@ -130,7 +130,8 @@ an `.ended` observer such as the sleep timer, cancels the advance before its sta
 play: a pause loads the next item paused, and a detach leaves it to finish. A
 blocked streaming decision keeps the item queued and never consents on the
 user's behalf. A queued item removed during the close wait gets no `/play`;
-the ended item is selected again, unloaded at its end (#338). The coordinator and the advancer hold each other weakly, so
+the ended item is selected again, unloaded at its end, unless the user asked for
+another item meanwhile; seeks and jumps made for the removed item are dropped (#338). The coordinator and the advancer hold each other weakly, so
 the owner must retain the advancer.
 
 App wiring (the advancer, `UIApplication.beginBackgroundTask`, progress and

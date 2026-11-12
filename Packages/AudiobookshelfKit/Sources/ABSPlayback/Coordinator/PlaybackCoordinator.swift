@@ -908,7 +908,10 @@ public final class PlaybackCoordinator {
         isStartingAdvance = false
         // The next item left the queue during the close wait, so its start sent nothing (#338):
         // back to the end of the item that ended, rather than leave the removed one selected.
-        guard generation == attempt, phase == .unloaded, mediaKey == next.key, error == nil,
+        // Not once the user asked for another item: a play still in its policy check hasn't
+        // bumped `generation` yet, but has the play-request counter.
+        guard generation == attempt, policyCheck == ended.playRequest, pendingPlayKey == nil,
+            phase == .unloaded, mediaKey == next.key, error == nil,
             nextItemProvider?.isStillNext(next.key) == false
         else { return }
         generation += 1
@@ -918,6 +921,9 @@ public final class PlaybackCoordinator {
         unloadedDuration = endedAt.duration
         lastPlayedAt = endedAt.lastPlayedAt
         isResolvingStart = false
+        // Seeks and jumps made while the removed item was starting were for it, not this one.
+        pendingStartTime = nil
+        pendingJumpOffset = 0
         emit(.itemChanged(key))
     }
 
