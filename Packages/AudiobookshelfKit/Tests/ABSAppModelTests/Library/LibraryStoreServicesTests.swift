@@ -95,6 +95,25 @@ private struct WritingClient: LibraryService, ProgressWriting {
     func deleteProgress(id: String) async throws { writes.value.append("\(name):delete:\(id)") }
 }
 
+/// A ``WritingClient`` whose writes wait for the test to reply before they're recorded.
+private struct GatedWritingClient: LibraryService, ProgressWriting {
+    let gate: GatedCalls<String, Void>
+    let client: WritingClient
+
+    func libraries() async throws -> [Library] { [] }
+    func library(id: String) async throws -> LibraryWithFilterData { try await client.library(id: id) }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
+        try await client.items(libraryID: libraryID, query: query)
+    }
+    func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        try await gate.call(itemID)
+        try await client.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
+    }
+    func progressID(itemID: String, episodeID: String?) async throws -> String? { nil }
+    func deleteProgress(id: String) async throws {}
+}
+
 /// A feature request and the fake client method it must reach.
 struct StoreServiceForwarding: Sendable, CustomTestStringConvertible {
     let method: String
@@ -337,6 +356,33 @@ private let forwardings: [StoreServiceForwarding] = [
             await #expect(throws: CancellationError.self) {
                 try await window.markFinished(ItemActionTarget(libraryItemID: "li"))
             }
+            #expect(writes.value == ["old:li", "new:li"])
+        }
+    }
+
+    /// A write still in flight when a failed switch restarts the session reaches the server
+    /// before the restarted session's next write on the same item.
+    @Test func aRestartedSessionsWritesWaitForTheEndedSessionsWrite() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let writes = Locked<[String]>([])
+            let gate = GatedCalls<String, Void>()
+            var calls = gate.calls.makeAsyncIterator()
+            let old = GatedWritingClient(gate: gate, client: WritingClient(name: "old", writes: writes))
+            await store.connect(client: old, connectionKey: serverA)
+            let window = try #require(store.sessionItemActions())
+            let finish = Task { try await window.markFinished(ItemActionTarget(libraryItemID: "li")) }
+            let held = try #require(await calls.next())
+
+            store.clear()
+            await store.connect(client: WritingClient(name: "new", writes: writes), connectionKey: serverA)
+            let reset = Task { try await window.markNotFinished(ItemActionTarget(libraryItemID: "li")) }
+            for _ in 0..<50 { await Task.yield() }
+            #expect(writes.value.isEmpty)
+
+            held.reply.resume()
+            _ = await finish.result
+            try await reset.value
             #expect(writes.value == ["old:li", "new:li"])
         }
     }

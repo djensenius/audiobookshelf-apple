@@ -109,6 +109,8 @@ public final class ProgressItemActions: ItemActionPerforming {
     private let now: @Sendable () -> Date
     private let sessionToken: ProgressCache.SessionToken
     private var tails: [String: Tail] = [:]
+    /// A predecessor's actions still pending per key; see ``continueQueue(of:)``.
+    private var inheritedTails: [String: Task<Result<Void, any Error>, Never>] = [:]
     private var tickets = 0
 
     public init(
@@ -125,6 +127,13 @@ public final class ProgressItemActions: ItemActionPerforming {
     /// Whether the progress session the actions were built in is still the cache's: `false`
     /// after a ``ProgressCache/clear()`` (sign-out, account switch, or a failed switch's restart).
     var isCurrentSession: Bool { cache.isCurrent(sessionToken) }
+
+    /// Orders this instance's actions after `predecessor`'s still pending ones on the same key,
+    /// so a write from the session it replaces can't land after a newer one. A stale instance
+    /// queues nothing new (``enqueue(_:operation:)`` rejects it), so its tails are final.
+    func continueQueue(of predecessor: ProgressItemActions) {
+        inheritedTails = predecessor.tails.mapValues(\.task)
+    }
 
     public func markFinished(_ target: ItemActionTarget) async throws {
         try await run(target, update: .finished(true, at: now()), local: { try await $0.didMarkFinished(target) }) {
@@ -210,7 +219,8 @@ public final class ProgressItemActions: ItemActionPerforming {
         let actionSession = cache.sessionToken()
         guard actionSession == sessionToken else { throw CancellationError() }
         let key = target.key
-        let previous = tails[key]?.task
+        // Later actions on the key chain on the first one, which waited for the predecessor's.
+        let previous = tails[key]?.task ?? inheritedTails.removeValue(forKey: key)
         tickets += 1
         let ticket = tickets
         let task = Task<Result<Void, any Error>, Never> { @MainActor in

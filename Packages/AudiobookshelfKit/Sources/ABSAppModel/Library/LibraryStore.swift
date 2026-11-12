@@ -277,11 +277,13 @@ public final class LibraryStore {
     /// window, or `nil` while the store doesn't serve that account. Built on first use and again
     /// once its progress session ended (a ``clear()``, so also a switch or a failed switch's
     /// restart), so a restarted session never acts through the previous one's stale token; an
-    /// ordinary reconnect keeps it.
+    /// ordinary reconnect keeps it. A replacement continues its predecessor's per-item queue.
     public func itemActions(for connectionKey: LibraryConnectionKey) -> ProgressItemActions? {
         guard self.connectionKey == connectionKey else { return nil }
         if let sharedItemActions, sharedItemActions.isCurrentSession { return sharedItemActions }
         let actions = makeItemActions()
+        // A write of the ended session may still be in flight: the new actions run after it.
+        if let sharedItemActions { actions?.continueQueue(of: sharedItemActions) }
         sharedItemActions = actions
         return actions
     }
