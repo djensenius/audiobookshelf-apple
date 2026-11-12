@@ -53,6 +53,10 @@ public struct LocalMediaProgressDTO: Sendable, Equatable, Identifiable {
     /// When `isFinished` was saved, dated like ``audioSavedAt``; `nil` when it never was.
     public var finishedSavedAt: Date? { ProgressSyncState(self).savedAt(.finished) }
 
+    /// When the ebook location was saved, dated like ``audioSavedAt``: its edit time while unsent,
+    /// else the later of that and the baseline's `lastUpdate`. `nil` when it never was.
+    public var ebookSavedAt: Date? { ProgressSyncState(self).savedAt(.ebook) }
+
     /// Whether `progress` holds the audio position and duration this row last saw from the server
     /// (``serverBaseline``), to the tolerance a sync merge uses. Then nothing from elsewhere has
     /// changed the audio, however new `progress.lastUpdate` is: it is row-wide. `false` when the row
@@ -63,6 +67,16 @@ public struct LocalMediaProgressDTO: Sendable, Equatable, Identifiable {
             currentTime: progress.currentTime, progress: progress.progress, duration: progress.duration,
             isFinished: progress.isFinished, lastUpdate: .distantPast)
         return ProgressSyncState(self).serverUnchanged(.audio, in: server)
+    }
+
+    /// Whether `progress` holds the ebook location and progress this row last saw from the
+    /// server, like ``serverAudioUnchanged(in:)`` for the ebook group. `false` without a baseline.
+    public func serverEbookUnchanged(in progress: MediaProgress) -> Bool {
+        // Only the ebook fields are compared.
+        let server = ProgressBaseline(
+            currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: progress.ebookLocation,
+            ebookProgress: progress.ebookProgress, lastUpdate: .distantPast)
+        return ProgressSyncState(self).serverUnchanged(.ebook, in: server)
     }
 }
 
