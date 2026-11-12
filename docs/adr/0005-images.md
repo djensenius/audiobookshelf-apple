@@ -506,10 +506,12 @@ static, unauthenticated remote images (none are planned).
       renames the folder to a hidden `.<id>.<uuid>.removing` folder, so new
       writes start a fresh folder and lookups miss; it then measures and
       deletes the moved folder off the actor, and the pass drops that
-      server's files from its listing. A pass that completes during the
-      deletion has already counted without them, so the deletion doesn't
-      subtract them again. A `.removing` folder left by an interrupted
-      removal isn't counted and is deleted by the next pass.
+      server's files from its listing. The deletion subtracts them only if
+      the last pass counted them: not if that pass dropped them (the
+      removal began, or moved the folder, while it ran) or listed the
+      folder after the move. Files retired before the move aren't subtracted again, even
+      if their lease is released meanwhile. A `.removing` folder left by an
+      interrupted removal isn't counted and is deleted by the next pass.
     - **Leases:** `CoverFileStore` is an actor. A lookup hit or an insert
       returns the file URL together with a lease (a per-file reference count)
       taken in the same actor call, so no eviction can run between the two.

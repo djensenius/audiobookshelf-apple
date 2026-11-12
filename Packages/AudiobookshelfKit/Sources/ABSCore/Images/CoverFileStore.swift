@@ -41,6 +41,11 @@ private final class LeaseCounts: Sendable {
         state.withLock { $0.isLeased(under: prefix) }
     }
 
+    /// The files under `prefix` waiting for their last lease before they are deleted.
+    func pendingDeletions(under prefix: String) -> Set<String> {
+        state.withLock { $0.pendingDeletion.filter { $0.hasPrefix(prefix) } }
+    }
+
     func lease(_ path: String) -> FileLease {
         state.withLock { $0.counts[path, default: 0] += 1 }
         return FileLease { [self] in
@@ -137,8 +142,9 @@ public actor CoverFileStore {
     private(set) var evictionCount = 0
     /// The number of folder listings, for tests.
     private(set) var listingCount = 0
-    /// The number of passes that have set the size from their listing.
-    private var completedPassCount = 0
+    /// The server generations the last pass to set the size started and finished with: it
+    /// dropped the files of each server whose generation differs between the two.
+    private var lastPass: (listed: [UUID: Int], finished: [UUID: Int])?
     /// Folders moved aside by ``removeServer(_:)`` and still being deleted, which a pass leaves
     /// alone; any other is left over from a removal the app was terminated in.
     private var removingFolders: Set<String> = []
@@ -299,18 +305,26 @@ public actor CoverFileStore {
         await waitForLeases(under: prefix)
         let folder = folder(for: serverID)
         let removing = directory.appending(path: ".\(serverID.uuidString).\(UUID().uuidString).removing")
+        // Read before the move: `retire` has already subtracted these, and a lease released
+        // after the move would forget them while the file is still in the moved folder.
+        let retired = leases.pendingDeletions(under: prefix)
         let isMoved = rename(folder.path, removing.path) == 0
         // A pass listing the folder meanwhile drops these files itself, by their generation.
         serverGenerations[serverID, default: 0] += 1
+        let moved = serverGenerations[serverID, default: 0]
         versions = versions.filter { !$0.key.hasPrefix(prefix) }
         let target = isMoved ? removing : folder
-        let passes = completedPassCount
         removingFolders.insert(target.lastPathComponent)
         let removed = await Self.deleteFolder(
-            target, as: serverID, root: root, leases: leases, hook: deletionHook)
+            target, as: serverID, root: root, excluding: retired, hook: deletionHook)
         removingFolders.remove(target.lastPathComponent)
-        // A pass that finished since the move counted the size without these files.
-        if isScanned, passes == completedPassCount { totalBytes = max(0, totalBytes - removed) }
+        // Only if the size still counts these files: the last pass listed the folder before the
+        // move (even during the lease wait) and didn't drop the server for a generation change.
+        if let lastPass, lastPass.listed[serverID, default: 0] == lastPass.finished[serverID, default: 0],
+            lastPass.finished[serverID, default: 0] < moved
+        {
+            totalBytes = max(0, totalBytes - removed)
+        }
     }
 
     /// Deletes the folder of every server not in `kept`, for example of connections removed in
@@ -375,7 +389,7 @@ public actor CoverFileStore {
         files += touched.compactMap { Self.file(at: URL(filePath: $0), root: root, leases: leases) }
         isScanned = true
         totalBytes = files.reduce(0) { $0 + $1.size }
-        completedPassCount += 1
+        lastPass = (generations, serverGenerations)
         if totalBytes > limit {
             // Read after the listing, so leases taken while it ran are kept.
             let leased = leases.leasedPaths
@@ -483,11 +497,12 @@ public actor CoverFileStore {
             })
     }
 
-    /// Measures and deletes a removed server's folder off the actor. Files retired and waiting
-    /// for their lease aren't counted: ``retire(_:)`` has already taken them out of `totalBytes`.
+    /// Measures and deletes a removed server's folder off the actor. The `retired` files, waiting
+    /// for their lease, aren't counted: ``retire(_:)`` has already taken them out of `totalBytes`.
     @concurrent
     private static func deleteFolder(
-        _ folder: URL, as serverID: UUID, root: String, leases: LeaseCounts, hook: (@Sendable () -> Void)?
+        _ folder: URL, as serverID: UUID, root: String, excluding retired: Set<String>,
+        hook: (@Sendable () -> Void)?
     ) async -> Int {
         hook?()
         let urls =
@@ -495,7 +510,7 @@ public actor CoverFileStore {
         let size = urls.reduce(0) { total, url in
             // Keyed by the server's own folder, where its leases were taken.
             let key = "\(root)/\(serverID.uuidString)/\(url.lastPathComponent)"
-            guard !url.lastPathComponent.hasPrefix("."), !leases.isPendingDeletion(key),
+            guard !url.lastPathComponent.hasPrefix("."), !retired.contains(key),
                 let values = try? url.resourceValues(forKeys: Set(fileKeys)), values.isRegularFile == true
             else { return total }
             return total + (values.totalFileAllocatedSize ?? 0)

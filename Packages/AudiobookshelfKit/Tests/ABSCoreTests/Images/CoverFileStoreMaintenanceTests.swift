@@ -124,6 +124,57 @@ import Testing
         #expect(await store.size == 16_384)
     }
 
+    @Test func passFinishedDuringTheLeaseWaitIsNotReducedAgain() async throws {
+        try await seed([serverID, otherServerID])
+        let listing = ListingGate()
+        listing.release()
+        let waiting = Gate()
+        let store = store(listing: listing) {
+            waiting.open(); await untilCancelled()
+        }
+        #expect(await store.size == 32_768)
+        var held: LeasedFile? = try await store.insert(
+            moving: temporaryFile(), for: key("b"), pathExtension: "webp", generation: 0)
+        #expect(await store.size == 49_152)
+
+        // A pass lists the folder, then the removal starts and waits for the lease.
+        listing.blocksAgain()
+        let pass = Task { await store.fullPass() }
+        #expect(await listing.waitForEntries(2))
+        let removal = Task { await store.removeServer(serverID) }
+        await waiting.wait()
+        // The pass drops the removed server's files.
+        listing.release()
+        await pass.value
+        #expect(await store.size == 16_384)
+        held = nil
+        await removal.value
+        #expect(files(serverID).isEmpty)
+        #expect(await store.size == 16_384)
+    }
+
+    @Test func fileRetiredBeforeTheRemovalIsNotSubtractedAgain() async throws {
+        try await seed([serverID, otherServerID])
+        let gate = ListingGate()
+        // The lease wait times out at once.
+        let store = store(deletion: gate)
+        #expect(await store.size == 32_768)
+        var held: LeasedFile? = try await store.insert(
+            moving: temporaryFile(), for: key("b"), pathExtension: "webp", generation: 0)
+        let (url, version) = try #require(held.map { ($0.url, $0.version) })
+        await store.discard(url, version: version)
+        #expect(await store.size == 32_768)
+
+        let removal = Task { await store.removeServer(serverID) }
+        #expect(await gate.waitForEntries(1))
+        // Released after the move, before the moved folder is measured.
+        held = nil
+        gate.release()
+        await removal.value
+        #expect(files(serverID).isEmpty)
+        #expect(await store.size == 16_384)
+    }
+
     @Test func folderLeftByAnInterruptedRemovalIsDeletedAndNotCounted() async throws {
         try await seed([serverID])
         let leftover = images.appending(path: ".\(otherServerID.uuidString).\(UUID().uuidString).removing")
