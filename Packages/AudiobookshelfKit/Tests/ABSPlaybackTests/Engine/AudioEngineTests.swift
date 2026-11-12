@@ -468,6 +468,68 @@ struct AudioEngineTests {
         #expect(await engine.seek(to: 1) == .failed)
     }
 
+    @Test func unloadClearsQueueButKeepsTheSessionActive() async throws {
+        let fixture = try AudioFixture()
+        let session = FakeAudioSession()
+        let engine = makeEngine(session: session)
+        try await engine.load(fixture.source, at: 1)
+        engine.play()
+        #expect(engine.isAudioSessionActive)
+
+        engine.unload()
+
+        // The flag describes the loaded media; the session itself stays active for the next item.
+        #expect(!engine.isAudioSessionActive)
+        #expect(engine.state == .idle)
+        #expect(engine.timeline == nil)
+        #expect(engine.player.items().isEmpty)
+        #expect(session.deactivations == 0)
+        #expect(await engine.seek(to: 1) == .failed)
+
+        engine.stop()
+        #expect(session.deactivations == 1)
+    }
+
+    @Test func failedActivationAfterUnloadReleasesTheKeptSessionButKeepsTheMedia() async throws {
+        let fixture = try AudioFixture()
+        let session = FakeAudioSession()
+        let engine = makeEngine(session: session)
+        try await engine.load(fixture.source, at: 1)
+        engine.play()
+        engine.unload()
+        try await engine.load(fixture.source, at: 1)
+
+        session.activationError = FakeAudioSession.ActivationError()
+        engine.play()
+
+        #expect(session.deactivations == 1)
+        #expect(engine.timeline != nil)
+        // Released once: a second failure has no kept session left to release.
+        engine.play()
+        #expect(session.deactivations == 1)
+        // The media is still usable: the next play() activates again.
+        session.activationError = nil
+        engine.play()
+        #expect(engine.isAudioSessionActive)
+        #expect(session.deactivations == 1)
+    }
+
+    @Test func failedActivationWithoutAKeptSessionDeactivatesNothing() async throws {
+        let fixture = try AudioFixture()
+        let session = FakeAudioSession()
+        let engine = makeEngine(session: session)
+        try await engine.load(fixture.source, at: 1)
+        engine.play()
+        engine.unload()
+        try await engine.load(fixture.source, at: 1)
+        engine.play()
+
+        // The new item activated: the session is its own now, as on a first play.
+        session.activationError = FakeAudioSession.ActivationError()
+        engine.play()
+        #expect(session.deactivations == 0)
+    }
+
     @Test(.tags(.realtimeAudio)) func interruptionPausesAndResumesAtDefaultRate() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()
