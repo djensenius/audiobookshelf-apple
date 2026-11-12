@@ -939,7 +939,7 @@ public final class ProgressSyncer {
             do {
                 _ = try await fetchProgress(for: key, attempted: &attemptedConfirmations, attemptedKeys: &attemptedKeys)
             } catch {
-                logger.error("Fetching ebook progress failed: \(String(describing: error), privacy: .public)")
+                logger.error("Fetching ebook progress failed: \(Self.caseName(error), privacy: .public)")
                 drainOutcome.failed = true
                 return
             }

@@ -159,12 +159,12 @@ public final class EbookProgressModel {
         let (clock, debounce) = (clock, debounce)
         debounceTask = Task { [weak self] in
             do { try await clock.sleep(for: debounce) } catch { return }
-            // A newer turn cancels this task before replacing it.
+            // A newer turn or a flush cancels this task, also while it waits for the save.
             guard let self, !Task.isCancelled else { return }
-            debounceTask = nil
             // A failed save is retried first; the drain isn't awaited, so this task doesn't keep
             // the model.
-            if await enqueueSave().value { enqueueDrain() }
+            guard await enqueueSave().value, !Task.isCancelled else { return }
+            enqueueDrain()
         }
     }
 
@@ -177,8 +177,10 @@ public final class EbookProgressModel {
         await enqueueDrain().value
     }
 
-    /// Sends unsent changes without a new page turn: the reconnect hook.
+    /// Sends unsent changes without a new page turn: the reconnect hook. A turn whose save failed
+    /// is saved first; nothing is sent while it can't be.
     public func syncPending() async {
+        guard await enqueueSave().value else { return }
         await enqueueDrain().value
     }
 

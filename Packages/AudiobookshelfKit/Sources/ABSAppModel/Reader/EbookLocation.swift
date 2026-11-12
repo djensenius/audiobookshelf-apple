@@ -100,7 +100,8 @@ public struct EbookResumePoint: Sendable, Equatable {
     public static let beginning = EbookResumePoint(location: nil, progress: nil, source: .beginning)
 
     /// The first location valid for `kind`, in order: the row's, the row's before a merge
-    /// replaced it (`replaced`, when the merge brought a location for another format), then
+    /// replaced it (`replaced`, only when the merge brought a location for another format; a
+    /// cleared location stays cleared), then
     /// `server`, the progress known without a row. Dates aren't compared: the row already holds
     /// the store's decision. The chosen progress is ``normalized(_:)``, as a recorded one is.
     public static func resolve(
@@ -108,6 +109,7 @@ public struct EbookResumePoint: Sendable, Equatable {
         server: MediaProgress?
     ) -> Self {
         let style = kind.locationStyle
+        let replaced = local?.ebookLocation == nil ? nil : replaced
         let candidates: [(String?, Double?, Source)] = [
             (local?.ebookLocation, local?.ebookProgress, .local),
             (replaced?.ebookLocation, replaced?.ebookProgress, .local),

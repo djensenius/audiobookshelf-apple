@@ -297,6 +297,42 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(model.lastError == nil)
     }
 
+    /// A turn made while the debounced task waits for a save cancels that task, so the new turn
+    /// gets its own quiet period before anything is sent.
+    @Test func aNewTurnCancelsADrainWaitingForItsSave() async throws {
+        let model = makeModel()
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        turn(model, to: 1)
+        let failed = try #require(model.saveTail)
+        #expect(await failed.value == false)
+
+        // The debounce retries the failed save; turn while that save is in the store.
+        clock.advance(by: .seconds(2))
+        while model.saveTail == failed { await Task.yield() }
+        turn(model, to: 2)
+        await model.saveTail?.value
+        await model.drainTail?.value
+        #expect(service.writes.value.isEmpty)
+
+        clock.advance(by: .seconds(2))
+        while model.drainTail == nil { await Task.yield() }
+        await model.drainTail?.value
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["2"])
+    }
+
+    /// The reconnect hook saves a turn whose save failed before it sends, so the turn isn't
+    /// left behind waiting for another page change.
+    @Test func syncPendingSavesAFailedTurnFirst() async throws {
+        let model = makeModel()
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        turn(model, to: 3)
+        #expect(await model.saveTail?.value == false)
+
+        await model.syncPending()
+        #expect(try await row().ebookLocation == "3")
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3"])
+    }
+
     /// A new row is seeded from known server progress (ADR 0003), so only the ebook group is
     /// dirty and the audio fields aren't sent.
     @Test func seedsANewRowFromServerProgress() async throws {
@@ -560,6 +596,16 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
 
         #expect(await makeModel(kind).resume() == expected)
         #expect(try await row().currentTime == 200)
+    }
+
+    /// A newer server value that clears the location clears a clean row, and the reader opens at
+    /// the start rather than at the page the row held before.
+    @Test func aClearedLocationIsNotRestored() async throws {
+        try await cleanRow("4", progress: 0.3)
+        service.server.value = serverProgress(nil, at: t0.addingTimeInterval(60))
+
+        #expect(await makeModel().resume() == .beginning)
+        #expect(try await row().ebookLocation == nil)
     }
 
     /// A server without progress drops the known one: the reader opens at the start, and a new
