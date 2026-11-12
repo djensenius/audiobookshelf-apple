@@ -61,6 +61,7 @@ private final class ObserverFirstSource: PlaybackProgressSource {
     var chapterIndex: Int? { base.chapterIndex }
     var sessionDisplayTitle: String? { base.sessionDisplayTitle }
     var resumeRewindLanding: Double? { base.resumeRewindLanding }
+    var loadLandingIsUserSeek: Bool { base.loadLandingIsUserSeek }
     var startProgressChange: ServerAudioPositionChange? { base.startProgressChange }
     var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)? {
         get { base.finalCloseReport }
@@ -581,6 +582,39 @@ struct PlaybackHistoryReportingTests {
         await Self.settle(s)
 
         #expect(spy.entries(.seek).map(\.position) == [300.5])
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func aSeekMadeWhileLoadingLandingOnItsTargetIsASeek(jump: Bool, interrupted: Bool) async throws {
+        let (s, spy) = try Self.harness()
+        let load = Gate()
+        defer { load.open() }
+        s.h.engine.loadGates = [load]
+        let play = Task { await s.coordinator.play(itemID: "a", startTime: 120) }
+        await yieldUntil { s.h.engine.loads.count == 1 }
+        // The catch-up seek lands exactly on 300: at once, or later after an interruption.
+        if jump { await s.coordinator.jump(by: 180) } else { await s.coordinator.seek(to: 300) }
+        if interrupted { s.h.engine.seekResults = [.interrupted] }
+        load.open()
+        await play.value
+        s.h.engine.landPendingSeek()
+        await Self.settle(s)
+
+        #expect(s.h.engine.seeks == [300])
+        #expect(s.coordinator.currentTime == 300)
+        #expect(spy.entries(.seek).map(\.position) == [300])
+    }
+
+    @Test(arguments: [false, true])
+    func aLoadLandingOnItsOwnTargetIsNotASeek(interrupted: Bool) async throws {
+        let (s, spy) = try Self.harness()
+        if interrupted { s.h.engine.interruptedLoads = 1 }
+        await s.coordinator.play(itemID: "a", startTime: 120)
+        s.h.engine.landPendingSeek()
+        await Self.settle(s)
+
+        #expect(s.coordinator.currentTime == 120)
+        #expect(spy.entries(.seek).isEmpty)
     }
 
     @Test(arguments: [false, true])

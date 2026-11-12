@@ -198,6 +198,9 @@ public final class PlaybackCoordinator {
     /// Where the latest automatic seek (a resume's rewind, or a load's late landing) landed; its
     /// `didSeek` isn't a user seek (#384).
     @ObservationIgnored public private(set) var resumeRewindLanding: Double?
+    /// The latest load's landing is a seek or jump the user made while it loaded, not its own
+    /// target: history records it as a seek even where it lands exactly on `loaded`'s time (#384).
+    @ObservationIgnored public private(set) var loadLandingIsUserSeek = false
     @ObservationIgnored private var seekIsResumeRewind = false
     /// An automatic seek (an interrupted resume rewind, or the load's own) whose landing the engine
     /// still owes; any other seek clears it.
@@ -545,6 +548,7 @@ public final class PlaybackCoordinator {
         // However late the engine lands the load's own target, that's not a user seek (#384).
         rewindAwaitsLanding = true
         resumeRewindLanding = nil
+        loadLandingIsUserSeek = false
         var seekTarget: Double?
         if let pending, pending != plannedStart {
             // A seek while loading: normalize before adding jumps, just as the initial load does.
@@ -555,6 +559,7 @@ public final class PlaybackCoordinator {
         if let seekTarget {
             // A seek or jump made while loading replaces the load's own target: a user seek.
             rewindAwaitsLanding = false
+            loadLandingIsUserSeek = true
             await engine.seek(to: engine.timeline?.clamp(seekTarget) ?? seekTarget)
             guard current == generation, phase == .loaded else { return }
         }

@@ -152,7 +152,8 @@ public final class ProgressSyncer {
     private var lastTick: (uptime: TimeInterval, mediaTime: Double)?
     private var lastSyncAt: TimeInterval?
     private var chapterIndex: Int?
-    /// The `didSeek` the coordinator emits right after `loaded` is the resume position, not a seek.
+    /// A `didSeek` landing on `loaded`'s time is the load's own position, not a new one to sync;
+    /// it's a history Seek only when the user chose it while loading (`loadLandingIsUserSeek`).
     private var loadedTime: Double?
     /// The session with a `/sync` queued but not started; later requests join it.
     private var queuedSyncSessionID: String?
@@ -396,16 +397,18 @@ public final class ProgressSyncer {
             defer { loadedTime = nil }
             chapterIndex = source?.chapterIndex
             lastTick = isPlaying ? (now, time) : nil
-            if loadedTime != time {
-                if time != source?.resumeRewindLanding {
-                    if current == nil {
-                        holdBeforeStop(.seek, at: time, sync: .notAttempted)
-                    } else if let event = historyEvent(.seek, at: time) {
-                        history?.record([event], sync: .notAttempted)
-                    }
+            // Landing on `loaded`'s time is no new position to send, but history follows its origin.
+            let isLoadLanding = loadedTime == time
+            let isUserSeek =
+                isLoadLanding ? source?.loadLandingIsUserSeek == true : time != source?.resumeRewindLanding
+            if isUserSeek {
+                if current == nil {
+                    holdBeforeStop(.seek, at: time, sync: .notAttempted)
+                } else if let event = historyEvent(.seek, at: time) {
+                    history?.record([event], sync: .notAttempted)
                 }
-                requestSync()
             }
+            if !isLoadLanding { requestSync() }
         case .tick(let time):
             tick(time, now: now)
         case .sessionWillClose(let closing):

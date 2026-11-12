@@ -93,6 +93,9 @@ public protocol PlaybackProgressSource: AnyObject {
     /// Where the latest automatic seek (a resume's rewind, or a load's late landing) landed
     /// (history doesn't count it as a seek).
     var resumeRewindLanding: Double? { get }
+    /// The latest load's landing is a seek or jump the user made while it loaded (history records
+    /// it as a seek, even at `loaded`'s time).
+    var loadLandingIsUserSeek: Bool { get }
     /// How the latest start's server progress moved the stored position (history).
     var startProgressChange: ServerAudioPositionChange? { get }
     var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)? { get set }
