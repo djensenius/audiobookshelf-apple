@@ -72,6 +72,8 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
 
     private struct PagingState {
         var nextPage: Int
+        /// The size of the kept pages: a refresh may have switched to a pending one.
+        var pageSize: Int
         var fetchedCount: Int
         var total: Int?
         var reachedEnd: Bool
@@ -125,7 +127,8 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
         // the ones it describes.
         if refreshRollback == nil {
             refreshRollback = PagingState(
-                nextPage: nextPage, fetchedCount: fetchedCount, total: total, reachedEnd: reachedEnd,
+                nextPage: nextPage, pageSize: pageSize, fetchedCount: fetchedCount, total: total,
+                reachedEnd: reachedEnd,
                 emptyPagesInARow: emptyPagesInARow)
         }
         restart()
@@ -243,6 +246,11 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
             if let rollback = refreshRollback {
                 refreshRollback = nil
                 nextPage = rollback.nextPage
+                // The kept pages are offsets of the old size; the newest requested size waits
+                // for the next restart again.
+                let requested = pendingPageSize ?? pageSize
+                pageSize = rollback.pageSize
+                pendingPageSize = requested == pageSize ? nil : requested
                 fetchedCount = rollback.fetchedCount
                 total = rollback.total
                 reachedEnd = rollback.reachedEnd
