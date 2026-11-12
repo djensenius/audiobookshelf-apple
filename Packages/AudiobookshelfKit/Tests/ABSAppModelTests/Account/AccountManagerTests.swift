@@ -189,7 +189,9 @@ private struct Harness {
     }
 
     /// - Parameter willReadClock: Runs before each reading of the clock, in the caller's task.
-    func makeManager(willReadClock: @escaping @Sendable () -> Void = {}) -> AccountManager {
+    func makeManager(
+        settings: AppSettings? = nil, willReadClock: @escaping @Sendable () -> Void = {}
+    ) -> AccountManager {
         let openID = OIDCLoginService { configuration, cookieStorage in
             let client = APIClient(
                 configuration: configuration, tokenProvider: SignedOutTokenProvider(),
@@ -206,7 +208,7 @@ private struct Harness {
             now: { [clock] in
                 willReadClock()
                 return clock.now()
-            })
+            }, settings: settings)
     }
 
     func session(_ id: UUID?) throws -> StoredSession? {
@@ -505,6 +507,45 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(manager.state == .signedOut && manager.connections.isEmpty && manager.client == nil)
         #expect(harness.keychain.isEmpty)
         await #expect(throws: AccountError.connectionNotFound) { try await manager.remove(secondID) }
+    }
+
+    @Test func removeClearsTheAccountsSavedSettingsAndLogoutKeepsThem() async throws {
+        let suiteName = "ABSAppModelTests.Account.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(defaults: defaults)
+        let harness = try Harness()
+        let manager = harness.makeManager(settings: settings)
+        let first = FakeServer()
+        let second = FakeServer()
+        let firstID = try await signIn(manager, to: first)
+        let secondID = try await signIn(manager, to: second)
+        // The removed account, the same server with another user, and the same user on another
+        // server, keyed as `LibraryConnectionKey` keys them.
+        let removed = (server: firstID.uuidString, user: first.userId)
+        let accounts = [removed, (firstID.uuidString, "usr-other"), (secondID.uuidString, second.userId)]
+        for (server, user) in accounts {
+            settings.setLastLibraryID("lib-\(user)", serverID: server, userID: user)
+            settings.setLibraryViewPreferencesJSON("{}", serverID: server, userID: user, libraryID: "lib")
+            settings.setRecentSearchesJSON("[\"Dune\"]", serverID: server, userID: user, libraryID: "lib")
+        }
+        let saved = AppSettings.snapshot(from: defaults)
+
+        // Signing out keeps them, for signing in again.
+        _ = await manager.logout()
+        #expect(AppSettings.snapshot(from: defaults) == saved)
+
+        try await manager.remove(firstID)
+        let stored = AppSettings(defaults: defaults)
+        #expect(stored.lastLibraryID(serverID: removed.server, userID: removed.user) == nil)
+        #expect(
+            stored.libraryViewPreferencesJSON(serverID: removed.server, userID: removed.user, libraryID: "lib") == nil)
+        #expect(stored.recentSearchesJSON(serverID: removed.server, userID: removed.user, libraryID: "lib") == nil)
+        for (server, user) in accounts.dropFirst() {
+            #expect(stored.lastLibraryID(serverID: server, userID: user) == "lib-\(user)")
+            #expect(stored.libraryViewPreferencesJSON(serverID: server, userID: user, libraryID: "lib") == "{}")
+            #expect(stored.recentSearchesJSON(serverID: server, userID: user, libraryID: "lib") == "[\"Dune\"]")
+        }
     }
 
     @Test func refreshedTokensArePersisted() async throws {

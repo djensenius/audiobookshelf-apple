@@ -106,6 +106,8 @@ public final class AccountManager {
     @ObservationIgnored private let openID: OIDCLoginService
     @ObservationIgnored private let sessionConfiguration: @Sendable () -> URLSessionConfiguration
     @ObservationIgnored private let now: @Sendable () -> Date
+    /// Where a removed connection's saved preferences and recent searches are cleared.
+    @ObservationIgnored private let settings: AppSettings?
     @ObservationIgnored private var credentials: [UUID: ConnectionCredentials] = [:]
     /// The credentials generation of each connection's latest sign-in in this process.
     @ObservationIgnored private var signInGenerations: [UUID: Int] = [:]
@@ -142,14 +144,18 @@ public final class AccountManager {
     /// - Parameters:
     ///   - keychain: The app passes `KeychainStore()`; tests pass a fake.
     ///   - sessionConfiguration: Tests return a configuration with stub protocol classes.
+    ///   - settings: ``remove(_:)`` clears the removed account's entries from it
+    ///     (``AppSettings/removeAccountData(serverID:userID:)``); ``logout()`` keeps them.
     public init(
         store: ServerConnectionStore,
         keychain: any KeychainStoring,
         validator: ServerValidator = ServerValidator(),
         openID: OIDCLoginService = OIDCLoginService(),
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
-        now: @escaping @Sendable () -> Date = { .now }
+        now: @escaping @Sendable () -> Date = { .now },
+        settings: AppSettings? = nil
     ) {
+        self.settings = settings
         self.store = store
         vault = CredentialVault(keychain: keychain)
         self.validator = validator
@@ -474,6 +480,9 @@ public final class AccountManager {
         var storeError: (any Error)?
         do {
             _ = try await store.remove(id: id, now: now())
+            // Keyed like `LibraryConnectionKey`. Not if the store kept the connection listed:
+            // removing it again retries.
+            settings?.removeAccountData(serverID: id.uuidString, userID: connection.userId)
         } catch {
             // The session's already deleted here, so nothing could end it on the server later.
             storeError = error
