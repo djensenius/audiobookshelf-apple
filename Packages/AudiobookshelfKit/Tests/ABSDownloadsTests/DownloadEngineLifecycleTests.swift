@@ -267,6 +267,29 @@ import Testing
         #expect(harness.requests.count == 4)
     }
 
+    /// A deactivation before an activation's restart launches anything stops the restart.
+    @Test func deactivateStopsAPendingRestart() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let engine = Mutex<DownloadEngine?>(nil)
+        let deactivating = Mutex(false)
+        let made = harness.makeEngine(readRecords: { store in
+            if deactivating.withLock({ $0 }) { await engine.withLock { $0 }?.deactivate() }
+            return try await store.allRecords()
+        })
+        engine.withLock { $0 = made }
+        #expect(await made.attachSurvivingTransfers())
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        deactivating.withLock { $0 = true }
+
+        #expect(await made.activate())
+        await made.waitForRestart()
+
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
+        #expect(part.taskIdentifier == nil)
+    }
+
     @Test func backgroundWakeDoesNotRestartButActivateDoes() async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let partID = UUID()
@@ -2250,6 +2273,16 @@ import Testing
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.requests.count == 2)
         #expect(try await engine.pause(recordID: UUID()) == false)
+    }
+
+    /// A failure saved after the caller read the record (a sign-out's cleanup, say) stays.
+    @Test func pauseLeavesAFailedRecordFailed() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let record = try await harness.addRecord(parts: [UUID()], state: .failed)
+        let engine = harness.makeEngine()
+
+        #expect(try await engine.pause(recordID: record.id) == false)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
     }
 
     @Test func failedPauseReadLeavesRecordAndTransferConsistent() async throws {

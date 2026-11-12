@@ -519,7 +519,8 @@ public actor DownloadEngine {
     /// Pauses a download: its record becomes `paused`, then its transfers stop, keeping their
     /// resume data. Pauses and resumes of a record run one at a time, in call order.
     ///
-    /// - Returns: `false` when the record doesn't exist.
+    /// - Returns: `false` when the record doesn't exist, or has failed or completed meanwhile:
+    ///   checked in the state's write, so a failure saved after the caller read it stays.
     @discardableResult
     public func pause(recordID: UUID) async throws -> Bool {
         try await serialized(recordID) { try await $0.performPause(recordID) }
@@ -527,7 +528,8 @@ public actor DownloadEngine {
 
     private func performPause(_ recordID: UUID) async throws -> Bool {
         guard let record = try await readRecord(store, recordID) else { return false }
-        guard try await store.setState(.paused, forRecord: recordID) else { return false }
+        guard try await store.setState(.paused, forRecord: recordID, expecting: [.queued, .downloading, .paused])
+        else { return false }
         pendingRecordFailures.remove(recordID)
         await stop(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), keepingResumeData: true)
         return true
@@ -1016,7 +1018,7 @@ public actor DownloadEngine {
 
     /// Launches the queued and failed parts of `queued` and `downloading` records. The read
     /// may be stale; ``DownloadStore/beginRunning(partID:expecting:now:)`` refuses the parts
-    /// that changed since.
+    /// that changed since. A ``deactivate()`` meanwhile stops it: background starts aren't reliable.
     private func restartQueuedParts() async {
         let records: [DownloadRecordDTO]
         do {
@@ -1028,7 +1030,7 @@ public actor DownloadEngine {
         let candidates = records.filter { $0.state == .queued || $0.state == .downloading }
             .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed || strandedRunning.contains($0.id) }
             .map(\.id)
-        for partID in candidates {
+        for partID in candidates where restartsQueuedParts {
             await launch(partID)
         }
     }

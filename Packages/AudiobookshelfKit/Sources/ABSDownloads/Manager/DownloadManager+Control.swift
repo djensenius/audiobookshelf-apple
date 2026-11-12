@@ -8,7 +8,7 @@ extension DownloadManager {
     /// Pauses a download: its record becomes `paused` and the engine stops its transfers,
     /// keeping their resume data. Reported with ``DownloadManagerEvent/recordChanged(_:)``.
     ///
-    /// - Returns: `false` when the record doesn't exist: it completed or was cancelled.
+    /// - Returns: `false` when the record doesn't exist (it completed or was cancelled) or has failed.
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or saved.
     @discardableResult
     public func pause(recordID: UUID) async throws(DownloadManagerError) -> Bool {
