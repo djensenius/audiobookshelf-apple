@@ -13,7 +13,8 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     case unauthorized
     /// A redirect dropped the `Authorization` header and the new address answered 401.
     case redirectedUnauthorized
-    /// A redirect left the server; the body was discarded.
+    /// A redirect left the server: the foreground check refused it before the transfer, or the
+    /// background transfer's body was discarded.
     case offOrigin
     /// The body was an error page or message (HTML, text, JSON or XML), not the file.
     case unexpectedContent
@@ -39,8 +40,8 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     /// The background session kept disconnecting; downloads wait for the next
     /// ``DownloadEngine/activate()``.
     case sessionLost
-    /// The connection sends custom headers, which a background session could forward to
-    /// another server on a redirect. Refused until a foreground redirect check exists (#145).
+    /// No longer reported: downloads from connections with custom headers were refused before
+    /// the foreground redirect check (#145). Kept so stored failures still read.
     case customHeadersUnsupported
 }
 
@@ -147,6 +148,7 @@ public actor DownloadEngine {
     private let now: @Sendable () -> Date
     private let random: @Sendable () -> Double
     private let makeSession: DownloadSessionFactory
+    private let preflight: any DownloadRedirectPreflighting
     private let registry: DownloadEngineRegistry
     private let readRecords: @Sendable (DownloadStore) async throws -> [DownloadRecordDTO]
     private let readRecord: @Sendable (DownloadStore, UUID) async throws -> DownloadRecordDTO?
@@ -270,6 +272,7 @@ public actor DownloadEngine {
     ///   - networkAccess: the request flags for the current download cellular policy, read
     ///     when each task is created.
     ///   - makeSession: ``backgroundSession()`` in the app.
+    ///   - preflight: checks each request's redirects before its background task is made.
     public init(
         store: DownloadStore,
         localItems: LocalItemStore,
@@ -281,14 +284,15 @@ public actor DownloadEngine {
         clock: any Clock<Duration> = ContinuousClock(),
         now: @escaping @Sendable () -> Date = { .now },
         random: @escaping @Sendable () -> Double = { Double.random(in: 0...1) },
-        makeSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession()
+        makeSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession(),
+        preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         self.init(
             store: store, localItems: localItems, credentials: credentials, vault: vault, locations: locations,
             retryPolicy: retryPolicy, networkAccess: networkAccess, clock: clock, now: now, random: random,
             makeSession: makeSession, registry: .shared, readRecords: { try await $0.allRecords() },
             readRecord: { try await $0.record(id: $1) },
-            cancelKeepingResumeData: { await $0.cancelByProducingResumeData() })
+            cancelKeepingResumeData: { await $0.cancelByProducingResumeData() }, preflight: preflight)
     }
 
     init(
@@ -311,7 +315,8 @@ public actor DownloadEngine {
         afterPermanentFailure: (@Sendable (UUID) async -> Void)? = nil,
         beforeReplayStart: (@Sendable (UUID) async -> Void)? = nil,
         startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
-        adoptionStarted: (@Sendable (UUID) async -> Void)? = nil
+        adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
+        preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
         (progress, progressContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(100))
@@ -326,6 +331,7 @@ public actor DownloadEngine {
         self.now = now
         self.random = random
         self.makeSession = makeSession
+        self.preflight = preflight
         self.registry = registry
         self.readRecords = readRecords
         self.readRecord = readRecord
@@ -1053,6 +1059,7 @@ public actor DownloadEngine {
             logError("Couldn't mark a download's start; a file it moves is only kept once recorded", error)
         }
         let request: URLRequest
+        var unchecked: URLRequest?
         do {
             let credentials = try await credentials.credentials(
                 for: context.connectionID, replacing: rejectedAccessToken)
@@ -1060,13 +1067,26 @@ public actor DownloadEngine {
                 path: context.serverPath, configuration: credentials.configuration,
                 accessToken: credentials.accessToken)
             fresh.apply(await networkAccess())
-            request = fresh
-        } catch DownloadRequestError.customHeadersRequireRedirectCheck {
+            unchecked = fresh
+            request = try await preflight.check(fresh)
+        } catch DownloadRedirectPreflightError.noNetwork(let code) {
+            if launching[partID] == token, let unchecked {
+                await waitForNetwork(partID, launch: token, request: unchecked, code: code)
+            }
+            return
+        } catch DownloadRedirectPreflightError.offOrigin {
             if launching[partID] == token {
                 await failPermanently(
-                    partID, code: .customHeadersUnsupported,
-                    message: "Downloads from a server that needs custom headers aren't supported yet.",
+                    partID, code: .offOrigin, message: "The download is redirected to another server.",
                     activationOwnsSession: activationOwnsSession)
+            }
+            return
+        } catch DownloadRedirectPreflightError.unreachable(let code) {
+            if launching[partID] == token {
+                await retry(
+                    partID, code: .transfer,
+                    message: "Couldn't reach the server: \(URLError(code).localizedDescription)",
+                    transferFailed: false, activationOwnsSession: activationOwnsSession)
             }
             return
         } catch {
@@ -1578,6 +1598,34 @@ public actor DownloadEngine {
                 return
             }
             await self?.retryNow(partID)
+        }
+    }
+
+    /// Queues the part until a network its request may use is available, then launches it
+    /// again. Unlike ``retry(_:code:message:transferFailed:activationOwnsSession:)`` this uses
+    /// none of the part's retries: being offline, or on a network the download settings forbid,
+    /// isn't the server failing. When the wait ends at once because a network was there after
+    /// all (a server that drops the connection, say), the failure is retried and counted. A stop
+    /// cancels the wait like a retry's.
+    private func waitForNetwork(_ partID: UUID, launch token: UUID, request: URLRequest, code: URLError.Code) async {
+        await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
+        // Stopped meanwhile. The wait begins after this launch returns, so it can launch again.
+        guard launching[partID] == token else { return }
+        let preflight = preflight
+        retries[partID] = Task { [weak self] in
+            let waited = await preflight.waitForNetwork(request)
+            await self?.networkWaitEnded(partID, waited: waited, code: code)
+        }
+    }
+
+    private func networkWaitEnded(_ partID: UUID, waited: Bool, code: URLError.Code) async {
+        guard !Task.isCancelled, retries.removeValue(forKey: partID) != nil else { return }
+        if waited {
+            await launch(partID)
+        } else {
+            await retry(
+                partID, code: .transfer, message: "Couldn't reach the server: \(URLError(code).localizedDescription)",
+                transferFailed: false)
         }
     }
 

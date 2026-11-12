@@ -1,0 +1,37 @@
+{
+  "id": "collection-fixture",
+  "libraryId": "library-books",
+  "name": "Captured collection",
+  "description": "Synthetic fixture",
+  "books": [],
+  "lastUpdate": 1700000000000,
+  "createdAt": 1700000000000,
+  "rssFeed": {
+    "id": "feed-collection",
+    "slug": "synthetic-collection",
+    "userId": "user-root",
+    "entityType": "collection",
+    "entityId": "collection-fixture",
+    "entityUpdatedAt": 1700000000000,
+    "coverPath": null,
+    "meta": {
+      "title": "Captured collection",
+      "description": "Synthetic fixture",
+      "author": "Ada Fixture",
+      "imageUrl": "https://abs.example/feed/synthetic-collection/cover",
+      "feedUrl": "https://abs.example/feed/synthetic-collection",
+      "link": "https://abs.example/collection/collection-fixture",
+      "explicit": false,
+      "type": "serial",
+      "language": null,
+      "preventIndexing": false,
+      "ownerName": null,
+      "ownerEmail": "owner@example.com"
+    },
+    "serverAddress": "https://abs.example",
+    "feedUrl": "/feed/synthetic-collection",
+    "updatedAt": 1700000000000,
+    "createdAt": 1700000000000,
+    "episodes": []
+  }
+}
