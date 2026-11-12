@@ -330,22 +330,25 @@ private func loadedModel(
         #expect(model.playButton == .playAgain)
     }
 
-    @Test func readNeedsAnEbookAndStaysDisabled() async {
+    @Test func readNeedsTheEbookFile() async {
         let withEbook = await loadedModel(makeBook(ebookFile: EbookFile(ino: "eb-1", ebookFormat: .epub)))
         #expect(withEbook.hasEbook)
         #expect(withEbook.ebookFormat == .epub)
-        #expect(!withEbook.isReadEnabled)
+        #expect(withEbook.isReadEnabled)
+        #expect(withEbook.readerEbookFile?.ino == "eb-1")
 
         // An ebook file without a format is still an ebook.
         let unknownFormat = await loadedModel(makeBook(ebookFile: EbookFile(ino: "eb-1")))
         #expect(unknownFormat.hasEbook)
         #expect(unknownFormat.ebookFormat == nil)
-        #expect(!unknownFormat.isReadEnabled)
+        #expect(unknownFormat.isReadEnabled)
 
         // A minified book only carries the format.
         let minified = await loadedModel(makeBook(ebookFormat: .pdf))
         #expect(minified.hasEbook)
         #expect(minified.ebookFormat == .pdf)
+        // Without the file there's nothing to fetch.
+        #expect(!minified.isReadEnabled)
 
         let both = await loadedModel(
             makeBook(ebookFile: EbookFile(ino: "eb-1", ebookFormat: .epub), ebookFormat: .pdf))
@@ -354,6 +357,7 @@ private func loadedModel(
         let without = await loadedModel(makeBook())
         #expect(!without.hasEbook)
         #expect(without.ebookFormat == nil)
+        #expect(!without.isReadEnabled)
         #expect(!without.isDownloadAvailable)
     }
 

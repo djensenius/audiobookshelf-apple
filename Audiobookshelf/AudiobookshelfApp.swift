@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSCore
+import ABSData
 import ABSDownloads
 import ABSUI
 import SwiftUI
@@ -10,6 +11,11 @@ struct AudiobookshelfApp: App {
     private let environment = AppEnvironment.shared
     private var settings: AppSettings { environment.settings }
     @Environment(\.scenePhase) private var scenePhase
+    /// Readers open an ebook's downloaded copy when there is one.
+    private let downloadedEbookFile = AppEnvironment.shared.dataStack.map {
+        EbookFileLoader.downloadedFileLookup(
+            items: LocalItemStore(modelContainer: $0.container), locations: DownloadLocations())
+    }
 
     var body: some Scene {
         // Every window; Open in New Window opens one at a screen (``WindowRoute``).
@@ -21,6 +27,7 @@ struct AudiobookshelfApp: App {
             )
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
+            .environment(\.downloadedEbookFile, downloadedEbookFile)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {
@@ -43,6 +50,14 @@ struct AudiobookshelfApp: App {
         }
 
         #if os(macOS)
+            // Each ebook opened with Read; reopening one brings its window forward.
+            WindowGroup(id: ReaderWindow.id, for: ReaderPresentation.self) { $presentation in
+                ReaderWindow(presentation: presentation, store: environment.library?.store)
+                    .environment(settings)
+                    .environment(\.downloadedEbookFile, downloadedEbookFile)
+                    .modifier(AppThemeModifier(settings: settings))
+            }
+
             Settings {
                 SettingsView(settings: settings)
                     .modifier(AppThemeModifier(settings: settings))

@@ -233,8 +233,12 @@ public final class ItemDetailModel {
         return book.ebookFile?.ebookFormat ?? book.ebookFormat
     }
 
-    /// Read is shown when ``hasEbook`` but stays disabled until the ebook readers exist.
-    public var isReadEnabled: Bool { false }
+    /// The primary ebook file Read opens (`index.vue` `readBook`); `nil` for a minified book,
+    /// which carries only the format.
+    public var readerEbookFile: EbookFile? { item?.book?.ebookFile }
+
+    /// Read is shown when ``hasEbook``, and enabled once the item's ebook file is loaded.
+    public var isReadEnabled: Bool { readerEbookFile != nil }
 
     /// Placeholder for the Download button (legacy `index.vue:451-454`, `613-694`): `false`
     /// until downloads exist, so the view shows the button disabled.

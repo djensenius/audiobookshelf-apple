@@ -131,6 +131,7 @@ struct ItemDetailContent: View {
                 Text(verbatim: L10n.string("ButtonCancel"))
             }
         }
+        .modifier(ReaderPresenter(itemID: model.itemID, title: details.title, file: model.readerEbookFile))
         #if os(iOS)
             .fullScreenCover(isPresented: $showsFullscreenCover) { fullscreenCover }
         #else
@@ -267,10 +268,11 @@ private struct PendingChapter {
 
 /// Play (or Resume, Play again, Missing), Read and Download.
 ///
-/// Play calls `onPlay`, which ``ItemDetailContent`` provides. Read stays disabled until the ebook
-/// readers exist, and Download until downloads exist.
+/// Play calls `onPlay`, which ``ItemDetailContent`` provides. Read opens the ebook through
+/// `openReader` (``ReaderPresenter``), and Download stays disabled until downloads exist.
 private struct ItemDetailActions: View {
     let model: ItemDetailModel
+    @Environment(\.openReader) private var openReader
     /// There's a `playItem` action, no start in progress, and the item isn't gone from the server
     /// (``ItemDetailGoneState``).
     let canPlay: Bool
@@ -291,6 +293,7 @@ private struct ItemDetailActions: View {
             .disabled(!play.isEnabled)
             if model.hasEbook {
                 Button {
+                    openReader?()
                 } label: {
                     Label {
                         Text(verbatim: L10n.string("ButtonRead"))
@@ -300,7 +303,7 @@ private struct ItemDetailActions: View {
                     .labelStyle(.iconOnly)
                 }
                 .buttonStyle(.bordered)
-                .disabled(!model.isReadEnabled)
+                .disabled(!model.isReadEnabled || openReader == nil)
             }
             if model.hasAudio {
                 Button {
