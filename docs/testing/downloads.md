@@ -8,10 +8,10 @@ protocols. Run these checks on a real device (and once on the Simulator) before 
 release that changes downloads, the session identifier, or the app's scene setup.
 
 `AppEnvironment` builds the download stack (`AppDownloads`) when it's created, and starts
-the manager and controller without a scene, so a CarPlay-only launch or a background
-relaunch has an engine. `DownloadsLifecycle` gets every scene phase from the app, in
-order: `.active` calls `activate()` and, when that succeeds, sweeps orphaned files;
-`.background` calls `deactivate()`. Until an engine exists, the static
+the manager without a scene, so a CarPlay-only launch or a background relaunch has an
+engine. `DownloadsLifecycle` gets every scene phase from the app, in order: `.active`
+starts the controller (once) and calls `activate()` and, when that succeeds, retries
+unfinished clean-ups and sweeps orphaned files; `.background` calls `deactivate()`. Until an engine exists, the static
 `DownloadEngine.handleBackgroundEvents()` waits up to 10 seconds for one, then returns;
 the events stay in `nsurlsessiond` for the next session. To pause or resume a download,
 the app calls `pause(recordID:)` or `resume(recordID:)`, which set the record's state
@@ -113,7 +113,8 @@ its restart pass, the part waits for the next time the app comes to the foregrou
 
 ## (c) Sign-out, removal and a CarPlay-only launch
 
-Signing out, an expired session or removing a server pauses that connection's queued and
+Signing out, an expired session (also one that expires while it's being restored, or of a
+server that isn't active) or removing a server pauses that connection's queued and
 running downloads, then deletes its resume data (ADR 0003). The paused downloads stay
 paused after signing back in.
 
@@ -124,9 +125,10 @@ A removal runs it once the Keychain items are deleted and before the store remov
 server (`AccountManager.credentialsRemoved`), so a failed removal keeps the downloads'
 progress. A new sign-in to the same server waits for a clean-up still running (a wait over
 5 seconds is logged). One that found no session still deletes the resume data, cancels the
-connection's transfers that survived a relaunch once the session is created, and is
-retried at the next activation unless the server is signed in to first. Nothing is
-activated until the download folders are prepared.
+connection's transfers that survived a relaunch once the session is created, dropping
+their results, and is retried at the next activation unless the server is signed in to
+first; so is one that couldn't save a pause or delete the resume data. Nothing is
+activated, and the controller isn't started, until the download folders are prepared.
 
 1. Start the 500 MB download, then sign out from the Account tab. Check that the
    download shows as paused, `nsurlsessiond` cancels the task, and `ResumeData/` holds

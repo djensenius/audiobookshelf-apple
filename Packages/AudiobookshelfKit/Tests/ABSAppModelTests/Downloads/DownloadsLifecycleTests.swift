@@ -81,6 +81,8 @@ private actor FakeManager: DownloadsLifecycleManager {
     private var failingStarts = 0
     /// Holds the next pause until it opens.
     private var pauseGate: StubGate?
+    /// How many of the next pauses throw.
+    private var failingPauses = 0
 
     init(calls: Calls) {
         self.calls = calls
@@ -92,6 +94,10 @@ private actor FakeManager: DownloadsLifecycleManager {
 
     func hold(_ gate: StubGate) {
         pauseGate = gate
+    }
+
+    func failPauses(_ count: Int) {
+        failingPauses = count
     }
 
     func start() throws {
@@ -112,6 +118,10 @@ private actor FakeManager: DownloadsLifecycleManager {
         if let gate = pauseGate {
             pauseGate = nil
             await gate.pass()
+        }
+        if failingPauses > 0 {
+            failingPauses -= 1
+            throw .storeFailure
         }
         return true
     }
@@ -169,7 +179,9 @@ struct DownloadsLifecycleTests {
 
     // MARK: - App lifecycle
 
-    @Test func launchStartsTheManagerThenTheControllerOnceWithoutActivating() async {
+    /// A launch without a window starts no transfer: the controller's network policy can restart
+    /// them, so it starts only with an active phase.
+    @Test func launchStartsOnlyTheManagerOnceWithoutActivating() async {
         let lifecycle = makeLifecycle()
 
         let first = lifecycle.launch()
@@ -177,7 +189,7 @@ struct DownloadsLifecycleTests {
         await first.value
         await second.value
 
-        #expect(calls.all == ["start manager", "start controller"])
+        #expect(calls.all == ["start manager"])
     }
 
     @Test func activeLaunchesThenActivatesThenSweeps() async {
@@ -365,8 +377,80 @@ struct DownloadsLifecycleTests {
 
         let cleanup = pauses(recordsA) + ["quiesce \(connectionA)"]
         #expect(
-            calls.all == ["start manager", "start controller"] + cleanup + ["activate", "activated"] + cleanup
+            calls.all == ["start manager"] + cleanup + ["start controller", "activate", "activated"] + cleanup
                 + ["sweep", "activate", "activated", "sweep"])
+    }
+
+    /// A pause that wasn't saved leaves a record the next activation would restart, so the
+    /// cleanup is tried again after it even though the quiesce succeeded.
+    @Test func cleanupWithAFailedPauseIsRetriedAfterTheNextActivation() async {
+        let lifecycle = makeLifecycle()
+        await lifecycle.launch().value
+        await lifecycle.sessionDidStart(context(connectionA))
+        await manager.failPauses(1)
+        await lifecycle.sessionWillEnd(.signOut)
+
+        await lifecycle.handle(scenePhase: .active).value
+        await lifecycle.handle(scenePhase: .active).value
+
+        let cleanup = pauses(recordsA) + ["quiesce \(connectionA)"]
+        #expect(
+            calls.all == ["start manager"] + cleanup + ["start controller", "activate", "activated"] + cleanup
+                + ["sweep", "activate", "activated", "sweep"])
+    }
+
+    /// A retry runs outside the phase chain: one that is stuck doesn't keep a background
+    /// phase from deactivating.
+    @Test func stuckRetryDoesNotHoldUpABackground() async {
+        let lifecycle = makeLifecycle()
+        await lifecycle.launch().value
+        await lifecycle.sessionDidStart(context(connectionA))
+        await engine.failQuiesces(1)
+        await lifecycle.sessionWillEnd(.signOut)
+        let gate = StubGate()
+        await manager.hold(gate)
+
+        let active = lifecycle.handle(scenePhase: .active)
+        await gate.arrived()
+        await lifecycle.handle(scenePhase: .background).value
+
+        #expect(calls.all.last == "deactivate")
+        #expect(await !engine.isActive)
+        gate.open()
+        await active.value
+    }
+
+    /// An expiry during a restore, or of another connection, has no session ending to clean up
+    /// in; a later session of the connection waits for this cleanup.
+    @Test func expiryWithoutARunningSessionPausesThenQuiescesBeforeASignIn() async {
+        let lifecycle = makeLifecycle()
+        let gate = StubGate()
+        await manager.hold(gate)
+
+        lifecycle.connectionExpired(connectionA)
+        let calls = calls
+        let start = Task {
+            await lifecycle.sessionDidStart(context(connectionA))
+            calls.append("started")
+        }
+        await gate.arrived()
+        for _ in 0..<10 { await Task.yield() }
+        #expect(!calls.all.contains("started"))
+        gate.open()
+        await start.value
+
+        #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)", "started"])
+    }
+
+    /// The running session's end cleans up its own expiry.
+    @Test func expiryOfTheRunningSessionsConnectionLeavesItToTheSessionEnd() async {
+        let lifecycle = makeLifecycle()
+        await lifecycle.sessionDidStart(context(connectionA))
+
+        lifecycle.connectionExpired(connectionA)
+        for _ in 0..<10 { await Task.yield() }
+
+        #expect(calls.all.isEmpty)
     }
 
     /// Once a session of the connection starts, its downloads are that session's.
@@ -381,7 +465,7 @@ struct DownloadsLifecycleTests {
         await lifecycle.handle(scenePhase: .active).value
 
         #expect(
-            calls.all == ["start manager", "start controller"] + pauses(recordsA)
-                + ["quiesce \(connectionA)", "activate", "activated", "sweep"])
+            calls.all == ["start manager"] + pauses(recordsA)
+                + ["quiesce \(connectionA)", "start controller", "activate", "activated", "sweep"])
     }
 }

@@ -538,6 +538,12 @@ public final class AccountManager {
     /// keeps its downloads' progress along with its session.
     @ObservationIgnored public var credentialsRemoved: (@MainActor (UUID) async -> Void)?
 
+    /// Called when a connection's session expires (its tokens are deleted, or a sign-out is
+    /// saved), active or not, and even before its session is restored: the app stops that
+    /// connection's downloads and discards their resume data there, unless its running session's
+    /// end does. Not for a connection being removed (``credentialsRemoved`` covers it).
+    @ObservationIgnored public var credentialsExpired: (@MainActor (UUID) -> Void)?
+
     /// Clients for download credentials of saved connections that aren't active, so a
     /// connection's download parts share one client, with the credentials' generation they were
     /// made for: every sign-in, sign-out, expiry and removal bumps it, so a client made before
@@ -817,6 +823,7 @@ public final class AccountManager {
         // A sign-in that saved the expired session mustn't activate it.
         expiredGenerations[id] = generation
         Log.auth.notice("The session expired")
+        if !removing.contains(id) { credentialsExpired?(id) }
         if activeConnection?.id == id, !removing.contains(id) { signOutLocally(error: .server(.sessionExpired)) }
         guard deleteFailed, !removing.contains(id) else { return }
         await willSaveExpiry?()

@@ -2,6 +2,7 @@ import ABSCore
 import ABSData
 import ABSDownloads
 import Foundation
+import Synchronization
 
 /// What ``DownloadsLifecycle`` needs from ``DownloadEngine``, so it can be tested with a fake.
 /// ``DownloadEngine`` conforms; see it for what each member means.
@@ -31,15 +32,16 @@ extension DownloadManager: DownloadsLifecycleManager {}
 /// account's session.
 ///
 /// - ``launch()`` starts the manager (before the engine's first activation, as
-///   ``DownloadManager/start()`` asks) and then, once the download folders are prepared, the
-///   controller, once. It doesn't activate the engine, so a launch without a window (CarPlay, a
-///   background wake) restarts nothing.
+///   ``DownloadManager/start()`` asks), which prepares the download folders. It neither
+///   activates the engine nor starts the controller (whose network policy can restart
+///   transfers), so a launch without a window (CarPlay, a background wake) starts no transfer.
 /// - ``handle(scenePhase:)`` runs the phases one after another, in call order. Each
-///   ``SessionScenePhase/active`` launches if needed, prepares the folders again if that failed
-///   (starting the controller once they are), then activates the engine only if the folders are
-///   prepared, then, if that succeeded, sweeps what downloads left behind (``DownloadJanitor``) without holding up
-///   the next phase. ``SessionScenePhase/background`` deactivates the engine, after any
-///   activation called before it, so the app never stays activated in the background.
+///   ``SessionScenePhase/active`` launches if needed, prepares the folders again if that failed,
+///   and only once they are prepared starts the controller (once) and activates the engine.
+///   If that succeeded, it then retries unfinished cleanups and sweeps what downloads left
+///   behind (``DownloadJanitor``), outside the chain, so neither holds up the next phase.
+///   ``SessionScenePhase/background`` deactivates the engine, after any activation called
+///   before it, so the app never stays activated in the background.
 /// - As a ``SessionParticipant``, a sign-out or expiry of the session's connection pauses that
 ///   connection's queued and downloading records, within a quiesce of it
 ///   (``DownloadEngine/quiesce(connectionID:pausing:)``): every transfer stops and its resume
@@ -47,11 +49,13 @@ extension DownloadManager: DownloadsLifecycleManager {}
 ///   with and couldn't be used after signing in again. The records stay paused after signing in
 ///   again; the user resumes them. This is local only, so it is also safe for an expiry. A switch
 ///   keeps them running: the other connection's credentials stay saved. A removal does the same
-///   as a sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted.
+///   as a sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted. An
+///   expiry without a running session of the connection (during a restore, or of another
+///   connection) does the same in ``connectionExpired(_:)``.
 /// - A cleanup runs in its own task, so it outlives the session teardown's time budget; a new
 ///   session of the same connection waits for it in ``sessionDidStart(_:)``, so it can't pause
 ///   or discard what that session starts. A cleanup that couldn't stop the transfers (the engine
-///   had no session) still deletes the resume data it can, and is tried again after the next
+///   had no session) or save a record's pause still deletes the resume data it can, and is tried again after the next
 ///   successful activation, unless a session of the connection starts first; either way the
 ///   engine cancels the connection's transfers that survived a relaunch once it has a session.
 /// - These waits (a new session's, and a removal's in ``connectionRemoved(_:)``, which
@@ -70,7 +74,7 @@ public final class DownloadsLifecycle: SessionParticipant {
     private var launching: Task<Void, Never>?
     /// Whether the manager has prepared the download folders. Until then nothing starts a
     /// transfer: the engine isn't activated and the controller (whose network policy restarts
-    /// transfers) isn't started. The next activation tries again.
+    /// transfers) isn't started. The next active phase tries again.
     private var isPrepared = false
     private var controllerStarted = false
     /// The last phase handled; the next one waits for it. Its value is whether it activated.
@@ -105,8 +109,7 @@ public final class DownloadsLifecycle: SessionParticipant {
 
     // MARK: - App lifecycle
 
-    /// Starts the manager, then the controller. Only the first call does anything; every call
-    /// returns that work.
+    /// Starts the manager. Only the first call does anything; every call returns that work.
     @discardableResult
     public func launch() -> Task<Void, Never> {
         if let launching { return launching }
@@ -127,9 +130,14 @@ public final class DownloadsLifecycle: SessionParticipant {
         }
         lastPhase = phase
         return Task { [sweep] in
-            // Outside the chain, so a background phase deactivates without waiting for the sweep,
-            // which only follows an activation that succeeded.
-            if await phase.value { await sweep() }
+            // Outside the chain, so a background phase deactivates without waiting for a retry or
+            // the sweep, which only follow an activation that succeeded.
+            guard await phase.value else { return }
+            // Checked again for each, in case a session of it started meanwhile.
+            for id in self.unfinishedCleanups where self.unfinishedCleanups.contains(id) {
+                await self.stopDownloads(of: id)
+            }
+            await sweep()
         }
     }
 
@@ -138,10 +146,11 @@ public final class DownloadsLifecycle: SessionParticipant {
         case .active:
             await launch().value
             guard await prepare() else { return false }
-            guard await engine.activate() else { return false }
-            // Checked again for each, in case a session of it started meanwhile.
-            for id in unfinishedCleanups where unfinishedCleanups.contains(id) { await stopDownloads(of: id) }
-            return true
+            if !controllerStarted {
+                controllerStarted = true
+                await startController()
+            }
+            return await engine.activate()
         case .background:
             await engine.deactivate()
             return false
@@ -150,25 +159,20 @@ public final class DownloadsLifecycle: SessionParticipant {
         }
     }
 
-    /// Starts the manager until it has prepared the folders, then the controller once.
+    /// Starts the manager until it has prepared the folders.
     ///
     /// - Returns: whether the folders are prepared.
     private func prepare() async -> Bool {
-        if !isPrepared {
-            do {
-                try await manager.start()
-                isPrepared = true
-            } catch {
-                Log.downloads.error(
-                    "Couldn't prepare the download folders: \(Log.redact(String(describing: error)), privacy: .public)")
-                return false
-            }
+        guard !isPrepared else { return true }
+        do {
+            try await manager.start()
+            isPrepared = true
+            return true
+        } catch {
+            Log.downloads.error(
+                "Couldn't prepare the download folders: \(Log.redact(String(describing: error)), privacy: .public)")
+            return false
         }
-        if !controllerStarted {
-            controllerStarted = true
-            await startController()
-        }
-        return true
     }
 
     // MARK: - Connections
@@ -179,6 +183,16 @@ public final class DownloadsLifecycle: SessionParticipant {
     /// earlier keeps the downloads and their progress.
     public func connectionRemoved(_ connectionID: UUID) async {
         await stopDownloads(of: connectionID)
+    }
+
+    /// Pauses an expired connection's queued and downloading records, then quiesces it, when no
+    /// session of it is running: one is (and its ``sessionWillEnd(_:)`` does this) unless the
+    /// expiry came during a restore or to another connection. A session of it that starts
+    /// later waits for this. Call it once the connection's tokens are deleted
+    /// (``AccountManager/credentialsExpired``).
+    public func connectionExpired(_ connectionID: UUID) {
+        guard connectionID != self.connectionID else { return }
+        _ = startCleanup(of: connectionID)
     }
 
     public func sessionDidStart(_ context: SessionContext) async {
@@ -205,6 +219,12 @@ public final class DownloadsLifecycle: SessionParticipant {
     /// In its own task, after the connection's previous cleanup, so the session teardown's time
     /// budget, which cancels the waiting call, can't skip the quiesce after the pause.
     private func stopDownloads(of connectionID: UUID) async {
+        await Self.wait(for: startCleanup(of: connectionID))
+    }
+
+    /// Starts the cleanup of `connectionID` after its previous one, registered before this
+    /// returns, so a session of it that starts later waits for it.
+    private func startCleanup(of connectionID: UUID) -> Task<Void, Never> {
         let records = records
         let manager = manager
         let engine = engine
@@ -213,6 +233,8 @@ public final class DownloadsLifecycle: SessionParticipant {
             await previous?.value
             // Paused within the quiesce, so a failure's replay can't queue a record again after
             // the read; pausing seals resume data with the old credentials, so it's discarded after.
+            // A pause that isn't saved leaves a record the next activation would restart.
+            let paused = Mutex(true)
             let quiesced = await engine.quiesce(connectionID: connectionID) {
                 do {
                     for record in try await records(connectionID)
@@ -220,18 +242,20 @@ public final class DownloadsLifecycle: SessionParticipant {
                         do {
                             _ = try await manager.pause(recordID: record.id)
                         } catch {
+                            paused.withLock { $0 = false }
                             Log.downloads.error(
                                 "Couldn't pause a download of a signed-out server: \(String(describing: error), privacy: .public)"
                             )
                         }
                     }
                 } catch {
+                    paused.withLock { $0 = false }
                     Log.downloads.error(
                         "Couldn't read the downloads of a signed-out server: \(Log.redact(String(describing: error)), privacy: .public)"
                     )
                 }
             }
-            if quiesced {
+            if quiesced, paused.withLock({ $0 }) {
                 self.unfinishedCleanups.remove(connectionID)
             } else {
                 Log.downloads.error("Couldn't stop a signed-out server's downloads; will retry")
@@ -239,8 +263,11 @@ public final class DownloadsLifecycle: SessionParticipant {
             }
         }
         cleanups[connectionID] = cleanup
-        await Self.wait(for: cleanup)
-        if cleanups[connectionID] == cleanup { cleanups[connectionID] = nil }
+        Task {
+            await cleanup.value
+            if self.cleanups[connectionID] == cleanup { self.cleanups[connectionID] = nil }
+        }
+        return cleanup
     }
 
     /// How long a wait for a cleanup lasts before it's logged.

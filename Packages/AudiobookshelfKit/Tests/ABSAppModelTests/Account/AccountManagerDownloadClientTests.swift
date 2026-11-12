@@ -217,6 +217,25 @@ private final class TokenServer: Sendable {
         #expect(await manager.downloadClient(for: idA) === client)
     }
 
+    // MARK: - Expiry
+
+    /// An expiry is reported, active or not, so the downloads are stopped even when no
+    /// session of the connection ends (a restore, another connection).
+    @Test(arguments: [false, true])
+    func expiryIsReported(active: Bool) async throws {
+        let serverA = TokenServer(userId: "usr-a")
+        let idA = try await signIn(to: serverA)
+        if !active { _ = try await signIn(to: TokenServer(userId: "usr-b")) }
+        let client = try #require(await manager.downloadClient(for: idA))
+        let reported = Mutex<[UUID]>([])
+        manager.credentialsExpired = { id in reported.withLock { $0.append(id) } }
+
+        serverA.rejectRefreshes()
+        await #expect(throws: APIError.sessionExpired) { try await client.accessToken(replacing: "usr-a-access-1") }
+
+        #expect(reported.withLock { $0 } == [idA])
+    }
+
     // MARK: - Removal
 
     /// The downloads are stopped once the session is deleted, but while the connection is
