@@ -181,11 +181,12 @@ private struct Harness {
         let harness = try Harness()
         try await harness.started()
         try await harness.lifecycle.switchAccount(to: identityB.connectionID)
-        #expect(await eventually { harness.scopes.all.count == 2 })
+        try await harness.lifecycle.switchAccount(to: identityA.connectionID)
+        #expect(await eventually { harness.scopes.all.count == 3 })
 
+        #expect(harness.scopes.all.map { user(of: $0.request.connectionID) } == ["a", "b", "a"])
         let writers = harness.scopes.all.map(\.request.writer)
-        #expect(writers[0] === writers[1])
-        #expect(writers[0] === harness.writer)
+        #expect(writers.allSatisfy { $0 === harness.writer })
         // The control: a store of its own is a different writer.
         let fresh = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
         #expect(writers[0] !== fresh)
@@ -232,8 +233,10 @@ private struct Harness {
         let finishGate = Gate()
         try #require(harness.scopes.last).finishGate = finishGate
         let scopeA = try #require(harness.scopes.last)
-        harness.images.onEnd = { [log = harness.log] in
+        // Runs after the playback end's synchronous part, while A's close is still held.
+        harness.images.onEnd = { [log = harness.log, current = harness.current] in
             log.record(scopeA.retiredReason == nil ? "images.sawLiveA" : "images.sawRetiredA")
+            log.record(current.current == nil && current.phase == .idle ? "images.sawUnbound" : "images.sawBound")
         }
 
         let switching = Task { try await harness.lifecycle.switchAccount(to: identityB.connectionID) }
@@ -245,6 +248,7 @@ private struct Harness {
         #expect(await eventually { harness.log.entries.contains("b.restore") })
 
         #expect(harness.log.entries.contains("images.sawRetiredA"))
+        #expect(harness.log.entries.contains("images.sawUnbound"))
         #expect(!harness.log.entries.contains("a.finished"))
         let scopeB = try #require(harness.scopes.last)
         #expect(scopeB !== scopeA)
@@ -325,5 +329,56 @@ private struct Harness {
         #expect(scopeA.onSessionRejected == nil)
         rejectA()
         #expect(harness.signOuts.entries == ["signOut(a)"])
+    }
+
+    /// A's close, held past the budget, finishes only after B has ended too: B's result stays.
+    @Test func aLateEndDoesNotReplaceANewerSessionsEnd() async throws {
+        let harness = try Harness()
+        try await harness.started()
+        let socketGate = Gate()
+        harness.socket.endGate = socketGate
+        let scopeA = try #require(harness.scopes.last)
+        let finishGate = Gate()
+        scopeA.finishGate = finishGate
+        scopeA.finishResult = .failure(PlaybackCloseError.timedOut)
+
+        let switching = Task { try await harness.lifecycle.switchAccount(to: identityB.connectionID) }
+        #expect(
+            await eventually { harness.log.entries.contains("socket.end(switch)") && harness.clock.sleeperCount == 1 })
+        harness.clock.advance(by: .seconds(3))
+        try await switching.value
+        #expect(await eventually { harness.log.entries.contains("b.restore") })
+        harness.socket.endGate = nil
+        socketGate.open()
+
+        await harness.lifecycle.signOut()
+        #expect(await eventually { harness.log.entries.contains("b.finished") })
+        if case .success = harness.participant.lastEnd {} else { Issue.record("Expected B's successful end") }
+
+        finishGate.open()
+        #expect(await eventually { harness.log.entries.contains("a.finished") })
+        for _ in 0..<100 { await Task.yield() }
+        if case .success = harness.participant.lastEnd {} else { Issue.record("A's late end replaced B's") }
+    }
+
+    /// A start while a scope is running (a misordered lifecycle) retires and releases the old
+    /// scope instead of orphaning its coordinator.
+    @Test func aMisorderedStartRetiresTheRunningScope() async throws {
+        let harness = try Harness()
+        try await harness.started()
+        let misuse = CallLog()
+        harness.participant.reportMisuse = { misuse.record($0) }
+        let scopeA = try #require(harness.scopes.last)
+
+        await harness.participant.sessionDidStart(
+            SessionContext(identity: identityB, client: nil, isOffline: true, sessionID: .max))
+
+        #expect(misuse.entries.count == 1)
+        #expect(scopeA.retiredReason == .accountSwitch)
+        #expect(scopeA.onSessionRejected == nil)
+        #expect(await eventually { harness.log.entries.contains("a.finished") })
+        let scopeB = try #require(harness.scopes.last)
+        #expect(scopeB !== scopeA)
+        #expect(harness.current.current === scopeB.control)
     }
 }

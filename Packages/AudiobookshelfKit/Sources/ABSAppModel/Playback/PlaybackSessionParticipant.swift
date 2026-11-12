@@ -71,11 +71,18 @@ public final class PlaybackSessionParticipant: SessionParticipant {
 
     /// Plays an item in the current account's scope; `nil` between sessions.
     public private(set) var playItem: PlayItemAction?
-    /// The latest finished retirement's outcome, or why its close isn't durable. A retirement the
-    /// lifecycle cancelled can finish after the next session started.
+    /// The latest ended session's close outcome, or why it isn't durable; `nil` until it finishes.
+    /// A retirement the lifecycle cancelled can finish after a later session ended; its result is
+    /// dropped rather than replacing that session's.
     public private(set) var lastEnd: Result<PlaybackCloseOutcome, any Error>?
 
     @ObservationIgnored private var scope: (any PlaybackScopeHandle)?
+    /// The running scope's session.
+    @ObservationIgnored private var scopeSessionID: UInt64?
+    /// The session whose retirement ``lastEnd`` reports.
+    @ObservationIgnored private var latestEndedSessionID: UInt64?
+    /// Reports a session starting while another is running. Tests record instead of stopping.
+    @ObservationIgnored var reportMisuse: @MainActor (String) -> Void = { assertionFailure($0) }
     @ObservationIgnored private let current: CurrentPlayback
     @ObservationIgnored private let writer: LocalProgressStore
     @ObservationIgnored private let deviceIdentifiers: any DeviceIdentifying
@@ -120,12 +127,20 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     }
 
     public func sessionDidStart(_ context: SessionContext) async {
-        assert(scope == nil, "A playback session started before the last one ended")
+        if scope != nil {
+            // Never orphan a live coordinator: retire it as for a switch, and release it.
+            Log.playback.fault("A playback session started before the last one ended")
+            reportMisuse("A playback session started before the last one ended")
+            if let ending = retireScope(reason: .accountSwitch) {
+                Task { await self.finishRetirement(ending) }
+            }
+        }
         let scope = makeScope(
             PlaybackScopeRequest(
                 connectionID: context.identity.connectionID, client: context.client,
                 features: features(context.identity), deviceIdentifiers: deviceIdentifiers, writer: writer))
         self.scope = scope
+        scopeSessionID = context.sessionID
         scope.onSessionRejected = { [weak self, weak scope] in
             guard let self, let scope, self.scope === scope else { return }
             self.requestSignOut(context)
@@ -143,19 +158,38 @@ public final class PlaybackSessionParticipant: SessionParticipant {
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
         // Everything up to the first `await` runs before the lifecycle can move on.
-        guard let scope else { return }
+        guard let ending = retireScope(reason: Self.stopReason(for: reason)) else { return }
+        await finishRetirement(ending)
+    }
+
+    private struct EndingScope {
+        let scope: any PlaybackScopeHandle
+        let sessionID: UInt64
+    }
+
+    /// Detaches and retires the running scope, synchronously.
+    private func retireScope(reason: PlaybackStopReason) -> EndingScope? {
+        guard let scope, let sessionID = scopeSessionID else { return nil }
         self.scope = nil
+        scopeSessionID = nil
+        latestEndedSessionID = sessionID
         playItem = nil
         scope.onSessionRejected = nil
-        scope.retire(reason: Self.stopReason(for: reason))
+        scope.retire(reason: reason)
         current.bind(nil)
+        return EndingScope(scope: scope, sessionID: sessionID)
+    }
 
-        let result = await scope.finishRetirement(timeout: closeTimeout)
-        lastEnd = result
+    /// Waits for the retired scope's close and releases it; records the result unless a later
+    /// session ended meanwhile.
+    private func finishRetirement(_ ending: EndingScope) async {
+        let result = await ending.scope.finishRetirement(timeout: closeTimeout)
         if case .failure(let error) = result {
             Log.playback.error(
                 "Playback scope ended without a durable close: \(Self.name(of: error), privacy: .public)")
         }
+        guard latestEndedSessionID == ending.sessionID else { return }
+        lastEnd = result
     }
 
     public func flush() async {

@@ -230,6 +230,28 @@ struct PlaybackScopeTests {
         #expect(h.nowPlaying.log.last == "late")
     }
 
+    /// Nothing keeps a released scope or its coordinator alive.
+    @Test func aReleasedScopeIsFreed() async throws {
+        weak var weakScope: PlaybackScope?
+        weak var weakCoordinator: PlaybackCoordinator?
+        do {
+            let scope = try madeScope(lastPlayed: { id in
+                let store = InMemoryLastPlayedStore()
+                store.save(record(id, item: "a"))
+                return store
+            })
+            weakScope = scope
+            weakCoordinator = scope.coordinator
+            #expect(scope.start())
+            scope.retire(reason: .accountSwitch)
+            _ = await scope.finishRetirement()
+            #expect(scope.isReleased)
+        }
+        await yieldUntil { weakScope == nil && weakCoordinator == nil }
+        #expect(weakScope == nil)
+        #expect(weakCoordinator == nil)
+    }
+
     @Test func timeoutDoesNotEraseTheCapturedPosition() async throws {
         let h = try ScopeHarness()
         let persistence = Gate()

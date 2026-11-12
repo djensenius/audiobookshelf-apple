@@ -215,6 +215,9 @@ public final class PlaybackScope {
     private func release() {
         guard !isReleased else { return }
         isReleased = true
+        // Only the syncer's hooks on the coordinator are cut here, after the close wait. A library
+        // progress sink (#184) must instead be cut off in `retire(reason:)`: the library's
+        // progress cache has no generation check, and the next account can start before this runs.
         syncer.detach()
         if let observer { coordinator.removeObserver(observer) }
         observer = nil
