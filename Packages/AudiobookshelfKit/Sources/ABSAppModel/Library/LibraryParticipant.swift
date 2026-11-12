@@ -124,14 +124,16 @@ public final class LibraryParticipant: SessionSeeding {
                 store.progress.seed(response.mediaProgress, token: token)
                 return
             } catch let error as APIError where error.isTransient && !retries.isEmpty {
+                // `APIError` can carry response bodies: only the status is public.
                 Log.api.info(
-                    "Retrying the progress seed after: \(Log.redact(String(describing: error)), privacy: .public)")
+                    "Retrying the progress seed after: \(RealtimeBridge.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
+                )
                 do { try await sleep(retries.removeFirst()) } catch { return }
                 guard isCurrent(generation, context, token) else { return }
             } catch {
                 if !(error is CancellationError) {
                     Log.api.error(
-                        "Couldn't load the progress to seed: \(Log.redact(String(describing: error)), privacy: .public)"
+                        "Couldn't load the progress to seed: \(RealtimeBridge.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
                     )
                 }
                 return

@@ -19,7 +19,9 @@ struct EpisodeDetailView: View {
     @State private var unavailableKey: EpisodeDetailHost.Key?
 
     private var key: EpisodeDetailHost.Key? {
-        guard let store, let connectionKey = store.connectionKey else { return nil }
+        // `connectedKey`: a reconnect that attaches a client, after an offline start without
+        // one, changes the key and retries the load.
+        guard let store, let connectionKey = store.connectedKey else { return nil }
         return EpisodeDetailHost.Key(
             itemID: itemID, episodeID: episodeID, store: ObjectIdentifier(store), connectionKey: connectionKey)
     }
