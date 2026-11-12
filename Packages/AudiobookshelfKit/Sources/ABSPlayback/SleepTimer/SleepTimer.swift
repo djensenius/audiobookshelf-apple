@@ -588,7 +588,7 @@ public final class SleepTimer {
 
     /// Plays after a grace-period reset, rewinding from `position` to `time` first, unless the run or the item
     /// changed, or playback played or paused, before or during the seek. When a seek moved playback from `position`
-    /// or is moving it (with or without a rewind), or the rewind doesn't land, `undo` reopens the grace period and the
+    /// or is moving it (with or without a rewind), or the rewind doesn't land, or the play is refused, `undo` reopens the grace period and the
     /// run stops.
     private func resume(
         rewindingTo time: Double?, from position: Double, runID id: Int, item: String?, undo: (SleepTimer) -> Void
@@ -603,7 +603,12 @@ public final class SleepTimer {
             return .failed
         }
         if time != nil { didSeek(to: landed) }
-        control.play()
+        // A refused play leaves playback paused: reopen the grace period, as when the rewind doesn't land.
+        guard control.play() else {
+            undo(self)
+            stopRun()
+            return .failed
+        }
         if options.playsResetFeedback { feedback?.playResetFeedback() }
         return .resumed
     }

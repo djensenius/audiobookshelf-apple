@@ -284,6 +284,24 @@ private final class Flag: Sendable {
         #expect(harness.panel.offersRestart)
     }
 
+    /// A restart whose play is refused (the audio session won't activate, say) reports it once the rewind has
+    /// landed, rather than leaving the restarted timer running over paused playback, and the grace period comes back.
+    @Test func refusedRestartPlayReportsFailure() async throws {
+        let harness = try Harness(options: autoSleepOptions(rewind: 30))
+        harness.load()
+        _ = harness.timer.playbackWillStart(at: noon)
+        harness.expire()
+        #expect(harness.panel.offersRestart)
+        harness.playback.playsStart = false
+
+        #expect(await harness.panel.restart() == .failed)
+        #expect(harness.playback.calls.last == .seek(90), "The rewind landed first")
+        #expect(harness.playback.isPlaying == false)
+        #expect(harness.timer.isRunning == false, "No timer runs over paused playback")
+        #expect(harness.panel.state == .restartable(isAutomatic: true), "The grace period is back")
+        #expect(harness.panel.offersRestart)
+    }
+
     /// An end-of-chapter timer that paused playback at the end of the media can't restart: Restart isn't offered,
     /// and asked anyway it says so.
     @Test func endOfChapterAtEndOfMediaOffersNoRestart() async throws {

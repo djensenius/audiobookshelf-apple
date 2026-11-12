@@ -168,6 +168,9 @@ private struct SleepTimerPanel: View {
     /// The timer the cancel confirmation is about; confirming acts on it only.
     @State private var cancelRequest: SleepTimerPanelModel.CancelRequest?
     @State private var isRestarting = false
+    /// Waits for a restart for this presentation only: cancelled when the sheet goes, so a late outcome can't
+    /// close or alert over another sheet that took its place (the restart itself carries on).
+    @State private var restartOutcome: Task<Void, Never>?
     @State private var showsRestartFailure = false
     @State private var showsEndOfChapterFailure = false
     @Environment(\.locale) private var locale
@@ -220,6 +223,10 @@ private struct SleepTimerPanel: View {
                 cancelSection(isAutomatic: isAutomatic)
             }
         }
+        .onDisappear {
+            restartOutcome?.cancel()
+            restartOutcome = nil
+        }
         .alert(
             Text(verbatim: L10n.string("HeaderConfirm")), isPresented: $confirmsCancel, presenting: cancelRequest
         ) { request in
@@ -262,12 +269,17 @@ private struct SleepTimerPanel: View {
 
     /// Restarts the expired timer, closing once playback resumes. When it can't (the grace period ran out
     /// before the timer noticed, or the rewind didn't land), the sheet stays open and says so; when
-    /// something else came first, the state shows what it did.
+    /// something else came first, the state shows what it did. A sheet dismissed meanwhile ignores the outcome.
     private func restart() {
         isRestarting = true
-        Task {
-            let result = await panel.restart()
+        let panel = panel
+        // Unstructured, so cancelling the outcome below leaves the restart (and its seek) running.
+        let restart = Task { await panel.restart() }
+        restartOutcome = Task {
+            let result = await restart.value
+            guard !Task.isCancelled else { return }
             isRestarting = false
+            restartOutcome = nil
             switch result {
             case .resumed: close()
             case .unavailable, .failed: showsRestartFailure = true

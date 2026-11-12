@@ -5,9 +5,12 @@ import ABSPlayback
 extension FakePlaybackControl: SleepTimerPlaybackControl {
     var pendingSeekTarget: Double? { nil }
 
-    func play() {
+    @discardableResult
+    func play() -> Bool {
+        guard playsStart else { return false }
         isPlaybackRequested = true
         isPlaying = true
+        return true
     }
 
     func setVolume(_ volume: Float) {}

@@ -7,9 +7,11 @@ import Foundation
 extension PreviewPlaybackControl: SleepTimerPlaybackControl {
     var pendingSeekTarget: Double? { nil }
 
-    func play() {
+    @discardableResult
+    func play() -> Bool {
         isPlaybackRequested = true
         isPlaying = true
+        return true
     }
 
     func setVolume(_ volume: Float) {}

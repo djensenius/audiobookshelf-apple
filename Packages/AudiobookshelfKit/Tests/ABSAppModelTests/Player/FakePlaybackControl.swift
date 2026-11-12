@@ -34,6 +34,9 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var timeline: PlaybackTimeline?
     /// Whether seeks land; one that doesn't returns `nil` and leaves playback where it was.
     var seeksLand = true
+    /// Whether the sleep timer's play is accepted; a refused one leaves playback paused, as when the audio session
+    /// won't activate.
+    var playsStart = true
     private(set) var calls: [Call] = []
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
