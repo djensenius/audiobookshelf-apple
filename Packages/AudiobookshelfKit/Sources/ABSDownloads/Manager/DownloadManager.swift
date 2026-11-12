@@ -92,6 +92,7 @@ public actor DownloadManager {
     /// How many times a record stopped being tracked (``forget(_:)``); a read of records that
     /// overlapped one is made again (``readSettled(_:)``).
     private var forgotten = 0
+    // Known limitation: a relaunch before the next episode completes loses a refused cover.
     /// Covers of items that had no local item when nothing took them over
     /// (``handOffCover(_:of:)``), by item-level key, while episode records of the item that are
     /// being finalised remain: the first of them to complete fetches it again
