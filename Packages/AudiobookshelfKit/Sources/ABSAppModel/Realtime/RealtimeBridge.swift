@@ -58,6 +58,7 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 ///   its progress list isn't known to be complete.
 /// - `author_added`, `author_updated` and `author_removed` go to ``onLibraryChange`` with the
 ///   session's account.
+/// - `rss_feed_open` and `rss_feed_closed` go to ``onRssFeedChange``.
 ///
 /// Socket values aren't merged into `LocalProgressStore` for downloaded items (ADR 0003's
 /// `.socket` source); that is left to the session wiring.
@@ -75,6 +76,9 @@ public final class RealtimeBridge: SessionParticipant {
     /// for ``LibraryStore/applyLibraryChange(_:connectionKey:)``. Nothing arrives after the
     /// session ends.
     @ObservationIgnored public var onLibraryChange: (@MainActor (LibraryChange, LibraryConnectionKey) -> Void)?
+    /// An RSS feed was opened or closed on the session's server, for ``RssFeedModel/apply(_:)``.
+    /// Nothing arrives after the session ends.
+    @ObservationIgnored public var onRssFeedChange: (@MainActor (RssFeedChange) -> Void)?
     /// Offers a jump to another session's position, as the legacy app did: the player has the
     /// item open and is paused, and the update comes from another playback session (whether or
     /// not the cache took it). It must also not be older than the cached progress (if as old, at
@@ -316,6 +320,8 @@ public final class RealtimeBridge: SessionParticipant {
             deliver(.playlist(change, userID: userID))
         case .authorChanged(let change):
             deliver(.author(change))
+        case .rssFeedChanged(let change):
+            onRssFeedChange?(change)
         }
         didHandle?(event)
     }
