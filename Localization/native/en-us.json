@@ -36,6 +36,8 @@
   "HeaderPodcastDetailEpisodes": "Episodes ({0})",
   "HeaderSearchRecents": "Recent Searches",
   "HeaderServers": "Servers",
+  "HeaderYearInReview": "Year in Review",
+  "HeaderYearInReviewYear": "{0} Year in Review",
   "LabelAbridged": "Abridged",
   "LabelAllowSeekingOnMediaControlsHelp": "Lets you change the playback position from the Lock Screen, Control Center and other system media controls.",
   "LabelBookmarkNote": "Note",
@@ -113,6 +115,41 @@
   "LabelThemeSystem": "System",
   "LabelToday": "Today",
   "LabelValue": "Value",
+  "LabelYearInReviewAdditions": "Some additions include...",
+  "LabelYearInReviewAuthorsAdded": "authors added",
+  "LabelYearInReviewAuthorsAddedCount": {
+    "one": "{0} author added",
+    "other": "{0} authors added"
+  },
+  "LabelYearInReviewBooksAdded": "books added",
+  "LabelYearInReviewBooksAddedCount": {
+    "one": "{0} book added",
+    "other": "{0} books added"
+  },
+  "LabelYearInReviewBooksFinished": "books finished",
+  "LabelYearInReviewBooksFinishedCount": {
+    "one": "{0} book finished",
+    "other": "{0} books finished"
+  },
+  "LabelYearInReviewBooksListened": "books listened to",
+  "LabelYearInReviewBooksListenedCount": {
+    "one": "{0} book listened to",
+    "other": "{0} books listened to"
+  },
+  "LabelYearInReviewFinishedBooks": "Some books finished this year...",
+  "LabelYearInReviewServer": "Server",
+  "LabelYearInReviewSessionCount": {
+    "one": "{0} listening session",
+    "other": "{0} listening sessions"
+  },
+  "LabelYearInReviewSessions": "sessions",
+  "LabelYearInReviewSpentListening": "spent listening",
+  "LabelYearInReviewTimeSpentListening": "{0} spent listening",
+  "LabelYearInReviewTopAuthors": "Top Authors",
+  "LabelYearInReviewTopGenres": "Top Genres",
+  "LabelYearInReviewUser": "You",
+  "LabelYearInReviewVariant": "Whose Year",
+  "LabelYearInReviewYear": "Year",
   "LabelYesterday": "Yesterday",
   "MessageAddPodcastNotAllowed": "Only server admins can add podcasts.",
   "MessageAddPodcastNotPodcastLibrary": "Podcasts can only be added to a podcast library.",
@@ -196,8 +233,10 @@
   "MessageNoLatestEpisodes": "No episodes yet",
   "MessagePlainHTTPWarning": "This connection isn't encrypted. Your password, tokens and listening activity can be read on the networks between you and the server. Use HTTPS if the server supports it.",
   "MessagePlaybackStartFailed": "Couldn't start playback.",
+  "MessagePlaylistAddFailed": "Couldn't add to the playlist.",
   "MessagePlaylistDetailLoadFailed": "Couldn't load this playlist.",
   "MessagePlaylistDetailNotFound": "This playlist isn't on the server anymore.",
+  "MessagePlaylistRemoveFailed": "Couldn't remove from the playlist.",
   "MessagePlaylistsListLoadFailed": "Couldn't load the playlists.",
   "MessagePodcastDetailNoEpisodes": "This podcast has no episodes.",
   "MessagePodcastDetailNoMatchingEpisodes": "No episodes match the filter or search.",
@@ -223,6 +262,7 @@
   "MessageSwitchServerFailed": "Couldn't switch servers. Check that the server is reachable, then try again.",
   "MessageSwitchServerForLink": "This link is for {0} on {1}. Switch to that server to open it?",
   "MessageSwitchServerSignedOut": "The server signed you out while switching. Sign in to it again, or choose another server.",
+  "MessageYearInReviewLoadFailed": "Couldn't load the year in review.",
   "SharedBookCount": {
     "one": "{0} book",
     "other": "{0} books"

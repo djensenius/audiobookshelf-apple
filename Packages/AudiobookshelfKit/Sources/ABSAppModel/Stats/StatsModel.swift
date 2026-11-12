@@ -3,13 +3,20 @@ import ABSCore
 import Foundation
 import Observation
 
-/// The stats endpoints ``StatsModel`` uses. `APIClient` conforms; tests use fakes.
+/// The stats endpoints ``StatsModel`` and ``YearInReviewModel`` use. `APIClient` conforms;
+/// tests use fakes.
 public protocol StatsService: Sendable {
     /// `GET /api/me/listening-stats`.
     func listeningStats() async throws -> ListeningStatsResponse
     /// The number of finished items in the user's progress (`GET /api/me`), counted like the
     /// legacy stats page, so finished podcast episodes count too.
     func finishedItemCount() async throws -> Int
+    /// The user's account type (`GET /api/me`).
+    func userType() async throws -> UserTypeResponse
+    /// `GET /api/me/stats/year/:year`.
+    func userYearStats(year: Int) async throws -> UserYearStats
+    /// `GET /api/stats/year/:year`, admins only.
+    func serverYearStats(year: Int) async throws -> ServerYearStats
 }
 
 extension APIClient: StatsService {
@@ -19,6 +26,18 @@ extension APIClient: StatsService {
 
     public func finishedItemCount() async throws -> Int {
         try await send(StatsEndpoints.finishedProgress()).finishedCount
+    }
+
+    public func userType() async throws -> UserTypeResponse {
+        try await send(StatsEndpoints.userType())
+    }
+
+    public func userYearStats(year: Int) async throws -> UserYearStats {
+        try await send(StatsEndpoints.userYearStats(year: year))
+    }
+
+    public func serverYearStats(year: Int) async throws -> ServerYearStats {
+        try await send(StatsEndpoints.serverYearStats(year: year))
     }
 }
 
