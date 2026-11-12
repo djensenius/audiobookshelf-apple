@@ -18,7 +18,9 @@ private struct Reached: Error, Equatable {
 
 /// A client implementing every feature service. ``item(id:)`` answers through `itemHandler`;
 /// the other feature calls throw ``Reached``.
-private struct FeatureClient: LibraryService, ItemDetailService, SearchService, SeriesAuthorsService, GroupsService {
+private struct FeatureClient: LibraryService, ItemDetailService, SearchService, SeriesAuthorsService, GroupsService,
+    LatestEpisodesService
+{
     var name = "client"
     var library = FakeLibraryService()
     var itemHandler: @Sendable (String) async throws -> LibraryItem = { _ in throw TestError.unexpected }
@@ -46,6 +48,9 @@ private struct FeatureClient: LibraryService, ItemDetailService, SearchService, 
     }
     func collectionDetail(id: String) async throws -> LibraryCollection { throw reached() }
     func playlistDetail(id: String) async throws -> Playlist { throw reached() }
+    func recentEpisodes(libraryID: String, page: Int, limit: Int) async throws -> RecentEpisodesPage {
+        throw reached()
+    }
 }
 
 /// A client that knows its server address.
@@ -96,6 +101,9 @@ private let forwardings: [StoreServiceForwarding] = [
     },
     StoreServiceForwarding(method: "collectionDetail(id:)") { _ = try await $0.collectionDetail(id: "c") },
     StoreServiceForwarding(method: "playlistDetail(id:)") { _ = try await $0.playlistDetail(id: "p") },
+    StoreServiceForwarding(method: "recentEpisodes(libraryID:page:limit:)") {
+        _ = try await $0.recentEpisodes(libraryID: "l", page: 0, limit: 50)
+    },
 ]
 
 @MainActor

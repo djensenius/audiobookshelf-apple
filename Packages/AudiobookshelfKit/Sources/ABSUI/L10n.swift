@@ -27,6 +27,56 @@ public enum L10n {
         return String(format: format, locale: locale ?? .current, arguments: arguments)
     }
 
+    /// The plural string for `key` (a plural in `Localization/native/`, see `docs/localization.md`)
+    /// in the form for `count`: "1 book", "3 books". `count` is shown formatted for the locale and
+    /// `arguments` replace `{1}`, `{2}`, … Plurals carry no markup.
+    ///
+    /// A locale that hasn't translated `key` has no entry for it (the importer doesn't copy English
+    /// plurals), so this falls back to the English forms picked by English rules: Foundation would
+    /// pick them by the locale's rules, giving "1 books" in Japanese and "0 book" in French. The count
+    /// is still formatted for the locale.
+    public static func plural(_ key: String, count: Int, _ arguments: String..., locale: Locale? = nil) -> String {
+        plural(key, count: count, arguments: arguments, locale: locale, bundle: .module, english: englishPlurals)
+    }
+
+    static func plural(
+        _ key: String, count: Int, arguments: [String], locale: Locale?, bundle: Bundle, english: EnglishPlurals
+    ) -> String {
+        let localized = localized(key, locale: locale, bundle: bundle)
+        let format = localized == key ? english.format(key, count: count) ?? key : localized
+        return String(format: format, locale: locale ?? .current, arguments: [count] + arguments)
+    }
+
+    /// The development language's plurals, compiled into `en.lproj/Localizable.stringsdict`.
+    private static let englishPlurals = EnglishPlurals(bundle: .module)
+
+    /// A bundle's English plurals, to pick a form by English rules whatever the locale.
+    struct EnglishPlurals: Sendable {
+        /// Per key, the format (`%#@value@`) and each variable's forms by plural category.
+        private let entries: [String: (format: String, variables: [String: [String: String]])]
+
+        init(bundle: Bundle) {
+            let url = bundle.url(
+                forResource: table, withExtension: "stringsdict", subdirectory: nil, localization: "en")
+            let plist = url.flatMap { NSDictionary(contentsOf: $0) as? [String: [String: Any]] } ?? [:]
+            entries = plist.compactMapValues { entry in
+                guard let format = entry["NSStringLocalizedFormatKey"] as? String else { return nil }
+                return (format, entry.compactMapValues { $0 as? [String: String] })
+            }
+        }
+
+        /// The plain format of `key` for `count`: `one` for 1 and -1 (English has no other integer
+        /// categories), else `other`. `nil` when `key` isn't an English plural.
+        func format(_ key: String, count: Int) -> String? {
+            guard let entry = entries[key] else { return nil }
+            let category = count == 1 || count == -1 ? "one" : "other"
+            return entry.format.replacing(/%#@(\w+)@/) { match in
+                let forms = entry.variables[String(match.output.1)]
+                return forms?[category] ?? forms?["other"] ?? ""
+            }
+        }
+    }
+
     /// The string for `key` with its inline Markdown rendered and line breaks kept.
     ///
     /// Only the localized format is parsed as Markdown; `arguments` are inserted afterwards
@@ -80,12 +130,12 @@ public enum L10n {
     }
 
     /// The localized value without the English fallback; `key` itself when the table lacks it.
-    static func localized(_ key: String, locale: Locale?) -> String {
-        guard let locale else { return Bundle.module.localizedString(forKey: key, value: nil, table: table) }
+    static func localized(_ key: String, locale: Locale?, bundle: Bundle = .module) -> String {
+        guard let locale else { return bundle.localizedString(forKey: key, value: nil, table: table) }
         var resource = LocalizedStringResource(
             String.LocalizationValue(key),
             table: table,
-            bundle: .atURL(Bundle.module.bundleURL)
+            bundle: .atURL(bundle.bundleURL)
         )
         resource.locale = locale
         return String(localized: resource)

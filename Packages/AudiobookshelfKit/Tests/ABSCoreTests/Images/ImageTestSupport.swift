@@ -299,3 +299,16 @@ struct PipelineHarness {
             .init(body: TestImages.data(width: width, height: height), mimeType: "image/png", gate: gate, delay: delay))
     }
 }
+
+extension ImagePipeline {
+    /// Waits up to ten seconds until `key`'s fetch and its decode into `box` have these many
+    /// waiters; `false` if they never do.
+    func waitForWaiters(_ key: ImageKey, box: PixelBox, fetch: Int, decode: Int) async -> Bool {
+        for _ in 0..<10_000 {
+            let counts = waiterCounts(for: key, box: box)
+            if counts.fetch == fetch, counts.decode == decode { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return false
+    }
+}

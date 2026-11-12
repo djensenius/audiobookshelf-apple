@@ -103,8 +103,8 @@ public final class SeriesDetailModel {
     public let seriesID: String
     public let libraryID: String
     /// Sends `collapseseries=1`, so sub-series show as one entry (the legacy
-    /// `collapseBookSeries` setting).
-    public let collapseSeries: Bool
+    /// `collapseBookSeries` setting); change it with ``setCollapseSeries(_:)``.
+    public private(set) var collapseSeries: Bool
 
     /// The last loaded series; kept while reloading and after a failed reload, dropped on 404.
     public private(set) var detail: SeriesDetail?
@@ -141,6 +141,15 @@ public final class SeriesDetailModel {
     /// The books query: the series filter, no sort (the server's sequence order) and no paging.
     public var booksQuery: LibraryQuery {
         LibraryQuery(filter: .series(id: seriesID), collapseSeries: collapseSeries)
+    }
+
+    /// Changes ``collapseSeries``. When it changed and the series has loaded or is loading, loads
+    /// again with the new query (a load still running with the old one is then dropped).
+    public func setCollapseSeries(_ collapse: Bool) async {
+        guard collapse != collapseSeries else { return }
+        collapseSeries = collapse
+        guard hasLoaded || isLoading else { return }
+        await load()
     }
 
     /// Loads unless the series has already loaded. Views call it each time they appear, so a
@@ -198,15 +207,22 @@ public final class SeriesDetailModel {
         cache.progress(libraryItemID: book.summary.itemID)
     }
 
-    /// Where "continue series" goes: the first playable book in list order that isn't finished,
-    /// or `nil` when there is none. Playable means a book (not a collapsed sub-series) that isn't
-    /// missing and has audio, like the group screens' play targets. Finished is read from the
-    /// ``ProgressCache`` alone, so a book whose progress was removed counts as not started.
+    /// Where "continue series" goes: the playable book in progress (started and not finished),
+    /// the one listened to last when there are several (ties keep list order); else the first
+    /// playable book in list order that isn't finished; `nil` when there is none. Playable means a
+    /// book (not a collapsed sub-series) that isn't missing and has audio, like the group screens'
+    /// play targets. Progress is read from the ``ProgressCache`` alone, so a book whose progress
+    /// was removed counts as not started.
     public var continueBook: SeriesBook? {
-        detail?.books.first { book in
+        let playable = (detail?.books ?? []).filter { book in
             let summary = book.summary
-            guard summary.kind == .book, !summary.isMissing, summary.hasAudio else { return false }
-            return !(progress(of: book)?.isFinished ?? false)
+            return summary.kind == .book && !summary.isMissing && summary.hasAudio
         }
+        let inProgress = playable.compactMap { book -> (book: SeriesBook, lastUpdate: Int)? in
+            guard let progress = progress(of: book), ItemProgress(progress).isInProgress else { return nil }
+            return (book, progress.lastUpdate ?? 0)
+        }
+        if let latest = inProgress.max(by: { $0.lastUpdate < $1.lastUpdate }) { return latest.book }
+        return playable.first { !(progress(of: $0)?.isFinished ?? false) }
     }
 }

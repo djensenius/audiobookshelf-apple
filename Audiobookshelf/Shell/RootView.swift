@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import ABSUI
 import SwiftUI
 
@@ -20,6 +21,8 @@ struct RootView: View {
     let accounts: AccountManager?
     /// The shared library, injected into the signed-in shell (`\.libraryStore`).
     var library: LibraryParticipant?
+    /// Given to the signed-in shell as `\.imagePipeline`; screens outside it see `nil`.
+    var imagePipeline: ImagePipeline?
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var links = SceneLinks()
@@ -110,6 +113,7 @@ struct RootView: View {
                         links.finishSwitch($0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
                     })
             )
+            .environment(\.imagePipeline, imagePipeline)
             .id(identity)
             // Only while the store serves this shell's account: during a switch the outgoing
             // shell stays up after the store attached the next account, and must not build

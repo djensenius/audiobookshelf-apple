@@ -32,6 +32,11 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var isBuffering = false
     var isPlaybackRequested = false
     var timeline: PlaybackTimeline?
+    /// Whether seeks land; one that doesn't returns `nil` and leaves playback where it was.
+    var seeksLand = true
+    /// Whether the sleep timer's play is accepted; a refused one leaves playback paused, as when the audio session
+    /// won't activate.
+    var playsStart = true
     private(set) var calls: [Call] = []
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
@@ -56,6 +61,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
 
     func seek(to time: Double) async -> Double? {
         calls.append(.seek(time))
+        guard seeksLand else { return nil }
         currentTime = timeline?.clamp(time) ?? max(time, 0)
         return currentTime
     }

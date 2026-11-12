@@ -407,6 +407,7 @@ struct SocketClientTests {
 
         connection.push("x")
         connection.push(#"42["user_updated",{"id":"usr-1"}]"#)
+        connection.push(#"42["author_added",{"id":"au-1","name":"No library"}]"#)
         connection.push(#"42["item_updated",{"id":"li-1"}]"#)
         connection.push(#"42["user_updated",\#(RealtimeFixtures.user)]"#)
         connection.push(#"42["user_item_progress_updated",\#(RealtimeFixtures.progressUpdate)]"#)

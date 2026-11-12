@@ -14,7 +14,8 @@ struct AudiobookshelfApp: App {
         WindowGroup {
             RootView(
                 lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts,
-                library: environment.library
+                library: environment.library,
+                imagePipeline: environment.images.pipeline
             )
             .environment(settings)
             .modifier(AppThemeModifier(settings: settings))
@@ -28,6 +29,10 @@ struct AudiobookshelfApp: App {
         // In the background, transfers the system cancels wait for the next activation.
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { Task { await DownloadEngine.deactivate() } }
+        }
+        // Keeps less of the cover cache in memory while in the background.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { environment.images.didEnterBackground() }
         }
 
         #if os(macOS)

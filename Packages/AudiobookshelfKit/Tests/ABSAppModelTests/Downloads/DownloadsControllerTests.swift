@@ -341,6 +341,57 @@ struct DownloadsControllerTests {
         #expect(controller.progress.isEmpty)
     }
 
+    /// A record that only fetches a podcast's cover again (#326).
+    private static func coverOnlyRecord(createdAt: Date) -> DownloadRecordDTO {
+        DownloadRecordDTO(
+            key: MediaKey(serverConnectionID: connectionID, libraryItemId: "podcast"), mediaType: .podcast,
+            title: "Podcast", relativeDirectory: "podcast", createdAt: createdAt,
+            media: LocalMediaSnapshot(metadata: .init(title: "Podcast")),
+            parts: [
+                DownloadPartDTO(
+                    kind: .cover, serverPath: "/api/items/podcast/cover", filename: "cover.jpg",
+                    mimeType: "image/jpeg", expectedBytes: 0, bytesWritten: 0,
+                    destinationRelativePath: "podcast/cover.jpg", state: .queued)
+            ])
+    }
+
+    @Test func coverOnlyRecordsAreNotListed() async throws {
+        let manager = FakeDownloadManager()
+        let now = Date.now
+        let stored = Self.coverOnlyRecord(createdAt: now.addingTimeInterval(-120))
+        let (controller, _, cleanUp) = try makeController(manager: manager) { [stored] }
+        defer { cleanUp() }
+        let (handled, report) = AsyncStream.makeStream(of: Void.self)
+        controller.eventHandled = { _ in report.yield() }
+        var events = handled.makeAsyncIterator()
+        await controller.start()
+        #expect(controller.records.isEmpty)
+
+        let refetch = Self.coverOnlyRecord(createdAt: now)
+        let book = Self.record("book", createdAt: now)
+        var downloading = refetch
+        downloading.state = .downloading
+        let sequence: [DownloadManagerEvent] = [
+            .recordChanged(refetch), .recordChanged(book), .recordChanged(downloading),
+            .progress(recordID: refetch.id, fraction: 0.5, bytes: 50),
+        ]
+        for event in sequence {
+            await manager.send(event)
+            _ = await events.next()
+        }
+        #expect(controller.records.map(\.title) == ["book"])
+        #expect(controller.progress.isEmpty)
+
+        // The manager reports a refetch that completed, was discarded by the engine
+        // (`DownloadUpdate.recordDiscarded`) or was cancelled as `recordRemoved`.
+        for id in [refetch.id, stored.id] {
+            await manager.send(.recordRemoved(recordID: id))
+            _ = await events.next()
+        }
+        #expect(controller.records.map(\.title) == ["book"])
+        #expect(controller.progress.isEmpty)
+    }
+
     @Test func storedRecordsDoNotOverrideEventsDuringTheirRead() async throws {
         let manager = FakeDownloadManager()
         let now = Date.now

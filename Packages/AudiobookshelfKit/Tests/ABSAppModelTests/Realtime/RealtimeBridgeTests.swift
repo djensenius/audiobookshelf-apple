@@ -426,6 +426,58 @@ struct RealtimeBridgeTests {
         #expect(harness.cache.progress(libraryItemID: "book") == nil)
     }
 
+    @Test func authorChangesReachTheHookWithTheSessionAccount() async throws {
+        let harness = BridgeHarness()
+        let socket = try await harness.start()
+        let changes = Recorder<LibraryChange>()
+        let keys = Recorder<LibraryConnectionKey>()
+        harness.bridge.onLibraryChange = {
+            changes.append($0)
+            keys.append($1)
+        }
+        let author = Author(id: "au-1", name: "Le Guin", libraryId: "lib-1")
+
+        await harness.send(.authorChanged(.added(author, libraryID: "lib-1")), on: socket)
+        await harness.send(.authorChanged(.updated(author, libraryID: "lib-1")), on: socket)
+        await harness.send(.authorChanged(.removed(id: "au-1", libraryID: "lib-1")), on: socket)
+
+        #expect(
+            changes.values == [
+                .author(.added(author, libraryID: "lib-1")), .author(.updated(author, libraryID: "lib-1")),
+                .author(.removed(id: "au-1", libraryID: "lib-1")),
+            ])
+        #expect(
+            keys.values
+                == Array(repeating: LibraryConnectionKey(connectionID: identityA.connectionID, userID: "a"), count: 3))
+    }
+
+    @Test func authorChangesOfAStaleSessionNeverReachTheHook() async throws {
+        let harness = BridgeHarness()
+        let first = try await harness.start()
+        let bridge = harness.bridge!
+        let changes = Recorder<LibraryConnectionKey>()
+        bridge.onLibraryChange = { changes.append($1) }
+        let removal = RealtimeEvent.authorChanged(.removed(id: "au-1", libraryID: "lib-1"))
+
+        // Queued on the first account's socket, then the session switches.
+        first.continuation.yield(removal)
+        await bridge.sessionDidStart(harness.context(identityB, client: try makeClient()))
+        first.continuation.yield(removal)
+        first.continuation.finish()
+        await harness.sockets.wait(count: 2)
+        let second = harness.sockets.values[1]
+        await second.calls.wait(for: "connect")
+
+        await harness.send(removal, on: second)
+        #expect(changes.values == [LibraryConnectionKey(connectionID: identityB.connectionID, userID: "b")])
+
+        second.continuation.yield(removal)
+        await bridge.sessionWillEnd(.signOut)
+        second.continuation.yield(removal)
+        second.continuation.finish()
+        #expect(changes.values.count == 1)
+    }
+
     @Test func echoesOfThisDevicesPlaybackAreSkipped() async throws {
         let harness = BridgeHarness()
         let socket = try await harness.start()

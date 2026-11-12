@@ -43,6 +43,11 @@ public struct DownloadRecordDTO: Sendable, Equatable, Identifiable {
 
     /// Whether every part finished, so the download can become a local item.
     public var isComplete: Bool { !parts.isEmpty && parts.allSatisfy { $0.state == .completed } }
+
+    /// Whether the download only fetches the item's cover again, for a local item that lost it
+    /// (`DownloadManager`); completed, it only sets the local item's cover
+    /// (`LocalItemStore.upsertFromDownload(_:coverUpdatedAt:now:)`).
+    public var isCoverOnly: Bool { !parts.isEmpty && parts.allSatisfy { $0.kind == .cover } }
 }
 
 /// One file of a download (`DownloadPart`) as a `Sendable` value.

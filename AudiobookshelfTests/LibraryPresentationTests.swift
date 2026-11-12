@@ -391,7 +391,7 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
         let messages = [LibraryPresentation.messages(for: .book), LibraryPresentation.messages(for: .podcast)]
         let keys =
             messages.flatMap { [$0.failed, $0.empty] }
-            + ["LabelSearchOneBook", "SharedBookCount", "LabelPodcast", "LabelPodcasts"]
+            + ["SharedBookCount", "LabelPodcast", "LabelPodcasts"]
         for key in keys {
             #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
         }
