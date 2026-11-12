@@ -11,8 +11,12 @@ public enum FeedEndpoints {
     }
 
     /// `POST /api/feeds/:id/close`: 200 plain `OK`, or 404 when the feed isn't open.
+    ///
+    /// Only redirects on the server's origin are followed (``Endpoint/staysOnOrigin``): another
+    /// origin's 200 or 404 says nothing about this feed, so a hop off the origin fails with
+    /// ``APIError/redirectRefused(status:)`` instead of reporting the feed closed.
     public static func close(id: String) -> Endpoint<EmptyResponse> {
-        Endpoint(.post, "/api/feeds/\(pathSegment(id))/close")
+        Endpoint(.post, "/api/feeds/\(pathSegment(id))/close", staysOnOrigin: true)
     }
 
     /// The feed open for `target`, if any: its detail route with `include=rssfeed` (items also need

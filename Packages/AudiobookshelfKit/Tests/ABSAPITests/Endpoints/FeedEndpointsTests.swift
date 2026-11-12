@@ -91,6 +91,20 @@ import Testing
         #expect(sent.httpBody == nil)
     }
 
+    /// Another origin's 200 or 404 can't confirm the feed closed: the hop is declined instead.
+    @Test(arguments: [(307, 200), (308, 404)])
+    func closeRefusesCrossOriginRedirects(status: Int, otherStatus: Int) async throws {
+        let other = StubServer { _ in .text("OK", status: otherStatus) }
+        let stub = StubServer { _ in .redirect(to: "https://\(other.host)/api/feeds/feed-fixture/close", status: status)
+        }
+
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await client(for: stub).send(FeedEndpoints.close(id: "feed-fixture"))
+        }
+        #expect(other.requests.isEmpty)
+        #expect(stub.requests.count == 1)
+    }
+
     @Test func currentDecodesTheFullCollectionFeedAndIgnoresTheRest() async throws {
         let data = try fixture("collection-rss-feed-2.37.2")
         let stub = StubServer { _ in StubResponse(status: 200, body: data) }
