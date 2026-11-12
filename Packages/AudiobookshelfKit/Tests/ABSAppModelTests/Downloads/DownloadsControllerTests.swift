@@ -24,7 +24,10 @@ private actor FakeDownloadManager: DownloadManaging {
     }
 
     private(set) var enqueues: [Enqueue] = []
+    /// Calls to `restartActiveTransfers()`, including those that failed.
     private(set) var restarts = 0
+    /// How many of the next restarts throw.
+    private var failingRestarts = 0
     private var result: Result<DownloadManager.EnqueueResult, DownloadManagerError>
     private var subscribers: [AsyncStream<DownloadManagerEvent>.Continuation] = []
 
@@ -49,8 +52,16 @@ private actor FakeDownloadManager: DownloadManaging {
         return try result.get()
     }
 
+    func failRestarts(_ count: Int) {
+        failingRestarts = count
+    }
+
     func restartActiveTransfers() async throws(DownloadManagerError) {
         restarts += 1
+        if failingRestarts > 0 {
+            failingRestarts -= 1
+            throw .storeFailure
+        }
     }
 }
 
@@ -77,9 +88,10 @@ struct DownloadsControllerTests {
         settings.downloadUsingCellular = policy
         let monitor = NetworkMonitor(source: FixedPathSource(path: path))
         monitor.start()
+        let access = DownloadNetworkAccess(defaults: defaults, treatsExpensiveAsCellular: treatsExpensiveAsCellular)
         let controller = DownloadsController(
-            manager: manager, monitor: monitor, settings: settings, storedRecords: storedRecords,
-            treatsExpensiveAsCellular: treatsExpensiveAsCellular, pathTimeout: .seconds(30))
+            manager: manager, monitor: monitor, settings: settings, networkAccess: access,
+            storedRecords: storedRecords, pathTimeout: .seconds(30))
         return (controller, settings, { defaults.removePersistentDomain(forName: suiteName) })
     }
 
@@ -211,24 +223,83 @@ struct DownloadsControllerTests {
         var policies = handled.makeAsyncIterator()
         await controller.start()
         #expect(await policies.next() == old)
+        // Starting under `never` restarts what may have run before the controller existed.
+        #expect(await manager.restarts == (old == .never ? 1 : 0))
+        let before = await manager.restarts
 
         settings.downloadUsingCellular = new
 
         #expect(await policies.next() == new)
-        #expect(await manager.restarts == (restarts ? 1 : 0))
+        #expect(await manager.restarts - before == (restarts ? 1 : 0))
     }
 
-    @Test func networkAccessFollowsTheStoredPolicy() throws {
-        let (controller, settings, cleanUp) = try makeController(policy: .ask, treatsExpensiveAsCellular: true)
+    /// The engine created a task under `always` between two writes of `never` that Observation
+    /// reports as one `never`: the transfers still restart.
+    @Test func coalescedNeverAlwaysNeverStillRestarts() async throws {
+        let manager = FakeDownloadManager()
+        let (controller, settings, cleanUp) = try makeController(policy: .never, manager: manager)
         defer { cleanUp() }
-        #expect(controller.networkAccess.current() == NetworkAccess(policy: .ask, treatsExpensiveAsCellular: true))
+        let (handled, report) = AsyncStream.makeStream(of: CellularPolicy.self)
+        controller.policyHandled = { report.yield($0) }
+        var policies = handled.makeAsyncIterator()
+        await controller.start()
+        #expect(await policies.next() == .never)
+        #expect(await manager.restarts == 1)
 
+        settings.downloadUsingCellular = .always
+        #expect(controller.networkAccess.current().allowsCellularAccess)
         settings.downloadUsingCellular = .never
 
-        let access = controller.networkAccess.current()
-        #expect(!access.allowsCellularAccess)
-        #expect(!access.allowsConstrainedNetworkAccess)
-        #expect(!access.allowsExpensiveNetworkAccess)
+        while await policies.next() != .never {}
+        #expect(await manager.restarts == 2)
+    }
+
+    @Test func aFailedRestartIsRetriedUntilItSucceeds() async throws {
+        let manager = FakeDownloadManager()
+        await manager.failRestarts(2)
+        let (controller, settings, cleanUp) = try makeController(policy: .always, manager: manager)
+        defer { cleanUp() }
+        let (handled, report) = AsyncStream.makeStream(of: CellularPolicy.self)
+        controller.policyHandled = { report.yield($0) }
+        var policies = handled.makeAsyncIterator()
+        await controller.start()
+        #expect(await policies.next() == .always)
+
+        settings.downloadUsingCellular = .never
+        #expect(await policies.next() == .never)
+        #expect(await manager.restarts == 1)
+
+        // Retried at the next policy change (it fails again), then at the next start.
+        settings.downloadUsingCellular = .always
+        #expect(await policies.next() == .always)
+        settings.downloadUsingCellular = .never
+        #expect(await policies.next() == .never)
+        #expect(await manager.restarts == 2)
+        await controller.start()
+        #expect(await manager.restarts == 3)
+
+        // Done: nothing metered was handed out since.
+        settings.downloadUsingCellular = .always
+        #expect(await policies.next() == .always)
+        settings.downloadUsingCellular = .never
+        #expect(await policies.next() == .never)
+        await controller.start()
+        #expect(await manager.restarts == 3)
+    }
+
+    @Test func neverBeforeStartRestartsAtStart() async throws {
+        let manager = FakeDownloadManager()
+        let (controller, settings, cleanUp) = try makeController(policy: .always, manager: manager)
+        defer { cleanUp() }
+        let (handled, report) = AsyncStream.makeStream(of: CellularPolicy.self)
+        controller.policyHandled = { report.yield($0) }
+        var policies = handled.makeAsyncIterator()
+
+        settings.downloadUsingCellular = .never
+        await controller.start()
+
+        #expect(await policies.next() == .never)
+        #expect(await manager.restarts == 1)
     }
 
     // MARK: - Records and progress
@@ -294,5 +365,58 @@ struct DownloadsControllerTests {
 
         #expect(controller.records.map(\.title) == ["changed", "kept"])
         #expect(controller.records.map(\.state) == [.downloading, .queued])
+    }
+
+    @Test func aSecondStartWaitsForTheStoredRecords() async throws {
+        let kept = Self.record("kept", createdAt: .now)
+        let (gate, open) = AsyncStream.makeStream(of: Void.self)
+        let (controller, _, cleanUp) = try makeController {
+            for await _ in gate { break }
+            return [kept]
+        }
+        defer { cleanUp() }
+
+        let first = Task { await controller.start() }
+        let second = Task {
+            await controller.start()
+            return controller.records.map(\.title)
+        }
+        // Main-actor jobs run in order: both starts are under way before the read is let through.
+        Task { open.yield() }
+
+        #expect(await second.value == ["kept"])
+        await first.value
+    }
+
+    @Test func aFailedStoredReadIsRetriedOnce() async throws {
+        let kept = Self.record("kept", createdAt: .now)
+        let reads = Locked(0)
+        let (controller, _, cleanUp) = try makeController {
+            reads.value += 1
+            if reads.value == 1 { throw CocoaError(.fileReadUnknown) }
+            return [kept]
+        }
+        defer { cleanUp() }
+
+        await controller.start()
+
+        #expect(reads.value == 2)
+        #expect(controller.records.map(\.title) == ["kept"])
+        #expect(controller.loadError == nil)
+    }
+
+    @Test func aStoredReadThatKeepsFailingIsReported() async throws {
+        let reads = Locked(0)
+        let (controller, _, cleanUp) = try makeController {
+            reads.value += 1
+            throw CocoaError(.fileReadUnknown)
+        }
+        defer { cleanUp() }
+
+        await controller.start()
+
+        #expect(reads.value == 2)
+        #expect(controller.records.isEmpty)
+        #expect((controller.loadError as? CocoaError)?.code == .fileReadUnknown)
     }
 }

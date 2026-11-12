@@ -13,17 +13,23 @@ import Observation
 ///   ``DownloadRequestOutcome/denied(_:)``, without queueing anything. After the user agrees,
 ///   ``confirmMeteredDownload(item:episodeID:connectionID:)`` queues it, as the legacy confirm
 ///   dialog did. Once approved, the download keeps going on the metered path.
+/// - Under ``CellularPolicy/ask``, transfers the user didn't start now aren't asked about: the
+///   engine's retries, resumes at relaunch, restarts, and new tasks after a path change all run
+///   with the flags ``CellularPolicy/ask`` allows. A resume or retry the user starts (#75) must go
+///   through the same check as ``request(item:episodeID:connectionID:)`` (``gate(waitingForPath:)``).
 /// - ``records`` and ``progress`` follow ``DownloadManager/events()`` from ``start()`` on, on top
 ///   of the records stored when it ran. A completed, cancelled or removed record leaves both.
-/// - When ``AppSettings/downloadUsingCellular`` gets stricter (to ``CellularPolicy/never``), the
-///   transfers under way restart under the new flags (``DownloadManager/restartActiveTransfers()``):
-///   a running task keeps the network access it was created with. A looser policy, or a change
-///   between ``CellularPolicy/always`` and ``CellularPolicy/ask``, keeps them: both allow every
-///   network, and a download already under way isn't asked about again.
+/// - While ``AppSettings/downloadUsingCellular`` is ``CellularPolicy/never``, transfers that may
+///   have been given metered access (``networkAccess`` handed out cellular or Low Data Mode flags
+///   since the last restart, or before the controller existed) restart under the new flags
+///   (``DownloadManager/restartActiveTransfers()``): a running task keeps the network access it was
+///   created with. A restart that fails is tried again at the next policy change or ``start()``.
+///   ``CellularPolicy/always`` and ``CellularPolicy/ask`` allow every network, so a change between
+///   them, or away from ``CellularPolicy/never``, keeps transfers running.
 /// - Failed downloads aren't retried here; the user retries them.
 ///
-/// The engine's `networkAccess` closure is ``networkAccess``'s ``DownloadNetworkAccess/provider``,
-/// or a ``DownloadNetworkAccess`` on the same store when the engine is built first.
+/// Build one ``DownloadNetworkAccess`` on ``AppSettings/defaults`` and pass it to both the engine
+/// (its ``DownloadNetworkAccess/provider``) and this controller.
 @MainActor
 @Observable
 public final class DownloadsController {
@@ -44,8 +50,11 @@ public final class DownloadsController {
     public private(set) var records: [DownloadRecordDTO] = []
     /// The latest progress of each record in ``records`` that reported any, by record ID.
     public private(set) var progress: [UUID: Progress] = [:]
+    /// Why the stored records couldn't be read at ``start()`` (after one retry), or `nil`. Records
+    /// still appear as their events arrive.
+    public private(set) var loadError: (any Error)?
 
-    /// The network access flags for new download tasks, read from the same store as the settings.
+    /// The network access flags for new download tasks, shared with the engine.
     public nonisolated let networkAccess: DownloadNetworkAccess
 
     @ObservationIgnored private let manager: any DownloadManaging
@@ -53,10 +62,9 @@ public final class DownloadsController {
     @ObservationIgnored private let policy: NetworkPolicy
     @ObservationIgnored private let storedRecords: @Sendable () async throws -> [DownloadRecordDTO]
     @ObservationIgnored private let pathTimeout: Duration
-    @ObservationIgnored private var didStart = false
+    /// The first ``start()``'s work; later calls wait for it.
+    @ObservationIgnored private var startup: Task<Void, Never>?
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
-    /// The policy the transfers under way were last restarted for, or started under.
-    @ObservationIgnored private var appliedPolicy: CellularPolicy
     /// Records that events changed or removed while the stored records were read, so the read
     /// doesn't bring back an older copy or a removed record; `nil` outside that read.
     @ObservationIgnored private var changedWhileLoading: Set<UUID>?
@@ -68,28 +76,29 @@ public final class DownloadsController {
     /// - Parameters:
     ///   - manager: the app's ``DownloadManager``.
     ///   - monitor: the network path to check requests against.
-    ///   - settings: the download cellular policy; its store also backs ``networkAccess``.
+    ///   - settings: the download cellular policy.
+    ///   - networkAccess: the instance the engine reads its flags from, built on
+    ///     `settings.defaults`; its ``DownloadNetworkAccess/treatsExpensiveAsCellular`` also applies
+    ///     to requests.
     ///   - storedRecords: the records stored when ``start()`` runs, for example
     ///     `DownloadStore.allRecords()`.
-    ///   - treatsExpensiveAsCellular: as for ``NetworkPolicy``.
     ///   - pathTimeout: how long a request waits for the first network path before it is allowed.
     public init(
         manager: any DownloadManaging,
         monitor: NetworkMonitor,
         settings: AppSettings,
+        networkAccess: DownloadNetworkAccess,
         storedRecords: @escaping @Sendable () async throws -> [DownloadRecordDTO],
-        treatsExpensiveAsCellular: Bool = NetworkPolicy.treatsExpensiveAsCellularByDefault,
         pathTimeout: Duration = .milliseconds(500)
     ) {
         self.manager = manager
         self.settings = settings
+        self.networkAccess = networkAccess
         policy = NetworkPolicy(
-            monitor: monitor, settings: settings, treatsExpensiveAsCellular: treatsExpensiveAsCellular)
+            monitor: monitor, settings: settings,
+            treatsExpensiveAsCellular: networkAccess.treatsExpensiveAsCellular)
         self.storedRecords = storedRecords
         self.pathTimeout = pathTimeout
-        networkAccess = DownloadNetworkAccess(
-            defaults: settings.defaults, treatsExpensiveAsCellular: treatsExpensiveAsCellular)
-        appliedPolicy = settings.downloadUsingCellular
     }
 
     isolated deinit {
@@ -99,11 +108,20 @@ public final class DownloadsController {
     // MARK: - Lifecycle
 
     /// Subscribes to the manager's events, reads the stored records, and starts watching the
-    /// download cellular policy. Later calls do nothing.
+    /// download cellular policy. Later calls wait for the first one to finish, then try again a
+    /// restart for ``CellularPolicy/never`` that failed.
     public func start() async {
-        guard !didStart else { return }
-        didStart = true
-        appliedPolicy = settings.downloadUsingCellular
+        if let startup {
+            await startup.value
+            await apply(settings.downloadUsingCellular)
+            return
+        }
+        let startup = Task { await self.run() }
+        self.startup = startup
+        await startup.value
+    }
+
+    private func run() async {
         let settings = settings
         tasks.append(
             Task { [weak self] in
@@ -111,6 +129,7 @@ public final class DownloadsController {
                 for await policy in changes {
                     guard let self else { return }
                     await self.apply(policy)
+                    self.policyHandled?(policy)
                 }
             })
         // Subscribed before the read, so nothing that happens after it is missed.
@@ -124,19 +143,36 @@ public final class DownloadsController {
             })
         changedWhileLoading = []
         defer { changedWhileLoading = nil }
-        do {
-            let stored = try await storedRecords()
+        if let stored = await readStoredRecords() {
             let changed = changedWhileLoading ?? []
             for record in stored where !changed.contains(record.id) {
                 upsert(record)
             }
-        } catch {
-            Log.downloads.error(
-                "Couldn't read the stored downloads: \(Log.redact(String(describing: error)), privacy: .public)")
         }
         // Progress that arrived meanwhile for a record that isn't listed.
         let listed = Set(records.map(\.id))
         progress = progress.filter { listed.contains($0.key) }
+    }
+
+    /// The stored records, read once more if the first read fails; `nil`, with ``loadError`` set,
+    /// if both fail.
+    private func readStoredRecords() async -> [DownloadRecordDTO]? {
+        var lastError: (any Error)?
+        for _ in 0..<2 {
+            do {
+                let stored = try await storedRecords()
+                loadError = nil
+                return stored
+            } catch {
+                lastError = error
+            }
+        }
+        loadError = lastError
+        if let lastError {
+            Log.downloads.error(
+                "Couldn't read the stored downloads: \(Log.redact(String(describing: lastError)), privacy: .public)")
+        }
+        return nil
     }
 
     // MARK: - Requests
@@ -146,7 +182,7 @@ public final class DownloadsController {
     ///
     /// - Parameter item: an expanded item (`ItemEndpoints.item(id:)`) of the server `connectionID`.
     public func request(item: LibraryItem, episodeID: String?, connectionID: UUID) async -> DownloadRequestOutcome {
-        switch await policy.canDownload(waitingUpTo: pathTimeout) {
+        switch await gate(waitingForPath: true) {
         case .allowed: await enqueue(item: item, episodeID: episodeID, connectionID: connectionID)
         case .askUser(let reason): .needsConfirmation(reason)
         case .denied(let reason): .denied(reason)
@@ -158,8 +194,15 @@ public final class DownloadsController {
     public func confirmMeteredDownload(
         item: LibraryItem, episodeID: String?, connectionID: UUID
     ) async -> DownloadRequestOutcome {
-        if case .denied(let reason) = policy.canDownload() { return .denied(reason) }
+        if case .denied(let reason) = await gate(waitingForPath: false) { return .denied(reason) }
         return await enqueue(item: item, episodeID: episodeID, connectionID: connectionID)
+    }
+
+    /// Whether a download the user starts may go ahead on the current path under the download
+    /// cellular policy. With `waitingForPath`, waits up to the path timeout for the first path.
+    /// For requests here, and for the user's resume and retry (#75).
+    func gate(waitingForPath: Bool) async -> NetworkDecision {
+        waitingForPath ? await policy.canDownload(waitingUpTo: pathTimeout) : policy.canDownload()
     }
 
     private func enqueue(item: LibraryItem, episodeID: String?, connectionID: UUID) async -> DownloadRequestOutcome {
@@ -174,21 +217,18 @@ public final class DownloadsController {
 
     // MARK: - Policy
 
-    /// Restarts the transfers under way when `policy` is stricter than the one they run under.
+    /// Under ``CellularPolicy/never``, restarts the transfers under way if metered access was handed
+    /// out since the last restart. A failed restart is tried again next time.
     private func apply(_ policy: CellularPolicy) async {
-        let previous = appliedPolicy
-        appliedPolicy = policy
-        // Only `never` narrows the network access flags; `always` and `ask` allow every network.
-        if policy == .never, previous != .never {
-            do {
-                try await manager.restartActiveTransfers()
-            } catch {
-                Log.downloads.error(
-                    "Couldn't restart downloads for a stricter cellular policy: \(Log.redact(String(describing: error)), privacy: .public)"
-                )
-            }
+        guard policy == .never, networkAccess.takeHandedOutMetered() else { return }
+        do {
+            try await manager.restartActiveTransfers()
+        } catch {
+            networkAccess.markHandedOutMetered()
+            Log.downloads.error(
+                "Couldn't restart downloads for a stricter cellular policy: \(Log.redact(String(describing: error)), privacy: .public)"
+            )
         }
-        policyHandled?(policy)
     }
 
     // MARK: - Events

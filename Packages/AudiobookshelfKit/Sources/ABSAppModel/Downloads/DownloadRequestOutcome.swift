@@ -2,7 +2,8 @@ import ABSCore
 import ABSDownloads
 
 /// What ``DownloadsController/request(item:episodeID:connectionID:)`` and
-/// ``DownloadsController/confirmMeteredDownload(item:episodeID:connectionID:)`` did.
+/// ``DownloadsController/confirmMeteredDownload(item:episodeID:connectionID:)`` did. For new
+/// requests only: resuming and retrying a download (#75) get their own result type.
 public enum DownloadRequestOutcome: Sendable, Equatable {
     /// The manager took the request: the download started, an existing record was kept (a paused
     /// or failed one resumed), or the media is already downloaded.
