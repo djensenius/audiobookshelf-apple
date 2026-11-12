@@ -176,6 +176,8 @@ struct SyncHarness {
     let h: CoordinatorHarness
     let service: StubProgressSyncService
     let syncer: ProgressSyncer
+    /// The syncer's retry wakes; they sleep until a test fires them.
+    let sleeper = ManualSleeper()
 
     init(
         progressStore: LocalProgressStore? = nil, connectionID: UUID = UUID(),
@@ -187,7 +189,8 @@ struct SyncHarness {
         let clock = h.clock
         syncer = ProgressSyncer(
             source: h.coordinator, service: service, store: h.progressStore,
-            clock: ProgressSyncClock(now: { clock.now }, uptime: { clock.now.timeIntervalSince1970 }),
+            clock: ProgressSyncClock(
+                now: { clock.now }, uptime: { clock.now.timeIntervalSince1970 }, sleep: sleeper.sleep),
             tickInterval: 0.5, paths: paths)
     }
 
@@ -234,4 +237,58 @@ final class StubNetworkPathSource: NetworkPathSource, Sendable {
     func paths() -> AsyncStream<NetworkPath> { stream }
 
     func send(_ path: NetworkPath) { continuation.yield(path) }
+}
+
+/// A sleep that ends only when a test fires it, recording each requested delay.
+final class ManualSleeper: Sendable {
+    private struct State {
+        var delays: [TimeInterval] = []
+        var waiting: [UUID: CheckedContinuation<Void, any Error>] = [:]
+        var credits = 0
+    }
+
+    private let state = Mutex(State())
+
+    /// Every delay requested so far, in order.
+    var delays: [TimeInterval] { state.withLock { $0.delays } }
+    /// The sleeps waiting now; a cancelled one leaves at once.
+    var waitingCount: Int { state.withLock { $0.waiting.count } }
+
+    @Sendable func sleep(_ delay: TimeInterval) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                // Cancellation is read under the lock the cancel handler takes, so a cancel can't
+                // fall between the check and registering (the handler would find no waiter).
+                let resume: Bool?
+                resume = state.withLock { state in
+                    state.delays.append(delay)
+                    if Task.isCancelled { return false }
+                    guard state.credits == 0 else {
+                        state.credits -= 1
+                        return true
+                    }
+                    state.waiting[id] = continuation
+                    return nil
+                }
+                switch resume {
+                case true?: continuation.resume()
+                case false?: continuation.resume(throwing: CancellationError())
+                case nil: break
+                }
+            }
+        } onCancel: {
+            state.withLock { $0.waiting.removeValue(forKey: id) }?.resume(throwing: CancellationError())
+        }
+    }
+
+    /// Ends every sleep waiting now or, if none is, the next one to start.
+    func fire() {
+        let waiting = state.withLock { state in
+            if state.waiting.isEmpty { state.credits += 1 }
+            defer { state.waiting.removeAll() }
+            return Array(state.waiting.values)
+        }
+        for continuation in waiting { continuation.resume() }
+    }
 }
