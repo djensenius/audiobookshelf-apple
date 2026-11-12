@@ -521,15 +521,15 @@ public final class AccountManager {
     /// Clients for download credentials of saved connections that aren't active, so a
     /// connection's download parts share one client and join its single refresh.
     @ObservationIgnored private var downloadClients: [UUID: APIClient] = [:]
-    /// Counts ``logout()`` and ``remove(_:)`` calls per connection, so a lookup that overlapped
-    /// one doesn't keep a client.
+    /// Counts ``logout()``, ``remove(_:)`` and expiries per connection, so a lookup that
+    /// overlapped one doesn't keep a client.
     @ObservationIgnored private var downloadClientResets: [UUID: Int] = [:]
 
     /// The client for a connection's download credentials (`AccountDownloadCredentials`): the
     /// active client, or for another saved connection that is connected, not signed out, not
     /// being removed and has a saved session, a client over its credentials (shared with the
-    /// app's own clients, so a refresh is saved and joined), kept until ``logout()`` or
-    /// ``remove(_:)`` of it. Reads the store, not ``connections``, so it works in a background
+    /// app's own clients, so a refresh is saved and joined), kept until ``logout()``,
+    /// ``remove(_:)`` or expiry of it. Reads the store, not ``connections``, so it works in a background
     /// wake before the session is restored. `nil` otherwise.
     public func downloadClient(for id: UUID) async -> APIClient? {
         if activeConnection?.id == id, let client {
@@ -788,6 +788,8 @@ public final class AccountManager {
     private func sessionExpired(_ id: UUID, generation: Int, deleteFailed: Bool) async {
         // A sign-in since the expiry replaced the session.
         guard generation > signInGenerations[id, default: 0] else { return }
+        // A kept download client has no tokens now, and a lookup that overlapped this mustn't keep one.
+        forgetDownloadClient(id)
         // A sign-in that saved the expired session mustn't activate it.
         expiredGenerations[id] = generation
         Log.auth.notice("The session expired")

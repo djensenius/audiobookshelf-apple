@@ -12,6 +12,8 @@ private final class TokenServer: Sendable {
     let host = "\(UUID().uuidString.lowercased()).download-client.test"
     let userId: String
     private let issued = Mutex(0)
+    /// Answers `/auth/refresh` with 401, ending the session.
+    private let rejectsRefresh = Mutex(false)
 
     init(userId: String) {
         self.userId = userId
@@ -19,6 +21,8 @@ private final class TokenServer: Sendable {
     }
 
     var address: String { "https://\(host)/abs" }
+
+    func rejectRefreshes() { rejectsRefresh.withLock { $0 = true } }
 
     var refreshes: Int { StubURLProtocol.requests(host: host).filter { $0.url?.path() == "/abs/auth/refresh" }.count }
 
@@ -28,6 +32,8 @@ private final class TokenServer: Sendable {
             case "/abs/status":
                 return .json(
                     #"{"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"authMethods":["local"]}"#)
+            case "/abs/auth/refresh" where rejectsRefresh.withLock({ $0 }):
+                return .json("{}", status: 401)
             case "/abs/login", "/abs/auth/refresh":
                 issued += 1
                 return .json(authJSON(tokens: issued))
@@ -122,6 +128,47 @@ private final class TokenServer: Sendable {
         #expect(try await store.setSignedOut(id: idA, at: .now))
 
         #expect(await manager.downloadClient(for: idA) == nil)
+    }
+
+    /// An expiry deletes the tokens without saving a sign-out; the kept client isn't used.
+    @Test func expiredConnectionGetsNothingEvenWithAKeptClient() async throws {
+        let serverA = TokenServer(userId: "usr-a")
+        let idA = try await signIn(to: serverA)
+        let idB = try await signIn(to: TokenServer(userId: "usr-b"))
+        let kept = try #require(await manager.downloadClient(for: idA))
+
+        serverA.rejectRefreshes()
+        await #expect(throws: APIError.sessionExpired) { try await kept.accessToken(replacing: "usr-a-access-1") }
+
+        #expect(try await store.connection(id: idA)?.signedOutAt == nil)
+        #expect(await manager.downloadClient(for: idA) == nil)
+        #expect(await manager.downloadClient(for: idB) === manager.client)
+    }
+
+    /// A sign-out while the lookup reads the Keychain: the session it read is being deleted.
+    @Test func lookupThatOverlapsASignOutGetsNothing() async throws {
+        let idA = try await signIn(to: TokenServer(userId: "usr-a"))
+        // A relaunch, so the lookup reads the session from the Keychain.
+        let relaunched = AccountManager(
+            store: store, keychain: keychain,
+            validator: ServerValidator(sessionConfiguration: { StubURLProtocol.sessionConfiguration() }),
+            sessionConfiguration: { StubURLProtocol.sessionConfiguration() })
+        let read = keychain.holdNextRead()
+        let lookup = Task { await relaunched.downloadClient(for: idA) }
+        await read.arrived()
+
+        // Restoring A, so the logout signs A out; both wait for the held read.
+        let restore = Task { await relaunched.restoreSession() }
+        while relaunched.state != .restoring { await Task.yield() }
+        let logout = Task { await relaunched.logout() }
+        while try await store.connection(id: idA)?.signedOutAt == nil { await Task.yield() }
+        read.open()
+
+        #expect(await lookup.value == nil)
+        _ = await logout.value
+        await restore.value
+        #expect(relaunched.state == .signedOut)
+        #expect(await relaunched.downloadClient(for: idA) == nil)
     }
 
     @Test func removedConnectionGetsNothing() async throws {
