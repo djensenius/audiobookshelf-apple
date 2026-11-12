@@ -325,6 +325,7 @@ final class DownloadHarness: Sendable {
         cancel: (@Sendable (URLSessionDownloadTask) async -> Data?)? = nil,
         beforeStoppingSiblings: (@Sendable (UUID) async -> Void)? = nil,
         afterPermanentFailure: (@Sendable (UUID) async -> Void)? = nil,
+        beforeReplayStart: (@Sendable (UUID) async -> Void)? = nil,
         startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
         adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
         listing: (@Sendable () async -> Void)? = nil,
@@ -343,7 +344,8 @@ final class DownloadHarness: Sendable {
             readRecord: readRecord ?? { try await $0.record(id: $1) },
             cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() },
             beforeStoppingSiblings: beforeStoppingSiblings, afterPermanentFailure: afterPermanentFailure,
-            startFoundSettling: startFoundSettling, adoptionStarted: adoptionStarted)
+            beforeReplayStart: beforeReplayStart, startFoundSettling: startFoundSettling,
+            adoptionStarted: adoptionStarted)
     }
 
     func sessionFactory(
