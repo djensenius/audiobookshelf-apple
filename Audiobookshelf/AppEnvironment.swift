@@ -23,6 +23,9 @@ final class AppEnvironment {
     let dataStack: DataStack?
     let accounts: AccountManager?
     let lifecycle: SessionLifecycle
+    /// The stable device ID for playback sessions (ADR 0007), kept in the same Keychain as the
+    /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
+    let deviceIdentifiers: any DeviceIdentifying
     let player: any PlayerSlotState
 
     /// - Parameters:
@@ -57,6 +60,7 @@ final class AppEnvironment {
         self.dataStack = dataStack
         self.accounts = accounts
         self.lifecycle = lifecycle
+        self.deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         // Replaced by the playback coordinator's view model with the player UI (#56).
         self.player = PlaceholderPlayerState()
     }

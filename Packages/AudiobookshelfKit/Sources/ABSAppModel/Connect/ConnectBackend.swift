@@ -2,6 +2,7 @@ import ABSAPI
 import ABSCore
 import ABSData
 import Foundation
+import Observation
 
 /// A server whose `/status` was read, ready to sign in to.
 public struct ConnectServer: Sendable {
@@ -27,7 +28,7 @@ public struct ConnectServer: Sendable {
 }
 
 /// What ``ConnectViewModel`` needs from ``ServerValidator`` and ``AccountManager``. The app uses
-/// ``ConnectViewModel/init(accounts:validator:localNetwork:)``; tests and previews use fakes.
+/// ``ConnectViewModel/init(accounts:validator:localNetwork:lifecycle:)``; tests and previews use fakes.
 @MainActor
 public protocol ConnectBackend {
     /// Saved connections, most recently used first.
@@ -43,36 +44,64 @@ public protocol ConnectBackend {
     /// The custom headers saved for a connection.
     func customHeaders(for id: UUID) async throws -> [String: String]
     func remove(_ id: UUID) async throws
+    /// Whether the session the flow was opened from has ended, so its sign-ins are refused.
+    var originHasEnded: Bool { get }
+}
+
+extension ConnectBackend {
+    public var originHasEnded: Bool { false }
 }
 
 /// The app's ``ConnectBackend``: validates with ``ServerValidator`` and signs in through
 /// ``AccountManager``, which saves the session and the custom headers.
-struct AccountConnectBackend: ConnectBackend {
+///
+/// With a `lifecycle` (adding a server while signed in), a sign-in or resume is an account change
+/// (``SessionLifecycle/performAccountChange(from:_:)``) from the session the sheet opened on, and
+/// a removal goes through ``SessionLifecycle/removeAccount(_:)``. Resuming the active connection
+/// or a signed-out one ends nothing. The change starts before the server checks the credentials,
+/// so a wrong password still restarts the running session; checking first is a follow-up.
+@Observable final class AccountConnectBackend: ConnectBackend {
     let accounts: AccountManager
     private let validator: ServerValidator
+    private let lifecycle: SessionLifecycle?
+    /// The session the sheet was opened from; after a change of its own, the one it left running.
+    private var origin: ReadySession?
+    /// Whether a change of its own runs, until its transition ends, even if the flow cancelled it.
+    private var isChanging = false
 
-    init(accounts: AccountManager, validator: ServerValidator = ServerValidator()) {
+    init(accounts: AccountManager, validator: ServerValidator = ServerValidator(), lifecycle: SessionLifecycle? = nil) {
         self.accounts = accounts
         self.validator = validator
+        self.lifecycle = lifecycle
+        origin = lifecycle?.readySession
     }
 
     var connections: [ServerConnectionDTO] { accounts.connections }
+    var originHasEnded: Bool { !isChanging && lifecycle.map { $0.readySession != origin } ?? false }
 
     func validate(address: String, customHeaders: [String: String]) async throws -> ConnectServer {
         ConnectServer(try await validator.validate(address: address, customHeaders: customHeaders))
     }
 
     func signIn(to server: ConnectServer, username: String, password: String) async throws {
-        try await accounts.connect(local: Self.validated(server), username: username, password: password)
+        let server = try Self.validated(server)
+        try await changingAccount {
+            try await accounts.connect(local: server, username: username, password: password)
+        }
     }
 
     func signIn(openIDTo server: ConnectServer, authenticator: any WebAuthenticator) async throws {
-        try await accounts.connect(oidc: Self.validated(server), authenticator: authenticator)
+        let server = try Self.validated(server)
+        try await changingAccount { try await accounts.connect(oidc: server, authenticator: authenticator) }
     }
 
     func resume(_ id: UUID) async throws -> Bool {
+        if lifecycle != nil {
+            if id == accounts.activeConnection?.id { return true }
+            if accounts.connections.first(where: { $0.id == id })?.signedOutAt != nil { return false }
+        }
         do {
-            try await accounts.switch(to: id)
+            try await changingAccount { try await accounts.switch(to: id) }
         } catch AccountError.notSignedIn {
             return false
         }
@@ -88,7 +117,26 @@ struct AccountConnectBackend: ConnectBackend {
 
     func remove(_ id: UUID) async throws {
         // An OpenID end-session URL isn't opened from the connect screen.
-        _ = try await accounts.remove(id)
+        if let lifecycle {
+            _ = try await lifecycle.removeAccount(id)
+        } else {
+            _ = try await accounts.remove(id)
+        }
+    }
+
+    private func changingAccount(_ body: @MainActor () async throws -> Void) async throws {
+        guard let lifecycle else { return try await body() }
+        // Refused, silently as a cancel, unless the sheet's session is ready now and still
+        // running at the change's turn: another window may have switched since the sheet opened.
+        guard let origin, lifecycle.readySession == origin else { throw CancellationError() }
+        var ran = true  // Unless refused; `body` may throw.
+        isChanging = true
+        defer {
+            if ran { self.origin = lifecycle.readySession }
+            isChanging = false
+        }
+        ran = try await lifecycle.performAccountChange(from: origin, body)
+        guard ran else { throw CancellationError() }
     }
 
     private static func validated(_ server: ConnectServer) throws -> ValidatedServer {

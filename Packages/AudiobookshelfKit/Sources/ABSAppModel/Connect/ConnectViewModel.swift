@@ -100,6 +100,8 @@ public final class ConnectViewModel {
         case select(ServerConnectionDTO)
     }
 
+    /// Set by ``startAddingServer()``: the flow has no saved servers step to go back to.
+    @ObservationIgnored private var addsServerOnly = false
     @ObservationIgnored private let backend: any ConnectBackend
     @ObservationIgnored private let localNetwork: any LocalNetworkAccessChecking
     /// Bumped by every action, so the result of one the user has left is dropped.
@@ -118,12 +120,17 @@ public final class ConnectViewModel {
         phase = backend.connections.isEmpty ? .address : .servers
     }
 
-    /// The app's flow: validates with `validator` and signs in through `accounts`.
+    /// The app's flow: validates with `validator` and signs in through `accounts`. Pass the
+    /// `lifecycle` to run it while signed in, so a sign-in ends the running session first and
+    /// keeps the other accounts' sessions.
     public convenience init(
         accounts: AccountManager, validator: ServerValidator = ServerValidator(),
-        localNetwork: any LocalNetworkAccessChecking = SystemLocalNetworkAccess()
+        localNetwork: any LocalNetworkAccessChecking = SystemLocalNetworkAccess(),
+        lifecycle: SessionLifecycle? = nil
     ) {
-        self.init(backend: AccountConnectBackend(accounts: accounts, validator: validator), localNetwork: localNetwork)
+        self.init(
+            backend: AccountConnectBackend(accounts: accounts, validator: validator, lifecycle: lifecycle),
+            localNetwork: localNetwork)
     }
 
     // MARK: - State
@@ -137,14 +144,20 @@ public final class ConnectViewModel {
         }
     }
 
-    /// Whether ``goBack()`` does anything. While busy, it cancels.
+    /// Whether ``goBack()`` does anything. While busy, it cancels: the toolbar's only way out of
+    /// a stalled sign-in in the add-server sheet, which can't be swiped away meanwhile.
     public var canGoBack: Bool {
         switch phase {
-        case .address: !savedServers.isEmpty
-        case .validating, .login: true
+        case .address: !savedServers.isEmpty && !addsServerOnly
+        case .validating, .login, .signingIn(.password), .signingIn(.openID): true
         case .signingIn(.savedSession): !isResumingSession
         case .servers, .signingIn, .done: false
         }
+    }
+
+    /// Whether to close the flow: the session it was opened from ended other than by its sign-in.
+    public var isStale: Bool {
+        if case .signingIn = phase { false } else { backend.originHasEnded }
     }
 
     /// Username and password sign-in. Hidden for OpenID-only servers.
@@ -186,6 +199,14 @@ public final class ConnectViewModel {
         username = ""
         password = ""
         phase = .address
+    }
+
+    /// Starts at a new server's address with no way back to the saved servers, for adding a
+    /// server while signed in, where the saved servers are listed elsewhere. The first step then
+    /// offers the presenter's Cancel instead of Back.
+    public func startAddingServer() {
+        addsServerOnly = true
+        addServer()
     }
 
     public func goBack() {
