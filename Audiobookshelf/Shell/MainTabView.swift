@@ -69,6 +69,9 @@ struct MainTabView<Root: View>: View {
                         RouteDestination(route: route)
                     }
             }
+            // Screens and their pushed routes know which tab's stack they're on, so a hidden tab's copy of the same
+            // screen never takes ⌘R or ⌥⌘F (`RefreshCommandPlacement.isFrontmost`).
+            .environment(\.navigationTab, tab)
         } label: {
             Label {
                 Text(verbatim: L10n.string(tab.titleKey))
