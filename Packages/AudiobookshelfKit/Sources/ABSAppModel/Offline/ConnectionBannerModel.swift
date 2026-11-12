@@ -7,7 +7,9 @@ import Observation
 ///
 /// Call ``run()`` from a task that lives as long as the banner, such as the shell's `.task`; it
 /// checks the server once, then follows the network until cancelled, which also cancels a
-/// scheduled ping. ``retry()`` is the banner's retry button: it pings now and resets the backoff.
+/// scheduled or running ping. Only the latest `run()` acts: an older one still finishing stops
+/// without touching the newer one's pings. ``retry()`` is the banner's retry button: it pings now
+/// and resets the backoff.
 @MainActor
 @Observable
 public final class ConnectionBannerModel {
@@ -23,6 +25,8 @@ public final class ConnectionBannerModel {
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private var pingTask: Task<Void, Never>?
+    /// Which ``run()`` is current; an older one stops following paths and leaves pings alone.
+    @ObservationIgnored private var runGeneration: UInt64 = 0
 
     /// - Parameters:
     ///   - paths: the device's network paths, such as `NetworkMonitor.paths()`.
@@ -49,18 +53,21 @@ public final class ConnectionBannerModel {
     public var state: ConnectionBannerState { reachability.state }
 
     /// Checks the server, then follows the network path until the calling task is cancelled.
+    /// Any change of online path (another interface, or an `onlineEpoch` showing an offline path
+    /// the stream coalesced away) checks the server again: the new route may not reach it.
     public func run() async {
+        runGeneration &+= 1
+        let generation = runGeneration
         send(.retry)
-        var epoch: UInt64?
+        var previous: NetworkPath?
         for await path in paths() {
-            guard !Task.isCancelled else { break }
+            guard !Task.isCancelled, generation == runGeneration else { break }
             let wasOffline = state == .offline(.noNetwork)
             send(.pathChanged(isOnline: path.isOnline))
-            // Back online after an offline path the stream coalesced away: check the server again.
-            if path.isOnline, !wasOffline, let epoch, epoch != path.onlineEpoch { send(.retry) }
-            epoch = path.onlineEpoch
+            if path.isOnline, !wasOffline, let previous, previous != path { send(.retry) }
+            previous = path
         }
-        perform(.cancelPing)
+        if generation == runGeneration { perform(.cancelPing) }
     }
 
     /// Pings the server now and resets the backoff; does nothing without a network.
@@ -87,12 +94,14 @@ public final class ConnectionBannerModel {
                 }
                 guard !Task.isCancelled else { return }
                 self?.send(.pingStarted(attempt: attempt))
+                // A ping cancelled meanwhile (its run ended, or it was replaced) reports nothing,
+                // even if it finished anyway: it must not change the state or schedule a retry.
                 do {
                     try await ping()
+                    guard !Task.isCancelled else { return }
                     self?.send(.pingSucceeded(attempt: attempt))
-                } catch is CancellationError {
-                    return
                 } catch {
+                    guard !Task.isCancelled, !(error is CancellationError) else { return }
                     self?.send(.pingFailed(attempt: attempt, at: now()))
                 }
             }

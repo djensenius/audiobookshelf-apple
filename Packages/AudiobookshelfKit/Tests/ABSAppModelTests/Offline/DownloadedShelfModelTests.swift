@@ -182,4 +182,63 @@ import Testing
         run.cancel()
         await run.value
     }
+
+    /// Wi-Fi to cellular, with no offline path between: the new route may not reach the server.
+    @Test func changedOnlineRouteChecksTheServerAgain() async throws {
+        let pings = Pings()
+        let (paths, pathFeed) = AsyncStream.makeStream(of: NetworkPath.self)
+        let model = ConnectionBannerModel(
+            paths: { paths }, ping: { try await pings.ping() }, clock: ManualClock(), now: { [date] in date })
+        let run = Task { await model.run() }
+        var calls = pings.calls.makeAsyncIterator()
+        try #require(await calls.next()).resume()
+        pathFeed.yield(.wifi)
+        pathFeed.yield(.wifi)
+        pathFeed.yield(.cellular)
+        try #require(await calls.next()).resume(throwing: Down())
+        await waitFor(model, .serverUnreachable(retryAt: date.addingTimeInterval(5)))
+        run.cancel()
+        await run.value
+    }
+
+    /// The old run, finishing after a new one started, leaves the new run's ping alone.
+    @Test func aReplacedRunKeepsTheNewRunsPing() async throws {
+        let clock = ManualClock()
+        let pings = Pings()
+        let model = ConnectionBannerModel(
+            paths: { AsyncStream { _ in } }, ping: { try await pings.ping() }, clock: clock, now: { [date] in date })
+        var calls = pings.calls.makeAsyncIterator()
+        let old = Task { await model.run() }
+        let first = try #require(await calls.next())
+        let current = Task { await model.run() }
+        let second = try #require(await calls.next())
+        old.cancel()
+        await old.value
+        first.resume(throwing: Down())
+
+        second.resume(throwing: Down())
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        #expect(await sleeps.next() == .seconds(5))
+        #expect(model.state == .serverUnreachable(retryAt: date.addingTimeInterval(5)))
+        current.cancel()
+        await current.value
+    }
+
+    /// A ping still running when the run ends neither changes the state nor schedules a retry.
+    @Test func aStoppedRunIgnoresItsLastPing() async throws {
+        let clock = ManualClock()
+        let pings = Pings()
+        let model = ConnectionBannerModel(
+            paths: { AsyncStream { _ in } }, ping: { try await pings.ping() }, clock: clock)
+        var calls = pings.calls.makeAsyncIterator()
+        let run = Task { await model.run() }
+        let ping = try #require(await calls.next())
+        run.cancel()
+        await run.value
+
+        ping.resume(throwing: Down())
+        for _ in 0..<100 { await Task.yield() }
+        #expect(model.state == .online)
+        #expect(clock.sleeperCount == 0)
+    }
 }
