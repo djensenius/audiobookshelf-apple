@@ -70,6 +70,10 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
         await current?.jump(by: offset)
     }
 
+    @discardableResult public func jumpOutcome(by offset: Double) async -> JumpOutcome {
+        await current?.jumpOutcome(by: offset) ?? .deferred
+    }
+
     public func setRate(_ rate: Double) {
         current?.setRate(rate)
     }
