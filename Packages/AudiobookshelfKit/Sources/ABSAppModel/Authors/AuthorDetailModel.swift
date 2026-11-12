@@ -149,4 +149,19 @@ public final class AuthorDetailModel {
             }
         }
     }
+
+    /// Follows a socket change of this author, once loaded: an update replaces the header (its
+    /// library and books stay), and a removal shows ``Phase/notFound``. Others are ignored.
+    public func apply(_ change: LibraryChange) {
+        guard case .author(let change) = change, detail != nil else { return }
+        switch change {
+        case .added(let author, _), .updated(let author, _):
+            guard author.id == authorID else { return }
+            detail = AuthorDetail(author: author)
+        case .removed(let id, _):
+            guard id == authorID else { return }
+            isNotFound = true
+            detail = nil
+        }
+    }
 }
