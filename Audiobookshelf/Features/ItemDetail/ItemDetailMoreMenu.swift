@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSUI
@@ -19,9 +20,11 @@ extension View {
 /// without one (previews); Add to playlist stays hidden until the playlist editor exists.
 ///
 /// The ebook entries (``ItemDetailEbookEntries``) follow, gated by ``EbookActionsModel`` on the
-/// signed-in account's authorization; they're hidden offline and without an account (previews).
-/// A send's result shows in an alert, a failure's with the server's text; every result is
-/// announced to VoiceOver, and a status change reloads the item.
+/// signed-in account's authorization and the loaded item; they're hidden offline and without an
+/// account (previews). The model is made per client and item model, so a reused view never acts
+/// on the previous book. A send is announced as it starts; its result shows in an alert, as a
+/// failure does (with the server's explanation when it's worth showing); a status change, which
+/// is checked against the item as it is when tapped, reloads the item and is announced.
 private struct ItemDetailMoreMenu: ViewModifier {
     let model: ItemDetailModel
     let serverURL: URL?
@@ -37,9 +40,17 @@ private struct ItemDetailMoreMenu: ViewModifier {
     /// The playlist editor doesn't exist yet.
     private static let canEditPlaylists = false
 
+    /// What the ebook actions are made for.
+    private struct EbookActionsKey: Hashable {
+        let client: ObjectIdentifier?
+        let model: ObjectIdentifier
+    }
+
     func body(content: Content) -> some View {
         let canShare = serverURL != nil
         let canRoute = router != nil
+        // Read once, so the menu depends on it explicitly and its closures capture this one.
+        let ebookActions = ebookActions.flatMap { $0.itemID == model.itemID ? $0 : nil }
         content
             .modifier(
                 DetailMoreMenu(model: model) { [model] isGone in
@@ -49,14 +60,22 @@ private struct ItemDetailMoreMenu: ViewModifier {
                 } entry: { action in
                     entry(action)
                 } extra: { isGone in
-                    ebookEntries(isGone: isGone)
+                    if let ebookActions {
+                        ebookEntries(ebookActions, isGone: isGone)
+                    }
                 }
             )
             .sheet(isPresented: $showsDetails) {
                 ItemDetailInfoSheet(model: model)
             }
-            .task(id: accounts?.client.map(ObjectIdentifier.init)) {
-                ebookActions = accounts?.client.map { EbookActionsModel(itemID: model.itemID, service: $0) }
+            .task(
+                id: EbookActionsKey(client: accounts?.client.map(ObjectIdentifier.init), model: ObjectIdentifier(model))
+            ) {
+                self.ebookActions = accounts?.client.map { EbookActionsModel(itemID: model.itemID, service: $0) }
+            }
+            .onChange(of: model.isLoading) { _, isLoading in
+                // A load that succeeded makes the files current after a failed reload.
+                if !isLoading, model.hasLoaded, model.error == nil { ebookActions?.itemDidLoad() }
             }
             .alert(
                 Text(verbatim: ebookFeedback?.alertTitle ?? ""), isPresented: $showsEbookFeedback,
@@ -70,34 +89,43 @@ private struct ItemDetailMoreMenu: ViewModifier {
             }
     }
 
-    @ViewBuilder private func ebookEntries(isGone: Bool) -> some View {
-        if let ebookActions {
-            let authorization = accounts?.authorization
-            ItemDetailEbookEntries(
-                devices: EbookActionsModel.devices(
-                    authorization: authorization, ebookFiles: model.ebookFiles, isGone: isGone),
-                statusChanges: EbookActionsModel.statusChanges(
-                    authorization: authorization, ebookFiles: model.ebookFiles, isGone: isGone),
-                isBusy: ebookActions.isBusy,
-                send: { deviceName in
-                    Task { show(await ebookActions.send(to: deviceName)) }
-                },
-                apply: { change in
-                    Task {
-                        let outcome = await ebookActions.apply(change)
-                        if case .statusChanged = outcome { await model.load() }
-                        show(outcome)
+    private func ebookEntries(_ ebookActions: EbookActionsModel, isGone: Bool) -> some View {
+        let authorization = accounts?.authorization
+        return ItemDetailEbookEntries(
+            devices: EbookActionsModel.devices(authorization: authorization, item: model.item, isGone: isGone),
+            statusChanges: ebookActions.offeredStatusChanges(
+                authorization: authorization, item: model.item, isGone: isGone),
+            isBusy: ebookActions.isBusy,
+            send: { deviceName in
+                guard !ebookActions.isBusy else { return }
+                AccessibilityNotification.Announcement(
+                    EbookActionsPresentation.sendingAnnouncement(deviceName: deviceName)
+                ).post()
+                Task { show(await ebookActions.send(to: deviceName)) }
+            },
+            apply: { change in
+                Task {
+                    // What would be offered now: the item may have changed since the menu opened.
+                    let offered = ebookActions.offeredStatusChanges(
+                        authorization: accounts?.authorization, item: model.item,
+                        isGone: isGone || (model.error as? APIError) == .notFound)
+                    let outcome = await ebookActions.apply(change, offered: offered) {
+                        await model.load()
+                        return model.error == nil
                     }
-                })
-        }
+                    show(outcome)
+                }
+            })
     }
 
+    /// Shows an alert, which VoiceOver reads, or else announces the outcome.
     private func show(_ outcome: EbookActionsModel.Outcome) {
         guard let feedback = EbookActionsPresentation.feedback(for: outcome) else { return }
-        AccessibilityNotification.Announcement(feedback.announcement).post()
         if feedback.alertTitle != nil {
             ebookFeedback = feedback
             showsEbookFeedback = true
+        } else {
+            AccessibilityNotification.Announcement(feedback.announcement).post()
         }
     }
 

@@ -6,14 +6,19 @@ import SwiftUI
 /// What the book screen shows after an ebook action (``EbookActionsModel/Outcome``): an alert
 /// title and optional message, and the text VoiceOver announces. The app has no toast, so a send
 /// confirms with an alert, as a failure does; a status change shows in the ebook files table and
-/// is only announced.
+/// is only announced. The view announces only when there's no alert, which VoiceOver reads.
 enum EbookActionsPresentation {
     struct Feedback: Hashable {
         /// `nil` when nothing needs dismissing.
         let alertTitle: String?
-        /// The server's text for a failure, if it sent one.
+        /// The server's explanation of a failure, if it's worth showing.
         let alertMessage: String?
         let announcement: String
+    }
+
+    /// Announced when a send starts, as it can take a while.
+    static func sendingAnnouncement(deviceName: String) -> String {
+        L10n.string("MessageItemDetailEbookSending", deviceName)
     }
 
     /// `nil` for ``EbookActionsModel/Outcome/ignored``.
@@ -44,8 +49,9 @@ enum EbookActionsPresentation {
     }
 }
 
-/// The book More menu's ebook entries: Send ebook to device, a submenu of the user's e-readers,
-/// and Set as primary / Set as supplementary for each ebook file. Disabled while one runs.
+/// The book More menu's ebook entries, in a section headed Ebook: Send ebook to device, a submenu
+/// of the user's e-readers, and Set as primary / Set as supplementary for each ebook file, with
+/// its filename. Disabled while one runs; Send's icon shows progress meanwhile.
 struct ItemDetailEbookEntries: View {
     let devices: [EReaderDevice]
     let statusChanges: [EbookActionsModel.StatusChange]
@@ -54,6 +60,16 @@ struct ItemDetailEbookEntries: View {
     let apply: (EbookActionsModel.StatusChange) -> Void
 
     var body: some View {
+        if !devices.isEmpty || !statusChanges.isEmpty {
+            Section {
+                entries
+            } header: {
+                Text(verbatim: L10n.string("LabelEbook"))
+            }
+        }
+    }
+
+    @ViewBuilder private var entries: some View {
         if !devices.isEmpty {
             Menu {
                 Section {
@@ -71,7 +87,11 @@ struct ItemDetailEbookEntries: View {
                 Label {
                     Text(verbatim: L10n.string("ButtonSendEbookToDevice"))
                 } icon: {
-                    Image(systemName: "paperplane")
+                    if isBusy {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "paperplane")
+                    }
                 }
             }
             .disabled(isBusy)
@@ -82,8 +102,8 @@ struct ItemDetailEbookEntries: View {
             } label: {
                 Label {
                     Text(verbatim: L10n.string(change.titleKey))
-                    // Which file, when there is more than one to tell apart.
-                    if statusChanges.count > 1, !change.filename.isEmpty {
+                    // Which file it applies to.
+                    if !change.filename.isEmpty {
                         Text(verbatim: change.filename)
                     }
                 } icon: {

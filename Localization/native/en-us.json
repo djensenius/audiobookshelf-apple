@@ -164,6 +164,7 @@
   "MessageItemDetailEbookNowPrimary": "{0} is now the primary ebook.",
   "MessageItemDetailEbookNowSupplementary": "{0} is now a supplementary ebook.",
   "MessageItemDetailEbookSendFailed": "Couldn't send the ebook to {0}.",
+  "MessageItemDetailEbookSending": "Sending the ebook to {0}…",
   "MessageItemDetailEbookSent": "Ebook sent to {0}.",
   "MessageItemDetailEbookStatusFailed": "Couldn't change the ebook's status.",
   "MessageItemDetailLoadFailed": "Couldn't load this item.",

@@ -25,26 +25,32 @@ extension APIClient: EbookActionsService {
 /// The book More menu's ebook actions: Send ebook to device (legacy `ItemMoreMenuModal.vue`) and,
 /// like the web client's ebook files table, Set as primary / Set as supplementary.
 ///
-/// Gating, from the signed-in user's ``AuthResponse``:
-/// - Send to device needs a primary ebook (the server only sends `media.ebookFile`) and at least
-///   one device in ``AuthResponse/ereaderDevices``, which the server already limits to the
-///   devices this user may use.
+/// Gating, from the signed-in user's ``AuthResponse`` and the loaded item:
+/// - Send to device needs a primary ebook (`media.ebookFile`, the only file the server sends)
+///   and at least one device in ``AuthResponse/ereaderDevices``, which the server already limits
+///   to the devices this user may use.
 /// - Changing a file's status needs the update permission on an active user (server
-///   `User.canUpdate`); the server answers 403 otherwise.
+///   `User.canUpdate`; 403 otherwise), a book, and a file with an inode. The server flips the
+///   file's own `isSupplementary` (`LibraryItemController.updateEbookFileStatus`), so that, not
+///   `media.ebookFile`, says which way a change goes; the two disagree on legacy data.
+/// - ``offeredStatusChanges(authorization:item:isGone:)`` stays empty after a change whose reload
+///   failed (``needsReload``), until the item loads again (``itemDidLoad()``), so it never offers
+///   the pre-change direction.
 /// - Neither is offered once the item is gone from the server.
 ///
-/// One action runs at a time (``isBusy``); each returns an ``Outcome`` for the view to show and
-/// announce. After a status change, the caller reloads the item to show the new primary file.
+/// One action runs at a time (``isBusy``), a status change through its reload. A tap is checked
+/// against the changes offered at that moment and dropped if the item changed meanwhile. Each
+/// action returns an ``Outcome`` for the view to show and announce.
 @MainActor
 @Observable
 public final class EbookActionsModel {
     /// A file's status change, as the menu offers it.
     public struct StatusChange: Sendable, Hashable, Identifiable {
-        /// The file's inode, ``ItemDetailModel/EbookFileRow/id``.
+        /// The file's inode, ``LibraryFile/ino``.
         public let id: String
         /// May be empty when the server sent no file metadata.
         public let filename: String
-        /// The change makes the file primary; otherwise it makes the primary file supplementary.
+        /// The change makes the file primary; otherwise it makes the file supplementary.
         public let makesPrimary: Bool
 
         public init(id: String, filename: String, makesPrimary: Bool) {
@@ -65,17 +71,23 @@ public final class EbookActionsModel {
         case sent(deviceName: String)
         /// The file's status changed as `change` asked.
         case statusChanged(StatusChange)
-        /// The send failed. `message` is the server's text, if it sent one.
+        /// The send failed. `message` is the server's explanation (``serverMessage(_:)``).
         case sendFailed(deviceName: String, message: String?)
-        /// The status change failed. `message` is the server's text, if it sent one.
+        /// The status change failed. `message` is the server's explanation (``serverMessage(_:)``).
         case statusChangeFailed(message: String?)
-        /// Another action was running; nothing was sent.
+        /// Another action was running, or the change is no longer offered; nothing was sent.
         case ignored
     }
 
+    /// The longest server text shown; longer bodies are pages or dumps, not explanations.
+    static let maxMessageLength = 200
+
     public let itemID: String
-    /// An action is in flight; the menu disables the ebook entries meanwhile.
+    /// An action is in flight, a status change until its reload ends; the menu disables the
+    /// ebook entries meanwhile.
     public private(set) var isBusy = false
+    /// The reload after a status change failed, so the item's files may be stale.
+    public private(set) var needsReload = false
 
     @ObservationIgnored private let service: any EbookActionsService
 
@@ -88,20 +100,36 @@ public final class EbookActionsModel {
 
     /// The devices to offer for Send ebook to device, in the server's order; empty when it isn't
     /// offered.
-    public static func devices(
-        authorization: AuthResponse?, ebookFiles: [ItemDetailModel.EbookFileRow], isGone: Bool
-    ) -> [EReaderDevice] {
-        guard !isGone, ebookFiles.contains(where: \.isPrimary) else { return [] }
+    public static func devices(authorization: AuthResponse?, item: LibraryItem?, isGone: Bool) -> [EReaderDevice] {
+        guard !isGone, item?.book?.ebookFile != nil else { return [] }
         return (authorization?.ereaderDevices ?? []).filter { !$0.name.isEmpty }
     }
 
-    /// The status changes to offer, one per ebook file in `ebookFiles` order; empty without the
-    /// update permission.
+    /// The status changes to offer, one per ebook file with an inode, in the item's order; empty
+    /// without the update permission or for items that aren't books.
     public static func statusChanges(
-        authorization: AuthResponse?, ebookFiles: [ItemDetailModel.EbookFileRow], isGone: Bool
+        authorization: AuthResponse?, item: LibraryItem?, isGone: Bool
     ) -> [StatusChange] {
-        guard !isGone, let user = authorization?.user, user.permissions.update, user.isActive else { return [] }
-        return ebookFiles.map { StatusChange(id: $0.id, filename: $0.filename, makesPrimary: !$0.isPrimary) }
+        guard !isGone, let user = authorization?.user, user.permissions.update, user.isActive,
+            let item, item.book != nil
+        else { return [] }
+        return (item.libraryFiles ?? []).compactMap { file in
+            guard file.fileType == "ebook", !file.ino.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+            return StatusChange(
+                id: file.ino, filename: file.metadata?.filename ?? "", makesPrimary: file.isSupplementary == true)
+        }
+    }
+
+    /// ``statusChanges(authorization:item:isGone:)`` for this model's item, hidden while
+    /// ``needsReload``.
+    public func offeredStatusChanges(authorization: AuthResponse?, item: LibraryItem?, isGone: Bool) -> [StatusChange] {
+        guard !needsReload, item?.id == itemID else { return [] }
+        return Self.statusChanges(authorization: authorization, item: item, isGone: isGone)
+    }
+
+    /// The item loaded successfully; its files are current again.
+    public func itemDidLoad() {
+        needsReload = false
     }
 
     // MARK: Actions
@@ -119,25 +147,32 @@ public final class EbookActionsModel {
         }
     }
 
-    /// Applies `change`; the caller reloads the item on success.
-    public func apply(_ change: StatusChange) async -> Outcome {
-        guard !isBusy else { return .ignored }
+    /// Applies `change` if `offered` (what the menu would offer now) still contains it, then
+    /// awaits `reload`, which returns whether the item loaded, before the entries are enabled
+    /// again. A failed reload sets ``needsReload``.
+    public func apply(
+        _ change: StatusChange, offered: [StatusChange], reload: () async -> Bool
+    ) async -> Outcome {
+        guard !isBusy, offered.contains(change) else { return .ignored }
         isBusy = true
         defer { isBusy = false }
         do {
             try await service.toggleEbookFileStatus(itemID: itemID, fileID: change.id)
-            return .statusChanged(change)
         } catch {
             return .statusChangeFailed(message: Self.serverMessage(error))
         }
+        needsReload = !(await reload())
+        return .statusChanged(change)
     }
 
-    /// The plain text the server sent with a failure, if any. A 404's text isn't kept by
-    /// ``APIError/notFound``.
+    /// The server's explanation of a failure, worth showing: only a 400's plain text (the
+    /// mailer's error, or "Invalid ebook file id"), and not when it looks like markup or is
+    /// longer than ``maxMessageLength``. Proxy pages (5xx), 401 and 403 bodies, and 404s (whose
+    /// text ``APIError/notFound`` drops) give `nil`, and the view shows its own message.
     static func serverMessage(_ error: any Error) -> String? {
-        switch error as? APIError {
-        case .http(_, let message), .forbidden(let message), .unauthorized(let message): message
-        default: nil
-        }
+        guard case .http(400, let message?) = error as? APIError,
+            !message.contains("<"), message.count <= maxMessageLength
+        else { return nil }
+        return message
     }
 }

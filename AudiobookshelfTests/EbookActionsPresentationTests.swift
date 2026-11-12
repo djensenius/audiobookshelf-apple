@@ -45,6 +45,12 @@ import Testing
                 == L10n.string("MessageItemDetailEbookNowSupplementary", L10n.string("LabelEbook")))
     }
 
+    @Test func sendingAnnouncementNamesDevice() {
+        let text = EbookActionsPresentation.sendingAnnouncement(deviceName: "Kindle")
+        #expect(text == L10n.string("MessageItemDetailEbookSending", "Kindle"))
+        #expect(text.contains("Kindle"))
+    }
+
     @Test func ignoredShowsNothing() {
         #expect(EbookActionsPresentation.feedback(for: .ignored) == nil)
     }
@@ -55,6 +61,8 @@ import Testing
             "ButtonSendEbookToDevice", "LabelSelectADevice", "LabelSetEbookAsPrimary", "LabelSetEbookAsSupplementary",
             "MessageItemDetailEbookSent", "MessageItemDetailEbookSendFailed", "MessageItemDetailEbookStatusFailed",
             "MessageItemDetailEbookNowPrimary", "MessageItemDetailEbookNowSupplementary",
+            "MessageItemDetailEbookSending",
+            "LabelEbook",
         ] {
             #expect(L10n.string(key) != key, "\(key)")
         }
