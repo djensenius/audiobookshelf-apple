@@ -149,8 +149,9 @@ private struct SeriesDetailHeader: View {
 #if DEBUG
     #Preview("Series detail") {
         @Previewable @State var model = SeriesAuthorsPreviewData.seriesDetail()
-        @Previewable @State var settings = UserDefaults(suiteName: "SeriesDetailPreview").map(
-            AppSettings.init(defaults:))
+        @Previewable @State var settings = UserDefaults(suiteName: "SeriesDetailPreview").map {
+            AppSettings(defaults: $0)
+        }
         NavigationStack {
             SeriesDetailContent(model: model)
         }
