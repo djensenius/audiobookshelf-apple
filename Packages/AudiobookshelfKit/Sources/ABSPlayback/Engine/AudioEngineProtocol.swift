@@ -22,15 +22,20 @@ public struct AudioEngineSource: Sendable, Hashable {
     /// user's streaming cellular setting, so the transport enforces it after a path change.
     /// `nil` leaves AVFoundation's defaults; local files ignore them.
     public let networkAccess: NetworkAccess?
+    /// Loads every track through this custom-header transport instead of a plain `AVURLAsset`
+    /// (ADR 0007 §6). The source keeps it alive while its assets play.
+    public let headerTransport: HeaderStreamingTransport?
 
     public init(
         timeline: PlaybackTimeline, trackURLs: [URL], trackMIMETypes: [String?] = [],
-        networkAccess: NetworkAccess? = nil, prefersPreciseTiming: Bool = false, seekTolerance: Double = 0
+        networkAccess: NetworkAccess? = nil, headerTransport: HeaderStreamingTransport? = nil,
+        prefersPreciseTiming: Bool = false, seekTolerance: Double = 0
     ) {
         self.timeline = timeline
         self.trackURLs = trackURLs
         self.trackMIMETypes = trackMIMETypes
         self.networkAccess = networkAccess
+        self.headerTransport = headerTransport
         self.prefersPreciseTiming = prefersPreciseTiming
         self.seekTolerance = seekTolerance.isFinite ? max(seekTolerance, 0) : 0
     }
