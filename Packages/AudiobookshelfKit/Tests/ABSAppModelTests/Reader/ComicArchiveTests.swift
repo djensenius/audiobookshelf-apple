@@ -53,6 +53,56 @@ import Testing
         try bytes.write(to: url)
     }
 
+    /// A central-directory record of ``makeRawZip(files:records:)``: `name` for the stored data of
+    /// `files[file]`, optionally claiming a ZIP64 size.
+    private struct Record {
+        var name: String
+        var file = 0
+        var claimedSize: UInt64?
+    }
+
+    /// Writes a ZIP of stored `files` by hand, with `records` in its central directory, which may
+    /// share local headers or forge sizes.
+    private func makeRawZip(files: [(String, Data)], records: [Record], name: String = "raw.cbz") throws -> URL {
+        var bytes = Data()
+        func put<T: FixedWidthInteger>(_ value: T) {
+            withUnsafeBytes(of: value.littleEndian) { bytes.append(contentsOf: $0) }
+        }
+        var offsets: [UInt32] = []
+        for (path, data) in files {
+            offsets.append(UInt32(bytes.count))
+            put(UInt32(0x0403_4B50))
+            put(UInt16(20)); put(UInt16(0)); put(UInt16(0)); put(UInt16(0)); put(UInt16(0x21))
+            put(data.crc32(checksum: 0)); put(UInt32(data.count)); put(UInt32(data.count))
+            put(UInt16(path.utf8.count)); put(UInt16(0))
+            bytes.append(contentsOf: path.utf8)
+            bytes.append(data)
+        }
+        let directoryOffset = bytes.count
+        for record in records {
+            let data = files[record.file].1
+            put(UInt32(0x0201_4B50))
+            put(UInt16(45)); put(UInt16(45)); put(UInt16(0)); put(UInt16(0)); put(UInt16(0)); put(UInt16(0x21))
+            put(data.crc32(checksum: 0))
+            let size: UInt32 = record.claimedSize == nil ? UInt32(data.count) : .max
+            put(size); put(size)
+            put(UInt16(record.name.utf8.count)); put(UInt16(record.claimedSize == nil ? 0 : 20)); put(UInt16(0))
+            put(UInt16(0)); put(UInt16(0)); put(UInt32(0)); put(offsets[record.file])
+            bytes.append(contentsOf: record.name.utf8)
+            if let claimed = record.claimedSize {
+                put(UInt16(1)); put(UInt16(16)); put(claimed); put(claimed)
+            }
+        }
+        let directorySize = bytes.count - directoryOffset
+        put(UInt32(0x0605_4B50))
+        put(UInt16(0)); put(UInt16(0)); put(UInt16(records.count)); put(UInt16(records.count))
+        put(UInt32(directorySize)); put(UInt32(directoryOffset)); put(UInt16(0))
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appending(path: name)
+        try bytes.write(to: url)
+        return url
+    }
+
     private func cachedFiles() -> Set<String> {
         Set((try? FileManager.default.contentsOfDirectory(atPath: cache.path)) ?? [])
     }
@@ -69,6 +119,16 @@ import Testing
     @Test func theLastNumberInTheBasenameCounts() {
         let order = ComicArchive.pageOrder(["vol2_page3.png", "vol9_page1.png", "vol1_page2.png"])
         #expect(order == ["vol9_page1.png", "vol1_page2.png", "vol2_page3.png"])
+    }
+
+    @Test func numbersCompareAsDoublesLikeJavaScript() {
+        // Both round to 2^53, so they keep their order, as `Number(a) - Number(b)` is 0.
+        let order = ComicArchive.pageOrder(["page9007199254740993.jpg", "page9007199254740992.jpg"])
+        #expect(order == ["page9007199254740993.jpg", "page9007199254740992.jpg"])
+        let huge = String(repeating: "9", count: 400)
+        // Both are infinite, so they're equal too.
+        let infinite = ComicArchive.pageOrder(["b\(huge)9.jpg", "a\(huge)8.jpg", "c1.jpg", "x.jpg"])
+        #expect(infinite == ["c1.jpg", "b\(huge)9.jpg", "a\(huge)8.jpg", "x.jpg"])
     }
 
     @Test func leadingZerosAndLongNumbersCompareByValue() {
@@ -186,6 +246,57 @@ import Testing
         #expect(throws: ComicArchiveError.tooManyFolders) {
             try ComicArchive(url: try makeZip(files), cacheDirectory: cache)
         }
+    }
+
+    @Test func anArchiveWithTooManyEntriesThrows() throws {
+        let image = [("1.jpg", Data("image".utf8))]
+        let atLimit = (0..<ComicArchive.maxEntries).map { Record(name: "\($0).jpg") }
+        let comic = try ComicArchive(url: try makeRawZip(files: image, records: atLimit), cacheDirectory: cache)
+        #expect(comic.pageCount == ComicArchive.maxEntries)
+        let overLimit = atLimit + [Record(name: "x.jpg")]
+        let url = try makeRawZip(files: image, records: overLimit, name: "over.cbz")
+        #expect(throws: ComicArchiveError.tooManyEntries) { try ComicArchive(url: url, cacheDirectory: cache) }
+    }
+
+    @Test func anArchiveWithTooLongPathsThrows() throws {
+        let long = String(repeating: "a", count: 60_000)
+        let count = ComicArchive.maxPathBytes / 60_000 + 1
+        let records = (0..<count).map { Record(name: "\(long)\($0).jpg") }
+        let url = try makeRawZip(files: [("1.jpg", Data("image".utf8))], records: records)
+        #expect(throws: ComicArchiveError.tooManyEntries) { try ComicArchive(url: url, cacheDirectory: cache) }
+    }
+
+    @Test func entriesSharingAHeaderAreReadAgainWhenExtracted() async throws {
+        let files = [("1.jpg", Data("one".utf8)), ("2.jpg", Data("two".utf8))]
+        let records = [Record(name: "2.jpg", file: 1), Record(name: "1.jpg", file: 0), Record(name: "3.jpg", file: 1)]
+        let comic = try ComicArchive(url: try makeRawZip(files: files, records: records), cacheDirectory: cache)
+        #expect(comic.pagePaths == ["1.jpg", "2.jpg", "3.jpg"])
+        #expect(try Data(contentsOf: try await comic.page(1)) == Data("one".utf8))
+        #expect(try Data(contentsOf: try await comic.page(3)) == Data("two".utf8))
+    }
+
+    @Test func entriesClaimingSizesOverInt64AreUnreadable() async throws {
+        let forged = UInt64(Int64.max) + 1
+        let files = [
+            ("1.jpg", Data("one".utf8)), ("ComicInfo.xml", Data("<ComicInfo><Title>T</Title></ComicInfo>".utf8)),
+        ]
+        let records = [
+            Record(name: "1.jpg"), Record(name: "2.jpg", claimedSize: forged),
+            Record(name: "ComicInfo.xml", file: 1, claimedSize: forged),
+        ]
+        let comic = try ComicArchive(url: try makeRawZip(files: files, records: records), cacheDirectory: cache)
+        #expect(comic.comicInfo == nil)
+        #expect(try Data(contentsOf: try await comic.page(1)) == Data("one".utf8))
+        await #expect(throws: ComicArchiveError.unreadablePage(2)) { try await comic.page(2) }
+    }
+
+    @Test func aRawZipWithoutForgedSizesIsRead() throws {
+        let files = [
+            ("1.jpg", Data("one".utf8)), ("ComicInfo.xml", Data("<ComicInfo><Title>T</Title></ComicInfo>".utf8)),
+        ]
+        let records = [Record(name: "1.jpg"), Record(name: "ComicInfo.xml", file: 1)]
+        let comic = try ComicArchive(url: try makeRawZip(files: files, records: records), cacheDirectory: cache)
+        #expect(comic.comicInfo?.title == "T")
     }
 
     @Test func opensAZipWithItsPagesInOrder() async throws {

@@ -17,6 +17,9 @@ public enum ComicArchiveError: Error, Equatable, Sendable {
     case pageTooLarge(Int)
     /// The entry paths make more than ``ComicArchive/maxFolders`` folders.
     case tooManyFolders
+    /// The archive has more than ``ComicArchive/maxEntries`` entries, or its paths are longer than
+    /// ``ComicArchive/maxPathBytes`` in total.
+    case tooManyEntries
 }
 
 /// A CBZ comic, read page by page (ADR 0008 §3).
@@ -29,6 +32,8 @@ public enum ComicArchiveError: Error, Equatable, Sendable {
 ///
 /// Entry sizes in the ZIP headers aren't trusted: extraction stops at ``maxPageBytes`` of output
 /// (64 MiB by default) and at 1 MiB for `ComicInfo.xml`, and each entry's CRC-32 is checked.
+/// ZIPFoundation's entries keep their headers, which many records can share, so only the paths are
+/// kept and an entry is read again when it's extracted.
 public actor ComicArchive {
     /// The entry paths of the pages; page `n` is `pagePaths[n - 1]`.
     public nonisolated let pagePaths: [String]
@@ -44,7 +49,8 @@ public actor ComicArchive {
     public nonisolated var pageCount: Int { pagePaths.count }
 
     private let archive: Archive
-    private let entries: [Entry]
+    /// The pages' positions among the archive's entries.
+    private let entryIndices: [Int]
     /// Cached pages, least recently requested first.
     private var cachedPages: [Int] = []
     /// How many entries were extracted, for tests.
@@ -56,6 +62,10 @@ public actor ComicArchive {
     /// The most folders the entry paths may make, so a small archive can't exhaust memory. A single
     /// path can make at most 32,768, as ZIP paths are under 64 KiB.
     public static let maxFolders = 1 << 16
+    /// The most entries an archive may have; comics have a few hundred.
+    public static let maxEntries = 10_000
+    /// The most bytes of entry paths an archive may have in total.
+    public static let maxPathBytes = 8 << 20
 
     /// Opens the archive at `url`. `cacheDirectory` is emptied: earlier contents may be pages of
     /// another file.
@@ -69,24 +79,32 @@ public actor ComicArchive {
         } catch {
             throw .notAZip
         }
-        let all = Array(archive)
-        let files = all.filter { $0.type == .file }
         // Other entries only create folders, which decide the web client's order.
-        guard
-            let fileOrder = Self.webFileOrder(
-                all.map { $0.type == .file || $0.path.hasSuffix("/") ? $0.path : $0.path + "/" })
-        else { throw .tooManyFolders }
+        var paths: [String] = []
+        // Byte-exact keys: `String` equality would merge canonically equivalent names.
+        var fileIndices: [[UInt8]: Int] = [:]
+        var pathBytes = 0
+        for (index, entry) in archive.enumerated() {
+            let path = entry.path
+            pathBytes += path.utf8.count
+            guard index < Self.maxEntries, pathBytes <= Self.maxPathBytes else { throw .tooManyEntries }
+            if entry.type == .file {
+                paths.append(path)
+                if fileIndices[Array(path.utf8)] == nil { fileIndices[Array(path.utf8)] = index }
+            } else {
+                paths.append(path.hasSuffix("/") ? path : path + "/")
+            }
+        }
+        guard let fileOrder = Self.webFileOrder(paths) else { throw .tooManyFolders }
         let pagePaths = Self.sortedPages(fileOrder)
         guard !pagePaths.isEmpty else { throw .noPages }
-        // Byte-exact keys: `String` equality would merge canonically equivalent names.
-        let byPath = Dictionary(files.map { (Array($0.path.utf8), $0) }, uniquingKeysWith: { first, _ in first })
 
         self.archive = archive
-        self.entries = pagePaths.compactMap { byPath[Array($0.utf8)] }
+        self.entryIndices = pagePaths.compactMap { fileIndices[Array($0.utf8)] }
         self.pagePaths = pagePaths
-        self.comicInfo = Self.comicInfoPath(in: fileOrder).flatMap { byPath[Array($0.utf8)] }.flatMap {
-            Self.readComicInfo($0, from: archive)
-        }
+        self.comicInfo = Self.comicInfoPath(in: fileOrder).flatMap { fileIndices[Array($0.utf8)] }.flatMap {
+            Self.entry(at: $0, in: archive)
+        }.flatMap { Self.readComicInfo($0, from: archive) }
         self.cacheDirectory = cacheDirectory
         self.maxCachedPages = max(maxCachedPages, 1)
         self.maxPageBytes = maxPageBytes
@@ -110,7 +128,10 @@ public actor ComicArchive {
         cachedPages.removeAll { $0 == number }
         do {
             try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
-            try extract(entries[number - 1], to: url)
+            guard let entry = Self.entry(at: entryIndices[number - 1], in: archive) else {
+                throw ExtractionError.unreadable
+            }
+            try extract(entry, to: url)
         } catch ExtractionError.tooLarge {
             try? FileManager.default.removeItem(at: url)
             throw .pageTooLarge(number)
@@ -153,6 +174,9 @@ public actor ComicArchive {
     private static func extract(
         _ entry: Entry, from archive: Archive, consumer: (Data) throws -> Void
     ) throws(ExtractionError) -> CRC32 {
+        // ZIPFoundation 0.9.20 converts these sizes to `Int64` unchecked, which traps.
+        let limit = UInt64(Int64.max)
+        guard entry.compressedSize <= limit, entry.uncompressedSize <= limit else { throw .unreadable }
         do {
             return try archive.extract(entry, skipCRC32: false, consumer: consumer)
         } catch ExtractionError.tooLarge {
@@ -160,6 +184,15 @@ public actor ComicArchive {
         } catch {
             throw .unreadable
         }
+    }
+
+    /// The entry at `index` in archive order.
+    private static func entry(at index: Int, in archive: Archive) -> Entry? {
+        let entries = archive.makeIterator()
+        for _ in 0..<index {
+            guard entries.next() != nil else { return nil }
+        }
+        return entries.next()
     }
 
     /// Deletes the extracted pages and the cache directory. Later pages are extracted again.
@@ -201,7 +234,8 @@ extension ComicArchive {
         }
         let numbered = pages.filter { $0.number != nil }.sorted { lhs, rhs in
             guard let left = lhs.number, let right = rhs.number else { return false }
-            if left != right { return left.count != right.count ? left.count < right.count : left < right }
+            // Equal numbers, including two infinities, keep their order, like JavaScript's `a - b`.
+            if left != right { return left < right }
             return lhs.offset < rhs.offset
         }
         return (numbered + pages.filter { $0.number == nil }).map(\.path)
@@ -335,17 +369,16 @@ extension ComicArchive {
         return components.dropLast().contains { $0.hasPrefix("_") || $0.hasPrefix(".") }
     }
 
-    /// The last run of ASCII digits in the file name without its extension, without leading zeros
-    /// (`"0"` for zero), so numbers of any length compare by length and then digits. Digits are
+    /// The last run of ASCII digits in the file name without its extension, as a `Double` like
+    /// JavaScript's `Number(...)`: long numbers round, and very long ones are infinite. Digits are
     /// found by scalar, like JavaScript's `/\d+/`, so the `1` of `1️⃣` counts.
-    private static func lastNumber(inBasenameOf path: String) -> String? {
+    private static func lastNumber(inBasenameOf path: String) -> Double? {
         let name = (path as NSString).lastPathComponent
         let basename = Array((name as NSString).deletingPathExtension.unicodeScalars)
         func isDigit(_ scalar: Unicode.Scalar) -> Bool { ("0"..."9").contains(scalar) }
         guard let end = basename.lastIndex(where: isDigit) else { return nil }
         let start = basename[..<end].lastIndex { !isDigit($0) }.map { $0 + 1 } ?? 0
-        let digits = basename[start...end].drop { $0 == "0" }
-        return digits.isEmpty ? "0" : String(String.UnicodeScalarView(digits))
+        return Double(String(String.UnicodeScalarView(basename[start...end])))
     }
 }
 
