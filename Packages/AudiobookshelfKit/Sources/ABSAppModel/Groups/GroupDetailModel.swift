@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSRealtime
 import Foundation
 import Observation
 
@@ -47,6 +48,9 @@ public struct GroupDetail: Sendable, Hashable, Identifiable {
 /// How a ``GroupDetailModel`` loads its group.
 public protocol GroupDetailKind: Sendable {
     static func detail(id: String, service: any GroupsService) async throws -> GroupDetail
+    /// `change` as a change to a group of this kind seen by the user `userID`, or `nil` if it's
+    /// another kind or another user's playlist.
+    static func groupChange(_ change: LibraryChange, userID: String?) -> LibraryEntityChange<GroupDetail>?
 }
 
 /// Loads `GET /api/collections/:id`.
@@ -54,12 +58,22 @@ public enum CollectionGroupKind: GroupDetailKind {
     public static func detail(id: String, service: any GroupsService) async throws -> GroupDetail {
         GroupDetail(collection: try await service.collectionDetail(id: id))
     }
+
+    public static func groupChange(_ change: LibraryChange, userID: String?) -> LibraryEntityChange<GroupDetail>? {
+        guard case .collection(let change) = change else { return nil }
+        return change.map(GroupDetail.init(collection:))
+    }
 }
 
 /// Loads `GET /api/playlists/:id`.
 public enum PlaylistGroupKind: GroupDetailKind {
     public static func detail(id: String, service: any GroupsService) async throws -> GroupDetail {
         GroupDetail(playlist: try await service.playlistDetail(id: id))
+    }
+
+    public static func groupChange(_ change: LibraryChange, userID: String?) -> LibraryEntityChange<GroupDetail>? {
+        guard case .playlist(let change, let owner) = change, owner == userID else { return nil }
+        return change.map(GroupDetail.init(playlist:))
     }
 }
 
@@ -80,6 +94,9 @@ public typealias PlaylistDetailModel = GroupDetailModel<PlaylistGroupKind>
 /// - Progress and ``nextToPlay`` are read from the cache on every access, so a view reading
 ///   them invalidates when one of its members' cache entries changes.
 /// - Play-all is data only: the model never starts playback.
+///
+/// ``apply(_:)`` follows the server's changes to the group, like the legacy playlist page: an
+/// update replaces it, and a removal shows it as not found.
 ///
 /// A model belongs to one group, client and account: it holds the signed-in account's service
 /// and that account's ``ProgressCache``. Views recreate it per group ID and under the session's
@@ -103,6 +120,8 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
     }
 
     public let groupID: String
+    /// The signed-in user, whose playlists ``apply(_:)`` follows.
+    public let userID: String?
 
     /// The last loaded group; kept while reloading and after a failed reload, dropped on 404.
     public private(set) var detail: GroupDetail?
@@ -116,8 +135,9 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
     @ObservationIgnored private let cache: ProgressCache
     @ObservationIgnored private var sequence = 0
 
-    public init(id: String, service: any GroupsService, cache: ProgressCache) {
+    public init(id: String, service: any GroupsService, cache: ProgressCache, userID: String? = nil) {
         groupID = id
+        self.userID = userID
         self.service = service
         self.cache = cache
     }
@@ -168,6 +188,21 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
                 isNotFound = true
                 detail = nil
             }
+        }
+    }
+
+    /// Applies a change the server pushed to this group, once it has loaded. Other groups, kinds
+    /// and users' playlists are ignored.
+    public func apply(_ change: LibraryChange) {
+        guard detail != nil, let change = Kind.groupChange(change, userID: userID) else { return }
+        switch change {
+        case .added(let group, _), .updated(let group, _):
+            guard group.id == groupID else { return }
+            detail = group
+        case .removed(let id, _):
+            guard id == groupID else { return }
+            isNotFound = true
+            detail = nil
         }
     }
 

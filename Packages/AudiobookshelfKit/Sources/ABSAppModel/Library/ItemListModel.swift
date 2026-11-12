@@ -205,6 +205,30 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
         itemAppeared(at: index)
     }
 
+    /// Replaces the loaded item with `item`'s ID, for a change the server pushed. Returns whether
+    /// it was loaded.
+    @discardableResult
+    public func replaceItem(_ item: Item) -> Bool {
+        guard let index = indexByID[item.id] else { return false }
+        items[index] = item
+        return true
+    }
+
+    /// Removes the loaded item with `id`, for a removal the server pushed, and lowers ``total``.
+    /// The server's later rows move up a place, so a list that hasn't reached its end refreshes:
+    /// its next page would otherwise skip one. Returns whether the item was loaded.
+    @discardableResult
+    public func removeItem(id: Item.ID) -> Bool {
+        guard let index = indexByID.removeValue(forKey: id) else { return false }
+        items.remove(at: index)
+        for (later, item) in items[index...].enumerated() {
+            indexByID[item.id] = index + later
+        }
+        total = total.map { max($0 - 1, 0) }
+        if !reachedEnd { refresh() }
+        return true
+    }
+
     private func finish(_ result: Result<PagedResults<Item>, any Error>, generation: Int) {
         // A reset since the request started owns the state now.
         guard generation == self.generation else { return }

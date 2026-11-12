@@ -26,16 +26,21 @@ struct GroupDetailView<Kind: GroupScreenKind>: View {
             }
         }
         .task(id: key) {
-            host = .updated(host, for: key, store: store) { _, services, progress in
-                GroupDetailModel(id: groupID, service: services, cache: progress)
+            host = .updated(host, for: key, store: store) { key, services, progress in
+                let model = GroupDetailModel<Kind>(
+                    id: groupID, service: services, cache: progress, userID: key.connection.userID)
+                store?.observeLibraryChanges(connectionKey: key.connection, owner: model) { [weak model] in
+                    model?.apply($0)
+                }
+                return model
             }
             await host?.model.loadIfNeeded()
         }
     }
 }
 
-/// The group screen for one model in the library `libraryID`; previews give it a fixture service. It doesn't follow
-/// the server's updates to the group yet (#355); pull to refresh or ⌘R reloads it.
+/// The group screen for one model in the library `libraryID`; previews give it a fixture service. Pull to refresh or
+/// ⌘R reloads it.
 struct GroupDetailContent<Kind: GroupScreenKind>: View {
     let model: GroupDetailModel<Kind>
     let libraryID: String

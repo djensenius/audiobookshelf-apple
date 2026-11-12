@@ -25,7 +25,11 @@ struct GroupListView: View {
         .navigationTitle(Text(verbatim: L10n.string(GroupPresentation.tab(kind).titleKey)))
         .task(id: key) {
             host = .updated(host, for: key, store: store) { key, services, _ in
-                GroupPresentation.makeList(kind, key: key, services: services)
+                let model = GroupPresentation.makeList(kind, key: key, services: services)
+                store?.observeLibraryChanges(connectionKey: key.connection, owner: model) { [weak model, kind] in
+                    model?.apply($0, kind: kind)
+                }
+                return model
             }
             if let model = host?.model, model.items.isEmpty, !model.reachedEnd {
                 await model.loadNextPage()?.value
