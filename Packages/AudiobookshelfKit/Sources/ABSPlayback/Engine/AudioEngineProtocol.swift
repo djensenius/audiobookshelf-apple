@@ -136,7 +136,8 @@ public protocol AudioEngineProtocol: AnyObject, Observable {
     /// Clears the queue as ``stop()`` does but leaves the audio session active, for switching
     /// items: deactivating notifies other apps, whose audio could resume briefly in between.
     /// ``isAudioSessionActive`` is cleared, as it describes the loaded media, and the next play
-    /// activates again. Call ``stop()`` when no item follows.
+    /// activates again; if that activation fails, the kept session is deactivated (the media
+    /// stays loaded for a retry). Call ``stop()`` when no item follows.
     func unload()
     /// Seeks to a global time, rebuilding the queue when the target is in another track.
     @discardableResult
