@@ -21,15 +21,20 @@ import UniformTypeIdentifiers
     }
 
     @Test func concurrentLoadsShareOneFetch() async throws {
-        let host = PipelineHarness.pngRoute(delay: .milliseconds(200))
+        let gate = Gate()
+        let host = PipelineHarness.pngRoute(gate: gate)
         let (pipeline, _) = await harness.make(host: host)
         let key = key()
-        let gridBox = gridBox
+        let (gridBox, smallBox) = (gridBox, PixelBox(width: 192, height: 288))
         let images = try await withThrowingTaskGroup(of: CoverImage.self) { group in
             for _ in 0..<10 {
                 group.addTask { try await pipeline.image(for: key, pixelBox: gridBox) }
             }
-            group.addTask { try await pipeline.image(for: key, pixelBox: PixelBox(width: 192, height: 288)) }
+            group.addTask { try await pipeline.image(for: key, pixelBox: smallBox) }
+            // Every caller joins before the response, so none can start a second fetch.
+            #expect(await pipeline.waitForWaiters(key, box: gridBox, fetch: 2, decode: 10))
+            #expect(await pipeline.waitForWaiters(key, box: smallBox, fetch: 2, decode: 1))
+            gate.open()
             return try await group.reduce(into: []) { $0.append($1) }
         }
         #expect(ImageStubProtocol.route(host)?.requests.count == 1)
@@ -172,6 +177,8 @@ import UniformTypeIdentifiers
         let leaving = Task { try await pipeline.image(for: key, pixelBox: gridBox) }
         let staying = Task { try await pipeline.image(for: key, pixelBox: gridBox) }
         await ImageStubProtocol.wait(for: host) { $0.requests.count == 1 }
+        // Cancelling before `staying` joins would abandon the only waiter's fetch.
+        #expect(await pipeline.waitForWaiters(key, box: gridBox, fetch: 1, decode: 2))
         leaving.cancel()
         await #expect(throws: CancellationError.self) { try await leaving.value }
         gate.open()
@@ -188,6 +195,7 @@ import UniformTypeIdentifiers
         let leaving = Task { try await pipeline.image(for: key, pixelBox: gridBox) }
         let staying = Task { try await pipeline.image(for: key, pixelBox: PixelBox(width: 192, height: 288)) }
         await ImageStubProtocol.wait(for: host) { $0.requests.count == 1 }
+        #expect(await pipeline.waitForWaiters(key, box: gridBox, fetch: 2, decode: 1))
         leaving.cancel()
         await #expect(throws: CancellationError.self) { try await leaving.value }
         gate.open()

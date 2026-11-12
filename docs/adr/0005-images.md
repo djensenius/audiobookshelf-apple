@@ -330,21 +330,26 @@ static, unauthenticated remote images (none are planned).
   1. memory LRU;
   2. downloaded cover file, from the injected `DownloadedCoverLookup`. It is used
      when the item is downloaded and its `coverUpdatedAt` is not older than the
-     key's `updatedAt`. Offline, it is used whatever its age;
-  3. `CoverFileStore`;
-  4. network.
+     key's `updatedAt`;
+  3. `CoverFileStore`, which holds only the exact requested version;
+  4. network;
+  5. offline, or when the network fails: a downloaded cover older than the
+     key's `updatedAt` (see the stale offline fallback below).
 
-  Steps 2–4 decode off the actor in a `@concurrent` function. Concurrent decodes
+  So offline, the exact version cached in `CoverFileStore` wins over an older
+  downloaded cover (amended in #143, as decided on #43).
+
+  Steps 2–5 decode off the actor in a `@concurrent` function. Concurrent decodes
   are capped at 4 on iPhone and at the active processor count on iPad and Mac.
   At most one of them may hold the **large-decode slot**, which any decode whose
   pixel box is larger than 512 × 832 px in area (for example the 1200 × 1200
   player box), any normalizing decode (see Decoding), and the Now Playing
   provider's downsampling must take (see the memory budget below).
-- **Stale offline fallback:** when step 2 uses a downloaded cover whose
-  `coverUpdatedAt` is older than the requested key's `updatedAt` (offline only),
+- **Stale offline fallback:** when step 5 uses a downloaded cover whose
+  `coverUpdatedAt` is older than the requested key's `updatedAt`,
   the image is shown but is **not** stored in the memory LRU under the requested
   key. It is cached under the fallback's own version key (the same key with
-  `updatedAt` = `coverUpdatedAt`), which step 2 checks before decoding the file
+  `updatedAt` = `coverUpdatedAt`), which step 5 checks before decoding the file
   again. Nothing is written to `CoverFileStore`. Once the device is back
   online, a load of the requested key misses the LRU, skips the stale file, and
   fetches the new cover.
@@ -353,7 +358,7 @@ static, unauthenticated remote images (none are planned).
     in, even when it's in memory.
 - **Deduplication and cancellation** (two levels, so views that need the same
   bucket at different pixel sizes share a fetched file but not a decode):
-  - **Fetch:** getting the encoded input for steps 2–4 (downloaded file,
+  - **Fetch:** getting the encoded input for steps 2–5 (downloaded file,
     `CoverFileStore`, or network) is a `[ImageKey: Task]` entry. There is at
     most one fetch per `ImageKey`. Its result is a **file URL**, never `Data`,
     and records the version it actually holds, which the stale-fallback rule
@@ -473,7 +478,9 @@ static, unauthenticated remote images (none are planned).
       sizes table).
     - **Full passes** run at launch and when the app enters the background.
       Each pass enumerates the folder and resets the size counter from what it
-      finds, which also picks up files the OS purged.
+      finds, which also picks up files the OS purged. The folder is listed off
+      the actor, so lookups and inserts aren't blocked meanwhile; files written
+      or touched during the listing are counted from their current state.
     - **During a session:** the store keeps its total size in bytes in memory.
       It is scanned at launch (`totalFileAllocatedSizeKey`) and updated on
       every write and delete. When a write pushes the total over the cap, the
@@ -542,7 +549,8 @@ static, unauthenticated remote images (none are planned).
     on every device we target.
   - If a later fetch shows a newer `updatedAt`, the cover is refreshed in the
     background.
-  - Offline, the pipeline always takes the downloaded file over the network.
+  - Offline, the pipeline takes the downloaded file whatever its age, unless
+    `CoverFileStore` holds the exact requested version.
 - **Widgets** (P5-11b, #89):
   - `WidgetSnapshotWriter` records each snapshot item's `ImageKey` (300 bucket).
   - Before reloading timelines it calls
