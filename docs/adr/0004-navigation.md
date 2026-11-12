@@ -396,6 +396,7 @@ ArrangementView { primary } secondary: { secondary }
 
 - The view splits side by side only when the area is wider than tall: inner landscape, book pose, iPad landscape and Mac windows. Otherwise only the primary pane shows.
 - The primary pane reads `splitArrangementAxis`. When it is `nil` (not split), the primary pane shows the secondary content inline (detail) or offers it as a sheet (player).
+- *Amended by #84:* an active vertical `.division` splits the player at any size class, so a compact window across the fold never gets the column, whose scrubber and transport would cross the hinge.
 - **Player panes.** Primary is Now Playing: artwork, title, chapter, scrubber and transport. Secondary is Chapters, Up Next, Bookmarks or Description.
 - **Detail panes.** Primary is the cover, metadata and actions. Secondary is the description, chapters, tracks or episodes.
 

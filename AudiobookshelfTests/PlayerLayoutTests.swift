@@ -58,13 +58,15 @@ import Testing
         }
     }
 
-    /// A vertical fold at compact sizes (a compact window on a folding display) keeps the column;
-    /// only a vertical bar moves the transport.
-    @Test func aVerticalFoldAtCompactSizesKeepsTheColumn() {
-        for verticalToolbar in [false, true] {
-            let layout = resolve(
-                regularWidth: false, regularHeight: true, fold: .vertical, verticalToolbar: verticalToolbar)
-            #expect(layout == PlayerLayout(arrangement: .column, transportInToolbar: verticalToolbar))
+    /// An active vertical fold splits at every size, including a compact window across it, so the
+    /// column's scrubber and transport never cross the hinge; the transport stays in the pane.
+    @Test func aVerticalFoldSplitsAtEverySize() {
+        for (width, height) in [(false, false), (false, true), (true, false), (true, true)] {
+            for verticalToolbar in [false, true] {
+                let layout = resolve(
+                    regularWidth: width, regularHeight: height, fold: .vertical, verticalToolbar: verticalToolbar)
+                #expect(layout == PlayerLayout(arrangement: .split, transportInToolbar: false))
+            }
         }
     }
 

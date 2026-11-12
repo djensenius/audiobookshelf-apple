@@ -28,11 +28,13 @@ enum PlayerFold: Equatable {
 struct PlayerLayout: Equatable {
     enum Arrangement: Equatable, CaseIterable {
         /// One column: the cover, titles, scrubber, transport and secondary controls. The only
-        /// layout before iOS 27.1, on macOS and in compact sizes, such as the Duo's outer display.
+        /// layout before iOS 27.1, on macOS and in compact sizes without a fold, such as the Duo's
+        /// outer display.
         case column
         /// An `ArrangementView` with the `.split.axes(.horizontal)` style at a 0.5 ratio: the cover
         /// and controls as primary, chapters, Up Next and bookmarks as secondary. Regular width
-        /// and height, such as the Duo's inner display, flat or in book pose. It only splits when
+        /// and height, such as the Duo's inner display lying flat, or any size across a vertical
+        /// fold (book pose), so nothing crosses the hinge. It only splits when
         /// wider than tall (ADR 0004); otherwise, as on an iPad in portrait, the primary fills it
         /// and the details open as sheets.
         case split
@@ -65,7 +67,11 @@ struct PlayerLayout: Equatable {
         guard supportsArrangements else { return .fallback }
         guard let fold else { return PlayerLayout(arrangement: .column, transportInToolbar: verticalToolbar) }
         if fold == .horizontal { return PlayerLayout(arrangement: .tabletop, transportInToolbar: false) }
-        if regularWidth, regularHeight { return PlayerLayout(arrangement: .split, transportInToolbar: false) }
+        // An active vertical fold splits at any size: the column would put the scrubber and
+        // transport across the hinge.
+        if fold == .vertical || (regularWidth && regularHeight) {
+            return PlayerLayout(arrangement: .split, transportInToolbar: false)
+        }
         return PlayerLayout(arrangement: .column, transportInToolbar: verticalToolbar)
     }
 }
