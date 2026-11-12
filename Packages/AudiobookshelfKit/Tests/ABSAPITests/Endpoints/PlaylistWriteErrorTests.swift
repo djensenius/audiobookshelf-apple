@@ -35,7 +35,7 @@ import Testing
     }
 
     @Test(
-        arguments: [PlaylistWriteOperation.create, .update, .add, .remove],
+        arguments: [PlaylistWriteOperation.create, .update, .add, .remove, .removeItem],
         ["not JSON", "{}", #"{"playlist":{"id":"p","libraryId":"l","name":"Wrapped","items":[]}}"#])
     func malformedSuccessIsDecodingFailure(operation: PlaylistWriteOperation, body: String) async throws {
         let stub = StubServer { _ in .json(body) }
