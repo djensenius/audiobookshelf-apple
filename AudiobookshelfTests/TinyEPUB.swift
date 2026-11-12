@@ -19,10 +19,11 @@ enum TinyEPUB {
 
     /// The book, with `extra` entries after its own and `manifest` items after its own, and without
     /// its navigation document (though the package still lists it) when `navigation` is false. The
-    /// package lists the chapter as `chapterHref`, and the navigation document links to `chapterLink`.
+    /// package lists the chapter as `chapterHref`, and the navigation document links to `chapterLink`;
+    /// the chapter's body is `chapterBody`, if given.
     static func data(
         extra: [Entry] = [], manifest: String = "", navigation: Bool = true, chapterHref: String = "c1.xhtml",
-        chapterLink: String = "c1.xhtml"
+        chapterLink: String = "c1.xhtml", chapterBody: String? = nil
     ) -> Data {
         let files: [(name: String, text: String)] = [
             ("mimetype", "application/epub+zip"),
@@ -64,7 +65,7 @@ enum TinyEPUB {
                 """
                 <?xml version="1.0" encoding="UTF-8"?>
                 <html xmlns="http://www.w3.org/1999/xhtml"><head><title>\(chapterTitle)</title></head>
-                <body><h1>\(chapterTitle)</h1><p>\(String(repeating: "Lorem ipsum dolor sit amet. ", count: 40))</p></body></html>
+                <body>\(chapterBody ?? "<h1>\(chapterTitle)</h1><p>\(String(repeating: "Lorem ipsum dolor sit amet. ", count: 40))</p>")</body></html>
                 """
             ),
         ]

@@ -670,6 +670,37 @@
     if (!locationsLoaded) generateLocations(opened, state, isCurrent)
   }
 
+  // About how many characters epub.js's locations for a section's `contents` come to, at most: one
+  // range CFI per `every` characters of text, each holding the CFI base and, twice, the path to
+  // its text (every ancestor's step, with its id). One walk of the section, as epub.js's parse.
+  function projectedLocations(contents, cfiBase, every) {
+    const doc = contents && contents.ownerDocument
+    const body = doc && doc.getElementsByTagName('body')[0]
+    if (!body || !(every > 0)) return 0
+    const paths = new Map([[body, 3 + (body.id ? body.id.length + 2 : 0)]])
+    const children = new Map()
+    const base = String(cfiBase || '').length + 32
+    const walker = doc.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT)
+    let size = 0
+    let counter = 0
+    let last = 0
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const parent = paths.get(node.parentNode) || 0
+      const index = (children.get(node.parentNode) || 0) + 1
+      children.set(node.parentNode, index)
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        paths.set(node, parent + 1 + String(index * 2).length + (node.id ? node.id.length + 2 : 0))
+      } else if (node.textContent.trim().length > 0) {
+        const emitted = Math.floor((counter + node.length) / every)
+        counter = (counter + node.length) % every
+        size += emitted * (base + 2 * (parent + 16))
+        last = parent
+      }
+    }
+    // The text after the last full one ends a final range.
+    return counter > 0 ? size + base + 2 * (last + 16) : size
+  }
+
   // Generates the book's locations within the limits, falling back to progress by section.
   function generateLocations(opened, state, isCurrent) {
     const coarse = function () {
@@ -697,8 +728,13 @@
     const limit = Number(window.absReaderLocationsMaxCharacters) || MAX_LOCATIONS_CHARACTERS
     let size = 0
     const parse = locations.parse
-    locations.parse = function () {
-      const parsed = abandoned ? [] : parse.apply(this, arguments)
+    // epub.js builds a section's locations in one go, so what they'd come to is projected first.
+    locations.parse = function (contents, cfiBase, chars) {
+      if (abandoned || size + projectedLocations(contents, cfiBase, chars || this.break) > limit) {
+        abandon()
+        return []
+      }
+      const parsed = parse.apply(this, arguments)
       parsed.forEach(function (cfi) {
         size += String(cfi).length
       })

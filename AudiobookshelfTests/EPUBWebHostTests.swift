@@ -986,6 +986,57 @@ private final class ReaderPage {
         #expect(page.last("locationsReady") == nil)
     }
 
+    /// Real epub.js builds a section's locations in one go, each repeating every ancestor's id. A
+    /// chapter whose would pass the limit is skipped before that, and progress goes by section; one
+    /// with an ordinary id still gets its locations.
+    @Test(.timeLimit(.minutes(1)), arguments: [20_000, 8])
+    func locationsRepeatingALongElementIDAreSkippedBeforeParsing(idLength: Int) async throws {
+        let body =
+            #"<div id="\#(String(repeating: "x", count: idLength))"><p>"#
+            + String(repeating: "Lorem ipsum dolor sit amet. ", count: 100) + "</p></div>"
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(chapterBody: body) })
+        _ = try await page.controller.webView.evaluateJavaScript(
+            """
+            window.absReaderLocationsMaxCharacters = 100000
+            const ePub = window.ePub
+            window.ePub = function (data, options) {
+              const book = ePub(data, options)
+              // Its queue waits for animation frames, which an off-screen page never gets.
+              book.locations.q.tick = function (task) { setTimeout(task, 0) }
+              const parse = book.locations.parse
+              book.locations.parse = function () { window.testParsed = true; return parse.apply(this, arguments) }
+              // epub.js can't lay pages out off screen, so a stand-in rendition displays at once.
+              book.renderTo = function () {
+                const nothing = function () {}
+                return {
+                  settings: {}, started: Promise.resolve(), on: nothing, off: nothing, spread: nothing,
+                  themes: { register: nothing, select: nothing, fontSize: nothing, font: nothing },
+                  getContents: function () { return [] },
+                  display: function () { return Promise.resolve() },
+                  currentLocation: function () {
+                    return { start: { cfi: 's', index: 0 }, end: { cfi: 'e', index: 0, displayed: { page: 1, total: 2 } } }
+                  }
+                }
+              }
+              return book
+            }
+            1
+            """)
+
+        try await page.open("long-id")
+
+        if idLength > 1000 {
+            while page.last("relocated")?["progress"] as? Double != 0.5 {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(try await page.evaluate("window.testParsed === undefined") == "true")
+            #expect(page.last("locationsReady") == nil)
+        } else {
+            _ = try await page.next("locationsReady")
+            #expect(try await page.evaluate("window.testParsed") == "true")
+        }
+    }
+
     /// A table of contents link to a chapter the package lists as `./c1.xhtml` keeps that href,
     /// which epub.js finds the section by.
     @Test(.timeLimit(.minutes(1))) func tableOfContentsLinksUseTheSpinesHref() async throws {
