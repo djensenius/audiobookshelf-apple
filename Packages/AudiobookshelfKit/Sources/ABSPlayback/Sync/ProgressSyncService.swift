@@ -87,6 +87,8 @@ public protocol PlaybackProgressSource: AnyObject {
     var duration: Double { get }
     var isPlaying: Bool { get }
     var chapterIndex: Int? { get }
+    /// The open session's title, for playback history.
+    var sessionDisplayTitle: String? { get }
     var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)? { get set }
     /// Synchronously suppresses sync/PATCH transport before account teardown can suspend.
     var quiesceProgressTransport: (@MainActor () -> Void)? { get set }
@@ -94,4 +96,6 @@ public protocol PlaybackProgressSource: AnyObject {
     func removeObserver(_ token: PlaybackObserverToken)
 }
 
-extension PlaybackCoordinator: PlaybackProgressSource {}
+extension PlaybackCoordinator: PlaybackProgressSource {
+    public var sessionDisplayTitle: String? { session?.displayTitle }
+}

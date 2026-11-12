@@ -25,6 +25,9 @@ public struct PlaybackCloseHandoff: Sendable {
     let position: PlaybackCloseResult<Void>
     /// Resolved once the closing session's `/sync` in flight returned.
     let sessionSync: PlaybackCloseResult<Void>?
+    /// The `/close` result the coordinator resolves (``PlaybackCloseOperation/transport``), so
+    /// the reporter can record it in playback history.
+    let transport = PlaybackCloseResult<Bool>()
 
     init(
         report: PlaybackSyncReport, position: PlaybackCloseResult<Void>,
@@ -140,7 +143,8 @@ final class PlaybackCloseOperation {
     let sessionID: String
     let wasLoaded: Bool
     let handoff: PlaybackCloseHandoff?
-    let transport = PlaybackCloseResult<Bool>()
+    /// `true` once acknowledged, `false` when suppressed or cancelled. Shared with the handoff.
+    let transport: PlaybackCloseResult<Bool>
     /// Resolved as `/close` is called, or once it won't be: the next `/play` waits for it.
     let dispatched = PlaybackCloseResult<Void>()
     var task: Task<Void, Never>?
@@ -149,6 +153,7 @@ final class PlaybackCloseOperation {
         self.sessionID = sessionID
         self.wasLoaded = wasLoaded
         self.handoff = handoff
+        transport = handoff?.transport ?? PlaybackCloseResult<Bool>()
     }
 
     func outcome() throws -> PlaybackCloseOutcome.Session {
