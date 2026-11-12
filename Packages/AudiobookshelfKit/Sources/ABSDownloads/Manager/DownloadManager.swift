@@ -449,6 +449,8 @@ public actor DownloadManager {
             await complete(recordID, as: itemID)
         case .sessionUnavailable(let code, _):
             Log.downloads.error("Downloads are waiting for the session: \(code.rawValue, privacy: .public)")
+        case .recordStarted(let recordID):
+            await refresh(recordID, announce: true)
         }
     }
 

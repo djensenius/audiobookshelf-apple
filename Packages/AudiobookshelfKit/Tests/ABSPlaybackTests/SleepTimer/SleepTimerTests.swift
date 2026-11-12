@@ -93,6 +93,8 @@ enum Move: CaseIterable, Sendable { case none, seek, unreportedSeek, pendingSeek
 enum ExpirySeek: CaseIterable, Sendable { case play, manualStart, failure, interruption, userSeek }
 /// What happens before a grace-period reset's rewind seek, or during it.
 enum ResetRace: CaseIterable, Sendable { case cancelBefore, startBefore, itemBefore, cancelDuring, itemDuring }
+/// What happens between a fresh load's `playbackWillStart` and its landing.
+enum BeforeLoadLands: CaseIterable, Sendable { case nothing, pause, anotherItem, cancel, manualStart }
 
 /// A 70 s timer from 1000 on chapters, started automatically (rewinding 300 s on expiry) or by hand: its fade
 /// begins at 1010.
@@ -955,6 +957,40 @@ struct SleepTimerTests {
         #expect(harness.timer.isRunning == false, "Suppressed until the window ends")
         _ = harness.timer.playbackWillStart(at: try makeDate(2026, 1, 16, 22, 0))
         #expect(harness.timer.isAutomatic)
+    }
+
+    @Test(arguments: BeforeLoadLands.allCases)
+    func automaticEndOfChapterTimerStartsOnceAFreshLoadLands(_ before: BeforeLoadLands) throws {
+        let harness = Harness(options: try autoOptions(mode: .endOfChapter))
+        let date = try makeDate(2026, 1, 15, 23, 0)
+        harness.timer.itemDidChange("a")
+        #expect(harness.timer.playbackWillStart(at: date) == 0)
+        harness.timer.didSeek(to: 0)
+        #expect(!harness.timer.isRunning, "No timeline yet")
+        switch before {
+        case .nothing: break
+        case .pause: harness.timer.playbackDidPause()
+        case .anotherItem: harness.timer.itemDidChange("b")
+        case .cancel: harness.timer.cancel(at: date)
+        case .manualStart: #expect(harness.timer.start(.duration(60)))
+        }
+
+        harness.control.timeline = chapters
+        harness.control.currentTime = 450
+        harness.timer.didSeek(to: 450)
+
+        switch before {
+        case .nothing:
+            #expect(harness.timer.mode == .endOfChapter)
+            #expect(harness.timer.isAutomatic)
+            #expect(harness.timer.remaining == 550)
+        case .manualStart:
+            #expect(harness.timer.mode == .duration(60))
+            #expect(!harness.timer.isAutomatic)
+        case .pause, .anotherItem, .cancel:
+            #expect(!harness.timer.isRunning)
+        }
+        harness.timer.cancel()
     }
 
     @Test(arguments: Move.allCases)
