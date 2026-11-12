@@ -124,7 +124,8 @@ public struct DownloadPlanner: Sendable {
                     destinationRelativePath: destination))
         }
         if let ebook = book.ebookFile {
-            guard let filename = Self.ebookFilename(ebook) else { throw .missingFileMetadata }
+            // A blank inode (legacy `ino: null`) has no `/file/<ino>` to fetch.
+            guard !ebook.ino.isEmpty, let filename = Self.ebookFilename(ebook) else { throw .missingFileMetadata }
             let destination = try Self.layoutPath { () throws in try layout.bookFilePath(filename: filename) }
             parts.append(
                 DownloadPartDTO(
