@@ -18,6 +18,8 @@ struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
     let accounts: AccountManager?
+    /// The shared library, injected into the signed-in shell (`\.libraryStore`).
+    var library: LibraryParticipant?
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var links = SceneLinks()
@@ -103,6 +105,9 @@ struct RootView: View {
                     })
             )
             .id(identity)
+            .environment(\.libraryStore, library?.store)
+            .environment(
+                \.itemProgressReader, library.map { BrowsePresentation.progressReader($0.store.progress) } ?? .none)
         case .storeUnavailable:
             ErrorStateView(
                 title: L10n.string("MessageStoreUnavailable"),

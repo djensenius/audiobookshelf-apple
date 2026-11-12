@@ -8,4 +8,10 @@ public enum UserEndpoints {
     public static func me() -> Endpoint<UserFinishedMediaResponse> {
         Endpoint(.get, "/api/me")
     }
+
+    /// `GET /api/me`, decoded for the user's full progress list (``UserProgressResponse``), the
+    /// only list complete enough to seed the library's progress cache.
+    public static func progress() -> Endpoint<UserProgressResponse> {
+        Endpoint(.get, "/api/me")
+    }
 }

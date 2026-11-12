@@ -12,9 +12,12 @@ struct AudiobookshelfApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts)
-                .environment(settings)
-                .modifier(AppThemeModifier(settings: settings))
+            RootView(
+                lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts,
+                library: environment.library
+            )
+            .environment(settings)
+            .modifier(AppThemeModifier(settings: settings))
         }
         .commands { SearchCommands() }
         // The system relaunches the app for finished background downloads; this waits until

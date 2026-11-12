@@ -69,6 +69,17 @@ public final class LibraryStore {
     public func connect(
         client: any LibraryService, connectionKey: LibraryConnectionKey, defaultLibraryID: String? = nil
     ) async {
+        attach(client: client, connectionKey: connectionKey, defaultLibraryID: defaultLibraryID)
+        await refresh()
+    }
+
+    /// ``connect(client:connectionKey:defaultLibraryID:)`` without the refresh, for callers that
+    /// must return promptly and refresh in a task they own (the session's library participant).
+    /// A `nil` client (offline without one) serves the account's settings, such as
+    /// ``lastLibraryID``, until a later attach brings one.
+    public func attach(
+        client: (any LibraryService)?, connectionKey: LibraryConnectionKey, defaultLibraryID: String? = nil
+    ) {
         if connectionKey != self.connectionKey {
             clear()
             self.connectionKey = connectionKey
@@ -77,7 +88,6 @@ public final class LibraryStore {
         // Reconnecting the same account (for example with a new client) without a default keeps
         // the one from login; a new account was cleared above.
         if let defaultLibraryID { self.defaultLibraryID = defaultLibraryID }
-        await refresh()
     }
 
     /// Reloads the libraries list. Loaded details take the refreshed libraries (for example a
