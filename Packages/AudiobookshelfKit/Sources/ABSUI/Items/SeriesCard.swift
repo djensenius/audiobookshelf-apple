@@ -37,6 +37,7 @@ public struct SeriesCard: View {
         .itemHover()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: ItemPresentation.accessibilityLabel(series)))
+        .cardInputLabels(title: series.name, label: ItemPresentation.accessibilityLabel(series))
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
         .accessibilityAddTraits(.isButton)
     }
