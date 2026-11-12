@@ -52,15 +52,39 @@ final class AudioFixture: Sendable {
     }
 }
 
+/// A wait's time budget that a stall of the main actor doesn't use up. A busy CI runner can hold
+/// the whole test process for over ten seconds; the work a condition waits on is then still queued
+/// behind the waiter when it wakes, so a wall-clock deadline fails a passing test (#482). Each
+/// check counts for at most ``maxStep``, so a stall costs one step while a hang still ends.
+struct WaitBudget {
+    static let maxStep = Duration.milliseconds(100)
+    private let clock = ContinuousClock()
+    private var remaining: Duration
+    private var last: ContinuousClock.Instant
+
+    init(_ timeout: Duration) {
+        remaining = timeout
+        last = clock.now
+    }
+
+    /// Charges the time since the last check (at most ``maxStep``); whether any is left.
+    mutating func hasTimeLeft() -> Bool {
+        let now = clock.now
+        remaining -= min(now - last, Self.maxStep)
+        last = now
+        return remaining > .zero
+    }
+}
+
 /// Polls `condition` on the main actor every 10 ms until it holds, `timeout` passes or the task
 /// is cancelled (both return `false`). The timeout is generous so a busy machine (parallel test
-/// runs) does not fail a passing test; it only bounds a failing one.
+/// runs) does not fail a passing test; it only bounds a failing one, and a stall of the process
+/// doesn't spend it (``WaitBudget``).
 @MainActor
 func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async -> Bool {
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
+    var budget = WaitBudget(timeout)
     while !condition() {
-        guard clock.now < deadline else { return false }
+        guard budget.hasTimeLeft() else { return false }
         do { try await Task.sleep(for: .milliseconds(10)) } catch { return false }
     }
     return true
@@ -69,17 +93,17 @@ func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async
 struct WaitTimedOut: Error {}
 
 /// Yields to other main-actor work until `condition` holds, checking it between every job so a
-/// short-lived state is not missed. Records an issue and throws after `timeout`; throws
+/// short-lived state is not missed. Records an issue and throws after `timeout` (a ``WaitBudget``,
+/// so a stall of the process doesn't spend it); throws
 /// `CancellationError` if the task is cancelled.
 @MainActor
 func waitUntil(
     timeout: Duration = .seconds(10), sourceLocation: SourceLocation = #_sourceLocation, _ condition: () -> Bool
 ) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
+    var budget = WaitBudget(timeout)
     while !condition() {
         try Task.checkCancellation()
-        guard clock.now < deadline else {
+        guard budget.hasTimeLeft() else {
             Issue.record("Timed out after \(timeout)", sourceLocation: sourceLocation)
             throw WaitTimedOut()
         }
