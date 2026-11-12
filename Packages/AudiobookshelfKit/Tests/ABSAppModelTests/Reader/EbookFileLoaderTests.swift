@@ -3,6 +3,7 @@ import ABSCore
 import ABSData
 import ABSDownloads
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSAppModel
@@ -223,7 +224,9 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
         await #expect(throws: EbookFileLoadError.tooLarge) { try await loader.load(request()) }
 
         #expect(!FileManager.default.fileExists(atPath: loader.cacheURL(for: request()).path))
-        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.appending(path: ".partial").path) == [])
+        #expect(
+            try FileManager.default.contentsOfDirectory(
+                atPath: directory.appending(path: ".partial/\(EbookFileLoader.launchID)").path) == [])
     }
 
     @Test(arguments: [(Int.max, 512 * 1024 * 1024), (1000, 1000)])
@@ -245,7 +248,9 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
 
         await #expect(throws: FakeEbookFetcher.Failure.self) { try await loader.load(request()) }
 
-        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.appending(path: ".partial").path) == [])
+        #expect(
+            try FileManager.default.contentsOfDirectory(
+                atPath: directory.appending(path: ".partial/\(EbookFileLoader.launchID)").path) == [])
     }
 
     @Test(arguments: [1e100, -1e100, .nan, .infinity, -.infinity])
@@ -289,5 +294,188 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
         #expect(EbookFileLoader.downloadedFile(in: item([audio]), fileIno: "ino_2", locations: locations) == nil)
         #expect(EbookFileLoader.downloadedFile(in: item([escaping]), fileIno: "ino_3", locations: locations) == nil)
         #expect(EbookFileLoader.downloadedFile(in: nil, fileIno: "ino_1", locations: locations) == nil)
+    }
+
+    @Test func aDownloadedFileOverTheBookLimitIsRefused() async throws {
+        let directory = readerTemporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let downloaded = directory.appending(path: "book.epub")
+        // Sparse, so it takes no space.
+        #expect(FileManager.default.createFile(atPath: downloaded.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: downloaded)
+        try handle.truncate(atOffset: UInt64(EbookFileLoader.maxBookBytes) + 1)
+        let fetcher = FakeEbookFetcher()
+        let loader = EbookFileLoader(directory: directory, fetcher: fetcher) { _ in downloaded }
+
+        await #expect(throws: EbookFileLoadError.tooLarge) { try await loader.load(request()) }
+
+        try handle.truncate(atOffset: UInt64(EbookFileLoader.maxBookBytes))
+        try handle.close()
+        #expect(try await loader.load(request()) == (downloaded, .downloaded))
+        #expect(fetcher.calls.value.isEmpty)
+    }
+
+    @Test func partialsFromEarlierLaunchesAreReclaimed() async throws {
+        let directory = readerTemporaryDirectory()
+        let partials = directory.appending(path: ".partial")
+        let abandoned = partials.appending(path: UUID().uuidString)
+        let active = partials.appending(path: EbookFileLoader.launchID)
+        for folder in [abandoned, active] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data(count: 100).write(to: folder.appending(path: "download"))
+        }
+        let loader = EbookFileLoader(directory: directory, fetcher: FakeEbookFetcher())
+
+        _ = try await loader.load(request())
+
+        #expect(!FileManager.default.fileExists(atPath: abandoned.path))
+        // This launch's may be another reader window's fetch.
+        #expect(FileManager.default.fileExists(atPath: active.appending(path: "download").path))
+    }
+
+    private func holdingFetcher(host: String, routes: [String: HoldingURLProtocol.Route]) throws -> APIEbookFileFetcher
+    {
+        HoldingURLProtocol.register(host: host, routes: routes)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HoldingURLProtocol.self]
+        let client = APIClient(
+            configuration: try APIClientConfiguration(baseURL: try #require(URL(string: "https://\(host)"))),
+            tokenProvider: FixedTokens(), sessionConfiguration: configuration)
+        return APIEbookFileFetcher(client: client, sessionConfiguration: configuration)
+    }
+
+    static let rejections: [(HoldingURLProtocol.Route, EbookFileLoadError?)] = [
+        // Declared too large.
+        (.init(status: 200, headers: ["Content-Length": "1000"]), .tooLarge),
+        // Streams past the limit.
+        (.init(status: 200, body: Data(count: 20)), .tooLarge),
+        // An error body.
+        (.init(status: 404), nil),
+    ]
+
+    @Test(arguments: rejections)
+    func aRejectedTransferIsStopped(route: HoldingURLProtocol.Route, error: EbookFileLoadError?) async throws {
+        let host = "\(UUID().uuidString.lowercased()).hold.test"
+        let path = "/api/items/li_1/ebook"
+        let fetcher = try holdingFetcher(host: host, routes: [path: route])
+        let destination = readerTemporaryDirectory()
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        await #expect(throws: (any Error).self) {
+            try await fetcher.downloadEbook(
+                itemID: "li_1", fileIno: nil, to: destination.appending(path: "book"), maxBytes: 10)
+        }
+
+        #expect(await HoldingURLProtocol.waitForStop(host: host, path: path))
+    }
+
+    @Test func aRejected401TransferIsStoppedBeforeTheRefresh() async throws {
+        let host = "\(UUID().uuidString.lowercased()).hold.test"
+        let path = "/api/items/li_1/ebook"
+        let fetcher = try holdingFetcher(
+            host: host,
+            routes: [
+                path: .init(status: 401),
+                "/auth/refresh": .init(status: 500, finishes: true, awaitsStopOf: path),
+            ])
+        let destination = readerTemporaryDirectory()
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+
+        await #expect(throws: (any Error).self) {
+            try await fetcher.downloadEbook(
+                itemID: "li_1", fileIno: nil, to: destination.appending(path: "book"), maxBytes: 10)
+        }
+
+        #expect(HoldingURLProtocol.stoppedBeforeStart(host: host, path: "/auth/refresh") == true)
+    }
+}
+
+/// Answers with a status, headers and an optional first part of the body, then holds the
+/// transfer open until the client stops it, recording which requests were stopped. It sets a
+/// content type, so URLSession delivers the response without waiting to sniff the body.
+final class HoldingURLProtocol: URLProtocol {
+    struct Route: Sendable {
+        var status: Int
+        var headers: [String: String] = [:]
+        var body = Data()
+        /// Ends the response instead of holding it.
+        var finishes = false
+        /// Records whether the request for this path was stopped or cancelled before this one
+        /// started.
+        var awaitsStopOf: String?
+    }
+
+    private struct HeldTask: @unchecked Sendable {
+        let task: URLSessionTask?
+    }
+
+    private struct Host {
+        var routes: [String: Route]
+        var stopped: Set<String> = []
+        var tasks: [String: HeldTask] = [:]
+        /// Whether the awaited path was stopped when each waiting path started.
+        var stoppedBeforeStart: [String: Bool] = [:]
+    }
+
+    private static let hosts = Mutex<[String: Host]>([:])
+
+    static func register(host: String, routes: [String: Route]) {
+        hosts.withLock { $0[host] = Host(routes: routes) }
+    }
+
+    static func stoppedBeforeStart(host: String, path: String) -> Bool? {
+        hosts.withLock { $0[host]?.stoppedBeforeStart[path] }
+    }
+
+    /// Stopped, or cancelled: `cancel()` makes the task `canceling` at once, while `stopLoading`
+    /// arrives later on the protocols' thread. (A task whose bytes aren't being read may be
+    /// suspended, which isn't stopped.)
+    private static func isStopped(host: String, path: String) -> Bool {
+        hosts.withLock {
+            $0[host]?.stopped.contains(path) == true
+                || $0[host]?.tasks[path].map { [.canceling, .completed].contains($0.task?.state) } == true
+        }
+    }
+
+    /// Whether the request for `path` is stopped within a couple of seconds.
+    static func waitForStop(host: String, path: String) async -> Bool {
+        for _ in 0..<200 {
+            if isStopped(host: host, path: path) { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard let host = request.url?.host() else { return false }
+        return hosts.withLock { $0[host] != nil }
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url, let host = url.host(),
+            let route = Self.hosts.withLock({ $0[host]?.routes[url.path()] })
+        else {
+            client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+            return
+        }
+        let task = HeldTask(task: task)
+        Self.hosts.withLock { $0[host]?.tasks[url.path()] = task }
+        if let awaited = route.awaitsStopOf {
+            let stopped = Self.isStopped(host: host, path: awaited)
+            Self.hosts.withLock { $0[host]?.stoppedBeforeStart[url.path()] = stopped }
+        }
+        let response = HTTPURLResponse(
+            url: url, statusCode: route.status, httpVersion: "HTTP/1.1",
+            headerFields: route.headers.merging(["Content-Type": "application/octet-stream"]) { old, _ in old })
+        client?.urlProtocol(self, didReceive: response ?? HTTPURLResponse(), cacheStoragePolicy: .notAllowed)
+        if !route.body.isEmpty { client?.urlProtocol(self, didLoad: route.body) }
+        if route.finishes { client?.urlProtocolDidFinishLoading(self) }
+    }
+
+    override func stopLoading() {
+        guard let url = request.url, let host = url.host() else { return }
+        _ = Self.hosts.withLock { $0[host]?.stopped.insert(url.path()) }
     }
 }

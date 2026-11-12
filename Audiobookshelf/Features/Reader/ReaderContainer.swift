@@ -43,8 +43,8 @@ enum ReaderCaches {
 /// It needs the scene's library store serving the presentation's connection, for the account's
 /// client and known progress. The reader follows the store: signing out or switching accounts
 /// drops the book (the "not signed in" state), and the account's client attaching again reopens
-/// it. Progress is flushed when the reader closes, when the app moves to the background, and
-/// when the account goes.
+/// it. Progress is flushed when the reader disappears (however it closes), when the app moves to
+/// the background, and when the account goes.
 struct ReaderContainer: View {
     let presentation: ReaderPresentation
     let onClose: () -> Void
@@ -102,6 +102,10 @@ struct ReaderContainer: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .background, let model { Task { await model.flush() } }
         }
+        // However it closes: the close button, or on Mac the window's close button or Command-W.
+        .onDisappear {
+            if let model { Task { await model.flush() } }
+        }
     }
 
     private func makeModel() -> ReaderContainerModel? {
@@ -118,8 +122,8 @@ struct ReaderContainer: View {
             serverProgress: serverProgress)
     }
 
+    /// Progress is flushed as the reader disappears.
     private func close() {
-        if let model { Task { await model.flush() } }
         onClose()
     }
 }

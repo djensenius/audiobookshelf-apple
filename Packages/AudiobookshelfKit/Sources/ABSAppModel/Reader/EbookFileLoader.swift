@@ -57,9 +57,13 @@ public final class APIEbookFileFetcher: EbookFileFetching {
             } catch let error as URLError {
                 throw error.code == .cancelled ? CancellationError() : APIError.network(error.code)
             }
+            // Stops the transfer on every way out, so a rejected or discarded body isn't still
+            // downloading (a no-op once the body has all arrived).
+            defer { bytes.task.cancel() }
             guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
             if http.statusCode == 401, !retried {
                 retried = true
+                bytes.task.cancel()
                 token = try await client.accessToken(replacing: token)
                 continue
             }
@@ -162,6 +166,10 @@ public actor EbookFileLoader {
     /// The largest ebook fetched: 512 MiB, matching `MAX_BOOK_BYTES` in the EPUB host's
     /// `reader.js`, so a book the reader would refuse is stopped before it's all on disk.
     public static let maxBookBytes = 512 * 1024 * 1024
+    /// This process's folder for partial downloads, in the hidden `.partial` folder. Another
+    /// folder there is from an earlier launch, so its downloads were abandoned; one of this
+    /// launch's is an active fetch, possibly in another reader window.
+    static let launchID = UUID().uuidString
     /// Ebooks can be large: allow more than the client's default request timeout.
     static let fetchTimeout: TimeInterval = 300
 
@@ -198,8 +206,14 @@ public actor EbookFileLoader {
     /// A fetch streams into a hidden partial folder and moves into the cache only once it's
     /// complete; a failed or rejected one is deleted. A file over ``maxBookBytes`` or
     /// `maxTotalBytes` is ``EbookFileLoadError/tooLarge``.
+    ///
+    /// A downloaded copy over ``maxBookBytes`` is ``EbookFileLoadError/tooLarge`` too: downloads
+    /// aren't limited per file, and the reader reads the whole book.
     public func load(_ request: EbookFileRequest) async throws -> (url: URL, origin: EbookFileOrigin) {
         if let url = await downloadedFile(request), FileManager.default.fileExists(atPath: url.path) {
+            // Read now, not from a URL's cached resource values.
+            let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int ?? 0
+            guard size <= Self.maxBookBytes else { throw EbookFileLoadError.tooLarge }
             return (url, .downloaded)
         }
         let url = cacheURL(for: request)
@@ -208,7 +222,9 @@ public actor EbookFileLoader {
             try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
             return (url, .cached)
         }
+        reclaimAbandonedPartials()
         let partials = directory.appending(path: ".partial", directoryHint: .isDirectory)
+            .appending(path: Self.launchID, directoryHint: .isDirectory)
         let partial = partials.appending(path: UUID().uuidString, directoryHint: .notDirectory)
         let cap = min(Self.maxBookBytes, maxTotalBytes)
         do {
@@ -269,6 +285,16 @@ public actor EbookFileLoader {
     public func remove(itemsOf connectionID: UUID) {
         try? FileManager.default.removeItem(
             at: directory.appending(path: connectionID.uuidString, directoryHint: .isDirectory))
+    }
+
+    /// Deletes partial downloads left by earlier launches, for example when the app was
+    /// terminated mid-fetch. This launch's are kept: a failed one is deleted where it failed.
+    private func reclaimAbandonedPartials() {
+        let partials = directory.appending(path: ".partial", directoryHint: .isDirectory)
+        guard let launches = try? FileManager.default.contentsOfDirectory(atPath: partials.path) else { return }
+        for launch in launches where launch != Self.launchID {
+            try? FileManager.default.removeItem(at: partials.appending(path: launch))
+        }
     }
 
     /// Deletes the least recently used copies, other than `kept`, until the cache fits.
