@@ -158,6 +158,26 @@ extension DownloadManager {
         _ = try await deleteRefetch(record)
     }
 
+    /// While the item of `itemKey` is held, after its local item was deleted: cancels its
+    /// cover-only record, as ``cancel(recordID:)`` cancels an episode (paused, stopped without
+    /// keeping resume data, deleted, its transfer markers cleared), so the cover isn't fetched
+    /// for an item that is gone. One that has completed meanwhile is left to the engine, which
+    /// discards it (``DownloadUpdate/recordDiscarded(_:)``).
+    /// - Returns: the paths of the cancelled record's files, for the caller to remove.
+    func cancelRefetch(of itemKey: MediaKey) async throws(DownloadManagerError) -> [String] {
+        guard let record = try await read({ try await self.store.record(key: itemKey) }), record.isCoverOnly,
+            try await read({ try await self.store.setState(.paused, forRecord: record.id) })
+        else { return [] }
+        guard let deleted = try await deleteRefetch(record) else {
+            _ = try? await read {
+                try await self.store.setState(record.state, forRecord: record.id, expecting: [.paused])
+            }
+            await refresh(record.id, announce: true)
+            return []
+        }
+        return deleted.parts.map(\.destinationRelativePath)
+    }
+
     /// Stops and deletes the unfinished cover-only `record`, then reports it removed.
     /// - Returns: the deleted record, or `nil` when it had completed or was gone.
     private func deleteRefetch(_ record: DownloadRecordDTO) async throws(DownloadManagerError) -> DownloadRecordDTO? {

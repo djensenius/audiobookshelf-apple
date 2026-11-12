@@ -327,8 +327,26 @@ import Testing
         #expect(try await fixture.localItems.item(id: local.id)?.coverRelativePath == nil)
     }
 
-    /// The local item was deleted while its cover was fetched again: once the engine discards
-    /// the refetch, its cover goes to an episode queued since, completed, or else is removed.
+    /// Deleting a podcast's last episode deletes its local item, and so cancels its cover
+    /// refetch, without keeping resume data.
+    @Test func deletingTheLastEpisodeCancelsTheCoverRefetch() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+
+        #expect(try await manager.deleteEpisode(itemID: local.id, episodeId: "ep_2"))
+
+        #expect(try await fixture.localItems.item(id: local.id) == nil)
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(
+            await fixture.engine.stopped.contains(.init(partIDs: refetch.parts.map(\.id), keepingResumeData: false)))
+        #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
+    }
+
+    /// The local item was deleted just after its cover was fetched again, so the deletion
+    /// couldn't cancel the refetch: once the engine discards it, its cover goes to an episode
+    /// queued without one, completed, or else is removed.
     @Test(arguments: [false, true])
     func aRefetchDiscardedAfterTheItemWasDeleted(episodeQueued: Bool) async throws {
         let (fixture, manager, events) = try await Self.started()
@@ -336,9 +354,12 @@ import Testing
         #expect(try await manager.cancel(recordID: first.id))
         let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
         let path = try #require(refetch.parts.first?.destinationRelativePath)
-        #expect(try await manager.deleteLocalItem(id: local.id))
         let queued = episodeQueued ? try await Self.enqueue("ep_3", fixture, manager) : nil
         try #require(queued?.parts.contains { $0.kind == .cover } != true)
+        // Completed before the deletion, which leaves it to the engine finalising it.
+        try write(path, fixture)
+        try await fixture.store.completePart(partID: refetch.parts[0].id, finalBytes: 5)
+        #expect(try await manager.deleteLocalItem(id: local.id))
         var discarded = refetch
         discarded.parts[0].state = .completed
         discarded.parts[0].bytesWritten = 5
@@ -486,13 +507,17 @@ import Testing
         #expect(refetch.parts.map(\.serverPath) == [cover.serverPath])
     }
 
-    /// A refetch discarded after its item was deleted gives its cover to a local item made since.
+    /// A refetch that completed just before its item was deleted, then discarded, gives its
+    /// cover to a local item made since.
     @Test func aRefetchDiscardedAfterTheItemWasMadeAgain() async throws {
         let (fixture, manager, events) = try await Self.started()
         let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
         #expect(try await manager.cancel(recordID: first.id))
         let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
         let path = try #require(refetch.parts.first?.destinationRelativePath)
+        // Completed before the deletion, which leaves it to the engine finalising it.
+        try write(path, fixture)
+        try await fixture.store.completePart(partID: refetch.parts[0].id, finalBytes: 5)
         #expect(try await manager.deleteLocalItem(id: local.id))
         let third = try await Self.enqueue("ep_3", fixture, manager)
         for part in third.parts { try write(part.destinationRelativePath, fixture) }

@@ -83,8 +83,8 @@ extension DownloadManager {
     }
 
     /// The rest of the deletion of `item`, deleted from the store by a caller that holds it:
-    /// its progress link, its cover hand-off, then its files and `extra` (files already deleted
-    /// from it). Its folder goes with everything in it only when it is the folder
+    /// its progress link, its cover refetch, cancelled (``cancelRefetch(of:)``), its cover
+    /// hand-off, then its files and `extra` (files already deleted from it). Its folder goes with everything in it only when it is the folder
     /// ``DownloadLayout`` gives the item; any other stored directory (a shallower one would
     /// hold other items) loses only the item's files.
     private func finishRemoving(_ item: LocalLibraryItemDTO, alsoRemoving extra: [String]) async {
@@ -97,7 +97,15 @@ extension DownloadManager {
                     itemID: item.libraryItemId, updatedAt: Self.coverTimestamp(item.coverUpdatedAt)),
                 relativePath: path, isStored: true, updatedAt: item.coverUpdatedAt)
         }
-        let paths = extra + item.files.map(\.relativePath) + (item.coverRelativePath.map { [$0] } ?? [])
+        var refetched: [String] = []
+        do throws(DownloadManagerError) {
+            refetched = try await cancelRefetch(of: Self.key(of: item))
+        } catch {
+            // The engine discards it once it completes.
+            logError("Couldn't cancel a deleted item's cover download", error)
+        }
+        let paths =
+            extra + item.files.map(\.relativePath) + (item.coverRelativePath.map { [$0] } ?? []) + refetched
         let layoutFolder = try? DownloadLayout(
             connectionID: item.serverConnectionID, libraryItemID: item.libraryItemId, locations: locations
         ).folder
