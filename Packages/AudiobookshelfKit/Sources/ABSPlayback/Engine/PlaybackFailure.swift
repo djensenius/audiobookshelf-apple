@@ -67,11 +67,13 @@ extension PlaybackFailure {
 
     /// Classifies `error` with the item's cumulative `errorLog`. Precedence:
     /// 1. A network, TLS or cancellation error in the current error's underlying chain.
-    /// 2. A decode or unsupported-format error in the current error's chain. Only specific
+    /// 2. An HTTP status from the custom-header resource loader (``HeaderStreamingError``) in the
+    ///    chain: that loader's statuses never reach the error log.
+    /// 3. A decode or unsupported-format error in the current error's chain. Only specific
     ///    `AVError` codes count, not the generic -11800 wrapper, because they describe this failure.
-    /// 3. The newest classifiable log entry (a transport error or an HTTP status). The log keeps
+    /// 4. The newest classifiable log entry (a transport error or an HTTP status). The log keeps
     ///    entries playback already recovered from, so only the newest one counts.
-    /// 4. ``Kind/unknown``.
+    /// 5. ``Kind/unknown``.
     init(error: (any Error)?, errorLog: [ErrorLogEntry] = []) {
         let status = Self.httpStatus(in: errorLog)
         guard let error else {
@@ -87,7 +89,14 @@ extension PlaybackFailure {
             kind: Self.kind(of: nsError, errorLog: errorLog),
             domain: nsError.domain, code: nsError.code,
             underlyingDomain: underlying?.domain, underlyingCode: underlying?.code,
-            httpStatus: status, description: nsError.localizedDescription)
+            httpStatus: Self.loaderStatus(in: Self.chain(of: nsError)) ?? status,
+            description: nsError.localizedDescription)
+    }
+
+    /// The HTTP status a ``HeaderStreamingError`` in `errors` carries (its code; the other cases
+    /// have negative codes).
+    private static func loaderStatus(in errors: [NSError]) -> Int? {
+        errors.first { $0.domain == HeaderStreamingError.errorDomain && $0.code > 0 }?.code
     }
 
     /// The newest HTTP status in the log.
@@ -118,6 +127,7 @@ extension PlaybackFailure {
         for error in errors where error.domain == NSURLErrorDomain {
             if let kind = urlKind(error.code) { return kind }
         }
+        if let status = loaderStatus(in: errors) { return .http(status: status) }
         for error in errors where error.domain == AVFoundationErrorDomain {
             switch AVError.Code(rawValue: error.code) {
             case .decodeFailed, .fileFailedToParse, .failedToParse: return .decode
