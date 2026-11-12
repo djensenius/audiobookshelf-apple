@@ -216,28 +216,57 @@ final class PlaybackRecovery {
 
     private func run(_ run: Int, host: PlaybackRecoveryHost) async {
         defer { if run == token { isRunning = false } }
+        // The path came back during this attempt's lookup or backoff: retry at once.
+        var cameBack = false
         while isCurrent(run, host), let current = episode {
-            if case .surface(let error) = step(for: current) { return giveUp(error, host) }
+            switch step(for: current) {
+            case .surface(let error): return giveUp(error, host)
+            // Out of attempts: never wait for the network first.
+            case .rebuild where current.rebuilds >= Self.rebuildDelays.count,
+                .refresh where current.rebuilds >= Self.rebuildDelays.count:
+                return giveUp(.recoveryExhausted, host)
+            default: break
+            }
             let network = await waitForNetwork()
             guard isCurrent(run, host) else { return }
             if network == .timedOut { return giveUp(.recoveryExhausted, host) }
+            let returned = cameBack || network == .returned
+            cameBack = false
             var session = PlaybackSessionStatus.unknown
-            if network == .returned || needsSessionCheck(current) {
+            if returned || needsSessionCheck(current) {
                 session = await host.checkSession()
                 guard isCurrent(run, host) else { return }
             }
-            guard var episode = self.episode else { return }
+            guard let episode = self.episode else { return }
+            let step = step(for: episode, session: session)
+            let delay: Duration
+            switch step {
+            case .surface(let error): return giveUp(error, host)
+            case .reseek: delay = Self.retryDelays[episode.retries]
+            case .rebuild, .refresh:
+                guard episode.rebuilds < Self.rebuildDelays.count else { return giveUp(.recoveryExhausted, host) }
+                delay = Self.rebuildDelays[episode.rebuilds]
+            }
             // Back online: retry at once.
-            let backoff = network != .returned
-            switch step(for: episode, session: session) {
-            case .surface(let error):
-                return giveUp(error, host)
-            case .reseek:
-                let delay = Self.retryDelays[episode.retries]
-                episode.retries += 1
-                self.episode = episode
-                if backoff { await wait(delay) }
+            if !returned {
+                await wait(delay)
                 guard isCurrent(run, host) else { return }
+            }
+            // The path may have dropped during the lookup or backoff: no attempt (or budget) offline.
+            switch await waitForNetwork() {
+            case .online: break
+            case .returned:
+                cameBack = true
+                continue
+            case .timedOut:
+                guard isCurrent(run, host) else { return }
+                return giveUp(.recoveryExhausted, host)
+            }
+            guard isCurrent(run, host) else { return }
+            switch step {
+            case .surface: return
+            case .reseek:
+                self.episode?.retries += 1
                 self.episode?.failedDuringAttempt = false
                 let result = await host.reseek(host.target())
                 guard isCurrent(run, host) else { return }
@@ -246,16 +275,13 @@ final class PlaybackRecovery {
                     return
                 }
             case .refresh:
-                guard episode.rebuilds < Self.rebuildDelays.count else { return giveUp(.recoveryExhausted, host) }
-                episode.refreshed = true
-                self.episode = episode
+                self.episode?.refreshed = true
                 let error = await host.refresh()
                 guard isCurrent(run, host) else { return }
                 if let error { return giveUp(error, host) }
-                guard await rebuild(run, host, backoff: backoff) else { return }
+                guard await rebuild(run, host) else { return }
             case .rebuild:
-                guard episode.rebuilds < Self.rebuildDelays.count else { return giveUp(.recoveryExhausted, host) }
-                guard await rebuild(run, host, backoff: backoff) else { return }
+                guard await rebuild(run, host) else { return }
             }
         }
     }
@@ -330,13 +356,9 @@ final class PlaybackRecovery {
     }
 
     /// One rebuild attempt; returns whether the run goes on (the attempt failed recoverably).
-    private func rebuild(_ run: Int, _ host: PlaybackRecoveryHost, backoff: Bool) async -> Bool {
-        guard var episode else { return false }
-        let delay = Self.rebuildDelays[episode.rebuilds]
-        episode.rebuilds += 1
-        self.episode = episode
-        if backoff { await wait(delay) }
-        guard isCurrent(run, host) else { return false }
+    private func rebuild(_ run: Int, _ host: PlaybackRecoveryHost) async -> Bool {
+        guard episode != nil else { return false }
+        self.episode?.rebuilds += 1
         self.episode?.failedDuringAttempt = false
         let attempt = host.generation() + 1
         attemptGeneration = attempt

@@ -121,6 +121,64 @@ struct PlaybackRecoveryNetworkTests {
         #expect(coordinator.error == nil)
     }
 
+    @Test func connectivityLostDuringTheBackoffHoldsTheAttemptUntilItReturns() async {
+        h.recoverySleep.isManual = true
+        setSession(.alive)
+        await playAt600()
+        let seeks = engine.seeks.count
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        let checked = lookups.count
+        // The path drops while the backoff is held: when it ends, no attempt runs offline.
+        paths.isOnline = false
+        h.recoverySleep.fireOldest()
+        await settle { h.recoverySleep.waitingCount == 1 }
+        await drain()
+        #expect(h.recoverySleep.durations == [.milliseconds(500), .seconds(300)])
+        #expect(engine.seeks.count == seeks)
+        #expect(lookups.count == checked)
+
+        // Back online: the attempt runs at once, after a fresh session check, with no new backoff.
+        paths.isOnline = true
+        await settle { engine.isPlaybackRequested }
+        #expect(Array(engine.seeks.dropFirst(seeks)) == [600])
+        #expect(lookups.count == checked + 1)
+        #expect(h.recoverySleep.durations == [.milliseconds(500), .seconds(300)])
+
+        // Only the attempt that ran was charged: the next failure takes the second retry delay.
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        #expect(h.recoverySleep.durations.last == .seconds(1))
+    }
+
+    @Test func anExhaustedRebuildBudgetSurfacesTheErrorWithoutWaitingForTheNetwork() async {
+        h.recoverySleep.isManual = true
+        setSession(.gone)
+        await playAt600()
+        engine.loadError = .itemFailed(trackIndex: 0, Self.failure(.network))
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 404))))
+        for starts in 2...3 {
+            await settle { h.recoverySleep.waitingCount == 1 }
+            h.recoverySleep.fireOldest()
+            await settle { service.starts.count == starts }
+        }
+        await settle { h.recoverySleep.waitingCount == 1 }
+        let gate = Gate()
+        service.state.withLock { $0.startGates["A"] = gate }
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 4 }
+
+        // The last rebuild fails offline: nothing is left to wait for.
+        paths.isOnline = false
+        gate.open()
+        await settle { coordinator.error != nil }
+
+        #expect(coordinator.error == .recoveryExhausted)
+        #expect(h.recoverySleep.durations == [.seconds(1), .seconds(2), .seconds(4)])
+        #expect(h.recoverySleep.waitingCount == 0)
+    }
+
     // MARK: - Session check
 
     @Test func a404WithTheSessionAliveReseeksTheSameSession() async {
@@ -276,6 +334,134 @@ struct PlaybackRecoveryNetworkTests {
 
         #expect(!engine.isPlaybackRequested)
         #expect(!coordinator.isPlaybackRequested)
+    }
+
+    /// A call while the previous item plays and the next one awaits its streaming check: the
+    /// pending play never starts.
+    @Test func aCallCancelsAPlayAwaitingItsStreamingCheck() async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        await playAt600()
+        let gate = Gate()
+        h.policy.gate = gate
+        let play = Task { await coordinator.play(itemID: "B") }
+        await settle { h.policy.checks == 2 }
+
+        handler.handle(.interruptionBegan)
+        gate.open()
+        await play.value
+        handler.handle(.interruptionEnded(shouldResume: true))
+        await drain()
+
+        #expect(service.starts == ["A"])
+        #expect(coordinator.mediaKey == h.key("A"))
+    }
+
+    /// A pause after the call ends, before the restored play runs, wins.
+    @Test func aPauseAfterTheCallEndsBeatsTheRestoredPlay() async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let seeks = engine.seeks.count
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        handler.handle(.interruptionBegan)
+        // Recovery succeeds, paused, during the call.
+        h.recoverySleep.fireOldest()
+        await settle { engine.seeks.count > seeks }
+        await drain()
+
+        handler.handle(.interruptionEnded(shouldResume: true))
+        coordinator.pause()
+        await drain()
+
+        #expect(!engine.isPlaybackRequested)
+        #expect(!coordinator.isPlaybackRequested)
+    }
+
+    /// A pause during the call while the item is starting: the call's end doesn't play it.
+    @Test func aPauseDuringTheCallWhileStartingIsKept() async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        let gate = Gate()
+        service.state.withLock { $0.startGates["A"] = gate }
+        let play = Task { await coordinator.play(itemID: "A", startTime: 600) }
+        await settle { service.starts.count == 1 }
+
+        handler.handle(.interruptionBegan)
+        coordinator.pause()
+        handler.handle(.interruptionEnded(shouldResume: true))
+        gate.open()
+        await play.value
+        await drain()
+
+        #expect(engine.loads.count == 1)
+        #expect(!engine.isPlaybackRequested)
+    }
+
+    /// A call during a start's catch-up seek: the load path still starts playback once the call
+    /// ends, whether that is before or after the seek lands.
+    @Test(arguments: [false, true])
+    func aCallDuringTheCatchUpSeekStillPlaysOnceItEnds(endsAfterTheSeek: Bool) async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        let load = Gate()
+        engine.loadGates = [load]
+        let play = Task { await coordinator.play(itemID: "A", startTime: 600) }
+        await settle { engine.loads.count == 1 }
+        _ = await coordinator.seek(to: 1200)
+        let catchUp = Gate()
+        engine.seekGates = [catchUp]
+        load.open()
+        await settle { engine.seeks.count == 1 }
+
+        handler.handle(.interruptionBegan)
+        #expect(!coordinator.isPlaybackRequested)
+        if endsAfterTheSeek {
+            catchUp.open()
+            await play.value
+            await drain()
+            #expect(!engine.isPlaybackRequested)
+        }
+        handler.handle(.interruptionEnded(shouldResume: true))
+        if !endsAfterTheSeek {
+            catchUp.open()
+            await play.value
+        }
+        await settle { engine.isPlaybackRequested }
+
+        #expect(coordinator.currentTime == 1200)
+        #expect(coordinator.error == nil)
+    }
+
+    /// The call ends while recovery waits: only its play intent comes back. No auto-rewind or
+    /// seek of the coordinator's own replaces its bounded attempt.
+    @Test func aLongCallEndingDuringRecoveryRestoresOnlyItsPlay() async {
+        let handler = AudioInterruptionHandler(engine: engine)
+        handler.heldPlayIntent = coordinator
+        h.recoverySleep.isManual = true
+        await playAt600()
+        // A pause records when playback last ran, so a resume after the call would rewind.
+        coordinator.pause()
+        await coordinator.resume()
+        let seeks = engine.seeks.count
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        handler.handle(.interruptionBegan)
+        h.clock.advance(by: 600)
+        handler.handle(.interruptionEnded(shouldResume: true))
+        await drain()
+
+        #expect(engine.seeks.count == seeks)
+        #expect(!engine.isPlaybackRequested)
+        #expect(h.recoverySleep.waitingCount == 1)
+        #expect(coordinator.isPlaybackRequested)
+        h.recoverySleep.fireOldest()
+        await settle { engine.isPlaybackRequested }
+        #expect(Array(engine.seeks.dropFirst(seeks)) == [600])
+        #expect(coordinator.currentTime == 600)
     }
 }
 

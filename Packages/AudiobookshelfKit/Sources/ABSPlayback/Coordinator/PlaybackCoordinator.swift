@@ -192,6 +192,9 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var reachedEnd = false
     /// A seek's `didSeek` is still owed: after `loaded`, and only once the target lands.
     @ObservationIgnored private var awaitingSeekLanding = false
+    /// What an interruption cancelled (``cancelHeldPlayIntent()``): the generation and play check
+    /// it happened at.
+    @ObservationIgnored private var heldPlay: (generation: Int, policyCheck: Int)?
     /// The ``resumingIntent`` of a user seek that took over recovery's play.
     @ObservationIgnored private var recoverySeekIntent: Int?
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
@@ -659,6 +662,7 @@ public final class PlaybackCoordinator {
     /// Always emits `paused`, even when already paused, so a sleep timer's pending resume can be cancelled.
     public func pause() {
         defer { emit(.paused(time: currentTime)) }
+        heldPlay = nil
         recovery.notePlayIntent(false)
         if pendingPlayKey != nil {
             policyCheck += 1
@@ -965,6 +969,7 @@ public final class PlaybackCoordinator {
     /// even when already paused, so a sleep timer's pending resume is cancelled too.
     private func outputLost() {
         defer { emit(.paused(time: currentTime)) }
+        heldPlay = nil
         // As a pause does: a play awaiting its streaming check doesn't start.
         if pendingPlayKey != nil {
             policyCheck += 1
@@ -980,15 +985,50 @@ public final class PlaybackCoordinator {
     /// pause can't reach, as a lost output does, so recovery never restarts audio during the call.
     /// Returns whether there was one.
     public func cancelHeldPlayIntent() -> Bool {
+        heldPlay = nil
+        // A play awaiting its streaming check never starts during the call, even beside a playing
+        // item; it isn't restored.
+        if pendingPlayKey != nil {
+            policyCheck += 1
+            pendingPlayKey = nil
+        }
         guard isPlaybackRequested, !engine.isPlaybackRequested else { return false }
-        outputLost()
+        if phase == .starting || (phase == .loaded && isFinishingLoad) {
+            // Keeps the load's resume token, so restoring `playWhenLoaded` plays it.
+            pause()
+        } else {
+            outputLost()
+        }
+        heldPlay = (generation, policyCheck)
         return true
     }
 
-    /// The interruption ended with a resumption recommended: plays as ``resume(rewindingBy:)``
-    /// does, so recovery's next attempt plays again.
+    /// The interruption ended with a resumption recommended: restores the play it cancelled, unless
+    /// playback changed since (a pause, lost output, play, stop or another item). Recovery still in
+    /// charge only gets its play intent back: no rewind or seek of the coordinator's own.
     public func resumeHeldPlayIntent() {
-        Task { await resume() }
+        guard let held = heldPlay else { return }
+        heldPlay = nil
+        guard held == (generation, policyCheck), mediaKey != nil else { return }
+        switch phase {
+        case .starting,
+            .loaded where isFinishingLoad:
+            playWhenLoaded = true
+            recovery.notePlayIntent(true)
+        case _ where recovery.isRecovering(at: generation):
+            recovery.notePlayIntent(true)
+        case .loaded:
+            let intent = resumeIntent
+            Task { [weak self] in
+                guard let self, held == (generation, policyCheck), phase == .loaded, intent == resumeIntent,
+                    heldPlay == nil
+                else { return }
+                if recovery.isRecovering(at: generation) { return recovery.notePlayIntent(true) }
+                await resume()
+            }
+        case .idle, .unloaded:
+            break
+        }
     }
 
     // MARK: Auto-advance
