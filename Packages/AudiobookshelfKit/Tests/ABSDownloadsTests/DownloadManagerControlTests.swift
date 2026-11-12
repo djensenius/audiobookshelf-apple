@@ -67,6 +67,36 @@ import Testing
         #expect(try await fixture.store.record(id: episode.id)?.state == .queued)
     }
 
+    /// On a cold launch the engine has no session yet, so a pause can't stop a transfer that
+    /// survived; the restart reattaches first, so the pause stops it and the resume starts anew.
+    @Test func restartStopsATransferThatSurvivedARelaunch() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.survive(book.id)
+
+        try await manager.restartActiveTransfers()
+
+        #expect(await fixture.engine.attaches == 1)
+        #expect(await fixture.engine.calls == [.pause(book.id), .resume(book.id)])
+        #expect(await fixture.engine.runningSurvivors.isEmpty)
+    }
+
+    /// Without a session nothing is restarted, and the caller learns it, so it can try again.
+    @Test func restartFailsWithoutASession() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        await fixture.engine.makeSessionUnavailable()
+
+        await #expect(throws: DownloadManagerError.storeFailure) { try await manager.restartActiveTransfers() }
+
+        #expect(await fixture.engine.calls.isEmpty)
+        #expect(try await fixture.store.record(id: book.id)?.state == .downloading)
+    }
+
     /// A resume that fails twice leaves its record queued, not paused as if by the user; the
     /// other record still restarts, and the failure is thrown at the end.
     @Test func restartQueuesARecordItCouldNotResumeAndGoesOn() async throws {

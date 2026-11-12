@@ -27,6 +27,8 @@ public struct DownloadNetworkAccess: @unchecked Sendable {
     /// Whether expensive paths count as cellular, as for ``NetworkAccess/init(policy:treatsExpensiveAsCellular:)``.
     public let treatsExpensiveAsCellular: Bool
     private let ledger = MeteredLedger()
+    /// Runs in ``current()`` between reading the policy and recording the flags, for tests.
+    private let afterPolicyRead: (@Sendable () -> Void)?
 
     /// - Parameters:
     ///   - defaults: the store ``AppSettings`` uses (``AppSettings/defaults``).
@@ -35,20 +37,30 @@ public struct DownloadNetworkAccess: @unchecked Sendable {
         defaults: UserDefaults,
         treatsExpensiveAsCellular: Bool = NetworkPolicy.treatsExpensiveAsCellularByDefault
     ) {
+        self.init(defaults: defaults, treatsExpensiveAsCellular: treatsExpensiveAsCellular, afterPolicyRead: nil)
+    }
+
+    init(defaults: UserDefaults, treatsExpensiveAsCellular: Bool, afterPolicyRead: (@Sendable () -> Void)?) {
         self.defaults = defaults
         self.treatsExpensiveAsCellular = treatsExpensiveAsCellular
+        self.afterPolicyRead = afterPolicyRead
     }
 
     /// The flags for the stored ``AppSettings/downloadUsingCellular``. Flags allowing cellular or
     /// Low Data Mode are recorded as handed out.
+    ///
+    /// The policy is read and the flags recorded under the ledger's lock, as one step against
+    /// ``takeHandedOutMetered()``: a take that finds nothing handed out comes before the read, so
+    /// a policy stored before the take is the one read.
     public func current() -> NetworkAccess {
-        let access = NetworkAccess(
-            policy: AppSettings.snapshot(from: defaults).downloadUsingCellular,
-            treatsExpensiveAsCellular: treatsExpensiveAsCellular)
-        if access.allowsCellularAccess || access.allowsConstrainedNetworkAccess {
-            ledger.handedOut.withLock { $0 = true }
+        ledger.handedOut.withLock { handedOut in
+            let access = NetworkAccess(
+                policy: AppSettings.snapshot(from: defaults).downloadUsingCellular,
+                treatsExpensiveAsCellular: treatsExpensiveAsCellular)
+            afterPolicyRead?()
+            if access.allowsCellularAccess || access.allowsConstrainedNetworkAccess { handedOut = true }
+            return access
         }
-        return access
     }
 
     /// ``current()`` as the engine's `networkAccess` closure.
@@ -59,6 +71,15 @@ public struct DownloadNetworkAccess: @unchecked Sendable {
     /// Whether metered access was handed out since the last call, and clears it.
     func takeHandedOutMetered() -> Bool {
         ledger.handedOut.withLock { handedOut in
+            defer { handedOut = false }
+            return handedOut
+        }
+    }
+
+    /// ``takeHandedOutMetered()`` if no ``current()`` holds the ledger's lock; otherwise `nil`,
+    /// without waiting. For tests.
+    func takeHandedOutMeteredIfAvailable() -> Bool? {
+        ledger.handedOut.withLockIfAvailable { handedOut in
             defer { handedOut = false }
             return handedOut
         }

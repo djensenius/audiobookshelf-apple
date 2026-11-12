@@ -54,4 +54,32 @@ import Testing
         access.markHandedOutMetered()
         #expect(access.takeHandedOutMetered())
     }
+
+    /// A take can't come between reading the policy and recording the flags: then a restart for
+    /// a policy stored meanwhile would find nothing handed out while the flags allowing cellular
+    /// still go to a new task.
+    @Test func aTakeWaitsForTheReadAndTheRecordToFinish() throws {
+        let suiteName = "ABSAppModelTests.DownloadNetworkAccess.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        AppSettings(defaults: defaults).downloadUsingCellular = .always
+        let instance = Locked<DownloadNetworkAccess?>(nil)
+        let takenDuringRead = Locked<Bool??>(nil)
+        let access = DownloadNetworkAccess(defaults: defaults, treatsExpensiveAsCellular: false) {
+            // From another thread, as the controller's take would come.
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global().async {
+                takenDuringRead.value = .some(instance.value?.takeHandedOutMeteredIfAvailable())
+                done.signal()
+            }
+            done.wait()
+        }
+        instance.value = access
+        _ = access.takeHandedOutMetered()
+
+        #expect(access.current().allowsCellularAccess)
+
+        #expect(takenDuringRead.value == .some(nil))
+        #expect(access.takeHandedOutMetered())
+    }
 }
