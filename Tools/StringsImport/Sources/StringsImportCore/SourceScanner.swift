@@ -26,6 +26,31 @@ public enum SourceScanner {
     /// not an identifier that merely contains it, such as `PreviewProviderView`.
     static var previewConformance: Regex<Substring> { #/[:,]\s*(?:SwiftUI\.)?PreviewProvider\b/# }
 
+    /// The start of a type or extension declaration: attributes and modifiers, then the keyword.
+    static var typeDeclaration: Regex<Substring> {
+        #/^\s*(?:(?:@\w+(?:\([^)]*\))?|public|package|internal|fileprivate|private|open|final|indirect)\s+)*(?:struct|class|enum|actor|extension)\s/#
+    }
+
+    /// Whether a type or extension declaration's header (its text before the body's `{`, possibly
+    /// over several lines) lists `PreviewProvider` in its inheritance clause. Generic parameters
+    /// and the `where` clause are dropped first, so `struct Box<T: PreviewProvider>: View` and
+    /// `extension Box: View where T: PreviewProvider` aren't previews.
+    static func conformsToPreviewProvider(_ header: String) -> Bool {
+        var clause = ""
+        var angles = 0
+        for character in header {
+            switch character {
+            case "<": angles += 1
+            case ">": angles = max(angles - 1, 0)
+            default: if angles == 0 { clause.append(character) }
+            }
+        }
+        if let whereClause = clause.firstMatch(of: #/\bwhere\b/#) {
+            clause = String(clause[..<whereClause.range.lowerBound])
+        }
+        return clause.contains(previewConformance)
+    }
+
     /// The opt-out comment, e.g. `// l10n-ignore: an example URL, not prose`.
     public static let ignoreMarker = "l10n-ignore"
 
@@ -67,8 +92,9 @@ public enum SourceScanner {
         /// and line numbers match ``text``.
         var codeText: String { String(decoding: SourceLexer.blankingComments(Array(text.utf8)), as: UTF8.self) }
 
-        /// The 1-based numbers of the lines in previews (a `#Preview` or a type or extension
-        /// conforming to `PreviewProvider`, from its line to its closing brace) or in the branch of
+        /// The 1-based numbers of the lines in previews (a `#Preview`, or a type or extension
+        /// declaring a `PreviewProvider` conformance, its header possibly spanning lines, from its
+        /// first line to its closing brace) or in the branch of
         /// a conditional that is exactly `#if DEBUG` (not its `#else`, and not a compound condition
         /// such as `#if DEBUG || os(macOS)`, which also builds in release). Braces and `#` in
         /// comments and strings don't count.
@@ -80,6 +106,9 @@ public enum SourceScanner {
             // The brace depth a preview started at while in one, and whether its body has opened.
             var previewDepth: Int?
             var previewOpened = false
+            // A type or extension declaration whose body hasn't opened yet: its first line, the
+            // depth there, and its header so far.
+            var declaration: (start: Int, depth: Int, header: String)?
             var depth = 0
             for (index, line) in code.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
                 let directive = line.drop { $0.isWhitespace }.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -89,9 +118,28 @@ public enum SourceScanner {
                 case "#endif": _ = conditionals.popLast()
                 default: break
                 }
-                if previewDepth == nil, line.contains("#Preview") || line.contains(SourceScanner.previewConformance) {
+                if previewDepth == nil, line.contains("#Preview") {
                     previewDepth = depth
                     previewOpened = false
+                    declaration = nil
+                } else if previewDepth == nil {
+                    if declaration == nil, line.contains(SourceScanner.typeDeclaration) {
+                        declaration = (index, depth, "")
+                    }
+                    if var pending = declaration {
+                        pending.header += line.prefix { $0 != "{" } + "\n"
+                        declaration = pending
+                        // The header ends at the body's `{`; give up on anything else that ends it.
+                        if line.contains("{") || line.contains("}") || line.contains(";") || index - pending.start >= 20
+                        {
+                            declaration = nil
+                            if line.contains("{"), SourceScanner.conformsToPreviewProvider(pending.header) {
+                                previewDepth = pending.depth
+                                previewOpened = false
+                                result.formUnion((pending.start + 1)..<(index + 1))
+                            }
+                        }
+                    }
                 }
                 let opened = line.filter { $0 == "{" }.count
                 depth += opened - line.filter { $0 == "}" }.count

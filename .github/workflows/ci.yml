@@ -52,15 +52,25 @@ jobs:
       - name: Check project.xcproj is canonical
         run: mise run xcproj:check
 
-      # strings:check rejects hard-coded-strings baseline entries the target branch doesn't have,
-      # and the shallow checkout doesn't include that branch.
-      - name: Fetch the base branch
-        if: github.event_name == 'pull_request'
+      # strings:check rejects hard-coded-strings baseline entries the base doesn't have: the target
+      # branch for a pull request, the commit before the push on main (on main itself, origin/main
+      # is the pushed commit). The shallow checkout has neither. If the fetch fails (a new branch,
+      # a force push), strings:check warns and skips that comparison.
+      - name: Fetch the strings baseline's base
         env:
+          EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-        run: git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = pull_request ]; then
+            git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          else
+            git fetch --no-tags --depth=1 origin "$BEFORE" || echo "::warning::Couldn't fetch $BEFORE"
+          fi
 
       - name: Check Localizable.xcstrings is up to date
+        env:
+          STRINGS_BASELINE_BASE: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: mise run strings:check
 
       - name: Test repository tools

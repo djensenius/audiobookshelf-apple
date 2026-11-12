@@ -31,8 +31,11 @@ public struct HardCodedBaseline: Sendable, Equatable {
     }
 
     /// Parses the baseline file's text; a line that isn't a comment, blank or `path\tcode` throws.
+    /// CRLF and lone CR line breaks count as `\n` (Swift reads `\r\n` as one `Character`, so
+    /// splitting on `"\n"` alone wouldn't break there).
     public init(text: String) throws {
         entries = []
+        let text = SourceScanner.SourceFile.normalizingLineBreaks(text)
         for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
@@ -54,9 +57,11 @@ public struct HardCodedBaseline: Sendable, Equatable {
         return try HardCodedBaseline(text: String(contentsOf: url, encoding: .utf8))
     }
 
-    /// The git ref whose baseline this one may only shrink from: `origin/<GITHUB_BASE_REF>` for a
-    /// pull request in CI, else `origin/main`.
+    /// The git ref whose baseline this one may only shrink from: `STRINGS_BASELINE_BASE` when set
+    /// (CI sets the commit before a push to main), else `origin/<GITHUB_BASE_REF>` for a pull
+    /// request in CI, else `origin/main`.
     public static func baseRef(environment: [String: String]) -> String {
+        if let base = environment["STRINGS_BASELINE_BASE"], !base.isEmpty { return base }
         if let base = environment["GITHUB_BASE_REF"], !base.isEmpty { return "origin/\(base)" }
         return "origin/main"
     }

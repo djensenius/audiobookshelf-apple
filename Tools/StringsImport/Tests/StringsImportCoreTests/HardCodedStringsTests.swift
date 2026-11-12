@@ -94,6 +94,47 @@ import Testing
         #expect(lines(text) == [2, 10])
     }
 
+    /// A generic constraint or `where` clause naming `PreviewProvider` isn't a conformance, and a
+    /// function isn't a preview type.
+    @Test func genericConstraintsAreNotPreviews() {
+        let text = """
+            func render<T: PreviewProvider>(_ type: T.Type) -> some View { Text("Function") }
+            struct Box<T: PreviewProvider>: View {
+                var body: some View { Text("Generic") }
+            }
+            extension Box: Equatable where T: PreviewProvider {
+                var label: some View { Text("Where") }
+            }
+            struct Row_Previews: PreviewProvider {
+                static var previews: some View { Text("Preview") }
+            }
+            """
+        #expect(lines(text) == [1, 3, 6])
+    }
+
+    /// A conformance on a later line of the declaration, before its body, still makes a preview,
+    /// header lines included.
+    @Test func multilinePreviewConformances() {
+        let text = """
+            struct Row_Previews:
+                PreviewProvider
+            {
+                static var previews: some View { Text("Preview") }
+            }
+            @available(iOS 18, *)
+            struct Other_Previews: View,
+                SwiftUI.PreviewProvider {
+                static var previews: some View { Text("Preview too") }
+            }
+            struct Plain:
+                View {
+                var body: some View { Text("Production") }
+            }
+            Text("After")
+            """
+        #expect(lines(text) == [13, 15])
+    }
+
     /// Only a condition that is exactly `DEBUG` is skipped: a compound one also builds in release.
     @Test func skipsOnlyExactDebugConditions() {
         let text = """
@@ -196,6 +237,24 @@ import Testing
         #expect(HardCodedBaseline.baseRef(environment: [:]) == "origin/main")
         #expect(HardCodedBaseline.baseRef(environment: ["GITHUB_BASE_REF": ""]) == "origin/main")
         #expect(HardCodedBaseline.baseRef(environment: ["GITHUB_BASE_REF": "release"]) == "origin/release")
+        // A push to main compares with the commit before the push.
+        #expect(HardCodedBaseline.baseRef(environment: ["STRINGS_BASELINE_BASE": "abc123"]) == "abc123")
+        #expect(
+            HardCodedBaseline.baseRef(environment: ["STRINGS_BASELINE_BASE": "", "GITHUB_BASE_REF": "main"])
+                == "origin/main")
+    }
+
+    /// A baseline saved with CRLF or CR line breaks parses like LF: its comment header doesn't
+    /// swallow the entries.
+    @Test func parsesCRLFBaselines() throws {
+        let lf = "# A comment\n\(features)\tText(\"Hello\")\n\(features)\tText(\"Bye\")\n"
+        let expected = try HardCodedBaseline(text: lf)
+        #expect(expected.entries.count == 2)
+        #expect(try HardCodedBaseline(text: lf.replacingOccurrences(of: "\n", with: "\r\n")) == expected)
+        #expect(try HardCodedBaseline(text: lf.replacingOccurrences(of: "\n", with: "\r")) == expected)
+        #expect(throws: ImportError.invalidBaselineLine(line: 2)) {
+            try HardCodedBaseline(text: "# A comment\r\nno tab\r\n")
+        }
     }
 }
 
