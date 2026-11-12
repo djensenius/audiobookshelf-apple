@@ -338,6 +338,31 @@ struct EbookActionsModelTests {
         #expect(model.offeredStatusChanges(authorization: auth(update: true), item: twoFiles, isGone: false).count == 2)
     }
 
+    /// The server sends its current primary ebook, which a toggle whose reload failed may have
+    /// changed, so sending waits for the item to load again.
+    @Test func failedReloadHidesAndRefusesSendUntilTheItemLoads() async {
+        let service = FakeEbookActionsService()
+        let model = EbookActionsModel(itemID: "li1", service: service)
+        #expect(await model.apply(makeB, offered: [makeB]) { nil } == .statusUpdated(filename: "b.epub"))
+        #expect(model.needsReload)
+        #expect(model.offeredDevices(authorization: auth(), item: twoFiles, isGone: false).isEmpty)
+        // A pending tap carries the devices offered before the change.
+        let stale = EbookActionsModel.devices(authorization: auth(), item: twoFiles, isGone: false)
+        #expect(!model.canSend(to: "Kindle", offered: stale))
+        #expect(await model.send(to: "Kindle", offered: stale) == .ignored)
+        #expect(service.calls == ["toggle li1 b"])
+
+        model.itemDidLoad()
+        let offered = model.offeredDevices(authorization: auth(), item: twoFiles, isGone: false)
+        #expect(offered.map(\.name) == ["Kindle"])
+        #expect(await model.send(to: "Kindle", offered: offered) == .sent(deviceName: "Kindle"))
+    }
+
+    @Test func offeredDevicesAreForThisItemOnly() {
+        let model = EbookActionsModel(itemID: "other", service: FakeEbookActionsService())
+        #expect(model.offeredDevices(authorization: auth(), item: twoFiles, isGone: false).isEmpty)
+    }
+
     @Test func staleTapIsDropped() async {
         let service = FakeEbookActionsService()
         let model = EbookActionsModel(itemID: "li1", service: service)
@@ -418,6 +443,8 @@ struct EbookActionsModelTests {
         model.replaceService(second)
         #expect(model.needsReload)
         #expect(model.offeredStatusChanges(authorization: auth(update: true), item: twoFiles, isGone: false).isEmpty)
+        #expect(await model.send(to: "Kindle", offered: offered) == .ignored)
+        model.itemDidLoad()
 
         // An action in flight on the old client still blocks one on the new client.
         let sending = Task { await model.send(to: "Kindle", offered: offered) }

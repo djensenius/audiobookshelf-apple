@@ -33,9 +33,11 @@ extension APIClient: EbookActionsService {
 ///   `User.canUpdate`; 403 otherwise), a book, and a file with an inode. The server flips the
 ///   file's own `isSupplementary` (`LibraryItemController.updateEbookFileStatus`), so that, not
 ///   `media.ebookFile`, says which way a change goes; the two disagree on legacy data.
-/// - ``offeredStatusChanges(authorization:item:isGone:)`` stays empty after a change whose reload
-///   failed (``needsReload``), until the item loads again (``itemDidLoad()``), so it never offers
-///   the pre-change direction.
+/// - ``offeredStatusChanges(authorization:item:isGone:)`` and
+///   ``offeredDevices(authorization:item:isGone:)`` stay empty, and sends are refused, after a
+///   change whose reload failed (``needsReload``), until the item loads again (``itemDidLoad()``):
+///   the menu never offers the pre-change direction, nor sends what the server now holds as the
+///   primary ebook while showing another.
 /// - Neither is offered once the item is gone from the server.
 ///
 /// One action runs at a time (``isBusy``), a status change through its reload. A tap is checked
@@ -134,6 +136,13 @@ public final class EbookActionsModel {
         }
     }
 
+    /// ``devices(authorization:item:isGone:)`` for this model's item, hidden while
+    /// ``needsReload``: the server sends its current primary ebook, which may not be the shown one.
+    public func offeredDevices(authorization: AuthResponse?, item: LibraryItem?, isGone: Bool) -> [EReaderDevice] {
+        guard !needsReload, item?.id == itemID else { return [] }
+        return Self.devices(authorization: authorization, item: item, isGone: isGone)
+    }
+
     /// ``statusChanges(authorization:item:isGone:)`` for this model's item, hidden while
     /// ``needsReload``.
     public func offeredStatusChanges(authorization: AuthResponse?, item: LibraryItem?, isGone: Bool) -> [StatusChange] {
@@ -148,9 +157,10 @@ public final class EbookActionsModel {
 
     // MARK: Actions
 
-    /// No action is running and `offered` has `deviceName`; checked before announcing a send.
+    /// No action is running, the item's files aren't stale (``needsReload``), and `offered` has
+    /// `deviceName`; checked before announcing a send.
     public func canSend(to deviceName: String, offered: [EReaderDevice]) -> Bool {
-        !isBusy && offered.contains { $0.name == deviceName }
+        !isBusy && !needsReload && offered.contains { $0.name == deviceName }
     }
 
     /// Sends the primary ebook to `deviceName` if `offered` (the devices the menu would offer now,

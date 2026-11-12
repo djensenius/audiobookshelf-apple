@@ -113,14 +113,14 @@ private struct ItemDetailMoreMenu: ViewModifier {
     private func ebookEntries(_ ebookActions: EbookActionsModel, isGone: Bool) -> some View {
         let authorization = accounts?.authorization
         return ItemDetailEbookEntries(
-            devices: EbookActionsModel.devices(authorization: authorization, item: model.item, isGone: isGone),
+            devices: ebookActions.offeredDevices(authorization: authorization, item: model.item, isGone: isGone),
             statusChanges: ebookActions.offeredStatusChanges(
                 authorization: authorization, item: model.item, isGone: isGone),
             isBusy: ebookActions.isBusy,
             send: { deviceName in
                 // What would be offered now: the account or item may have changed since the menu
                 // opened.
-                let offered = EbookActionsModel.devices(
+                let offered = ebookActions.offeredDevices(
                     authorization: accounts?.authorization, item: model.item,
                     isGone: isGone || (model.error as? APIError) == .notFound)
                 guard ebookActions.canSend(to: deviceName, offered: offered) else { return }
