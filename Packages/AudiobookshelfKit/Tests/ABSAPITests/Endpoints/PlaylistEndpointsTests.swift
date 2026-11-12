@@ -101,13 +101,15 @@ enum PlaylistWriteOperation: CaseIterable, Sendable {
         }
     }
 
-    @Test func removeItemOfABookHasNoEpisodeSegment() async throws {
+    /// A nil or empty episode ID is a book: no trailing segment, which would be `/item/book/`.
+    @Test(arguments: [nil, ""] as [String?])
+    func removeItemOfABookHasNoEpisodeSegment(episodeID: String?) async throws {
         let data = try playlistWriteFixture("2.26.0")
         let stub = StubServer { _ in StubResponse(status: 200, body: data) }
         let client = APIClient(
             configuration: try APIClientConfiguration(baseURL: stub.baseURL),
             tokenProvider: InMemoryTokenProvider(), sessionConfiguration: stub.sessionConfiguration())
-        _ = try await client.send(PlaylistEndpoints.removeItem(id: "p", libraryItemID: "book"))
+        _ = try await client.send(PlaylistEndpoints.removeItem(id: "p", libraryItemID: "book", episodeID: episodeID))
         let request = try #require(stub.requests.first)
         #expect(request.httpMethod == "DELETE")
         #expect(request.url?.absoluteString == stub.baseURL.absoluteString + "/api/playlists/p/item/book")
