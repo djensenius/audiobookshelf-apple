@@ -196,6 +196,10 @@ private struct AddToPlaylistRow: View {
             try await removeFromPlaylist(id: id, items: [item])
         }
 
+        func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist {
+            try await respond(try find(id))
+        }
+
         func deletePlaylist(id: String) async throws { try check() }
 
         private func find(_ id: String) throws -> Playlist {

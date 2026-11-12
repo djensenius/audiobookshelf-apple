@@ -31,6 +31,9 @@ private struct FakePlaylistEditingService: PlaylistEditingService {
     func removeFromPlaylist(id: String, item: PlaylistItemReference) async throws -> Playlist {
         throw TestError.unexpected
     }
+    func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        throw TestError.unexpected
+    }
     func deletePlaylist(id: String) async throws { throw TestError.unexpected }
 }
 

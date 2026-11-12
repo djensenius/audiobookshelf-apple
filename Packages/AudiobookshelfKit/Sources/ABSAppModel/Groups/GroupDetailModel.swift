@@ -209,6 +209,25 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
         }
     }
 
+    // MARK: Edits
+
+    /// Shows `detail` for an edit: its optimistic result, the server's answer or a rollback. A
+    /// load in flight is dropped, as it may have been answered before the edit.
+    func showEdited(_ detail: GroupDetail) {
+        sequence += 1
+        isLoading = false
+        self.detail = detail
+    }
+
+    /// The group was deleted by an edit (deleting it, or removing its last member): it shows as
+    /// not found, as after a removal the server pushed.
+    func showDeleted() {
+        sequence += 1
+        isLoading = false
+        isNotFound = true
+        detail = nil
+    }
+
     // MARK: Progress and play-all
 
     /// The user's progress on `member`, if any.
