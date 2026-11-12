@@ -258,6 +258,7 @@ private typealias F = SeriesAuthorsFixtures
                 return F.page([F.book("b1"), F.book("b2"), F.book("b3")])
             })
         let model = AuthorDetailModel(authorID: "a1", libraryID: "lib_a", service: service)
+        #expect(model.booksLibraryID == "lib_a")
 
         await model.loadIfNeeded()
 
@@ -265,6 +266,9 @@ private typealias F = SeriesAuthorsFixtures
         #expect(model.books.items.map(\.id) == ["b1", "b2", "b3"])
         #expect(model.books.total == 3)
         #expect(cancelled.value == ["lib_a"])
+        // Actions on the books (Add to playlist) go to the author's library, not the one the screen opened in.
+        #expect(model.booksLibraryID == "lib_b")
+        #expect(model.libraryID == "lib_a")
     }
 
     @Test func countsBooksRefreshesWhateverTheAuthorDoes() async {

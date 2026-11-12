@@ -289,7 +289,7 @@ import Testing
         #expect(state.unacknowledgedSends.isEmpty)
     }
 
-    @Test func untruncatedGroupStillResolvesConflictsByTime() throws {
+    @Test func dirtyEbookKeepsItsValueBesideTruncatedAudio() throws {
         var state = Self.seeded()
         for index in 0...ProgressSend.historyLimit {
             state.apply(Self.seek(Double(200 + index)), now: Self.at(Double(10 + index)))
@@ -297,10 +297,11 @@ import Testing
         }
         #expect(state.truncated == .audio)
         state.apply(Self.page("mine", 0.2), now: Self.at(30))
-        // Ebook isn't truncated: an unmatched, newer server value is a real conflict the server wins.
+        // Ebook isn't truncated, but a dirty ebook group is local-authoritative: a newer server
+        // value doesn't replace it.
         state.merge(Self.server(currentTime: 900, ebookLocation: "other", lastUpdate: Self.at(500)))
-        #expect(state.ebookLocation == "other")
-        #expect(state.dirty.contains(.ebook) == false)
+        #expect(state.ebookLocation == "mine")
+        #expect(state.dirty.contains(.ebook))
         // Audio is truncated: its local value wins.
         #expect(state.currentTime == Double(200 + ProgressSend.historyLimit))
         #expect(state.dirty.contains(.audio))
@@ -308,7 +309,7 @@ import Testing
 
     /// The case from the ADR 0003 review (#37 comment): ebook edit → PATCH A (response lost) →
     /// newer ebook edit → a fetch whose audio matches A. Settling audio must not prune A's ebook
-    /// evidence, so A's ebook echo is still recognised and the newer ebook edit survives.
+    /// evidence, and the newer ebook edit survives A's ebook echo.
     @Test func audioMatchDoesNotPruneEbookEvidence() throws {
         var state = Self.seeded()
         state.apply(Self.seek(200), now: Self.at(10))
@@ -324,15 +325,15 @@ import Testing
         #expect(state.unacknowledgedSends == [ProgressSend(ebook: sendA.ebook)])
 
         // Later the server shows A's ebook, with a row-wide `lastUpdate` after the newer edit
-        // (another device changed audio). Without per-group pruning this would be a conflict the
-        // server wins, rolling the ebook back to A.
+        // (another device changed audio). The dirty ebook group is local-authoritative, and its
+        // evidence is kept until an acknowledgement.
         let echo = Self.server(currentTime: 800, ebookLocation: "A", ebookProgress: 0.3, lastUpdate: Self.at(90))
         state.merge(echo)
         #expect(state.ebookLocation == "E2")
         #expect(state.ebookProgress == 0.5)
         #expect(state.dirty == .ebook)
         #expect(state.currentTime == 800)
-        #expect(state.unacknowledgedSends.isEmpty)
+        #expect(state.unacknowledgedSends == [ProgressSend(ebook: sendA.ebook)])
     }
 
     @Test func matchingOneGroupKeepsOtherGroupsEntriesIntact() throws {
@@ -344,18 +345,18 @@ import Testing
         state.apply(Self.page("B", 0.4), now: Self.at(20))
         let sendB = Self.recordMixedSend(&state)
 
-        // Ebook echoes A, audio is unchanged from the baseline: only A's ebook is pruned.
-        state.merge(Self.server(ebookLocation: "A", ebookProgress: 0.3, lastUpdate: Self.at(30)))
+        // Audio echoes A, ebook is unchanged from the baseline: only A's audio is pruned.
+        state.merge(Self.server(currentTime: 200, lastUpdate: Self.at(30)))
         #expect(state.unacknowledgedSends.count == 2)
-        #expect(state.unacknowledgedSends[0].ebook == nil)
-        #expect(state.unacknowledgedSends[0].audio?.currentTime == 200)
+        #expect(state.unacknowledgedSends[0].audio == nil)
+        #expect(state.unacknowledgedSends[0].ebook?.ebookLocation == "A")
         #expect(state.unacknowledgedSends[1] == sendB)
         #expect(state.dirty == [.audio, .ebook])
     }
 
     /// The #37 scenario when A carried only the ebook group: an ebook edit, PATCH A (response
     /// lost), a newer ebook edit, then fetches. Another device's audio change doesn't touch the
-    /// ebook evidence, and A's ebook echo is still recognised.
+    /// ebook evidence, and A's ebook echo doesn't replace the newer edit.
     @Test func ebookOnlySendEvidenceSurvivesUnrelatedFetches() throws {
         var state = Self.seeded()
         state.apply(Self.page("A", 0.3), now: Self.at(10))
@@ -369,7 +370,7 @@ import Testing
         #expect(state.ebookLocation == "E2")
         #expect(state.dirty == .ebook)
         #expect(state.currentTime == 800)
-        #expect(state.unacknowledgedSends.isEmpty)
+        #expect(state.unacknowledgedSends == [sendA])
     }
 
     // MARK: - Single-group sends
@@ -772,9 +773,10 @@ import Testing
     }
 
     /// Creating progress stores a missing `ebookProgress` as 0. A page turn made while that PATCH
-    /// was in flight survives its echo; an unchanged edit takes the 0.
+    /// was in flight survives its echo; an acknowledged, unchanged edit takes the 0. Without the
+    /// acknowledgement the edit stays pending: the echo doesn't settle an ebook edit.
     @Test(arguments: [false, true], [false, true])
-    func createdEbookProgressDefaultStillMatchesOurSend(acknowledged: Bool, editedAgain: Bool) throws {
+    func createdEbookProgressDefaultOnlySettlesByAcknowledgement(acknowledged: Bool, editedAgain: Bool) throws {
         var state = ProgressSyncState(lastUpdate: Self.t0)
         state.apply(ProgressEdit(ebook: .init(location: "A", progress: nil)), now: Self.at(1))
         let ebook = try Self.send(&state)
@@ -784,9 +786,10 @@ import Testing
             ProgressBaseline(
                 currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "A", ebookProgress: 0,
                 lastUpdate: Self.at(5)))
+        let settled = acknowledged && !editedAgain
         #expect(state.ebookLocation == (editedAgain ? "B" : "A"))
-        #expect(state.ebookProgress == (editedAgain ? 0.4 : 0))
-        #expect(state.dirty == (editedAgain ? .ebook : []))
+        #expect(state.ebookProgress == (editedAgain ? 0.4 : settled ? 0 : nil))
+        #expect(state.dirty == (settled ? [] : .ebook))
     }
 
     /// A missing `ebookProgress` is sent as 0: existing progress would store a sent `nil` as
@@ -1114,7 +1117,8 @@ private struct Simulation {
                         && before.unacknowledgedSends.contains { ProgressSyncState.matches(fetched, $0, cause) }
                 }
                 || (before.serverBaseline == nil && (inFlight != nil || !before.unacknowledgedSends.isEmpty))
-            if fresh, before.dirty.contains(group), origins[index] == .other,
+            // A dirty ebook group is local-authoritative: only its acknowledgement settles it.
+            if fresh, group != .ebook, before.dirty.contains(group), origins[index] == .other,
                 fetched.lastUpdate > before.editedAt(group) ?? .distantPast, !justified
             {
                 #expect(
