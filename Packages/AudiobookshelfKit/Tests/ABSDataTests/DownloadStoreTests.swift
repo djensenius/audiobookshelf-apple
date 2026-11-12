@@ -456,4 +456,66 @@ import Testing
         #expect(try context.fetchCount(FetchDescriptor<DownloadPart>()) == 1)
         #expect(try context.fetchCount(FetchDescriptor<LocalMediaProgress>()) == 1)
     }
+
+    @Test func deleteUnfinishedRecordKeepsACompleteOne() async throws {
+        let (store, container) = try makeStore()
+        let first = Self.part(state: .completed)
+        let second = Self.part(trackIndex: 2, filename: "b.mp3")
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [first, second]), now: now).record
+        #expect(try await store.completePart(partID: second.id, finalBytes: 7))
+
+        #expect(try await store.deleteUnfinishedRecord(created.id) == .complete)
+        #expect(try await store.record(id: created.id)?.isComplete == true)
+
+        #expect(try await store.setPartState(.queued, partID: second.id, taskIdentifier: nil, requeue: true))
+        let unfinished = try #require(try await store.record(id: created.id))
+        #expect(try await store.deleteUnfinishedRecord(created.id) == .deleted(unfinished))
+        #expect(try await store.deleteUnfinishedRecord(created.id) == .notFound)
+        #expect(try ModelContext(container).fetchCount(FetchDescriptor<DownloadPart>()) == 0)
+        // A completion arriving after the deletion finds nothing to complete.
+        #expect(try await store.completePart(partID: second.id, finalBytes: 7) == false)
+    }
+
+    @Test func addCoverPartKeepsTheOtherParts() async throws {
+        let (store, _) = try makeStore()
+        let audio = Self.part()
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [audio]), now: now).record
+        #expect(try await store.updateProgress(partID: audio.id, bytesWritten: 9, expectedBytes: 99))
+        let cover = Self.part(kind: .cover, trackIndex: nil, filename: "cover.jpg")
+        let coverDate = now.addingTimeInterval(-60)
+        let later = now.addingTimeInterval(5)
+
+        #expect(try await store.addCoverPart(cover, coverUpdatedAt: coverDate, toRecord: created.id, now: later))
+
+        let saved = try #require(try await store.record(id: created.id))
+        #expect(saved.parts.map(\.id) == [audio.id, cover.id])
+        #expect(saved.parts.first?.bytesWritten == 9)
+        #expect(saved.parts.last == cover)
+        #expect(saved.media.coverUpdatedAt == coverDate)
+        #expect(saved.updatedAt == later)
+        let another = Self.part(kind: .cover, trackIndex: nil, filename: "cover.jpg")
+        #expect(try await store.addCoverPart(another, coverUpdatedAt: nil, toRecord: created.id) == false)
+        #expect(try await store.addCoverPart(another, coverUpdatedAt: nil, toRecord: UUID()) == false)
+    }
+
+    @Test func addCoverPartRefusesACompleteRecordAndATakenID() async throws {
+        let (store, _) = try makeStore()
+        let complete = try await store.upsertRecord(
+            Self.record(key: key, parts: [Self.part(state: .completed)]), now: now
+        ).record
+        let otherKey = MediaKey(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_2", episodeId: "ep_2")
+        let taken = Self.part(filename: "ep2.mp3")
+        let other = try await store.upsertRecord(Self.record(key: otherKey, parts: [taken]), now: now).record
+        let cover = Self.part(kind: .cover, trackIndex: nil, filename: "cover.jpg")
+
+        #expect(try await store.addCoverPart(cover, coverUpdatedAt: nil, toRecord: complete.id) == false)
+        #expect(try await store.record(id: complete.id) == complete)
+        var reused = cover
+        reused.id = taken.id
+        await #expect(throws: DownloadStore.StoreError.partIDConflict(taken.id)) {
+            try await store.addCoverPart(reused, coverUpdatedAt: nil, toRecord: other.id)
+        }
+        #expect(await store.hasUncommittedChanges == false)
+        #expect(try await store.record(id: other.id) == other)
+    }
 }

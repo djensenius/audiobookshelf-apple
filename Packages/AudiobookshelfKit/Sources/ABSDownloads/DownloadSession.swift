@@ -30,11 +30,13 @@ extension URLSessionConfiguration {
     /// There is no `sharedContainerIdentifier`: only the app uses the session, and the
     /// delegate moves every file into the app's own container (ADR 0003). Cookies and the URL
     /// cache are off: downloads authenticate with headers only and the files are moved out of
-    /// the session's temporary location.
+    /// the session's temporary location. At most three transfers run at once per server, as in
+    /// the legacy app; the engine creates every part's task, and the rest wait in the session.
     public static func absDownloads(identifier: String = absDownloadsIdentifier) -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
         configuration.sharedContainerIdentifier = nil
         configuration.isDiscretionary = false
+        configuration.httpMaximumConnectionsPerHost = 3
         configuration.sessionSendsLaunchEvents = true
         configuration.httpCookieAcceptPolicy = .never
         configuration.httpShouldSetCookies = false

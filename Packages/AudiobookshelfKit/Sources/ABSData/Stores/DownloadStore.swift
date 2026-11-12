@@ -27,6 +27,15 @@ import SwiftData
         public var removedParts: [DownloadPartDTO]
     }
 
+    /// What ``deleteUnfinishedRecord(_:)`` did.
+    public enum UnfinishedRecordDeletion: Sendable, Equatable {
+        /// The record and its parts were deleted.
+        case deleted(DownloadRecordDTO)
+        /// Every part has completed, so the record was kept: the engine is finalising it.
+        case complete
+        case notFound
+    }
+
     var pendingCommitFailure: (any Error)?
 
     /// Creates the record for `record.key`, or reconciles the existing one in place, keeping its
@@ -359,6 +368,49 @@ import SwiftData
             let deleted = DownloadRecordDTO(model)
             modelContext.delete(model)
             return deleted
+        }
+    }
+
+    /// Deletes the record and, by cascade, its parts, in one write, unless every part has
+    /// completed. Parts only ever become `.completed`, so once this deletes a record nothing can
+    /// read it as complete, and one the engine already read as complete (to finalise it into a
+    /// local item, then ``deleteRecord(_:)``) is left for it to finish.
+    public func deleteUnfinishedRecord(_ id: UUID) throws -> UnfinishedRecordDeletion {
+        try commit {
+            guard let model = try fetchRecord(id: id) else { return .notFound }
+            let record = DownloadRecordDTO(model)
+            if record.isComplete { return .complete }
+            modelContext.delete(model)
+            return .deleted(record)
+        }
+    }
+
+    /// Adds a cover part to a record that has none, in one write, leaving its other parts as
+    /// they are (``upsertRecord(_:now:)`` would overwrite them from the caller's read). A given
+    /// `coverUpdatedAt` becomes the snapshot's ``LocalMediaSnapshot/coverUpdatedAt``, which the
+    /// local item records for the cover.
+    ///
+    /// - Returns: `false` without writing when the record doesn't exist, already has a cover
+    ///   part, or has only completed parts: the engine may be finalising it from a read without
+    ///   the new part.
+    /// - Throws: ``StoreError/partIDConflict(_:)`` when the part's `id` is taken.
+    @discardableResult
+    public func addCoverPart(
+        _ part: DownloadPartDTO, coverUpdatedAt: Date?, toRecord id: UUID, now: Date = .now
+    ) throws -> Bool {
+        try commit {
+            guard let model = try fetchRecord(id: id) else { return false }
+            let record = DownloadRecordDTO(model)
+            guard !record.isComplete, !record.parts.contains(where: { $0.kind == .cover }) else { return false }
+            try checkPartIDs([part.id], owner: nil)
+            model.parts.append(part.makeModel())
+            if let coverUpdatedAt {
+                var media = model.media
+                media.coverUpdatedAt = coverUpdatedAt
+                model.media = media
+            }
+            model.updatedAt = now
+            return true
         }
     }
 

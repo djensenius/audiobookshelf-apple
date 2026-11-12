@@ -20,7 +20,7 @@ struct HomeView: View {
                     .id(HomeModelIdentity(store: ObjectIdentifier(store), connection: store.connectionKey))
             } else {
                 HomeContent(
-                    state: .signedOut, sections: [], context: HomePresentation.actionContext(canPlay: false),
+                    state: .signedOut, sections: [], context: ItemCardActions.actionContext(canPlay: false),
                     open: { _ in }, perform: { _, _ in }, retry: {})
             }
         }
@@ -66,7 +66,7 @@ private struct HomeScreen: View {
         let sections = model.sections
         let state = HomeScreenState.resolve(store: store, model: model, libraryID: libraryID, sections: sections)
         HomeContent(
-            state: state, sections: sections, context: HomePresentation.actionContext(canPlay: playItem != nil),
+            state: state, sections: sections, context: ItemCardActions.actionContext(canPlay: playItem != nil),
             open: { navigate(to: $0) }, perform: { perform($0, on: $1) }, retry: { Task { await refresh() } }
         )
         // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
@@ -79,23 +79,7 @@ private struct HomeScreen: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await update() } }
         }
-        #if os(macOS)
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        Task { await refresh() }
-                    } label: {
-                        Label {
-                            Text(verbatim: L10n.string("ButtonRefresh"))
-                        } icon: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                    }
-                    .keyboardShortcut("r", modifiers: .command)
-                    .disabled(store.isLoading || model.isLoading)
-                }
-            }
-        #endif
+        .refreshCommand(.root(.home), isDisabled: store.isLoading || model.isLoading) { Task { await refresh() } }
         .alert(
             Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
             presenting: failureKey
@@ -143,7 +127,7 @@ private struct HomeScreen: View {
         let actions = itemActions
         let play = playItem
         Task {
-            if let key = await HomePresentation.perform(kind, on: item, actions: actions, play: play) {
+            if let key = await ItemCardActions.perform(kind, on: item, actions: actions, play: play) {
                 failureKey = key
                 showsFailure = true
             }
@@ -232,7 +216,7 @@ private struct HomeMessageView: View {
         NavigationStack {
             HomeContent(
                 state: .shelves(refreshFailed: false), sections: HomePreviewData.sections,
-                context: HomePresentation.actionContext(canPlay: true), open: { _ in }, perform: { _, _ in },
+                context: ItemCardActions.actionContext(canPlay: true), open: { _ in }, perform: { _, _ in },
                 retry: {}
             )
             .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
@@ -246,7 +230,7 @@ private struct HomeMessageView: View {
 #Preview("Empty") {
     NavigationStack {
         HomeContent(
-            state: .empty, sections: [], context: HomePresentation.actionContext(canPlay: true), open: { _ in },
+            state: .empty, sections: [], context: ItemCardActions.actionContext(canPlay: true), open: { _ in },
             perform: { _, _ in }, retry: {}
         )
         .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
@@ -257,7 +241,7 @@ private struct HomeMessageView: View {
 #Preview("Error") {
     NavigationStack {
         HomeContent(
-            state: .failed, sections: [], context: HomePresentation.actionContext(canPlay: true), open: { _ in },
+            state: .failed, sections: [], context: ItemCardActions.actionContext(canPlay: true), open: { _ in },
             perform: { _, _ in }, retry: {}
         )
         .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))

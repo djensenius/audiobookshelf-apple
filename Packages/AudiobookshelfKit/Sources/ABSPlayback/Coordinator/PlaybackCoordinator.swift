@@ -129,6 +129,9 @@ public final class PlaybackCoordinator {
     /// seconds to rewind (the sleep timer's `playbackWillStart`, P2-08). The extra rewind is
     /// ignored for an explicit start time and for a restart from the end.
     @ObservationIgnored public var willResume: (@MainActor () -> TimeInterval)?
+    /// Picks what plays when an item ends (``PlaybackQueueAdvancer/attach(to:)``); without one,
+    /// the item stays loaded at its end.
+    @ObservationIgnored weak var nextItemProvider: (any NextItemProvider)?
 
     // MARK: Dependencies
 
@@ -140,6 +143,7 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private let lastPlayedStore: any LastPlayedStoring
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private let sleep: @Sendable (Duration) async -> Void
+    @ObservationIgnored private let backgroundActivity: any BackgroundActivity
 
     // MARK: Bookkeeping
 
@@ -182,6 +186,9 @@ public final class PlaybackCoordinator {
         [:]
     @ObservationIgnored private var queuedEvents: [PlaybackCoordinatorEvent] = []
     @ObservationIgnored private var isEmitting = false
+    @ObservationIgnored private var advanceTask: Task<Void, Never>?
+    /// The advance in flight has begun its start: from then on it is an ordinary play.
+    @ObservationIgnored private var isStartingAdvance = false
 
     /// The last-played record is saved at most this often from time updates.
     static let lastPlayedSaveInterval: TimeInterval = 15
@@ -194,13 +201,17 @@ public final class PlaybackCoordinator {
     /// … and more than this many seconds away from the record's position.
     static let otherProgressPositionTolerance: Double = 5
 
-    /// - Parameter sleep: Times the wait for closes in flight (tests replace it).
+    /// - Parameters:
+    ///   - sleep: Times the wait for closes in flight (tests replace it).
+    ///   - backgroundActivity: Held while an auto-advance starts the next item with no audio playing.
     public init(
         engine: any AudioEngineProtocol, sessions: any PlaybackSessionService, progressStore: any LocalProgressReading,
         settings: any PlaybackSettingsProviding, policy: any StreamingPolicyChecking,
         lastPlayedStore: any LastPlayedStoring, now: @escaping @Sendable () -> Date = { .now },
-        sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+        sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
+        backgroundActivity: any BackgroundActivity = NoBackgroundActivity()
     ) {
+        self.backgroundActivity = backgroundActivity
         self.engine = engine
         self.sessions = sessions
         self.progressStore = progressStore
@@ -297,7 +308,14 @@ public final class PlaybackCoordinator {
         case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: key))
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
+        await start(key: key, startTime: startTime, prepared: nil)
+    }
 
+    /// Everything after a play passed the streaming policy. A `prepared` start (an auto-advance)
+    /// reuses its server progress instead of fetching it.
+    private func start(key: MediaKey, startTime: Double?, prepared: PreparedNextItem?) async {
+        let itemID = key.libraryItemId
+        let episodeID = key.episodeId
         generation += 1
         let current = generation
         // Retain pending old closes, but not a lifetime history of completed user sessions.
@@ -339,7 +357,7 @@ public final class PlaybackCoordinator {
         do {
             guard
                 let result = try await startSessionSerially(
-                    itemID: itemID, episodeID: episodeID, generation: current)
+                    itemID: itemID, episodeID: episodeID, generation: current, prepared: prepared)
             else { return }
             started = result
         } catch is CancellationError {
@@ -691,6 +709,7 @@ public final class PlaybackCoordinator {
     /// clear only this connection's record. Capture and transport quiescence are synchronous.
     public func stop(reason: PlaybackStopReason = .user) {
         guard !isRetired else { return }
+        cancelAutoAdvance()
         if reason != .user {
             isRetired = true
             startTask?.cancel()
@@ -827,13 +846,91 @@ public final class PlaybackCoordinator {
             reachedEnd = true
             lastPlayedAt = now()
             saveLastPlayed()
+            // Taken before the observers run, so one that pauses or stops on the end (the sleep
+            // timer) cancels the advance.
+            let ended = AdvanceSnapshot(generation: generation, intent: resumeIntent, playRequest: policyCheck)
+            let key = mediaKey
             emit(.ended)
+            if let key { beginAdvance(after: key, ended) }
         case .failed(let failure):
             // Recovery (ADR 0007 retries, rebuilds) hooks in here; for now the failure is surfaced.
             let error = PlaybackCoordinatorError(engineError: failure)
             self.error = error
             emit(.failed(error))
         }
+    }
+
+    // MARK: Auto-advance
+
+    /// What a start fetches before `/play` (the streaming decision and server progress, after
+    /// capturing local progress as a start does), done ahead of time for the item to follow.
+    func prepareStart(for key: MediaKey) async -> PreparedNextItem {
+        let capture = try? await progressStore.captureStartProgress(for: key)
+        let progress = await Self.serverProgress(sessions, itemID: key.libraryItemId, episodeID: key.episodeId)
+        let decision = await policy.streamingDecision()
+        return PreparedNextItem(key: key, decision: decision, serverProgress: progress, progressCapture: capture)
+    }
+
+    /// Starts the next item after `key` ended, holding background activity from now until the
+    /// start succeeds, fails or is cancelled. A play, pause, seek, stop or detach before the
+    /// start cancels it, as does any play request, even one the streaming policy blocks. Once the
+    /// start has begun it is an ordinary play: a pause loads the next item paused, and a detach
+    /// leaves it to finish.
+    private func beginAdvance(after key: MediaKey, _ ended: AdvanceSnapshot) {
+        guard let provider = nextItemProvider, isAdvancing(after: key, ended) else { return }
+        advanceTask?.cancel()
+        let activity = backgroundActivity
+        let token = activity.begin(name: "Auto-advance")
+        advanceTask = Task { [weak self] in
+            defer { activity.end(token) }
+            await self?.advance(after: key, provider: provider, ended)
+        }
+    }
+
+    private func advance(after key: MediaKey, provider: any NextItemProvider, _ ended: AdvanceSnapshot) async {
+        var next = provider.preparedNext(after: key)
+        if next == nil { next = await provider.prepareNext(after: key) }
+        // Anything the user did meanwhile (play, pause, seek, stop), or a detach, cancels it.
+        guard let next, !Task.isCancelled, nextItemProvider === provider,
+            isAdvancing(after: key, ended)
+        else { return }
+        // The path and setting now decide, not the prepared (possibly stale) decision; no waiting.
+        switch policy.currentStreamingDecision() {
+        case .allowed: break
+        // Nobody can agree to a metered network at the lock screen; the item stays queued.
+        case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: next.key))
+        case .denied(let reason): return block(.streamingNotAllowed(reason, key: next.key))
+        }
+        isStartingAdvance = true
+        await start(key: next.key, startTime: nil, prepared: next)
+        isStartingAdvance = false
+    }
+
+    /// What the advance must find unchanged when the item ended: the generation, the resume
+    /// intent and the play requests (``play(itemID:episodeID:startTime:allowingMeteredNetwork:)``).
+    private struct AdvanceSnapshot {
+        let generation: Int
+        let intent: Int
+        let playRequest: Int
+    }
+
+    /// The item that ended is still current, at its end, with nothing played (or requested to,
+    /// even if blocked, or waiting on its policy check), paused, sought or stopped since.
+    private func isAdvancing(after key: MediaKey, _ ended: AdvanceSnapshot) -> Bool {
+        !isRetired && phase == .loaded && mediaKey == key && reachedEnd && generation == ended.generation
+            && resumeIntent == ended.intent && policyCheck == ended.playRequest && pendingPlayKey == nil
+    }
+
+    /// Cancels the advance while it prepares; once its start has begun, that finishes as an
+    /// ordinary play (`stop()` and retirement still cancel it, by their own path).
+    func cancelAutoAdvance() {
+        guard !isStartingAdvance else { return }
+        advanceTask?.cancel()
+    }
+
+    /// Waits for the auto-advance in flight (tests).
+    func waitForAutoAdvance() async {
+        await advanceTask?.value
     }
 
     // MARK: Helpers
@@ -1006,19 +1103,29 @@ public final class PlaybackCoordinator {
     /// returns, before the caller registers the close of a stale session, so the next start's
     /// ``waitForCloses()`` sees it.
     private func startSessionSerially(
-        itemID: String, episodeID: String?, generation: Int
+        itemID: String, episodeID: String?, generation: Int, prepared: PreparedNextItem?
     ) async throws -> StartedSession? {
         await startGate.acquire()
         defer { startGate.release() }
         guard self.generation == generation else { return nil }
         await waitForCloses()
         guard self.generation == generation else { return nil }
+        // The next item changed during the wait (removed from the queue): no `/play`; the start
+        // ends as a cancelled one, with the item unloaded (#338).
+        if let prepared, nextItemProvider?.isStillNext(prepared.key) == false { throw CancellationError() }
         let sessions = self.sessions
         let progressStore = self.progressStore
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
         let task = Task { @MainActor in
             try Task.checkCancellation()
+            if let prepared {
+                // Prepared before the end: only `/play` is left.
+                let session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
+                return StartedSession(
+                    session: session, serverProgress: prepared.serverProgress,
+                    progressCapture: prepared.progressCapture)
+            }
             let capture = try? await progressStore.captureStartProgress(for: key)
             try Task.checkCancellation()
             // After the closes: a restart must see the previous final report.

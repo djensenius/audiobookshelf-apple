@@ -66,6 +66,8 @@ extension AppSettings: PlaybackSettingsProviding {}
 @MainActor
 public protocol StreamingPolicyChecking {
     func streamingDecision() async -> NetworkDecision
+    /// The decision for the path known now, without waiting (an auto-advance's last check).
+    func currentStreamingDecision() -> NetworkDecision
 }
 
 extension NetworkPolicy: StreamingPolicyChecking {
@@ -74,6 +76,8 @@ extension NetworkPolicy: StreamingPolicyChecking {
     public func streamingDecision() async -> NetworkDecision {
         await canStream(waitingUpTo: .milliseconds(500))
     }
+
+    public func currentStreamingDecision() -> NetworkDecision { canStream() }
 }
 
 /// Reads local progress and admits a start or active-session baseline GET (#279/#281);
