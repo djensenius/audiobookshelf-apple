@@ -15,6 +15,8 @@ public enum ComicArchiveError: Error, Equatable, Sendable {
     case unreadablePage(Int)
     /// The page decompresses to more than ``ComicArchive/maxPageBytes``.
     case pageTooLarge(Int)
+    /// The entry paths make more than ``ComicArchive/maxFolders`` folders.
+    case tooManyFolders
 }
 
 /// A CBZ comic, read page by page (ADR 0008 §3).
@@ -51,6 +53,9 @@ public actor ComicArchive {
     /// The largest `ComicInfo.xml` read, so a hostile archive can't make the parser read gigabytes.
     static let maxComicInfoSize = 1 << 20
     public static let defaultMaxPageBytes = 64 << 20
+    /// The most folders the entry paths may make, so a small archive can't exhaust memory. A single
+    /// path can make at most 32,768, as ZIP paths are under 64 KiB.
+    public static let maxFolders = 1 << 16
 
     /// Opens the archive at `url`. `cacheDirectory` is emptied: earlier contents may be pages of
     /// another file.
@@ -67,7 +72,11 @@ public actor ComicArchive {
         let all = Array(archive)
         let files = all.filter { $0.type == .file }
         // Other entries only create folders, which decide the web client's order.
-        let pagePaths = Self.pageOrder(all.map { $0.type == .file || $0.path.hasSuffix("/") ? $0.path : $0.path + "/" })
+        guard
+            let fileOrder = Self.webFileOrder(
+                all.map { $0.type == .file || $0.path.hasSuffix("/") ? $0.path : $0.path + "/" })
+        else { throw .tooManyFolders }
+        let pagePaths = Self.sortedPages(fileOrder)
         guard !pagePaths.isEmpty else { throw .noPages }
         // Byte-exact keys: `String` equality would merge canonically equivalent names.
         let byPath = Dictionary(files.map { (Array($0.path.utf8), $0) }, uniquingKeysWith: { first, _ in first })
@@ -75,7 +84,9 @@ public actor ComicArchive {
         self.archive = archive
         self.entries = pagePaths.compactMap { byPath[Array($0.utf8)] }
         self.pagePaths = pagePaths
-        self.comicInfo = Self.comicInfoEntry(in: files).flatMap { Self.readComicInfo($0, from: archive) }
+        self.comicInfo = Self.comicInfoPath(in: fileOrder).flatMap { byPath[Array($0.utf8)] }.flatMap {
+            Self.readComicInfo($0, from: archive)
+        }
         self.cacheDirectory = cacheDirectory
         self.maxCachedPages = max(maxCachedPages, 1)
         self.maxPageBytes = maxPageBytes
@@ -178,9 +189,14 @@ extension ComicArchive {
     ///
     /// Images in a folder whose name starts with `_` (such as `__MACOSX`) are skipped, as the web
     /// client doesn't flatten those folders. So are dotfiles and dot folders, such as macOS `._`
-    /// resource forks.
-    static func pageOrder(_ paths: [String]) -> [String] {
-        let pages = webFileOrder(paths).filter(isPage).enumerated().map { offset, path in
+    /// resource forks. `nil` if the paths make more than `maxFolders` folders.
+    static func pageOrder(_ paths: [String], maxFolders: Int = ComicArchive.maxFolders) -> [String]? {
+        webFileOrder(paths, maxFolders: maxFolders).map(sortedPages)
+    }
+
+    /// The page images among `files`, which are in ``webFileOrder(_:maxFolders:)``, sorted.
+    private static func sortedPages(_ files: [String]) -> [String] {
+        let pages = files.filter(isPage).enumerated().map { offset, path in
             (path: path, number: lastNumber(inBasenameOf: path), offset: offset)
         }
         let numbered = pages.filter { $0.number != nil }.sorted { lhs, rhs in
@@ -197,10 +213,19 @@ extension ComicArchive {
     /// together, at the position where the folder first appeared. JavaScript lists integer-like
     /// keys (folders named `1`, `2`, …) first, in numeric order. A repeated path keeps its first
     /// position, and the first entry is kept. Names are compared byte for byte, as in JavaScript,
-    /// so canonically equivalent names (NFC and NFD) stay apart.
-    static func webFileOrder(_ paths: [String]) -> [String] {
+    /// so canonically equivalent names (NFC and NFD) stay apart. `nil` once the paths have made
+    /// more than `maxFolders` folders.
+    static func webFileOrder(_ paths: [String], maxFolders: Int = ComicArchive.maxFolders) -> [String]? {
         let root = Folder()
         defer { root.dismantle() }
+        var folderCount = 0
+        // `nil` over the budget, `.some(nil)` where a file has the name.
+        func child(_ name: String, of parent: Folder) -> Folder?? {
+            guard let found = parent.folder(named: name) else { return .some(nil) }
+            if found.isNew { folderCount += 1 }
+            guard folderCount <= maxFolders else { return nil }
+            return found.folder
+        }
         entries: for path in paths {
             var parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
             let isFolder = parts.count > 1 && parts.last == ""
@@ -208,12 +233,13 @@ extension ComicArchive {
             guard let name = parts.popLast() else { continue }
             var folder = root
             for part in parts {
+                guard let next = child(part, of: folder) else { return nil }
                 // Below a file, libarchive.js sets properties that the walk never reads.
-                guard let next = folder.folder(named: part) else { continue entries }
+                guard let next else { continue entries }
                 folder = next
             }
             if isFolder {
-                _ = folder.folder(named: name)
+                guard child(name, of: folder) != nil else { return nil }
             } else {
                 folder.setFile(named: name, path: path)
             }
@@ -233,16 +259,16 @@ extension ComicArchive {
         private var nodes: [[UInt8]: Node] = [:]
 
         /// The folder `name`, created if new; `nil` if a file has that name.
-        func folder(named name: String) -> Folder? {
+        func folder(named name: String) -> (folder: Folder, isNew: Bool)? {
             let key = Array(name.utf8)
             switch nodes[key] {
-            case .folder(let folder): return folder
+            case .folder(let folder): return (folder, false)
             case .file: return nil
             case nil:
                 let folder = Folder()
                 names.append(name)
                 nodes[key] = .folder(folder)
-                return folder
+                return (folder, true)
             }
         }
 
@@ -251,7 +277,8 @@ extension ComicArchive {
             let key = Array(name.utf8)
             switch nodes[key] {
             case .file: return
-            case .folder: break
+            // Emptied first, so releasing a deep folder doesn't recurse.
+            case .folder(let folder): folder.dismantle()
             case nil: names.append(name)
             }
             nodes[key] = .file(path: path)
@@ -309,32 +336,29 @@ extension ComicArchive {
     }
 
     /// The last run of ASCII digits in the file name without its extension, without leading zeros
-    /// (`"0"` for zero), so numbers of any length compare by length and then digits.
+    /// (`"0"` for zero), so numbers of any length compare by length and then digits. Digits are
+    /// found by scalar, like JavaScript's `/\d+/`, so the `1` of `1️⃣` counts.
     private static func lastNumber(inBasenameOf path: String) -> String? {
         let name = (path as NSString).lastPathComponent
-        let basename = Substring((name as NSString).deletingPathExtension)
-        guard let end = basename.lastIndex(where: \.isASCIIDigit) else { return nil }
-        let start =
-            basename[..<end].lastIndex(where: { !$0.isASCIIDigit }).map(basename.index(after:))
-            ?? basename.startIndex
+        let basename = Array((name as NSString).deletingPathExtension.unicodeScalars)
+        func isDigit(_ scalar: Unicode.Scalar) -> Bool { ("0"..."9").contains(scalar) }
+        guard let end = basename.lastIndex(where: isDigit) else { return nil }
+        let start = basename[..<end].lastIndex { !isDigit($0) }.map { $0 + 1 } ?? 0
         let digits = basename[start...end].drop { $0 == "0" }
-        return digits.isEmpty ? "0" : String(digits)
+        return digits.isEmpty ? "0" : String(String.UnicodeScalarView(digits))
     }
-}
-
-extension Character {
-    fileprivate var isASCIIDigit: Bool { isASCII && isWholeNumber }
 }
 
 // MARK: ComicInfo.xml
 
 extension ComicArchive {
     /// `ComicInfo.xml` in any folder and case; otherwise the first XML file, which is what the
-    /// legacy reader reads. Files skipped as pages, such as `__MACOSX/._ComicInfo.xml`, aren't
-    /// metadata.
-    private static func comicInfoEntry(in files: [Entry]) -> Entry? {
-        let xml = files.filter { !isSkipped($0.path) && ($0.path as NSString).pathExtension.lowercased() == "xml" }
-        return xml.first { ($0.path as NSString).lastPathComponent.lowercased() == "comicinfo.xml" } ?? xml.first
+    /// legacy reader reads. `files` are in ``webFileOrder(_:maxFolders:)``, as the legacy reader
+    /// looks for it among the flattened files. Files skipped as pages, such as
+    /// `__MACOSX/._ComicInfo.xml`, aren't metadata.
+    private static func comicInfoPath(in files: [String]) -> String? {
+        let xml = files.filter { !isSkipped($0) && ($0 as NSString).pathExtension.lowercased() == "xml" }
+        return xml.first { ($0 as NSString).lastPathComponent.lowercased() == "comicinfo.xml" } ?? xml.first
     }
 
     /// `nil` if the entry is over ``maxComicInfoSize`` once decompressed (whatever its header says)

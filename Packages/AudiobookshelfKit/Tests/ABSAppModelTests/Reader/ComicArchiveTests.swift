@@ -76,6 +76,11 @@ import Testing
         #expect(order == ["p0.jpg", "p7.jpg", "p012.jpg", "p100.jpg", "p99999999999999999999999.jpg"])
     }
 
+    @Test func digitsInsideOtherCharactersCountLikeJavaScript() {
+        let keycapOne = "page1\u{FE0F}\u{20E3}.jpg"
+        #expect(ComicArchive.pageOrder(["page2.jpg", keycapOne]) == [keycapOne, "page2.jpg"])
+    }
+
     @Test func unnumberedImagesComeLastInArchiveOrder() {
         let order = ComicArchive.pageOrder(["credits.jpg", "2.jpg", "cover.jpg", "1.jpg"])
         #expect(order == ["1.jpg", "2.jpg", "credits.jpg", "cover.jpg"])
@@ -128,13 +133,24 @@ import Testing
         let order = ComicArchive.pageOrder(["caf\u{E9}/1.jpg", "x/1.jpg", "cafe\u{301}/01.jpg"])
         // `String` equality is canonical, so compare the bytes.
         #expect(
-            order.map { Array($0.utf8) } == ["caf\u{E9}/1.jpg", "x/1.jpg", "cafe\u{301}/01.jpg"].map { Array($0.utf8) })
+            order?.map { Array($0.utf8) }
+                == ["caf\u{E9}/1.jpg", "x/1.jpg", "cafe\u{301}/01.jpg"].map { Array($0.utf8) })
     }
 
     @Test func deeplyNestedFoldersDoNotOverflowTheStack() {
         let deep = String(repeating: "a/", count: 100_000)
-        let order = ComicArchive.pageOrder(["1.jpg", deep + "2.jpg", String(repeating: "b/", count: 100_000) + "x.txt"])
-        #expect(order == ["1.jpg", deep + "2.jpg"])
+        let order = ComicArchive.pageOrder(
+            [
+                "1.jpg", deep + "2.jpg", String(repeating: "b/", count: 100_000) + "x.txt",
+                // A file replaces the deep folder of the same name.
+                "c.jpg/" + deep + "3.jpg", "c.jpg",
+            ], maxFolders: 1_000_000)
+        #expect(order == ["1.jpg", deep + "2.jpg", "c.jpg"])
+    }
+
+    @Test func pathsOverTheFolderBudgetAreRejected() {
+        #expect(ComicArchive.pageOrder(["a/b/1.jpg", "c/1.jpg", "a/b/2.jpg"], maxFolders: 3) != nil)
+        #expect(ComicArchive.pageOrder(["a/b/1.jpg", "c/1.jpg", "d/"], maxFolders: 3) == nil)
     }
 
     // MARK: Opening
@@ -158,9 +174,18 @@ import Testing
     }
 
     @Test func anArchiveWithDeeplyNestedFoldersOpens() throws {
-        let deep = String(repeating: "a/", count: 30_000) + "2.jpg"
-        let comic = try ComicArchive(url: try makeZip(pages("1.jpg", deep)), cacheDirectory: cache)
-        #expect(comic.pagePaths == ["1.jpg", deep])
+        let deep = String(repeating: "a/", count: 30_000)
+        let files = pages("1.jpg", deep + "2.jpg", "c.jpg/" + deep + "3.jpg", "c.jpg")
+        let comic = try ComicArchive(url: try makeZip(files), cacheDirectory: cache)
+        #expect(comic.pagePaths == ["1.jpg", deep + "2.jpg", "c.jpg"])
+    }
+
+    @Test func anArchiveWithTooManyFoldersThrows() throws {
+        let files =
+            pages("1.jpg") + (0..<3).flatMap { pages("\($0)/" + String(repeating: "a/", count: 30_000) + "2.jpg") }
+        #expect(throws: ComicArchiveError.tooManyFolders) {
+            try ComicArchive(url: try makeZip(files), cacheDirectory: cache)
+        }
     }
 
     @Test func opensAZipWithItsPagesInOrder() async throws {
@@ -377,6 +402,23 @@ import Testing
             ]
         let comic = try ComicArchive(url: try makeZip(files), cacheDirectory: cache)
         #expect(comic.comicInfo?.title == "Other")
+    }
+
+    @Test func theFirstXMLFileIsTheFirstInTheWebClientsOrder() throws {
+        let meta = ("b/meta.xml", Data("<ComicInfo><Title>Meta</Title></ComicInfo>".utf8))
+        let notes = ("a/notes.xml", Data("<Notes/>".utf8))
+        let comic = try ComicArchive(url: try makeZip(pages("b/1.jpg") + [notes, meta]), cacheDirectory: cache)
+        #expect(comic.comicInfo?.title == "Meta")
+    }
+
+    @Test func comicInfoIsPreferredWhereverItIs() throws {
+        let files =
+            pages("b/1.jpg") + [
+                ("b/meta.xml", Data("<ComicInfo><Title>Meta</Title></ComicInfo>".utf8)),
+                ("a/ComicInfo.xml", Data("<ComicInfo><Title>Info</Title></ComicInfo>".utf8)),
+            ]
+        let comic = try ComicArchive(url: try makeZip(files, name: "info.cbz"), cacheDirectory: cache)
+        #expect(comic.comicInfo?.title == "Info")
     }
 
     @Test(arguments: ["<NotComicInfo/>", "not xml <", "", "<ComicInfo><Title>x</ComicInfo>"])
