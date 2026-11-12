@@ -9,6 +9,8 @@ public enum ItemActionKind: Sendable, Hashable, CaseIterable {
     case addToPlaylist
     case share
     case openDetails
+    /// Opens the item's screen in a new window, on iPad and Mac.
+    case openInNewWindow
 }
 
 /// One available action. Views turn it into a button and a VoiceOver action.
@@ -30,11 +32,17 @@ public struct ItemActionContext: Sendable, Hashable {
     public var canPlay: Bool
     /// Whether sharing is wired up on this screen.
     public var canShare: Bool
+    /// Whether the screen can open an item in a new window: only where the device has windows
+    /// (iPad and Mac), and the screen opens them.
+    public var canOpenInNewWindow: Bool
 
-    public init(canEditPlaylists: Bool = false, canPlay: Bool = true, canShare: Bool = true) {
+    public init(
+        canEditPlaylists: Bool = false, canPlay: Bool = true, canShare: Bool = true, canOpenInNewWindow: Bool = false
+    ) {
         self.canEditPlaylists = canEditPlaylists
         self.canPlay = canPlay
         self.canShare = canShare
+        self.canOpenInNewWindow = canOpenInNewWindow
     }
 }
 
@@ -47,6 +55,7 @@ extension ItemAction {
     ///   changed or added to a playlist either, but can still be opened.
     /// - Hiding applies to items in progress that are not hidden already.
     /// - Play and share are left out when the context says the screen can't perform them.
+    /// - Any item, even a missing one, opens in a new window where the context allows it.
     public static func available(
         for item: ItemSummary, progress: ItemProgress?, context: ItemActionContext = ItemActionContext()
     ) -> [ItemAction] {
@@ -62,6 +71,7 @@ extension ItemAction {
         if playable, present, context.canEditPlaylists { kinds.append(.addToPlaylist) }
         if item.kind != .series, present, context.canShare { kinds.append(.share) }
         kinds.append(.openDetails)
+        if context.canOpenInNewWindow { kinds.append(.openInNewWindow) }
         return kinds.map(ItemAction.init)
     }
 }

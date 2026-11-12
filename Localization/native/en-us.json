@@ -14,6 +14,7 @@
   "ButtonLogin": "Log In",
   "ButtonLoginWithOpenID": "Log In with OpenID",
   "ButtonLogout": "Log Out",
+  "ButtonOpenInNewWindow": "Open in New Window",
   "ButtonOpenSettings": "Open Settings",
   "ButtonRefresh": "Refresh",
   "ButtonRestartSleepTimer": "Restart Timer",

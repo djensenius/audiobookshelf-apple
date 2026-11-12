@@ -1,11 +1,24 @@
 import ABSAPI
 import ABSAppModel
 import ABSCore
+import ABSRealtime
 import ABSUI
 import Foundation
 import Testing
 
 @testable import Audiobookshelf
+
+/// Answers the current feed with `open`; nothing else is asked for.
+private struct StubRssFeedService: RssFeedService {
+    var open: RssFeed?
+
+    func serverURL() async -> URL { URL(string: "https://abs.example")! }
+    func currentFeed(for target: RssFeedTarget) async throws -> RssFeed? { open }
+    func openFeed(for target: RssFeedTarget, _ request: RssFeedOpenRequest) async throws -> RssFeed {
+        throw CancellationError()
+    }
+    func closeFeed(id: String) async throws {}
+}
 
 @Suite struct RssFeedPresentationTests {
     @Test(arguments: [
@@ -80,5 +93,60 @@ import Testing
         #expect(
             L10n.string("MessageFeedURLWillBe", "https://abs.example/feed/s", locale: Locale(identifier: "en"))
                 == "Feed URL will be https://abs.example/feed/s")
+    }
+
+    /// A feed carried over from the last sheet isn't offered for closing when the lookup failed: another
+    /// client may have replaced it.
+    @Test func aFailedLookupShowsRetryBeforeAnyFeed() {
+        let feed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
+        #expect(RssFeedPresentation.content(.failed, feed: feed) == .retry)
+        #expect(RssFeedPresentation.content(.failed, feed: nil) == .retry)
+        #expect(RssFeedPresentation.content(.idle, feed: feed) == .loading)
+        #expect(RssFeedPresentation.content(.loading, feed: nil) == .loading)
+        #expect(RssFeedPresentation.content(.loaded, feed: feed) == .open(feed))
+        #expect(RssFeedPresentation.content(.loaded, feed: nil) == .openForm)
+    }
+
+    /// A failed lookup with a carried-over feed doesn't read as open.
+    @Test func onlyTheOpenFeedReadsAsOpen() {
+        let feed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
+        let failed = RssFeedPresentation.content(.failed, feed: feed)
+        #expect(failed.titleKey == "HeaderOpenRSSFeed")
+        #expect(failed.dismissKey == "ButtonCancel")
+        let open = RssFeedPresentation.content(.loaded, feed: feed)
+        #expect(open.titleKey == "HeaderRSSFeedIsOpen")
+        #expect(open.dismissKey == "ButtonDone")
+        for content in [RssFeedPresentation.Content.loading, .openForm] {
+            #expect(content.titleKey == "HeaderOpenRSSFeed")
+            #expect(content.dismissKey == "ButtonCancel")
+        }
+    }
+
+    /// What the screen fetched shows until the sheet knows better.
+    @MainActor
+    @Test func theIndicatorFollowsTheSheetOnceItKnows() async {
+        let target = RssFeedTarget(.item, id: "li-1")
+        let feed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
+        #expect(RssFeedPresentation.showsOpen(fetched: true, model: nil))
+        #expect(!RssFeedPresentation.showsOpen(fetched: false, model: nil))
+
+        let closedNow = RssFeedModel(target: target, service: StubRssFeedService(open: nil))
+        #expect(RssFeedPresentation.showsOpen(fetched: true, model: closedNow))
+        await closedNow.load()
+        #expect(!RssFeedPresentation.showsOpen(fetched: true, model: closedNow))
+
+        let openedLive = RssFeedModel(target: target, service: StubRssFeedService(open: nil))
+        openedLive.apply(.opened(feed))
+        #expect(RssFeedPresentation.showsOpen(fetched: false, model: openedLive))
+
+        // A live close before any load answers.
+        let closedLive = RssFeedModel(target: target, service: StubRssFeedService(open: feed))
+        closedLive.apply(.closed(feed))
+        #expect(!RssFeedPresentation.showsOpen(fetched: true, model: closedLive))
+
+        // The next sheet starts from the last one's state, not the screen's stale fetch.
+        let reopened = RssFeedModel(target: target, service: StubRssFeedService(open: feed))
+        reopened.seed(from: closedNow)
+        #expect(!RssFeedPresentation.showsOpen(fetched: true, model: reopened))
     }
 }

@@ -41,6 +41,17 @@
                ReferencedContainer = "container:Audiobookshelf.xcodeproj">
             </BuildableReference>
          </TestableReference>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "AB0000000000000000000004"
+               BuildableName = "AudiobookshelfUITests.xctest"
+               BlueprintName = "AudiobookshelfUITests"
+               ReferencedContainer = "container:Audiobookshelf.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

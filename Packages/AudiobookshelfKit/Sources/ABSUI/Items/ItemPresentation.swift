@@ -115,6 +115,7 @@ enum ItemPresentation {
         case .addToPlaylist: L10n.string("LabelAddToPlaylist")
         case .share: L10n.string("ButtonShare")
         case .openDetails: L10n.string("HeaderDetails")
+        case .openInNewWindow: L10n.string("ButtonOpenInNewWindow")
         }
     }
 
@@ -127,6 +128,7 @@ enum ItemPresentation {
         case .addToPlaylist: "text.badge.plus"
         case .share: "square.and.arrow.up"
         case .openDetails: "info.circle"
+        case .openInNewWindow: "macwindow.badge.plus"
         }
     }
 }
