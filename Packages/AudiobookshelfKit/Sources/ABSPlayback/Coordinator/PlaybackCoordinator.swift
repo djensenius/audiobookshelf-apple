@@ -192,11 +192,11 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var reachedEnd = false
     /// A seek's `didSeek` is still owed: after `loaded`, and only once the target lands.
     @ObservationIgnored private var awaitingSeekLanding = false
+    /// The ``resumingIntent`` of a user seek that took over recovery's play.
+    @ObservationIgnored private var recoverySeekIntent: Int?
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
     private var resumingIntent: Int?
-    /// The ``resumingIntent`` of a user seek that took over recovery's play.
-    @ObservationIgnored private var recoverySeekIntent: Int?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
     /// When each close in ``closeTasks`` was sent, so a hanging one holds back only the first play
