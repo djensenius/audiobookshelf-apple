@@ -418,4 +418,42 @@ private let forwardings: [StoreServiceForwarding] = [
             #expect(writes.value == ["second:y", "first:x", "third:x"])
         }
     }
+
+    /// Another account's actions don't wait for the previous account's pending write on the same
+    /// item, while switching back still orders the account's own writes after it.
+    @Test func pendingQueuesArePerAccount() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let writes = Locked<[String]>([])
+            let gate = GatedCalls<String, Void>()
+            var calls = gate.calls.makeAsyncIterator()
+            let slowA = GatedWritingClient(gate: gate, client: WritingClient(name: "a1", writes: writes))
+            await store.connect(client: slowA, connectionKey: serverA)
+            let windowA = try #require(store.sessionItemActions())
+            let finish = Task { try await windowA.markFinished(ItemActionTarget(libraryItemID: "x")) }
+            let held = try #require(await calls.next())
+
+            // Switch to B: its action on the same item applies and writes right away.
+            store.clear()
+            await store.connect(client: WritingClient(name: "b", writes: writes), connectionKey: serverB)
+            let windowB = try #require(store.sessionItemActions())
+            let finishB = Task { try await windowB.markFinished(ItemActionTarget(libraryItemID: "x")) }
+            for _ in 0..<50 { await Task.yield() }
+            #expect(store.progress.progress(libraryItemID: "x")?.isFinished == true)
+            #expect(writes.value == ["b:x"])
+
+            // Back to A: its next write on the item still waits for A's first.
+            store.clear()
+            await store.connect(client: WritingClient(name: "a2", writes: writes), connectionKey: serverA)
+            let reset = Task { try await windowA.markNotFinished(ItemActionTarget(libraryItemID: "x")) }
+            for _ in 0..<50 { await Task.yield() }
+            #expect(writes.value == ["b:x"])
+
+            held.reply.resume()
+            _ = await finish.result
+            try await finishB.value
+            try await reset.value
+            #expect(writes.value == ["b:x", "a1:x", "a2:x"])
+        }
+    }
 }

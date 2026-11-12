@@ -62,8 +62,9 @@ public final class LibraryStore {
     @ObservationIgnored private var latestDetailRequests: [String: Int] = [:]
     /// Services already logged as missing from the client, so each is logged once.
     @ObservationIgnored private var loggedUnavailableServices: Set<String> = []
-    /// The account session's shared item actions; see ``itemActions(for:)``.
-    @ObservationIgnored private var sharedItemActions: ProgressItemActions?
+    /// Each account's latest shared item actions; see ``itemActions(for:)``. Kept after the
+    /// account's session ends, so its next session continues its pending queue.
+    @ObservationIgnored private var sharedItemActions: [LibraryConnectionKey: ProgressItemActions] = [:]
     /// Told of each view preferences save (``observeViewPreferences(connectionKey:owner:_:)``).
     @ObservationIgnored private var viewPreferencesObservers: [ViewPreferencesObserver] = []
     /// Told of each socket change (``observeLibraryChanges(connectionKey:owner:_:)``).
@@ -277,14 +278,16 @@ public final class LibraryStore {
     /// window, or `nil` while the store doesn't serve that account. Built on first use and again
     /// once its progress session ended (a ``clear()``, so also a switch or a failed switch's
     /// restart), so a restarted session never acts through the previous one's stale token; an
-    /// ordinary reconnect keeps it. A replacement continues its predecessor's per-item queue.
+    /// ordinary reconnect keeps it. A replacement continues the per-item queue of the same
+    /// account's previous actions only: another account's progress is independent.
     public func itemActions(for connectionKey: LibraryConnectionKey) -> ProgressItemActions? {
         guard self.connectionKey == connectionKey else { return nil }
-        if let sharedItemActions, sharedItemActions.isCurrentSession { return sharedItemActions }
+        let previous = sharedItemActions[connectionKey]
+        if let previous, previous.isCurrentSession { return previous }
         let actions = makeItemActions()
-        // A write of the ended session may still be in flight: the new actions run after it.
-        if let sharedItemActions { actions?.continueQueue(of: sharedItemActions) }
-        sharedItemActions = actions
+        // A write of the account's ended session may still be in flight: the new actions run after it.
+        if let previous { actions?.continueQueue(of: previous) }
+        sharedItemActions[connectionKey] = actions
         return actions
     }
 
