@@ -17,7 +17,7 @@ struct GroupDetailView<Kind: GroupScreenKind>: View {
         let key = BrowseModelKey(store: store, libraryID: libraryID, entityID: groupID)
         Group {
             if let host, let model = host.model(for: key) {
-                GroupDetailContent(model: model, libraryID: host.key.libraryID)
+                GroupDetailContent(model: model, libraryID: host.key.libraryID, editing: editing(for: host))
                     // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
                     .environment(\.itemProgressReader, host.progressReader)
             } else {
@@ -37,13 +37,25 @@ struct GroupDetailView<Kind: GroupScreenKind>: View {
             await host?.model.loadIfNeeded()
         }
     }
+
+    /// The account's playlist writes for a playlist screen; `nil` for a collection, which can't be edited here.
+    private func editing(for host: BrowseModelHost<GroupDetailModel<Kind>>) -> (any PlaylistEditingService)? {
+        guard Kind.summaryKind == .playlist, let services = store?.makeServices(),
+            services.connectionKey == host.key.connection
+        else { return nil }
+        return services
+    }
 }
 
 /// The group screen for one model in the library `libraryID`; previews give it a fixture service. Pull to refresh or
-/// ⌘R reloads it.
+/// ⌘R reloads it. With `editing`, a playlist's Edit button opens ``PlaylistEditSheet``, and the screen closes once the
+/// playlist is deleted from there.
 struct GroupDetailContent<Kind: GroupScreenKind>: View {
     let model: GroupDetailModel<Kind>
     let libraryID: String
+    var editing: (any PlaylistEditingService)?
+    @Environment(\.dismiss) private var dismiss
+    @State private var editor: PlaylistDetailEditor?
 
     var body: some View {
         let kind = Kind.summaryKind
@@ -81,6 +93,27 @@ struct GroupDetailContent<Kind: GroupScreenKind>: View {
             .pushed(GroupPresentation.route(Kind.summaryKind, id: model.groupID)), isDisabled: model.isLoading
         ) {
             reload()
+        }
+        .toolbar {
+            if let editing, detail != nil, let playlist = model as? PlaylistDetailModel {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        editor = PlaylistDetailEditor(model: playlist, service: editing)
+                    } label: {
+                        Text(verbatim: L10n.string("ButtonEdit"))
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: Binding(get: { editor != nil }, set: { if !$0 { editor = nil } })) {
+            if let editor {
+                PlaylistEditSheet(editor: editor)
+            }
+        }
+        .onChange(of: editor?.isDeleted ?? false) { _, isDeleted in
+            guard isDeleted else { return }
+            editor = nil
+            dismiss()
         }
     }
 
@@ -172,6 +205,16 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
         .environment(\.dynamicTypeSize, .accessibility3)
         .absBackground()
         .preferredColorScheme(.dark)
+    }
+
+    #Preview("Playlist, editable") {
+        @Previewable @State var model = GroupsPreviewData.playlist()
+        NavigationStack {
+            GroupDetailContent(model: model, libraryID: SampleLibrary.libraryID, editing: PlaylistEditPreviewService())
+        }
+        .task { await model.load() }
+        .environment(\.itemProgressReader, GroupsPreviewData.progressReader)
+        .absBackground()
     }
 
     #Preview("Playlist, failed") {
