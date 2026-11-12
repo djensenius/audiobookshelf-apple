@@ -278,10 +278,13 @@ public enum SessionUploadResult: Sendable, Equatable {
             now: now, playbackToken: nil)
     }
 
-    /// Records an ebook location turned at `now` and saved later, unless the server's ebook
-    /// location changed meanwhile to one dated after the turn: a merge in between would have
-    /// taken that location over the turn, so saving the turn now would mark it dirty against the
-    /// newer value and PATCH over it. The check and the write are one step on this actor.
+    /// Records an ebook location turned at `now` and saved later, unless it was superseded
+    /// meanwhile. The check and the write are one step on this actor. A turn is dropped when:
+    /// - the server's ebook location changed to one dated at or after the turn: a merge in between
+    ///   would have taken that location over the turn (the server wins ties), so saving the turn
+    ///   now would mark it dirty against that value and PATCH over it;
+    /// - the row holds an unsent ebook edit turned after it, for example by another reader of the
+    ///   same media: the turn's date, taken when it was made, orders it before that edit.
     ///
     /// - Parameters:
     ///   - knownLocations: The server ebook locations the editor accounted for when the turn was
@@ -290,7 +293,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     ///     unknown, which never drops the turn.
     ///   - serverProgress, localLibraryItemID: As for ``recordEdit(_:for:serverProgress:localLibraryItemID:now:)``.
     /// - Returns: The saved row, or `nil` when the turn was dropped: the row's baseline is dated
-    ///   after `now` and holds a location not in `knownLocations`.
+    ///   at or after `now` and holds a location not in `knownLocations`, or its unsent ebook edit
+    ///   is dated after `now`.
     @discardableResult
     public func recordEbookTurn(
         _ ebook: ProgressEdit.Ebook,
@@ -300,11 +304,14 @@ public enum SessionUploadResult: Sendable, Equatable {
         localLibraryItemID: UUID? = nil,
         now: Date
     ) throws -> LocalMediaProgressDTO? {
-        if let knownLocations, let row = try fetchRow(key), let baseline = ProgressSyncState(row).serverBaseline,
-            baseline.lastUpdate > now, baseline.ebookLocationIsUnknown != true,
-            !knownLocations.contains(baseline.ebookLocation)
-        {
-            return nil
+        if let row = try fetchRow(key) {
+            let state = ProgressSyncState(row)
+            if row.ebookDirty, let savedAt = state.savedAt(.ebook), savedAt > now { return nil }
+            if let knownLocations, let baseline = state.serverBaseline, baseline.lastUpdate >= now,
+                baseline.ebookLocationIsUnknown != true, !knownLocations.contains(baseline.ebookLocation)
+            {
+                return nil
+            }
         }
         return try recordEdit(
             ProgressEdit(ebook: ebook), for: key, serverProgress: serverProgress,

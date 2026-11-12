@@ -199,6 +199,15 @@ public final class EbookProgressModel {
         {
             server = nil
         }
+        // A fetched value the store didn't take that echoes one of the row's own sends still
+        // awaiting acknowledgement isn't another device's page: its server date is the PATCH's,
+        // not the page's. A newer unsent location the row holds stays ahead of it.
+        if let unmerged, let candidate, candidate.ebookDirty,
+            EbookLocation(candidate.ebookLocation, style: style) != nil,
+            candidate.unacknowledgedSends.contains(where: { $0.ebook?.ebookLocation == unmerged.ebookLocation })
+        {
+            server = nil
+        }
         // The store merged the fetched value: the row holds its decision. A location it kept over
         // the fetched one (a newer unsent turn, or one whose PATCH is in flight) mustn't lose to
         // the raw value's date. The server stays a fallback when the row has nothing this reader
@@ -224,7 +233,7 @@ public final class EbookProgressModel {
     /// A non-finite progress counts as unknown.
     public func record(_ location: EbookLocation, progress: Double?) {
         guard location.isValid(for: kind) else { return }
-        let progress = progress.flatMap { $0.isFinite ? min(max($0, 0), 1) : nil }
+        let progress = EbookResumePoint.normalized(progress)
         guard location != self.location || progress != self.progress else { return }
         self.location = location
         self.progress = progress

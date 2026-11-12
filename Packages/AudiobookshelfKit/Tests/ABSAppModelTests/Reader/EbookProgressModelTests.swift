@@ -699,11 +699,64 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await store.progress(for: key)?.ebookLocation == "5")
     }
 
+    /// Two readers of the same book: reader B turns to page 4 at t+10, reader A to page 8 at t+20,
+    /// which stays unsent (the PATCH fails). B's turn, saved after A's, is older than A's unsent
+    /// edit: it doesn't replace page 8 locally or get sent; B's drain sends page 8.
+    @Test func anOlderTurnFromAnotherReaderDoesNotOverwriteANewerUnsentEdit() async throws {
+        service.server.value = serverProgress("2", at: t0)
+        let readerA = makeModel()
+        let readerB = makeModel()
+        _ = await readerA.resume()
+        _ = await readerB.resume()
+
+        time.value = t0.addingTimeInterval(10)
+        turn(readerB, to: 4)
+        time.value = t0.addingTimeInterval(20)
+        turn(readerA, to: 8)
+        service.patchErrors.value = [.http(status: 503, message: nil)]
+        await readerA.flush()
+        #expect(try await store.progress(for: key)?.ebookLocation == "8")
+        time.value = t0.addingTimeInterval(30)
+        await readerB.flush()
+
+        #expect(!service.writes.value.contains { $0.update.ebookLocation == "4" })
+        #expect(try await store.progress(for: key)?.ebookLocation == "8")
+        #expect(service.server.value?.ebookLocation == "8")
+    }
+
+    /// Resuming while page 3's PATCH is in flight: the GET, held until after page 5 is saved
+    /// locally, echoes page 3 dated after page 5. The store doesn't take it (the row changed since
+    /// the capture), and the reader still opens at page 5, not at its own in-flight send.
+    @Test func aHeldResumeFetchEchoingAnInFlightPatchLosesToALaterLocalPage() async throws {
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "3", progress: 0.2)), for: key,
+            serverProgress: ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "2", lastUpdate: t0),
+            now: t0.addingTimeInterval(5))
+        let patch = try #require(try await store.beginSend(for: key, now: t0.addingTimeInterval(5)))
+        #expect(patch.values.ebook?.ebookLocation == "3")
+        service.server.value = serverProgress("3", progress: 0.2, at: t0.addingTimeInterval(20))
+        service.holdReaderFetches.value = true
+        let model = makeModel()
+        let resume = Task { await model.resume() }
+        #expect(await eventually { service.heldFetchCount == 1 })
+
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "5", progress: 0.4)), for: key, now: t0.addingTimeInterval(10))
+        service.releaseReaderFetches()
+
+        #expect(await resume.value == EbookResumePoint(location: .page(5), progress: 0.4, source: .local))
+        #expect(try await store.progress(for: key)?.ebookLocation == "5")
+    }
+
     /// Another device's newer page 8, merged (by a socket event or another drain) while an older
     /// turn to page 4 waits for its debounce, wins: the turn isn't saved against page 8 and
-    /// PATCHed over it. When the merge only moved audio, the turn is saved and sent (control).
-    @Test(arguments: [("8", false), ("2", true)])
-    func aTurnOlderThanAMergedServerPageIsNotSentOverIt(serverLocation: String, sendsTurn: Bool) async throws {
+    /// PATCHed over it. Page 8 dated exactly at the turn wins too: the server wins ties. When the
+    /// merge only moved audio, the turn is saved and sent (control).
+    @Test(arguments: [("8", 20.0, false), ("8", 10.0, false), ("2", 20.0, true)])
+    func aTurnOlderThanAMergedServerPageIsNotSentOverIt(
+        serverLocation: String, serverAt: TimeInterval, sendsTurn: Bool
+    ) async throws {
         service.server.value = serverProgress("2", at: t0)
         let model = makeModel()
         _ = await model.resume()
@@ -714,8 +767,8 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
 
         let elsewhere = ProgressBaseline(
             currentTime: 120, progress: 0.2, duration: 600, isFinished: false, ebookLocation: serverLocation,
-            lastUpdate: t0.addingTimeInterval(20))
-        service.server.value = serverProgress(serverLocation, at: t0.addingTimeInterval(20))
+            lastUpdate: t0.addingTimeInterval(serverAt))
+        service.server.value = serverProgress(serverLocation, at: t0.addingTimeInterval(serverAt))
         let merged = try await store.applyServerProgress(
             [key: elsewhere], capturedAt: await store.captureGeneration(), source: .socket)
         #expect(merged.contains(key))
@@ -844,6 +897,22 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
             ProgressEdit(ebook: .init(location: "4", progress: nil)), for: key, now: t0)
         #expect(EbookResumePoint.resolve(kind: .pdf, local: local, server: server).location == .page(4))
         #expect(EbookResumePoint.resolve(kind: .epub, local: local, server: server).source == .server)
+    }
+
+    /// A chosen progress is normalized like a recorded one: non-finite is unknown, a finite one is
+    /// clamped to `0...1`; one in range is kept (control).
+    @Test(arguments: [(Double.nan, nil), (.infinity, nil), (1.7, 1), (-0.2, 0), (0.4, 0.4)] as [(Double, Double?)])
+    func chosenProgressIsNormalized(saved: Double, expected: Double?) async throws {
+        var local = try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "4", progress: 0.3)), for: key, now: t0.addingTimeInterval(10))
+        local.ebookProgress = saved
+        let fromLocal = EbookResumePoint.resolve(kind: .pdf, local: local, server: nil)
+        #expect(fromLocal == EbookResumePoint(location: .page(4), progress: expected, source: .local))
+
+        var server = serverProgress("6", at: t0.addingTimeInterval(20))
+        server.ebookProgress = saved
+        let fromServer = EbookResumePoint.resolve(kind: .pdf, local: nil, server: server)
+        #expect(fromServer == EbookResumePoint(location: .page(6), progress: expected, source: .server))
     }
 
     /// On equal dates the server wins; an unsent edit wins only when strictly newer.

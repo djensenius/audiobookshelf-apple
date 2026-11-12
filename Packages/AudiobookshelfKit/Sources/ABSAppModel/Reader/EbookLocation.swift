@@ -112,6 +112,7 @@ public struct EbookResumePoint: Sendable, Equatable {
     ///   stale snapshot (cached or delayed) the store would drop: it isn't a candidate while the
     ///   row has a valid location, even when an audio update moved that baseline past the row's
     ///   unsent ebook edit.
+    /// - The chosen progress is ``normalized(_:)``, as a recorded one is.
     /// - A location that isn't valid for `kind` is not a candidate; with no candidate the reader
     ///   opens at the start. An unsent edit this reader can't open doesn't hide the server's
     ///   unchanged location.
@@ -127,14 +128,25 @@ public struct EbookResumePoint: Sendable, Equatable {
             // A snapshot older than the server progress the row last took, which the store would
             // drop, can't win over the row's own location.
             if !(localIsValid && local?.serverBaseline.map({ date < $0.lastUpdate }) == true) {
-                best = (EbookResumePoint(location: location, progress: server.ebookProgress, source: .server), date)
+                best = (
+                    EbookResumePoint(location: location, progress: normalized(server.ebookProgress), source: .server),
+                    date
+                )
             }
         }
         if let local, let date = local.ebookSavedAt, let location = EbookLocation(local.ebookLocation, style: style),
             best.map({ date > $0.date }) ?? true
         {
-            best = (EbookResumePoint(location: location, progress: local.ebookProgress, source: .local), date)
+            best = (
+                EbookResumePoint(location: location, progress: normalized(local.ebookProgress), source: .local), date
+            )
         }
         return best?.point ?? .beginning
+    }
+
+    /// A saved progress as a reader takes it: `nil` when unknown or non-finite, else clamped to
+    /// `0...1`.
+    public static func normalized(_ progress: Double?) -> Double? {
+        progress.flatMap { $0.isFinite ? min(max($0, 0), 1) : nil }
     }
 }
