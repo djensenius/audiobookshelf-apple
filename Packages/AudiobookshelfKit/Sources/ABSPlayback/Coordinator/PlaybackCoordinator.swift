@@ -553,6 +553,8 @@ public final class PlaybackCoordinator {
         // Use the requested resume anchor (or newer seek), not the engine's gap-snapped landing.
         if jumpOffset != 0 { seekTarget = (seekTarget ?? target) + jumpOffset }
         if let seekTarget {
+            // A seek or jump made while loading replaces the load's own target: a user seek.
+            rewindAwaitsLanding = false
             await engine.seek(to: engine.timeline?.clamp(seekTarget) ?? seekTarget)
             guard current == generation, phase == .loaded else { return }
         }

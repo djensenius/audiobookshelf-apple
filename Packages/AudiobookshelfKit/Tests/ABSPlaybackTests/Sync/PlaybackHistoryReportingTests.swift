@@ -583,6 +583,27 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.seek).map(\.position) == [300.5])
     }
 
+    @Test(arguments: [false, true])
+    func anInterruptedSeekMadeWhileLoadingIsASeek(jump: Bool) async throws {
+        let (s, spy) = try Self.harness()
+        let load = Gate()
+        defer { load.open() }
+        s.h.engine.loadGates = [load]
+        let play = Task { await s.coordinator.play(itemID: "a", startTime: 120) }
+        await yieldUntil { s.h.engine.loads.count == 1 }
+        // A seek or jump while the engine loads replaces the load's target; its catch-up seek is
+        // interrupted, and the engine lands it later, past the target.
+        if jump { await s.coordinator.jump(by: 180) } else { await s.coordinator.seek(to: 300) }
+        s.h.engine.seekResults = [.interrupted]
+        load.open()
+        await play.value
+        s.h.engine.landPendingSeek(at: 300.5)
+        await Self.settle(s)
+
+        #expect(s.h.engine.seeks == [300])
+        #expect(spy.entries(.seek).map(\.position) == [300.5])
+    }
+
     @Test func aReportIsRecordedBeforeTheDrainAfterIt() async throws {
         let (s, spy) = try Self.harness()
         let started = Gate()
