@@ -39,6 +39,11 @@ public enum ConnectionStatus: Hashable, Sendable {
     /// The localized status message.
     public var message: String { L10n.string(messageKey) }
 
+    /// Whether the icon pulses: while connecting, unless Reduce Motion is on.
+    func pulses(reduceMotion: Bool) -> Bool {
+        self == .connecting && !reduceMotion
+    }
+
     /// The icon's tint, following legacy's colours.
     public var tint: AnyShapeStyle {
         switch self {
@@ -57,6 +62,7 @@ public enum ConnectionStatus: Hashable, Sendable {
 public struct ConnectionIndicator: View {
     private let status: ConnectionStatus
     @State private var isShowingMessage = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     public init(status: ConnectionStatus) {
         self.status = status
@@ -68,7 +74,7 @@ public struct ConnectionIndicator: View {
         } label: {
             Image(systemName: status.systemImage)
                 .foregroundStyle(status.tint)
-                .symbolEffect(.pulse, isActive: status == .connecting)
+                .symbolEffect(.pulse, isActive: status.pulses(reduceMotion: reduceMotion))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(verbatim: L10n.string("HeaderConnectionStatus")))

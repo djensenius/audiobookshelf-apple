@@ -25,6 +25,7 @@ public struct PlayerScrubber: View {
     @ScaledMetric(relativeTo: .caption) private var thumbDiameter: CGFloat = 14
     @Environment(\.locale) private var locale
     @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// - Parameters:
     ///   - progress: The fraction played, `0...1`.
@@ -68,6 +69,12 @@ public struct PlayerScrubber: View {
     nonisolated static func fraction(atX x: CGFloat, width: CGFloat) -> Double {
         guard width > 0, x.isFinite else { return 0 }
         return Double(min(max(x / width, 0), 1))
+    }
+
+    /// How the thumb grows and shrinks as a drag starts and ends: springy, or at once with
+    /// Reduce Motion.
+    nonisolated static func thumbAnimation(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .snappy
     }
 
     /// Reacts to the dragging flag changing: a drag that stops, by ending or by being cancelled,
@@ -138,7 +145,7 @@ public struct PlayerScrubber: View {
         // At least a 44-point touch target, growing with the thumb at large text sizes.
         .frame(height: max(44, thumbDiameter * 2))
         .contentShape(.rect)
-        .animation(.snappy, value: isDragging)
+        .animation(Self.thumbAnimation(reduceMotion: reduceMotion), value: isDragging)
         .onChange(of: isDragging) { wasDragging, dragging in
             draggingChanged(from: wasDragging, to: dragging)
         }
