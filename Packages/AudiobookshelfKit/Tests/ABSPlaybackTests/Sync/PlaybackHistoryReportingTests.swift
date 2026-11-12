@@ -202,6 +202,38 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.pause).map(\.sync) == [.succeeded])
     }
 
+    @Test func aReusedSessionIDClosingWhileItsCloseIsPendingIsNotAttempted() async throws {
+        let (s, spy) = try Self.harness()
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 6)
+        let gate = Gate()
+        defer { gate.open() }
+        let session = try #require(s.coordinator.session)
+        s.h.service.state.withLock {
+            $0.closeGates[session.id] = gate
+            // The server hands out the same session ID again.
+            $0.sessionOverride = session
+        }
+        s.h.sleep.elapsesImmediately = true
+        s.coordinator.stop()
+        await s.coordinator.play(itemID: "a")
+        #expect(s.coordinator.session?.id == session.id)
+        await s.play(for: 3)
+        // Its close is still pending, so this one is never sent.
+        s.coordinator.stop()
+        await yieldUntil { !spy.entries(.stop).isEmpty }
+
+        #expect(spy.entries(.stop).map(\.position) == [9])
+        // Without a result, the history waits forever: stop here rather than hang.
+        try #require(spy.entries(.stop).map(\.sync) == [.notAttempted])
+        gate.open()
+        await s.coordinator.waitForPendingCloses()
+        await Self.settle(s)
+        #expect(s.h.service.closes == [session.id])
+        #expect(spy.entries(.stop).map(\.position) == [9, 6])
+        #expect(spy.entries(.stop).map(\.sync) == [.notAttempted, .succeeded])
+    }
+
     @Test func closeEventsAreRecordedAfterTheLogIsReleased() async throws {
         let spy = HistorySpy()
         let recorded = Gate()
@@ -289,6 +321,27 @@ struct PlaybackHistoryReportingTests {
         #expect(s.h.engine.seeks.contains(10))
         #expect(spy.entries(.play).map(\.position) == [0, 10])
         #expect(spy.entries(.seek).map(\.position) == [5])
+    }
+
+    @Test(arguments: [false, true])
+    func anInterruptedResumeRewindIsNotASeekUnlessSuperseded(superseded: Bool) async throws {
+        let (s, spy) = try Self.harness()
+        s.h.settings.disableAutoRewind = false
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 20)
+        s.coordinator.pause()
+        await s.settle()
+        s.h.clock.advance(by: 120)
+        // The rewind's seek is interrupted, and the engine lands it later on a tick.
+        s.h.engine.seekResults = superseded ? [.interrupted, .interrupted] : [.interrupted]
+        await s.coordinator.resume()
+        // A user seek, itself interrupted, replaces the rewind before it lands.
+        if superseded { await s.coordinator.seek(to: 5) }
+        s.h.engine.landPendingSeek()
+        await Self.settle(s)
+
+        #expect(s.h.engine.seeks.prefix(1) == [10])
+        #expect(spy.entries(.seek).map(\.position) == (superseded ? [5] : []))
     }
 
     @Test func aReportIsRecordedBeforeTheDrainAfterIt() async throws {
