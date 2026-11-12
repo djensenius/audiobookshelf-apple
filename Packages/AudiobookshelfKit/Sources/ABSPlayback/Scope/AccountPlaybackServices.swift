@@ -74,7 +74,7 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     }
 
     /// The current client; ``APIError/notAuthenticated`` without one.
-    private func client() throws -> APIClient {
+    func client() throws -> APIClient {
         guard let client = state.withLock({ $0.client }) else { throw APIError.notAuthenticated }
         return client
     }
