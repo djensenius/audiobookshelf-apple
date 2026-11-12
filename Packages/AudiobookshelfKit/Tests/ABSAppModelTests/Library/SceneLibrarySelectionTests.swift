@@ -80,21 +80,50 @@ private let pods = makeLibrary("pods", mediaType: .podcast)
         }
     }
 
-    /// A user with no libraries: loading finishes without a library to show, and a library
-    /// link has nothing to open.
+    /// A user with no libraries: a saved or previous library is dropped with its library-scoped
+    /// paths, other tabs are kept, and a library link has nothing to open.
     @Test func loadedWithoutLibraries() async throws {
         try await withLibrarySettings { settings in
+            settings.setLastLibraryID("gone", serverID: key.serverID, userID: key.userID)
             let store = await loadedStore(settings, libraries: [])
             #expect(store.hasLoaded)
             let router = Router(identity: identityA)
+            router.restoreLibrary(id: "gone", kind: .book)
+            router.selectedTab = .series
+            router[path: .home] = [.item(id: "li_1")]
+            router[path: .series] = [.series(id: "se_1")]
+            router[path: .downloads] = [.item(id: "li_2")]
             router.requestLibrary(id: "books")
 
             SceneLibrarySelection.reconcile(router, store: store)
 
             #expect(router.libraryID == nil)
+            #expect(router.libraryKind == nil)
+            #expect(router.supportedSections.isEmpty)
             #expect(router.pendingLibraryID == nil)
+            #expect(router.selectedTab == .library)
+            #expect(router[path: .home].isEmpty)
+            #expect(router[path: .series].isEmpty)
+            #expect(router[path: .downloads] == [.item(id: "li_2")])
             SceneLibrarySelection.select("books", router: router, store: store)
             #expect(router.libraryID == nil)
+        }
+    }
+
+    /// A link to the library already shown is resolved, so it can't pull the scene back after
+    /// the user picks another library.
+    @Test func linkToTheShownLibraryDoesNotOverrideALaterPick() async throws {
+        try await withLibrarySettings { settings in
+            let store = await loadedStore(settings, libraries: [books, pods])
+            let router = Router(identity: identityA)
+            SceneLibrarySelection.select("pods", router: router, store: store)
+            router.requestLibrary(id: "pods")
+            SceneLibrarySelection.reconcile(router, store: store)
+            #expect(router.pendingLibraryID == nil)
+
+            SceneLibrarySelection.select("books", router: router, store: store)
+            SceneLibrarySelection.reconcile(router, store: store)
+            #expect(router.libraryID == "books")
         }
     }
 

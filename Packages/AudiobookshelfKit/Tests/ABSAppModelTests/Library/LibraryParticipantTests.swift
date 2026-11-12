@@ -116,6 +116,9 @@ private struct Harness {
             await harness.participant.beginSeed(offline)
             await harness.participant.seed(offline)
             #expect(harness.meRequests.value.isEmpty)
+            // Loads keyed on it run again once a client attaches.
+            #expect(harness.store.connectionKey == keyA)
+            #expect(harness.store.connectedKey == nil)
 
             let client = try makeClient()
             let online = harness.context(client: client)
@@ -124,6 +127,7 @@ private struct Harness {
             await harness.participant.seed(online)
 
             #expect(harness.store.client != nil)
+            #expect(harness.store.connectedKey == keyA)
             #expect(await eventually { harness.store.hasLoaded })
             #expect(harness.libraryRequests.value == 1)
             #expect(harness.meRequests.value == [ObjectIdentifier(client)])
@@ -258,6 +262,9 @@ private struct Harness {
             await seedA.value
             await harness.participant.seed(contextA)
             #expect(harness.store.connectionKey == keyB)
+            // A's shell, still up during the switch, no longer gets the store.
+            #expect(!harness.store.serves(identityA))
+            #expect(harness.store.serves(identityB))
             #expect(harness.cached.isEmpty)
             #expect(harness.meRequests.value == [idA])
 

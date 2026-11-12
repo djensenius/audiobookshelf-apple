@@ -9,6 +9,7 @@ import Foundation
 ///   the libraries have loaded it's unchecked, and kept with every section of its kind.
 /// - Once ``LibraryStore/hasLoaded`` is set the library is checked again: one that no longer
 ///   exists falls back to the initial library, and one that does gets its kind and sections.
+///   With no libraries at all the selection and library-scoped paths are cleared.
 ///   Replacing an unchecked guess keeps the paths, such as a deep link's, opened before then.
 /// - A deep link's ``Router/pendingLibraryID`` is opened once loaded, or dropped when the user
 ///   has no such library.
@@ -69,6 +70,10 @@ public enum SceneLibrarySelection {
             } else {
                 show(library, in: router)
             }
+        } else if router.libraryID != nil {
+            // The user has no libraries: drop the stale selection so screens reach their
+            // empty state.
+            router.clearLibrary()
         }
     }
 
@@ -100,8 +105,11 @@ public enum SceneLibrarySelection {
     private static func show(_ library: Library, in router: Router) {
         let kind = LibraryKind(library.mediaType)
         let sections = sections(for: library)
-        // Only on a change: the router is observed, and this runs on its changes.
-        guard router.libraryID != library.id || router.libraryKind != kind || router.supportedSections != sections
+        // Only on a change: the router is observed, and this runs on its changes. A request for
+        // the library already shown is a change too: selecting it is what drops the request.
+        guard
+            router.libraryID != library.id || router.libraryKind != kind || router.supportedSections != sections
+                || router.pendingLibraryID == library.id
         else { return }
         router.selectLibrary(id: library.id, kind: kind, supportedSections: sections)
     }

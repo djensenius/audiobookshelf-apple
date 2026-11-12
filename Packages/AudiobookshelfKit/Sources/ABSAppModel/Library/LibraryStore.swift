@@ -131,6 +131,20 @@ public final class LibraryStore {
         }
     }
 
+    /// ``connectionKey`` while the store has a client for it, `nil` otherwise. Key a load on it
+    /// rather than on ``connectionKey``, so a reconnect that attaches a client to an account
+    /// started offline without one retries the load.
+    public var connectedKey: LibraryConnectionKey? {
+        client == nil ? nil : connectionKey
+    }
+
+    /// Whether the store serves `identity`'s account. A scene's shell outlives its account
+    /// during a switch, while the store already serves the next one; it must stop reading the
+    /// store then.
+    public func serves(_ identity: SessionIdentity) -> Bool {
+        connectionKey == LibraryConnectionKey(connectionID: identity.connectionID, userID: identity.userID)
+    }
+
     /// Drops all data, progress and the client, for logout or before switching accounts.
     public func clear() {
         generation += 1

@@ -208,6 +208,18 @@ public final class Router {
         supportedSections = kind == nil ? Set(AppTab.sections) : AppTab.sections(for: kind)
     }
 
+    /// Shows no library, for a user without any: resets the library-scoped paths and the
+    /// sections, and keeps Downloads and Account.
+    func clearLibrary() {
+        for tab in AppTab.allCases where tab.isLibraryScoped {
+            self[path: tab] = []
+        }
+        libraryID = nil
+        libraryKind = nil
+        supportedSections = []
+        repairSections(supported: [])
+    }
+
     /// Falls back from unsupported sections: the selected tab to Library, the Library section
     /// to the default grid (dropping the Library path, which came from that section), and
     /// clears the paths of unsupported section tabs.

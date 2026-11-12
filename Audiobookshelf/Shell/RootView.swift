@@ -68,6 +68,12 @@ struct RootView: View {
 
     /// One link waits at a time: the last one received wins, including over a confirmed server
     /// switch's link (``SceneLinks``).
+    /// The shared library store while it serves `identity`'s account, `nil` otherwise.
+    private func servedStore(for identity: SessionIdentity) -> LibraryStore? {
+        guard let store = library?.store, store.serves(identity) else { return nil }
+        return store
+    }
+
     private func receive(_ link: DeepLink) {
         links.receive(link, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
     }
@@ -105,9 +111,14 @@ struct RootView: View {
                     })
             )
             .id(identity)
-            .environment(\.libraryStore, library?.store)
+            // Only while the store serves this shell's account: during a switch the outgoing
+            // shell stays up after the store attached the next account, and must not build
+            // services or read progress for it with its own library and item IDs.
+            .environment(\.libraryStore, servedStore(for: identity))
             .environment(
-                \.itemProgressReader, library.map { BrowsePresentation.progressReader($0.store.progress) } ?? .none)
+                \.itemProgressReader,
+                servedStore(for: identity).map { BrowsePresentation.progressReader($0.progress) }
+                    ?? .none)
         case .storeUnavailable:
             ErrorStateView(
                 title: L10n.string("MessageStoreUnavailable"),

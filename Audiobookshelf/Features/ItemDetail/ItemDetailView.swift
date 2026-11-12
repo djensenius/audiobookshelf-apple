@@ -22,7 +22,9 @@ struct ItemDetailView: View {
     @State private var unavailableKey: ItemDetailHost.Key?
 
     private var key: ItemDetailHost.Key? {
-        guard let store, let connectionKey = store.connectionKey else { return nil }
+        // `connectedKey`: a reconnect that attaches a client, after an offline start without
+        // one, changes the key and retries the load.
+        guard let store, let connectionKey = store.connectedKey else { return nil }
         return ItemDetailHost.Key(itemID: itemID, store: ObjectIdentifier(store), connectionKey: connectionKey)
     }
 
