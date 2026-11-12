@@ -71,6 +71,23 @@ private actor GatedLibraryClient: LibraryService {
     }
 }
 
+/// A library client whose libraries have one genre, series and author as filter data.
+private struct FilterDataClient: LibraryService {
+    func libraries() async throws -> [Library] { [] }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<ABSCore.LibraryItem> {
+        PagedResults(results: [], total: 0, limit: 0, page: 0)
+    }
+
+    func library(id: String) async throws -> LibraryWithFilterData {
+        LibraryWithFilterData(
+            library: Library(id: id, name: "Books", mediaType: .book),
+            filterData: LibraryFilterData(
+                authors: [Author(id: "aut_1", name: "Jane Austen")], series: [Series(id: "ser_1", name: "Barsoom")],
+                genres: ["Fantasy"]))
+    }
+}
+
 /// `count` books of `libraryID`, with IDs `<prefix>0`, `<prefix>1`, ….
 private func books(_ prefix: String, _ count: Int, in libraryID: String) -> [ABSCore.LibraryItem] {
     (0..<count).map {
@@ -378,6 +395,123 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
         for key in keys {
             #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
         }
+    }
+
+    @Test func podcastSortMenuHasNoProgressOrDurationKeys() {
+        let podcast = LibraryPresentation.sortOptions(for: .podcast, preferences: LibraryViewPreferences()).map(\.key)
+        #expect(podcast == LibrarySortKey.podcastKeys)
+        for key in [LibrarySortKey.progress, .progressStarted, .progressFinished, .duration] {
+            #expect(!podcast.contains(key))
+        }
+        let books = LibraryPresentation.sortOptions(for: .book, preferences: LibraryViewPreferences()).map(\.key)
+        #expect(books == LibrarySortKey.bookKeys)
+        #expect(!books.contains(.episodeCount) && !books.contains(.podcastAuthor))
+    }
+
+    @Test func sortMenuMarksTheSelectedKeyWithItsDirection() {
+        let options = LibraryPresentation.sortOptions(
+            for: .book, preferences: LibraryViewPreferences(sort: .title, descending: false))
+        #expect(options.filter(\.isSelected).map(\.key) == [.title])
+        #expect(options.compactMap(\.arrowSymbol) == ["arrow.up"])
+        let descending = LibraryPresentation.sortOptions(for: .book, preferences: LibraryViewPreferences())
+        #expect(descending.first { $0.isSelected }?.key == .addedAt)
+        #expect(descending.compactMap(\.arrowSymbol) == ["arrow.down"])
+    }
+
+    @Test func choosingASortFlipsOrSetsTheDirectionAndSavesIt() async throws {
+        let client = GatedLibraryClient(items: ["lib_a": books("a", 3, in: "lib_a")])
+        try await withStore(client) { store in
+            let model = try makeHost(store, "lib_a").host.model
+            #expect(model.preferences.sort == .addedAt && model.preferences.descending)
+
+            LibraryPresentation.selectSort(.addedAt, in: model)
+            #expect(model.preferences.sort == .addedAt && !model.preferences.descending)
+            LibraryPresentation.selectSort(.title, in: model)
+            #expect(model.preferences.sort == .title && !model.preferences.descending)
+            LibraryPresentation.selectSort(.title, in: model)
+            #expect(model.preferences.descending)
+            await model.load()?.value
+
+            let saved = try #require(store.viewPreferences(libraryID: "lib_a"))
+            #expect(saved.sort == .title && saved.descending)
+            let request = try #require(await client.requests.last)
+            #expect(request.query.sort == LibrarySortKey.title.rawValue)
+            #expect(request.query.descending)
+        }
+    }
+
+    @Test func filterValuesAreLocalizedWithNoSeriesFirst() async throws {
+        let filterModel = LibraryFilterModel(client: FilterDataClient(), locale: english)
+        await filterModel.load(libraryID: "lib_a")?.value
+        let choices = try #require(filterModel.choices)
+        let series = LibraryPresentation.filterValues(for: .series, choices: choices, locale: english)
+        #expect(series?.map(\.id) == ["no-series", "ser_1"])
+        #expect(series?.first?.name == L10n.string("MessageNoSeries", locale: english))
+        #expect(
+            LibraryPresentation.filterValues(for: .progress, choices: nil, locale: english)?.map(\.name)
+                == ["Finished", "In Progress", "Not Started", "Not Finished"])
+        #expect(
+            LibraryPresentation.filterValues(for: .ebooks, choices: nil, locale: english)?.map(\.id)
+                == ["ebook", "supplementary"])
+        // Groups from the filter data wait for it; groups without values have none.
+        #expect(LibraryPresentation.filterValues(for: .genres, choices: nil) == nil)
+        for group in LibraryFilterGroup.allCases where !group.needsValue {
+            #expect(LibraryPresentation.filterValues(for: group, choices: nil)?.isEmpty == true)
+        }
+
+        #expect(LibraryPresentation.filterSummary(nil, choices: nil, locale: english) == "All")
+        #expect(
+            LibraryPresentation.filterSummary(.init(group: .authors, value: "aut_1"), choices: choices, locale: english)
+                == "Author, Jane Austen")
+        #expect(
+            LibraryPresentation.filterSummary(.init(group: .authors, value: "aut_1"), choices: nil, locale: english)
+                == "Author")
+        #expect(
+            LibraryPresentation.filterSummary(
+                .init(group: .narrators, value: "Stephen Fry"), choices: nil, locale: english)
+                == "Narrator, Stephen Fry")
+        #expect(
+            LibraryPresentation.filterSummary(.init(group: .explicit), choices: nil, locale: english) == "Explicit")
+    }
+
+    @Test func choosingAFilterViewOrCollapseSavesIt() async throws {
+        let client = GatedLibraryClient(items: ["lib_a": books("a", 3, in: "lib_a")])
+        try await withStore(client) { store in
+            let model = try makeHost(store, "lib_a").host.model
+            await model.update { $0.filter = .init(group: .feedOpen) }?.value
+            #expect(await client.requests.last?.query.filter == LibraryFilter(group: "feed-open"))
+            await model.update { $0.collapseSeries = true }?.value
+            #expect(await client.requests.last?.query.collapseSeries == true)
+            let requests = await client.requests.count
+            // Grid or list is the same query: nothing reloads.
+            model.update { $0.viewMode = .list }
+            #expect(await client.requests.count == requests)
+            let saved = try #require(store.viewPreferences(libraryID: "lib_a"))
+            #expect(saved.filter == .init(group: .feedOpen) && saved.collapseSeries && saved.viewMode == .list)
+        }
+        #expect(LibraryPresentation.showsCollapseSeries(for: .book))
+        #expect(!LibraryPresentation.showsCollapseSeries(for: .podcast))
+    }
+
+    @Test func everySortKeyAndFilterGroupHasACatalogKey() {
+        let keys =
+            LibrarySortKey.allCases.map(LibraryPresentation.titleKey(for:))
+            + LibraryFilterGroup.allCases.map(LibraryPresentation.titleKey(for:))
+            + LibraryFilterModel.ProgressState.allCases.map(LibraryPresentation.titleKey(for:))
+            + LibraryFilterModel.EbookKind.allCases.map(LibraryPresentation.titleKey(for:))
+            + LibraryPresentation.viewModes.map(LibraryPresentation.titleKey(for:))
+            + [true, false].map(LibraryPresentation.directionKey(descending:))
+            + [
+                "HeaderLibrarySort", "HeaderLibraryFilter", "ButtonLibraryFilterDone", "ButtonClearFilter",
+                "LabelLibraryViewOptions", "LabelCollapseSeries", "LabelAll", "MessageNoSeries",
+                "MessageLibraryFilterLoadFailed", "MessageLibraryFilterNoValues", "ButtonRetry",
+            ]
+        for key in keys {
+            #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
+            #expect(L10n.string(key, locale: english) != key, "\(key) isn't in the English catalog")
+        }
+        // Negative control: a key the catalog lacks comes back as itself, so the checks above can fail.
+        #expect(L10n.string("LabelLibraryNoSuchKey") == "LabelLibraryNoSuchKey")
     }
 }
 
