@@ -10,6 +10,7 @@ import SwiftUI
 /// Play and the finished toggle are also in a context menu and the VoiceOver actions of the
 /// link, as ``PodcastEpisodeActions/available(for:progress:context:isGone:)`` offers them; when
 /// the podcast is gone from the server only the link, which opens the episode, still works.
+/// Remove from Server follows them when the screen offers it (`remove`).
 /// VoiceOver reads the start of the summary, with the rest under More Content.
 struct PodcastEpisodeRow: View {
     let model: PodcastDetailModel
@@ -23,6 +24,8 @@ struct PodcastEpisodeRow: View {
     let isOtherStarting: Bool
     /// This episode's finished state is being changed.
     let isUpdating: Bool
+    /// Asks to remove the episode from the server; `nil` when that isn't offered.
+    let remove: (() -> Void)?
     /// Performs an action other than ``ItemActionKind/openDetails`` on the episode.
     let perform: (ItemActionKind) -> Void
     @Environment(\.locale) private var locale
@@ -52,7 +55,13 @@ struct PodcastEpisodeRow: View {
                 summary == spokenSummary ? nil : summary.map { Text(verbatim: $0) }
             )
             .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
-            .itemActions(actions, perform: perform)
+            .itemActions(actions, perform: perform) {
+                if let remove {
+                    Button(role: .destructive, action: remove) {
+                        Label(L10n.string("ButtonRemoveFromServer"), systemImage: "trash")
+                    }
+                }
+            }
             EpisodeRowControls(
                 status: model.status(for: episode), progress: progress, actions: actions.map(\.kind),
                 isStarting: isStarting, isOtherStarting: isOtherStarting, isUpdating: isUpdating, perform: perform)
