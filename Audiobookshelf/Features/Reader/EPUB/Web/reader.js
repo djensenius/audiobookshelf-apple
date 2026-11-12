@@ -15,6 +15,13 @@
   // names, extra fields and comments it decodes (a local name counts once per entry using it).
   const MAX_ENTRIES = 10000
   const MAX_METADATA_BYTES = 8 * 1024 * 1024
+  // How many characters swapping asset URLs for blob URLs may add to one section or style sheet;
+  // past it the resource is left unrewritten (a section) or dropped (a style sheet).
+  const MAX_REWRITE_GROWTH = 16 * 1024 * 1024
+  // epub.js's locations take time and memory in proportion to the spine. A longer spine, or
+  // generation running past the deadline, gets progress by section instead.
+  const MAX_LOCATION_SECTIONS = 2000
+  const LOCATIONS_TIMEOUT_MS = 5 * 60 * 1000
   // How long the table of contents may take once the book is open; it comes from the archive
   // already in memory, so only a missing navigation document takes this long.
   const NAVIGATION_TIMEOUT_MS = 10000
@@ -44,7 +51,14 @@
       }
     })
     closed.catch(function () {})
-    return { pendingDisplays: 0, lastDisplay: Promise.resolve(), fontApplied: false, closed: closed, close: close }
+    return {
+      pendingDisplays: 0,
+      lastDisplay: Promise.resolve(),
+      fontApplied: false,
+      coarse: false,
+      closed: closed,
+      close: close
+    }
   }
 
   function post(event) {
@@ -59,13 +73,16 @@
 
   // A navigation document's links are relative to it, but epub.js's spine (and `relocated`'s href)
   // to the package; this makes `href` relative to the package's `directory` in the archive, given
-  // the document's `navPath` (relative to the package, and possibly above it).
-  function packageHref(href, navPath, directory) {
+  // the document's `navPath` (relative to the package, and possibly above it). A file in the spine
+  // keeps the spine's own href (`./c1.xhtml`, say), since epub.js finds sections by it literally.
+  function packageHref(href, navPath, directory, spineHrefs) {
     if (!navPath) return href
     try {
       const root = new URL(directory || '/', 'http://archive')
       const url = new URL(href, new URL(navPath, root))
       if (url.origin !== 'http://archive') return href
+      const listed = spineHrefs && spineHrefs.get(decodeURI(url.pathname))
+      if (listed) return listed + url.hash
       const from = decodeURI(root.pathname).split('/').slice(1, -1)
       const to = decodeURI(url.pathname).split('/').slice(1)
       let shared = 0
@@ -76,13 +93,26 @@
     }
   }
 
-  function tocItems(items, navPath, directory) {
+  // Each spine item's href, by the archive path it resolves to.
+  function spineHrefs(opened, directory) {
+    const hrefs = new Map()
+    const root = new URL(directory || '/', 'http://archive')
+    ;((opened.spine && opened.spine.spineItems) || []).forEach(function (item) {
+      try {
+        const path = decodeURI(new URL(item.href, root).pathname)
+        if (item.href && !hrefs.has(path)) hrefs.set(path, item.href)
+      } catch (error) {}
+    })
+    return hrefs
+  }
+
+  function tocItems(items, navPath, directory, spine) {
     return (items || []).map(function (item) {
       return {
         id: String(item.id || ''),
         label: String(item.label || '').trim(),
-        href: packageHref(String(item.href || ''), navPath, directory),
-        subitems: tocItems(item.subitems, navPath, directory)
+        href: packageHref(String(item.href || ''), navPath, directory, spine),
+        subitems: tocItems(item.subitems, navPath, directory, spine)
       }
     })
   }
@@ -93,7 +123,7 @@
       type: 'relocated',
       startCfi: location.start.cfi,
       endCfi: location.end.cfi,
-      progress: Number(location.end.percentage) || 0,
+      progress: session && session.coarse ? sectionProgress(location.end) : Number(location.end.percentage) || 0,
       href: location.start.href || null,
       atStart: Boolean(location.atStart),
       atEnd: Boolean(location.atEnd)
@@ -104,6 +134,15 @@
     if (lastRelocation && Object.keys(event).every(same)) return
     lastRelocation = event
     post(event)
+  }
+
+  // Progress by section, and by page within it, for a book without locations.
+  function sectionProgress(end) {
+    const sections = Number(book && book.spine && book.spine.length) || 0
+    if (!sections || typeof end.index !== 'number') return 0
+    const shown = end.displayed || {}
+    const within = shown.total > 0 ? Math.min(1, (Number(shown.page) || 0) / shown.total) : 0
+    return Math.min(1, (end.index + within) / sections)
   }
 
   function postCurrentLocation() {
@@ -298,7 +337,8 @@
 
   // Every URL in `content` swapped for its replacement in one pass, longest first. epub.js swaps
   // each in turn over the whole text, so a later URL also matches inside the blob URLs an earlier
-  // one put in, and the text grows exponentially with the assets a book lists.
+  // one put in, and the text grows exponentially with the assets a book lists. `null` once the
+  // swaps would add more than the rewrite budget.
   function substituteOnce(content, urls, replacements) {
     const swaps = new Map()
     urls.forEach(function (url, index) {
@@ -313,9 +353,21 @@
         return url.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
       })
       .join('|')
-    return content.replace(new RegExp(pattern, 'g'), function (url) {
-      return swaps.get(url)
-    })
+    // Tests lower the budget.
+    const budget = Number(window.absReaderRewriteBudget) || MAX_REWRITE_GROWTH
+    const overBudget = new Error('Over the rewrite budget')
+    let growth = 0
+    try {
+      return content.replace(new RegExp(pattern, 'g'), function (url) {
+        const swap = swaps.get(url)
+        growth += swap.length - url.length
+        if (growth > budget) throw overBudget
+        return swap
+      })
+    } catch (error) {
+      if (error === overBudget) return null
+      throw error
+    }
   }
 
   // Wraps the book's unpacking, which epub.js does once the package loads: refuses an asset listed
@@ -368,7 +420,8 @@
         })
       }
       resources.substitute = function (content, url) {
-        return substituteOnce(content, url ? this.relativeTo(url) : this.urls, replacements())
+        const replaced = substituteOnce(content, url ? this.relativeTo(url) : this.urls, replacements())
+        return replaced === null ? content : replaced
       }
       // As epub.js's own, which `replaceCss` calls once the assets' blob URLs exist.
       resources.createCssFile = function (href) {
@@ -379,6 +432,7 @@
         return text.then(
           function (css) {
             const replaced = substituteOnce(css, this.relativeTo(absolute), replacements())
+            if (replaced === null) return undefined
             const sheet = keep(URL.createObjectURL(new Blob([replaced], { type: 'text/css' })))
             sheets.set(href, sheet)
             return sheet
@@ -433,7 +487,8 @@
     try {
       await Promise.race([previous, current.closed])
       shown.on('displayerror', onError)
-      return await Promise.race([shown.display(target), failed, current.closed])
+      const show = shown.unqueuedDisplay || shown.display
+      return await Promise.race([show.call(shown, target), failed, current.closed])
     } catch (error) {
       releaseQueue(shown)
       throw error
@@ -502,6 +557,14 @@
     })
     const opened = book
     const shown = rendition
+    // epub.js displays on its own too (a link, a resize, a layout change). Those wait their turn
+    // behind the bridge's, so a `displayerror` reaches the display it belongs to; theirs is posted.
+    shown.unqueuedDisplay = shown.display
+    shown.display = function (target) {
+      return display(state, shown, target).catch(function (error) {
+        if (isCurrent()) postError('display', error)
+      })
+    }
     applySettings(settings)
 
     shown.on('displayed', function () {
@@ -535,7 +598,8 @@
         const packaging = opened.packaging || {}
         const navPath = packaging.navPath || packaging.ncxPath
         const directory = opened.path && opened.path.directory
-        if (isCurrent()) post({ type: 'toc', items: tocItems(navigation && navigation.toc, navPath, directory) })
+        const items = tocItems(navigation && navigation.toc, navPath, directory, spineHrefs(opened, directory))
+        if (isCurrent()) post({ type: 'toc', items: items })
       })
       .catch(function (error) {
         if (isCurrent()) postError('toc', error)
@@ -598,19 +662,40 @@
     if (!isCurrent()) return
     postCurrentLocation()
 
-    if (!locationsLoaded) {
-      opened.locations
-        .generate()
-        .then(function () {
-          if (!isCurrent()) return
-          post({ type: 'locationsReady', locations: opened.locations.save() })
-          // The percentage was 0 until the locations existed.
-          postCurrentLocation()
-        })
-        .catch(function (error) {
-          if (isCurrent()) postError('locations', error)
-        })
+    if (!locationsLoaded) generateLocations(opened, state, isCurrent)
+  }
+
+  // Generates the book's locations within the limits, falling back to progress by section.
+  function generateLocations(opened, state, isCurrent) {
+    const coarse = function () {
+      state.coarse = true
+      postCurrentLocation()
     }
+    if ((Number(opened.spine.length) || 0) > MAX_LOCATION_SECTIONS) return coarse()
+    // Tests shorten the deadline.
+    const timeout = Number(window.absReaderLocationsTimeoutMs) || LOCATIONS_TIMEOUT_MS
+    let timedOut = false
+    const deadline = setTimeout(function () {
+      timedOut = true
+      // Stops the sections still queued; the one in progress finishes.
+      const locations = opened.locations
+      if (locations && locations.q) locations.q.stop()
+      if (isCurrent()) coarse()
+    }, timeout)
+    opened.locations
+      .generate()
+      .then(function () {
+        if (timedOut || !isCurrent()) return
+        post({ type: 'locationsReady', locations: opened.locations.save() })
+        // The percentage was 0 until the locations existed.
+        postCurrentLocation()
+      })
+      .catch(function (error) {
+        if (!timedOut && isCurrent()) postError('locations', error)
+      })
+      .finally(function () {
+        clearTimeout(deadline)
+      })
   }
 
   function asError(error) {
