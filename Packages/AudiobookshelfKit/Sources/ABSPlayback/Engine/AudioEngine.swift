@@ -178,6 +178,13 @@ public final class AudioEngine: AudioEngineProtocol {
         audioSession?.deactivate()
     }
 
+    public func unload() {
+        loadGeneration += 1
+        reset()
+        refreshState()
+        isAudioSessionActive = false
+    }
+
     public func setRate(_ rate: Float) {
         guard rate.isFinite, rate > 0 else { return }
         defaultRate = rate

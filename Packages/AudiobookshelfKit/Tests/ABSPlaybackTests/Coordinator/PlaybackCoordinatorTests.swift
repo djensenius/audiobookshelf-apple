@@ -605,6 +605,76 @@ struct PlaybackCoordinatorTests {
         await coordinator.waitForPendingCloses()
     }
 
+    @Test func switchingItemsKeepsTheAudioSessionUntilStop() async {
+        await coordinator.play(itemID: "A")
+        await coordinator.play(itemID: "B")
+        await coordinator.play(itemID: "A")
+
+        #expect(engine.unloadCount == 2)
+        #expect(engine.stopCount == 0)
+        coordinator.stop()
+        #expect(engine.stopCount == 1)
+        await coordinator.waitForPendingCloses()
+    }
+
+    @Test func aFailedSwitchReleasesTheKeptAudioSession() async {
+        await coordinator.play(itemID: "A")
+        service.state.withLock { $0.startError = .forbidden(message: nil) }
+
+        await coordinator.play(itemID: "B")
+
+        #expect(engine.unloadCount == 1)
+        #expect(engine.stopCount == 1)
+        // Released once: a later stop has nothing left to release.
+        coordinator.stop()
+        #expect(engine.stopCount == 1)
+        await coordinator.waitForPendingCloses()
+    }
+
+    @Test func aHangingCloseDelaysOnlyThePlayRightAfterIt() async {
+        await coordinator.play(itemID: "A")
+        let gate = Gate()
+        service.state.withLock { $0.closeGates["A-1"] = gate }
+        h.sleep.isManual = true
+
+        let playB = Task { await coordinator.play(itemID: "B") }
+        await yieldUntil { h.sleep.waitingCount == 1 }
+        #expect(h.sleep.durations == [PlaybackCoordinator.closeWaitTimeout])
+        h.clock.advance(by: 2)
+        h.sleep.fireOldest()
+        await playB.value
+
+        // A's close still hangs, but it has had its 2 s: C waits at most for B's close.
+        let playC = Task { await coordinator.play(itemID: "C") }
+        await yieldUntil { service.starts == ["A", "B", "C"] }
+        #expect(!service.log.contains("close A-1 done"))
+
+        gate.open()
+        while h.sleep.waitingCount > 0 { h.sleep.fireOldest() }
+        await playC.value
+        await coordinator.waitForPendingCloses()
+    }
+
+    @Test func theCloseWaitCountsFromWhenTheCloseWasSent() async {
+        await coordinator.play(itemID: "A")
+        let gate = Gate()
+        service.state.withLock { $0.closeGates["A-1"] = gate }
+        coordinator.stop()
+        await yieldUntil { service.closes == ["A-1"] }
+        h.clock.advance(by: 1.5)
+        h.sleep.isManual = true
+
+        let playB = Task { await coordinator.play(itemID: "B") }
+        await yieldUntil { h.sleep.waitingCount == 1 }
+        #expect(h.sleep.durations == [.seconds(0.5)])
+
+        h.sleep.fireOldest()
+        await playB.value
+        #expect(service.starts == ["A", "B"])
+        gate.open()
+        await coordinator.waitForPendingCloses()
+    }
+
     @Test func finalCloseReportIsAskedOnlyForLoadedSessions() async {
         var closing: [ClosingSession] = []
         coordinator.finalCloseReport = {

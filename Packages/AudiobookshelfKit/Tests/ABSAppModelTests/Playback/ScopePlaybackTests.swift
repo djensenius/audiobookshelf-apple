@@ -49,6 +49,8 @@ private final class InstantEngine: AudioEngineProtocol {
         state = .idle
     }
 
+    func unload() { stop() }
+
     func seek(to time: Double) async -> SeekResult {
         currentTime = timeline?.clamp(time) ?? time
         return .completed
