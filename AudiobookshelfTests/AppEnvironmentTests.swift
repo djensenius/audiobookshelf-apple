@@ -39,6 +39,25 @@ import Testing
         }
     }
 
+    /// A store other than the App Group one may not list the connections whose covers share the
+    /// App Group cover cache, so the launch sweep mustn't delete covers from it.
+    @Test func onlyTheAppGroupStoreSweepsRemovedConnectionsCovers() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "AppEnvironmentTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try await withSettings { settings in
+            let inMemory = AppEnvironment(settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain())
+            #expect(inMemory.accounts != nil)
+            #expect(!inMemory.images.sweepsRemovedConnections)
+
+            let onDisk = AppEnvironment(
+                settings: settings, storeLocation: .url(directory.appending(path: "Audiobookshelf.store")),
+                keychain: ConnectTestKeychain())
+            #expect(onDisk.accounts != nil)
+            #expect(!onDisk.images.sweepsRemovedConnections)
+        }
+    }
+
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
         try await withSettings { settings in
             let keychain = ConnectTestKeychain()

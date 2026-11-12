@@ -28,6 +28,9 @@ final class ImageServices {
     /// Called by the system's memory events, on whatever thread they arrive.
     nonisolated let trimmer: MemoryTrimmer
     private let fileStore: CoverFileStore
+    /// Whether the launch maintenance deletes the covers of connections the store no longer
+    /// saves; see ``init(accounts:sweepsRemovedConnections:trim:notifications:)``.
+    let sweepsRemovedConnections: Bool
     /// The running disk maintenance, so another isn't started meanwhile.
     private var maintenance: Task<Void, Never>?
     #if os(iOS)
@@ -43,12 +46,18 @@ final class ImageServices {
         private var memoryPressure: (any DispatchSourceMemoryPressure)?
     #endif
 
+    /// - Parameter sweepsRemovedConnections: Whether `accounts` reads the App Group store, which
+    ///   lists every connection whose covers share ``CoverFileStore/defaultDirectory(appGroup:)``.
+    ///   Only then are the covers of connections it doesn't save deleted at launch: an in-memory
+    ///   store (tests, previews) or a private fallback store (a build without the App Group
+    ///   entitlement) may not list them, as `DownloadJanitor` skips such stores too.
     /// - Parameter trim: Trims the memory cache to a fraction of its cap; tests record it. By
     ///   default, ``pipeline``'s ``ImagePipeline/trimMemory(toFraction:)``.
     /// - Parameter notifications: Where memory warnings arrive on iOS; tests pass their own, so
     ///   one test's warning doesn't reach another's services.
     init(
         accounts: AccountManager?,
+        sweepsRemovedConnections: Bool = false,
         trim: (@Sendable (_ fraction: Double) async -> Void)? = nil,
         notifications: NotificationCenter = .default
     ) {
@@ -56,6 +65,7 @@ final class ImageServices {
         let online = self.online
         let fileStore = CoverFileStore(directory: CoverFileStore.defaultDirectory(), limit: limits.diskBytes)
         self.fileStore = fileStore
+        self.sweepsRemovedConnections = sweepsRemovedConnections
         let pipeline = ImagePipeline(
             limits: limits,
             fileStore: fileStore,
@@ -78,7 +88,7 @@ final class ImageServices {
         #elseif os(macOS)
             memoryPressure = Self.observeMemoryPressure(calling: trimmer)
         #endif
-        maintainDisk(sweepingRemovalsOf: accounts, inBackground: false)
+        maintainDisk(sweepingRemovalsOf: sweepsRemovedConnections ? accounts : nil, inBackground: false)
     }
 
     isolated deinit {

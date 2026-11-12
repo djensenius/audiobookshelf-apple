@@ -67,7 +67,8 @@ final class AppEnvironment {
         self.player = PlaceholderPlayerState()
 
         // Images (#182).
-        let images = ImageServices(accounts: accounts)
+        let images = ImageServices(
+            accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
     }
