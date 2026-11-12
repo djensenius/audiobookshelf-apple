@@ -112,6 +112,11 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
             .syncSession(id: id, report: report)
     }
 
+    public func openSession(id: String) async throws -> PlaybackSession {
+        try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
+            .openSession(id: id)
+    }
+
     public func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {
         try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
             .updateProgress(itemID: itemID, episodeID: episodeID, update)
