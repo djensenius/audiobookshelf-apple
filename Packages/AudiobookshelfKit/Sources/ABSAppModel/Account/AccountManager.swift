@@ -108,6 +108,8 @@ public final class AccountManager {
     @ObservationIgnored private let now: @Sendable () -> Date
     /// Where a removed connection's saved preferences and recent searches are cleared.
     @ObservationIgnored private let settings: AppSettings?
+    /// Whether ``restoreSession()`` has swept the settings of accounts that aren't saved.
+    @ObservationIgnored private var sweptSettings = false
     @ObservationIgnored private var credentials: [UUID: ConnectionCredentials] = [:]
     /// The credentials generation of each connection's latest sign-in in this process.
     @ObservationIgnored private var signInGenerations: [UUID: Int] = [:]
@@ -145,7 +147,8 @@ public final class AccountManager {
     ///   - keychain: The app passes `KeychainStore()`; tests pass a fake.
     ///   - sessionConfiguration: Tests return a configuration with stub protocol classes.
     ///   - settings: ``remove(_:)`` clears the removed account's entries from it
-    ///     (``AppSettings/removeAccountData(serverID:userID:)``); ``logout()`` keeps them.
+    ///     (``AppSettings/removeAccountData(serverID:userID:)``), and the first
+    ///     ``restoreSession()`` those of any account that isn't saved; ``logout()`` keeps them.
     public init(
         store: ServerConnectionStore,
         keychain: any KeychainStoring,
@@ -313,6 +316,7 @@ public final class AccountManager {
         state = .restoring
         lastError = nil
         await reloadConnections()
+        await sweepSettingsOnce()
         await restoreWillChooseConnection?()
         guard isCurrent(operation) else { return }
         var chosen: ServerConnectionDTO?
@@ -762,6 +766,20 @@ public final class AccountManager {
             _ = try? await store.clearSignedOut(id: id, savedAt: savedAt)
         }
         await reloadConnections()
+    }
+
+    /// Clears, once, the settings of accounts that aren't saved: ``remove(_:)`` clears them
+    /// after the store removes the connection, so a removal the app was terminated in, or one
+    /// from before that, left them with no connection to remove again. Keeps the saved
+    /// connections' and, in case one was saved since the store was read, the listed and active
+    /// ones'. Not if the store can't be read.
+    private func sweepSettingsOnce() async {
+        guard let settings, !sweptSettings,
+            let saved = try? await store.allConnections().filter({ !$0.isDisconnected })
+        else { return }
+        sweptSettings = true
+        let accounts = saved + connections + [activeConnection].compactMap(\.self)
+        settings.removeAccountData(keepingOnly: accounts.map { (serverID: $0.id.uuidString, userID: $0.userId) })
     }
 
     private func reloadConnections() async {

@@ -548,6 +548,51 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         }
     }
 
+    @Test func restoreSweepsTheSettingsOfAccountsThatArentSaved() async throws {
+        let suiteName = "ABSAppModelTests.Account.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = AppSettings(defaults: defaults)
+        let harness = try Harness()
+        let first = FakeServer()
+        let second = FakeServer()
+        let third = FakeServer()
+        // Removed without clearing its settings, as by a removal the app was terminated in:
+        // `first` is deleted, `second` kept disconnected for its unsynced progress.
+        let interrupted = harness.makeManager()
+        let firstID = try await signIn(interrupted, to: first)
+        let secondID = try await signIn(interrupted, to: second)
+        let thirdID = try await signIn(interrupted, to: third)
+        try harness.retainRecords(of: secondID)
+        try await interrupted.remove(firstID)
+        try await interrupted.remove(secondID)
+        let orphans = [
+            (firstID.uuidString, first.userId), (secondID.uuidString, second.userId),
+            (thirdID.uuidString, "usr-other"), (UUID().uuidString, third.userId),
+        ]
+        let saved = (serverID: thirdID.uuidString, userID: third.userId)
+        for (server, user) in orphans + [saved] {
+            settings.setLastLibraryID("lib", serverID: server, userID: user)
+            settings.setLibraryViewPreferencesJSON("{}", serverID: server, userID: user, libraryID: "lib")
+            settings.setRecentSearchesJSON("[\"Dune\"]", serverID: server, userID: user, libraryID: "lib")
+        }
+
+        let relaunched = harness.makeManager(settings: settings)
+        await relaunched.restoreSession()
+        #expect(relaunched.state.user?.connectionID == thirdID)
+        let stored = AppSettings(defaults: defaults)
+        for (server, user) in orphans {
+            #expect(stored.lastLibraryID(serverID: server, userID: user) == nil)
+            #expect(stored.libraryViewPreferencesJSON(serverID: server, userID: user, libraryID: "lib") == nil)
+            #expect(stored.recentSearchesJSON(serverID: server, userID: user, libraryID: "lib") == nil)
+        }
+        #expect(stored.lastLibraryID(serverID: saved.serverID, userID: saved.userID) == "lib")
+        #expect(
+            stored.libraryViewPreferencesJSON(serverID: saved.serverID, userID: saved.userID, libraryID: "lib") == "{}")
+        #expect(
+            stored.recentSearchesJSON(serverID: saved.serverID, userID: saved.userID, libraryID: "lib") == "[\"Dune\"]")
+    }
+
     @Test func refreshedTokensArePersisted() async throws {
         let harness = try Harness()
         let server = FakeServer()
