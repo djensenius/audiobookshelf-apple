@@ -132,7 +132,7 @@ private struct ComicPagerView: View {
                     }
                     .modifier(
                         ComicZoom(
-                            isZoomed: $isZoomed, pages: spread.pages.map { model.pageSizes[$0] }, gap: gap,
+                            isZoomed: $isZoomed, pages: pages.map { model.pageSizes[$0] }, gap: gap,
                             onTap: onTap)
                     )
                     .containerRelativeFrame([.horizontal, .vertical])
@@ -241,7 +241,8 @@ private struct ComicPageView: View {
 
 /// Pinch to zoom up to 5×, drag to pan while zoomed, double-tap to zoom in or reset; a single tap
 /// calls `onTap`. The pages don't turn while zoomed. Panning stops at the edges of `pages`
-/// aspect-fitted in the viewport (decoded sizes; empty means the content fills the viewport).
+/// (decoded sizes, in display order) as the pager fits them; empty means the content fills the
+/// viewport.
 private struct ComicZoom: ViewModifier {
     @Binding var isZoomed: Bool
     let pages: [CGSize?]
@@ -304,7 +305,7 @@ private struct ComicZoom: ViewModifier {
     }
 
     private func clamped(_ offset: CGSize) -> CGSize {
-        let content = pages.isEmpty ? size : ComicReaderLayout.fittedSize(of: pages, gap: gap, in: size)
+        let content = ComicReaderLayout.fittedRect(of: pages, gap: gap, in: size)
         return ComicReaderLayout.clampedOffset(offset, scale: scale, content: content, viewport: size)
     }
 

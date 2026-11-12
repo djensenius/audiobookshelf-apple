@@ -98,32 +98,47 @@ public enum ComicReaderLayout {
     /// The zoom a pinch may reach.
     public static let zoomRange: ClosedRange<CGFloat> = 1...5
 
-    /// The size of a spread's pages aspect-fitted side by side in `viewport`, `gap` apart: each
-    /// page fits half the width (or all of it alone). A page not yet decoded fills its half.
-    public static func fittedSize(of pages: [CGSize?], gap: CGFloat, in viewport: CGSize) -> CGSize {
-        guard !pages.isEmpty else { return viewport }
+    /// Where a spread's pages land aspect-fitted side by side in `viewport`, `gap` apart, in
+    /// display order (left to right): each page fits its half of the width and sits against the
+    /// gutter, so pages of unequal widths make an off-centre spread. A page alone is centred, and
+    /// a page not yet decoded fills its half.
+    public static func fittedRect(of pages: [CGSize?], gap: CGFloat, in viewport: CGSize) -> CGRect {
+        guard !pages.isEmpty else { return CGRect(origin: .zero, size: viewport) }
         let gaps = gap * CGFloat(pages.count - 1)
         let cell = CGSize(width: max(viewport.width - gaps, 0) / CGFloat(pages.count), height: viewport.height)
-        let fitted = pages.map { page -> CGSize in
-            guard let page, page.width > 0, page.height > 0 else { return cell }
-            let ratio = min(cell.width / page.width, cell.height / page.height)
-            return CGSize(width: page.width * ratio, height: page.height * ratio)
+        let frames = pages.enumerated().map { index, page -> CGRect in
+            var size = cell
+            if let page, page.width > 0, page.height > 0 {
+                let ratio = min(cell.width / page.width, cell.height / page.height)
+                size = CGSize(width: page.width * ratio, height: page.height * ratio)
+            }
+            let cellX = CGFloat(index) * (cell.width + gap)
+            let x =
+                if pages.count == 1 { cellX + (cell.width - size.width) / 2 } else if index == 0 {
+                    cellX + cell.width - size.width
+                } else { cellX }
+            return CGRect(x: x, y: (viewport.height - size.height) / 2, width: size.width, height: size.height)
         }
-        return CGSize(width: fitted.reduce(gaps) { $0 + $1.width }, height: fitted.map(\.height).max() ?? 0)
+        return frames.dropFirst().reduce(frames[0]) { $0.union($1) }
     }
 
-    /// The pan offset of `content`, centred in `viewport` and zoomed by `scale`, kept so the
-    /// content's edges never come inside the viewport: each axis pans only as far as the zoomed
-    /// content overflows it. No offset at `1×`.
+    /// The pan offset of `content` (a rectangle in `viewport`) zoomed by `scale` about the
+    /// viewport's centre. On each axis where the zoomed content covers the viewport, it pans only
+    /// until its edge reaches the viewport's; where it doesn't, it doesn't pan, and sits at the offset
+    /// nearest zero that shows all of it. No offset at `1×`.
     public static func clampedOffset(
-        _ offset: CGSize, scale: CGFloat, content: CGSize, viewport: CGSize
+        _ offset: CGSize, scale: CGFloat, content: CGRect, viewport: CGSize
     ) -> CGSize {
         let scale = min(max(scale, zoomRange.lowerBound), zoomRange.upperBound)
-        let limit = CGSize(
-            width: max(content.width * scale - viewport.width, 0) / 2,
-            height: max(content.height * scale - viewport.height, 0) / 2)
+        func axis(_ offset: CGFloat, _ low: CGFloat, _ high: CGFloat, _ length: CGFloat) -> CGFloat {
+            let centre = length / 2
+            let (scaledLow, scaledHigh) = (centre + (low - centre) * scale, centre + (high - centre) * scale)
+            // The offsets that bring each edge to the viewport's edge.
+            let (lowest, highest) = (length - scaledHigh, -scaledLow)
+            return lowest <= highest ? min(max(offset, lowest), highest) : min(max(0, highest), lowest)
+        }
         return CGSize(
-            width: min(max(offset.width, -limit.width), limit.width),
-            height: min(max(offset.height, -limit.height), limit.height))
+            width: axis(offset.width, content.minX, content.maxX, viewport.width),
+            height: axis(offset.height, content.minY, content.maxY, viewport.height))
     }
 }

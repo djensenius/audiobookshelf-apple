@@ -91,7 +91,8 @@ import Testing
     @Test func aZoomedPageCanPanOnlyToItsEdges() {
         let size = CGSize(width: 100, height: 200)
         func clamp(_ offset: CGSize, _ scale: CGFloat) -> CGSize {
-            ComicReaderLayout.clampedOffset(offset, scale: scale, content: size, viewport: size)
+            ComicReaderLayout.clampedOffset(
+                offset, scale: scale, content: CGRect(origin: .zero, size: size), viewport: size)
         }
         #expect(clamp(CGSize(width: 30, height: -40), 1) == .zero)
         #expect(clamp(CGSize(width: 80, height: -300), 2) == CGSize(width: 50, height: -100))
@@ -102,8 +103,8 @@ import Testing
 
     @Test func panningStopsAtTheFittedPageNotTheViewport() {
         let viewport = CGSize(width: 1200, height: 800)
-        let cover = ComicReaderLayout.fittedSize(of: [CGSize(width: 600, height: 800)], gap: 0, in: viewport)
-        #expect(cover == CGSize(width: 600, height: 800))
+        let cover = ComicReaderLayout.fittedRect(of: [CGSize(width: 600, height: 800)], gap: 0, in: viewport)
+        #expect(cover == CGRect(x: 300, y: 0, width: 600, height: 800))
         // At 2× the cover is exactly as wide as the viewport, so it can't pan sideways.
         #expect(
             ComicReaderLayout.clampedOffset(
@@ -114,19 +115,41 @@ import Testing
                 == CGSize(width: 300, height: 0))
     }
 
+    @Test func anUnevenSpreadPansToItsOwnEdgesInEitherDirection() {
+        let viewport = CGSize(width: 1000, height: 800)
+        let (narrow, wide) = (CGSize(width: 300, height: 800), CGSize(width: 500, height: 800))
+        func clamp(_ pages: [CGSize], _ x: CGFloat, _ scale: CGFloat = 2) -> CGFloat {
+            let content = ComicReaderLayout.fittedRect(of: pages, gap: 0, in: viewport)
+            return ComicReaderLayout.clampedOffset(
+                CGSize(width: x, height: 0), scale: scale, content: content, viewport: viewport
+            ).width
+        }
+        // Left to right: the narrow page sits against the gutter, so the spread spans 200...1000.
+        #expect(ComicReaderLayout.fittedRect(of: [narrow, wide], gap: 0, in: viewport).minX == 200)
+        #expect(clamp([narrow, wide], 300) == 100)
+        #expect(clamp([narrow, wide], -800) == -500)
+        // Right to left shows the wide page first: 0...800.
+        #expect(ComicReaderLayout.fittedRect(of: [wide, narrow], gap: 0, in: viewport).maxX == 800)
+        #expect(clamp([wide, narrow], 600) == 500)
+        #expect(clamp([wide, narrow], -300) == -100)
+        // Unzoomed it doesn't move; zoomed but still narrower, it shifts just enough to show it all.
+        #expect(clamp([narrow, wide], 300, 1) == 0)
+        #expect(clamp([narrow, wide], 300, 1.125) == -62.5)
+    }
+
     @Test func aSpreadFitsItsPagesSideBySide() {
         let viewport = CGSize(width: 1000, height: 800)
         let portrait = CGSize(width: 400, height: 800)
         #expect(
-            ComicReaderLayout.fittedSize(of: [portrait, portrait], gap: 20, in: viewport)
-                == CGSize(width: 820, height: 800))
+            ComicReaderLayout.fittedRect(of: [portrait, portrait], gap: 20, in: viewport)
+                == CGRect(x: 90, y: 0, width: 820, height: 800))
         // Pages too wide for their half fit its width; an undecoded page fills its half.
         #expect(
-            ComicReaderLayout.fittedSize(of: [CGSize(width: 980, height: 490), nil], gap: 20, in: viewport)
-                == CGSize(width: 1000, height: 800))
+            ComicReaderLayout.fittedRect(of: [CGSize(width: 980, height: 490), nil], gap: 20, in: viewport)
+                == CGRect(origin: .zero, size: viewport))
         #expect(
-            ComicReaderLayout.fittedSize(of: [CGSize(width: 500, height: 250)], gap: 0, in: viewport)
-                == CGSize(width: 1000, height: 500))
-        #expect(ComicReaderLayout.fittedSize(of: [], gap: 0, in: viewport) == viewport)
+            ComicReaderLayout.fittedRect(of: [CGSize(width: 500, height: 250)], gap: 0, in: viewport)
+                == CGRect(x: 0, y: 150, width: 1000, height: 500))
+        #expect(ComicReaderLayout.fittedRect(of: [], gap: 0, in: viewport) == CGRect(origin: .zero, size: viewport))
     }
 }
