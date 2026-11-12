@@ -207,6 +207,34 @@ private typealias F = GroupFixtures
 
 @MainActor
 @Suite struct PlaylistDetailModelTests {
+    /// The server pushed a change while a reload ran; the reload's answer may predate it, so the
+    /// pushed state stays: a removal isn't revived, and an update isn't undone.
+    @Test func aLoadAnsweredAfterAPushedChangeIsDropped() async throws {
+        let gate = GatedCalls<String, Playlist>()
+        let loads = KeyedCallCounter()
+        let service = FakeGroupsService(playlistHandler: { id in
+            loads.record("load") == 1 ? F.playlist(id, items: [F.bookEntry(F.book("a"))]) : try await gate.call(id)
+        })
+        let model = PlaylistDetailModel(id: "p1", service: service, cache: ProgressCache(), userID: "u1")
+        await model.load()
+        var calls = gate.calls.makeAsyncIterator()
+
+        let reload = Task { await model.load() }
+        var call = try #require(await calls.next())
+        model.apply(.playlist(.removed(id: "p1", libraryID: "lib"), userID: "u1"))
+        call.reply.resume(returning: F.playlist("p1", items: [F.bookEntry(F.book("a"))]))
+        await reload.value
+        #expect(model.phase == .notFound)
+        #expect(!model.isLoading)
+
+        // A later load still answers normally.
+        let retry = Task { await model.load() }
+        call = try #require(await calls.next())
+        call.reply.resume(returning: F.playlist("p1", items: [F.bookEntry(F.book("b"))]))
+        await retry.value
+        #expect(model.detail?.members.map(\.id) == ["b"])
+    }
+
     @Test func mapsMixedBooksAndEpisodes() async throws {
         let show = F.podcast("show")
         let service = FakeGroupsService(playlistHandler: { id in

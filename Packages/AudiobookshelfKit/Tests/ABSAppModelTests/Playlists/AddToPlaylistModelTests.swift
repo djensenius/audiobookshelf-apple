@@ -31,6 +31,9 @@ private struct FakePlaylistEditingService: PlaylistEditingService {
     func removeFromPlaylist(id: String, item: PlaylistItemReference) async throws -> Playlist {
         throw TestError.unexpected
     }
+    func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        throw TestError.unexpected
+    }
     func deletePlaylist(id: String) async throws { throw TestError.unexpected }
 }
 
@@ -264,6 +267,32 @@ private func loadedModel(
         #expect(call.request == PlaylistWrite(id: "lib/One", entries: [book1]))
         #expect(model.rows.map(\.id) == ["new", "p"])
         #expect(!model.isCreating)
+    }
+
+    /// The sheet can't close while a toggle or create is in flight.
+    @Test func theSheetCanCloseOnlyBetweenWrites() async throws {
+        let gate = CancellableGatedCalls<PlaylistWrite, Playlist>()
+        let model = await loadedModel(
+            [book1], playlists: [playlist("p", [])],
+            service: FakePlaylistEditingService(
+                create: { try await gate.call($0) }, add: { try await gate.call($0) },
+                remove: { try await gate.call($0) }))
+        var calls = gate.calls.makeAsyncIterator()
+        #expect(model.canDismiss)
+
+        async let toggled: Void = model.toggle(playlistID: "p")
+        var call = try #require(await calls.next())
+        #expect(!model.canDismiss)
+        call.reply.resume(throwing: TestError.offline)
+        await toggled
+        #expect(model.canDismiss)
+
+        async let created = model.create(name: "New")
+        call = try #require(await calls.next())
+        #expect(!model.canDismiss)
+        call.reply.resume(returning: playlist("new", [book1]))
+        #expect(await created == true)
+        #expect(model.canDismiss)
     }
 
     @Test func aNewerLoadWinsOverAnOlderResponse() async throws {
