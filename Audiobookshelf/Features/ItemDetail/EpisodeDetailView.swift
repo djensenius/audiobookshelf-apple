@@ -95,19 +95,20 @@ struct EpisodeDetailScreen: View {
 
     @ViewBuilder private var content: some View {
         let detail = model.detail
-        if let episode = model.episode {
-            EpisodeDetailContent(model: model, episode: episode)
-        } else if model.isEpisodeMissing
-            || (detail.error != nil && !detail.isLoading && ItemDetailLoadError.isNotFound(detail.error))
-        {
+        switch EpisodeDetailPresentation.screen(for: model) {
+        case .episode:
+            if let episode = model.episode {
+                EpisodeDetailContent(model: model, episode: episode)
+            }
+        case .notFound:
             ErrorStateView(title: L10n.string("MessageEpisodeDetailNotFound"), systemImage: "waveform") {
                 Task { await detail.load() }
             }
-        } else if detail.error != nil, !detail.isLoading {
+        case .failed:
             ErrorStateView(title: L10n.string("MessageEpisodeDetailLoadFailed")) {
                 Task { await detail.load() }
             }
-        } else {
+        case .loading:
             LoadingView()
         }
     }

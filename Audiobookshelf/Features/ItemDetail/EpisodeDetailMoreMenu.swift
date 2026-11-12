@@ -106,7 +106,10 @@ private struct EpisodeDetailMoreMenu: ViewModifier {
                 label(action)
             }
             .disabled(isPerforming)
-        case .addToPlaylist, .hideFromContinueListening, .details, .history:
+        case .addToPlaylist:
+            // Not offered while `canEditPlaylists` is false (#93).
+            EmptyView()
+        case .hideFromContinueListening, .details, .history:
             // Not offered for episodes.
             EmptyView()
         }

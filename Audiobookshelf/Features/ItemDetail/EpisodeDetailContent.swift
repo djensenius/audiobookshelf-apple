@@ -133,23 +133,14 @@ struct EpisodeDetailContent: View {
         .accessibilityValue(Text(verbatim: episode.title))
     }
 
-    /// Plays the episode from the server's position, or from the start once finished, and
-    /// shows an alert if that fails.
+    /// Plays the episode (``EpisodeDetailPresentation/startPlayback(of:with:)``) and shows an
+    /// alert if that fails.
     private func start() {
         guard let playItem, !isStarting else { return }
-        let itemID = model.itemID
-        let episodeID = model.episodeID
-        let startTime = model.playStartTime
         isStarting = true
         Task {
             defer { isStarting = false }
-            do {
-                try await playItem(itemID: itemID, episodeID: episodeID, startTime: startTime)
-            } catch {
-                guard let failure = ItemDetailPlayFailure(error: error) else { return }
-                Log.playback.error(
-                    "Couldn't play \(itemID, privacy: .private(mask: .hash)) episode \(episodeID, privacy: .private(mask: .hash)): \(failure.message, privacy: .private)"
-                )
+            if let failure = await EpisodeDetailPresentation.startPlayback(of: model, with: playItem) {
                 playFailure = failure
             }
         }

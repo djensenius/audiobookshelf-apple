@@ -37,6 +37,30 @@ private actor SwitchablePodcastService: ItemDetailService {
     }
 }
 
+/// Holds each podcast request until the test answers it, so a load can be seen in flight.
+private actor HeldPodcastService: ItemDetailService {
+    private var waiting: [CheckedContinuation<ABSCore.LibraryItem, any Error>] = []
+
+    func item(id: String) async throws -> ABSCore.LibraryItem {
+        try await withCheckedThrowingContinuation { waiting.append($0) }
+    }
+
+    func answer(_ result: Result<ABSCore.LibraryItem, any Error>) {
+        waiting.removeFirst().resume(with: result)
+    }
+
+    /// Waits for the model's request to arrive.
+    func waitForRequest() async {
+        while waiting.isEmpty { await Task.yield() }
+    }
+}
+
+/// Records the episodes Play starts.
+@MainActor
+private final class RecordedPlays {
+    var starts: [(itemID: String, episodeID: String?, startTime: Double?)] = []
+}
+
 @MainActor
 @Suite struct EpisodeDetailPresentationTests {
     private let locale = Locale(identifier: "en_US")
@@ -131,6 +155,32 @@ private actor SwitchablePodcastService: ItemDetailService {
         #expect(inProgress.playStartTime == nil)
     }
 
+    @Test func playStartsThisEpisodeOverOnlyOnceFinished() async {
+        let plays = RecordedPlays()
+        let play = PlayItemAction { itemID, episodeID, startTime in
+            plays.starts.append((itemID, episodeID, startTime))
+        }
+        for episodeID in ["pe_1", "pe_2", "pe_3"] {
+            let model = await loadedModel(episodeID: episodeID)
+            #expect(await EpisodeDetailPresentation.startPlayback(of: model, with: play) == nil)
+        }
+        #expect(plays.starts.map(\.itemID) == Array(repeating: podcast.id, count: 3))
+        #expect(plays.starts.map(\.episodeID) == ["pe_1", "pe_2", "pe_3"])
+        // Play Again on the finished `pe_3` starts at 0; the others resume (`nil`).
+        #expect(plays.starts.map(\.startTime) == [nil, nil, 0])
+    }
+
+    @Test func aFailedStartIsReportedButACancelledOneIsnt() async {
+        struct Failure: LocalizedError {
+            var errorDescription: String? { "No route" }
+        }
+        let model = await loadedModel(episodeID: "pe_2")
+        let failing = PlayItemAction { _, _, _ in throw Failure() }
+        let cancelled = PlayItemAction { _, _, _ in throw CancellationError() }
+        #expect(await EpisodeDetailPresentation.startPlayback(of: model, with: failing)?.message == "No route")
+        #expect(await EpisodeDetailPresentation.startPlayback(of: model, with: cancelled) == nil)
+    }
+
     @Test func aMissingPodcastSaysMissingAndCantPlay() async {
         let missing = ABSCore.LibraryItem(
             id: podcast.id, libraryId: podcast.libraryId, isMissing: true, mediaType: .podcast, media: podcast.media)
@@ -172,6 +222,65 @@ private actor SwitchablePodcastService: ItemDetailService {
         #expect(
             EpisodeDetailPresentation.shareURL(serverURL: server, itemID: "li 1").absoluteString
                 == "https://abs.example.com/audiobookshelf/item/li%201")
+    }
+
+    // MARK: Screen state
+
+    /// Runs one load against `service`, checks the screen shows loading while it's in flight,
+    /// answers it, and returns the screen afterwards.
+    private func screenAfterLoad(
+        _ model: EpisodeDetailModel, service: HeldPodcastService,
+        answering result: Result<ABSCore.LibraryItem, any Error>
+    ) async -> (inFlight: EpisodeDetailScreenState, after: EpisodeDetailScreenState) {
+        let load = Task { await model.detail.load() }
+        await service.waitForRequest()
+        let inFlight = EpisodeDetailPresentation.screen(for: model)
+        await service.answer(result)
+        await load.value
+        return (inFlight, EpisodeDetailPresentation.screen(for: model))
+    }
+
+    private func heldModel(episodeID: String) -> (EpisodeDetailModel, HeldPodcastService) {
+        let service = HeldPodcastService()
+        let cache = ProgressCache()
+        let detail = ItemDetailModel(itemID: podcast.id, service: service, cache: cache)
+        return (EpisodeDetailModel(detail: detail, episodeID: episodeID, cache: cache), service)
+    }
+
+    @Test func screenFollowsTheLoad() async {
+        let (model, service) = heldModel(episodeID: "pe_2")
+        #expect(EpisodeDetailPresentation.screen(for: model) == .loading)
+        let first = await screenAfterLoad(model, service: service, answering: .failure(APIError.timedOut))
+        #expect(first.inFlight == .loading)
+        #expect(first.after == .failed)
+        let retry = await screenAfterLoad(model, service: service, answering: .success(podcast))
+        #expect(retry.inFlight == .loading)
+        #expect(retry.after == .episode)
+        // A refresh keeps the episode on screen, even one that answers 404 (its actions go off).
+        let refresh = await screenAfterLoad(model, service: service, answering: .failure(APIError.notFound))
+        #expect(refresh.inFlight == .episode)
+        #expect(refresh.after == .episode)
+    }
+
+    @Test func aFirstLoadAnswering404IsNotFound() async {
+        let (model, service) = heldModel(episodeID: "pe_2")
+        let load = await screenAfterLoad(model, service: service, answering: .failure(APIError.notFound))
+        #expect(load.after == .notFound)
+    }
+
+    @Test func retryFromNotFoundShowsLoadingAndATimedOutRetryFails() async {
+        // The podcast loads without the episode: not found.
+        let (model, service) = heldModel(episodeID: "pe_deleted")
+        let first = await screenAfterLoad(model, service: service, answering: .success(podcast))
+        #expect(first.after == .notFound)
+        // Retry shows its spinner, not "not found".
+        let timedOut = await screenAfterLoad(model, service: service, answering: .failure(APIError.timedOut))
+        #expect(timedOut.inFlight == .loading)
+        // A retry that times out failed; it doesn't say the episode is gone.
+        #expect(timedOut.after == .failed)
+        let found = await screenAfterLoad(model, service: service, answering: .success(podcast))
+        #expect(found.inFlight == .loading)
+        #expect(found.after == .notFound)
     }
 
     // MARK: Stale sessions
