@@ -234,18 +234,25 @@ public final class DownloadsLifecycle: SessionParticipant {
             // the read; pausing seals resume data with the old credentials, so it's discarded after.
             // A pause that isn't saved leaves a record the next activation would restart. One a
             // policy restart has paused for now is skipped, but its resume is refused once this began.
+            // The pauses run at once, so a slow one doesn't keep the others' transfers running.
             let paused = Mutex(true)
             let quiesced = await engine.quiesce(connectionID: connectionID) {
                 do {
-                    for record in try await records(connectionID)
-                    where [.queued, .downloading].contains(record.state) {
-                        do {
-                            _ = try await manager.pause(recordID: record.id)
-                        } catch {
-                            paused.withLock { $0 = false }
-                            Log.downloads.error(
-                                "Couldn't pause a download of a signed-out server: \(String(describing: error), privacy: .public)"
-                            )
+                    let stopping = try await records(connectionID).filter {
+                        [.queued, .downloading].contains($0.state)
+                    }
+                    await withTaskGroup(of: Void.self) { group in
+                        for record in stopping {
+                            group.addTask {
+                                do {
+                                    _ = try await manager.pause(recordID: record.id)
+                                } catch {
+                                    paused.withLock { $0 = false }
+                                    Log.downloads.error(
+                                        "Couldn't pause a download of a signed-out server: \(String(describing: error), privacy: .public)"
+                                    )
+                                }
+                            }
                         }
                     }
                 } catch {

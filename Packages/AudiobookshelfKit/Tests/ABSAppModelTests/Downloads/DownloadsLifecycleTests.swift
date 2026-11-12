@@ -15,7 +15,14 @@ private final class Calls: Sendable {
         calls.withLock { $0.append(call) }
     }
 
-    var all: [String] { calls.withLock { $0 } }
+    /// A cleanup's pauses run at once, so each run of pauses is sorted.
+    var all: [String] {
+        calls.withLock { $0 }.reduce(into: [String]()) { all, call in
+            guard call.hasPrefix("pause ") else { return all.append(call) }
+            let start = all.lastIndex { !$0.hasPrefix("pause ") }.map { $0 + 1 } ?? 0
+            all.insert(call, at: all[start...].firstIndex { $0 > call } ?? all.endIndex)
+        }
+    }
 }
 
 /// An engine that records its calls and whether it ends activated.
@@ -81,6 +88,9 @@ private actor FakeManager: DownloadsLifecycleManager {
     private var failingStarts = 0
     /// Holds the next pause until it opens.
     private var pauseGate: StubGate?
+    private var isHoldingAPause = false
+    /// Reached by the next pause that starts while another is held.
+    private var overtaking: StubGate?
     /// How many of the next pauses throw.
     private var failingPauses = 0
 
@@ -94,6 +104,10 @@ private actor FakeManager: DownloadsLifecycleManager {
 
     func hold(_ gate: StubGate) {
         pauseGate = gate
+    }
+
+    func watchOvertaking(_ gate: StubGate) {
+        overtaking = gate
     }
 
     func failPauses(_ count: Int) {
@@ -115,9 +129,15 @@ private actor FakeManager: DownloadsLifecycleManager {
             return false
         }
         calls.append("pause \(recordID)")
+        if isHoldingAPause, let gate = overtaking {
+            overtaking = nil
+            gate.reach()
+        }
         if let gate = pauseGate {
             pauseGate = nil
+            isHoldingAPause = true
             await gate.pass()
+            isHoldingAPause = false
         }
         if failingPauses > 0 {
             failingPauses -= 1
@@ -174,7 +194,7 @@ struct DownloadsLifecycleTests {
 
     /// The pauses of `records`' queued and downloading records, in order.
     private func pauses(_ records: [DownloadRecordDTO]) -> [String] {
-        records.filter { $0.state == .queued || $0.state == .downloading }.map { "pause \($0.id)" }
+        records.filter { $0.state == .queued || $0.state == .downloading }.map { "pause \($0.id)" }.sorted()
     }
 
     // MARK: - App lifecycle
@@ -397,6 +417,24 @@ struct DownloadsLifecycleTests {
         #expect(
             calls.all == ["start manager"] + cleanup + ["start controller", "activate", "activated"] + cleanup
                 + ["sweep", "activate", "activated", "sweep"])
+    }
+
+    /// A cleanup's pauses run at once: one that hangs doesn't keep the others' transfers running
+    /// past the teardown's budget.
+    @Test func hungPauseDoesNotHoldUpTheOthers() async {
+        let lifecycle = makeLifecycle()
+        await lifecycle.sessionDidStart(context(connectionA))
+        let hung = StubGate()
+        let overtaken = StubGate()
+        await manager.hold(hung)
+        await manager.watchOvertaking(overtaken)
+
+        let end = Task { await lifecycle.sessionWillEnd(.signOut) }
+        await overtaken.arrived()
+        hung.open()
+        await end.value
+
+        #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)"])
     }
 
     /// Each connection's retry runs alongside the others': whichever reads its records first
