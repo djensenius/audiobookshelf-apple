@@ -31,7 +31,7 @@ struct BrowseStateView<Loaded: View>: View {
         case .loading:
             LoadingView()
         case .failed:
-            scrollable(BrowseMessageView(title: L10n.string(messages.failed), retry: retry))
+            scrollable(ErrorStateView(title: L10n.string(messages.failed), retry: retry))
         case .notFound:
             scrollable(BrowseMessageView(title: L10n.string(messages.notFound), systemImage: "questionmark.circle"))
         case .empty:
@@ -67,12 +67,11 @@ struct BrowsePlaceholder: View {
     }
 }
 
-/// A full-screen message; `retry` adds a Retry at least 44×44 points (unlike ABSUI's `ErrorStateView`).
+/// A full-screen message without actions; the failed state uses ABSUI's `ErrorStateView` for its Retry.
 private struct BrowseMessageView: View {
     let title: String
     var message: String?
     var systemImage = "exclamationmark.triangle"
-    var retry: (() -> Void)?
 
     var body: some View {
         ContentUnavailableView {
@@ -85,15 +84,6 @@ private struct BrowseMessageView: View {
         } description: {
             if let message {
                 Text(verbatim: message)
-            }
-        } actions: {
-            if let retry {
-                Button(action: retry) {
-                    Text(verbatim: L10n.string("ButtonRetry"))
-                        .frame(minWidth: 44, minHeight: 44)
-                        .contentShape(.rect)
-                }
-                .buttonStyle(.borderedProminent)
             }
         }
     }

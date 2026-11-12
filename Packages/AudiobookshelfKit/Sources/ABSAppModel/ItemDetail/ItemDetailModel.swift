@@ -82,6 +82,13 @@ public final class ItemDetailModel {
     public private(set) var item: LibraryItem?
     /// The book's display values; `nil` until loaded, and for items that aren't books.
     public private(set) var details: Details?
+    /// The book's chapters, sorted by start; empty until loaded, and for items that aren't books.
+    public private(set) var chapters: [ChapterRow] = []
+    /// The book's audio tracks, sorted by index; empty until loaded, and for items that aren't
+    /// books.
+    public private(set) var tracks: [TrackRow] = []
+    /// The item's ebook files; empty until loaded, and for items that aren't books.
+    public private(set) var ebookFiles: [EbookFileRow] = []
     public private(set) var isLoading = false
     /// The error of the last load, cleared by the next successful one.
     public private(set) var error: (any Error)?
@@ -129,7 +136,11 @@ public final class ItemDetailModel {
         switch result {
         case .success(let loaded):
             item = loaded
-            details = loaded.book.map { Self.details(item: loaded, book: $0) }
+            let book = loaded.book
+            details = book.map { Self.details(item: loaded, book: $0) }
+            chapters = book.map(Self.chapterRows(book:)) ?? []
+            tracks = book.map(Self.trackRows(book:)) ?? []
+            ebookFiles = book.map { Self.ebookFileRows(item: loaded, book: $0) } ?? []
             error = nil
         case .failure(let error):
             if !(error is CancellationError) { self.error = error }
