@@ -16,7 +16,7 @@ struct SessionModelClient: Sendable {
 /// explore client-visible ambiguity, NOT a proof of server ordering after cancellation.
 actor ReconciliationSessionModel {
     enum Operation: Hashable, Sendable {
-        case start, sync, close, lookup, records, progress
+        case start, sync, close, lookup, records, progress, patch
     }
 
     enum Failure: Error, Equatable { case responseLost, notApplied }
@@ -158,6 +158,57 @@ actor ReconciliationSessionModel {
 
     func lookup(_ client: SessionModelClient, id: String) async throws -> PlaybackSession {
         try await perform(.lookup) { try requireOpen(id, userID: client.userID) }
+    }
+
+    /// `PATCH /api/me/progress/:id`: sets the groups sent, creating the progress if absent, and
+    /// dates it with the server's clock (the body carries no `lastUpdate`) only when something
+    /// changed or a `progress` was written. As on both pinned servers, `isFinished` acts only when
+    /// it changes the state: `false` resets the audio position of finished progress, and `true`
+    /// keeps the `finishedAt` of finished progress unless a date is sent. An audio PATCH that moves
+    /// finished progress at least 10 s from the end un-finishes it. On existing progress a
+    /// `progress` equal to the stored position's ratio is ignored, so repeating a finished
+    /// position keeps progress 1, and any other is written, even one equal to the stored progress.
+    /// There is no auto-finish.
+    func update(
+        _ client: SessionModelClient, itemID: String, episodeID: String?, _ update: MediaProgressUpdate
+    ) async throws {
+        try await perform(.patch) {
+            let key = Key(user: client.userID, item: itemID, episode: episodeID)
+            let existing = progress[key]
+            // The server compares a sent `progress` with the existing position's ratio, not with
+            // the stored progress: it ignores an equal one and writes any other, which dates the
+            // progress even when the stored value stays the same.
+            let ratio = existing.map { $0.duration > 0 ? max(0, min($0.currentTime / $0.duration, 1)) : 0 }
+            let writesProgress = update.progress.map { $0 != ratio } ?? false
+            var row =
+                existing
+                ?? MediaProgress(id: "progress-\(itemID)", libraryItemId: itemID, episodeId: episodeID)
+            let moved = update.currentTime.map { $0 != row.currentTime } ?? false
+            if let currentTime = update.currentTime { row.currentTime = currentTime }
+            if let duration = update.duration { row.duration = duration }
+            if writesProgress, let value = update.progress { row.progress = value }
+            if moved, row.isFinished, row.duration - row.currentTime >= 10 {
+                row.isFinished = false
+                row.finishedAt = nil
+            }
+            if let finished = update.isFinished, finished != row.isFinished {
+                row.isFinished = finished
+                row.finishedAt = finished ? update.finishedAt ?? milliseconds : nil
+                if finished {
+                    row.progress = 1
+                } else {
+                    row.currentTime = 0
+                    row.progress = 0
+                }
+            } else if let finishedAt = update.finishedAt {
+                row.finishedAt = finishedAt
+            }
+            if let location = update.ebookLocation { row.ebookLocation = location }
+            if let value = update.ebookProgress { row.ebookProgress = value }
+            guard writesProgress || row != existing else { return }
+            row.lastUpdate = milliseconds
+            progress[key] = row
+        }
     }
 
     func fetchProgress(
