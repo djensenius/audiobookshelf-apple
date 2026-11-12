@@ -28,10 +28,54 @@ final class ConnectTestKeychain: KeychainStoring {
     func delete(_ item: KeychainItem) throws(KeychainError) {
         items.withLock { $0[item] = nil }
     }
+
+    /// Deletes a connection's saved session and custom headers, as an expiry deletes its session.
+    func deleteItems(of connectionID: UUID) {
+        items.withLock { $0 = $0.filter { $0.key.account != connectionID.uuidString } }
+    }
 }
 
-private final class ConnectTestProtocol: URLProtocol {
+/// Answers for `*.connect-ui.test` hosts. Host prefixes change some answers: `offline-` refuses
+/// the authorization of a saved session (`/api/authorize`) like a proxy (403), `hold-` holds it
+/// until ``release(_:)``, `old-` answers it with an unsupported server version, `bad-` refuses
+/// every password (`/login`, 401), and `oidc-` returns an end-session `redirect_url` from `/logout`.
+final class ConnectTestProtocol: URLProtocol {
     static let requests = Mutex<[String: [URLRequest]]>([:])
+    private static let held = Mutex<(responses: [String: [HeldResponse]], released: Set<String>)>(([:], []))
+    static let endSessionURL = URL(string: "https://idp.example.com/logout?state=test-state")!
+
+    /// A held answer. URLSession expects the client calls on the run loop that started loading,
+    /// so ``send()`` schedules them there.
+    private struct HeldResponse: @unchecked Sendable {
+        let request: ObjectIdentifier
+        let runLoop: CFRunLoop
+        let answer: () -> Void
+
+        func send() {
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.commonModes.rawValue, answer)
+            CFRunLoopWakeUp(runLoop)
+        }
+    }
+
+    /// Set once URLSession stops this load; a held answer then sends nothing.
+    private let isStopped = Mutex(false)
+
+    /// Answers the held requests to `host`, and from now on its requests at once.
+    static func release(_ host: String) {
+        let responses = held.withLock { state in
+            state.released.insert(host)
+            return state.responses.removeValue(forKey: host) ?? []
+        }
+        for response in responses { response.send() }
+    }
+
+    static func forget(_ host: String) {
+        requests.withLock { $0[host] = nil }
+        held.withLock { state in
+            state.responses[host] = nil
+            state.released.remove(host)
+        }
+    }
 
     override class func canInit(with request: URLRequest) -> Bool {
         request.url?.host()?.hasSuffix(".connect-ui.test") == true
@@ -46,6 +90,19 @@ private final class ConnectTestProtocol: URLProtocol {
         var status = 200
         var headers = ["Content-Type": "application/json"]
         switch url.path() {
+        case "/api/authorize" where host.hasPrefix("offline-"):
+            status = 403
+            json = "{}"
+        case "/api/authorize" where host.hasPrefix("old-"):
+            json = """
+                {"user":{"id":"user-1","username":"reader","type":"admin","token":null},
+                "serverSettings":{"version":"1.0.0"}}
+                """
+        case "/login" where host.hasPrefix("bad-"):
+            status = 401
+            json = "{}"
+        case "/logout" where host.hasPrefix("oidc-"):
+            json = #"{"redirect_url":"\#(Self.endSessionURL.absoluteString)"}"#
         case "/status":
             json = #"{"app":"audiobookshelf","serverVersion":"2.26.0","isInit":true,"authMethods":["local","openid"]}"#
         case "/auth/openid":
@@ -63,12 +120,28 @@ private final class ConnectTestProtocol: URLProtocol {
         }
         let response = HTTPURLResponse(
             url: url, statusCode: status, httpVersion: nil, headerFields: headers)!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(json.utf8))
-        client?.urlProtocolDidFinishLoading(self)
+        let answer = { [self] in
+            guard !isStopped.withLock({ $0 }) else { return }
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data(json.utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+        let holds = url.path() == "/api/authorize" && host.hasPrefix("hold-")
+        let isHeld = Self.held.withLock { state in
+            guard holds, !state.released.contains(host) else { return false }
+            let held = HeldResponse(request: ObjectIdentifier(self), runLoop: CFRunLoopGetCurrent(), answer: answer)
+            state.responses[host, default: []].append(held)
+            return true
+        }
+        if !isHeld { answer() }
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        isStopped.withLock { $0 = true }
+        guard let host = request.url?.host() else { return }
+        let id = ObjectIdentifier(self)
+        Self.held.withLock { $0.responses[host]?.removeAll { $0.request == id } }
+    }
 
     static func configuration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.absConnection()
