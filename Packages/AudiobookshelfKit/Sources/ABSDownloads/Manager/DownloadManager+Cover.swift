@@ -14,8 +14,10 @@ extension DownloadManager {
     ///    again (``refetchCover(_:for:)``).
     ///
     /// Without any of those, nothing is fetched: the item may have no cover on the server.
-    /// The kept cover is dropped once this got that far; a failed read keeps it for the next
-    /// completion. Best effort: failures are logged.
+    /// When the item has or gets a cover without the refetch, a paused or failed refetch is
+    /// deleted (``dropStalledRefetch(_:)``), so it doesn't stay hidden for good. The kept cover
+    /// is dropped once this got that far; a failed read keeps it for the next completion. Best
+    /// effort: failures are logged.
     func restoreCover(after key: MediaKey, itemID: UUID) async {
         let itemKey = MediaKey(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
         do throws(DownloadManagerError) {
@@ -29,21 +31,21 @@ extension DownloadManager {
     private func restoreCover(
         of itemID: UUID, itemKey: MediaKey, refused: CoverSource?
     ) async throws(DownloadManagerError) {
-        guard let item = try await read({ try await self.localItems.item(id: itemID) }),
-            item.coverRelativePath == nil
-        else { return }
+        guard let item = try await read({ try await self.localItems.item(id: itemID) }) else { return }
+        guard item.coverRelativePath == nil else { return try await dropStalledRefetch(itemKey) }
         let existing = try await existingCover(for: itemKey, localItem: item)
         guard existing.pendingPath == nil else { return }
         let updatedAt = refused?.updatedAt ?? item.coverUpdatedAt
         if let completed = existing.completed {
             try await adoptCover(completed.destinationRelativePath, updatedAt: updatedAt, for: item)
-            return
+            return try await dropStalledRefetch(itemKey)
         }
         let layoutPath = try? DownloadLayout(
             connectionID: item.serverConnectionID, libraryItemID: item.libraryItemId, locations: locations
         ).coverPath()
         if let stored = [refused?.relativePath, layoutPath].compactMap({ $0 }).first(where: fileExists) {
             try await adoptCover(stored, updatedAt: updatedAt, for: item)
+            try await dropStalledRefetch(itemKey)
         } else {
             try await refetchCover(refused, for: item)
         }
@@ -62,7 +64,8 @@ extension DownloadManager {
     /// item:
     /// - a cover-only record (``DownloadRecordDTO/isCoverOnly``) already there that is paused or
     ///   failed is resumed: it is hidden from the user, who can't; a queued or downloading one
-    ///   is left alone;
+    ///   is left alone. Like the insert below, nothing is resumed while the connection is signed
+    ///   out or disconnected (``DownloadStore/isSignedIn(serverConnectionID:)``);
     /// - otherwise, with `cover`, a new cover-only record that fetches it is saved and started.
     ///   Nothing is saved while the connection is signed out or disconnected, or the key is
     ///   taken (``DownloadStore/insertRecordIfSignedIn(_:now:)``).
@@ -74,6 +77,7 @@ extension DownloadManager {
         let key = MediaKey(serverConnectionID: item.serverConnectionID, libraryItemId: item.libraryItemId)
         if let current = try await read({ try await self.store.record(key: key) }) {
             guard current.isCoverOnly, current.state == .paused || current.state == .failed,
+                try await read({ try await self.store.isSignedIn(serverConnectionID: key.serverConnectionID) }),
                 try await read({ try await self.engine.resume(recordID: current.id) })
             else { return }
             await refresh(current.id, announce: true)
@@ -103,16 +107,9 @@ extension DownloadManager {
             try await holdingItem(first.key) { () async throws(DownloadManagerError) in
                 // Read again: it may have been resumed or cancelled meanwhile.
                 guard let record = try await read({ try await self.store.record(id: recordID) }),
-                    record.isCoverOnly, record.state == .failed
+                    record.isCoverOnly, record.state == .failed,
+                    let deleted = try await deleteRefetch(record)
                 else { return }
-                await engine.stop(partIDs: record.parts.map(\.id), keepingResumeData: false)
-                guard
-                    case .deleted(let deleted) = try await read({
-                        try await self.store.deleteUnfinishedRecord(recordID)
-                    })
-                else { return }
-                reportRemoved(recordID)
-                for part in deleted.parts { locations.clearTransferMarker(partID: part.id) }
                 if let part = deleted.parts.first {
                     refusedCovers[deleted.key] = CoverSource(
                         serverPath: part.serverPath, relativePath: part.destinationRelativePath, isStored: false,
@@ -122,6 +119,27 @@ extension DownloadManager {
         } catch {
             logError("Couldn't drop a cover download that failed", error)
         }
+    }
+
+    /// While the item of `itemKey` is held and its local item has a cover: deletes its
+    /// cover-only record if one is paused or failed, as nothing would resume or remove it.
+    private func dropStalledRefetch(_ itemKey: MediaKey) async throws(DownloadManagerError) {
+        guard let record = try await read({ try await self.store.record(key: itemKey) }),
+            record.isCoverOnly, record.state == .paused || record.state == .failed
+        else { return }
+        _ = try await deleteRefetch(record)
+    }
+
+    /// Stops and deletes the unfinished cover-only `record`, then reports it removed.
+    /// - Returns: the deleted record, or `nil` when it had completed or was gone.
+    private func deleteRefetch(_ record: DownloadRecordDTO) async throws(DownloadManagerError) -> DownloadRecordDTO? {
+        await engine.stop(partIDs: record.parts.map(\.id), keepingResumeData: false)
+        guard
+            case .deleted(let deleted) = try await read({ try await self.store.deleteUnfinishedRecord(record.id) })
+        else { return nil }
+        reportRemoved(record.id)
+        for part in deleted.parts { locations.clearTransferMarker(partID: part.id) }
+        return deleted
     }
 
     /// After an episode of the item of `key` completed into a deleted item or episode, while

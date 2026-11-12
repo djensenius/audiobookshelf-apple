@@ -112,13 +112,7 @@ import SwiftData
     ///   ``StoreError/partIDConflict(_:)`` when a part's `id` is taken.
     public func insertRecordIfSignedIn(_ record: DownloadRecordDTO, now: Date = .now) throws -> DownloadRecordDTO? {
         try commit {
-            let connectionID = record.key.serverConnectionID
-            var descriptor = FetchDescriptor<ServerConnectionRecord>(predicate: #Predicate { $0.id == connectionID })
-            descriptor.fetchLimit = 1
-            guard let connection = try modelContext.fetch(descriptor).first else {
-                throw StoreError.connectionNotFound(connectionID)
-            }
-            guard !connection.isDisconnected, connection.signedOutAt == nil,
+            guard try fetchIsSignedIn(record.key.serverConnectionID),
                 try fetchRecord(key: record.key) == nil, try fetchRecord(id: record.id) == nil
             else { return nil }
             try checkPartIDs(record.parts.map(\.id), owner: nil)
@@ -126,6 +120,21 @@ import SwiftData
             model.updatedAt = now
             return DownloadRecordDTO(model)
         }
+    }
+
+    /// Whether the connection is neither signed out nor disconnected.
+    /// - Throws: ``StoreError/connectionNotFound(_:)`` when the connection doesn't exist.
+    public func isSignedIn(serverConnectionID: UUID) throws -> Bool {
+        try fetchIsSignedIn(serverConnectionID)
+    }
+
+    private func fetchIsSignedIn(_ connectionID: UUID) throws -> Bool {
+        var descriptor = FetchDescriptor<ServerConnectionRecord>(predicate: #Predicate { $0.id == connectionID })
+        descriptor.fetchLimit = 1
+        guard let connection = try modelContext.fetch(descriptor).first else {
+            throw StoreError.connectionNotFound(connectionID)
+        }
+        return !connection.isDisconnected && connection.signedOutAt == nil
     }
 
     public func record(id: UUID) throws -> DownloadRecordDTO? {

@@ -130,6 +130,52 @@ import Testing
         #expect(await fixture.engine.resumed == [refetch.id])
     }
 
+    /// A refetch left failed (its drop failed) is resumed by the item's next episode
+    /// completion, as nobody else can.
+    @Test func aFailedRefetchIsResumedAtTheNextCompletion() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, _) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        let third = try await Self.enqueue("ep_3", fixture, manager)
+        try #require(!third.parts.contains { $0.kind == .cover })
+        // Failed in the store only: no `.partFailed`, so the manager doesn't drop it.
+        _ = try await fixture.store.setState(.failed, forRecord: refetch.id)
+
+        try write(third.parts[0].destinationRelativePath, fixture)
+        try await Self.finalise(third, fixture)
+
+        #expect(
+            await events.next {
+                if case .completed(third.id, _, _) = $0 { true } else { false }
+            } != nil)
+        let resumed = try #require(await Self.nextRecordChanged(events))
+        #expect(resumed.id == refetch.id)
+        #expect(await fixture.engine.resumed == [refetch.id])
+        #expect(try await fixture.store.record(id: refetch.id)?.state == .queued)
+    }
+
+    /// A refetch left failed or paused is deleted once the local item has a cover without it:
+    /// hidden, nothing would resume or remove it.
+    @Test(arguments: [DownloadState.failed, .paused])
+    func aStalledRefetchIsDroppedOnceTheItemHasACover(state: DownloadState) async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        let third = try await Self.enqueue("ep_3", fixture, manager)
+        _ = try await fixture.store.setState(state, forRecord: refetch.id)
+        _ = try await fixture.localItems.updateCover(itemID: local.id, relativePath: "elsewhere.jpg", updatedAt: nil)
+
+        try write(third.parts[0].destinationRelativePath, fixture)
+        try await Self.finalise(third, fixture)
+
+        #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(await fixture.engine.resumed.isEmpty)
+        #expect(try await fixture.localItems.item(id: local.id)?.coverRelativePath == "elsewhere.jpg")
+    }
+
     /// Nothing is fetched for a connection that was signed out or disconnected.
     @Test(arguments: [false, true])
     func nothingIsRefetchedAfterSignOut(disconnected: Bool) async throws {
@@ -398,10 +444,11 @@ import Testing
         return try #require(try await fixture.store.record(id: id))
     }
 
+    /// The next cover-only record reported changed: episode records' changes are skipped.
     private static func nextRecordChanged(_ events: AsyncStream<DownloadManagerEvent>) async -> DownloadRecordDTO? {
         guard
             case .recordChanged(let record) = await events.next(where: {
-                if case .recordChanged = $0 { true } else { false }
+                if case .recordChanged(let record) = $0 { record.isCoverOnly } else { false }
             })
         else { return nil }
         return record
