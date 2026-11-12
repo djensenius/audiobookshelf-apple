@@ -163,12 +163,35 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
-    /// A connection's custom headers are checked by the redirect preflight and sent with the
-    /// transfer, which starts at the URL the preflight cleared (#145).
-    @Test func startsAtThePreflightsClearedURLWithCustomHeaders() async throws {
+    /// A background session follows a redirect of the transfer (or of a resumed transfer's
+    /// `Range` request) without asking, so a connection with custom headers is refused for good
+    /// before any request, the preflight's included: the headers go nowhere (follow-up #467).
+    @Test func customHeadersFailWithoutARequest() async throws {
         let harness = try await DownloadHarness(customHeaders: ["CF-Access-Client-Secret": "secret"]) { _ in
             .status(200)
         }
+        let preflight = StubPreflight()
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine(preflight: preflight)
+
+        await engine.start(partIDs: [partID])
+
+        #expect(
+            await engine.nextPermanentFailure()
+                == .partFailed(
+                    partID: partID, recordID: record.id, code: .customHeadersUnsupported,
+                    message: "Downloads aren't available yet for servers that need custom headers.",
+                    willRetry: false))
+        #expect(preflight.requests.isEmpty)
+        #expect(harness.requests.isEmpty)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+    }
+
+    /// The redirect preflight checks the request, and the transfer starts at the URL it
+    /// cleared (#145).
+    @Test func startsAtThePreflightsClearedURL() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
         let final = URL(string: "\(harness.base)/media/1.mp3")!
         let preflight = StubPreflight { request, _ in
             var cleared = request
@@ -185,20 +208,16 @@ import Testing
         let checked = try #require(preflight.requests.first)
         #expect(preflight.requests.count == 1)
         #expect(checked.url?.absoluteString == "\(harness.base)/api/items/li_1/file/1/download")
-        #expect(checked.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
         let request = try #require(harness.requests.first)
         #expect(harness.requests.count == 1)
         #expect(request.url == final)
-        #expect(request.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "secret")
         #expect(request.authorization == "Bearer token-1")
     }
 
     /// A download the preflight finds redirected off the server fails for good without a
-    /// transfer, so its headers never reach the other server.
+    /// transfer, so its token never reaches the other server.
     @Test func anOffOriginPreflightFailsWithoutATransfer() async throws {
-        let harness = try await DownloadHarness(customHeaders: ["CF-Access-Client-Secret": "secret"]) { _ in
-            .status(200)
-        }
+        let harness = try await DownloadHarness { _ in .status(200) }
         let preflight = StubPreflight { _, _ throws(DownloadRedirectPreflightError) in
             throw .offOrigin(URL(string: "https://elsewhere.example/1.mp3")!)
         }

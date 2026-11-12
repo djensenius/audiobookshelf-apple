@@ -49,6 +49,9 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     /// Whether ``resume(recordID:)`` deletes the record first, as a finalise running meanwhile does.
     private var finaliseBeforeResume = false
     private var failingResumes = 0
+    /// Whether a failing resume queues the record first, as the engine's guarded resume does
+    /// when it then can't pause it again.
+    private var failingResumesQueue = false
     private var hasSession = false
     private var sessionAvailable = true
     /// Records whose surviving transfer isn't adopted yet.
@@ -103,8 +106,9 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     }
 
     /// Makes the next `count` resumes throw before they change anything.
-    func failNextResumes(_ count: Int) {
+    func failNextResumes(_ count: Int, queueingFirst: Bool = false) {
         failingResumes = count
+        failingResumesQueue = queueingFirst
     }
 
     func finaliseOnResume() {
@@ -147,6 +151,7 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         calls.append(.resume(recordID))
         if failingResumes > 0 {
             failingResumes -= 1
+            if failingResumesQueue { _ = try await store.setState(.queued, forRecord: recordID) }
             throw ResumeFailure()
         }
         resumed.append(recordID)
@@ -155,6 +160,43 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         // Like the engine's start, which creates the session first.
         _ = await ensureSession()
         return queued
+    }
+
+    /// The quiesce generations ``hasQuiesced(connectionID:since:)`` reports as quiesced since.
+    private var quiescedSince: Set<Int> = []
+
+    /// Makes ``hasQuiesced(connectionID:since:)`` and ``resume(recordID:unlessQuiescedSince:)``
+    /// treat every connection as quiesced since `generation`.
+    func quiesce(since generation: Int) {
+        quiescedSince.insert(generation)
+    }
+
+    /// The generations a quiesce begins since as soon as ``hasQuiesced(connectionID:since:)``
+    /// is first asked about them (answering `false`), as one beginning just after that check.
+    private var quiescingAfterCheck: Set<Int> = []
+
+    func quiesce(afterNextCheckSince generation: Int) {
+        quiescingAfterCheck.insert(generation)
+    }
+
+    func quiesceGeneration() -> Int { 0 }
+
+    func hasQuiesced(connectionID: UUID, since generation: Int) -> Bool {
+        if quiescingAfterCheck.remove(generation) != nil {
+            quiescedSince.insert(generation)
+            return false
+        }
+        return quiescedSince.contains(generation)
+    }
+
+    /// ``resume(recordID:)``, unless quiesced since `generation` (and not made to throw): then it
+    /// changes nothing, as the engine's puts the record back to `paused`.
+    func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        guard !quiescedSince.contains(generation) || failingResumes > 0 else {
+            calls.append(.resume(recordID))
+            return false
+        }
+        return try await resume(recordID: recordID)
     }
 }
 
