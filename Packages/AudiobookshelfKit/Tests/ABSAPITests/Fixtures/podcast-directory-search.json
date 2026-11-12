@@ -1,0 +1,34 @@
+[
+  {
+    "id": 1234567890,
+    "artistId": 987654,
+    "title": "Synthetic Cast",
+    "artistName": "Example Studio",
+    "description": "<p>A <b>synthetic</b> show.</p>",
+    "descriptionPlain": "A synthetic show.",
+    "releaseDate": "2026-10-01T12:00:00Z",
+    "genres": [
+      "Fiction",
+      "Podcasts"
+    ],
+    "cover": "https://images.example.com/synthetic/600x600bb.jpg",
+    "trackCount": 42,
+    "feedUrl": "https://feeds.example.com/synthetic.xml",
+    "pageUrl": "https://podcasts.example.com/synthetic-cast/id1234567890",
+    "explicit": true
+  },
+  {
+    "id": 222,
+    "artistId": null,
+    "title": "No Feed Show",
+    "artistName": "Someone",
+    "description": "",
+    "descriptionPlain": "",
+    "releaseDate": null,
+    "genres": [],
+    "cover": null,
+    "trackCount": null,
+    "pageUrl": "https://podcasts.example.com/no-feed/id222",
+    "explicit": false
+  }
+]
