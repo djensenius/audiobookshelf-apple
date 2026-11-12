@@ -91,8 +91,10 @@ extension APIClient: ProgressWriting {
 ///   requested after a successful action reconciles its authoritative row, even with clock skew.
 /// - The per-key queue belongs to this instance: inject one instance per account and share it
 ///   between screens (#181), or actions from two instances on the same key can interleave.
-/// - The local playback database isn't touched; reconciling it with a newer server value is the
-///   syncer's job (P2-06d, #158).
+/// - After the server accepted marking finished or not finished, or discarding, and the change
+///   was committed, `localSync` (``ItemActionLocalSync``) updates the local playback database,
+///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
+///   called for a failed or rolled-back action, or for hiding; its errors are logged, not thrown.
 @MainActor
 public final class ProgressItemActions: ItemActionPerforming {
     private struct Tail {
@@ -102,26 +104,33 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     private let cache: ProgressCache
     private let writer: any ProgressWriting
+    private let localSync: (any ItemActionLocalSync)?
     private let now: @Sendable () -> Date
     private let sessionToken: ProgressCache.SessionToken
     private var tails: [String: Tail] = [:]
     private var tickets = 0
 
-    public init(cache: ProgressCache, writer: any ProgressWriting, now: @escaping @Sendable () -> Date = { Date() }) {
+    public init(
+        cache: ProgressCache, writer: any ProgressWriting, localSync: (any ItemActionLocalSync)? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
         self.cache = cache
         self.writer = writer
+        self.localSync = localSync
         self.now = now
         self.sessionToken = cache.sessionToken()
     }
 
     public func markFinished(_ target: ItemActionTarget) async throws {
-        try await run(target, update: .finished(true, at: now())) { existing, date in
+        try await run(target, update: .finished(true, at: now()), local: { try await $0.didMarkFinished(target) }) {
+            existing, date in
             Self.finished(target, existing: existing, at: date)
         }
     }
 
     public func markNotFinished(_ target: ItemActionTarget) async throws {
-        try await run(target, update: .finished(false)) { existing, _ in
+        try await run(target, update: .finished(false), local: { try await $0.didMarkNotFinished(target) }) {
+            existing, _ in
             guard var progress = existing, progress.isFinished else { return nil }
             progress.isFinished = false
             progress.progress = 0
@@ -141,7 +150,8 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     public func discardProgress(_ target: ItemActionTarget) async throws {
         try await enqueue(target) { session in
-            try await self.discard(target, session: session)
+            guard try await self.discard(target, session: session) else { return }
+            await self.syncLocally { try await $0.didDiscard(target) }
         }
     }
 
@@ -163,12 +173,27 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     // MARK: Running
 
+    /// The local database's part of an action, run after the server accepted it.
+    private typealias LocalUpdate = @Sendable (any ItemActionLocalSync) async throws -> Void
+
     private func run(
-        _ target: ItemActionTarget, update: MediaProgressUpdate,
+        _ target: ItemActionTarget, update: MediaProgressUpdate, local: LocalUpdate? = nil,
         optimistic: @escaping @MainActor (MediaProgress?, Date) -> MediaProgress?
     ) async throws {
         try await enqueue(target) { session in
             try await self.perform(target, update: update, optimistic: optimistic, session: session)
+            await self.syncLocally(local)
+        }
+    }
+
+    /// Runs `local` on ``localSync``, logging a failure: the server already has the change.
+    private func syncLocally(_ local: LocalUpdate?) async {
+        guard let local, let localSync else { return }
+        do {
+            try await local(localSync)
+        } catch {
+            Log.data.error(
+                "Couldn't update local progress after an item action: \(String(describing: error), privacy: .public)")
         }
     }
 
@@ -218,10 +243,11 @@ public final class ProgressItemActions: ItemActionPerforming {
         if let applied { cache.commitOptimistic(applied, token: session) }
     }
 
-    private func discard(_ target: ItemActionTarget, session: ProgressCache.SessionToken) async throws {
+    /// Returns whether the server's progress is gone; `false` when there was nothing to discard.
+    private func discard(_ target: ItemActionTarget, session: ProgressCache.SessionToken) async throws -> Bool {
         guard cache.isCurrent(session) else { throw CancellationError() }
         guard let before = cache.progress(libraryItemID: target.libraryItemID, episodeID: target.episodeID) else {
-            return
+            return false
         }
         guard
             let removal = cache.applyOptimisticRemoval(
@@ -244,5 +270,6 @@ public final class ProgressItemActions: ItemActionPerforming {
         }
         guard cache.isCurrent(session) else { throw CancellationError() }
         cache.commitOptimistic(removal, token: session)
+        return true
     }
 }
