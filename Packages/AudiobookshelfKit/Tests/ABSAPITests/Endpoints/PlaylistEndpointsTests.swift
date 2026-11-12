@@ -5,7 +5,7 @@ import Testing
 @testable import ABSAPI
 
 enum PlaylistWriteOperation: CaseIterable, Sendable {
-    case create, update, delete, add, remove
+    case create, update, delete, add, remove, removeItem
 
     func send(client: APIClient, id: String) async throws -> Playlist? {
         let items = [
@@ -27,6 +27,8 @@ enum PlaylistWriteOperation: CaseIterable, Sendable {
             return try await client.send(PlaylistEndpoints.addItems(id: id, PlaylistItemsRequest(items: items)))
         case .remove:
             return try await client.send(PlaylistEndpoints.removeItems(id: id, PlaylistItemsRequest(items: items)))
+        case .removeItem:
+            return try await client.send(PlaylistEndpoints.removeItem(id: id, libraryItemID: "a/b", episodeID: "e p"))
         }
     }
 
@@ -34,7 +36,7 @@ enum PlaylistWriteOperation: CaseIterable, Sendable {
         switch self {
         case .create, .add, .remove: "POST"
         case .update: "PATCH"
-        case .delete: "DELETE"
+        case .delete, .removeItem: "DELETE"
         }
     }
 
@@ -42,6 +44,7 @@ enum PlaylistWriteOperation: CaseIterable, Sendable {
         switch self {
         case .add: "/batch/add"
         case .remove: "/batch/remove"
+        case .removeItem: "/item/a%2Fb/e%20p"
         default: ""
         }
     }
@@ -73,7 +76,7 @@ enum PlaylistWriteOperation: CaseIterable, Sendable {
         let path = "/api/playlists" + (operation == .create ? "" : "/\(ids.1)\(operation.suffix)")
         #expect(request.url?.absoluteString == base.absoluteString + path)
         #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-1")
-        if operation == .delete {
+        if operation == .delete || operation == .removeItem {
             #expect(request.httpBody == nil)
         } else {
             #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
@@ -96,6 +99,21 @@ enum PlaylistWriteOperation: CaseIterable, Sendable {
                 #expect(Set(object.keys) == ["items"])
             }
         }
+    }
+
+    /// A nil or empty episode ID is a book: no trailing segment, which would be `/item/book/`.
+    @Test(arguments: [nil, ""] as [String?])
+    func removeItemOfABookHasNoEpisodeSegment(episodeID: String?) async throws {
+        let data = try playlistWriteFixture("2.26.0")
+        let stub = StubServer { _ in StubResponse(status: 200, body: data) }
+        let client = APIClient(
+            configuration: try APIClientConfiguration(baseURL: stub.baseURL),
+            tokenProvider: InMemoryTokenProvider(), sessionConfiguration: stub.sessionConfiguration())
+        _ = try await client.send(PlaylistEndpoints.removeItem(id: "p", libraryItemID: "book", episodeID: episodeID))
+        let request = try #require(stub.requests.first)
+        #expect(request.httpMethod == "DELETE")
+        #expect(request.url?.absoluteString == stub.baseURL.absoluteString + "/api/playlists/p/item/book")
+        #expect(request.httpBody == nil)
     }
 
     @Test func optionalAndEmptyBodiesAreNotNormalized() async throws {
