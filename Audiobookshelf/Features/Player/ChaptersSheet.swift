@@ -105,7 +105,7 @@ private struct ChaptersList: View {
                 Section {
                     ForEach(chapters, id: \.row.id) { entry in
                         ChapterRow(
-                            presentation: entry.presentation, isCurrent: entry.row.id == current,
+                            row: entry.row, presentation: entry.presentation, isCurrent: entry.row.id == current,
                             columnWidth: isAccessibilitySize ? nil : columnWidth
                         ) {
                             select(entry.row)
@@ -145,6 +145,9 @@ private struct ChaptersList: View {
 
 /// One chapter. Equatable without its action, so a tick that doesn't change its inputs skips it.
 private struct ChapterRow: View, Equatable {
+    /// What the action seeks to. Part of equality, so a row reused after the item changed (same
+    /// text, another exact start) never keeps the old action.
+    let row: PlayerChapterRow
     let presentation: ChapterRowPresentation
     let isCurrent: Bool
     /// The width of each time column, or `nil` to stack the times under the title.
@@ -152,7 +155,8 @@ private struct ChapterRow: View, Equatable {
     let action: () -> Void
 
     nonisolated static func == (lhs: ChapterRow, rhs: ChapterRow) -> Bool {
-        lhs.presentation == rhs.presentation && lhs.isCurrent == rhs.isCurrent && lhs.columnWidth == rhs.columnWidth
+        lhs.row == rhs.row && lhs.presentation == rhs.presentation && lhs.isCurrent == rhs.isCurrent
+            && lhs.columnWidth == rhs.columnWidth
     }
 
     var body: some View {
