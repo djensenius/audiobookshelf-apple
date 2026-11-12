@@ -253,13 +253,18 @@ extension LibraryPresentation {
     }
 
     /// What the filter button tells VoiceOver: "All", the group ("Explicit"), or the group and value's name
-    /// ("Genre, Fantasy"). A series or author whose name isn't loaded shows the group alone.
+    /// ("Genre, Fantasy"). A series or author whose name isn't loaded shows the group alone; "No series" and the
+    /// progress and ebook values need no filter data.
     static func filterSummary(
         _ filter: LibraryViewPreferences.Filter?, choices: LibraryFilterModel.Choices?, locale: Locale? = nil
     ) -> String {
         guard let filter else { return L10n.string("LabelAll", locale: locale) }
         let group = L10n.string(titleKey(for: filter.group), locale: locale)
         guard let value = filter.value else { return group }
+        // "No series" needs no filter data, like the fixed progress and ebook values.
+        if filter.group == .series, value == LibraryFilterModel.Choice.noSeries.id {
+            return [group, L10n.string("MessageNoSeries", locale: locale)].joined(separator: ", ")
+        }
         let name =
             filterValues(for: filter.group, choices: choices, locale: locale)?.first { $0.id == value }?.name
             ?? ([.series, .authors].contains(filter.group) ? nil : value)

@@ -472,6 +472,19 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
                 == "Narrator, Stephen Fry")
         #expect(
             LibraryPresentation.filterSummary(.init(group: .explicit), choices: nil, locale: english) == "Explicit")
+        // Values that need no filter data are named before the choices load.
+        let noSeries = LibraryViewPreferences.Filter(group: .series, value: LibraryFilterModel.Choice.noSeries.id)
+        #expect(
+            LibraryPresentation.filterSummary(noSeries, choices: nil, locale: english)
+                == "Series, No series")
+        #expect(
+            LibraryPresentation.filterSummary(
+                .init(group: .progress, value: "in-progress"), choices: nil, locale: english)
+                == "Progress, In Progress")
+        #expect(
+            LibraryPresentation.filterSummary(
+                .init(group: .ebooks, value: "supplementary"), choices: nil, locale: english)
+                == "Ebooks, \(L10n.string("LabelHasSupplementaryEbook", locale: english))")
 
         // Only an author's or series' name needs the choices before the sheet opens.
         #expect(LibraryPresentation.loadsFilterChoicesEarly(for: .init(group: .authors, value: "aut_1")))
