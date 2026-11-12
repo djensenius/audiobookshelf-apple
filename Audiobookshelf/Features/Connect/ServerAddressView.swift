@@ -12,6 +12,7 @@ struct ServerAddressView: View {
     var body: some View {
         Form {
             Section {
+                // l10n-ignore: an example address, not prose.
                 TextField(text: $model.address, prompt: Text(verbatim: "https://abs.example.com")) {
                     Text(verbatim: L10n.string("LabelServerAddress"))
                 }
