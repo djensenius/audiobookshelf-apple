@@ -67,6 +67,8 @@ struct TestDownloads {
                 settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(),
                 downloadsRoot: downloads.root, makeDownloadSession: downloads.makeSession)
             let stack = try #require(environment.downloads)
+            // A removal stops the downloads once its credentials are deleted.
+            #expect(environment.accounts?.credentialsRemoved != nil)
 
             // The launch the environment began; the same task, so this waits for it.
             await stack.lifecycle.launch().value
@@ -87,6 +89,7 @@ struct TestDownloads {
 
             #expect(environment.accounts != nil)
             #expect(environment.downloads == nil)
+            #expect(environment.accounts?.credentialsRemoved == nil)
 
             await environment.lifecycle.start()
 

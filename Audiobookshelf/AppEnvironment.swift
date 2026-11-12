@@ -66,11 +66,14 @@ final class AppEnvironment {
             }
             dataStack = stack
             accounts = manager
-            lifecycle = SessionLifecycle(
-                source: AccountSessionAdapter(accounts: manager) { [downloads] in
-                    await downloads?.lifecycle.connectionRemoved($0)
-                })
-            if let downloads { lifecycle.register(downloads.lifecycle, stage: .connect) }
+            lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))
+            if let downloads {
+                lifecycle.register(downloads.lifecycle, stage: .connect)
+                // A removal stops the downloads once the credentials are deleted, active or not.
+                manager.credentialsRemoved = { [weak downloadsLifecycle = downloads.lifecycle] in
+                    await downloadsLifecycle?.connectionRemoved($0)
+                }
+            }
         } catch {
             let reason = Log.redact(String(describing: error))
             Log.data.fault("The on-device store couldn't be opened: \(reason, privacy: .public)")

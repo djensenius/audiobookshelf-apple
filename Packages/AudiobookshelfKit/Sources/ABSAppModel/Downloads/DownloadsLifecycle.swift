@@ -10,8 +10,8 @@ public protocol DownloadsLifecycleEngine: Sendable {
     func activate() async -> Bool
     /// See ``DownloadEngine/deactivate()``.
     func deactivate() async
-    /// See ``DownloadEngine/discardResumeData(connectionID:)``.
-    func discardResumeData(connectionID: UUID) async
+    /// See ``DownloadEngine/quiesce(connectionID:)``.
+    func quiesce(connectionID: UUID) async -> Bool
 }
 
 extension DownloadEngine: DownloadsLifecycleEngine {}
@@ -40,13 +40,19 @@ extension DownloadManager: DownloadsLifecycleManager {}
 ///   prepared, then, if that succeeded, sweeps what downloads left behind (``DownloadJanitor``) without holding up
 ///   the next phase. ``SessionScenePhase/background`` deactivates the engine, after any
 ///   activation called before it, so the app never stays activated in the background.
-/// - As a ``SessionParticipant``, a sign-out, expiry or removal of the session's connection
-///   pauses that connection's queued and downloading records, then discards its resume data
-///   (ADR 0003): resume data is sealed to the credentials it was made with, so it couldn't be
-///   used after signing in again. The records stay paused after signing in again; the user
-///   resumes them. This is local only, so it is also safe for an expiry. A switch keeps them
-///   running: the other connection's credentials stay saved.
-/// - ``connectionRemoved(_:)`` does the same for a connection removed while it isn't active.
+/// - As a ``SessionParticipant``, a sign-out or expiry of the session's connection pauses that
+///   connection's queued and downloading records, then quiesces it
+///   (``DownloadEngine/quiesce(connectionID:)``): every transfer stops and its resume data is
+///   discarded (ADR 0003), since resume data is sealed to the credentials it was made with and
+///   couldn't be used after signing in again. The records stay paused after signing in again;
+///   the user resumes them. This is local only, so it is also safe for an expiry. A switch keeps
+///   them running: the other connection's credentials stay saved. A removal does the same as a
+///   sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted.
+/// - A cleanup runs in its own task, so it outlives the session teardown's time budget; a new
+///   session of the same connection waits for it in ``sessionDidStart(_:)``, so it can't pause
+///   or discard what that session starts. A cleanup that couldn't stop the transfers (the engine
+///   had no session) is tried again after the next successful activation, unless a session of
+///   the connection starts first.
 @MainActor
 public final class DownloadsLifecycle: SessionParticipant {
     private let engine: any DownloadsLifecycleEngine
@@ -65,6 +71,10 @@ public final class DownloadsLifecycle: SessionParticipant {
     private var lastPhase: Task<Bool, Never>?
     /// The connection of the running session.
     private var connectionID: UUID?
+    /// Each connection's last cleanup; the next one, and a new session of it, waits for it.
+    private var cleanups: [UUID: Task<Void, Never>] = [:]
+    /// Connections whose cleanup couldn't stop their transfers; tried again after activating.
+    private var unfinishedCleanups: Set<UUID> = []
 
     /// - Parameters:
     ///   - engine: the app's ``DownloadEngine``.
@@ -122,7 +132,10 @@ public final class DownloadsLifecycle: SessionParticipant {
         case .active:
             await launch().value
             guard await prepare() else { return false }
-            return await engine.activate()
+            guard await engine.activate() else { return false }
+            // Checked again for each, in case a session of it started meanwhile.
+            for id in unfinishedCleanups where unfinishedCleanups.contains(id) { await stopDownloads(of: id) }
+            return true
         case .background:
             await engine.deactivate()
             return false
@@ -154,31 +167,44 @@ public final class DownloadsLifecycle: SessionParticipant {
 
     // MARK: - Connections
 
-    /// Pauses a removed connection's queued and downloading records, then discards its resume
-    /// data. For a removal of a connection whose session isn't running; the active one's ends
-    /// with ``SessionEndReason/removed``, which does the same.
+    /// Pauses a removed connection's queued and downloading records, then quiesces it. Call it
+    /// once the connection's credentials are deleted (``AccountManager/credentialsRemoved``) and
+    /// before the store removes it, whether or not its session is running: a removal that fails
+    /// earlier keeps the downloads and their progress.
     public func connectionRemoved(_ connectionID: UUID) async {
         await stopDownloads(of: connectionID)
     }
 
     public func sessionDidStart(_ context: SessionContext) async {
-        connectionID = context.identity.connectionID
+        let id = context.identity.connectionID
+        connectionID = id
+        // A cleanup that outlived the last teardown's budget pauses and discards only what the
+        // ended session left; then it isn't tried again over this session's downloads.
+        while let pending = cleanups[id] {
+            await pending.value
+            // Done unless a retry after an activation began meanwhile.
+            if cleanups[id] == pending { break }
+        }
+        unfinishedCleanups.remove(id)
     }
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
         let ended = connectionID
         connectionID = nil
-        guard let ended, reason != .switch else { return }
+        // A removal stops the downloads once the credentials are deleted (connectionRemoved).
+        guard let ended, reason == .signOut || reason == .expired else { return }
         await stopDownloads(of: ended)
     }
 
-    /// In its own task, so the session teardown's time budget, which cancels the waiting call,
-    /// can't skip the discard after the pause.
+    /// In its own task, after the connection's previous cleanup, so the session teardown's time
+    /// budget, which cancels the waiting call, can't skip the quiesce after the pause.
     private func stopDownloads(of connectionID: UUID) async {
         let records = records
         let manager = manager
         let engine = engine
-        await Task {
+        let previous = cleanups[connectionID]
+        let cleanup = Task {
+            await previous?.value
             do {
                 for record in try await records(connectionID) where [.queued, .downloading].contains(record.state) {
                     do {
@@ -195,7 +221,15 @@ public final class DownloadsLifecycle: SessionParticipant {
                 )
             }
             // Pausing seals resume data with the old credentials, so it's discarded after.
-            await engine.discardResumeData(connectionID: connectionID)
-        }.value
+            if await engine.quiesce(connectionID: connectionID) {
+                self.unfinishedCleanups.remove(connectionID)
+            } else {
+                Log.downloads.error("Couldn't stop a signed-out server's downloads; will retry")
+                self.unfinishedCleanups.insert(connectionID)
+            }
+        }
+        cleanups[connectionID] = cleanup
+        await cleanup.value
+        if cleanups[connectionID] == cleanup { cleanups[connectionID] = nil }
     }
 }

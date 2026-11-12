@@ -473,6 +473,7 @@ public final class AccountManager {
         // removed it.
         removals += 1
         removedLogins[ServerLogin(address: connection.address, userId: connection.userId)] = removals
+        await credentialsRemoved?(id)
         var storeError: (any Error)?
         do {
             _ = try await store.remove(id: id, now: now())
@@ -517,6 +518,12 @@ public final class AccountManager {
     public var hasBegunSinceLogout: Bool { operation != latestLogout }
 
     // MARK: - Downloads
+
+    /// Awaited by ``remove(_:)`` once the connection's Keychain items are deleted, before the
+    /// store removes it and its server session is ended: the app stops its downloads and
+    /// discards their resume data there. Not called when the delete fails, so the connection
+    /// keeps its downloads' progress along with its session.
+    @ObservationIgnored public var credentialsRemoved: (@MainActor (UUID) async -> Void)?
 
     /// Clients for download credentials of saved connections that aren't active, so a
     /// connection's download parts share one client, with the credentials' generation they were

@@ -1,5 +1,6 @@
 import ABSCore
 import Foundation
+import Security
 import Synchronization
 import Testing
 
@@ -214,5 +215,46 @@ private final class TokenServer: Sendable {
         #expect(client !== kept)
         #expect(await client.configuration.customHeaders == ["X-Proxy": "1"])
         #expect(await manager.downloadClient(for: idA) === client)
+    }
+
+    // MARK: - Removal
+
+    /// The downloads are stopped once the session is deleted, but while the connection is
+    /// still saved, for an inactive connection as for the active one.
+    @Test(arguments: [false, true])
+    func removalReportsTheDeletedCredentialsBeforeRemovingTheConnection(active: Bool) async throws {
+        let idA = try await signIn(to: TokenServer(userId: "usr-a"))
+        if !active { _ = try await signIn(to: TokenServer(userId: "usr-b")) }
+        let reported = Mutex<[(id: UUID, sessionDeleted: Bool, connectionSaved: Bool)]>([])
+        let keychain = keychain
+        let store = store
+        manager.credentialsRemoved = { id in
+            let deleted = (try? CredentialVault(keychain: keychain).session(for: id)) == nil
+            let saved = (try? await store.connection(id: id)) != nil
+            reported.withLock { $0.append((id, deleted, saved)) }
+        }
+
+        try await manager.remove(idA)
+
+        let calls = reported.withLock { $0 }
+        #expect(calls.count == 1)
+        #expect(calls.first?.id == idA)
+        #expect(calls.first?.sessionDeleted == true)
+        #expect(calls.first?.connectionSaved == true)
+    }
+
+    /// A removal whose Keychain delete fails keeps the session, so the downloads keep their
+    /// progress: nothing is reported.
+    @Test func failedRemovalReportsNothing() async throws {
+        let idA = try await signIn(to: TokenServer(userId: "usr-a"))
+        _ = try await signIn(to: TokenServer(userId: "usr-b"))
+        let reported = Mutex(0)
+        manager.credentialsRemoved = { _ in reported.withLock { $0 += 1 } }
+        keychain.failWrites(with: errSecInteractionNotAllowed) { $0 == nil }
+
+        await #expect(throws: KeychainError.self) { try await manager.remove(idA) }
+
+        #expect(reported.withLock { $0 } == 0)
+        #expect(try await store.connection(id: idA) != nil)
     }
 }

@@ -205,22 +205,6 @@ private final class Recorder: SessionParticipant {
         #expect(adapter.client != nil && adapter.client === restored.client)
     }
 
-    @Test func adapterReportsOnlyARemovalThatSucceeded() async throws {
-        let environment = try makeEnvironment()
-        let accounts = try #require(environment.accounts)
-        let host = Self.host()
-        defer { cleanUp([host]) }
-        let identity = try await signIn(accounts, to: host)
-        var removed: [UUID] = []
-        let adapter = AccountSessionAdapter(accounts: accounts) { removed.append($0) }
-
-        await #expect(throws: AccountError.self) { try await adapter.remove(UUID()) }
-        #expect(removed.isEmpty)
-
-        _ = try await adapter.remove(identity.connectionID)
-        #expect(removed == [identity.connectionID])
-    }
-
     // MARK: Account tab and server list
 
     @Test func signingOutEndsTheSessionThroughTheLifecycle() async throws {

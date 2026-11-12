@@ -55,10 +55,21 @@ private actor FakeEngine: DownloadsLifecycleEngine {
         isActive = false
     }
 
+    /// What the next quiesces return, then `true`.
+    private var quiesceResults: [Bool] = []
+
+    func failQuiesces(_ count: Int) {
+        quiesceResults = Array(repeating: false, count: count)
+    }
+
     /// Skipped when cancelled, as work that checks for cancellation would be.
-    func discardResumeData(connectionID: UUID) {
-        guard !Task.isCancelled else { return calls.append("cancelled discard \(connectionID)") }
-        calls.append("discard \(connectionID)")
+    func quiesce(connectionID: UUID) -> Bool {
+        guard !Task.isCancelled else {
+            calls.append("cancelled quiesce \(connectionID)")
+            return false
+        }
+        calls.append("quiesce \(connectionID)")
+        return quiesceResults.isEmpty ? true : quiesceResults.removeFirst()
     }
 }
 
@@ -248,14 +259,14 @@ struct DownloadsLifecycleTests {
 
     // MARK: - Connections
 
-    @Test(arguments: [SessionEndReason.signOut, .expired, .removed])
-    func endPausesTheConnectionsRunningRecordsThenDiscardsItsResumeData(_ reason: SessionEndReason) async {
+    @Test(arguments: [SessionEndReason.signOut, .expired])
+    func endPausesTheConnectionsRunningRecordsThenQuiescesIt(_ reason: SessionEndReason) async {
         let lifecycle = makeLifecycle()
         await lifecycle.sessionDidStart(context(connectionA))
 
         await lifecycle.sessionWillEnd(reason)
 
-        #expect(calls.all == pauses(recordsA) + ["discard \(connectionA)"])
+        #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)"])
         #expect(pauses(recordsA).count == 2)
     }
 
@@ -270,26 +281,26 @@ struct DownloadsLifecycleTests {
         #expect(calls.all.isEmpty)
     }
 
-    @Test func removingAnotherConnectionPausesThenDiscardsOnlyIt() async {
+    @Test func removingAnotherConnectionPausesThenQuiescesOnlyIt() async {
         let lifecycle = makeLifecycle()
         await lifecycle.sessionDidStart(context(connectionA))
 
         await lifecycle.connectionRemoved(connectionB)
 
-        #expect(calls.all == pauses(recordsB) + ["discard \(connectionB)"])
+        #expect(calls.all == pauses(recordsB) + ["quiesce \(connectionB)"])
     }
 
-    @Test func unreadableRecordsStillDiscard() async {
+    @Test func unreadableRecordsStillQuiesce() async {
         let lifecycle = makeLifecycle(records: { _ in throw CocoaError(.fileReadUnknown) })
         await lifecycle.sessionDidStart(context(connectionA))
 
         await lifecycle.sessionWillEnd(.signOut)
 
-        #expect(calls.all == ["discard \(connectionA)"])
+        #expect(calls.all == ["quiesce \(connectionA)"])
     }
 
-    /// The session teardown cancels a participant that runs out of time; the discard still follows.
-    @Test func cancelledEndStillDiscardsAfterThePauses() async {
+    /// The session teardown cancels a participant that runs out of time; the quiesce still follows.
+    @Test func cancelledEndStillQuiescesAfterThePauses() async {
         let lifecycle = makeLifecycle()
         await lifecycle.sessionDidStart(context(connectionA))
         let gate = StubGate()
@@ -301,6 +312,75 @@ struct DownloadsLifecycleTests {
         gate.open()
         await end.value
 
-        #expect(calls.all == pauses(recordsA) + ["discard \(connectionA)"])
+        #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)"])
+    }
+
+    /// A removal stops the downloads only once its credentials are deleted (connectionRemoved),
+    /// so a removal that fails earlier keeps them and their progress.
+    @Test func removedSessionEndStopsNothing() async {
+        let lifecycle = makeLifecycle()
+        await lifecycle.sessionDidStart(context(connectionA))
+
+        await lifecycle.sessionWillEnd(.removed)
+
+        #expect(calls.all.isEmpty)
+    }
+
+    /// A cleanup that outlived the teardown's budget finishes before a new session of its
+    /// connection starts, so it can't pause or discard what that session starts.
+    @Test func newSessionOfTheConnectionWaitsForItsCleanup() async {
+        let lifecycle = makeLifecycle()
+        await lifecycle.sessionDidStart(context(connectionA))
+        let gate = StubGate()
+        await manager.hold(gate)
+        let end = Task { await lifecycle.sessionWillEnd(.signOut) }
+        await gate.arrived()
+        end.cancel()
+
+        let calls = calls
+        let start = Task {
+            await lifecycle.sessionDidStart(context(connectionA))
+            calls.append("started")
+        }
+        for _ in 0..<10 { await Task.yield() }
+        #expect(!calls.all.contains("started"))
+        gate.open()
+        await start.value
+        await end.value
+
+        #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)", "started"])
+    }
+
+    /// A cleanup that couldn't stop the transfers is tried again after the next activation.
+    @Test func unfinishedCleanupIsRetriedAfterTheNextActivation() async {
+        let lifecycle = makeLifecycle()
+        await lifecycle.launch().value
+        await lifecycle.sessionDidStart(context(connectionA))
+        await engine.failQuiesces(1)
+        await lifecycle.sessionWillEnd(.signOut)
+
+        await lifecycle.handle(scenePhase: .active).value
+        await lifecycle.handle(scenePhase: .active).value
+
+        let cleanup = pauses(recordsA) + ["quiesce \(connectionA)"]
+        #expect(
+            calls.all == ["start manager", "start controller"] + cleanup + ["activate", "activated"] + cleanup
+                + ["sweep", "activate", "activated", "sweep"])
+    }
+
+    /// Once a session of the connection starts, its downloads are that session's.
+    @Test func unfinishedCleanupIsDroppedOnceTheConnectionSignsInAgain() async {
+        let lifecycle = makeLifecycle()
+        await lifecycle.launch().value
+        await lifecycle.sessionDidStart(context(connectionA))
+        await engine.failQuiesces(1)
+        await lifecycle.sessionWillEnd(.signOut)
+        await lifecycle.sessionDidStart(context(connectionA))
+
+        await lifecycle.handle(scenePhase: .active).value
+
+        #expect(
+            calls.all == ["start manager", "start controller"] + pauses(recordsA)
+                + ["quiesce \(connectionA)", "activate", "activated", "sweep"])
     }
 }
