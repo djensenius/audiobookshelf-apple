@@ -130,6 +130,12 @@ public enum CatalogBuilder {
                     warnings.append("\(file.name): skipped \(key): \(problem)")
                     continue
                 }
+                let dropped = Set(sourceForms.values.flatMap(StringConverter.placeholderIndices(in:)))
+                    .subtracting(forms.values.flatMap(StringConverter.placeholderIndices(in:)))
+                if !isSource, !dropped.isEmpty {
+                    let list = dropped.sorted().map { "{\($0)}" }.joined(separator: ", ")
+                    warnings.append("\(file.name): \(key) drops \(list)")
+                }
                 let plural = forms.mapValues {
                     Variant(stringUnit: StringUnit(value: StringConverter.convertPlural($0)))
                 }

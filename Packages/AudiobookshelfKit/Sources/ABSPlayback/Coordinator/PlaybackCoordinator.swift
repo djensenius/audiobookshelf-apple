@@ -26,7 +26,9 @@ private let logger = Log.playback
 /// - **Closing.** A session is owned by exactly one place: the start continuation until it becomes
 ///   current, then the coordinator. Whoever drops it closes it once, in the background. The next
 ///   `/play` waits up to ``closeWaitTimeout`` for closes in flight, so the server normally sees the
-///   old session closed first; a slow or failed close never blocks it. A close held back by its
+///   old session closed first; a slow or failed close never blocks it. That limit counts from when
+///   each close was sent, so a hanging close delays only the plays within its first
+///   ``closeWaitTimeout``. A close held back by its
 ///   session's report in flight (at most ``closeWaitTimeout``, #337) is sent before that wait
 ///   starts, so `/play` never overtakes it. Closes are best effort;
 ///   P2-06b's final report is plugged in through ``finalCloseReport``.
@@ -195,6 +197,12 @@ public final class PlaybackCoordinator {
     private var resumingIntent: Int?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
+    /// When each close in ``closeTasks`` was sent, so a hanging one holds back only the first play
+    /// after it for ``closeWaitTimeout``, not every play until it times out.
+    @ObservationIgnored private var closeSentAt: [UUID: Date] = [:]
+    /// An item switch unloaded the engine with its audio session still active (``tearDown(reason:)``);
+    /// the next stop, or a failed start, deactivates it.
+    @ObservationIgnored private var keepsAudioSession = false
     @ObservationIgnored private var closeOperations: [PlaybackCloseOperation] = []
     @ObservationIgnored private var startTask: Task<StartedSession, any Error>?
     @ObservationIgnored private var resolvingTasks: [UUID: Task<ResolvedStream, any Error>] = [:]
@@ -382,6 +390,7 @@ public final class PlaybackCoordinator {
         } catch is CancellationError {
             // A cancelled caller abandons the start; that isn't a failure. No session was opened.
             if current == generation, phase == .starting { phase = .unloaded }
+            if current == generation { releaseKeptAudioSession() }
             return
         } catch {
             return fail(Self.sessionError(error), generation: current)
@@ -398,6 +407,7 @@ public final class PlaybackCoordinator {
             // A cancelled caller abandons the start; that isn't a failure.
             if error is CancellationError {
                 if current == generation, phase == .starting { phase = .unloaded }
+                if current == generation { releaseKeptAudioSession() }
                 return
             }
             return fail(Self.streamError(error), generation: current)
@@ -991,7 +1001,16 @@ public final class PlaybackCoordinator {
         self.error = error
         pendingJumpOffset = 0
         if phase == .starting { phase = .unloaded }
+        releaseKeptAudioSession()
         emit(.failed(error))
+    }
+
+    /// The item that was to follow a switch failed or was abandoned: release the audio session the
+    /// switch kept, so other apps' audio can resume.
+    private func releaseKeptAudioSession() {
+        guard keepsAudioSession, phase != .loaded else { return }
+        keepsAudioSession = false
+        engine.stop()
     }
 
     /// A streaming-policy block: the current item, and anything in flight for it, carries on.
@@ -1013,7 +1032,17 @@ public final class PlaybackCoordinator {
         resumeIntent += 1
         resumingIntent = nil
         isFinishingLoad = false
-        if phase == .loaded || phase == .starting { engine.stop() }
+        if phase == .loaded || phase == .starting || keepsAudioSession {
+            // Another item follows: the audio session stays active, so other apps' audio doesn't
+            // resume in between. Anything else releases it.
+            if reason == .itemChanged || reason == .restarted {
+                keepsAudioSession = keepsAudioSession || engine.isAudioSessionActive
+                engine.unload()
+            } else {
+                keepsAudioSession = false
+                engine.stop()
+            }
+        }
         if phase != .idle { phase = .unloaded }
         if let session, let key = mediaKey {
             self.session = nil
@@ -1044,6 +1073,7 @@ public final class PlaybackCoordinator {
         let task = Task { [weak self] in
             defer {
                 self?.closeTasks[id] = nil
+                self?.closeSentAt[id] = nil
                 self?.closingSessionIDs.remove(sessionID)
                 operation.task = nil
                 operation.dispatched.resolve(.success(()))
@@ -1056,6 +1086,7 @@ public final class PlaybackCoordinator {
                 operation.transport.resolve(.success(false))
                 return
             }
+            self?.closeSentAt[id] = self?.now()
             operation.dispatched.resolve(.success(()))
             do {
                 try await sessions.closeSession(id: sessionID, report: handoff?.report ?? report)
@@ -1124,27 +1155,41 @@ public final class PlaybackCoordinator {
         return try await result.wait()
     }
 
-    /// Waits up to ``closeWaitTimeout`` for the closes in flight, so the server normally sees
-    /// the old session closed before the next `/play`. The wait starts once each has been sent
-    /// or suppressed, which its own wait for a report in flight bounds.
+    /// Waits for the closes in flight until each has had ``closeWaitTimeout`` since it was sent, so
+    /// the server normally sees the old session closed before the next `/play`. A close that has
+    /// already had its time (one hanging until the client's timeout) is not waited for again. The
+    /// wait starts once each has been sent or suppressed, which its own wait for a report in flight
+    /// bounds.
     private func waitForCloses() async {
         for operation in closeOperations where operation.task != nil {
             try? await operation.dispatched.wait()
         }
-        let closes = Array(closeTasks.values)
-        guard !closes.isEmpty else { return }
-        let first = FirstFinish()
+        let now = now()
+        let (seconds, attoseconds) = Self.closeWaitTimeout.components
+        let limit = Double(seconds) + Double(attoseconds) / 1e18
         let sleep = self.sleep
-        let timer = Task {
-            await sleep(Self.closeWaitTimeout)
-            first.finish()
+        var waits: [Task<Void, Never>] = []
+        for (id, close) in closeTasks {
+            // Clamped, so a clock set back never stretches the wait past the limit.
+            let left = min(limit, limit - now.timeIntervalSince(closeSentAt[id] ?? now))
+            guard left > 0 else { continue }
+            // Each close races its own remaining time, so a newer close never extends an older one's.
+            waits.append(
+                Task {
+                    let first = FirstFinish()
+                    let timer = Task {
+                        await sleep(.seconds(left))
+                        first.finish()
+                    }
+                    Task {
+                        await close.value
+                        first.finish()
+                    }
+                    await first.wait()
+                    timer.cancel()
+                })
         }
-        Task {
-            for close in closes { await close.value }
-            first.finish()
-        }
-        await first.wait()
-        timer.cancel()
+        for wait in waits { await wait.value }
     }
 
     /// Takes this start's turn (see the class doc): the previous start has returned and the closes
