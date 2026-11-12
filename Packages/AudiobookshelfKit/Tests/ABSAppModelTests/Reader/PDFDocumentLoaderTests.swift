@@ -30,6 +30,24 @@ import Testing
         await #expect(throws: PDFDocumentLoadError.unreadable) { try await PDFDocumentLoader.load(from: url) }
     }
 
+    @Test func fileWithoutReadPermissionIsUnreadable() async throws {
+        let url = try writePDF(pages: 1)
+        defer { try? FileManager.default.removeItem(at: url) }
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path(percentEncoded: false))
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path(percentEncoded: false))
+        }
+        await #expect(throws: PDFDocumentLoadError.unreadable) { try await PDFDocumentLoader.load(from: url) }
+    }
+
+    @Test func directoryIsUnreadable() async throws {
+        let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).pdf")
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: url) }
+        await #expect(throws: PDFDocumentLoadError.unreadable) { try await PDFDocumentLoader.load(from: url) }
+    }
+
     @Test func encryptedPDFWithoutAPasswordIsLocked() async throws {
         let url = try writePDF(pages: 2, password: "secret")
         defer { try? FileManager.default.removeItem(at: url) }

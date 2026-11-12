@@ -5,7 +5,8 @@ import PDFKit
 public enum PDFDocumentLoadError: Error, Sendable, Hashable {
     /// No file at the URL, or the URL isn't a file URL.
     case fileNotFound
-    /// PDFKit can't read the file: it's corrupt, not a PDF, or has no pages.
+    /// The file exists, but PDFKit can't read it: it's corrupt, not a PDF, has no pages, or
+    /// can't be read (for example, without read permission).
     case unreadable
     /// The PDF is encrypted, and no password, or the wrong one, was given.
     case locked
@@ -21,7 +22,8 @@ public enum PDFDocumentLoader {
     public static func load(from url: URL, password: String? = nil) async throws(PDFDocumentLoadError)
         -> sending PDFDocument
     {
-        guard url.isFileURL, FileManager.default.isReadableFile(atPath: url.path(percentEncoded: false)) else {
+        // Only a missing file is "not found"; one that exists but can't be read is unreadable.
+        guard url.isFileURL, FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else {
             throw .fileNotFound
         }
         guard let document = PDFDocument(url: url) else { throw .unreadable }

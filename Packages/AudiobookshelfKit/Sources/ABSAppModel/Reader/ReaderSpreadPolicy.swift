@@ -54,14 +54,16 @@ public enum ReaderSpreadPolicy {
         setting: ReaderSpreadSetting, platform: ReaderPlatform, sizeClass: ReaderSizeClass?, size: CGSize,
         hingeWidth: CGFloat?
     ) -> ReaderSpreadLayout {
-        guard setting == .auto else { return .single }
+        let width = size.width
+        let height = size.height
+        // A reader that isn't measured yet shows one page, even on a spanned Duo.
+        guard setting == .auto, width.isFinite, height.isFinite, width > 0, height > 0 else { return .single }
+        // Checked before the shape: a spanned Duo is taller than wide and still spreads.
         if platform == .iOS, let hingeWidth, hingeWidth.isFinite, hingeWidth > 0 {
             return .twoUp(gap: hingeWidth)
         }
-        let width = size.width
-        let height = size.height
         // Strictly wider than tall: a square reader shows one page.
-        guard width.isFinite, height.isFinite, width > 0, height > 0, width > height else { return .single }
+        guard width > height else { return .single }
         switch platform {
         case .iOS:
             return sizeClass == .regular ? .twoUp(gap: 0) : .single

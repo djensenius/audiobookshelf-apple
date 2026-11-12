@@ -35,7 +35,8 @@ enum PDFReaderBackground: Sendable, Hashable, CaseIterable {
 /// a two-page book spread, and reports each page the reader turns to.
 ///
 /// Pages are 1-based, the form `ebookLocation` stores. The initial page isn't reported, so
-/// opening a book doesn't count as reading it; nor is a page reported twice in a row.
+/// opening a book doesn't count as reading it; nor is a page reported twice in a row, nor one
+/// PDFKit passes through while a document or layout is being set.
 struct PDFReaderView {
     let document: PDFDocument
     /// The 1-based page to open on, clamped to the document. Read when `document` changes.
@@ -51,7 +52,19 @@ struct PDFReaderView {
     @MainActor final class Coordinator: NSObject {
         var onPageChange: @MainActor (Int) -> Void = { _ in }
         /// The page last reported or opened on, so it isn't reported again.
-        var lastPage: Int?
+        private(set) var lastPage: Int?
+        /// Set while ``withoutReporting(_:_:)`` reconfigures the view.
+        private var isReconfiguring = false
+
+        /// Runs `body` without reporting the pages PDFKit passes through: assigning a document
+        /// selects its first page before `go(to:)` reaches the one to open on. Afterwards the
+        /// page the view shows counts as reported.
+        func withoutReporting(_ view: PDFView, _ body: () -> Void) {
+            isReconfiguring = true
+            body()
+            isReconfiguring = false
+            lastPage = view.currentPage.flatMap { view.document?.oneBasedPageNumber(of: $0) }
+        }
 
         func observe(_ view: PDFView) {
             NotificationCenter.default.addObserver(
@@ -63,7 +76,7 @@ struct PDFReaderView {
         }
 
         @objc private func pageChanged(_ notification: Notification) {
-            guard let view = notification.object as? PDFView, let page = view.currentPage,
+            guard !isReconfiguring, let view = notification.object as? PDFView, let page = view.currentPage,
                 let number = view.document?.oneBasedPageNumber(of: page), number != lastPage
             else { return }
             lastPage = number
@@ -88,18 +101,17 @@ struct PDFReaderView {
         let mode: PDFDisplayMode = isSpread ? .twoUp : .singlePage
         let isNewLayout = view.displayMode != mode || view.displaysAsBook != isSpread || isNewDocument
         if isNewLayout {
-            view.setSpread(isSpread)
-            view.displayMode = mode
-            view.displaysAsBook = isSpread
-            view.autoScales = true
-        }
-        if isNewDocument {
-            coordinator.lastPage = document.page(oneBased: initialPage).flatMap(document.oneBasedPageNumber(of:))
-            view.document = document
-        }
-        // A new layout keeps the page; a new document opens on the initial one.
-        if isNewLayout, let target = isNewDocument ? initialPage : current, let page = document.page(oneBased: target) {
-            view.go(to: page)
+            coordinator.withoutReporting(view) {
+                view.setSpread(isSpread)
+                view.displayMode = mode
+                view.displaysAsBook = isSpread
+                view.autoScales = true
+                if isNewDocument { view.document = document }
+                // A new layout keeps the page; a new document opens on the initial one.
+                if let target = isNewDocument ? initialPage : current, let page = document.page(oneBased: target) {
+                    view.go(to: page)
+                }
+            }
         }
         view.backgroundColor = background.color
     }

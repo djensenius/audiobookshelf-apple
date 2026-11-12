@@ -90,6 +90,15 @@ import Testing
             name: "zero size", setting: .auto, platform: .macOS, sizeClass: nil, size: .zero, hinge: nil,
             expected: .single),
         Case(
+            name: "spanned Duo not measured yet", setting: .auto, platform: .iOS, sizeClass: .compact, size: .zero,
+            hinge: 24, expected: .single),
+        Case(
+            name: "spanned Duo with a non-finite size", setting: .auto, platform: .iOS, sizeClass: .compact,
+            size: CGSize(width: CGFloat.nan, height: 900), hinge: 24, expected: .single),
+        Case(
+            name: "spanned Duo with an infinite height", setting: .auto, platform: .iOS, sizeClass: .regular,
+            size: CGSize(width: 800, height: CGFloat.infinity), hinge: 24, expected: .single),
+        Case(
             name: "infinite width", setting: .auto, platform: .iOS, sizeClass: .regular,
             size: CGSize(width: CGFloat.infinity, height: 800), hinge: nil, expected: .single),
     ]
