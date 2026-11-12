@@ -523,6 +523,15 @@ Model notes:
   decryption fails, the key is missing, the user signs out, the connection is
   removed or disconnected, a request gets a 401, or the connection's credentials
   or custom headers change.
+- **A queued close keeps its session id as is** (`PendingSessionClose`, #382). The
+  id is a capability for one item's audio through the unauthenticated `/public/session/:id`
+  routes ([ADR 0007](0007-streaming.md)), but only while the server holds the
+  session in memory, which the server bounds without this row: the close itself,
+  this device's next `/play`, a server restart, or the server's nightly sweep of
+  sessions with no update for 36 hours ends it. It is not a long-lived credential
+  under the Keychain-only rule. The row is deleted once its close settles
+  (acknowledged, rejected for good, or skipped by admission), and keeping it lets the
+  device end the session sooner, never later.
 - **Downloaded files live in the app container, not the App Group.** Widgets never
   read downloaded media files; they get covers through the image cache
   ([ADR 0005](0005-images.md), #89 (P5-11b)).

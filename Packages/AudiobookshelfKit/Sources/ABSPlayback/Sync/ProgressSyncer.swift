@@ -170,7 +170,7 @@ public final class ProgressSyncer {
     private(set) var pendingPositions: [MediaKey: Position] = [:]
     /// The pending positions whose last save failed, as opposed to ones merely still queued.
     private var failedPositions: [MediaKey: Position] = [:]
-    private var positionRevision: UInt64 = 0
+    private(set) var positionRevision: UInt64 = 0
     private var positionReceipts: [MediaKey: [(revision: UInt64, receipt: PlaybackCloseResult<Void>)]] = [:]
     private var transportTasks: [UUID: Task<Void, Never>] = [:]
     private(set) var isTransportQuiesced = false

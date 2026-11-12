@@ -13,7 +13,8 @@ enum DeferredReportAdmission: Equatable, Sendable {
         /// Another session for the same media is current: its reports are newer.
         case newerSessionForMedia
         /// The server's progress couldn't be read and merged (offline, a failed lookup or store
-        /// read, or a position still being saved): never send blind.
+        /// read, a reply the merge didn't take, or a position saved or still being saved since
+        /// the lookup): never send blind.
         case lookupFailed
         /// The stored position is no longer the report's own: a later local edit, another
         /// device's newer progress merged over it, or a position that never committed.
@@ -31,7 +32,11 @@ extension ProgressSyncer {
     /// 3. read the server's progress through ``fetchProgress(for:attempted:attemptedKeys:confirmationOnly:)``
     ///    so the ADR 0003 merge decides; a failed lookup (offline included) skips;
     /// 4. the stored audio is no longer the report's own position: skip;
-    /// 5. otherwise send.
+    /// 5. a reply the merge didn't take (step 3) decided nothing: skip;
+    /// 6. otherwise send.
+    ///
+    /// Steps 1 and 2, and that no position was queued since the lookup, are checked again after
+    /// each suspension (``deferredReportSkip(sessionID:key:since:)``).
     ///
     /// The report's position is identified by the audio edit time it committed with
     /// (`editedAt`), not by its `PlaybackPositionToken`, which doesn't survive a relaunch. A
@@ -46,26 +51,43 @@ extension ProgressSyncer {
         await waitForPendingWrites()
         var attempted: [MediaKey: UUID] = [:]
         var attemptedKeys: Set<MediaKey> = []
+        let merged: Bool
         do {
-            _ = try await fetchProgress(for: key, attempted: &attempted, attemptedKeys: &attemptedKeys)
+            merged = try await fetchProgress(for: key, attempted: &attempted, attemptedKeys: &attemptedKeys)
         } catch {
             logger.info("A deferred report's progress lookup failed: \(Self.caseName(error), privacy: .public)")
             return .skip(.lookupFailed)
         }
-        guard !isDetached, !isTransportQuiesced else { return .skip(.quiesced) }
         // A session may have started while the lookup was in flight. A position queued meanwhile
         // kept the merge from running (`fetchProgress` checks it), so there is nothing to compare.
-        if hasNewerSession(than: sessionID, for: key) { return .skip(.newerSessionForMedia) }
-        guard pendingPositions.isEmpty else { return .skip(.lookupFailed) }
+        let revision = positionRevision
+        if let reason = deferredReportSkip(sessionID: sessionID, key: key, since: revision) { return .skip(reason) }
         guard let editedAt else { return .skip(.positionSuperseded) }
+        let isLatest: Bool
         do {
-            let isLatest = try await store.isLatestPlaybackPosition(
-                currentTime: currentTime, editedAt: editedAt, for: key)
-            return isLatest ? .send : .skip(.positionSuperseded)
+            isLatest = try await store.isLatestPlaybackPosition(currentTime: currentTime, editedAt: editedAt, for: key)
         } catch {
             logger.error("Reading a deferred report's position failed: \(Self.caseName(error), privacy: .public)")
             return .skip(.lookupFailed)
         }
+        await closeQueue.reached?(.positionRead)
+        // The read suspended too: check again, with nothing after this before the caller acts.
+        if let reason = deferredReportSkip(sessionID: sessionID, key: key, since: revision) { return .skip(reason) }
+        guard isLatest else { return .skip(.positionSuperseded) }
+        // A reply that wasn't merged (another item's, undated, or older than the stored server
+        // progress) decided nothing: never send blind.
+        return merged ? .send : .skip(.lookupFailed)
+    }
+
+    /// Steps 1 and 2 of the rule, and a position queued since `revision`: checked again after
+    /// each suspension, so the verdict holds when the caller acts on it without suspending.
+    func deferredReportSkip(
+        sessionID: String, key: MediaKey, since revision: UInt64
+    ) -> DeferredReportAdmission.Reason? {
+        if isDetached || isTransportQuiesced { return .quiesced }
+        if hasNewerSession(than: sessionID, for: key) { return .newerSessionForMedia }
+        guard pendingPositions.isEmpty, positionRevision == revision else { return .lookupFailed }
+        return nil
     }
 
     private func hasNewerSession(than sessionID: String, for key: MediaKey) -> Bool {

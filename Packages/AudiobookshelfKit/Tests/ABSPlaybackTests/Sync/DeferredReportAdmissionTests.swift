@@ -119,4 +119,62 @@ struct DeferredReportAdmissionTests {
         #expect(try await f.serverTime() == (change == "tablet" ? 900 : 15))
         #expect(f.s.service.closes.isEmpty)
     }
+
+    /// A reply the merge doesn't take decides nothing, so it skips like a failed lookup: one
+    /// without a date, another item's, or one older than the server progress already stored.
+    /// The model's own reply sends.
+    @Test(arguments: [nil, "undated", "other item", "older"])
+    func anUnmergedReplySkips(reply: String?) async throws {
+        let (f, close) = try await Self.retained()
+        var server = try #require(try await f.model.fetchProgress(f.client, itemID: "a", episodeID: nil))
+        switch reply {
+        case "undated": server.lastUpdate = nil
+        case "other item": server.libraryItemId = "b"
+        case "older": server.lastUpdate = 1
+        default: break
+        }
+        if reply != nil { f.s.service.state.withLock { $0.fetchReplies = [server] } }
+        let mark = f.s.service.log.count
+
+        #expect(await Self.admit(f, close) == (reply == nil ? .send : .skip(.lookupFailed)))
+        #expect(Self.requests(f, since: mark) == ["get a"])
+        #expect(try await f.s.store.progress(for: f.key)?.currentTime == 20)
+        #expect(f.s.service.closes.isEmpty)
+    }
+
+    /// Admission reads the stored position last, and that read suspends: an account that ended,
+    /// a newer session of the same media, or a position saved meanwhile (even another item's)
+    /// skips, though the position read said send.
+    @Test(arguments: [nil, "quiesce", "newer session", "saved position"])
+    func aChangeDuringThePositionReadSkips(change: String?) async throws {
+        let (f, close) = try await Self.retained()
+        let read = Gate()
+        f.s.syncer.closeQueue.reached = { step in
+            guard step == .positionRead else { return }
+            read.open()
+            switch change {
+            case "quiesce":
+                f.s.syncer.quiesceTransport()
+            case "newer session":
+                await f.s.coordinator.play(itemID: "a")
+            case "saved position":
+                await f.s.coordinator.play(itemID: "b")
+                await f.s.play(for: 20)
+                #expect(f.s.syncer.pendingPositions.isEmpty)
+            default:
+                break
+            }
+        }
+
+        let verdict = await Self.admit(f, close)
+
+        await read.wait()
+        switch change {
+        case "quiesce": #expect(verdict == .skip(.quiesced))
+        case "newer session": #expect(verdict == .skip(.newerSessionForMedia))
+        case "saved position": #expect(verdict == .skip(.lookupFailed))
+        default: #expect(verdict == .send)
+        }
+        #expect(f.s.service.closes.isEmpty)
+    }
 }

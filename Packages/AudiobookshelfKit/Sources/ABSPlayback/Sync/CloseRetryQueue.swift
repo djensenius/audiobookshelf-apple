@@ -30,6 +30,19 @@ final class CloseRetryQueue {
     /// Test seam: every admission verdict, in order.
     fileprivate(set) var verdicts: [(sessionID: String, verdict: DeferredReportAdmission)] = []
 
+    /// The store calls after which state may have moved on (tests).
+    enum Step: Sendable {
+        /// Admission read the stored position; its checks run again next.
+        case positionRead
+        /// A resend's attempt time was saved; admission's checks run again next.
+        case attemptSaved
+        /// A captured close was saved while the coordinator's attempt is out.
+        case captureSaved
+    }
+
+    /// Test seam: runs after each ``Step``.
+    var reached: (@MainActor (Step) async -> Void)?
+
     /// Waits until every captured close settled (tests). A held `/close` holds this too.
     func waitForCaptures() async {
         while let (id, task) = captures.first {
@@ -74,6 +87,7 @@ extension ProgressSyncer {
                 do {
                     try await store.saveSessionClose(inFlight)
                     stored = true
+                    await queue.reached?(.captureSaved)
                 } catch {
                     logger.error("Saving a close to retry failed: \(Self.caseName(error), privacy: .public)")
                 }
@@ -87,7 +101,8 @@ extension ProgressSyncer {
             }
             let settlement = await Self.settleClose(
                 close, after: result, store: store, now: clock.now(), stored: stored)
-            if settlement == .kept, let self, !self.isDetached, !self.isTransportQuiesced {
+            // A close kept to retry, or one whose settlement couldn't be saved, waits for a drain.
+            if settlement != .finished, let self, !self.isDetached, !self.isTransportQuiesced {
                 self.scheduleDrainRetry()
             }
         }
@@ -112,9 +127,16 @@ extension ProgressSyncer {
                 drainOutcome.failed = true
                 continue
             }
-            let verdict = await admitDeferredReport(
+            var verdict = await admitDeferredReport(
                 sessionID: close.sessionID, key: close.key, currentTime: close.currentTime,
                 editedAt: close.positionEditedAt)
+            if verdict == .send {
+                guard let checked = await recordCloseAttempt(close) else {
+                    drainOutcome.failed = true
+                    return false
+                }
+                verdict = checked
+            }
             closeQueue.verdicts.append((close.sessionID, verdict))
             switch verdict {
             case .send:
@@ -156,6 +178,26 @@ extension ProgressSyncer {
             }
         }
         return true
+    }
+
+    /// Saves a resend's attempt time before it goes out, as the coordinator's attempt is saved,
+    /// so a relaunch while it is out waits ``reconcileDelay`` for it. The save suspends, so
+    /// admission's checks run again after it, with nothing after them before the send. Returns
+    /// the verdict that stands, or `nil` when the save failed and nothing may be sent. A skip
+    /// after the save leaves that attempt time, which can only delay the close's next resend.
+    private func recordCloseAttempt(_ close: PendingSessionCloseDTO) async -> DeferredReportAdmission? {
+        let revision = positionRevision
+        var attempt = close
+        attempt.lastAttemptAt = clock.now()
+        do {
+            try await store.saveSessionClose(attempt)
+        } catch {
+            logger.error("Saving a close's attempt failed: \(Self.caseName(error), privacy: .public)")
+            return nil
+        }
+        await closeQueue.reached?(.attemptSaved)
+        return deferredReportSkip(sessionID: close.sessionID, key: close.key, since: revision).map { .skip($0) }
+            ?? .send
     }
 
     /// No resend before ``reconcileDelay`` after an attempt that may have reached the server,

@@ -1,9 +1,9 @@
 import ABSCore
-import ABSData
 import Foundation
 import Testing
 
 @testable import ABSAPI
+@testable import ABSData
 @testable import ABSPlayback
 
 /// A coordinator and syncer sharing one session model, the stub server. Session 1 of "a" plays
@@ -166,5 +166,121 @@ struct CloseRetryTests {
         // Without the newer session, the drain PATCHed session 1's own position.
         #expect(try await f.serverTime() == (sameItem ? newer : 20))
         #expect(try await f.queued().isEmpty)
+    }
+
+    /// A resend's attempt time is saved before it reaches the server, as the coordinator's
+    /// attempt is, so a relaunch while it is out waits for it. One that never reached the server
+    /// (no connection to the host) keeps the previous attempt's time.
+    @Test(arguments: [false, true])
+    func aResendSavesItsAttemptBeforeSending(unreachable: Bool) async throws {
+        let f = try CloseRetryFixture()
+        try await f.stopSessionOne(.unapplied)
+        let first = try #require(try await f.queued().first?.lastAttemptAt)
+        let resend = CloseRetryFixture.Request(.acknowledged)
+        defer { resend.release() }
+        if unreachable {
+            f.s.service.state.withLock { $0.closeErrors = [.network(.cannotConnectToHost)] }
+        } else {
+            await f.model.enqueue(resend, for: .close)
+        }
+
+        let drain = Task { await f.drainWhenDue() }
+        if !unreachable {
+            await resend.arrived.wait()
+            let inFlight = try #require(try await f.queued().first)
+            #expect(inFlight.lastAttemptAt == f.s.h.clock.now)
+            #expect(inFlight.lastAttemptAt != first)
+            #expect(inFlight.attempts == 1)
+            resend.release()
+        }
+        await drain.value
+
+        #expect(f.s.service.closes.map(\.id) == ["session-1"])
+        let queued = try await f.queued()
+        if unreachable {
+            #expect(queued.first?.lastAttemptAt == first)
+            #expect(queued.first?.attempts == 2)
+        } else {
+            #expect(queued.isEmpty)
+            #expect(try await f.listened("session-1") == 20)
+        }
+    }
+
+    /// A resend whose attempt time couldn't be saved isn't sent: the close stays as it was and
+    /// the drain retries.
+    @Test(arguments: [false, true])
+    func aResendIsNotSentUnlessItsAttemptSaved(saveFails: Bool) async throws {
+        let f = try CloseRetryFixture()
+        try await f.stopSessionOne(.unapplied)
+        let first = try #require(try await f.queued().first?.lastAttemptAt)
+        if saveFails {
+            f.s.syncer.closeQueue.reached = { step in
+                // The attempt's save is the store's next commit.
+                if step == .positionRead { await f.s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission)) }
+            }
+        }
+
+        await f.drainWhenDue()
+
+        #expect(f.s.service.closes.map(\.id) == (saveFails ? [] : ["session-1"]))
+        #expect(f.verdicts == (saveFails ? [] : [.send]))
+        #expect(try await f.queued().first?.lastAttemptAt == (saveFails ? first : nil))
+        #expect((f.s.syncer.drainWake != nil) == saveFails)
+    }
+
+    /// Saving the attempt suspends, so admission's checks run again before the resend: an
+    /// account that ended meanwhile keeps the close, and a newer session of the same media
+    /// removes it.
+    @Test(arguments: [nil, "quiesce", "newer session"])
+    func aChangeWhileSavingTheAttemptSkipsTheResend(change: String?) async throws {
+        let f = try CloseRetryFixture()
+        try await f.stopSessionOne(.unapplied)
+        let saved = Gate()
+        f.s.syncer.closeQueue.reached = { step in
+            guard step == .attemptSaved else { return }
+            saved.open()
+            if change == "quiesce" { f.s.syncer.quiesceTransport() }
+            if change == "newer session" { await f.s.coordinator.play(itemID: "a") }
+        }
+
+        await f.drainWhenDue()
+
+        await saved.wait()
+        switch change {
+        case "quiesce": #expect(f.verdicts == [.skip(.quiesced)])
+        case "newer session": #expect(f.verdicts == [.skip(.newerSessionForMedia)])
+        default: #expect(f.verdicts == [.send])
+        }
+        #expect(f.s.service.closes.map(\.id) == (change == nil ? ["session-1"] : []))
+        #expect(try await f.queued().count == (change == "quiesce" ? 1 : 0))
+    }
+
+    /// A captured close whose settlement couldn't be saved (here, removing it once the
+    /// coordinator's `/close` was acknowledged) schedules a drain, like one kept to retry.
+    @Test(arguments: [false, true])
+    func aCaptureWhoseSettlementFailsSchedulesADrain(removalFails: Bool) async throws {
+        let f = try CloseRetryFixture()
+        await f.s.coordinator.play(itemID: "a")
+        await f.s.play(for: 20)
+        let close = CloseRetryFixture.Request(.acknowledged)
+        defer { close.release() }
+        await f.model.enqueue(close, for: .close)
+        let stored = Gate()
+        f.s.syncer.closeQueue.reached = { if $0 == .captureSaved { stored.open() } }
+        f.s.coordinator.stop()
+        await stored.wait()
+        await f.s.settle()
+        #expect(try await f.queued().count == 1)
+        #expect(f.s.syncer.drainWake == nil)
+        // Removing the acknowledged close is the store's next commit.
+        if removalFails { await f.s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission)) }
+
+        close.release()
+        await f.s.coordinator.waitForPendingCloses()
+        await f.s.syncer.closeQueue.waitForCaptures()
+
+        #expect(try await f.listened("session-1") == 20)
+        #expect(try await f.queued().count == (removalFails ? 1 : 0))
+        #expect((f.s.syncer.drainWake != nil) == removalFails)
     }
 }
