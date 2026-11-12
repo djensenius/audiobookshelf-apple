@@ -5,34 +5,38 @@ import SwiftUI
 
 extension View {
     /// Adds the episode screen's More menu ("…") to the toolbar, with its confirmation and
-    /// failure alerts.
-    func episodeDetailMoreMenu(model: EpisodeDetailModel, serverURL: URL?) -> some View {
-        modifier(EpisodeDetailMoreMenu(model: model, serverURL: serverURL))
+    /// failure alerts and, with `playlists`, the add-to-playlist sheet.
+    func episodeDetailMoreMenu(
+        model: EpisodeDetailModel, serverURL: URL?, playlists: (any PlaylistEditingService)? = nil
+    ) -> some View {
+        modifier(EpisodeDetailMoreMenu(model: model, serverURL: serverURL, playlists: playlists))
     }
 }
 
 /// The episode screen's More menu (legacy `moreMenuItems`): Mark as finished or not finished,
-/// Discard progress and Share, as ``EpisodeDetailModel/menuActions(canEditPlaylists:canShare:isGone:)``
+/// Discard progress, Add to playlist and Share, as ``EpisodeDetailModel/menuActions(canEditPlaylists:canShare:isGone:)``
 /// offers them, through ``DetailMoreMenu``, which runs the progress actions for the episode with
 /// the book screen's titles, confirmations and failure messages and remembers a 404. Share links
-/// to the podcast in the web client, so it needs the server's address. Add to playlist stays
-/// hidden until the playlist editor exists.
+/// to the podcast in the web client, so it needs the server's address. Add to playlist opens
+/// ``AddToPlaylistSheet`` for the episode, so it needs the account's playlist writes (`playlists`).
 private struct EpisodeDetailMoreMenu: ViewModifier {
     let model: EpisodeDetailModel
     let serverURL: URL?
-
-    /// The playlist editor doesn't exist yet.
-    private static let canEditPlaylists = false
+    let playlists: (any PlaylistEditingService)?
+    @State private var addToPlaylist: AddToPlaylistModel?
 
     func body(content: Content) -> some View {
         let canShare = serverURL != nil
-        content.modifier(
-            DetailMoreMenu(model: model) { [model] isGone in
-                model.menuActions(canEditPlaylists: Self.canEditPlaylists, canShare: canShare, isGone: isGone)
-            } entry: { action in
-                entry(action)
-            }
-        )
+        let canEditPlaylists = playlists != nil
+        content
+            .modifier(
+                DetailMoreMenu(model: model) { [model] isGone in
+                    model.menuActions(canEditPlaylists: canEditPlaylists, canShare: canShare, isGone: isGone)
+                } entry: { action in
+                    entry(action)
+                }
+            )
+            .addToPlaylistSheet($addToPlaylist)
     }
 
     /// The episode's own entries; ``DetailMoreMenu`` shows the progress actions.
@@ -45,8 +49,14 @@ private struct EpisodeDetailMoreMenu: ViewModifier {
                 }
             }
         case .addToPlaylist:
-            // Not offered while `canEditPlaylists` is false (#93).
-            EmptyView()
+            Button {
+                guard let playlists, let libraryID = model.detail.item?.libraryId else { return }
+                addToPlaylist = AddToPlaylistModel(
+                    entries: [PlaylistEntryKey(itemID: model.itemID, episodeID: model.episodeID)],
+                    libraryID: libraryID, service: playlists)
+            } label: {
+                DetailMoreMenuLabel(action: action)
+            }
         case .markFinished, .markNotFinished, .discardProgress:
             // Shown by ``DetailMoreMenu``.
             EmptyView()
