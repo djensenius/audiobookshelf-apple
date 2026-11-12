@@ -1,9 +1,9 @@
 import ABSCore
-import ABSData
 import Foundation
 import Testing
 
 @testable import ABSAPI
+@testable import ABSData
 @testable import ABSPlayback
 
 /// A PATCH rejected for good stops being retried, and stops retaining its connection, until
@@ -68,6 +68,46 @@ struct ProgressRejectionTests {
             #expect(!ProgressSyncer.isPermanent(error))
         }
         #expect(!ProgressSyncer.isPermanent(CancellationError()))
+    }
+
+    /// A rejection whose cleanup can't be saved keeps its send in flight: the next drain saves
+    /// the cleanup without PATCHing the same values again, and a new edit is still sent, whether
+    /// it lands before that retry or after it.
+    @Test(arguments: [false, true])
+    func failedRejectionCleanupIsRetriedWithoutAnotherPatch(editBeforeRetry: Bool) async throws {
+        let s = try SyncHarness()
+        let started = Gate()
+        let response = Gate()
+        s.service.state.withLock {
+            $0.patchErrors = [.notFound]
+            $0.patchStarted = started
+            $0.patchGates = [response]
+        }
+        try await edit(s, 50)
+        let drain = Task { await s.syncer.drainPendingProgress() }
+        await started.wait()
+        await s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        response.open()
+        await drain.value
+        let failed = try #require(try await s.store.progress(for: s.h.key("a")))
+        #expect(failed.needsServerSync && failed.lastSyncError == nil)
+
+        if editBeforeRetry {
+            s.h.clock.advance(by: 1)
+            try await edit(s, 60)
+        }
+        await s.syncer.drainPendingProgress()
+        if !editBeforeRetry {
+            let cleaned = try #require(try await s.store.progress(for: s.h.key("a")))
+            #expect(!cleaned.needsServerSync && cleaned.lastSyncError == "rejected 404")
+            #expect(s.service.patches.map(\.update) == [SyncHarness.audio(50)])
+            s.h.clock.advance(by: 1)
+            try await edit(s, 60)
+            await s.syncer.drainPendingProgress()
+        }
+
+        #expect(s.service.patches.map(\.update) == [SyncHarness.audio(50), SyncHarness.audio(60)])
+        #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
     }
 
     /// An edit made while the rejected PATCH was in flight is still sent.

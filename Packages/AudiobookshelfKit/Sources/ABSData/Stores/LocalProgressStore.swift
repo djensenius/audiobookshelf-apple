@@ -514,11 +514,13 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// can't succeed. Its groups stop being dirty unless edited since ``beginSend(for:now:)``,
     /// so the row no longer keeps the connection retained; a later edit sends again. The
     /// baseline is unchanged, and `error` is kept in `lastSyncError`. Returns `false`, changing
-    /// nothing, when `patch` is not the row's send in flight; throws like ``failSend(_:error:)``.
+    /// nothing, when `patch` is not the row's send in flight. If the cleanup can't be saved, the
+    /// send stays in flight, so the row isn't PATCHed again with the same values, and this
+    /// throws: retry it.
     @discardableResult
     public func rejectSend(_ patch: ProgressPatch, error: String) throws -> Bool {
         guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
-        try settle(patch.key, sentFrom: flight.row) { row in
+        try settle(patch.key, sentFrom: flight.row, retainingOnFailure: true) { row in
             var state = ProgressSyncState(row)
             state.reject(patch.values)
             state.write(to: row)
@@ -740,10 +742,12 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// if that save, or the lookup telling the rows apart, fails, the send stays in flight (its
     /// groups still excluded from merges) until a retried outcome saves the shield. Once the lookup
     /// found the send's own row, or none, the send is settled even when the save fails: it stays
-    /// recorded in the row, so a later fetch still recognises its echo.
+    /// recorded in the row, so a later fetch still recognises its echo. With `retainingOnFailure`,
+    /// a failed save always leaves the send in flight, for an outcome that must not be lost.
     @discardableResult
     private func settle(
-        _ key: MediaKey, sentFrom rowID: PersistentIdentifier, applying outcome: (LocalMediaProgress) -> Void
+        _ key: MediaKey, sentFrom rowID: PersistentIdentifier, retainingOnFailure: Bool = false,
+        applying outcome: (LocalMediaProgress) -> Void
     ) throws -> Bool {
         var ownRowOrNone = false
         do {
@@ -765,7 +769,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             settle(key)
             return applied
         } catch {
-            if ownRowOrNone { settle(key) }
+            if ownRowOrNone, !retainingOnFailure { settle(key) }
             throw error
         }
     }
