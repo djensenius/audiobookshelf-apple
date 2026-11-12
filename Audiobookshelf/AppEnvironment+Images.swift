@@ -14,12 +14,24 @@ import Synchronization
 /// builder, removes it when the session ends, and deletes a server's covers once the server is
 /// removed. ``trimmer`` trims the memory cache on memory warnings (iOS) or memory pressure
 /// (macOS), and when the app enters the background on iOS.
+///
+/// Disk maintenance (#143) runs at `.background` priority, so it doesn't hold up the first
+/// frame: at launch it runs a full pass of the cover file store, and every time the app enters
+/// the background it runs another pass. The app registers no `BGTaskScheduler` tasks, so this
+/// doesn't add one: on iOS the background pass asks for a little background time instead. At
+/// most one maintenance run is in flight, and the store joins concurrent passes into one.
 @MainActor
 final class ImageServices {
     let pipeline: ImagePipeline
     let participant: ImageParticipant
     /// Called by the system's memory events, on whatever thread they arrive.
     nonisolated let trimmer: MemoryTrimmer
+    private let fileStore: CoverFileStore
+    /// The running disk maintenance, so another isn't started meanwhile.
+    private var maintenance: Task<Void, Never>?
+    #if os(iOS)
+        private var maintenanceTime = UIBackgroundTaskIdentifier.invalid
+    #endif
     private let network = NetworkMonitor()
     private let online = OnlineFlag()
     private var networkTask: Task<Void, Never>?
@@ -41,9 +53,11 @@ final class ImageServices {
     ) {
         let limits = Self.limits
         let online = self.online
+        let fileStore = CoverFileStore(directory: CoverFileStore.defaultDirectory(), limit: limits.diskBytes)
+        self.fileStore = fileStore
         let pipeline = ImagePipeline(
             limits: limits,
-            fileStore: CoverFileStore(directory: CoverFileStore.defaultDirectory(), limit: limits.diskBytes),
+            fileStore: fileStore,
             // TODO(#143): pass the downloads' `DownloadedCoverLookup`, so downloaded items' covers
             // load from their files.
             downloadedCovers: nil,
@@ -63,6 +77,7 @@ final class ImageServices {
         #elseif os(macOS)
             memoryPressure = Self.observeMemoryPressure(calling: trimmer)
         #endif
+        maintainDisk(inBackground: false)
     }
 
     isolated deinit {
@@ -79,6 +94,36 @@ final class ImageServices {
     func didEnterBackground() {
         #if os(iOS)
             trimmer.didEnterBackground()
+        #endif
+        maintainDisk(inBackground: true)
+    }
+
+    /// Runs a full pass of the cover file store at `.background` priority, unless a run is
+    /// already in flight.
+    private func maintainDisk(inBackground: Bool) {
+        guard maintenance == nil else { return }
+        #if os(iOS)
+            // Background time, so the pass can finish once the app is in the background; it
+            // is redone by the next launch or background entry if the system suspends it anyway.
+            if inBackground {
+                maintenanceTime = UIApplication.shared.beginBackgroundTask(withName: "Cover cache maintenance") {
+                    [weak self] in self?.endMaintenanceTime()
+                }
+            }
+        #endif
+        let fileStore = self.fileStore
+        maintenance = Task(priority: .background) { [weak self] in
+            await fileStore.fullPass()
+            self?.maintenance = nil
+            self?.endMaintenanceTime()
+        }
+    }
+
+    private func endMaintenanceTime() {
+        #if os(iOS)
+            guard maintenanceTime != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(maintenanceTime)
+            maintenanceTime = .invalid
         #endif
     }
 

@@ -477,6 +477,11 @@ static, unauthenticated remote images (none are planned).
     - **Caps:** 256 MiB on iPhone and iPad, 512 MiB on Mac (also in the cache
       sizes table).
     - **Full passes** run at launch and when the app enters the background.
+      The app registers no `BGTaskScheduler` tasks, so there is no
+      `BGProcessingTask`: the launch pass runs at `.background` priority, so
+      it doesn't hold up the first frame, and the background pass runs
+      under `beginBackgroundTask` on iOS. A run doesn't start while another
+      is in flight (#143).
       Each pass enumerates the folder and resets the size counter from what it
       finds, which also picks up files the OS purged. The folder is listed off
       the actor, so lookups and inserts aren't blocked meanwhile; files written
@@ -497,9 +502,14 @@ static, unauthenticated remote images (none are planned).
       another is running joins it instead of listing the folder again, so two
       listings never evict from the same snapshot. A pass evicts only when
       the total is over the cap.
-    - **Removing a server** doesn't wait for a running pass: it measures and
-      deletes the folder, and the pass drops that server's files from its
-      listing.
+    - **Removing a server** doesn't wait for a running pass. On the actor it
+      renames the folder to a hidden `.<id>.<uuid>.removing` folder, so new
+      writes start a fresh folder and lookups miss; it then measures and
+      deletes the moved folder off the actor, and the pass drops that
+      server's files from its listing. A pass that completes during the
+      deletion has already counted without them, so the deletion doesn't
+      subtract them again. A `.removing` folder left by an interrupted
+      removal isn't counted and is deleted by the next pass.
     - **Leases:** `CoverFileStore` is an actor. A lookup hit or an insert
       returns the file URL together with a lease (a per-file reference count)
       taken in the same actor call, so no eviction can run between the two.
@@ -511,11 +521,13 @@ static, unauthenticated remote images (none are planned).
       download), the decode treats it as a miss and refetches once. A second
       failure shows the placeholder.
   - **Logout:** removing a server deletes its folder.
-    - *Implementation deviation (#43):* `ImagePipeline.removeServer` cancels
-      the server's fetches and decodes, drops its memory entries, and makes
-      `CoverFileStore` refuse writes from fetches started before the
-      removal, but it deletes the folder without waiting for open leases.
-      Waiting for them is tracked in #143.
+    `ImagePipeline.removeServer` cancels the server's fetches and decodes,
+    drops its memory entries, and makes `CoverFileStore` refuse writes from
+    fetches started before the removal. The store then waits for the
+    server's leases, at most 5 seconds, before deleting the folder (#143).
+    Cancelling the work releases the leases almost at once; the bound covers
+    a decode that is slow to notice its cancellation. Deleting after the
+    bound is still safe, since an open file stays readable after its unlink.
 - **Rendering:** the pipeline returns `CGImage` plus scale. Each consumer wraps
   it:
   - SwiftUI: `Image(decorative:scale:)`;

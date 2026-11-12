@@ -135,9 +135,16 @@ public actor ImagePipeline {
 
     /// Forgets a removed server: its request builder, in-flight fetches and decodes (which are
     /// cancelled), memory entries and cached files. Fetches already running can't write to the
-    /// store afterwards, and new ones fail until a builder is set again.
-    // TODO(#143): wait for the server's file leases before deleting its folder.
+    /// store afterwards, and new ones fail until a builder is set again. The files are deleted
+    /// once the decodes reading them have finished, or after a few seconds
+    /// (``CoverFileStore/removeServer(_:)``).
     public func removeServer(_ serverID: UUID) async {
+        forget(serverID)
+        await fileStore.removeServer(serverID)
+    }
+
+    /// Everything but the files of ``removeServer(_:)``, before its first `await`.
+    private func forget(_ serverID: UUID) {
         builders[serverID] = nil
         removedServers.insert(serverID)
         // First, so the synchronous lookup stops returning the server's covers at once.
@@ -150,7 +157,6 @@ public actor ImagePipeline {
             flight.cancel()
             decodes[key] = nil
         }
-        await fileStore.removeServer(serverID)
     }
 
     /// The bytes in the memory LRU, and of every live image plus reservations.
