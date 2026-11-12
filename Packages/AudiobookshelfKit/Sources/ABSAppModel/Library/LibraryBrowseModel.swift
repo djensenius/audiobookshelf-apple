@@ -24,8 +24,10 @@ public struct LibraryBrowseQuery: Sendable, Hashable {
 /// ``preferences`` are always the stored ones repaired for the library's type
 /// (``LibraryViewPreferences/resolved(for:)``), with the ``pinnedFilter`` in place of the stored
 /// filter when one is pinned. Nothing is saved until the user changes something with
-/// ``update(_:)``, which saves the whole repaired value through `persist`; opening a library, or
-/// switching to a library of another type, never writes.
+/// ``update(_:)``, which hands `persist` the repaired value before and after the change, so only
+/// the changed fields are saved; opening a library, or switching to a library of another type,
+/// never writes. Another model's save for the same library arrives through
+/// ``applySaved(_:libraryID:)``, which takes it without saving.
 ///
 /// A pinned filter (for example a narrator's route) is shown and queried but never saved: the
 /// library keeps its stored filter. When the repair for the library's type would drop the pinned
@@ -37,8 +39,13 @@ public struct LibraryBrowseQuery: Sendable, Hashable {
 @MainActor
 @Observable
 public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
-    /// Saves a library's preferences after the user changed them.
-    public typealias Persist = @MainActor (_ libraryID: String, _ preferences: LibraryViewPreferences) -> Void
+    /// Saves a library's preferences after the user changed them from `previous`: only the fields
+    /// that differ are to be saved
+    /// (``LibraryStore/saveViewPreferences(_:changedFrom:libraryID:connectionKey:)``).
+    public typealias Persist =
+        @MainActor (
+            _ libraryID: String, _ previous: LibraryViewPreferences, _ preferences: LibraryViewPreferences
+        ) -> Void
 
     public private(set) var libraryID: String
     public private(set) var mediaType: MediaType
@@ -62,6 +69,8 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
     @ObservationIgnored private let persist: Persist?
     /// The stored preferences repaired for ``mediaType``: what ``update(_:)`` saves.
     @ObservationIgnored private var storedPreferences: LibraryViewPreferences
+    /// Set while `persist` runs, so ``applySaved(_:libraryID:)`` ignores the model's own save.
+    @ObservationIgnored private var isSaving = false
 
     public var items: [Item] { list.items }
     public var total: Int? { list.total }
@@ -117,9 +126,25 @@ public final class LibraryBrowseModel<Item: Identifiable & Sendable> {
         var changed = preferences
         change(&changed)
         if pinnedFilter != nil { changed.filter = storedPreferences.filter }
+        let previous = storedPreferences
         storedPreferences = changed.resolved(for: mediaType)
-        persist?(libraryID, storedPreferences)
+        isSaving = true
+        persist?(libraryID, previous, storedPreferences)
+        isSaving = false
         preferences = Self.pinning(pinnedFilter, to: storedPreferences)
+        return list.setQuery(browseQuery)
+    }
+
+    /// Takes the preferences another model saved for `libraryID` (another screen's sort or view
+    /// change), repaired for ``mediaType``, without saving them. The ``pinnedFilter`` stays. A save
+    /// for another library or the model's own is ignored. Reloads from the first page when the
+    /// query changes, like ``update(_:)``, and returns that load.
+    @discardableResult
+    public func applySaved(_ saved: LibraryViewPreferences, libraryID: String) -> Task<Void, Never>? {
+        guard libraryID == self.libraryID, !isSaving else { return nil }
+        storedPreferences = saved.resolved(for: mediaType)
+        let preferences = Self.pinning(pinnedFilter, to: storedPreferences)
+        if preferences != self.preferences { self.preferences = preferences }
         return list.setQuery(browseQuery)
     }
 

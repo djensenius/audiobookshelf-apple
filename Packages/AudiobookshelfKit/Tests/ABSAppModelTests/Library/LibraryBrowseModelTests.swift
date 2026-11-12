@@ -37,7 +37,7 @@ private struct Harness {
         })
         model = LibraryBrowseModel(
             client: service, libraryID: libraryID, mediaType: mediaType, stored: stored, pinnedFilter: pinnedFilter,
-            pageSize: pageSize, persist: { id, preferences in saved.value[id] = preferences },
+            pageSize: pageSize, persist: { id, _, preferences in saved.value[id] = preferences },
             map: { Slim(id: $0.id) })
     }
 }

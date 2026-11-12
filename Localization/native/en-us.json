@@ -22,6 +22,7 @@
   "HeaderBrowse": "Browse",
   "HeaderCustomHeaders": "Custom Headers",
   "HeaderLibraryFilter": "Filter",
+  "HeaderLibraryFilterRoute": "{0}: {1}",
   "HeaderLibrarySort": "Sort",
   "HeaderLogin": "Log In",
   "HeaderOpenLinkOnAnotherServer": "Open Link on Another Server?",
