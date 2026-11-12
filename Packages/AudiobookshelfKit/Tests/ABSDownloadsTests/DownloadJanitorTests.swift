@@ -1,6 +1,7 @@
 import ABSCore
 import Foundation
 import SwiftData
+import Synchronization
 import Testing
 
 @testable import ABSData
@@ -227,6 +228,60 @@ import Testing
         #expect(!connection.isDisconnected)
     }
 
+    /// An old empty folder of an item the snapshot doesn't know, whose download is enqueued
+    /// while the sweep reads the store, stays: the engine creates it, then moves a file in,
+    /// and the sweep reads the item again while it holds it. One nothing refers to goes.
+    @Test func keepsAnEmptyFolderOfADownloadEnqueuedDuringTheSweep() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book(id: "li_new")
+        let planned = try DownloadPlanner(locations: fixture.locations).plan(
+            item: item, episodeID: nil, connectionID: fixture.connectionID, existingCoverPath: nil)
+        let cover = try #require(planned.parts.first { $0.kind == .cover }).destinationRelativePath
+        let folder = DownloadJanitor.pathComponents(cover).dropLast().joined(separator: "/")
+        let unused = "\(fixture.connectionID.uuidString)/li_empty"
+        for path in [folder, unused] {
+            try FileManager.default.createDirectory(
+                at: fixture.locations.downloadsRoot.appending(path: path), withIntermediateDirectories: true)
+        }
+        try age(fixture)
+
+        let report = await janitor(fixture, manager: manager) { step in
+            if step == .readingLocalItems {
+                _ = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+            }
+        }.sweep()
+
+        #expect(report.outcome == .completed)
+        #expect(exists(folder, fixture))
+        #expect(report.removedFolders == [unused])
+    }
+
+    /// A stopped part is queued again, so a launch between the stop and the deletion would
+    /// restart a record still queued: the purge pauses it first.
+    @Test func pausesARecordBeforeStoppingItsTransfersWhenPurging() async throws {
+        let fixture = try await ManagerFixture()
+        let setup = try await Setup(fixture)
+        #expect([.queued, .downloading].contains(setup.record.state))
+        let store = fixture.store
+        let restarted = Mutex<[UUID]>([])
+        await fixture.engine.onStop { partIDs in
+            // What the engine's activation launches: the queued parts of startable records.
+            let records = (try? await store.allRecords()) ?? []
+            let startable = records.filter { $0.state == .queued || $0.state == .downloading }
+                .flatMap(\.parts).map(\.id).filter(partIDs.contains)
+            restarted.withLock { $0 += startable }
+        }
+        try deleteConnection(fixture.connectionID, fixture)
+
+        let report = await janitor(fixture).sweep()
+
+        #expect(report.removedRecords == [setup.record.id])
+        #expect(await fixture.engine.stopped.map(\.partIDs) == [setup.record.parts.map(\.id)])
+        #expect(restarted.withLock { $0 }.isEmpty)
+        #expect(try await fixture.store.allRecords().isEmpty)
+    }
+
     @Test func aSecondSweepWhileOneRunsIsSkipped() async throws {
         let fixture = try await ManagerFixture()
         let gate = StubGate()
@@ -323,6 +378,50 @@ import Testing
         #expect(exists(recent, fixture))
         let pendingFolder = pending.split(separator: "/").dropLast().joined(separator: "/")
         #expect(exists(pendingFolder, fixture))
+    }
+
+    // MARK: - Paths
+
+    /// A name starting with a combining mark: as Characters, the `/` before it and the mark are
+    /// one, which would hide the boundary.
+    @Test func splitsPathsOnScalars() {
+        let connection = UUID()
+        let path = "\(connection.uuidString)/li_1/\u{301}1.mp3"
+        #expect(
+            DownloadJanitor.itemKey(ofPath: path) == MediaKey(serverConnectionID: connection, libraryItemId: "li_1"))
+        #expect(DownloadJanitor.itemKey(ofFolder: "\(connection.uuidString)/\u{301}li") == nil)
+        #expect(DownloadJanitor.parentKey(of: path) == DownloadLayout.collisionKey("\(connection.uuidString)/li_1"))
+    }
+
+    /// A file named so is in its item's folder, so it is only removed while the item is held.
+    @Test func holdsTheItemOfAFileStartingWithACombiningMark() async throws {
+        let fixture = try await ManagerFixture()
+        let file = "\(fixture.connectionID.uuidString)/li_mark/\u{301}1.mp3"
+        try write(file, fixture)
+        try age(fixture)
+
+        let report = await janitor(fixture, failing: .readingItem).sweep()
+
+        #expect(report.outcome == .aborted(.readingItem))
+        #expect(report.removedFiles.isEmpty)
+        #expect(exists(file, fixture))
+    }
+
+    /// The folder of a referenced path whose name starts with a combining mark stays.
+    @Test func keepsTheFolderOfAReferencedPathStartingWithACombiningMark() async throws {
+        let fixture = try await ManagerFixture()
+        let folder = "\(fixture.connectionID.uuidString)/li_mark"
+        try FileManager.default.createDirectory(
+            at: fixture.locations.downloadsRoot.appending(path: folder), withIntermediateDirectories: true)
+        try age(fixture)
+
+        let removed = DownloadJanitor.removeEmptyFolders(
+            [DownloadJanitor.Entry(path: folder, modified: Self.old)], emptied: [],
+            keeping: [DownloadLayout.collisionKey("\(folder)/\u{301}1.mp3")],
+            before: Self.now.addingTimeInterval(-DownloadJanitor.recentInterval), locations: fixture.locations)
+
+        #expect(removed.isEmpty)
+        #expect(exists(folder, fixture))
     }
 
     // MARK: - Helpers

@@ -61,6 +61,14 @@ actor FakeDownloadEngine: DownloadEngineControlling {
 
     func stop(partIDs: [UUID], keepingResumeData: Bool) async {
         stopped.append(Stop(partIDs: partIDs, keepingResumeData: keepingResumeData))
+        await afterStop?(partIDs)
+    }
+
+    /// Runs after each stop is recorded, before it returns, as a launch racing it can.
+    private var afterStop: (@Sendable ([UUID]) async -> Void)?
+
+    func onStop(_ body: @escaping @Sendable ([UUID]) async -> Void) {
+        afterStop = body
     }
 
     /// Marks a record whose parts have all completed as being finalised, reading it now.
