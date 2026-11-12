@@ -283,12 +283,14 @@ struct AutoAdvanceTests {
         #expect(coordinator.error == nil)
     }
 
-    /// L3: B left the queue while the ended session's close was in flight: no `/play` for it.
+    /// #338: B left the queue while the ended session's close was in flight: no `/play` for it,
+    /// and A is selected again, unloaded at its end, rather than the removed B.
     @Test func itemRemovedDuringTheCloseWaitIsNotStarted() async {
         a.enqueue("B")
         await a.play("A")
         let gate = Gate()
         a.service.state.withLock { $0.closeGates["A-1"] = gate }
+        let before = a.fetches
         a.h.engine.finish()
         await yieldUntil { a.service.closes == ["A-1"] }
 
@@ -297,7 +299,12 @@ struct AutoAdvanceTests {
         await coordinator.waitForAutoAdvance()
 
         #expect(a.service.starts == ["A"])
+        #expect(a.fetches == before)
+        #expect(coordinator.mediaKey == a.key("A"))
         #expect(coordinator.phase == .unloaded)
+        #expect(coordinator.currentTime == 3600)
+        #expect(coordinator.error == nil)
+        #expect(a.h.events.events.last == .itemChanged(a.key("A")))
         #expect(a.activity.active == 0)
     }
 

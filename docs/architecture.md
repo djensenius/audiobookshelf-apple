@@ -129,8 +129,8 @@ Any user action (a play request too, even one the policy blocks), or a pause fro
 an `.ended` observer such as the sleep timer, cancels the advance before its start. Once the start has begun it is an ordinary
 play: a pause loads the next item paused, and a detach leaves it to finish. A
 blocked streaming decision keeps the item queued and never consents on the
-user's behalf. A queued item removed during the close wait gets no `/play` and
-is left unloaded (#338). The coordinator and the advancer hold each other weakly, so
+user's behalf. A queued item removed during the close wait gets no `/play`;
+the ended item is selected again, unloaded at its end (#338). The coordinator and the advancer hold each other weakly, so
 the owner must retain the advancer.
 
 App wiring (the advancer, `UIApplication.beginBackgroundTask`, progress and
