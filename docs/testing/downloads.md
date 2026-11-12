@@ -7,10 +7,11 @@ session with a stub `URLProtocol`, because background sessions don't support cus
 protocols. Run these checks on a real device (and once on the Simulator) before a
 release that changes downloads, the session identifier, or the app's scene setup.
 
-These checks need the app to create a `DownloadEngine` at launch and call `activate()`
-each time it comes to the foreground (the composition root, P4-02). The app already calls
-`DownloadEngine.deactivate()` when its scene goes to the background. Until an engine
-exists, the static `DownloadEngine.handleBackgroundEvents()` waits up to 10 seconds for
+`AppEnvironment` builds the download stack (`AppDownloads`) when it's created, and starts
+the manager and controller without a scene, so a CarPlay-only launch or a background
+relaunch has an engine. `DownloadsLifecycle` gets every scene phase from the app, in
+order: `.active` calls `activate()` and, when that succeeds, sweeps orphaned files;
+`.background` calls `deactivate()`. Until an engine exists, the static `DownloadEngine.handleBackgroundEvents()` waits up to 10 seconds for
 one, then returns; the events stay in `nsurlsessiond` for the next session. To pause or
 resume a download, the app calls `pause(recordID:)` or `resume(recordID:)`, which set the
 record's state before stopping or starting its parts. The engine only starts a part after
@@ -108,6 +109,27 @@ first, turn off **Settings > General > Background App Refresh** for the app, sta
 download, and go to the Home Screen. When you open the app again, the part continues. If
 the cancellation only reaches the app after it has come to the foreground and finished
 its restart pass, the part waits for the next time the app comes to the foreground.
+
+## (c) Sign-out, removal and a CarPlay-only launch
+
+Signing out, an expired session or removing a server pauses that connection's queued and
+running downloads, then deletes its resume data (ADR 0003). The paused downloads stay
+paused after signing back in.
+
+1. Start the 500 MB download, then sign out from the Account tab. Check that the
+   download shows as paused, `nsurlsessiond` cancels the task, and `ResumeData/` holds
+   nothing for it.
+2. Sign in again. The download stays paused; resume it and check that the part starts
+   from 0%.
+3. With two servers, start a download on the inactive one, then remove that server from
+   the server list. Its downloads stop and its resume data is deleted.
+4. Quit the app, connect to CarPlay with the phone locked, and start the app from the
+   CarPlay screen only. In Console.app, check that the engine is created (its session
+   is recreated and stored downloads are tracked) without a window scene. Then unlock
+   the phone and open the app: the first `.active` activates the engine once.
+5. Switch between the app and the Home Screen a few times during a download. Each time
+   the app comes back, the transfers resume and the clean-up runs; going to the
+   background never leaves the engine active.
 
 ## macOS
 

@@ -184,6 +184,8 @@ created by a window scene.
 - It is the composition root: it builds the API client, realtime client, SwiftData
   container, player, download manager, and the `ABSAppModel` state objects, and
   passes dependencies in through initializers. It contains no feature logic.
+- It also builds and launches the download stack (`AppEnvironment+Downloads.swift`), whose
+  `DownloadsLifecycle` is a session participant and gets every scene phase from the app.
 - Window scenes receive its objects through `.environment(_:)` in
   `AudiobookshelfApp`. The CarPlay scene delegate (created by UIKit, outside
   SwiftUI) reads `AppEnvironment.shared` directly.
