@@ -344,9 +344,11 @@ final class ManagerFixture: Sendable {
 
     /// Stores `item` (or its episode) as downloaded, as the engine does when a record completes.
     @discardableResult
-    func storeDownloaded(_ item: LibraryItem, episodeID: String? = nil) async throws -> LocalLibraryItemDTO {
+    func storeDownloaded(
+        _ item: LibraryItem, episodeID: String? = nil, connectionID: UUID? = nil
+    ) async throws -> LocalLibraryItemDTO {
         var record = try DownloadPlanner(locations: locations).plan(
-            item: item, episodeID: episodeID, connectionID: connectionID, existingCoverPath: nil)
+            item: item, episodeID: episodeID, connectionID: connectionID ?? self.connectionID, existingCoverPath: nil)
         for index in record.parts.indices {
             record.parts[index].state = .completed
             record.parts[index].bytesWritten = record.parts[index].expectedBytes

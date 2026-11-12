@@ -10,8 +10,10 @@ public struct SweepReport: Sendable, Equatable {
         case completed
         /// Nothing ran (see ``SkipReason``).
         case skipped(SkipReason)
-        /// A read failed during this step, so the sweep stopped there; what it removed before
-        /// that is listed.
+        /// A read or deletion failed during this step, so the sweep stopped there. A failure in
+        /// the first four steps (the snapshot) comes before anything is deleted; one at
+        /// ``Step/readingItem`` or ``Step/deletingOrphanedMedia`` comes after some removals,
+        /// which the report lists.
         case aborted(Step)
     }
 
@@ -23,7 +25,8 @@ public struct SweepReport: Sendable, Equatable {
         case alreadySweeping
     }
 
-    /// The reads a sweep makes, in order.
+    /// The reads (and deletions) that can stop a sweep, in order. The first four make the
+    /// snapshot every deletion is decided from.
     public enum Step: Sendable, Equatable {
         case listingFiles
         case readingRecords
@@ -68,20 +71,31 @@ public struct SweepReport: Sendable, Equatable {
 ///    every listed file in use is referred to by at least one of the reads;
 /// 2. removes listed files that no record part, local file or cover refers to. Files changed
 ///    within ``recentInterval`` stay: one a settling part moved in after its record was
-///    cancelled is removed by a later sweep. Files in an item's folder are removed while the
-///    ``DownloadManager`` holds the item, after reading its records and local item again, so an
-///    enqueue, cancel or deletion of it (which can hand a stored cover to another record)
-///    can't interleave;
-/// 3. removes empty folders that are older than ``recentInterval`` or that step 2 emptied: a
-///    folder the engine just created for a file it is about to move in stays;
+///    cancelled is removed by a later sweep. Any file in an item's folder
+///    (`<connection id>/<escaped item id>/…`, known to the snapshot or not) is removed while
+///    the ``DownloadManager`` holds the item, after reading its records and local item again
+///    and checking its date again, so a download of it enqueued meanwhile (whose file can
+///    replace one at the same path), or a cancel or deletion of it (which can hand a stored
+///    cover to another record) can't interleave. Any other file's date is checked again just
+///    before it is removed;
+/// 3. removes empty folders that step 2 emptied, or that are older than ``recentInterval``
+///    when listed and still are just before removal, but never one that holds a path a record
+///    or local item refers to: the engine creates a destination's folder, then moves the file
+///    in;
 /// 4. deletes `ResumeData/<part id>.bin` blobs whose part no record has (and that are older
 ///    than ``recentInterval``);
 /// 5. deletes the records, then the local items, of connections that no longer exist, with
 ///    their files, through the ``DownloadManager``;
-/// 6. calls `ServerConnectionStore.remove(id:)` again for each disconnected connection with no
-///    record or local item left, which deletes it unless something else still refers to it.
+/// 6. calls `ServerConnectionStore.removeIfDisconnected(id:disconnectedAt:)` for each
+///    disconnected connection with no record or local item left, which deletes it unless
+///    something else still refers to it or it was logged in to (or removed again) since it was
+///    read.
 ///
-/// When a read fails, the sweep stops and reports it: it never deletes on a partial view.
+/// When a read fails, the sweep stops and reports it (``SweepReport/Outcome/aborted(_:)``).
+/// A failure while taking the snapshot (listing the files, reading the records, local items
+/// or connections) comes before anything is deleted, so nothing is ever decided from a partial
+/// snapshot; a failure rereading an item (step 2) or deleting media of a removed connection
+/// (step 5) comes after the removals before it.
 /// It only runs against the App Group store (ADR 0003); any other store location (the
 /// fallback store of a process without the entitlement, or a test store) skips it, because
 /// that store doesn't refer to the app's downloads.
@@ -100,17 +114,18 @@ public actor DownloadJanitor {
     /// - Parameters:
     ///   - manager: the app's manager; its store, local items and locations are swept.
     ///   - connections: the store of server connections.
-    ///   - storeLocation: where the store was opened (`DataStack.resolvedLocation`); only
-    ///     `.appGroup` is swept.
+    ///   - dataStack: the stack the stores use; only a store opened in the App Group
+    ///     (`resolvedLocation == .appGroup`) is swept.
     ///   - now: the current time, for ``recentInterval``.
     public init(
         manager: DownloadManager,
         connections: ServerConnectionStore,
-        storeLocation: DataStack.Location,
+        dataStack: DataStack,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.init(
-            manager: manager, connections: connections, storeLocation: storeLocation, now: now, beforeRead: nil)
+            manager: manager, connections: connections, storeLocation: dataStack.resolvedLocation, now: now,
+            beforeRead: nil)
     }
 
     init(
@@ -160,19 +175,6 @@ public actor DownloadJanitor {
             referenced.formUnion(item.files.map { DownloadLayout.collisionKey($0.relativePath) })
             if let cover = item.coverRelativePath { referenced.insert(DownloadLayout.collisionKey(cover)) }
         }
-        // The folders of items the store knows, whose files are removed while the item is held.
-        var itemFolders: [String: MediaKey] = [:]
-        let itemKeys =
-            records.map { MediaKey(serverConnectionID: $0.key.serverConnectionID, libraryItemId: $0.key.libraryItemId) }
-            + items.map { MediaKey(serverConnectionID: $0.serverConnectionID, libraryItemId: $0.libraryItemId) }
-        for key in itemKeys {
-            guard
-                let folder = try? DownloadLayout(
-                    connectionID: key.serverConnectionID, libraryItemID: key.libraryItemId, locations: locations
-                ).folder
-            else { continue }
-            itemFolders[DownloadLayout.collisionKey(folder)] = key
-        }
         var unheld: [String] = []
         var byItem: [MediaKey: [String]] = [:]
         for file in listing.files where !referenced.contains(DownloadLayout.collisionKey(file.path)) {
@@ -180,20 +182,29 @@ public actor DownloadJanitor {
                 report.keptRecentFiles.append(file.path)
                 continue
             }
-            if let key = itemFolders[DownloadLayout.collisionKey(Self.itemFolder(of: file.path))] {
+            if let key = Self.itemKey(ofPath: file.path) {
                 byItem[key, default: []].append(file.path)
             } else {
                 unheld.append(file.path)
             }
         }
-        report.removedFiles += unheld.filter { Self.remove(try? locations.fileURL(forRelativePath: $0)) }
+        report.removedFiles += unheld.filter {
+            guard let url = try? locations.fileURL(forRelativePath: $0) else { return false }
+            // Checked again: the snapshot was read since the listing.
+            return Self.isModified(url, before: cutoff) && Self.remove(url)
+        }
         for (key, paths) in byItem.sorted(by: { $0.value[0] < $1.value[0] }) {
-            report.removedFiles += try await read(.readingItem) { try await self.manager.removeUnused(paths, of: key) }
+            let result = try await read(.readingItem) {
+                try await self.manager.removeUnused(paths, of: key, changedBefore: cutoff)
+            }
+            report.removedFiles += result.removed
+            referenced.formUnion(result.used)
         }
 
         // 3. Empty folders.
         report.removedFolders = Self.removeEmptyFolders(
-            listing.directories, emptied: report.removedFiles, before: cutoff, locations: locations)
+            listing.directories, emptied: report.removedFiles, keeping: referenced, before: cutoff,
+            locations: locations)
 
         // 4. Resume data of parts that are gone.
         let parts = Set(records.flatMap(\.parts).map(\.id))
@@ -220,7 +231,9 @@ public actor DownloadJanitor {
         let inUse = Set(records.map(\.key.serverConnectionID)).union(items.map(\.serverConnectionID))
         for connection in connections where connection.isDisconnected && !inUse.contains(connection.id) {
             do {
-                if try await self.connections.remove(id: connection.id) == .deleted {
+                if try await self.connections.removeIfDisconnected(
+                    id: connection.id, disconnectedAt: connection.disconnectedAt)
+                {
                     report.removedConnections.append(connection.id)
                 }
             } catch {
@@ -319,9 +332,24 @@ public actor DownloadJanitor {
         return entries
     }
 
-    /// `<connectionID>/<libraryItemID>` of a path in an item's folder.
-    private static func itemFolder(of path: String) -> String {
-        path.split(separator: "/", maxSplits: 2, omittingEmptySubsequences: false).prefix(2).joined(separator: "/")
+    /// The item whose folder (``DownloadLayout/folder``, `<connection id>/<escaped item id>`)
+    /// holds the file at `path`, whether the store knows the item or not; `nil` for a path
+    /// outside any item folder.
+    static func itemKey(ofPath path: String) -> MediaKey? {
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.count >= 3, let connectionID = UUID(uuidString: String(components[0])),
+            let itemID = components[1].removingPercentEncoding,
+            (try? DownloadLayout.escapedIdentifier(itemID)) == String(components[1])
+        else { return nil }
+        return MediaKey(serverConnectionID: connectionID, libraryItemId: itemID)
+    }
+
+    /// Whether the file or folder at `url` exists and was last changed before `cutoff`, read now.
+    static func isModified(_ url: URL, before cutoff: Date) -> Bool {
+        // A fresh URL, so no cached values are read.
+        let modified = try? URL(filePath: url.path(percentEncoded: false))
+            .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        return modified.map { $0 < cutoff } ?? false
     }
 
     /// Removes the file at `url`; whether it was removed (or already gone).
@@ -339,14 +367,22 @@ public actor DownloadJanitor {
         }
     }
 
-    /// Removes empty folders, deepest first, that changed before `cutoff` or held a file or
-    /// folder removed in this sweep. `rmdir` refuses a folder that isn't empty, so a file moved
-    /// in meanwhile is never removed with it.
+    /// Removes empty folders, deepest first, that held a file or folder removed in this sweep,
+    /// or that changed before `cutoff` both when listed and just before removal. A folder that
+    /// holds a path in `referenced` (collision keys) stays: the engine creates a destination's
+    /// folder before it moves the file in. `rmdir` refuses a folder that isn't empty, so a file
+    /// moved in meanwhile is never removed with it.
     private static func removeEmptyFolders(
-        _ directories: [Entry], emptied removed: [String], before cutoff: Date, locations: DownloadLocations
+        _ directories: [Entry], emptied removed: [String], keeping referenced: Set<String>, before cutoff: Date,
+        locations: DownloadLocations
     ) -> [String] {
         func parent(_ path: String) -> String {
             DownloadLayout.collisionKey(path.split(separator: "/").dropLast().joined(separator: "/"))
+        }
+        var holding: Set<String> = []
+        for path in referenced {
+            var folder = parent(path)
+            while !folder.isEmpty, holding.insert(folder).inserted { folder = parent(folder) }
         }
         var emptied = Set(removed.map(parent))
         var removedFolders: [String] = []
@@ -354,9 +390,12 @@ public actor DownloadJanitor {
             $0.path.split(separator: "/").count > $1.path.split(separator: "/").count
         }
         for directory in deepestFirst {
-            let isOld = directory.modified.map { $0 < cutoff } ?? false
-            guard isOld || emptied.contains(DownloadLayout.collisionKey(directory.path)),
+            let key = DownloadLayout.collisionKey(directory.path)
+            let wasEmptied = emptied.contains(key)
+            guard !holding.contains(key),
+                wasEmptied || directory.modified.map({ $0 < cutoff }) == true,
                 let url = try? locations.fileURL(forRelativePath: directory.path),
+                wasEmptied || isModified(url, before: cutoff),
                 rmdir(url.path(percentEncoded: false)) == 0
             else { continue }
             removedFolders.append(directory.path)
@@ -368,14 +407,21 @@ public actor DownloadJanitor {
 
 extension DownloadManager {
     /// Removes `paths`, files in the folder of the item of `key`, that no record of its
-    /// connection or its local item uses, read again while the item is held. Returns the paths
-    /// removed (or already gone).
-    func removeUnused(_ paths: [String], of key: MediaKey) async throws(DownloadManagerError) -> [String] {
-        try await holdingItem(key) { () async throws(DownloadManagerError) -> [String] in
+    /// connection or its local item uses, read again while the item is held, and that were
+    /// still last changed before `cutoff` just before removal.
+    ///
+    /// - Returns: the paths removed (or already gone), and the collision keys of the paths in
+    ///   use that were read.
+    func removeUnused(
+        _ paths: [String], of key: MediaKey, changedBefore cutoff: Date
+    ) async throws(DownloadManagerError) -> (removed: [String], used: Set<String>) {
+        try await holdingItem(key) { () async throws(DownloadManagerError) -> (removed: [String], used: Set<String>) in
             let used = Set(try await usedPaths(of: key).map(DownloadLayout.collisionKey))
             var removed: [String] = []
             for path in paths where !used.contains(DownloadLayout.collisionKey(path)) {
-                guard let url = try? locations.fileURL(forRelativePath: path) else { continue }
+                guard let url = try? locations.fileURL(forRelativePath: path),
+                    DownloadJanitor.isModified(url, before: cutoff)
+                else { continue }
                 do {
                     try FileManager.default.removeItem(at: url)
                     removed.append(path)
@@ -385,7 +431,7 @@ extension DownloadManager {
                     logError("Couldn't remove an orphaned download", error)
                 }
             }
-            return removed
+            return (removed, used)
         }
     }
 
