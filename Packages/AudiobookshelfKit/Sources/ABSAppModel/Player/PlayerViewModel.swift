@@ -78,6 +78,9 @@ public final class PlayerViewModel {
     /// The owners whose current gesture was rejected or cancelled: their further
     /// ``scrub(to:owner:)`` calls, from the same gesture, must not begin a scrub.
     @ObservationIgnored private var ineligibleScrubOwners: Set<ScrubOwner> = []
+    /// Counts item changes and closes, so a finished scrub can tell that its item went away even
+    /// if the same item is back by the time it seeks.
+    @ObservationIgnored private var itemGeneration = 0
 
     /// Identifies one scrubber (one view's gesture), so scrubbers in different windows can't move
     /// or end each other's scrub. Make one per scrubber and keep it for the view's lifetime.
@@ -90,6 +93,7 @@ public final class PlayerViewModel {
     /// The seek a finished scrub needs; see ``finishScrub(owner:)``.
     public struct ScrubSeek: Sendable, Hashable {
         fileprivate let key: MediaKey?
+        fileprivate let generation: Int
         /// The media time to seek to.
         public let time: Double
     }
@@ -324,12 +328,13 @@ public final class PlayerViewModel {
         let scrub = activeScrub
         if scrubState?.owner == owner { scrubState = nil }
         guard let scrub, scrub.owner == owner, scrub.moved else { return nil }
-        return ScrubSeek(key: scrub.key, time: scrub.time)
+        return ScrubSeek(key: scrub.key, generation: itemGeneration, time: scrub.time)
     }
 
-    /// Seeks to a finished scrub's position, unless the item changed since it finished.
+    /// Seeks to a finished scrub's position, unless the item changed or closed since it finished,
+    /// even if the same item has come back: seeking it would replace its resolved start position.
     public func commitScrub(_ seek: ScrubSeek) async {
-        guard seek.key == playback.mediaKey else { return }
+        guard seek.generation == itemGeneration, seek.key == playback.mediaKey else { return }
         await playback.seek(to: seek.time)
     }
 
@@ -354,6 +359,7 @@ public final class PlayerViewModel {
     /// item change (the item-change observer won't see one cleared here), so the rest of a drag, in
     /// any window, doesn't scrub an item loaded before it ends.
     public func close() {
+        itemGeneration += 1
         if let scrub = scrubState {
             scrubState = nil
             ineligibleScrubOwners.insert(scrub.owner)
@@ -414,6 +420,7 @@ public final class PlayerViewModel {
             // Safe for the same reason as in `trackDisplay()`.
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.itemGeneration += 1
                 if let scrub = self.scrubState {
                     self.scrubState = nil
                     self.ineligibleScrubOwners.insert(scrub.owner)

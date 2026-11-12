@@ -668,6 +668,32 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    @Test func aFinishedScrubDoesNotSeekTheSameItemLoadedAgain() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.scrub(to: 0.5, owner: owner)
+            let seek = try #require(model.finishScrub(owner: owner))
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            await model.commitScrub(seek)
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    @Test func aFinishedScrubDoesNotSeekAfterAClose() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.scrub(to: 0.5, owner: owner)
+            let seek = try #require(model.finishScrub(owner: owner))
+            model.close()
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            await model.commitScrub(seek)
+            #expect(!playback.calls.contains(.seek(200)))
+        }
+    }
+
     // MARK: Errors
 
     @Test(arguments: [
