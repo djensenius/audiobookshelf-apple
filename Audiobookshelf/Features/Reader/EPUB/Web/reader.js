@@ -16,12 +16,16 @@
   const MAX_ENTRIES = 10000
   const MAX_METADATA_BYTES = 8 * 1024 * 1024
   // How many characters swapping asset URLs for blob URLs may add to one section or style sheet;
-  // past it the resource is left unrewritten (a section) or dropped (a style sheet).
+  // past it the resource is left unrewritten (a section) or emptied (a style sheet).
   const MAX_REWRITE_GROWTH = 16 * 1024 * 1024
   // epub.js's locations take time and memory in proportion to the spine. A longer spine, or
   // generation running past the deadline, gets progress by section instead.
   const MAX_LOCATION_SECTIONS = 2000
   const LOCATIONS_TIMEOUT_MS = 5 * 60 * 1000
+  // Each location repeats its section's CFI base (with the spine item's id), so a long base, or
+  // more location text in all than this, also gets progress by section.
+  const MAX_LOCATION_BASE = 512
+  const MAX_LOCATIONS_CHARACTERS = 16 * 1024 * 1024
   // How long the table of contents may take once the book is open; it comes from the archive
   // already in memory, so only a missing navigation document takes this long.
   const NAVIGATION_TIMEOUT_MS = 10000
@@ -432,8 +436,9 @@
         return text.then(
           function (css) {
             const replaced = substituteOnce(css, this.relativeTo(absolute), replacements())
-            if (replaced === null) return undefined
-            const sheet = keep(URL.createObjectURL(new Blob([replaced], { type: 'text/css' })))
+            // Over the budget, an empty sheet: with none, `replacements()` would use the original.
+            const body = replaced === null ? '' : replaced
+            const sheet = keep(URL.createObjectURL(new Blob([body], { type: 'text/css' })))
             sheets.set(href, sheet)
             return sheet
           }.bind(this),
@@ -671,27 +676,46 @@
       state.coarse = true
       postCurrentLocation()
     }
-    if ((Number(opened.spine.length) || 0) > MAX_LOCATION_SECTIONS) return coarse()
-    // Tests shorten the deadline.
-    const timeout = Number(window.absReaderLocationsTimeoutMs) || LOCATIONS_TIMEOUT_MS
-    let timedOut = false
-    const deadline = setTimeout(function () {
-      timedOut = true
-      // Stops the sections still queued; the one in progress finishes.
-      const locations = opened.locations
+    const locations = opened.locations
+    // Every location repeats its section's CFI base, which holds the spine item's id.
+    const longBase = ((opened.spine && opened.spine.spineItems) || []).some(function (item) {
+      return String(item.cfiBase || '').length > MAX_LOCATION_BASE
+    })
+    if ((Number(opened.spine.length) || 0) > MAX_LOCATION_SECTIONS || longBase) return coarse()
+    let abandoned = false
+    let deadline
+    // Stops the sections still queued (the one in progress finishes) and keeps nothing.
+    const abandon = function () {
+      if (abandoned) return
+      abandoned = true
+      clearTimeout(deadline)
       if (locations && locations.q) locations.q.stop()
       if (isCurrent()) coarse()
-    }, timeout)
-    opened.locations
+    }
+    // Tests shorten the deadline and lower the output limit.
+    deadline = setTimeout(abandon, Number(window.absReaderLocationsTimeoutMs) || LOCATIONS_TIMEOUT_MS)
+    const limit = Number(window.absReaderLocationsMaxCharacters) || MAX_LOCATIONS_CHARACTERS
+    let size = 0
+    const parse = locations.parse
+    locations.parse = function () {
+      const parsed = abandoned ? [] : parse.apply(this, arguments)
+      parsed.forEach(function (cfi) {
+        size += String(cfi).length
+      })
+      if (size <= limit) return parsed
+      abandon()
+      return []
+    }
+    locations
       .generate()
       .then(function () {
-        if (timedOut || !isCurrent()) return
-        post({ type: 'locationsReady', locations: opened.locations.save() })
+        if (abandoned || !isCurrent()) return
+        post({ type: 'locationsReady', locations: locations.save() })
         // The percentage was 0 until the locations existed.
         postCurrentLocation()
       })
       .catch(function (error) {
-        if (!timedOut && isCurrent()) postError('locations', error)
+        if (!abandoned && isCurrent()) postError('locations', error)
       })
       .finally(function () {
         clearTimeout(deadline)

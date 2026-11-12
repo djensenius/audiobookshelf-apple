@@ -119,18 +119,20 @@ private final class ReaderPage {
     /// given, or never finish displaying while `window.fakeOptions.displayHangs`; whose books never
     /// open while `window.fakeOptions.openedHangs`; and whose table of contents is `toc`, from a
     /// navigation document at `navPath`, but never loads unless `navigation`; whose spine is
-    /// `spineLength` long; and whose locations never finish. Its starting rendition takes the spread `true`, as
+    /// `spineLength` long, with CFI bases `cfiBase` characters long; and whose locations never finish,
+    /// once one section's are parsed as `locationCharacters` characters, if given. Its starting rendition takes the spread `true`, as
     /// epub.js's does for a book whose metadata says `both`. The latest book and rendition are
     /// `window.fakeBook` and `window.fakeRendition`; the sections it shows, `window.fakeContents`.
     func fakeEPUBJS(
         displayError: String? = nil, displayHangs: Bool = false, openedHangs: Bool = false, navigation: Bool = true,
         toc: [[String: Any]] = [], navPath: String? = nil, packageDirectory: String = "/", failTarget: String = "",
-        spineLength: Int = 0
+        spineLength: Int = 0, cfiBase: Int = 0, locationCharacters: Int = 0
     ) async throws {
         let options = try JSONSerialization.data(withJSONObject: [
             "displayError": displayError ?? "", "displayHangs": displayHangs, "openedHangs": openedHangs,
             "navigation": navigation, "toc": toc, "navPath": navPath ?? "", "packageDirectory": packageDirectory,
-            "failTarget": failTarget, "spineLength": spineLength,
+            "failTarget": failTarget, "spineLength": spineLength, "cfiBase": cfiBase,
+            "locationCharacters": locationCharacters,
         ])
         _ = try await controller.webView.evaluateJavaScript(
             "window.fakeOptions = \(String(decoding: options, as: UTF8.self));\n\(Self.fakeEPUBJS)")
@@ -207,13 +209,19 @@ private final class ReaderPage {
             loaded: { navigation: options.navigation ? Promise.resolve({ toc: options.toc }) : never },
             spine: {
               length: options.spineLength,
+              spineItems: [{ cfiBase: 'x'.repeat(options.cfiBase) }],
               get: function () { return null },
               hooks: { content: { register: function (hook) { window.fakeSpineHook = hook } } }
             },
             locations: {
               load: function (locations) { window.fakeLoadedLocations = locations },
               length: function () { return window.fakeLoadedLocations ? 1 : 0 },
-              generate: function () { window.fakeGenerated = true; return never },
+              parse: function () { return ['c'.repeat(options.locationCharacters)] },
+              generate: function () {
+                window.fakeGenerated = true
+                if (options.locationCharacters) window.fakeParsed = this.parse()
+                return never
+              },
               q: { stop: function () { window.fakeStopped = true } },
               save: function () { return '' }
             },
@@ -822,7 +830,8 @@ private final class ReaderPage {
 
     /// How the real epub.js, once the book opens, rewrites `text` as a style sheet and as a
     /// section, for a book listing the assets `listed` and containing only `present`, within a
-    /// rewrite `budget` (characters) if given. A dropped style sheet reads as empty.
+    /// rewrite `budget` (characters) if given; then the style sheet a section linking to it gets.
+    /// A missing style sheet reads as empty.
     private func rewritten(
         _ text: String, listed: [String], present: [String], budget: Int = 0
     ) async throws -> [String] {
@@ -855,7 +864,11 @@ private final class ReaderPage {
             await window.testBook.opened
             const resources = window.testBook.resources
             const css = resources.replacementUrls[resources.urls.indexOf('style.css')]
-            return [css ? await window.testBlobs[css].text() : '', resources.substitute(text, '/OEBPS/c1.xhtml')]
+            const linked = resources.substitute('style.css', '/OEBPS/c1.xhtml')
+            return [
+              css ? await window.testBlobs[css].text() : '', resources.substitute(text, '/OEBPS/c1.xhtml'),
+              window.testBlobs[linked] ? await window.testBlobs[linked].text() : linked
+            ]
             """, arguments: ["text": text], contentWorld: .page)
         return try #require(texts as? [String])
     }
@@ -866,7 +879,7 @@ private final class ReaderPage {
         let names = ["a", "b", "c", "d"]
         let texts = try await rewritten("a b c d", listed: names, present: names)
 
-        #expect(texts.map { $0.components(separatedBy: "blob:").count - 1 } == [4, 4])
+        #expect(texts.map { $0.components(separatedBy: "blob:").count - 1 } == [4, 4, 4])
     }
 
     /// An asset missing from the archive stays unresolved without shifting the others onto the
@@ -875,16 +888,16 @@ private final class ReaderPage {
         let texts = try await rewritten("a.png b.png", listed: ["a.png", "b.png"], present: ["b.png"])
 
         let blob = try Regex("blob:[^ ]+")
-        #expect(texts.map { $0.replacing(blob, with: "BLOB") } == ["a.png BLOB", "a.png BLOB"])
+        #expect(texts.map { $0.replacing(blob, with: "BLOB") } == ["a.png BLOB", "a.png BLOB", "a.png BLOB"])
     }
 
-    /// A style sheet or section whose rewrite would grow past the budget is dropped (a style sheet)
-    /// or left as it was (a section), rather than ballooning.
+    /// A style sheet or section whose rewrite would grow past the budget is emptied (a style sheet,
+    /// so sections linking to it get the empty one, not the original) or left as it was (a section).
     @Test(.timeLimit(.minutes(1))) func aRewriteOverTheBudgetIsSkipped() async throws {
         let text = Array(repeating: "a.png", count: 100).joined(separator: " ")
         let texts = try await rewritten(text, listed: ["a.png"], present: ["a.png"], budget: 1000)
 
-        #expect(texts == ["", text])
+        #expect(texts == ["", text, ""])
     }
 
     /// A relocation is posted whenever any of its fields changes, not only its start.
@@ -942,6 +955,33 @@ private final class ReaderPage {
             try await Task.sleep(for: .milliseconds(20))
         }
 
+        #expect(try await progress(on: page, endingInSection: 1) == 0.375)
+        #expect(page.last("locationsReady") == nil)
+    }
+
+    /// A spine item whose CFI base (with its id) is past the limit gets no locations: every
+    /// location would repeat it.
+    @Test(.timeLimit(.minutes(1))) func aLongCFIBaseGetsProgressBySection() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(spineLength: 4, cfiBase: 513)
+
+        try await page.open("tiny")
+
+        #expect(try await page.evaluate("window.fakeGenerated === undefined") == "true")
+        #expect(try await progress(on: page, endingInSection: 1) == 0.375)
+    }
+
+    /// Location text past the limit stops generation and is dropped; progress goes by section, and
+    /// nothing is posted to cache.
+    @Test(.timeLimit(.minutes(1))) func locationsPastTheOutputLimitFallBackToProgressBySection() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(spineLength: 4, locationCharacters: 1001)
+        _ = try await page.evaluate("window.absReaderLocationsMaxCharacters = 1000")
+
+        try await page.open("tiny")
+
+        #expect(try await page.evaluate("window.fakeStopped") == "true")
+        #expect(try await page.evaluate("window.fakeParsed") == "[]")
         #expect(try await progress(on: page, endingInSection: 1) == 0.375)
         #expect(page.last("locationsReady") == nil)
     }
