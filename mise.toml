@@ -28,12 +28,12 @@ run = "scripts/lint-nowplaying.sh"
 [tasks."lint:swift"]
 description = "Lint Swift sources with swift format"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
-run = "swift format lint --strict --recursive --parallel Audiobookshelf AudiobookshelfShared AudiobookshelfTests AudiobookshelfWidgets Packages Tools"
+run = "swift format lint --strict --recursive --parallel Audiobookshelf AudiobookshelfShared AudiobookshelfTests AudiobookshelfUITests AudiobookshelfWidgets Packages Tools"
 
 [tasks.format]
 description = "Format Swift sources in place with swift format"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
-run = "swift format format --in-place --recursive --parallel Audiobookshelf AudiobookshelfShared AudiobookshelfTests AudiobookshelfWidgets Packages Tools"
+run = "swift format format --in-place --recursive --parallel Audiobookshelf AudiobookshelfShared AudiobookshelfTests AudiobookshelfUITests AudiobookshelfWidgets Packages Tools"
 
 [tasks."xcproj:check"]
 description = "Verify Audiobookshelf.xcodeproj/project.xcproj is in canonical form"
@@ -124,7 +124,8 @@ env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xco
 # Override ABS_MACOS_ENTITLEMENTS and ABS_WIDGETS_MACOS_ENTITLEMENTS (each read only by its
 # target), not CODE_SIGN_ENTITLEMENTS, which would also apply to SwiftPM resource-bundle targets
 # and fail to resolve there.
-run = "xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'platform=macOS' -derivedDataPath .build/DerivedData CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ABS_MACOS_ENTITLEMENTS=Audiobookshelf/Audiobookshelf-AdHoc.entitlements ABS_WIDGETS_MACOS_ENTITLEMENTS=AudiobookshelfWidgets/AudiobookshelfWidgets-AdHoc.entitlements"
+# UI tests run separately, with `test:ui`.
+run = "xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination 'platform=macOS' -derivedDataPath .build/DerivedData -skip-testing:AudiobookshelfUITests CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ABS_MACOS_ENTITLEMENTS=Audiobookshelf/Audiobookshelf-AdHoc.entitlements ABS_WIDGETS_MACOS_ENTITLEMENTS=AudiobookshelfWidgets/AudiobookshelfWidgets-AdHoc.entitlements"
 
 [tasks."test:ios"]
 description = "Run app tests on the iPhone Duo simulator"
@@ -140,7 +141,35 @@ if [[ -z "$udid" ]]; then
   echo "error: no available iPhone Duo simulator; create one in Xcode or set IOS_SIMULATOR_ID" >&2
   exit 1
 fi
-xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination "platform=iOS Simulator,id=$udid" -derivedDataPath .build/DerivedData CODE_SIGNING_ALLOWED=NO
+xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destination "platform=iOS Simulator,id=$udid" -derivedDataPath .build/DerivedData -skip-testing:AudiobookshelfUITests CODE_SIGNING_ALLOWED=NO
+"""
+
+[tasks."test:ui"]
+description = "Run the UI tests against the fixture server on macOS (ABS_UI_PLATFORM=ios for the iPhone Duo simulator)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+# The app launches with -ABSFixtures, so no server is needed (docs/testing/ui-tests.md). macOS
+# signs ad hoc as test:app does; iOS resolves a simulator as test:ios does.
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+common=(-project Audiobookshelf.xcodeproj -scheme Audiobookshelf -derivedDataPath .build/DerivedData -only-testing:AudiobookshelfUITests)
+case "${ABS_UI_PLATFORM:-macos}" in
+  macos)
+    xcodebuild test "${common[@]}" -destination 'platform=macOS' CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ABS_MACOS_ENTITLEMENTS=Audiobookshelf/Audiobookshelf-AdHoc.entitlements ABS_WIDGETS_MACOS_ENTITLEMENTS=AudiobookshelfWidgets/AudiobookshelfWidgets-AdHoc.entitlements "$@"
+    ;;
+  ios)
+    udid="${IOS_SIMULATOR_ID:-$(xcrun simctl list devices available | grep -E '^ +iPhone Duo [(]' | tail -n 1 | grep -oE '[0-9A-F-]{36}' || true)}"
+    if [[ -z "$udid" ]]; then
+      echo "error: no available iPhone Duo simulator; create one in Xcode or set IOS_SIMULATOR_ID" >&2
+      exit 1
+    fi
+    xcodebuild test "${common[@]}" -destination "platform=iOS Simulator,id=$udid" CODE_SIGNING_ALLOWED=NO "$@"
+    ;;
+  *)
+    echo "error: ABS_UI_PLATFORM must be macos or ios" >&2
+    exit 1
+    ;;
+esac
 """
 
 [tasks."test:tools"]

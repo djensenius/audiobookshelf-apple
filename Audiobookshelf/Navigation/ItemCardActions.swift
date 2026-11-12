@@ -18,9 +18,12 @@ enum ItemCardActions {
         return .item(id: item.itemID)
     }
 
-    /// The actions a card offers: Play only while there is a player to call; no sharing or playlists yet.
-    static func actionContext(canPlay: Bool) -> ItemActionContext {
-        ItemActionContext(canEditPlaylists: false, canPlay: canPlay, canShare: false)
+    /// The actions a card offers: Play only while there is a player to call, Open in New Window only where the
+    /// device has windows (``OpenInNewWindow``); no sharing or playlists yet.
+    static func actionContext(canPlay: Bool, canOpenInNewWindow: Bool = false) -> ItemActionContext {
+        ItemActionContext(
+            canEditPlaylists: false, canPlay: canPlay, canShare: false, canOpenInNewWindow: canOpenInNewWindow
+        )
     }
 
     /// Performs a context-menu action on `item`: Play through `play`, the progress actions through `actions`.
@@ -40,7 +43,7 @@ enum ItemCardActions {
             case .markFinished: try await actions.markFinished(target)
             case .markNotFinished: try await actions.markNotFinished(target)
             case .hideFromContinueListening: try await actions.hideFromContinueListening(target)
-            case .addToPlaylist, .share, .openDetails: return nil
+            case .addToPlaylist, .share, .openDetails, .openInNewWindow: return nil
             }
             return nil
         } catch is CancellationError {
@@ -57,7 +60,7 @@ enum ItemCardActions {
         case .markFinished: "ToastItemMarkedAsFinishedFailed"
         case .markNotFinished: "ToastItemMarkedAsNotFinishedFailed"
         case .hideFromContinueListening: "MessageHideFromContinueListeningFailed"
-        case .addToPlaylist, .share, .openDetails: nil
+        case .addToPlaylist, .share, .openDetails, .openInNewWindow: nil
         }
     }
 }

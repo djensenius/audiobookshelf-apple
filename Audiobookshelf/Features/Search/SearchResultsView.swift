@@ -27,6 +27,7 @@ struct SearchResultsView: View {
                 Section {
                     ForEach(section.rows) { row in
                         SearchResultRowView(row: row, kind: section.kind) { open(row.route) }
+                            .openInNewWindowMenu(row.route)
                     }
                 } header: {
                     Text(verbatim: L10n.string(SearchPresentation.titleKey(of: section.kind)))
@@ -69,6 +70,7 @@ struct SearchResultRowView: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        .itemHover()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: SearchPresentation.accessibilityLabel(of: row, in: kind, locale: locale)))
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
