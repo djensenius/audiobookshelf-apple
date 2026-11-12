@@ -37,7 +37,9 @@ struct EpisodeDetailView: View {
                 LoadingView()
             }
         }
-        .task(id: key) {
+        // With the store's online revision too: a reconnect that keeps the offline session's
+        // client leaves the key unchanged, and must still retry a failed load.
+        .task(id: DetailLoadTrigger(key: key, onlineRevision: store?.onlineRevision)) {
             guard let key, let store else {
                 host = nil
                 return

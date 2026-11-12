@@ -141,6 +141,29 @@ private struct Harness {
         }
     }
 
+    /// Offline at start with a client (`AccountManager.goOffline` keeps it): ``connectedKey`` is
+    /// the same before and after the reconnect, so the online revision is what tells failed
+    /// loads to retry. Going offline again doesn't bump it.
+    @Test func offlineStartWithAClientThenReconnectBumpsTheOnlineRevision() async throws {
+        try await withLibrarySettings { settings in
+            let harness = Harness(settings: settings)
+            let client = try makeClient()
+            let offline = harness.context(client: client, isOffline: true)
+            await harness.participant.sessionDidStart(offline)
+            let key = harness.store.connectedKey
+            let revision = harness.store.onlineRevision
+            #expect(key == keyA)
+
+            await harness.participant.sessionDidReconnect(harness.context(client: client))
+            #expect(harness.store.connectedKey == key)
+            #expect(harness.store.onlineRevision > revision)
+
+            let online = harness.store.onlineRevision
+            await harness.participant.sessionDidReconnect(offline)
+            #expect(harness.store.onlineRevision == online)
+        }
+    }
+
     /// A transient failure (timeout, 5xx) is retried after the backoff and still seeds.
     @Test func transientSeedFailureIsRetried() async throws {
         try await withLibrarySettings { settings in

@@ -42,6 +42,11 @@ public final class LibraryStore {
     public private(set) var error: (any Error)?
     /// The server's default library for the user (`userDefaultLibraryId` from login).
     public private(set) var defaultLibraryID: String?
+    /// Bumped each time a client is attached online (a start or a reconnect), so a load that
+    /// failed offline can retry. An offline session can keep its client, and then a reconnect
+    /// leaves ``connectedKey`` unchanged. Add it to a load's trigger, not to a model's identity:
+    /// the account's models stay.
+    public private(set) var onlineRevision = 0
 
     /// The account's server progress; cleared with the store.
     public let progress = ProgressCache()
@@ -82,9 +87,11 @@ public final class LibraryStore {
     /// ``connect(client:connectionKey:defaultLibraryID:)`` without the refresh, for callers that
     /// must return promptly and refresh in a task they own (the session's library participant).
     /// A `nil` client (offline without one) serves the account's settings, such as
-    /// ``lastLibraryID``, until a later attach brings one.
+    /// ``lastLibraryID``, until a later attach brings one. Attaching a client while not
+    /// `isOffline` bumps ``onlineRevision``.
     public func attach(
-        client: (any LibraryService)?, connectionKey: LibraryConnectionKey, defaultLibraryID: String? = nil
+        client: (any LibraryService)?, connectionKey: LibraryConnectionKey, defaultLibraryID: String? = nil,
+        isOffline: Bool = false
     ) {
         if connectionKey != self.connectionKey {
             clear()
@@ -94,6 +101,7 @@ public final class LibraryStore {
         // Reconnecting the same account (for example with a new client) without a default keeps
         // the one from login; a new account was cleared above.
         if let defaultLibraryID { self.defaultLibraryID = defaultLibraryID }
+        if client != nil, !isOffline { onlineRevision += 1 }
     }
 
     /// Reloads the libraries list. Loaded details take the refreshed libraries (for example a

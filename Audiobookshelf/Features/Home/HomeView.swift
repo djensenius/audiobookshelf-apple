@@ -41,6 +41,7 @@ private struct HomeModelIdentity: Hashable {
 private struct HomeLoadTrigger: Hashable {
     let libraryID: String?
     let connection: LibraryConnectionKey?
+    let onlineRevision: Int
 }
 
 /// Home while signed in: owns the ``HomeModel``, loads the router's library, reloads shelves
@@ -81,9 +82,13 @@ private struct HomeScreen: View {
         // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
         .environment(\.itemProgressReader, progressReader)
         .refreshable { await refresh() }
-        // With the client too: a reconnect that attaches one, after an offline start without
-        // one, loads again even when the library is unchanged.
-        .task(id: HomeLoadTrigger(libraryID: libraryID, connection: store.connectedKey)) {
+        // With the client and the online revision too: a reconnect, whether it attaches a client
+        // after an offline start without one or keeps the offline session's, loads again even
+        // when the library is unchanged.
+        .task(
+            id: HomeLoadTrigger(
+                libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision)
+        ) {
             model.libraryID = libraryID
             await update()
         }

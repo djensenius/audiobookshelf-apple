@@ -17,7 +17,8 @@ import Foundation
 ///   participant's generation and the token, not only by cancellation. An offline session or
 ///   one without a client doesn't seed; its reconnect does.
 /// - A reconnect attaches the new client from its context, keeping the account's data, and
-///   refreshes again.
+///   refreshes again. Attaching online bumps ``LibraryStore/onlineRevision``, so loads that
+///   failed offline retry even when the offline session kept its client.
 /// - End cancels the refresh and clears the store synchronously, so the clear always runs,
 ///   even once the teardown's deadline passed.
 ///
@@ -152,7 +153,8 @@ public final class LibraryParticipant: SessionSeeding {
     private func attach(_ context: SessionContext) {
         let key = LibraryConnectionKey(connectionID: context.identity.connectionID, userID: context.identity.userID)
         store.attach(
-            client: context.client.map(service), connectionKey: key, defaultLibraryID: defaultLibraryID())
+            client: context.client.map(service), connectionKey: key, defaultLibraryID: defaultLibraryID(),
+            isOffline: context.isOffline)
         refreshTask?.cancel()
         refreshTask = nil
         guard context.client != nil, !context.isOffline else { return }

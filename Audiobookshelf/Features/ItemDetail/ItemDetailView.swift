@@ -39,7 +39,9 @@ struct ItemDetailView: View {
                 LoadingView()
             }
         }
-        .task(id: key) {
+        // With the store's online revision too: a reconnect that keeps the offline session's
+        // client leaves the key unchanged, and must still retry a failed load.
+        .task(id: DetailLoadTrigger(key: key, onlineRevision: store?.onlineRevision)) {
             guard let key, let store else {
                 host = nil
                 return
@@ -62,6 +64,13 @@ struct ItemDetailView: View {
             await host?.model.loadIfNeeded()
         }
     }
+}
+
+/// When a detail screen loads: its model's key, and the store's
+/// ``LibraryStore/onlineRevision``, which isn't part of the model's identity.
+struct DetailLoadTrigger<Key: Hashable>: Hashable {
+    let key: Key?
+    let onlineRevision: Int?
 }
 
 /// The model for one item and account.
