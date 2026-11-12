@@ -10,11 +10,13 @@ import Observation
 /// passes it in. The last-used library per server and user is read from and saved to
 /// `AppSettings`.
 ///
-/// The store doesn't watch the signed-in account itself. The app shell wires it up:
-/// - when `AccountManager.activeConnection` becomes a connection, call
-///   ``connect(client:connectionKey:defaultLibraryID:)`` with that connection's `APIClient`,
-///   `LibraryConnectionKey(connectionID:userID:)` and the login's `userDefaultLibraryId`;
-/// - when it becomes `nil` (logout), call ``clear()``.
+/// The store doesn't watch the signed-in account itself. ``LibraryParticipant`` wires it to
+/// the session lifecycle:
+/// - when a session starts or reconnects, it calls ``attach(client:connectionKey:defaultLibraryID:)``
+///   with the session's `APIClient`, `LibraryConnectionKey(connectionID:userID:)` and the
+///   login's `userDefaultLibraryId`, then ``refresh()`` in a task it owns
+///   (``connect(client:connectionKey:defaultLibraryID:)`` does both in one call);
+/// - when the session ends (logout or switch), it calls ``clear()``.
 ///
 /// Connecting a different account clears everything first, including ``progress``, and
 /// responses to requests made for an earlier account are dropped. Per-library models

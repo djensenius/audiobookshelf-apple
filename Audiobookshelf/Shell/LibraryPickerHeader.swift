@@ -29,14 +29,17 @@ struct LibraryPickerToolbar: ToolbarContent {
 }
 
 /// A menu that switches the scene's library through ``SceneLibrarySelection``, saving it as the
-/// account's last library. Shows `placeholder` until the store has libraries.
+/// account's last library. Shows `placeholder` until the store has libraries for the router's
+/// account (during a switch the store can already serve the next one).
 private struct LibraryPicker<Placeholder: View>: View {
     @ViewBuilder let placeholder: Placeholder
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
 
     var body: some View {
-        if let store, let router, !store.libraries.isEmpty {
+        if let store, let router, SceneLibrarySelection.isServing(router: router, store: store),
+            !store.libraries.isEmpty
+        {
             let current = router.libraryID.flatMap { id in store.libraries.first { $0.id == id } }
             Menu {
                 Picker(

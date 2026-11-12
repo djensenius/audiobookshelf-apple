@@ -9,6 +9,7 @@ import Foundation
 ///   the libraries have loaded it's unchecked, and kept with every section of its kind.
 /// - Once ``LibraryStore/hasLoaded`` is set the library is checked again: one that no longer
 ///   exists falls back to the initial library, and one that does gets its kind and sections.
+///   Replacing an unchecked guess keeps the paths, such as a deep link's, opened before then.
 /// - A deep link's ``Router/pendingLibraryID`` is opened once loaded, or dropped when the user
 ///   has no such library.
 /// - Only a user's pick is saved as the account's last library.
@@ -40,7 +41,7 @@ public enum SceneLibrarySelection {
 
     /// Applies the store's libraries to the router; see ``SceneLibrarySelection``.
     public static func reconcile(_ router: Router, store: LibraryStore) {
-        guard serves(router, store) else { return }
+        guard isServing(router: router, store: store) else { return }
         guard store.hasLoaded else {
             // Unchecked until the libraries load: keep every section of the library's kind.
             if router.libraryID == nil, let initial = store.initialLibraryID {
@@ -60,13 +61,30 @@ public enum SceneLibrarySelection {
         } else if let initial = store.initialLibraryID,
             let library = store.libraries.first(where: { $0.id == initial })
         {
-            show(library, in: router)
+            if router.libraryKind == nil {
+                // The gone library was only an unchecked guess (no kind yet), so the paths
+                // weren't opened in it, for example a deep link before the libraries loaded.
+                // Replace it without resetting them.
+                adopt(library, in: router)
+            } else {
+                show(library, in: router)
+            }
         }
+    }
+
+    /// Whether `store` serves the account `router` belongs to. During an account switch a
+    /// scene's router can still belong to the old account while the store already serves the
+    /// new one; nothing of the store should be shown then.
+    public static func isServing(router: Router, store: LibraryStore) -> Bool {
+        guard let key = store.connectionKey else { return false }
+        return key.serverID == router.serverID && key.userID == router.userID
     }
 
     /// The user picked `libraryID`: shows it and saves it as the account's last library.
     public static func select(_ libraryID: String, router: Router, store: LibraryStore) {
-        guard serves(router, store), let library = store.libraries.first(where: { $0.id == libraryID }) else {
+        guard isServing(router: router, store: store),
+            let library = store.libraries.first(where: { $0.id == libraryID })
+        else {
             return
         }
         show(library, in: router)
@@ -88,8 +106,10 @@ public enum SceneLibrarySelection {
         router.selectLibrary(id: library.id, kind: kind, supportedSections: sections)
     }
 
-    private static func serves(_ router: Router, _ store: LibraryStore) -> Bool {
-        guard let key = store.connectionKey else { return false }
-        return key.serverID == router.serverID && key.userID == router.userID
+    /// Shows `library` in place of an unchecked guess, keeping the paths; sections it doesn't
+    /// support are still repaired.
+    private static func adopt(_ library: Library, in router: Router) {
+        router.restoreLibrary(id: library.id, kind: LibraryKind(library.mediaType))
+        router.repairSections(supported: router.supportedSections)
     }
 }

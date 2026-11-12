@@ -12,7 +12,12 @@ private func progress(_ itemID: String, at time: Double = 1) -> MediaProgress {
     MediaProgress(id: "p-\(itemID)", libraryItemId: itemID, currentTime: time)
 }
 
-/// A participant whose `/api/me` and libraries requests wait for the test to answer them.
+/// Answers the `n`th `/api/me` request (from 1) sent through a client, or `nil` to wait on
+/// ``Harness/me``.
+private typealias MeAnswer = @Sendable (_ client: ObjectIdentifier, _ n: Int) throws -> [MediaProgress]?
+
+/// A participant whose `/api/me` and libraries requests wait for the test to answer them,
+/// unless `answer` answers at once. Every request is counted, and backoffs don't wait.
 @MainActor
 private struct Harness {
     let store: LibraryStore
@@ -20,17 +25,37 @@ private struct Harness {
     /// `/api/me` requests, with the client each was sent through.
     let me = GatedCalls<ObjectIdentifier, [MediaProgress]>()
     let libraries = GatedCalls<Void, [Library]>()
+    /// The client of every `/api/me` request so far.
+    let meRequests = Locked<[ObjectIdentifier]>([])
+    let libraryRequests = Locked(0)
+    /// The backoffs the participant waited out.
+    let sleeps = Locked<[Duration]>([])
 
     /// - Parameter gatesLibraries: whether libraries requests wait on ``libraries``; otherwise
     ///   they answer with none.
-    init(settings: AppSettings, defaultLibraryID: String? = nil, gatesLibraries: Bool = false) {
+    init(
+        settings: AppSettings, defaultLibraryID: String? = nil, gatesLibraries: Bool = false,
+        answer: MeAnswer? = nil
+    ) {
         store = LibraryStore(settings: settings)
         var service = FakeLibraryService()
-        if gatesLibraries { service.librariesHandler = { [libraries] in try await libraries.call(()) } }
+        let libraryRequests = libraryRequests
+        service.librariesHandler = { [libraries] in
+            libraryRequests.value += 1
+            return gatesLibraries ? try await libraries.call(()) : []
+        }
         let me = me
+        let meRequests = meRequests
+        let sleeps = sleeps
         participant = LibraryParticipant(
             store: store, defaultLibraryID: { defaultLibraryID }, service: { _ in service },
-            fetchProgress: { client in try await me.call(ObjectIdentifier(client)) })
+            fetchProgress: { client in
+                let id = ObjectIdentifier(client)
+                meRequests.value.append(id)
+                if let answer = try answer?(id, meRequests.value.count) { return answer }
+                return try await me.call(id)
+            },
+            sleep: { sleeps.value.append($0) })
     }
 
     func context(
@@ -75,6 +100,77 @@ private struct Harness {
             #expect(harness.store.connectionKey == keyA)
             #expect(harness.store.client == nil)
             #expect(!harness.store.isLoading)
+            for _ in 0..<20 { await Task.yield() }
+            #expect(harness.meRequests.value.isEmpty)
+            #expect(harness.libraryRequests.value == 0)
+        }
+    }
+
+    /// Offline at start without a client; the reconnect attaches its client, refreshes the
+    /// libraries and seeds the cache.
+    @Test func offlineStartThenReconnectAttachesRefreshesAndSeeds() async throws {
+        try await withLibrarySettings { settings in
+            let harness = Harness(settings: settings, answer: { _, _ in [progress("a")] })
+            let offline = harness.context(client: nil, isOffline: true)
+            await harness.participant.sessionDidStart(offline)
+            await harness.participant.beginSeed(offline)
+            await harness.participant.seed(offline)
+            #expect(harness.meRequests.value.isEmpty)
+
+            let client = try makeClient()
+            let online = harness.context(client: client)
+            await harness.participant.beginSeed(online)
+            await harness.participant.sessionDidReconnect(online)
+            await harness.participant.seed(online)
+
+            #expect(harness.store.client != nil)
+            #expect(await eventually { harness.store.hasLoaded })
+            #expect(harness.libraryRequests.value == 1)
+            #expect(harness.meRequests.value == [ObjectIdentifier(client)])
+            #expect(harness.cached == ["a"])
+        }
+    }
+
+    /// A transient failure (timeout, 5xx) is retried after the backoff and still seeds.
+    @Test func transientSeedFailureIsRetried() async throws {
+        try await withLibrarySettings { settings in
+            let harness = Harness(
+                settings: settings,
+                answer: { _, n in
+                    if n == 1 { throw APIError.timedOut }
+                    if n == 2 { throw APIError.http(status: 503, message: nil) }
+                    return [progress("a")]
+                })
+            let context = harness.context(client: try makeClient())
+            await harness.participant.sessionDidStart(context)
+            await harness.participant.beginSeed(context)
+            await harness.participant.seed(context)
+
+            #expect(harness.cached == ["a"])
+            #expect(harness.meRequests.value.count == 3)
+            #expect(harness.sleeps.value == Array(LibraryParticipant.defaultRetryDelays.prefix(2)))
+        }
+    }
+
+    /// Retries stop after the last backoff, and a permanent failure isn't retried.
+    @Test func seedRetriesAreBounded() async throws {
+        try await withLibrarySettings { settings in
+            let permanent = Locked(false)
+            let harness = Harness(
+                settings: settings,
+                answer: { _, _ in throw permanent.value ? APIError.notFound : APIError.timedOut })
+            let context = harness.context(client: try makeClient())
+            await harness.participant.sessionDidStart(context)
+            await harness.participant.beginSeed(context)
+            await harness.participant.seed(context)
+            #expect(harness.meRequests.value.count == LibraryParticipant.defaultRetryDelays.count + 1)
+            #expect(harness.sleeps.value == LibraryParticipant.defaultRetryDelays)
+
+            permanent.value = true
+            await harness.participant.beginSeed(context)
+            await harness.participant.seed(context)
+            #expect(harness.meRequests.value.count == LibraryParticipant.defaultRetryDelays.count + 2)
+            #expect(harness.cached.isEmpty)
         }
     }
 
@@ -134,25 +230,61 @@ private struct Harness {
         }
     }
 
+    /// A's seed, in flight or only starting after B's boundary, never lands in B's cache, and
+    /// B's seed does. The late start is what the participant alone guards: B's boundary token
+    /// is valid in the cache, so only the session check keeps A's request (through A's client)
+    /// from seeding with it.
     @Test func staleSeedAfterSwitchIsDropped() async throws {
         try await withLibrarySettings { settings in
-            let harness = Harness(settings: settings)
+            let clientA = try makeClient()
+            let clientB = try makeClient()
+            let idA = ObjectIdentifier(clientA)
+            let harness = Harness(
+                settings: settings,
+                answer: { client, n in client == idA ? (n == 1 ? nil : [progress("a")]) : [progress("b")] })
             var me = harness.me.calls.makeAsyncIterator()
-            let contextA = harness.context(client: try makeClient())
+            let contextA = harness.context(client: clientA)
             await harness.participant.sessionDidStart(contextA)
             await harness.participant.beginSeed(contextA)
             let seedA = Task { await harness.participant.seed(contextA) }
             let callA = try #require(await me.next())
 
             await harness.participant.sessionWillEnd(.switch)
-            let contextB = harness.context(identityB, client: try makeClient(), sessionID: 2)
+            let contextB = harness.context(identityB, client: clientB, sessionID: 2)
             await harness.participant.sessionDidStart(contextB)
             await harness.participant.beginSeed(contextB)
 
             callA.reply.resume(returning: [progress("a")])
             await seedA.value
+            await harness.participant.seed(contextA)
             #expect(harness.store.connectionKey == keyB)
             #expect(harness.cached.isEmpty)
+            #expect(harness.meRequests.value == [idA])
+
+            await harness.participant.seed(contextB)
+            #expect(harness.cached == ["b"])
+            #expect(harness.meRequests.value == [idA, ObjectIdentifier(clientB)])
+        }
+    }
+
+    /// A reconnect replaces the refresh in flight: the old request's late answer is ignored.
+    @Test func reconnectReplacesTheRefreshInFlight() async throws {
+        try await withLibrarySettings { settings in
+            let harness = Harness(settings: settings, gatesLibraries: true)
+            var requests = harness.libraries.calls.makeAsyncIterator()
+            let first = harness.context(client: try makeClient())
+            await harness.participant.sessionDidStart(first)
+            let old = try #require(await requests.next())
+
+            await harness.participant.sessionDidReconnect(harness.context(client: try makeClient()))
+            let new = try #require(await requests.next())
+            new.reply.resume(returning: [makeLibrary("new")])
+            #expect(await eventually { harness.store.hasLoaded })
+            old.reply.resume(returning: [makeLibrary("old")])
+            for _ in 0..<50 { await Task.yield() }
+
+            #expect(harness.store.libraries.map(\.id) == ["new"])
+            #expect(harness.libraryRequests.value == 2)
         }
     }
 
@@ -163,7 +295,7 @@ private struct Harness {
             let context = harness.context(client: try makeClient())
             await harness.participant.sessionDidStart(context)
             let request = try #require(await requests.next())
-            #expect(harness.participant.progressSink(for: context)(progress("a")))
+            #expect(harness.store.progress.apply(progress("a")))
 
             await harness.participant.sessionWillEnd(.signOut)
             #expect(harness.store.connectionKey == nil)
@@ -193,24 +325,6 @@ private struct Harness {
             await harness.participant.sessionDidReconnect(harness.context(client: try makeClient()))
             #expect(harness.store.connectionKey == nil)
             #expect(harness.cached.isEmpty)
-        }
-    }
-
-    @Test func progressSinkIsGatedBySession() async throws {
-        try await withLibrarySettings { settings in
-            let harness = Harness(settings: settings)
-            let first = harness.context(client: nil, isOffline: true)
-            await harness.participant.sessionDidStart(first)
-            let oldSink = harness.participant.progressSink(for: first)
-            #expect(oldSink(progress("a")))
-            #expect(harness.cached == ["a"])
-
-            await harness.participant.sessionWillEnd(.switch)
-            let second = harness.context(identityB, client: nil, isOffline: true, sessionID: 2)
-            await harness.participant.sessionDidStart(second)
-            #expect(!oldSink(progress("old")))
-            #expect(harness.participant.progressSink(for: second)(progress("b")))
-            #expect(harness.cached == ["b"])
         }
     }
 

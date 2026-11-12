@@ -9,7 +9,9 @@ import Foundation
 ///   refreshes the libraries in a task the participant owns, so the hook returns promptly.
 /// - The seed boundary is ``ProgressCache/beginSeed()``; the seed fetches `GET /api/me`
 ///   (``UserEndpoints/progress()``) with the client of the seed's context and seeds the cache
-///   with its full list. Nothing else ever seeds it. A seed whose session ended, reconnected
+///   with its full list. Nothing else ever seeds it. A transient failure (offline, timeout, 408,
+///   429, 5xx) is retried within the seed after a short backoff (2, 5 and 10 seconds), so a
+///   flaky sign-in still seeds the cache this session. A seed whose session ended, reconnected
 ///   or reseeded since its boundary is dropped by the participant's generation and the token,
 ///   not only by cancellation. An offline session or one without a client doesn't seed; its
 ///   reconnect does.
@@ -24,11 +26,18 @@ import Foundation
 public final class LibraryParticipant: SessionSeeding {
     /// Fetches the user's full progress list (`GET /api/me`) through a client.
     public typealias FetchProgress = @Sendable (APIClient) async throws -> [MediaProgress]
+    /// Waits out a retry's backoff; throws when cancelled.
+    public typealias Sleep = @Sendable (Duration) async throws -> Void
+
+    /// The backoff before each retry of a transient seed failure.
+    public static let defaultRetryDelays: [Duration] = [.seconds(2), .seconds(5), .seconds(10)]
 
     public let store: LibraryStore
     private let defaultLibraryID: @MainActor () -> String?
     private let service: @MainActor (APIClient) -> any LibraryService
     private let fetchProgress: FetchProgress
+    private let retryDelays: [Duration]
+    private let sleep: Sleep
 
     /// The running session, between start and end.
     private var sessionID: UInt64?
@@ -42,15 +51,22 @@ public final class LibraryParticipant: SessionSeeding {
     ///     (`AuthResponse.userDefaultLibraryId`), read at start and reconnect.
     ///   - service: the library service for a session's client; the client itself in the app.
     ///   - fetchProgress: the `/api/me` request; tests replace it.
+    ///   - retryDelays: the backoff before each retry of a transient seed failure; its count is
+    ///     the number of retries.
+    ///   - sleep: waits out a backoff; tests replace it so they don't wait.
     public init(
         store: LibraryStore, defaultLibraryID: @escaping @MainActor () -> String? = { nil },
         service: @escaping @MainActor (APIClient) -> any LibraryService = { $0 },
-        fetchProgress: @escaping FetchProgress = { try await $0.send(UserEndpoints.progress()).mediaProgress }
+        fetchProgress: @escaping FetchProgress = { try await $0.send(UserEndpoints.progress()).mediaProgress },
+        retryDelays: [Duration] = LibraryParticipant.defaultRetryDelays,
+        sleep: @escaping Sleep = { try await Task.sleep(for: $0) }
     ) {
         self.store = store
         self.defaultLibraryID = defaultLibraryID
         self.service = service
         self.fetchProgress = fetchProgress
+        self.retryDelays = retryDelays
+        self.sleep = sleep
     }
 
     // MARK: SessionParticipant
@@ -90,37 +106,37 @@ public final class LibraryParticipant: SessionSeeding {
             !context.isOffline
         else { return }
         let generation = generation
-        let progress: [MediaProgress]
-        do {
-            progress = try await fetchProgress(client)
-        } catch {
-            if !(error is CancellationError) {
-                Log.api.error("Couldn't load the progress to seed: \(error.localizedDescription, privacy: .public)")
+        var retries = retryDelays[...]
+        while true {
+            do {
+                let progress = try await fetchProgress(client)
+                // The session ended, reconnected or reseeded while the request ran.
+                guard isCurrent(generation, context, token) else { return }
+                store.progress.seed(progress, token: token)
+                return
+            } catch let error as APIError where error.isTransient && !retries.isEmpty {
+                Log.api.info(
+                    "Retrying the progress seed after: \(Log.redact(String(describing: error)), privacy: .public)")
+                do { try await sleep(retries.removeFirst()) } catch { return }
+                guard isCurrent(generation, context, token) else { return }
+            } catch {
+                if !(error is CancellationError) {
+                    Log.api.error(
+                        "Couldn't load the progress to seed: \(Log.redact(String(describing: error)), privacy: .public)"
+                    )
+                }
+                return
             }
-            return
-        }
-        // The session ended, reconnected or reseeded while the request ran.
-        guard !Task.isCancelled, generation == self.generation, sessionID == context.sessionID,
-            seedToken == token
-        else { return }
-        store.progress.seed(progress, token: token)
-    }
-
-    // MARK: Progress
-
-    /// Where a progress source of `context`'s session (playback, the syncer, the socket)
-    /// applies progress: the store's ``ProgressCache/apply(_:)`` while that session runs. Once
-    /// it ended the sink drops everything and returns `false`, so a late write can't land in the
-    /// next account's cache.
-    public func progressSink(for context: SessionContext) -> @MainActor (MediaProgress) -> Bool {
-        let sessionID = context.sessionID
-        return { [weak self] progress in
-            guard let self, self.sessionID == sessionID else { return false }
-            return self.store.progress.apply(progress)
         }
     }
 
     // MARK: Private
+
+    /// Whether a seed begun at `generation` with `token` still belongs to the running session:
+    /// not cancelled, and no end, reconnect or new boundary since.
+    private func isCurrent(_ generation: Int, _ context: SessionContext, _ token: ProgressCache.SeedToken) -> Bool {
+        !Task.isCancelled && generation == self.generation && sessionID == context.sessionID && seedToken == token
+    }
 
     private func attach(_ context: SessionContext) {
         let key = LibraryConnectionKey(connectionID: context.identity.connectionID, userID: context.identity.userID)
