@@ -41,4 +41,13 @@ public protocol AccountSessionSource: AnyObject, Observable, Sendable {
     /// Forgets a saved connection, signing out if it's the active one.
     /// - Returns: An OpenID end-session URL to open, as for ``logout()``.
     func remove(_ connectionID: UUID) async throws -> URL?
+    /// The saved connection signed in to a Handoff activity's account, for
+    /// ``HandoffActivity/resolve(using:)``: one that matches it and still has a saved session to
+    /// switch to. `nil` when no connection here is.
+    func connectionID(for account: HandoffAccount) async -> UUID?
+}
+
+extension AccountSessionSource {
+    /// No saved connections to match, so an activity that names an account opens nothing.
+    public func connectionID(for account: HandoffAccount) async -> UUID? { nil }
 }

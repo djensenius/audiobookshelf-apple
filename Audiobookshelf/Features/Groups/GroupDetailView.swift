@@ -115,6 +115,7 @@ struct GroupDetailContent<Kind: GroupScreenKind>: View {
             editor = nil
             dismiss()
         }
+        .rssFeedEntry(RssFeedPresentation.target(Kind.summaryKind, id: model.groupID))
     }
 
     private func reload() {
