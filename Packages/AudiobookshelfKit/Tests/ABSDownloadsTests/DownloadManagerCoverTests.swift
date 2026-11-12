@@ -13,7 +13,7 @@ import Testing
 @Suite(.timeLimit(.minutes(1))) struct DownloadManagerCoverTests {
     private static let item = LibraryItemFixtures.podcast(episodes: [
         LibraryItemFixtures.episode(id: "ep_1", ino: "301"), LibraryItemFixtures.episode(id: "ep_2", ino: "302"),
-        LibraryItemFixtures.episode(id: "ep_3", ino: "303"),
+        LibraryItemFixtures.episode(id: "ep_3", ino: "303"), LibraryItemFixtures.episode(id: "ep_4", ino: "304"),
     ])
 
     /// Episode 1 holds the cover, still on its way; episode 2, planned without one, completed.
@@ -32,7 +32,9 @@ import Testing
         let part = try #require(refetch.parts.first)
         #expect(refetch.parts.count == 1)
         #expect(part.serverPath == cover.serverPath)
-        #expect(part.destinationRelativePath == cover.destinationRelativePath)
+        // A file of its own, beside the cover it replaces.
+        #expect(part.destinationRelativePath != cover.destinationRelativePath)
+        #expect(Self.folder(part.destinationRelativePath) == Self.folder(cover.destinationRelativePath))
         #expect(part.state == .queued)
         #expect(refetch.media.coverUpdatedAt == first.media.coverUpdatedAt)
         #expect(await fixture.engine.started.last == [part.id])
@@ -44,11 +46,11 @@ import Testing
 
         #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
         let restored = try #require(try await fixture.localItems.item(id: local.id))
-        #expect(restored.coverRelativePath == cover.destinationRelativePath)
+        #expect(restored.coverRelativePath == part.destinationRelativePath)
         #expect(restored.coverUpdatedAt == first.media.coverUpdatedAt)
         #expect(restored.files == local.files)
         #expect(restored.media == local.media)
-        #expect(exists(cover.destinationRelativePath, fixture))
+        #expect(exists(part.destinationRelativePath, fixture))
         #expect(try await fixture.store.allRecords().isEmpty)
         // Only episode 2 is linked: the refetch downloaded no media.
         #expect(linker.calls == [.link(fixture.key(Self.item, episodeID: "ep_2"), local.id)])
@@ -174,6 +176,109 @@ import Testing
         #expect(try await fixture.store.allRecords().isEmpty)
         #expect(await fixture.engine.resumed.isEmpty)
         #expect(try await fixture.localItems.item(id: local.id)?.coverRelativePath == "elsewhere.jpg")
+    }
+
+    /// The item got a cover, at the usual path, while its refetch was on its way: the refetched
+    /// file, of its own, doesn't replace it, and is removed once the refetch completes.
+    @Test func aRefetchedCoverNeverReplacesOneTheItemGotMeanwhile() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        let cover = try #require(first.parts.last { $0.kind == .cover })
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        let episodeCover = Data("episode".utf8)
+        try FileManager.default.createDirectory(
+            at: fixture.locations.downloadsRoot.appending(path: Self.folder(cover.destinationRelativePath)),
+            withIntermediateDirectories: true)
+        try episodeCover.write(to: fixture.locations.downloadsRoot.appending(path: cover.destinationRelativePath))
+        try #require(
+            try await fixture.localItems.setCoverIfMissing(
+                itemID: local.id, relativePath: cover.destinationRelativePath, updatedAt: nil))
+
+        // The engine moves the refetched file into place, then finalises the record.
+        try write(refetch.parts[0].destinationRelativePath, fixture)
+        try await Self.finalise(refetch, fixture)
+
+        #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
+        await manager.holdingItem(fixture.key(Self.item)) {}
+        #expect(
+            try Data(contentsOf: fixture.locations.downloadsRoot.appending(path: cover.destinationRelativePath))
+                == episodeCover)
+        #expect(try await fixture.localItems.item(id: local.id)?.coverRelativePath == cover.destinationRelativePath)
+        #expect(!exists(refetch.parts[0].destinationRelativePath, fixture))
+    }
+
+    /// A refetch the cover hand-off couldn't save, signed out, is kept and saved by the next
+    /// completion after signing in, not dropped by one while still signed out.
+    @Test func aCoverKeptWhileSignedOutIsFetchedAfterSigningIn() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, _) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        let third = try await Self.enqueue("ep_3", fixture, manager)
+        let fourth = try await Self.enqueue("ep_4", fixture, manager)
+        try #require(!(third.parts + fourth.parts).contains { $0.kind == .cover })
+        // The refetch fails for good, so its cover is kept for the next completion.
+        let part = try #require(refetch.parts.first)
+        try await fixture.store.setPartState(.failed, partID: part.id, taskIdentifier: nil, error: "404")
+        _ = try await fixture.store.setState(.failed, forRecord: refetch.id)
+        fixture.engine.updateContinuation.yield(
+            .partFailed(partID: part.id, recordID: refetch.id, code: .httpStatus, message: "404", willRetry: false))
+        #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
+        try Self.setSignedOut(true, fixture)
+
+        try write(third.parts[0].destinationRelativePath, fixture)
+        try await Self.finalise(third, fixture)
+        _ = try await Self.completion(events, manager, fixture)
+        #expect(try await fixture.store.record(key: fixture.key(Self.item)) == nil)
+
+        try Self.setSignedOut(false, fixture)
+        try write(fourth.parts[0].destinationRelativePath, fixture)
+        try await Self.finalise(fourth, fixture)
+        _ = try await Self.completion(events, manager, fixture)
+        let again = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        #expect(again.isCoverOnly)
+        #expect(again.parts.map(\.serverPath) == [part.serverPath])
+    }
+
+    /// A cancelled episode's fetched cover becomes the item's while its refetch is paused: the
+    /// refetch, hidden and no longer needed, is deleted.
+    @Test func aCoverHandedOffDropsAPausedRefetch() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        #expect(try await manager.pause(recordID: refetch.id))
+        let third = try await Self.enqueue("ep_3", fixture, manager)
+        let cover = try #require(third.parts.last { $0.kind == .cover })
+        try write(cover.destinationRelativePath, fixture)
+        try await fixture.store.completePart(partID: cover.id, finalBytes: 5)
+
+        #expect(try await manager.cancel(recordID: third.id))
+
+        #expect(try await fixture.localItems.item(id: local.id)?.coverRelativePath == cover.destinationRelativePath)
+        #expect(try await fixture.store.allRecords().isEmpty)
+    }
+
+    /// A refetch whose failure was saved before the process ended is dropped at start, its
+    /// cover kept for the item's next completion.
+    @Test func aRefetchFailedBeforeARelaunchIsDroppedAtStart() async throws {
+        let fixture = try await ManagerFixture()
+        let part = DownloadPartDTO(
+            kind: .cover, serverPath: "/api/items/\(Self.item.id)/cover", filename: "cover.jpg", mimeType: "image/jpeg",
+            expectedBytes: 0, bytesWritten: 0, destinationRelativePath: "show/cover-1.jpg", state: .failed)
+        let record = try #require(
+            try await fixture.store.insertRecordIfSignedIn(
+                DownloadRecordDTO(
+                    key: fixture.key(Self.item), mediaType: .podcast, title: "Show", relativeDirectory: "show",
+                    media: LocalMediaSnapshot(metadata: .init(title: "Show")), parts: [part])))
+        try #require(try await fixture.store.setState(.failed, forRecord: record.id))
+        let manager = fixture.makeManager()
+
+        try await manager.start()
+
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(await manager.refusedCovers[fixture.key(Self.item)]?.serverPath == part.serverPath)
     }
 
     /// Nothing is fetched for a connection that was signed out or disconnected.
@@ -446,6 +551,18 @@ import Testing
         else { throw UnexpectedEvent() }
         await manager.holdingItem(fixture.key(item)) {}
         return itemID
+    }
+
+    private static func folder(_ path: String) -> String {
+        (path as NSString).deletingLastPathComponent
+    }
+
+    /// Signs the connection out, or back in.
+    private static func setSignedOut(_ signedOut: Bool, _ fixture: ManagerFixture) throws {
+        let context = ModelContext(fixture.container)
+        let connection = try #require(try context.fetch(FetchDescriptor<ServerConnectionRecord>()).first)
+        connection.signedOutAt = signedOut ? .now : nil
+        try context.save()
     }
 
     /// Completes every part of `record`, then finalises it as the engine does.

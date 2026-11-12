@@ -67,6 +67,45 @@ import Testing
         #expect(harness.fileExists("li_1/cover.jpg"))
     }
 
+    /// A cover over the limit, declared or sent without a length, fails for good as too large
+    /// and never reaches its destination.
+    @Test(arguments: [true, false])
+    func failsACoverOverTheLimit(declared: Bool) async throws {
+        let limit = DownloadEngine.maxCoverBytes
+        let reply: StubReply =
+            declared
+            ? .status(
+                200, body: Data("img".utf8), contentType: "image/jpeg", headers: ["Content-Length": "\(limit + 1)"])
+            : .status(
+                200, body: Data(count: Int(limit) + 1), contentType: "image/jpeg", headers: ["Content-Length": ""])
+        let harness = try await DownloadHarness { _ in reply }
+        let partID = UUID()
+        let record = try await harness.store.upsertRecord(
+            DownloadRecordDTO(
+                key: MediaKey(serverConnectionID: harness.connectionID, libraryItemId: "li_1"), mediaType: .podcast,
+                title: "The Show", relativeDirectory: "li_1",
+                media: LocalMediaSnapshot(metadata: .init(title: "The Show")),
+                parts: [
+                    DownloadPartDTO(
+                        id: partID, kind: .cover, serverPath: DownloadRequests.coverPath(itemID: "li_1", updatedAt: 0),
+                        filename: "cover.jpg", mimeType: "image/jpeg", expectedBytes: 0, bytesWritten: 0,
+                        destinationRelativePath: "li_1/cover-1.jpg", state: .queued)
+                ])
+        ).record
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: [partID])
+
+        let update = await engine.next { if case .partFailed = $0 { true } else { false } }
+        guard case .partFailed(partID, record.id, let code, _, let willRetry) = update else {
+            Issue.record("Unexpected \(String(describing: update))")
+            return
+        }
+        #expect(code == .tooLarge)
+        #expect(!willRetry)
+        #expect(!harness.fileExists("li_1/cover-1.jpg"))
+    }
+
     /// The record is reported started once, when its first part moves it from queued to
     /// downloading, before any part completes; its other part starts without a report.
     @Test func reportsARecordStartedOnce() async throws {

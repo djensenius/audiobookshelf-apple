@@ -16,51 +16,61 @@ extension DownloadManager {
     /// Without any of those, nothing is fetched: the item may have no cover on the server.
     /// When the item has or gets a cover without the refetch, a paused or failed refetch is
     /// deleted (``dropStalledRefetch(_:)``), so it doesn't stay hidden for good. The kept cover
-    /// is dropped once this got that far; a failed read keeps it for the next completion. Best
-    /// effort: failures are logged.
+    /// is dropped once it is used, or a record will fetch it; a refetch that couldn't be saved
+    /// or resumed (signed out) or a failed read keeps it for the next completion. Best effort:
+    /// failures are logged.
     func restoreCover(after key: MediaKey, itemID: UUID) async {
         let itemKey = MediaKey(serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
         do throws(DownloadManagerError) {
-            try await restoreCover(of: itemID, itemKey: itemKey, refused: refusedCovers[itemKey])
-            refusedCovers[itemKey] = nil
+            if try await restoreCover(of: itemID, itemKey: itemKey, refused: refusedCovers[itemKey]) {
+                refusedCovers[itemKey] = nil
+            }
         } catch {
             logError("Couldn't restore a downloaded item's cover", error)
         }
     }
 
+    /// - Returns: whether the kept cover is done with: `false` when a refetch was needed but
+    ///   couldn't be saved or resumed.
     private func restoreCover(
         of itemID: UUID, itemKey: MediaKey, refused: CoverSource?
-    ) async throws(DownloadManagerError) {
-        guard let item = try await read({ try await self.localItems.item(id: itemID) }) else { return }
-        guard item.coverRelativePath == nil else { return try await dropStalledRefetch(itemKey) }
+    ) async throws(DownloadManagerError) -> Bool {
+        guard let item = try await read({ try await self.localItems.item(id: itemID) }) else { return true }
+        guard item.coverRelativePath == nil else {
+            try await dropStalledRefetch(itemKey)
+            return true
+        }
         let existing = try await existingCover(for: itemKey, localItem: item)
-        guard existing.pendingPath == nil else { return }
+        guard existing.pendingPath == nil else { return true }
         let updatedAt = refused?.updatedAt ?? item.coverUpdatedAt
         if let completed = existing.completed {
             // Dated by the record that fetched it.
             try await adoptCover(
                 completed.destinationRelativePath, updatedAt: existing.completedUpdatedAt ?? updatedAt, for: item)
-            return try await dropStalledRefetch(itemKey)
+            return true
         }
         let layoutPath = try? DownloadLayout(
             connectionID: item.serverConnectionID, libraryItemID: item.libraryItemId, locations: locations
         ).coverPath()
         if let stored = [refused?.relativePath, layoutPath].compactMap({ $0 }).first(where: fileExists) {
             try await adoptCover(stored, updatedAt: updatedAt, for: item)
-            try await dropStalledRefetch(itemKey)
-        } else {
-            try await refetchCover(refused, for: item)
+            return true
         }
+        return try await refetchCover(refused, for: item)
     }
 
     /// Makes the file at `path`, on disk, the local item's cover, unless it got one meanwhile:
-    /// the engine finalises downloads without holding the item.
+    /// the engine finalises downloads without holding the item. Then, as the item has a cover,
+    /// a paused or failed refetch of it is deleted (``dropStalledRefetch(_:)``). Called while
+    /// the item is held.
     func adoptCover(
         _ path: String, updatedAt: Date?, for item: LocalLibraryItemDTO
     ) async throws(DownloadManagerError) {
         _ = try await read {
             try await self.localItems.setCoverIfMissing(itemID: item.id, relativePath: path, updatedAt: updatedAt)
         }
+        try await dropStalledRefetch(
+            MediaKey(serverConnectionID: item.serverConnectionID, libraryItemId: item.libraryItemId))
     }
 
     /// Fetches the cover of `item` again, under its item-level key, while its caller holds the
@@ -71,32 +81,45 @@ extension DownloadManager {
     ///   out or disconnected (``DownloadStore/isSignedIn(serverConnectionID:)``);
     /// - otherwise, with `cover`, a new cover-only record that fetches it is saved and started.
     ///   Nothing is saved while the connection is signed out or disconnected, or the key is
-    ///   taken (``DownloadStore/insertRecordIfSignedIn(_:now:)``).
+    ///   taken (``DownloadStore/insertRecordIfSignedIn(_:now:)``). Its file gets a name of its
+    ///   own beside `cover`'s, so it never replaces a cover another record fetched meanwhile;
+    ///   the engine makes it the item's cover only if the item still has none, and the manager
+    ///   removes it otherwise (``complete(_:as:)``).
     ///
     /// Once complete, the engine sets the cover as the local item's. Like any record, it is
     /// reported with ``DownloadManagerEvent/recordChanged(_:)``; once complete with
     /// ``DownloadManagerEvent/recordRemoved(recordID:)``, as it downloaded no media.
-    func refetchCover(_ cover: CoverSource?, for item: LocalLibraryItemDTO) async throws(DownloadManagerError) {
+    ///
+    /// - Returns: whether a refetch is on its way: `false` when none could be saved or resumed.
+    @discardableResult
+    func refetchCover(
+        _ cover: CoverSource?, for item: LocalLibraryItemDTO
+    ) async throws(DownloadManagerError) -> Bool {
         let key = MediaKey(serverConnectionID: item.serverConnectionID, libraryItemId: item.libraryItemId)
         if let current = try await read({ try await self.store.record(key: key) }) {
-            guard current.isCoverOnly, current.state == .paused || current.state == .failed,
-                try await read({ try await self.store.isSignedIn(serverConnectionID: key.serverConnectionID) }),
+            guard current.isCoverOnly, current.state == .paused || current.state == .failed else { return true }
+            guard try await read({ try await self.store.isSignedIn(serverConnectionID: key.serverConnectionID) }),
                 try await read({ try await self.engine.resume(recordID: current.id) })
-            else { return }
+            else { return false }
             await refresh(current.id, announce: true)
-            return
+            return true
         }
-        guard let cover else { return }
+        guard let cover else { return false }
+        let partID = UUID()
+        let folder = (cover.relativePath as NSString).deletingLastPathComponent
+        let name = "cover-\(partID.uuidString.lowercased()).jpg"
         let part = DownloadPartDTO(
-            kind: .cover, serverPath: cover.serverPath, filename: DownloadLayout.coverFilename, mimeType: "image/jpeg",
-            expectedBytes: 0, bytesWritten: 0, destinationRelativePath: cover.relativePath, state: .queued)
+            id: partID, kind: .cover, serverPath: cover.serverPath, filename: DownloadLayout.coverFilename,
+            mimeType: "image/jpeg", expectedBytes: 0, bytesWritten: 0,
+            destinationRelativePath: folder.isEmpty ? name : "\(folder)/\(name)", state: .queued)
         let plan = DownloadRecordDTO(
             key: key, mediaType: item.mediaType, title: item.title, relativeDirectory: item.relativeDirectory,
             media: LocalMediaSnapshot(metadata: item.media.metadata, coverUpdatedAt: cover.updatedAt), parts: [part])
-        guard let record = try await read({ try await self.store.insertRecordIfSignedIn(plan) }) else { return }
+        guard let record = try await read({ try await self.store.insertRecordIfSignedIn(plan) }) else { return false }
         track(record)
         emit(.recordChanged(record))
         await engine.start(partIDs: [part.id])
+        return true
     }
 
     /// A cover-only record whose fetch failed for good, while its item is held: deleted and
@@ -104,7 +127,9 @@ extension DownloadManager {
     /// keeps its connection's records from being purged. Its cover is kept in
     /// ``refusedCovers``, so the item's next episode completion fetches it again. Best effort:
     /// failures are logged, and leave the failed record for ``refetchCover(_:for:)`` to resume.
-    func dropFailedRefetch(_ recordID: UUID) async {
+    /// Also run at ``start()``, for a failure saved before the process ended. A refetch that
+    /// failed as its file was too large (``DownloadFailureCode/tooLarge``) isn't kept to try again.
+    func dropFailedRefetch(_ recordID: UUID, code: DownloadFailureCode? = nil) async {
         do throws(DownloadManagerError) {
             guard let first = try await read({ try await self.store.record(id: recordID) }) else { return }
             try await holdingItem(first.key) { () async throws(DownloadManagerError) in
@@ -113,7 +138,7 @@ extension DownloadManager {
                     record.isCoverOnly, record.state == .failed,
                     let deleted = try await deleteRefetch(record)
                 else { return }
-                if let part = deleted.parts.first {
+                if let part = deleted.parts.first, code != .tooLarge {
                     refusedCovers[deleted.key] = CoverSource(
                         serverPath: part.serverPath, relativePath: part.destinationRelativePath, isStored: false,
                         updatedAt: deleted.media.coverUpdatedAt)

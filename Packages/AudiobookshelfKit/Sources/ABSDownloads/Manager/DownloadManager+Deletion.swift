@@ -164,7 +164,8 @@ extension DownloadManager {
     /// When no record takes it (each one left has completed, and the engine may be finalising
     /// it), and `cover.restoresLocalItem`:
     /// - a podcast's local item without a cover gets it back: the file itself while it is still
-    ///   there, or else a cover-only record that fetches it again (``refetchCover(_:for:)``);
+    ///   there, or else a cover-only record that fetches it again (``refetchCover(_:for:)``),
+    ///   or, when none can be saved, it is kept in ``refusedCovers`` as below;
     /// - with no local item yet, it is kept in ``refusedCovers`` for the first of those records
     ///   to complete (``restoreCover(after:itemID:)``).
     func handOffCover(_ cover: CoverSource, of key: MediaKey) async throws(DownloadManagerError) {
@@ -214,8 +215,9 @@ extension DownloadManager {
             do throws(DownloadManagerError) {
                 if size != nil {
                     try await adoptCover(cover.relativePath, updatedAt: cover.updatedAt, for: localItem)
-                } else {
-                    try await refetchCover(cover, for: localItem)
+                } else if try await !refetchCover(cover, for: localItem) {
+                    // Signed out: kept for a completion after signing in.
+                    refusedCovers[itemKey] = cover
                 }
             } catch {
                 logError("Couldn't give a downloaded item its cover back", error)

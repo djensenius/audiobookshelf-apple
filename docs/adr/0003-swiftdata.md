@@ -192,11 +192,15 @@ Model notes:
   local item's cover while it has none. The UI doesn't list it, and it links no
   progress. If its local item was deleted before it finishes, the engine deletes it
   and reports `DownloadUpdate.recordDiscarded`, and the manager hands the cover on or
-  removes it. A refetch that fails for good is deleted. Its cover is fetched again
+  removes it. A refetch that fails for good is deleted, including one found failed
+  at start. Its cover is fetched again
   at the item's next episode completion, as is a cover refused while the item had
   no local item yet. Those covers are kept in memory only (`refusedCovers`): a
   relaunch loses them, and the podcast then stays without a cover until another
-  download brings one.
+  download brings one. A refetch saves to a file of its own (`cover-<part id>.jpg`),
+  so it never replaces a cover fetched meanwhile, and is removed if unused. Every
+  cover part is capped at 20 MB (`DownloadEngine.maxCoverBytes`); a larger one fails
+  for good (`.tooLarge`) and isn't fetched again.
 - **`LocalMediaSnapshot`** is a `Codable, Sendable, Hashable` struct owned by
   `ABSData`, not an `ABSCore` API model, so API changes can't break stored blobs.
   It holds `snapshotVersion: Int` (2), metadata (title, subtitle, authors,
