@@ -146,9 +146,9 @@ struct PodcastEpisodesFeedSheet: View {
     }
 }
 
-/// One feed episode: a checkbox, or a checkmark when the library has it, then its number, title,
-/// subtitle and publish date. The whole row toggles it; VoiceOver reads it as a selected or
-/// unselected button.
+/// One feed episode: a checkbox, or a checkmark when the library has it, then its number, title
+/// (``PodcastFeedEpisodePresentation/displayTitle(_:locale:)``), subtitle and publish date. The
+/// whole row toggles it; VoiceOver reads it as a selected or unselected button.
 private struct PodcastFeedEpisodeRow: View {
     let row: PodcastFeedEpisodesModel.Row
     let isSelected: Bool
@@ -161,6 +161,7 @@ private struct PodcastFeedEpisodeRow: View {
         let number = episode.episode.map { L10n.string("LabelPodcastDetailEpisodeNumber", $0, locale: locale) }
         let published = PodcastDetailPresentation.publishedText(episode.publishedAt, locale: locale)
         let inLibrary = row.isInLibrary ? L10n.string("LabelPodcastFeedInLibrary") : nil
+        let title = PodcastFeedEpisodePresentation.displayTitle(episode, locale: locale)
         Button(action: toggle) {
             HStack(alignment: .firstTextBaseline, spacing: ABSSpacing.medium) {
                 Image(
@@ -179,7 +180,7 @@ private struct PodcastFeedEpisodeRow: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(ABSColor.mutedForeground)
                     }
-                    Text(verbatim: episode.title)
+                    Text(verbatim: title)
                         .font(.subheadline)
                     if let subtitle = episode.subtitle {
                         Text(verbatim: subtitle)
@@ -205,7 +206,7 @@ private struct PodcastFeedEpisodeRow: View {
         .buttonStyle(.plain)
         .disabled(row.isInLibrary || isDisabled)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(verbatim: PodcastFeedEpisodePresentation.accessibilityLabel(episode, locale: locale)))
+        .accessibilityLabel(Text(verbatim: title))
         .accessibilityValue(
             Text(
                 verbatim: PodcastFeedEpisodePresentation.accessibilityValue(
@@ -215,11 +216,12 @@ private struct PodcastFeedEpisodeRow: View {
     }
 }
 
-/// What VoiceOver reads for a feed episode's row.
+/// What a feed episode's row shows as its title and VoiceOver reads for it.
 enum PodcastFeedEpisodePresentation {
-    /// The title; for an untitled episode, "Untitled episode" and what tells it apart: the
-    /// episode number, else the publish date, else the enclosure's file name (never the URL).
-    static func accessibilityLabel(_ episode: RSSFeedEpisode, locale: Locale) -> String {
+    /// The title the row shows and VoiceOver reads as its label; for an untitled episode,
+    /// "Untitled episode" and what tells it apart: the episode number, else the publish date,
+    /// else the enclosure's file name (never the URL).
+    static func displayTitle(_ episode: RSSFeedEpisode, locale: Locale) -> String {
         let title = episode.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard title.isEmpty else { return title }
         let detail =
