@@ -183,6 +183,31 @@ private func memberIDs(_ editor: PlaylistDetailEditor) -> [String]? {
         #expect(editor.canEdit)
     }
 
+    /// Another update is pushed while that reload runs: its answer may predate the update, so the
+    /// pushed state stays.
+    @Test func anUpdatePushedDuringTheReloadAfterAMoveWins() async throws {
+        let gate = CancellableGatedCalls<EditCall, Playlist?>()
+        let reloads = CancellableGatedCalls<Int, Playlist>()
+        var editing = FakeEditing()
+        editing.answer = { call in try await gate.call(call) }
+        let editor = await loadedEditor(editing) { try await reloads.call(0) }
+        var calls = gate.calls.makeAsyncIterator()
+        var reloadCalls = reloads.calls.makeAsyncIterator()
+
+        async let moved: Void = editor.move(fromOffsets: [2], toOffset: 0)
+        let call = try #require(await calls.next())
+        editor.model.apply(.playlist(.updated(playlist([b1, e1, b2]), libraryID: "lib"), userID: "u1"))
+        call.reply.resume(returning: playlist([b2, b1, e1]))
+        let reload = try #require(await reloadCalls.next())
+        editor.model.apply(.playlist(.updated(playlist([b2, b1, e1, b3]), libraryID: "lib"), userID: "u1"))
+        reload.reply.resume(returning: playlist([b2, b1, e1]))
+        await moved
+        #expect(memberIDs(editor) == ["b2", "b1", "pod-e1", "b3"])
+        #expect(editor.failure == nil)
+        #expect(editor.canEdit)
+        #expect(!editor.model.isLoading)
+    }
+
     /// The reload after a pushed update fails: the write succeeded, so the pushed state stays and
     /// nothing is reported.
     @Test func aFailedReloadAfterASuccessfulMoveKeepsThePushedUpdate() async throws {

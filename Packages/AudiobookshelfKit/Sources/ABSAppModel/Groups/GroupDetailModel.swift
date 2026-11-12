@@ -165,18 +165,19 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
         await load()
     }
 
-    /// Loads the group. A response to an older call that arrives after a newer one started is
-    /// dropped.
+    /// Loads the group. A response to an older call that arrives after a newer one started, or
+    /// after the server pushed the group, is dropped.
     public func load() async {
         await loadReportingFailure()
     }
 
     /// ``load()``, returning its error when it failed (a cancellation included) and was the
-    /// latest load; `nil` when it succeeded or a newer load or edit superseded it.
+    /// latest load; `nil` when it succeeded or a newer load, edit or pushed update superseded it.
     @discardableResult
     func loadReportingFailure() async -> (any Error)? {
         sequence += 1
         let sequence = sequence
+        let started = revision
         isLoading = true
         let result: Result<GroupDetail, any Error>
         do {
@@ -186,6 +187,9 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
         }
         guard sequence == self.sequence else { return nil }
         isLoading = false
+        // An update the server pushed while the request ran is newer than its answer, which may
+        // have been read before it: keep the pushed state.
+        guard revision == started else { return nil }
         switch result {
         case .success(let loaded):
             revision += 1
