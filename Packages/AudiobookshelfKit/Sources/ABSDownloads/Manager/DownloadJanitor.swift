@@ -209,21 +209,25 @@ public actor DownloadJanitor {
         let itemKeys = Set(filesByItem.keys).union(foldersByItem.keys).sorted {
             ($0.serverConnectionID.uuidString, $0.libraryItemId) < ($1.serverConnectionID.uuidString, $1.libraryItemId)
         }
+        // The folders holding a referenced path, once per sweep; each item adds its own paths
+        // read in its hold.
+        var protected: Set<String> = []
+        Self.addFolders(holding: referenced, to: &protected)
         for key in itemKeys {
-            let keeping = referenced
+            let snapshotProtected = protected
             let result = try await read(.readingItem) {
                 try await self.manager.sweepItem(
-                    key, files: filesByItem[key] ?? [], folders: foldersByItem[key] ?? [], keeping: keeping,
-                    changedBefore: cutoff)
+                    key, files: filesByItem[key] ?? [], folders: foldersByItem[key] ?? [],
+                    protecting: snapshotProtected, changedBefore: cutoff)
             }
             report.removedFiles += result.removedFiles
             report.removedFolders += result.removedFolders
-            referenced.formUnion(result.used)
+            Self.addFolders(holding: result.used, to: &protected)
         }
 
         // 3. Empty folders outside item folders (an item's went with its files).
         report.removedFolders += Self.removeEmptyFolders(
-            otherFolders, emptied: report.removedFiles + report.removedFolders, keeping: referenced,
+            otherFolders, emptied: report.removedFiles + report.removedFolders, protecting: protected,
             before: cutoff, locations: locations)
 
         // 4. Resume data of parts that are gone.
@@ -408,21 +412,26 @@ public actor DownloadJanitor {
         }
     }
 
+    /// Adds the collision keys of the folders holding each of `paths` (collision keys), up to
+    /// the root, to `folders`.
+    static func addFolders(holding paths: some Sequence<String>, to folders: inout Set<String>) {
+        for path in paths {
+            var folder = parentKey(of: path)
+            while !folder.isEmpty, folders.insert(folder).inserted { folder = parentKey(of: folder) }
+        }
+    }
+
     /// Removes empty folders, deepest first, that held a file or folder removed in this sweep,
-    /// or that changed before `cutoff` both when listed and just before removal. A folder that
-    /// holds a path in `referenced` (collision keys) stays: the engine creates a destination's
-    /// folder before it moves the file in. `rmdir` refuses a folder that isn't empty, so a file
-    /// moved in meanwhile is never removed with it.
+    /// or that changed before `cutoff` both when listed and just before removal. A folder in
+    /// `protected` or `alsoProtected` (collision keys of folders holding a referenced path, see
+    /// ``addFolders(holding:to:)``) stays: the engine creates a destination's folder before it
+    /// moves the file in. `rmdir` refuses a folder that isn't empty, so a file moved in
+    /// meanwhile is never removed with it.
     static func removeEmptyFolders(
-        _ directories: [Entry], emptied removed: [String], keeping referenced: Set<String>, before cutoff: Date,
-        locations: DownloadLocations
+        _ directories: [Entry], emptied removed: [String], protecting protected: Set<String>,
+        alsoProtecting alsoProtected: Set<String> = [], before cutoff: Date, locations: DownloadLocations
     ) -> [String] {
         let parent = parentKey(of:)
-        var holding: Set<String> = []
-        for path in referenced {
-            var folder = parent(path)
-            while !folder.isEmpty, holding.insert(folder).inserted { folder = parent(folder) }
-        }
         var emptied = Set(removed.map(parent))
         var removedFolders: [String] = []
         let deepestFirst = directories.sorted {
@@ -431,7 +440,7 @@ public actor DownloadJanitor {
         for directory in deepestFirst {
             let key = DownloadLayout.collisionKey(directory.path)
             let wasEmptied = emptied.contains(key)
-            guard !holding.contains(key),
+            guard !protected.contains(key), !alsoProtected.contains(key),
                 wasEmptied || directory.modified.map({ $0 < cutoff }) == true,
                 let url = try? locations.fileURL(forRelativePath: directory.path),
                 wasEmptied || isModified(url, before: cutoff),
@@ -445,27 +454,36 @@ public actor DownloadJanitor {
 }
 
 extension DownloadManager {
-    /// What ``sweepItem(_:files:folders:keeping:changedBefore:)`` did.
+    /// What ``sweepItem(_:files:folders:protecting:changedBefore:)`` did.
     struct ItemSweep: Sendable {
         /// Files removed (or already gone).
         var removedFiles: [String] = []
         var removedFolders: [String] = []
-        /// The collision keys of the paths in use that were read.
+        /// The collision keys of the paths in use in the item's folder that were read.
         var used: Set<String> = []
     }
 
     /// While the item of `key` is held: removes `files`, in its folder, that no record of its
     /// connection or its local item uses, read again in the hold, and that were still last
     /// changed before `cutoff` just before removal; then removes its empty `folders` as
-    /// ``DownloadJanitor`` does, keeping those that hold a path in `referenced` or read in the
-    /// hold. A download of the item enqueued after the sweep's snapshot is read here, so its
-    /// folder stays; one enqueued later waits for the hold.
+    /// ``DownloadJanitor`` does, keeping those in `protected` (the sweep's, built once) or that
+    /// hold a path in the item's folder read in the hold. A download of the item enqueued after
+    /// the sweep's snapshot is read here, so its folder stays; one enqueued later waits for the
+    /// hold.
     func sweepItem(
-        _ key: MediaKey, files paths: [String], folders: [DownloadJanitor.Entry], keeping referenced: Set<String>,
+        _ key: MediaKey, files paths: [String], folders: [DownloadJanitor.Entry], protecting protected: Set<String>,
         changedBefore cutoff: Date
     ) async throws(DownloadManagerError) -> ItemSweep {
         try await holdingItem(key) { () async throws(DownloadManagerError) -> ItemSweep in
             let used = Set(try await usedPaths(of: key).map(DownloadLayout.collisionKey))
+            // Only the item's own paths: the read covers its whole connection. Compared as
+            // scalars, so a name starting with a combining mark still matches.
+            let itemFolder = DownloadLayout.collisionKey(
+                "\(key.serverConnectionID.uuidString)/\((try? DownloadLayout.escapedIdentifier(key.libraryItemId)) ?? "")/"
+            )
+            let usedHere = used.filter { $0.unicodeScalars.starts(with: itemFolder.unicodeScalars) }
+            var itemProtected: Set<String> = []
+            DownloadJanitor.addFolders(holding: usedHere, to: &itemProtected)
             var removed: [String] = []
             for path in paths where !used.contains(DownloadLayout.collisionKey(path)) {
                 guard let url = try? locations.fileURL(forRelativePath: path),
@@ -481,8 +499,9 @@ extension DownloadManager {
                 }
             }
             let removedFolders = DownloadJanitor.removeEmptyFolders(
-                folders, emptied: removed, keeping: referenced.union(used), before: cutoff, locations: locations)
-            return ItemSweep(removedFiles: removed, removedFolders: removedFolders, used: used)
+                folders, emptied: removed, protecting: protected, alsoProtecting: itemProtected, before: cutoff,
+                locations: locations)
+            return ItemSweep(removedFiles: removed, removedFolders: removedFolders, used: usedHere)
         }
     }
 

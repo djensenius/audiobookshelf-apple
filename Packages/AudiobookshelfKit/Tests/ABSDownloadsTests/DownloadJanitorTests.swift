@@ -415,13 +415,47 @@ import Testing
             at: fixture.locations.downloadsRoot.appending(path: folder), withIntermediateDirectories: true)
         try age(fixture)
 
+        var protected: Set<String> = []
+        DownloadJanitor.addFolders(holding: [DownloadLayout.collisionKey("\(folder)/\u{301}1.mp3")], to: &protected)
         let removed = DownloadJanitor.removeEmptyFolders(
-            [DownloadJanitor.Entry(path: folder, modified: Self.old)], emptied: [],
-            keeping: [DownloadLayout.collisionKey("\(folder)/\u{301}1.mp3")],
+            [DownloadJanitor.Entry(path: folder, modified: Self.old)], emptied: [], protecting: protected,
             before: Self.now.addingTimeInterval(-DownloadJanitor.recentInterval), locations: fixture.locations)
 
         #expect(removed.isEmpty)
         #expect(exists(folder, fixture))
+    }
+
+    /// An item's sweep protects the folders of the paths read in its hold from its own folder
+    /// only, with the sweep's protected folders as given (built once per sweep, not per item):
+    /// an episode queued for the item keeps its old empty folder, though `protecting` is empty,
+    /// and another item's paths, read with it, aren't returned.
+    @Test func anItemSweepProtectsItsOwnPathsReadInTheHold() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await fixture.storeDownloaded(LibraryItemFixtures.book())
+        let result = try await manager.enqueue(
+            item: LibraryItemFixtures.podcast(), episodeID: "ep_1", connectionID: fixture.connectionID)
+        guard case .started(let recordID) = result else { throw UnexpectedResult(result: result) }
+        let record = try #require(try await fixture.store.record(id: recordID))
+        let episode = try #require(record.parts.first { $0.kind == .audio }).destinationRelativePath
+        let episodeFolder = DownloadJanitor.pathComponents(episode).dropLast().joined(separator: "/")
+        let unused = "\(DownloadJanitor.pathComponents(episodeFolder).dropLast().joined(separator: "/"))/ep_gone"
+        let folders = [episodeFolder, unused]
+        for folder in folders {
+            try FileManager.default.createDirectory(
+                at: fixture.locations.downloadsRoot.appending(path: folder), withIntermediateDirectories: true)
+        }
+        try age(fixture)
+
+        let sweep = try await manager.sweepItem(
+            MediaKey(serverConnectionID: fixture.connectionID, libraryItemId: record.key.libraryItemId), files: [],
+            folders: folders.map { DownloadJanitor.Entry(path: $0, modified: Self.old) },
+            protecting: [], changedBefore: Self.now.addingTimeInterval(-DownloadJanitor.recentInterval))
+
+        #expect(sweep.removedFolders == [unused])
+        #expect(exists(episodeFolder, fixture))
+        #expect(sweep.used == Set(record.parts.map { DownloadLayout.collisionKey($0.destinationRelativePath) }))
+        #expect(!book.files.isEmpty)
     }
 
     // MARK: - Helpers
