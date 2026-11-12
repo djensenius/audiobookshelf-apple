@@ -130,6 +130,89 @@ private func makeLossyModel(
         #expect(model.items == items(1...40))
     }
 
+    @Test func pagingChangesApplyWithoutBreakingThePageOffsets() async {
+        // Serves items by offset, so a page size mismatch between pages would skip or repeat items.
+        let all = items(1...100)
+        let limits = Mutex<[Int]>([])
+        let model = Model(query: "a") { _, page, limit in
+            limits.withLock { $0.append(limit) }
+            let results = Array(all.dropFirst(page * limit).prefix(limit))
+            return PagedResults(results: results, total: all.count, limit: limit, page: page)
+        }
+        // Nothing requested yet: both apply now.
+        model.setPaging(pageSize: 40, prefetchThreshold: 20)
+        #expect(model.pageSize == 40)
+        await model.loadNextPage()?.value
+        #expect(model.items == items(1...40))
+        model.itemAppeared(at: 19)
+        #expect(!model.isLoading)
+
+        // Mid-list, the threshold applies to the next appearance; the page size waits for a restart.
+        model.setPaging(pageSize: 30, prefetchThreshold: 30)
+        #expect(model.pageSize == 40)
+        model.itemAppeared(at: 10)
+        #expect(model.isLoading)
+        await model.loadNextPage()?.value
+        #expect(model.items == items(1...80))
+
+        await model.refresh()?.value
+        #expect(model.pageSize == 30)
+        #expect(model.items == items(1...30))
+        #expect(limits.withLock { $0 } == [40, 40, 30])
+
+        // Setting the current size back drops the waiting one.
+        model.setPaging(pageSize: 50, prefetchThreshold: 5)
+        model.setPaging(pageSize: 30, prefetchThreshold: 5)
+        await model.reset()?.value
+        #expect(model.pageSize == 30)
+    }
+
+    /// A refresh that applied a waiting page size but never landed keeps paging the old list by
+    /// its old size, and the next refresh applies the new one.
+    @Test(arguments: [false, true])
+    func refreshThatDoesNotLandKeepsTheOldPageSize(cancelled: Bool) async throws {
+        let all = items(1...100)
+        let gate = GatedCalls<PageRequest, PagedResults<TestItem>>()
+        let model = Model(query: "a", pageSize: 20) { query, page, limit in
+            try await gate.call(PageRequest(query: query, page: page, limit: limit))
+        }
+        var calls = gate.calls.makeAsyncIterator()
+        func page(_ page: Int, limit: Int) -> PagedResults<TestItem> {
+            PagedResults(
+                results: Array(all.dropFirst(page * limit).prefix(limit)), total: all.count, limit: limit, page: page)
+        }
+        let first = try #require(model.loadNextPage())
+        try #require(await calls.next()).reply.resume(returning: page(0, limit: 20))
+        await first.value
+        model.setPaging(pageSize: 40, prefetchThreshold: 5)
+
+        let refresh = try #require(model.refresh())
+        let refreshCall = try #require(await calls.next())
+        #expect(refreshCall.request.limit == 40)
+        refreshCall.reply.resume(throwing: cancelled ? CancellationError() : TestError.offline)
+        await refresh.value
+        #expect(model.items == items(1...20))
+        #expect(model.pageSize == 20)
+
+        // Offset 20, not 40: no item is skipped.
+        let next = try #require(model.loadNextPage())
+        let nextCall = try #require(await calls.next())
+        #expect(nextCall.request.page == 1)
+        #expect(nextCall.request.limit == 20)
+        nextCall.reply.resume(returning: page(1, limit: 20))
+        await next.value
+        #expect(model.items == items(1...40))
+
+        // The next refresh applies the requested size.
+        let retry = try #require(model.refresh())
+        let retryCall = try #require(await calls.next())
+        #expect(retryCall.request.limit == 40)
+        retryCall.reply.resume(returning: page(0, limit: 40))
+        await retry.value
+        #expect(model.pageSize == 40)
+        #expect(model.items == items(1...40))
+    }
+
     @Test func skipsDuplicateItems() async {
         // An item was added on the server between pages, shifting item 20 onto page 1.
         let server = PageServer(pages: [items(1...20), items(20...39)], total: 40)
