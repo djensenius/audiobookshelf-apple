@@ -101,6 +101,20 @@ enum RealtimeFixtures {
                 == .collectionChanged(.removed(id: "col-1", libraryID: "lib-1")))
     }
 
+    @Test func decodesRssFeedChanges() throws {
+        // `Feed.toOldJSONMinified()`.
+        let json = #"""
+            {"id":"feed-1","entityType":"libraryItem","entityId":"li-1","feedUrl":"/feed/my-book",
+            "meta":{"title":"My Book","description":null,"preventIndexing":true,"ownerName":null,"ownerEmail":null}}
+            """#
+        let feed = RssFeed(
+            id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/my-book",
+            meta: .init(title: "My Book", preventIndexing: true))
+        #expect(try decode(#"["rss_feed_open",\#(json)]"#) == .rssFeedChanged(.opened(feed)))
+        #expect(try decode(#"["rss_feed_closed",\#(json)]"#) == .rssFeedChanged(.closed(feed)))
+        #expect(throws: (any Error).self) { try decode(#"["rss_feed_open",{"id":"feed-1"}]"#) }
+    }
+
     @Test func ignoresUnknownEvents() throws {
         #expect(try decode(#"["item_updated",{"id":"li-1"}]"#) == nil)
         #expect(try decode(#"["pong"]"#) == nil)

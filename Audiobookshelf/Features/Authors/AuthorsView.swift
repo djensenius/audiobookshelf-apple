@@ -53,6 +53,7 @@ struct AuthorsContent: View {
                         AuthorCard(author: author, serverID: serverID) {
                             BrowsePresentation.open(.author(id: author.id), in: router)
                         }
+                        .openInNewWindowMenu(.author(id: author.id))
                     }
                 }
                 .padding(.vertical, ABSSpacing.large)
