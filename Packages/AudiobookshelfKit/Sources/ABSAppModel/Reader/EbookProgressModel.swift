@@ -75,6 +75,9 @@ public final class EbookProgressModel {
     /// The server ebook locations accounted for: the row's baseline, unsent and in-flight values
     /// as last read, and the locations saved since. A turn takes a copy; `nil` before the first read.
     @ObservationIgnored private var knownLocations: [String?]?
+    /// Awaited by a save after it took the waiting turn, before writing it. Settable for tests,
+    /// to turn a page during a local save.
+    @ObservationIgnored var willSave: (@MainActor () async -> Void)?
     /// The last local save's failure; a drain finishing meanwhile doesn't hide it.
     @ObservationIgnored private var saveError: String?
     /// Counts updates of ``hasUnsyncedChanges`` from saves and drains, so ``resume()`` doesn't
@@ -321,6 +324,7 @@ public final class EbookProgressModel {
         guard let pending = unsaved else { return true }
         unsaved = nil
         let ebook = ProgressEdit.Ebook(location: pending.location.stored, progress: pending.progress)
+        await willSave?()
         do {
             guard
                 let row = try await store.recordEbookTurn(
@@ -334,6 +338,12 @@ public final class EbookProgressModel {
                 return true
             }
             knownLocations = (knownLocations ?? []) + [ebook.location]
+            // A turn recorded during this save took its snapshot before this location: the
+            // acknowledgement of this save mustn't drop it as another device's newer page.
+            if var waiting = unsaved, let known = waiting.knownLocations {
+                waiting.knownLocations = known + [ebook.location]
+                unsaved = waiting
+            }
             syncStateRevision += 1
             hasUnsyncedChanges = row.ebookDirty
             saveError = nil

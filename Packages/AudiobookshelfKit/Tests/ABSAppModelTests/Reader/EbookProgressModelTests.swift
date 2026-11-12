@@ -755,6 +755,40 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await store.progress(for: key)?.ebookLocation == "4")
     }
 
+    /// A turn to page 4 recorded while page 3 is being saved locally, then page 3's acknowledgement
+    /// dated after it, before page 4's debounce expires: page 4 is still saved and sent.
+    @Test func aTurnDuringALocalSaveSurvivesThatSavesAcknowledgement() async throws {
+        service.server.value = serverProgress("2", at: t0)
+        let model = makeModel()
+        _ = await model.resume()
+        let gate = Gate()
+        let saving = Locked(false)
+        model.willSave = {
+            saving.value = true
+            await gate.wait()
+        }
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        turn(model, to: 3)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+        #expect(await eventually { saving.value })
+        model.willSave = nil
+
+        time.value = t0.addingTimeInterval(10)
+        turn(model, to: 4)
+        #expect(await sleeps.next() == .seconds(2))
+        time.value = t0.addingTimeInterval(20)
+        gate.open()
+        #expect(await eventually { service.writes.value.count == 1 })
+        await model.drainTail?.value
+        #expect(try await store.progress(for: key)?.serverBaseline?.lastUpdate == t0.addingTimeInterval(20))
+
+        clock.advance(by: .seconds(2))
+        await model.flush()
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3", "4"])
+        #expect(try await store.progress(for: key)?.ebookLocation == "4")
+    }
+
     /// The first online resume keeps the server's position locally, so reopening offline
     /// without a page turn opens there too.
     @Test func anOnlineResumeIsKeptForAnOfflineReopen() async throws {
