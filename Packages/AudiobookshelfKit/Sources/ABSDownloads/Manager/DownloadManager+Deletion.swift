@@ -84,9 +84,10 @@ extension DownloadManager {
 
     /// The rest of the deletion of `item`, deleted from the store by a caller that holds it:
     /// its progress link, its cover refetch, cancelled (``cancelRefetch(of:)``), its cover
-    /// hand-off, then its files and `extra` (files already deleted from it). Its folder goes with everything in it only when it is the folder
-    /// ``DownloadLayout`` gives the item; any other stored directory (a shallower one would
-    /// hold other items) loses only the item's files.
+    /// hand-off, then its files and `extra` (files already deleted from it). Its folder goes
+    /// with everything in it only when it is the folder ``DownloadLayout`` gives the item; any
+    /// other stored directory (a shallower one would hold other items) loses only the item's
+    /// files.
     private func finishRemoving(_ item: LocalLibraryItemDTO, alsoRemoving extra: [String]) async {
         await detachProgress("Couldn't detach progress from a deleted download") {
             try await $0.detach(itemID: item.id)
