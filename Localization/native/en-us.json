@@ -108,6 +108,7 @@
   "LabelValue": "Value",
   "LabelYesterday": "Yesterday",
   "MessageAddPodcastNotAllowed": "Only server admins can add podcasts.",
+  "MessageAddPodcastNotPodcastLibrary": "Podcasts can only be added to a podcast library.",
   "MessageAuthorBooksLoadFailed": "Couldn't load this author's books.",
   "MessageAuthorDetailLoadFailed": "Couldn't load this author.",
   "MessageAuthorDetailNotFound": "This author isn't on the server anymore.",

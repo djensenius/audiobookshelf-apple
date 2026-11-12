@@ -14,7 +14,9 @@ struct NewPodcastForm: View {
     @Environment(\.serverID) private var serverID
     /// The genres as typed, comma-separated; the draft gets them split.
     @State private var genresText: String
+    /// The last submit's failure, kept while the alert is dismissed.
     @State private var failureMessage: String?
+    @State private var showsFailure = false
 
     init(draft: NewPodcastDraft, onCreated: @escaping (String) -> Void) {
         self.draft = draft
@@ -98,6 +100,12 @@ struct NewPodcastForm: View {
             .navigationBarTitleDisplayMode(.inline)
         #endif
         .interactiveDismissDisabled(draft.isSubmitting)
+        .onChange(of: issues) { old, new in
+            for issue in new.subtracting(old) {
+                let key = issue == .titleMissing ? "MessageNewPodcastTitleRequired" : "MessageNewPodcastFolderRequired"
+                AccessibilityNotification.Announcement(L10n.string(key)).post()
+            }
+        }
         .onChange(of: genresText) { _, text in
             draft.genres = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
         }
@@ -116,10 +124,7 @@ struct NewPodcastForm: View {
                 }
             }
         }
-        .alert(
-            Text(verbatim: failureMessage ?? ""),
-            isPresented: Binding(get: { failureMessage != nil }, set: { if !$0 { failureMessage = nil } })
-        ) {
+        .alert(Text(verbatim: failureMessage ?? ""), isPresented: $showsFailure, presenting: failureMessage) { _ in
             Button(L10n.string("ButtonOk")) {}
         }
     }
@@ -131,6 +136,7 @@ struct NewPodcastForm: View {
                 onCreated(itemID)
             } else if draft.submitError != nil {
                 failureMessage = draft.submitErrorMessage ?? L10n.string("ToastPodcastCreateFailed")
+                showsFailure = true
             }
         }
     }
@@ -140,20 +146,13 @@ struct NewPodcastForm: View {
     @MainActor
     private func newPodcastPreviewDraft(title: String = "Classic Tales", folders: Bool = true) -> NewPodcastDraft {
         let feedURL = "https://feeds.example.com/classic-tales.xml"
-        let feed = PodcastFeed(
-            metadata: PodcastFeedMetadata(
-                title: title, author: "B. J. Harrison", descriptionPlain: "The finest classic stories, read aloud.",
-                categories: ["Arts", "Books"], feedURL: feedURL),
-            numEpisodes: 812)
+        let metadata = PodcastFeedMetadata(
+            title: title, author: "B. J. Harrison", descriptionPlain: "Classic stories, read aloud.",
+            categories: ["Arts", "Books"], feedURL: feedURL)
         return NewPodcastDraft(
             service: AddPodcastPreviewService(), libraryID: SampleLibrary.libraryID,
-            folders: folders
-                ? [
-                    LibraryFolder(id: "fol_1", fullPath: "/podcasts"),
-                    LibraryFolder(id: "fol_2", fullPath: "/mnt/shows"),
-                ]
-                : [],
-            feed: feed, feedURL: feedURL)
+            folders: folders ? [LibraryFolder(id: "f1", fullPath: "/podcasts")] : [],
+            feed: PodcastFeed(metadata: metadata, numEpisodes: 812), feedURL: feedURL)
     }
 
     #Preview("New podcast") {

@@ -4,78 +4,64 @@ import ABSCore
 import ABSUI
 import SwiftUI
 
-/// The Add podcast section of a podcast library (legacy `pages/bookshelf/add-podcast.vue`): search the podcast
-/// directory or paste an RSS feed URL, then fill in ``NewPodcastForm``. Only admins see the form, as the server
-/// refuses everyone else.
-///
-/// Builds one ``AddPodcastModel`` per account and library, so a switch never shows the previous results. Present it
-/// as a section, a route or a sheet; `onCreated` gets the new item's ID, and by default pushes it onto the selected
-/// tab's stack.
+/// Add podcast (legacy `pages/bookshelf/add-podcast.vue`) for admins on a podcast library, with one model per account
+/// and library. `onCreated` gets the new item's ID; by default it's pushed on the selected tab's stack.
 struct AddPodcastView: View {
     var onCreated: ((String) -> Void)?
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
-    @State private var model: AddPodcastModel?
-    @State private var modelKey: ModelKey?
-
-    /// What a model belongs to; another one rebuilds it. A library refresh that keeps its folders and region keeps
-    /// the results.
-    private struct ModelKey: Hashable {
-        let connectionID: UUID
-        let userID: String
-        let libraryID: String
-        let folders: [LibraryFolder]
-        let region: String?
-    }
+    @State private var built: (key: AddPodcastAccess.Key, model: AddPodcastModel)?
 
     init(onCreated: ((String) -> Void)? = nil) {
         self.onCreated = onCreated
     }
 
     var body: some View {
-        let user = accounts?.authorization?.user
-        let key = currentKey(user: user)
+        let (access, library) = AddPodcastPresentation.access(accounts: accounts, store: store, router: router)
         Group {
-            if let user, !user.canAddPodcasts {
+            switch access {
+            case .notAllowed:
+                ErrorStateView(title: L10n.string("MessageAddPodcastNotAllowed"), systemImage: "lock")
+            case .notPodcastLibrary:
                 ErrorStateView(
-                    title: L10n.string("MessageAddPodcastNotAllowed"), systemImage: "lock")
-            } else if let model, modelKey == key {
-                AddPodcastContent(model: model) { open($0) }
-            } else {
-                LoadingView()
+                    title: L10n.string(AddPodcastPresentation.messages.empty),
+                    systemImage: AppTab.addPodcast.systemImage)
+            case .ready(let key):
+                if let built, built.key == key {
+                    // Captures the environment's objects: the create can finish after this view has changed.
+                    AddPodcastContent(model: built.model) { [accounts, store, router, onCreated] itemID in
+                        Self.open(
+                            itemID, createdFor: key, accounts: accounts, store: store, router: router,
+                            onCreated: onCreated)
+                    }
+                } else {
+                    LoadingView()
+                }
+            case .waiting:
+                BrowsePlaceholder(libraryID: library?.id, messages: AddPodcastPresentation.messages)
             }
         }
         .navigationTitle(Text(verbatim: L10n.string("HeaderAddPodcast")))
-        .task(id: key) {
-            guard key != modelKey else { return }
-            if let key, let client = accounts?.client, let library = findLibrary(id: key.libraryID) {
-                model = AddPodcastModel(service: client, library: library)
-            } else {
-                model = nil
+        .task(id: access) {
+            guard case .ready(let key) = access, built?.key != key else { return }
+            if let client = accounts?.client, let library {
+                built = (key, AddPodcastModel(service: client, library: library))
             }
-            modelKey = key
+        }
+        // A refresh keeps the model, and any open form, and only updates the folders and search region.
+        .onChange(of: library) { _, library in
+            if let library { built?.model.update(library: library) }
         }
     }
 
-    /// The signed-in admin's account and the router's library; `nil` until both are known and agree.
-    private func currentKey(user: User?) -> ModelKey? {
-        guard let user, user.canAddPodcasts, let connectionID = accounts?.activeConnection?.id,
-            store?.connectionKey?.connectionID == connectionID, let libraryID = router?.libraryID,
-            let library = findLibrary(id: libraryID)
-        else { return nil }
-        return ModelKey(
-            connectionID: connectionID, userID: user.id, libraryID: libraryID, folders: library.folders ?? [],
-            region: library.settings?.podcastSearchRegion)
-    }
-
-    private func findLibrary(id: String) -> Library? {
-        store?.libraries.first { $0.id == id }
-    }
-
-    /// Calls `onCreated`, or pushes the new podcast on the selected tab's stack. In compact width the Add podcast
-    /// section lives in Library, which is then the selected tab, so this is the stack showing this screen.
-    private func open(_ itemID: String) {
+    /// Opens the podcast created for `key`, unless the account or library has changed since.
+    private static func open(
+        _ itemID: String, createdFor key: AddPodcastAccess.Key, accounts: AccountManager?, store: LibraryStore?,
+        router: Router?, onCreated: ((String) -> Void)?
+    ) {
+        let (access, _) = AddPodcastPresentation.access(accounts: accounts, store: store, router: router)
+        guard access.canOpen(createdFor: key) else { return }
         if let onCreated {
             onCreated(itemID)
         } else {
@@ -89,6 +75,9 @@ struct AddPodcastContent: View {
     @Bindable var model: AddPodcastModel
     let onCreated: (String) -> Void
     @Environment(\.serverID) private var serverID
+    /// The lookup error shown, kept while the alert is dismissed so its title doesn't go blank.
+    @State private var shownLookupError: AddPodcastLookupError?
+    @State private var showsLookupError = false
 
     var body: some View {
         List {
@@ -121,11 +110,22 @@ struct AddPodcastContent: View {
                 }
             }
         }
+        .onChange(of: model.lookupError) { _, error in
+            guard let error else { return }
+            shownLookupError = error
+            showsLookupError = true
+            model.clearLookupError()
+        }
+        .onChange(of: model.searchError != nil) { _, failed in
+            if failed { announce("MessagePodcastSearchFailed") }
+        }
+        .onChange(of: model.isLookingUpFeed) { _, started in
+            if started { announce("MessageLoading") }
+        }
         .alert(
-            Text(verbatim: model.lookupError.map(Self.message) ?? ""),
-            isPresented: Binding(
-                get: { model.lookupError != nil }, set: { if !$0 { model.clearLookupError() } })
-        ) {
+            Text(verbatim: shownLookupError.map(Self.message) ?? ""), isPresented: $showsLookupError,
+            presenting: shownLookupError
+        ) { _ in
             Button(L10n.string("ButtonOk")) {}
         }
         .sheet(item: $model.draft) { draft in
@@ -150,6 +150,10 @@ struct AddPodcastContent: View {
         } else {
             AddPodcastPrompt(messageKey: "MessagePodcastSearchField", systemImage: "dot.radiowaves.left.and.right")
         }
+    }
+
+    private func announce(_ key: String) {
+        AccessibilityNotification.Announcement(L10n.string(key)).post()
     }
 
     static func message(for error: AddPodcastLookupError) -> String {
@@ -220,6 +224,21 @@ private struct AddPodcastResultRow: View {
 
 /// Covers of podcasts that aren't on the server yet.
 enum AddPodcastPresentation {
+    static let messages = BrowseMessages(
+        failed: "MessageLibraryItemsLoadFailed", empty: "MessageAddPodcastNotPodcastLibrary",
+        systemImage: AppTab.addPodcast.systemImage)
+
+    /// What the screen may show, and the router's library from the store.
+    @MainActor
+    static func access(accounts: AccountManager?, store: LibraryStore?, router: Router?) -> (AddPodcastAccess, Library?)
+    {
+        let library = router?.libraryID.flatMap { id in store?.libraries.first { $0.id == id } }
+        let access = AddPodcastAccess.resolve(
+            user: accounts?.authorization?.user, connectionID: accounts?.activeConnection?.id,
+            storeConnectionID: store?.connectionKey?.connectionID, library: library)
+        return (access, library)
+    }
+
     /// The external artwork at `url`, cached under `id`; `nil` without a URL or while signed out.
     static func coverKey(url: String?, id: String?, serverID: UUID?) -> ImageKey? {
         guard let url, let externalURL = URL(string: url), let serverID else { return nil }
@@ -228,14 +247,11 @@ enum AddPodcastPresentation {
 }
 
 #if DEBUG
-    /// Answers searches with two shows (none for "nothing"), and every feed with one; creates fail for titles
-    /// containing "fail".
+    /// Two shows, none for "nothing"; "fail" fails searches and creates.
     struct AddPodcastPreviewService: AddPodcastService {
-        struct Failure: Error {}
-
         func searchPodcastDirectory(term: String, country: String?) async throws -> [PodcastDirectoryResult] {
             if term == "nothing" { return [] }
-            if term == "fail" { throw Failure() }
+            if term == "fail" { throw APIError.notFound }
             return [
                 PodcastDirectoryResult(
                     itunesID: "1", title: "Classic Tales", artistName: "B. J. Harrison",
@@ -263,54 +279,33 @@ enum AddPodcastPresentation {
         }
     }
 
-    @MainActor
-    func addPodcastPreviewModel(query: String? = nil) -> AddPodcastModel {
-        let library = Library(
-            id: SampleLibrary.libraryID, name: "Podcasts",
-            folders: [
-                LibraryFolder(id: "fol_1", fullPath: "/podcasts"), LibraryFolder(id: "fol_2", fullPath: "/mnt/shows"),
-            ], mediaType: .podcast)
-        let model = AddPodcastModel(service: AddPodcastPreviewService(), library: library)
-        if let query {
-            model.query = query
-            model.submit()
-        }
-        return model
-    }
+    /// Search results for `query`, in a library with two folders.
+    private struct AddPodcastPreview: View {
+        @State private var model = AddPodcastModel(
+            service: AddPodcastPreviewService(),
+            library: Library(
+                id: SampleLibrary.libraryID, name: "Podcasts",
+                folders: [LibraryFolder(id: "f1", fullPath: "/podcasts")],
+                mediaType: .podcast))
+        var query: String?
 
-    #Preview("Results") {
-        @Previewable @State var model = addPodcastPreviewModel(query: "classic")
-        NavigationStack {
-            AddPodcastContent(model: model) { _ in }
-                .navigationTitle(Text(verbatim: L10n.string("HeaderAddPodcast")))
-        }
-        .environment(\.serverID, UUID())
-    }
-
-    #Preview("Prompt") {
-        @Previewable @State var model = addPodcastPreviewModel()
-        NavigationStack {
-            AddPodcastContent(model: model) { _ in }
-                .navigationTitle(Text(verbatim: L10n.string("HeaderAddPodcast")))
+        var body: some View {
+            NavigationStack {
+                AddPodcastContent(model: model) { _ in }
+                    .navigationTitle(Text(verbatim: L10n.string("HeaderAddPodcast")))
+            }
+            .task {
+                model.query = query ?? ""
+                model.submit()
+            }
         }
     }
 
+    #Preview("Results") { AddPodcastPreview(query: "classic").environment(\.serverID, UUID()) }
+    #Preview("Prompt") { AddPodcastPreview() }
+    #Preview("Search failed") { AddPodcastPreview(query: "fail") }
     #Preview("No results, dark, largest text") {
-        @Previewable @State var model = addPodcastPreviewModel(query: "nothing")
-        NavigationStack {
-            AddPodcastContent(model: model) { _ in }
-                .navigationTitle(Text(verbatim: L10n.string("HeaderAddPodcast")))
-        }
-        .environment(\.dynamicTypeSize, .accessibility5)
-        .preferredColorScheme(.dark)
-    }
-
-    #Preview("Search failed") {
-        @Previewable @State var model = addPodcastPreviewModel(query: "fail")
-        NavigationStack {
-            AddPodcastContent(model: model) { _ in }
-                .navigationTitle(Text(verbatim: L10n.string("HeaderAddPodcast")))
-        }
+        AddPodcastPreview(query: "nothing").environment(\.dynamicTypeSize, .accessibility5).preferredColorScheme(.dark)
     }
 #endif
 
