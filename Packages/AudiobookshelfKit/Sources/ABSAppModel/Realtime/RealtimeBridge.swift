@@ -56,6 +56,8 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 ///   session, or a reconnect without a usable token, closes the socket without a farewell.
 /// - `user_updated` goes to ``onUserUpdated`` for the session's user. It never seeds the cache:
 ///   its progress list isn't known to be complete.
+/// - `author_added`, `author_updated` and `author_removed` go to ``onLibraryChange`` with the
+///   session's account.
 ///
 /// Socket values aren't merged into `LocalProgressStore` for downloaded items (ADR 0003's
 /// `.socket` source); that is left to the session wiring.
@@ -69,6 +71,10 @@ public final class RealtimeBridge: SessionParticipant {
 
     /// The session's user changed on the server.
     @ObservationIgnored public var onUserUpdated: (@MainActor (User) -> Void)?
+    /// A library's entity changed on the server; with the account of the session it came from,
+    /// for ``LibraryStore/applyLibraryChange(_:connectionKey:)``. Nothing arrives after the
+    /// session ends.
+    @ObservationIgnored public var onLibraryChange: (@MainActor (LibraryChange, LibraryConnectionKey) -> Void)?
     /// Offers a jump to another session's position, as the legacy app did: the player has the
     /// item open and is paused, and the update comes from another playback session (whether or
     /// not the cache took it). It must also not be older than the cached progress (if as old, at
@@ -87,7 +93,7 @@ public final class RealtimeBridge: SessionParticipant {
 
     /// Bumped on start and stop, so tasks of an earlier session do nothing.
     @ObservationIgnored private var generation = 0
-    @ObservationIgnored private var userID: String?
+    @ObservationIgnored private var identity: SessionIdentity?
     @ObservationIgnored private var client: APIClient?
     @ObservationIgnored private var tokens: (any RealtimeTokenSource)?
     @ObservationIgnored private var socket: (any RealtimeConnecting)?
@@ -123,7 +129,7 @@ public final class RealtimeBridge: SessionParticipant {
 
     public func sessionDidStart(_ context: SessionContext) async {
         let previous = detach()
-        userID = context.identity.userID
+        identity = context.identity
         begin(context)
         await previous.socket?.disconnect(sendingFarewell: true)
     }
@@ -166,7 +172,7 @@ public final class RealtimeBridge: SessionParticipant {
     /// With ``SessionEndReason/expired`` the socket is closed without a farewell.
     public func sessionWillEnd(_ reason: SessionEndReason) async {
         let (socket, reader) = detach()
-        userID = nil
+        identity = nil
         await reader?.value
         await socket?.disconnect(sendingFarewell: reason != .expired)
     }
@@ -301,13 +307,20 @@ public final class RealtimeBridge: SessionParticipant {
                 Log.realtime.error("The socket rejected a refreshed token; waiting for a network change")
             }
         case .userUpdated(let user):
-            if user.id == userID { onUserUpdated?(user) }
+            if user.id == identity?.userID { onUserUpdated?(user) }
         case .userItemProgressUpdated(let update):
             apply(update)
         case .playlistAdded:
             break
+        case .authorChanged(let change):
+            deliver(.author(change))
         }
         didHandle?(event)
+    }
+
+    private func deliver(_ change: LibraryChange) {
+        guard let identity else { return }
+        onLibraryChange?(change, LibraryConnectionKey(connectionID: identity.connectionID, userID: identity.userID))
     }
 
     private func apply(_ update: UserItemProgressUpdate) {
