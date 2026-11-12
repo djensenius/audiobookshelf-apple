@@ -13,10 +13,14 @@ final class WidgetCenterReloader: WidgetTimelineReloading {
 
 extension AppEnvironment {
     /// The Continue Listening widget's snapshot writer (#89): a ``SessionStage/connect``
-    /// participant that clears the snapshot on sign-out, and once its connection is removed.
-    /// Without an App Group container (an unsigned macOS build) it writes nothing.
-    static func makeWidgetSnapshotWriter(accounts: AccountManager?) -> WidgetSnapshotWriter {
+    /// participant that clears the snapshot on sign-out, once its connection is removed, and when
+    /// the launch's restore ends signed out. Without an App Group container (an unsigned macOS
+    /// build) it writes nothing.
+    static func makeWidgetSnapshotWriter(
+        accounts: AccountManager?, lifecycle: SessionLifecycle
+    ) -> WidgetSnapshotWriter {
         let writer = WidgetSnapshotWriter(fileURL: WidgetSnapshot.defaultFileURL(), reloader: WidgetCenterReloader())
+        writer.followLaunch { lifecycle.gate }
         if let accounts {
             writer.followRemovals { Set(accounts.connections.map(\.id)) }
         }

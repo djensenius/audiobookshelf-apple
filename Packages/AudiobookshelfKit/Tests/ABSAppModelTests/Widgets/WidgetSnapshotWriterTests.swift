@@ -30,6 +30,36 @@ private final class FakeConnections {
     var saved: Set<UUID> = []
 }
 
+@MainActor
+@Observable
+private final class FakeGate {
+    var gate = AuthGate.launching
+}
+
+/// The writer's trailing-write timer: it waits until the test wakes it, or it's cancelled.
+@MainActor
+private final class FakeSleeper {
+    private(set) var waits: [TimeInterval] = []
+    private var sleepers: [UUID: CheckedContinuation<Void, any Error>] = [:]
+    var sleeping: Int { sleepers.count }
+
+    func sleep(_ seconds: TimeInterval) async throws {
+        let id = UUID()
+        waits.append(seconds)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { sleepers[id] = $0 }
+        } onCancel: {
+            Task { @MainActor in self.sleepers.removeValue(forKey: id)?.resume(throwing: CancellationError()) }
+        }
+    }
+
+    func wake() {
+        let woken = sleepers
+        sleepers = [:]
+        for sleeper in woken.values { sleeper.resume() }
+    }
+}
+
 private let serverA = UUID(uuidString: "0A0A0A0A-0000-4000-8000-000000000001")!
 private let serverB = UUID(uuidString: "0B0B0B0B-0000-4000-8000-000000000002")!
 
@@ -40,7 +70,8 @@ private func snapshot(
     WidgetSnapshot(
         serverID: server, itemID: item, title: "Dune", author: "Frank Herbert", chapterTitle: chapter,
         currentTime: time, duration: 400, isPlaying: playing,
-        coverKey: ImageKey(serverID: server, kind: .itemCover, entityID: item, updatedAt: 7, bucket: .small))
+        cover: CoverLocator(
+            ImageKey(serverID: server, kind: .itemCover, entityID: item, updatedAt: 7, bucket: .small)))
 }
 
 private func context(_ server: UUID) -> SessionContext {
@@ -54,6 +85,7 @@ private func context(_ server: UUID) -> SessionContext {
     private let file: URL
     private let reloader = FakeReloader()
     private let clock = FakeClock()
+    private let sleeper = FakeSleeper()
 
     init() throws {
         directory = FileManager.default.temporaryDirectory.appending(path: "WidgetSnapshotWriterTests-\(UUID())")
@@ -62,7 +94,9 @@ private func context(_ server: UUID) -> SessionContext {
 
     private func writer(server: UUID? = serverA) async -> WidgetSnapshotWriter {
         let clock = self.clock
-        let writer = WidgetSnapshotWriter(fileURL: file, reloader: reloader, now: { clock.now })
+        let sleeper = self.sleeper
+        let writer = WidgetSnapshotWriter(
+            fileURL: file, reloader: reloader, now: { clock.now }, sleep: { try await sleeper.sleep($0) })
         if let server { await writer.sessionDidStart(context(server)) }
         return writer
     }
@@ -84,10 +118,32 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(
             Set(json.keys) == [
                 "serverID", "itemID", "title", "author", "chapterTitle", "currentTime", "duration", "isPlaying",
-                "coverKey",
+                "cover",
             ])
         let text = try String(contentsOf: file, encoding: .utf8).lowercased()
         #expect(!text.contains("token"))
+    }
+
+    @Test func aSignedExternalCoverURLIsNotWritten() async throws {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = await writer()
+        let key = ImageKey(
+            serverID: serverA, kind: .itemCover, entityID: "li_1", updatedAt: 7, bucket: .small,
+            externalURL: URL(string: "https://covers.example/image.jpg?token=secret"))
+        var signed = snapshot()
+        signed.cover = CoverLocator(key)
+
+        writer.update(signed)
+
+        let text = try String(contentsOf: file, encoding: .utf8).lowercased()
+        for leak in ["token", "secret", "covers.example", "image.jpg", "http"] {
+            #expect(!text.contains(leak), "\(leak)")
+        }
+        #expect(onDisk?.cover == CoverLocator(key))
+        // The digest still tells it from the server route's cover of the same item.
+        var route = key
+        route.externalURL = nil
+        #expect(onDisk?.cover != CoverLocator(route))
     }
 
     @Test func deepLinkOpensTheItemOnItsServer() throws {
@@ -117,6 +173,48 @@ private func context(_ server: UUID) -> SessionContext {
         clock.advance(by: 1)
         writer.update(snapshot(at: 310))
         #expect(onDisk?.currentTime == 310)
+        #expect(reloader.kinds.count == 2)
+    }
+
+    @Test func aThrottledPositionIsWrittenOnceTheIntervalPasses() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = await writer()
+        writer.update(snapshot(at: 10))
+        clock.advance(by: 1)
+        writer.update(snapshot(at: 11, playing: false))
+
+        // A seek while paused: nothing follows it, so it's written when the interval passes.
+        clock.advance(by: 5)
+        writer.update(snapshot(at: 200, playing: false))
+        #expect(onDisk?.currentTime == 11)
+        #expect(await eventually { sleeper.sleeping == 1 })
+        #expect(sleeper.waits == [295])
+
+        clock.advance(by: 295)
+        sleeper.wake()
+        #expect(await eventually { onDisk?.currentTime == 200 })
+        #expect(reloader.kinds.count == 3)
+    }
+
+    @Test func aThrottledPositionIsDroppedWhenSupersededOrCleared() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = await writer()
+        writer.update(snapshot(at: 10, playing: false))
+
+        // Seeking back to the written position cancels the pending one.
+        clock.advance(by: 5)
+        writer.update(snapshot(at: 200, playing: false))
+        #expect(await eventually { sleeper.sleeping == 1 })
+        writer.update(snapshot(at: 10, playing: false))
+        #expect(await eventually { sleeper.sleeping == 0 })
+        #expect(onDisk?.currentTime == 10)
+
+        // Signing out cancels it too, so it can't bring the snapshot back.
+        writer.update(snapshot(at: 300, playing: false))
+        #expect(await eventually { sleeper.sleeping == 1 })
+        await writer.sessionWillEnd(.signOut)
+        #expect(await eventually { sleeper.sleeping == 0 })
+        #expect(onDisk == nil)
         #expect(reloader.kinds.count == 2)
     }
 
@@ -211,6 +309,36 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(!FileManager.default.fileExists(atPath: file.path))
     }
 
+    @Test func aRestoreThatEndsSignedOutAtLaunchClearsTheSnapshot() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await writer().update(snapshot())
+        let launch = FakeGate()
+        let relaunched = await writer(server: nil)
+        relaunched.followLaunch { launch.gate }
+
+        launch.gate = .connect
+
+        #expect(await eventually { reloader.kinds.count == 2 })
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+    }
+
+    @Test func aRestoredSessionAtLaunchKeepsTheSnapshot() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        await writer().update(snapshot())
+        let launch = FakeGate()
+        let relaunched = await writer(server: nil)
+        relaunched.followLaunch { launch.gate }
+
+        launch.gate = .ready(SessionIdentity(connectionID: serverA, userID: "u1"), isOffline: false)
+        for _ in 0..<100 { await Task.yield() }
+        // Only the launch counts: a later sign-out clears it as a session's end.
+        launch.gate = .connect
+        for _ in 0..<100 { await Task.yield() }
+
+        #expect(onDisk == snapshot())
+        #expect(reloader.kinds.count == 1)
+    }
+
     @Test func aRelaunchedWriterKnowsTheSnapshotOnDisk() async {
         defer { try? FileManager.default.removeItem(at: directory) }
         await writer().update(snapshot())
@@ -245,7 +373,7 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(shown.currentTime == 150)
         #expect(shown.duration == 400)
         #expect(shown.isPlaying)
-        #expect(shown.coverKey == player.coverKey?.with(bucket: .small))
-        #expect(shown.coverKey?.bucket == .small)
+        #expect(shown.cover == player.coverKey.map { CoverLocator($0.with(bucket: .small)) })
+        #expect(shown.cover?.bucket == .small)
     }
 }

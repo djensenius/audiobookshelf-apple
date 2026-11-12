@@ -14,11 +14,14 @@ public protocol WidgetTimelineReloading: AnyObject {
 /// - It writes and reloads at once when anything but the position changes: another item, play
 ///   or pause, a new chapter, title, author or cover. A position-only change waits until
 ///   ``minimumInterval`` has passed since the last write, so playback's ticks don't spend the
-///   widget's reload budget; the next write carries the latest position.
+///   widget's reload budget: the latest one is written then, even if nothing changes after it
+///   (a seek while paused).
 /// - It clears the snapshot (deletes the file and reloads) when the user signs out, removes the
 ///   active account or the server rejects the session (``SessionParticipant``), and when the
 ///   snapshot's connection is removed while another one is active (``followRemovals(of:)``). A
-///   switch keeps it: the widget still opens that item, asking to switch back.
+///   switch keeps it: the widget still opens that item, asking to switch back. It also clears
+///   it when the launch's restore ends signed out (``followLaunch(of:)``), since then no session
+///   starts or ends.
 /// - It ignores snapshots for any connection but the running session's, so a tick from the
 ///   ending session can't write the snapshot back after a sign-out cleared it.
 @MainActor
@@ -28,40 +31,61 @@ public final class WidgetSnapshotWriter: SessionParticipant {
     private let fileURL: URL?
     private let reloader: any WidgetTimelineReloading
     private let now: () -> Date
+    private let sleep: @Sendable (TimeInterval) async throws -> Void
     /// The running session's connection; `nil` when none runs.
     private var connectionID: UUID?
     /// The snapshot on disk, or `nil` when there is none.
     private var written: WidgetSnapshot?
     private var lastWrite: Date?
+    /// A throttled position, written when ``minimumInterval`` has passed.
+    private var pending: WidgetSnapshot?
+    private var trailing: Task<Void, Never>?
     private var following: Task<Void, Never>?
     private var removals: Task<Void, Never>?
+    private var launch: Task<Void, Never>?
 
     /// - Parameter fileURL: Where the snapshot goes (``WidgetSnapshot/defaultFileURL(appGroup:)``);
     ///   `nil` without an App Group, when nothing is written but the session is still followed.
+    /// - Parameters:
+    ///   - now: The clock the interval is measured with.
+    ///   - sleep: Waits the given seconds before a throttled position is written; tests resume
+    ///     it by hand.
     public init(
         fileURL: URL?, reloader: any WidgetTimelineReloading, minimumInterval: TimeInterval = 300,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
     ) {
         self.fileURL = fileURL
         self.reloader = reloader
         self.minimumInterval = minimumInterval
         self.now = now
+        self.sleep = sleep
         written = fileURL.flatMap(WidgetSnapshot.read(from:))
     }
 
     isolated deinit {
         following?.cancel()
         removals?.cancel()
+        launch?.cancel()
+        trailing?.cancel()
     }
 
     /// Records the current item's snapshot, subject to the rules above. `nil` (no item, as after
     /// the player closes) keeps the last one, so the widget still offers it.
     public func update(_ snapshot: WidgetSnapshot?) {
-        guard let snapshot, snapshot.serverID == connectionID, snapshot != written else { return }
-        if let written, let lastWrite, Self.positionOnly(written, snapshot),
-            now().timeIntervalSince(lastWrite) < minimumInterval
-        {
+        guard let snapshot, snapshot.serverID == connectionID else { return }
+        guard snapshot != written else {
+            // Back where it was written: a throttled position mustn't overwrite it later.
+            cancelTrailingWrite()
             return
+        }
+        if let written, let lastWrite, Self.positionOnly(written, snapshot) {
+            let wait = minimumInterval - now().timeIntervalSince(lastWrite)
+            if wait > 0 {
+                pending = snapshot
+                if trailing == nil { scheduleTrailingWrite(after: wait) }
+                return
+            }
         }
         write(snapshot)
     }
@@ -73,6 +97,7 @@ public final class WidgetSnapshotWriter: SessionParticipant {
         }
         written = nil
         lastWrite = nil
+        cancelTrailingWrite()
         reloader.reloadTimelines(ofKind: WidgetSnapshot.continueListeningKind)
     }
 
@@ -106,6 +131,22 @@ public final class WidgetSnapshotWriter: SessionParticipant {
         }
     }
 
+    /// Clears the snapshot if `gate` (``SessionLifecycle/gate``) goes from launching to connect:
+    /// the saved session was rejected, or there was none, so the app shows sign-in without a
+    /// session starting or ending. Follows only until the gate first leaves launching.
+    public func followLaunch(of gate: @escaping @MainActor @Sendable () -> AuthGate) {
+        launch?.cancel()
+        guard gate() == .launching else { return }
+        launch = Task { [weak self] in
+            for await current in Observations({ @MainActor in gate() }) {
+                guard !Task.isCancelled, let self else { return }
+                if current == .launching { continue }
+                if current == .connect, self.written != nil { self.clear() }
+                return
+            }
+        }
+    }
+
     // MARK: - SessionParticipant
 
     public func sessionDidStart(_ context: SessionContext) async {
@@ -114,6 +155,7 @@ public final class WidgetSnapshotWriter: SessionParticipant {
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
         connectionID = nil
+        cancelTrailingWrite()
         switch reason {
         case .signOut, .removed, .expired: clear()
         case .switch: break
@@ -134,7 +176,24 @@ public final class WidgetSnapshotWriter: SessionParticipant {
         }
         written = snapshot
         lastWrite = now()
+        cancelTrailingWrite()
         reloader.reloadTimelines(ofKind: WidgetSnapshot.continueListeningKind)
+    }
+
+    private func scheduleTrailingWrite(after wait: TimeInterval) {
+        let sleep = self.sleep
+        trailing = Task { [weak self] in
+            do { try await sleep(wait) } catch { return }
+            guard !Task.isCancelled, let self else { return }
+            self.trailing = nil
+            if let pending = self.pending { self.update(pending) }
+        }
+    }
+
+    private func cancelTrailingWrite() {
+        trailing?.cancel()
+        trailing = nil
+        pending = nil
     }
 
     /// Whether `new` differs from `old` only in its position.
@@ -155,6 +214,6 @@ extension PlayerViewModel {
             serverID: key.serverConnectionID, itemID: key.libraryItemId, episodeID: key.episodeId, title: title,
             author: author, chapterTitle: chapterTitle, currentTime: playback.currentTime,
             duration: playback.duration, isPlaying: playback.isPlaybackRequested,
-            coverKey: coverKey?.with(bucket: .small))
+            cover: coverKey.map { CoverLocator($0.with(bucket: .small)) })
     }
 }

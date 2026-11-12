@@ -3,9 +3,10 @@ import Foundation
 /// What the Continue Listening widget shows (#89): the item last played, written by the app to
 /// the App Group and read by the widget extension.
 ///
-/// It holds no tokens or server address: only the connection's local ID, the item's IDs and
-/// text, the position and the cover's ``ImageKey``, by which the widget finds the cover in
-/// the shared ``CoverFileStore`` (ADR 0005).
+/// It holds no tokens, server address or cover URL: only the connection's local ID, the item's
+/// IDs and text, the position and the cover's ``CoverLocator``, by which the widget finds the
+/// cover in the shared ``CoverFileStore`` (ADR 0005). A legacy external cover URL may be signed
+/// (`?token=`), so only its digest is kept.
 public struct WidgetSnapshot: Codable, Sendable, Hashable {
     /// The saved server connection's local ID.
     public var serverID: UUID
@@ -22,12 +23,12 @@ public struct WidgetSnapshot: Codable, Sendable, Hashable {
     public var duration: Double
     /// Whether play was requested when the snapshot was taken.
     public var isPlaying: Bool
-    /// The item's cover at the 300 px bucket; `nil` when it has none.
-    public var coverKey: ImageKey?
+    /// The item's cover file at the 300 px bucket; `nil` when it has none.
+    public var cover: CoverLocator?
 
     public init(
         serverID: UUID, itemID: String, episodeID: String? = nil, title: String, author: String,
-        chapterTitle: String? = nil, currentTime: Double, duration: Double, isPlaying: Bool, coverKey: ImageKey?
+        chapterTitle: String? = nil, currentTime: Double, duration: Double, isPlaying: Bool, cover: CoverLocator?
     ) {
         self.serverID = serverID
         self.itemID = itemID
@@ -38,7 +39,7 @@ public struct WidgetSnapshot: Codable, Sendable, Hashable {
         self.currentTime = currentTime
         self.duration = duration
         self.isPlaying = isPlaying
-        self.coverKey = coverKey
+        self.cover = cover
     }
 
     /// The fraction played, `0...1`; `0` without a duration.

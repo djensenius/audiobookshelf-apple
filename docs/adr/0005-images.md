@@ -565,6 +565,9 @@ static, unauthenticated remote images (none are planned).
     `CoverFileStore` holds the exact requested version.
 - **Widgets** (P5-11b, #89):
   - `WidgetSnapshotWriter` records each snapshot item's `ImageKey` (300 bucket).
+    The App Group snapshot stores it as a `CoverLocator`, which names the
+    cached file without the key's external URL: a legacy external cover URL
+    may be signed (`?token=`), so only the digest in the file name is kept.
   - Before reloading timelines it calls
     `ImagePipeline.ensureCoverFile(for: ImageKey) async throws -> URL` for each
     of those keys. A normal `cgImage(for:size:)` call isn't enough, because it

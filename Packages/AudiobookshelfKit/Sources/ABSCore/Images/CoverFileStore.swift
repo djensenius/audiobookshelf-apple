@@ -176,14 +176,15 @@ public actor CoverFileStore {
         return nil
     }
 
-    /// The file for `key` whatever its extension in a store at `directory`, or `nil`, for a
+    /// The file `locator` names, whatever its extension, in a store at `directory`, or `nil`, for a
     /// process that only reads the cache (the widget extension, ADR 0005). Unlike ``lookup(_:)``
     /// it neither leases nor touches the file, so the app may evict or replace it meanwhile:
     /// a reader that can't open it shows its placeholder.
-    public static func cachedFile(for key: ImageKey, in directory: URL) -> URL? {
-        let folder = directory.appending(path: key.serverID.uuidString, directoryHint: .isDirectory)
+    public static func cachedFile(for locator: CoverLocator, in directory: URL) -> URL? {
+        let folder = directory.appending(path: locator.serverID.uuidString, directoryHint: .isDirectory)
+        let stem = locator.fileStem
         for ext in extensions {
-            let url = folder.appending(path: "\(key.fileStem).\(ext)")
+            let url = folder.appending(path: "\(stem).\(ext)")
             if (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true { return url }
         }
         return nil

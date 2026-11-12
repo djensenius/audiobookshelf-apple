@@ -50,17 +50,17 @@ struct ContinueListeningProvider: TimelineProvider {
 
     private static func entry() -> ContinueListeningEntry {
         let snapshot = WidgetSnapshot.defaultFileURL().flatMap(WidgetSnapshot.read(from:))
-        return ContinueListeningEntry(date: .now, snapshot: snapshot, cover: snapshot?.coverKey.flatMap(cover(for:)))
+        return ContinueListeningEntry(date: .now, snapshot: snapshot, cover: snapshot?.cover.flatMap(cover(for:)))
     }
 
     /// The snapshot's cover from the cache, downsampled; `nil` on a miss. Tries the 300 px file the
     /// snapshot names, then a larger cached rendition of the same version.
     // TODO(#89): once `ImagePipeline.ensureCoverFile` writes the 300 px file before each reload
     // (ADR 0005), the fallback to larger buckets can go.
-    private static func cover(for key: ImageKey) -> CGImage? {
+    private static func cover(for locator: CoverLocator) -> CGImage? {
         let directory = CoverFileStore.defaultDirectory()
         for bucket in ImageWidthBucket.allCases {
-            guard let url = CoverFileStore.cachedFile(for: key.with(bucket: bucket), in: directory),
+            guard let url = CoverFileStore.cachedFile(for: locator.with(bucket: bucket), in: directory),
                 let source = CGImageSourceCreateWithURL(
                     url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
             else { continue }
