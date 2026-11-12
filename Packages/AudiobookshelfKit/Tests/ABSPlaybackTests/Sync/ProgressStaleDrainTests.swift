@@ -6,9 +6,9 @@ import Testing
 @testable import ABSPlayback
 
 /// A deferred edit is drained against the server's current progress (#195, ADR 0007 decision 8):
-/// the drain fetches first and merges by ADR 0003, so it PATCHes only an edit newer than what
-/// another device wrote meanwhile. Both devices share one session model; the phone is the
-/// syncer under test and the tablet writes to the model directly.
+/// the drain fetches first and merges by ADR 0003, so in a real conflict it PATCHes only an edit
+/// newer than what another device wrote meanwhile. Both devices share one session model; the
+/// phone is the syncer under test and the tablet writes to the model directly.
 @MainActor
 @Suite(.timeLimit(.minutes(1)))
 struct ProgressStaleDrainTests {

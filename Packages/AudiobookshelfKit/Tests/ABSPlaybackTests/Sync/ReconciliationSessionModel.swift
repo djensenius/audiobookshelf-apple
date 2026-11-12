@@ -161,18 +161,19 @@ actor ReconciliationSessionModel {
     }
 
     /// `PATCH /api/me/progress/:id`: sets the groups sent, creating the progress if absent, and
-    /// dates it with the server's clock (the body carries no `lastUpdate`). As on both pinned
-    /// servers, `isFinished: false` resets the audio position of finished progress and changes
-    /// nothing on unfinished progress, and an audio PATCH that moves finished progress at least
-    /// 10 s from the end un-finishes it. There is no auto-finish.
+    /// dates it with the server's clock (the body carries no `lastUpdate`) only when something
+    /// changed. As on both pinned servers, `isFinished` acts only when it changes the state:
+    /// `false` resets the audio position of finished progress, and `true` keeps the `finishedAt`
+    /// of finished progress unless a date is sent. An audio PATCH that moves finished progress at
+    /// least 10 s from the end un-finishes it. There is no auto-finish.
     func update(
         _ client: SessionModelClient, itemID: String, episodeID: String?, _ update: MediaProgressUpdate
     ) async throws {
         try await perform(.patch) {
             let key = Key(user: client.userID, item: itemID, episode: episodeID)
-            if let row = progress[key], !row.isFinished, update == .finished(false) { return }
+            let existing = progress[key]
             var row =
-                progress[key]
+                existing
                 ?? MediaProgress(id: "progress-\(itemID)", libraryItemId: itemID, episodeId: episodeID)
             let moved = update.currentTime.map { $0 != row.currentTime } ?? false
             if let currentTime = update.currentTime { row.currentTime = currentTime }
@@ -182,7 +183,7 @@ actor ReconciliationSessionModel {
                 row.isFinished = false
                 row.finishedAt = nil
             }
-            if let finished = update.isFinished {
+            if let finished = update.isFinished, finished != row.isFinished {
                 row.isFinished = finished
                 row.finishedAt = finished ? update.finishedAt ?? milliseconds : nil
                 if finished {
@@ -191,9 +192,12 @@ actor ReconciliationSessionModel {
                     row.currentTime = 0
                     row.progress = 0
                 }
+            } else if let finishedAt = update.finishedAt {
+                row.finishedAt = finishedAt
             }
             if let location = update.ebookLocation { row.ebookLocation = location }
             if let value = update.ebookProgress { row.ebookProgress = value }
+            guard row != existing else { return }
             row.lastUpdate = milliseconds
             progress[key] = row
         }

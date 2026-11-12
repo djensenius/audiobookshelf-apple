@@ -293,6 +293,34 @@ struct ReconciliationSessionModelTests {
         #expect(reset.lastUpdate == Int(clock.now.timeIntervalSince1970 * 1000))
     }
 
+    /// A PATCH that changes nothing leaves the progress alone, `lastUpdate` included
+    /// (`ProgressContractTests.lastUpdate`, `MediaProgress.applyProgressUpdate`): a repeated
+    /// audio position, or an undated `isFinished: true` on finished progress, which keeps its
+    /// `finishedAt`. A sent date still replaces `finishedAt` and dates the progress.
+    @Test func onlyAnEffectivePatchDatesProgress() async throws {
+        let clock = TestClock()
+        let client = Adapters(ReconciliationSessionModel(clock: clock))
+        let now = { Int(clock.now.timeIntervalSince1970 * 1000) }
+        try await client.patch(.audio(currentTime: 12, duration: 50, progress: 0.24))
+        let audio = try await client.row()
+        clock.advance(by: 1)
+        try await client.patch(.audio(currentTime: 12, duration: 50, progress: 0.24))
+        #expect(try await client.row() == audio)
+
+        try await client.patch(.finished(true))
+        let finished = try await client.row()
+        #expect(finished.finishedAt == now() && finished.lastUpdate == now())
+        clock.advance(by: 1)
+        try await client.patch(.finished(true))
+        #expect(try await client.row() == finished)
+
+        let when = clock.ago(86_400)
+        try await client.patch(.finished(true, at: when))
+        let dated = try await client.row()
+        #expect(dated.finishedAt == Int((when.timeIntervalSince1970 * 1000).rounded()))
+        #expect(dated.isFinished && dated.lastUpdate == now())
+    }
+
     /// An audio PATCH that moves finished progress away from the end un-finishes it
     /// (`ProgressContractTests.audioUnfinishes`); exactly 10 s from the end is still away. The
     /// same position, or one fewer than 10 s from the end, leaves it finished (`MediaProgressUpdate`).

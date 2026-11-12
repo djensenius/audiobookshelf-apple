@@ -145,22 +145,27 @@ visibility barrier, late-processing fence or universal exactly-once/no-loss guar
 ordering is unspecified on the server (the model has a deterministic fixture tie-break).
 The model uses fixed 3600-second media and does not simulate auto-finish, ebook intent,
 permissions, local uploads, transport admission races or asynchronous database writes.
-`PATCH /api/me/progress/:id` (#380) sets the groups sent, creating the row if absent, and dates
-it with the model's clock, since the body carries no `lastUpdate`; `isFinished` follows the
-contract above (finished stores progress 1; un-finishing resets finished progress to 0 and
-leaves unfinished progress, `lastUpdate` included, unchanged), and an audio PATCH that moves
-finished progress at least 10 s from the end un-finishes it. A queued
+`PATCH /api/me/progress/:id` (#380) sets the groups sent, creating the row if absent, and, only
+when something changed, dates it with the model's clock (the body carries no `lastUpdate`): a
+PATCH that changes nothing leaves the row, `lastUpdate` included, as it was. `isFinished`
+follows the contract above and acts only when it changes the state (finishing stores progress 1
+and `finishedAt`; un-finishing resets finished progress to 0); finishing finished progress keeps
+its `finishedAt` unless a date is sent. An audio PATCH that moves finished progress at least
+10 s from the end un-finishes it. A queued
 `fetchErrors` or `patchErrors` entry fails before reaching the model. Legacy recording
 accessors remain recording-only; tests using this model inspect `fetchProgress`, `openSession`
 and `listeningSessions`. Unconfigured fake defaults are unchanged.
 
 Stale writes on this shared ledger (#380, ADR 0007 decision 8) are covered by
-`ProgressStaleDrainTests` (a drain keeps another device's newer position and PATCHes only a
-newer edit, defers on a failed read, creates absent progress, and characterizes clock skew) and
-`ProgressLateCloseTests` (a held `/sync` or `/close` from a session this device has moved on
-from answers 404 after the takeover, and one applied before it with its response lost still
-leaves the newer session's position; no `/close` is resent; and a slow `/close`
-can still overwrite another device's newer report, a documented limit).
+`ProgressStaleDrainTests` (in a real conflict a drain keeps another device's newer position and
+PATCHes only a newer edit; it defers on a failed read, creates absent progress, and
+characterizes clock skew) and `ProgressLateCloseTests` (a `/sync` or `/close` from a session
+this device has moved on from, held before its session lookup, answers 404 after the takeover,
+and one applied before it with its response lost still leaves the newer session's position; no
+`/close` is resent; and a slow `/close` can still overwrite another device's newer report, a
+documented limit). Groups ADR 0003 shields from the time comparison, and a request whose lookup
+passed before the takeover but writes after it, are documented limits the model doesn't exercise
+(ADR 0007 decision 8).
 
 Neither first-page absence, `/sync` success nor durable audio-report evidence proves delivery
 of listening time. No production recovery, resend, backoff, close-routing or history policy

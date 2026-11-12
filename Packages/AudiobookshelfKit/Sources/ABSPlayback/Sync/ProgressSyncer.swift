@@ -67,10 +67,12 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   `/sync`; a drain that completes cleanly resets that backoff. Both wakes are cancelled on
 ///   detach and quiesce.
 ///   Each pending row is fetched once before sending. Unusable or rejected progress defers that
-///   row; a thrown lookup stops the pass. A server value newer than the edit wins by ADR 0003,
-///   so the row is never PATCHed over it. This protects observed server values, not another
-///   device's write between GET and PATCH (the server offers no conditional write here), nor
-///   against clock skew between this device's edit time and the server's `lastUpdate`
+///   row; a thrown lookup stops the pass. In a real conflict, a server value newer than the edit
+///   wins by ADR 0003 and that group isn't PATCHed over it. A group ADR 0003 shields, because the
+///   server's value may be this device's own send or a side effect of one, keeps its edit without
+///   that check, so its PATCH can overwrite another device's newer value. Nor does the merge
+///   cover another device's write between GET and PATCH (the server offers no conditional write
+///   here), or clock skew between this device's edit time and the server's `lastUpdate`
 ///   (ADR 0007 decision 8, "Stale writes"). The drain never sends a `/sync` or `/close`; replaying
 ///   deferred listening must pass #158-d2's admission rule.
 ///   After settlements, outstanding PATCH acknowledgements get one confirmation lookup per key,

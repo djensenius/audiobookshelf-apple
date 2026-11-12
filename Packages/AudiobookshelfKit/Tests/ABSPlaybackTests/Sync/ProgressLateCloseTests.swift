@@ -7,9 +7,11 @@ import Testing
 
 /// A request from a session this device has moved on from can't regress its newer session of the
 /// same media: the next `/play` retires every open session of this user and device, so a late
-/// `/sync` or `/close` for one answers 404 instead of writing (ADR 0007 decision 8). Another
-/// device's sessions aren't retired, which leaves the cross-device race below. The close wait
-/// elapses at once here; reports go out every 15 s.
+/// `/sync` or `/close` for one that the server looks up after the takeover answers 404 instead of
+/// writing (ADR 0007 decision 8). The model looks up and writes atomically, so it doesn't cover a
+/// request whose lookup passed before the takeover and that writes after it. Another device's
+/// sessions aren't retired, which leaves the cross-device race below. The close wait elapses at
+/// once here; reports go out every 15 s.
 @MainActor
 @Suite(.timeLimit(.minutes(1)))
 struct ProgressLateCloseTests {
