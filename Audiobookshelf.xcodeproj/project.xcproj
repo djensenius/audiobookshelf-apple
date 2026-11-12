@@ -101,6 +101,7 @@
         "INFOPLIST_KEY_ITSAppUsesNonExemptEncryption": "NO",
         "INFOPLIST_KEY_LSApplicationCategoryType": "public.app-category.books",
         "INFOPLIST_KEY_NSLocalNetworkUsageDescription": "Audiobookshelf connects to servers on your local network, such as a server at home.",
+        "INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription": "Audiobookshelf saves the year in review images you choose to your photo library.",
         "INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents": "YES",
         "INFOPLIST_KEY_UILaunchScreen_Generation": "YES",
         "INFOPLIST_KEY_UISupportedInterfaceOrientations": "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
