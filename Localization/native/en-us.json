@@ -83,7 +83,7 @@
   "LabelMiniPlayerHint": "Opens the full player.",
   "LabelMinimizePlayer": "Minimize player",
   "LabelNextChapter": "Next chapter",
-  "LabelPlayFromBookmarkHint": "Plays from this bookmark.",
+  "LabelPlayFromBookmarkHint": "Moves playback to this bookmark.",
   "LabelPlaybackRate": "{0}×",
   "LabelPodcastDetailAscending": "Ascending",
   "LabelPodcastDetailBonus": "Bonus",

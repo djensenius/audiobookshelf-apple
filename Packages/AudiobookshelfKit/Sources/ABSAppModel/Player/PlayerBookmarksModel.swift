@@ -8,6 +8,15 @@ extension PlayerViewModel {
     public var supportsBookmarks: Bool { hasSession && !isPodcastEpisode }
 }
 
+/// Why ``PlayerBookmarksModel/create(title:itemID:at:defaultTitle:locale:)`` refused a bookmark.
+public enum PlayerBookmarksError: Error, Sendable, Hashable {
+    /// The player moved to another item since the form opened, so the bookmark would go on the
+    /// wrong one.
+    case itemChanged
+    /// A bookmark is already at that second (D10); the store would rename it instead.
+    case alreadyBookmarked
+}
+
 /// The current item's bookmarks for the player's bookmarks sheet (port of `BookmarksModal.vue`):
 /// joins the player's item and position with the account's ``BookmarkStore``.
 ///
@@ -16,8 +25,9 @@ extension PlayerViewModel {
 ///   connection (no client, or offline).
 /// - **Order (D8).** ``rows`` are sorted by time, as ``BookmarkStore/bookmarks(itemID:)`` returns them.
 /// - **Time (D10).** A new bookmark is at a whole second, ``creationTime``, and can't be created
-///   where one already exists; edit that one instead.
-/// - **Writes.** ``create(title:at:locale:)``, ``rename(_:to:)`` and ``delete(_:)`` go through the
+///   where one already exists, nor before the first load says whether one does; edit that one
+///   instead. Bookmarks are stored and sought in media time, whatever the playback rate.
+/// - **Writes.** ``create(title:itemID:at:defaultTitle:locale:)``, ``rename(_:to:)`` and ``delete(_:)`` go through the
 ///   store, which applies them at once and rolls them back if the server rejects them.
 ///
 /// The model holds no state of its own, so a view can make one whenever it needs it.
@@ -28,7 +38,7 @@ public final class PlayerBookmarksModel {
     @ObservationIgnored private let store: BookmarkStore
     @ObservationIgnored private let now: @Sendable () -> Date
 
-    /// - Parameter now: The clock for ``defaultTitle(locale:)``; tests pass a fixed date.
+    /// - Parameter now: The clock for ``defaultTitle(locale:timeZone:)``; tests pass a fixed date.
     public init(player: PlayerViewModel, store: BookmarkStore, now: @escaping @Sendable () -> Date = { .now }) {
         self.player = player
         self.store = store
@@ -47,7 +57,17 @@ public final class PlayerBookmarksModel {
         return store.bookmarks(itemID: itemID)
     }
 
+    /// Whether the current item has any bookmarks, for the toolbar button's filled symbol.
     public var hasBookmarks: Bool { !rows.isEmpty }
+
+    /// The item a new bookmark goes on: the current item's ID, or `nil` for a podcast episode or
+    /// without an item. The sheet captures it when its form opens, for
+    /// ``create(title:itemID:at:defaultTitle:locale:)``.
+    public var currentItemID: String? { itemID }
+
+    /// Whether the store's first load is still running, so an empty list doesn't mean there are no
+    /// bookmarks yet.
+    public var isFirstLoadInProgress: Bool { !store.hasLoaded && store.isLoading }
 
     /// The whole second a new bookmark goes at: the playback position rounded down. Reads the
     /// playback time, so read it only in a small leaf view.
@@ -56,9 +76,10 @@ public final class PlayerBookmarksModel {
     }
 
     /// Whether a bookmark can be created at ``creationTime``: bookmarks are enabled and visible,
-    /// and none is at that second. Reads the playback time, like ``creationTime``.
+    /// the first load isn't running, and none is at that second. Reads the playback time, like
+    /// ``creationTime``.
     public var canCreate: Bool {
-        guard isVisible, isEnabled else { return false }
+        guard isVisible, isEnabled, !isFirstLoadInProgress else { return false }
         return !isBookmarked(at: creationTime)
     }
 
@@ -70,9 +91,9 @@ public final class PlayerBookmarksModel {
     }
 
     /// The title a bookmark gets when the user leaves it empty (D9): the date and time now, such as
-    /// "Nov 12, 2026 at 9:41 AM" in `locale`.
-    public func defaultTitle(locale: Locale) -> String {
-        now().formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(locale))
+    /// "Nov 12, 2026 at 9:41 AM" in `locale` and `timeZone`.
+    public func defaultTitle(locale: Locale, timeZone: TimeZone = .autoupdatingCurrent) -> String {
+        now().formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, timeZone: timeZone).locale(locale))
     }
 
     /// Seeks to the bookmark without changing play or pause, as legacy `clickBookmark`.
@@ -80,17 +101,30 @@ public final class PlayerBookmarksModel {
         await player.playback.seek(to: bookmark.time)
     }
 
-    /// Adds a bookmark to the current item at `time`, rounded down to a whole second (D10). An
-    /// empty or blank `title` becomes ``defaultTitle(locale:)``.
+    /// Adds a bookmark to `itemID` at `time`, rounded down to a whole second (D10), in media time.
+    /// An empty or blank `title` becomes `defaultTitle`, or ``defaultTitle(locale:timeZone:)``
+    /// when that's `nil`.
     ///
-    /// The sheet passes the ``creationTime`` read when its form opened, so playing on while the
-    /// user types doesn't move the bookmark. Throws ``BookmarkStoreError/unavailable`` without an
-    /// item that supports bookmarks, and whatever ``BookmarkStore/create(itemID:time:title:)`` throws.
-    public func create(title: String, at time: Double, locale: Locale = .autoupdatingCurrent) async throws {
-        guard let itemID else { throw BookmarkStoreError.unavailable }
+    /// The sheet passes the ``currentItemID``, ``creationTime`` and default title read when its
+    /// form opened, so neither playing on nor another window changing the item while the user types
+    /// moves the bookmark, and the title saved is the placeholder shown.
+    ///
+    /// Throws ``BookmarkStoreError/unavailable`` without an item that supports bookmarks,
+    /// ``PlayerBookmarksError/itemChanged`` when `itemID` isn't the current item any more,
+    /// ``PlayerBookmarksError/alreadyBookmarked`` when a bookmark is at that second (one may have
+    /// arrived since the form opened), and whatever ``BookmarkStore/create(itemID:time:title:)``
+    /// throws.
+    public func create(
+        title: String, itemID: String, at time: Double, defaultTitle: String? = nil,
+        locale: Locale = .autoupdatingCurrent
+    ) async throws {
+        guard let current = self.itemID else { throw BookmarkStoreError.unavailable }
+        guard current == itemID else { throw PlayerBookmarksError.itemChanged }
+        let second = Self.wholeSecond(time)
+        guard !isBookmarked(at: second) else { throw PlayerBookmarksError.alreadyBookmarked }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = trimmed.isEmpty ? defaultTitle(locale: locale) : trimmed
-        try await store.create(itemID: itemID, time: Self.wholeSecond(time), title: title)
+        let title = trimmed.isEmpty ? (defaultTitle ?? self.defaultTitle(locale: locale)) : trimmed
+        try await store.create(itemID: itemID, time: second, title: title)
     }
 
     /// Renames the bookmark; an empty or blank `title` keeps the current one and does nothing.

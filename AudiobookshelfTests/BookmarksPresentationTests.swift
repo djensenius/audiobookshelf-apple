@@ -36,7 +36,7 @@ import Testing
     }
 
     @Test func editorTextFollowsTarget() {
-        let new = BookmarkEditorPresentation(target: .create(time: 42))
+        let new = BookmarkEditorPresentation(target: .create(itemID: "li_preview", time: 42, defaultTitle: "Now"))
         #expect(new.titleKey == "HeaderNewBookmark")
         #expect(new.submitKey == "ButtonCreate")
         #expect(new.initialTitle.isEmpty)
@@ -47,6 +47,9 @@ import Testing
         #expect(edit.submitKey == "ButtonUpdate")
         #expect(edit.initialTitle == "Old")
         #expect(edit.time == 30)
+
+        #expect(BookmarkEditorTarget.create(itemID: "li_preview", time: 42, defaultTitle: "Now").isCreate)
+        #expect(!BookmarkEditorTarget.edit(mark("Old", at: 30)).isCreate)
     }
 
     @Test func slotDisabledWithoutStore() {

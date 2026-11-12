@@ -79,7 +79,7 @@ struct BookmarkEditorPresentation: Equatable {
 
     init(target: BookmarkEditorTarget) {
         switch target {
-        case .create(let time):
+        case .create(_, let time, _):
             titleKey = "HeaderNewBookmark"
             submitKey = "ButtonCreate"
             initialTitle = ""
@@ -95,7 +95,10 @@ struct BookmarkEditorPresentation: Equatable {
 
 #Preview("New") {
     NavigationStack {
-        BookmarkEditor(target: .create(time: 4_000), rate: 1, placeholder: "Nov 12, 2026 at 9:41 AM") { _ in }
+        BookmarkEditor(
+            target: .create(itemID: "li_preview", time: 4_000, defaultTitle: "Nov 12, 2026 at 9:41 AM"), rate: 1,
+            placeholder: "Nov 12, 2026 at 9:41 AM"
+        ) { _ in }
     }
 }
 

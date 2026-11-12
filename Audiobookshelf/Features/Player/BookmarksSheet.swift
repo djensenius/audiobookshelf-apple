@@ -55,8 +55,8 @@ struct BookmarksSlotPresentation: Equatable {
     }
 }
 
-/// How the sheet writes a bookmark's time: at the playback rate, as the legacy modal did, so it
-/// matches the wall-clock time a listener hears.
+/// How the sheet displays a bookmark's time: the media time divided by the current playback rate,
+/// as the legacy modal did. Display only; bookmarks are stored and sought in media time.
 enum BookmarkTimePresentation {
     /// `time` divided by `rate`; a non-finite or non-positive rate counts as `1`.
     static func atRate(_ time: Double, rate: Double) -> Double {
@@ -126,14 +126,25 @@ struct BookmarksSheet: View {
     }
 }
 
-/// What the form opened for: a new bookmark at a second, or an existing one.
+/// What the form opened for: a new bookmark, with the item, second and default title captured
+/// when it opened, or an existing one.
 enum BookmarkEditorTarget: Hashable, Identifiable {
-    case create(time: Double)
+    case create(itemID: String, time: Double, defaultTitle: String)
     case edit(AudioBookmark)
 
     var id: Self { self }
+
+    /// Whether the form creates a bookmark rather than renaming one.
+    var isCreate: Bool {
+        if case .create = self { true } else { false }
+    }
 }
 
+/// The sheet's body when there is a store: the list (or a spinner during the first load, or the
+/// empty state), the create bar, the form, the delete confirmation and the error alert.
+///
+/// Writes run in unstructured tasks, so they finish after the sheet closes; a failure then only
+/// rolls the store back, silently, as the alert has nowhere to show.
 private struct BookmarksContent: View {
     let bookmarks: PlayerBookmarksModel
     let rate: Double
@@ -141,14 +152,19 @@ private struct BookmarksContent: View {
     @Environment(\.locale) private var locale
     @State private var editor: BookmarkEditorTarget?
     @State private var pendingDelete: AudioBookmark?
+    /// The last failure; kept while the alert closes so its title doesn't go blank.
     @State private var failure: BookmarkFailure?
+    @State private var isShowingFailure = false
 
     var body: some View {
         let rows = bookmarks.rows.map {
             (bookmark: $0, presentation: BookmarkRowPresentation(bookmark: $0, rate: rate, locale: locale))
         }
         Group {
-            if rows.isEmpty {
+            if rows.isEmpty, bookmarks.isFirstLoadInProgress {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if rows.isEmpty {
                 NoBookmarksView()
             } else {
                 BookmarksList(
@@ -157,7 +173,10 @@ private struct BookmarksContent: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            CreateBookmarkBar(bookmarks: bookmarks, rate: rate) { editor = .create(time: $0) }
+            CreateBookmarkBar(bookmarks: bookmarks, rate: rate) { time in
+                guard let itemID = bookmarks.currentItemID else { return }
+                editor = .create(itemID: itemID, time: time, defaultTitle: bookmarks.defaultTitle(locale: locale))
+            }
         }
         .navigationDestination(item: $editor) { target in
             BookmarkEditor(target: target, rate: rate, placeholder: placeholder(for: target)) { title in
@@ -180,9 +199,9 @@ private struct BookmarksContent: View {
             }
         }
         .alert(
-            Text(verbatim: failure.map { L10n.string($0.messageKey) } ?? ""),
-            isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })
-        ) {
+            Text(verbatim: failure.map { L10n.string($0.messageKey) } ?? ""), isPresented: $isShowingFailure,
+            presenting: failure
+        ) { _ in
             Button {
             } label: {
                 Text(verbatim: L10n.string("ButtonOk"))
@@ -193,7 +212,7 @@ private struct BookmarksContent: View {
 
     private func placeholder(for target: BookmarkEditorTarget) -> String {
         switch target {
-        case .create: bookmarks.defaultTitle(locale: locale)
+        case .create(_, _, let defaultTitle): defaultTitle
         // An empty title keeps the current one.
         case .edit(let bookmark): bookmark.title
         }
@@ -207,16 +226,16 @@ private struct BookmarksContent: View {
     private func submit(_ title: String, for target: BookmarkEditorTarget) {
         editor = nil
         let bookmarks = bookmarks
-        let locale = locale
         Task {
             do {
                 switch target {
-                case .create(let time): try await bookmarks.create(title: title, at: time, locale: locale)
+                case .create(let itemID, let time, let defaultTitle):
+                    try await bookmarks.create(title: title, itemID: itemID, at: time, defaultTitle: defaultTitle)
                 case .edit(let bookmark): try await bookmarks.rename(bookmark, to: title)
                 }
             } catch is CancellationError {
             } catch {
-                failure = target.isCreate ? .create : .update
+                show(target.isCreate ? .create : .update)
             }
         }
     }
@@ -229,15 +248,14 @@ private struct BookmarksContent: View {
                 try await bookmarks.delete(bookmark)
             } catch is CancellationError {
             } catch {
-                failure = .remove
+                show(.remove)
             }
         }
     }
-}
 
-extension BookmarkEditorTarget {
-    var isCreate: Bool {
-        if case .create = self { true } else { false }
+    private func show(_ failure: BookmarkFailure) {
+        self.failure = failure
+        isShowingFailure = true
     }
 }
 
@@ -273,13 +291,19 @@ private struct BookmarksList: View {
                     select(row.bookmark)
                 }
                 .equatable()
-                .swipeActions(edge: .trailing) {
-                    deleteButton(row.bookmark)
-                    editButton(row.bookmark)
+                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                    // Not `.destructive`: the list would remove the row before the confirmation.
+                    if canEdit {
+                        deleteButton(row.bookmark, role: nil)
+                            .tint(.red)
+                        editButton(row.bookmark)
+                    }
                 }
                 .contextMenu {
-                    editButton(row.bookmark)
-                    deleteButton(row.bookmark)
+                    if canEdit {
+                        editButton(row.bookmark)
+                        deleteButton(row.bookmark, role: .destructive)
+                    }
                 }
             }
         }
@@ -296,11 +320,10 @@ private struct BookmarksList: View {
             }
         }
         .tint(ABSColor.accent)
-        .disabled(!canEdit)
     }
 
-    private func deleteButton(_ bookmark: AudioBookmark) -> some View {
-        Button(role: .destructive) {
+    private func deleteButton(_ bookmark: AudioBookmark, role: ButtonRole?) -> some View {
+        Button(role: role) {
             delete(bookmark)
         } label: {
             Label {
@@ -309,7 +332,6 @@ private struct BookmarksList: View {
                 Image(systemName: "trash")
             }
         }
-        .disabled(!canEdit)
     }
 }
 
