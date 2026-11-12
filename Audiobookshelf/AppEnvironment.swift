@@ -15,12 +15,18 @@ import Observation
 /// participant before ``SessionLifecycle/start()``, so build them here, in `init`.
 @MainActor
 final class AppEnvironment {
-    /// Built on first use, so a process that never asks for it opens no store. The app test
-    /// host (`mise run test:app`) leaves out the download stack: its store holds the app's real
-    /// downloads, which it mustn't restart or sweep, and tests build their own.
-    static let shared = AppEnvironment(
-        downloadsRoot: ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
-            ? .applicationSupportDirectory : nil)
+    /// Built on first use, so a process that never asks for it opens no store. A Debug build
+    /// launched with `-ABSFixtures` gets ``FixtureServer``'s in-memory environment instead. The
+    /// app test host (`mise run test:app`) leaves out the download stack: its store holds the
+    /// app's real downloads, which it mustn't restart or sweep, and tests build their own.
+    static let shared: AppEnvironment = {
+        #if DEBUG
+            if FixtureServer.isEnabled { return FixtureServer.environment() }
+        #endif
+        return AppEnvironment(
+            downloadsRoot: ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+                ? .applicationSupportDirectory : nil)
+    }()
 
     let settings: AppSettings
     /// The on-device store, or `nil` when it couldn't be opened. ``lifecycle`` then shows
@@ -44,12 +50,14 @@ final class AppEnvironment {
     ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:)``);
     ///     tests pass a temporary directory, and `nil` leaves out the download stack.
     ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
+    ///   - covers: Where the cover pipeline fetches and caches covers.
     init(
         settings: AppSettings = AppSettings(), storeLocation: DataStack.Location = .appGroup,
         keychain: any KeychainStoring = KeychainStore(),
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
         downloadsRoot: URL? = .applicationSupportDirectory,
-        makeDownloadSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession()
+        makeDownloadSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession(),
+        covers: CoverSource = .app
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
@@ -98,7 +106,7 @@ final class AppEnvironment {
         downloads?.lifecycle.launch()
 
         // Images (#182).
-        let images = ImageServices(accounts: accounts)
+        let images = ImageServices(accounts: accounts, covers: covers)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
     }

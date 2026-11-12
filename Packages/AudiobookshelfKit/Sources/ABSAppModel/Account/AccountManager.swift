@@ -102,7 +102,9 @@ public final class AccountManager {
 
     @ObservationIgnored private let store: ServerConnectionStore
     @ObservationIgnored private let vault: CredentialVault
-    @ObservationIgnored private let validator: ServerValidator
+    /// Checks addresses and signs in, over the session configuration the manager was given, so a
+    /// connect flow validates a new server the same way.
+    @ObservationIgnored public let validator: ServerValidator
     @ObservationIgnored private let openID: OIDCLoginService
     @ObservationIgnored private let sessionConfiguration: @Sendable () -> URLSessionConfiguration
     @ObservationIgnored private let now: @Sendable () -> Date
