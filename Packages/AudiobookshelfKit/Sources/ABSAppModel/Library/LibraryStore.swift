@@ -326,7 +326,7 @@ extension APIClient: ServerURLProviding {
 /// started before a ``LibraryStore/clear()``. When the current client doesn't implement the
 /// requested service, requests throw ``LibraryStoreError/serviceUnavailable(_:)``.
 public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchService, SeriesAuthorsService,
-    GroupsService
+    GroupsService, LatestEpisodesService
 {
     private weak var store: LibraryStore?
     /// The account the services belong to.
@@ -426,6 +426,14 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
     }
     public func playlistDetail(id: String) async throws -> Playlist {
         try await send((any GroupsService).self) { try await $0.playlistDetail(id: id) }
+    }
+
+    // MARK: LatestEpisodesService
+
+    public func recentEpisodes(libraryID: String, page: Int, limit: Int) async throws -> RecentEpisodesPage {
+        try await send((any LatestEpisodesService).self) {
+            try await $0.recentEpisodes(libraryID: libraryID, page: page, limit: limit)
+        }
     }
 
     // MARK: Server address (forwarded to the client's ServerURLProviding)
