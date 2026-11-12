@@ -6,8 +6,9 @@ import SwiftUI
 
 /// Edits a playlist from its detail screen: drag to reorder, swipe or the context menu to remove a member, and Delete
 /// Playlist with a confirmation. VoiceOver gets Move Up and Move Down actions on each row. Rows and buttons are
-/// disabled while a write is in flight (``PlaylistDetailEditor/canEdit``). The detail screen closes the sheet and
-/// leaves when ``PlaylistDetailEditor/isDeleted`` turns true.
+/// disabled while a write is in flight (``PlaylistDetailEditor/canEdit``), and so is closing the sheet, with Done, a
+/// swipe or Escape (``PlaylistDetailEditor/canDismiss``). The detail screen closes the sheet and leaves when
+/// ``PlaylistDetailEditor/isDeleted`` turns true.
 struct PlaylistEditSheet: View {
     let editor: PlaylistDetailEditor
     @Environment(\.dismiss) private var dismiss
@@ -29,6 +30,7 @@ struct PlaylistEditSheet: View {
                         } label: {
                             Text(verbatim: L10n.string("ButtonDone"))
                         }
+                        .disabled(!editor.canDismiss)
                     }
                     if editor.isSaving {
                         ToolbarItem(placement: .status) {
@@ -41,6 +43,7 @@ struct PlaylistEditSheet: View {
         #if os(macOS)
             .frame(minWidth: 380, idealWidth: 460, minHeight: 420, idealHeight: 560)
         #endif
+        .interactiveDismissDisabled(!editor.canDismiss)
         .alert(
             Text(verbatim: editor.failure.map { L10n.string(Self.failureKey($0)) } ?? ""),
             isPresented: Binding(get: { editor.failure != nil }, set: { if !$0 { editor.clearFailure() } })

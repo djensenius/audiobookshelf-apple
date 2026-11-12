@@ -11,7 +11,10 @@ import Observation
 /// - Reorders and removals are optimistic: the model shows the result at once, then the server's
 ///   playlist when the request succeeds. When it fails, the model goes back to the playlist as it
 ///   was and ``failure`` is set. A 404 means the playlist (or the member) is already gone, so the
-///   model reloads instead, which shows the playlist as not found or the server's members.
+///   model reloads instead, which shows the playlist as not found or the server's members; if that
+///   reload fails, it goes back and ``failure`` is set too.
+/// - Going back never undoes a newer state: when the server pushed the playlist (or a load
+///   answered) after the edit showed, the model keeps that instead.
 /// - One write runs at a time: edits while one is in flight are ignored (``canEdit``).
 /// - A reorder sends every member once, in the new order (`PATCH /api/playlists/:id`); the server
 ///   rejects any other count with 400. One member is removed with
@@ -45,6 +48,10 @@ public final class PlaylistDetailEditor {
 
     /// The playlist has loaded, isn't deleted and no write is in flight.
     public var canEdit: Bool { model.detail != nil && !isSaving && !isDeleted }
+
+    /// No write is in flight, so the sheet may close: one closed mid-write would leave the write
+    /// running without its failure alert, and a reopened editor could start an overlapping one.
+    public var canDismiss: Bool { !isSaving }
 
     public func clearFailure() {
         failure = nil
@@ -119,6 +126,7 @@ public final class PlaylistDetailEditor {
         isSaving = true
         defer { isSaving = false }
         model.showEdited(before.replacingMembers(members))
+        let edit = model.revision
         do {
             let playlist = try await request(service)
             if playlist.items.isEmpty {
@@ -127,11 +135,21 @@ public final class PlaylistDetailEditor {
                 model.showEdited(GroupDetail(playlist: playlist))
             }
         } catch  where error as? APIError == .notFound {
-            await model.load()
+            let reloadError = await model.loadReportingFailure()
+            goBack(to: before, from: edit)
+            if let reloadError, !(reloadError is CancellationError), reloadError as? APIError != .notFound {
+                failure = kind
+            }
         } catch {
-            model.showEdited(before)
+            goBack(to: before, from: edit)
             if !(error is CancellationError) { failure = kind }
         }
+    }
+
+    /// Shows `before` again unless the model has shown anything since the edit's revision `edit`:
+    /// a pushed update or a load's answer is newer than both.
+    private func goBack(to before: GroupDetail, from edit: Int) {
+        if model.revision == edit { model.showEdited(before) }
     }
 
     private func showDeleted() {

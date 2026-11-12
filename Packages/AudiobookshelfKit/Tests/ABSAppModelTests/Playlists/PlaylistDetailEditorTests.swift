@@ -72,6 +72,7 @@ private func playlist(_ entries: [PlaylistItem]) -> Playlist {
 private let b1 = GroupFixtures.bookEntry(book1)
 private let b2 = GroupFixtures.bookEntry(book2)
 private let e1 = GroupFixtures.episodeEntry(podcast, episode)
+private let b3 = GroupFixtures.bookEntry(GroupFixtures.book("b3"))
 
 /// An editor on `p1` loaded with `b1`, `pod/e1`, `b2`; later loads answer with `reload`.
 @MainActor
@@ -86,7 +87,7 @@ private func loadedEditor(
         }
         return count == 1 ? playlist([b1, e1, b2]) : try await reload()
     })
-    let model = PlaylistDetailModel(id: "p1", service: groups, cache: ProgressCache())
+    let model = PlaylistDetailModel(id: "p1", service: groups, cache: ProgressCache(), userID: "u1")
     await model.load()
     return PlaylistDetailEditor(model: model, service: editing)
 }
@@ -141,6 +142,25 @@ private func memberIDs(_ editor: PlaylistDetailEditor) -> [String]? {
         #expect(editor.failure == .reorder)
         editor.clearFailure()
         #expect(editor.failure == nil)
+        #expect(editor.canEdit)
+    }
+
+    /// A playlist update the server pushed while a reorder was in flight is newer than the
+    /// playlist the reorder would go back to, so a failed reorder keeps it.
+    @Test func aFailedMoveKeepsAnUpdatePushedMeanwhile() async throws {
+        let gate = CancellableGatedCalls<EditCall, Playlist?>()
+        var editing = FakeEditing()
+        editing.answer = { call in try await gate.call(call) }
+        let editor = await loadedEditor(editing)
+        var calls = gate.calls.makeAsyncIterator()
+
+        async let moved: Void = editor.move(fromOffsets: [2], toOffset: 0)
+        let call = try #require(await calls.next())
+        editor.model.apply(.playlist(.updated(playlist([b1, e1, b2, b3]), libraryID: "lib"), userID: "u1"))
+        call.reply.resume(throwing: APIError.http(status: 400, message: "Length mismatch"))
+        await moved
+        #expect(memberIDs(editor) == ["b1", "pod-e1", "b2", "b3"])
+        #expect(editor.failure == .reorder)
         #expect(editor.canEdit)
     }
 
@@ -278,6 +298,22 @@ private func memberIDs(_ editor: PlaylistDetailEditor) -> [String]? {
         #expect(deleted.failure == nil)
     }
 
+    /// 404, then the reload fails too: nothing confirms the edit, so it goes back and says so.
+    @Test func aFailedReloadAfter404GoesBackAndReportsIt() async {
+        var editing = FakeEditing()
+        editing.answer = { _ in throw APIError.notFound }
+        let editor = await loadedEditor(editing) { throw TestError.offline }
+        await editor.remove(memberIDs: ["b1", "pod-e1", "b2"])
+        #expect(memberIDs(editor) == ["b1", "pod-e1", "b2"])
+        #expect(editor.failure == .remove)
+        #expect(!editor.isDeleted)
+
+        editor.clearFailure()
+        await editor.move(fromOffsets: [0], toOffset: 3)
+        #expect(memberIDs(editor) == ["b1", "pod-e1", "b2"])
+        #expect(editor.failure == .reorder)
+    }
+
     @Test func aCancelledEditGoesBackWithoutAnAlert() async {
         var editing = FakeEditing()
         editing.answer = { _ in throw CancellationError() }
@@ -319,6 +355,38 @@ private func memberIDs(_ editor: PlaylistDetailEditor) -> [String]? {
         #expect(editor.failure == .delete)
         #expect(memberIDs(editor) == ["b1", "pod-e1", "b2"])
         #expect(editor.canEdit)
+    }
+
+    /// The sheet can't close while a reorder, removal or delete is in flight.
+    @Test func theSheetCanCloseOnlyBetweenWrites() async throws {
+        let gate = CancellableGatedCalls<EditCall, Playlist?>()
+        var editing = FakeEditing()
+        editing.answer = { call in try await gate.call(call) }
+        let editor = await loadedEditor(editing)
+        var calls = gate.calls.makeAsyncIterator()
+        #expect(editor.canDismiss)
+
+        async let moved: Void = editor.move(fromOffsets: [2], toOffset: 0)
+        var call = try #require(await calls.next())
+        #expect(!editor.canDismiss)
+        call.reply.resume(returning: playlist([b2, b1, e1]))
+        await moved
+        #expect(editor.canDismiss)
+
+        async let removed: Void = editor.remove(memberIDs: ["b1"])
+        call = try #require(await calls.next())
+        #expect(!editor.canDismiss)
+        call.reply.resume(throwing: TestError.offline)
+        await removed
+        #expect(editor.canDismiss)
+
+        async let deleted: Void = editor.deletePlaylist()
+        call = try #require(await calls.next())
+        #expect(!editor.canDismiss)
+        call.reply.resume(returning: nil)
+        await deleted
+        #expect(editor.isDeleted)
+        #expect(editor.canDismiss)
     }
 
     @Test func nothingIsSentBeforeThePlaylistLoads() async {
