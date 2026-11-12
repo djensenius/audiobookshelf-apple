@@ -38,8 +38,21 @@
             defaults.removePersistentDomain(forName: suite)
             return AppEnvironment(
                 settings: AppSettings(defaults: defaults), storeLocation: .inMemory, keychain: FixtureKeychain(),
-                sessionConfiguration: sessionConfiguration,
-                coverSessionConfiguration: fixtureConfiguration(.ephemeral))
+                sessionConfiguration: sessionConfiguration, covers: coverSource())
+        }
+
+        /// A fixture launch's covers: answered by ``FixtureURLProtocol``, so they never wait for
+        /// the network monitor, and cached in ``coverDirectory``, so they never share the app's
+        /// cache or evict its covers.
+        static func coverSource() -> CoverSource {
+            try? FileManager.default.removeItem(at: coverDirectory)
+            return CoverSource(
+                sessionConfiguration: fixtureConfiguration(.ephemeral), directory: coverDirectory, isOnline: { true })
+        }
+
+        /// The fixture cover cache, in the temporary directory and emptied on every fixture launch.
+        static var coverDirectory: URL {
+            URL.temporaryDirectory.appending(path: "AudiobookshelfFixtures/Covers", directoryHint: .isDirectory)
         }
 
         /// A reply: the status, content type and body.

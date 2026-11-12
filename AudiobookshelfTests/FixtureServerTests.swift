@@ -58,6 +58,46 @@ struct FixtureServerTests {
         #expect(data.starts(with: [0x89, 0x50, 0x4E, 0x47]))
     }
 
+    /// Fixture covers load without the network monitor and cache only in the fixture directory.
+    @Test func loadsCoversIntoTheirOwnCacheWithoutTheNetworkMonitor() async throws {
+        let source = FixtureServer.coverSource()
+        #expect(source.directory == FixtureServer.coverDirectory)
+        #expect(source.isOnline?() == true)
+        let services = ImageServices(accounts: nil, covers: source)
+        let key = try await coverKey(in: services)
+        _ = try await services.pipeline.image(for: key, pixelBox: PixelBox(width: 8, height: 8))
+        #expect(!files(in: FixtureServer.coverDirectory).isEmpty)
+        #expect(files(in: CoverFileStore.defaultDirectory()).allSatisfy { !$0.path.contains(key.serverID.uuidString) })
+    }
+
+    /// The cover source's gate, not the network monitor, decides whether a cover may load.
+    @Test func coverLoadsFollowTheSourcesOnlineGate() async throws {
+        let directory = URL.temporaryDirectory.appending(path: "FixtureServerTests-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let services = ImageServices(
+            accounts: nil,
+            covers: CoverSource(
+                sessionConfiguration: FixtureServer.fixtureConfiguration(.ephemeral), directory: directory,
+                isOnline: { false }))
+        let key = try await coverKey(in: services)
+        await #expect(throws: ImagePipelineError.offline) {
+            _ = try await services.pipeline.image(for: key, pixelBox: PixelBox(width: 8, height: 8))
+        }
+    }
+
+    /// A fixture cover's key, with the fixture server's request builder set for a new server.
+    private func coverKey(in services: ImageServices) async throws -> ImageKey {
+        let server = UUID()
+        let configuration = try APIClientConfiguration(baseURL: URL(string: FixtureServer.address)!)
+        await services.pipeline.setRequestBuilder(MediaURLBuilder(configuration: configuration), for: server)
+        return ImageKey(serverID: server, kind: .itemCover, entityID: "li_pride", updatedAt: 10)
+    }
+
+    private func files(in directory: URL) -> [URL] {
+        let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil)
+        return (enumerator?.allObjects as? [URL] ?? []).filter { !$0.hasDirectoryPath }
+    }
+
     @Test func answersAMissingFixtureWithNotFound() async throws {
         await #expect(throws: APIError.notFound) {
             try await client.send(ItemEndpoints.item(id: "li_emma"))

@@ -28,6 +28,9 @@ A Debug build launched with `-ABSFixtures` (`Audiobookshelf/Fixtures/FixtureServ
   sign-in and the cover pipeline), never registered globally;
 - keeps the store, Keychain and settings in memory, so every launch starts signed out and
   touches nothing a normal launch saved.
+- caches covers in `AudiobookshelfFixtures/Covers` in the temporary directory, emptied on every
+  fixture launch, instead of the app's cover cache, and loads them without waiting for the
+  network monitor, so fixture covers neither evict real ones nor fail offline.
 
 Type the fixture address on the connect screen and sign in with any username and password.
 

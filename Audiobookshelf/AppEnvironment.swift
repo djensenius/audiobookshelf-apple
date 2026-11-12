@@ -39,12 +39,12 @@ final class AppEnvironment {
     /// - Parameters:
     ///   - settings: The settings every scene shares.
     ///   - storeLocation: Where the store lives; tests and previews pass `.inMemory`.
-    ///   - coverSessionConfiguration: The cover pipeline's session configuration.
+    ///   - covers: Where the cover pipeline fetches and caches covers.
     init(
         settings: AppSettings = AppSettings(), storeLocation: DataStack.Location = .appGroup,
         keychain: any KeychainStoring = KeychainStore(),
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
-        coverSessionConfiguration: URLSessionConfiguration = .ephemeral
+        covers: CoverSource = .app
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
@@ -75,7 +75,7 @@ final class AppEnvironment {
         self.player = PlaceholderPlayerState()
 
         // Images (#182).
-        let images = ImageServices(accounts: accounts, sessionConfiguration: coverSessionConfiguration)
+        let images = ImageServices(accounts: accounts, covers: covers)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
     }
