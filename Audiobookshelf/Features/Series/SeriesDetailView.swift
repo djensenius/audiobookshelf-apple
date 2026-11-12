@@ -72,7 +72,7 @@ struct SeriesDetailContent: View {
     }
 }
 
-/// The description and Continue Series, which opens the first unfinished book.
+/// The description and Continue Series, which opens the book in progress, else the first unfinished one.
 private struct SeriesDetailHeader: View {
     let detail: SeriesDetail
     let continueBook: SeriesBook?

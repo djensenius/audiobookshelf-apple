@@ -140,6 +140,49 @@ private typealias F = SeriesAuthorsFixtures
         #expect(model.continueBook == nil)
     }
 
+    /// A later book in progress wins over an earlier unfinished one (#319); of several, the one listened to last.
+    @Test func continuesWithTheBookInProgress() async throws {
+        let cache = ProgressCache()
+        let service = FakeSeriesAuthorsService(
+            seriesDetailHandler: { id in F.seriesResponse(id) },
+            booksHandler: { _, _ in
+                F.page([
+                    F.book("b1", seriesID: "s1", sequence: "1"), F.book("b2", seriesID: "s1", sequence: "2"),
+                    F.book("b3", seriesID: "s1", sequence: "3"),
+                    F.book("missing", seriesID: "s1", sequence: "4", isMissing: true),
+                ])
+            })
+        let model = SeriesDetailModel(seriesID: "s1", libraryID: "lib", service: service, cache: cache)
+        await model.load()
+        // The cache keeps an item's newest progress, so each item's updates get later.
+        func started(_ itemID: String, _ fraction: Double, lastUpdate: Int, finished: Bool = false) -> MediaProgress {
+            MediaProgress(
+                id: "p-\(itemID)", libraryItemId: itemID, progress: fraction, isFinished: finished,
+                lastUpdate: lastUpdate)
+        }
+
+        // Progress of 0 isn't started: still the first unfinished book.
+        cache.apply(started("b3", 0, lastUpdate: 4))
+        #expect(model.continueBook?.id == "b1")
+
+        cache.apply(started("b3", 0.4, lastUpdate: 5))
+        #expect(model.continueBook?.id == "b3")
+        // Of two in progress, the one listened to last.
+        cache.apply(started("b2", 0.1, lastUpdate: 9))
+        #expect(model.continueBook?.id == "b2")
+        cache.apply(started("b3", 0.5, lastUpdate: 10))
+        #expect(model.continueBook?.id == "b3")
+        // A tie keeps list order.
+        cache.apply(started("b2", 0.2, lastUpdate: 10))
+        #expect(model.continueBook?.id == "b2")
+        // Finished books and unplayable ones are never in progress.
+        cache.apply(started("b2", 1, lastUpdate: 20, finished: true))
+        cache.apply(started("missing", 0.9, lastUpdate: 99))
+        #expect(model.continueBook?.id == "b3")
+        cache.apply(started("b3", 1, lastUpdate: 20, finished: true))
+        #expect(model.continueBook?.id == "b1")
+    }
+
     @Test func ignoresTheLoadTimeFinishedList() async throws {
         let cache = ProgressCache()
         let service = FakeSeriesAuthorsService(
