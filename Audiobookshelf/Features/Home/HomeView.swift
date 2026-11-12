@@ -24,6 +24,9 @@ struct HomeView: View {
                     open: { _ in }, perform: { _, _ in }, retry: {})
             }
         }
+        // The signed-in shell's first screen, for UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("home.screen")
         .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
     }
 }

@@ -133,4 +133,34 @@ private final class Recorder {
         #expect(TransportControls.playPauseAccessibilityValue(isBuffering: true) == "Loading...")
         #expect(TransportControls.playPauseAccessibilityValue(isBuffering: false).isEmpty)
     }
+
+    /// The toolbar transport (#84) keeps everything the row has: both chapter buttons, enabled as
+    /// the row's are, the buffering spinner and its value, and the captions of plain arrows.
+    @Test func toolbarTransportMatchesTheRow() {
+        let entries = TransportToolbarEntry.entries(
+            showsPause: true, isBuffering: true, jumpBackwardSeconds: 20, jumpForwardSeconds: 30,
+            hasPreviousChapter: false, hasNextChapter: true, locale: locale)
+        #expect(entries.map(\.action) == [.previousChapter, .jumpBackward, .playPause, .jumpForward, .nextChapter])
+        #expect(
+            entries.map(\.accessibilityLabel) == [
+                "Previous chapter", "Jump back 20 seconds", "Pause", "Jump forward 30 seconds", "Next chapter",
+            ])
+        #expect(entries.map(\.isEnabled) == [false, true, true, true, true])
+        #expect(
+            entries.map(\.symbol) == [
+                "backward.end.fill", "gobackward", "pause.fill", "goforward.30", "forward.end.fill",
+            ])
+        #expect(entries.map(\.caption) == [nil, "20s", nil, nil, nil])
+        #expect(entries[2].showsSpinner)
+        #expect(entries[2].accessibilityValue == "Loading...")
+
+        let idle = TransportToolbarEntry.entries(
+            showsPause: false, isBuffering: false, jumpBackwardSeconds: 10, jumpForwardSeconds: 120,
+            hasPreviousChapter: true, hasNextChapter: false, locale: locale)
+        #expect(idle.map(\.isEnabled) == [true, true, true, true, false])
+        #expect(idle[2].symbol == "play.fill")
+        #expect(!idle[2].showsSpinner)
+        #expect(idle[2].accessibilityValue.isEmpty)
+        #expect(idle[3].caption == "2m")
+    }
 }

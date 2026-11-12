@@ -1,0 +1,73 @@
+{
+  "id": "li_pride",
+  "ino": "10",
+  "libraryId": "lib_sample",
+  "folderId": "fol_sample",
+  "path": "/audiobooks/Jane Austen/Pride and Prejudice",
+  "relPath": "Jane Austen/Pride and Prejudice",
+  "isFile": false,
+  "mtimeMs": 1700000000000,
+  "ctimeMs": 1700000000000,
+  "birthtimeMs": 0,
+  "addedAt": 1700000000000,
+  "updatedAt": 10,
+  "isMissing": false,
+  "isInvalid": false,
+  "mediaType": "book",
+  "media": {
+    "id": "book_li_pride",
+    "libraryItemId": "li_pride",
+    "metadata": {
+      "title": "Pride and Prejudice",
+      "titleIgnorePrefix": "Pride and Prejudice",
+      "subtitle": null,
+      "genres": [
+        "Fiction"
+      ],
+      "publishedYear": "1813",
+      "publishedDate": null,
+      "publisher": "LibriVox",
+      "description": "A public-domain LibriVox recording.",
+      "isbn": null,
+      "asin": null,
+      "language": "English",
+      "explicit": false,
+      "abridged": false,
+      "authors": [
+        {
+          "id": "aut_austen",
+          "name": "Jane Austen"
+        }
+      ],
+      "narrators": [
+        "LibriVox Volunteers"
+      ],
+      "series": [],
+      "authorName": "Jane Austen",
+      "authorNameLF": "Austen, Jane",
+      "narratorName": "LibriVox Volunteers",
+      "seriesName": "",
+      "descriptionPlain": "A public-domain LibriVox recording."
+    },
+    "coverPath": "/metadata/items/li_pride/cover.jpg",
+    "tags": [],
+    "audioFiles": [],
+    "chapters": [
+      {
+        "id": 0,
+        "start": 0,
+        "end": 41760,
+        "title": "Chapter 1"
+      }
+    ],
+    "ebookFile": null,
+    "tracks": [],
+    "duration": 41760,
+    "size": 334080000,
+    "numTracks": 1,
+    "numAudioFiles": 1,
+    "numChapters": 1
+  },
+  "numFiles": 1,
+  "size": 334080000
+}

@@ -52,19 +52,16 @@ import Testing
         #expect(request.url?.path() == "/abs/api/items/li_1/cover")
     }
 
-    /// A background session would forward custom headers to a redirect's new address (#145).
-    @Test func refusesConnectionsWithCustomHeaders() throws {
+    /// A connection's custom headers (a proxy's, say) are sent with the bearer header; ABSDownloads
+    /// checks the redirects in the foreground first (#145).
+    @Test func sendsCustomHeaders() throws {
         let proxied = try APIClientConfiguration(
             baseURL: configuration.baseURL, customHeaders: ["CF-Access-Client-Secret": "proxy-secret"])
 
-        #expect(throws: DownloadRequestError.customHeadersRequireRedirectCheck) {
-            try DownloadRequests.request(
-                path: "/api/items/li_1/file/13/download", configuration: proxied, accessToken: "tok")
-        }
-        #expect(throws: DownloadRequestError.customHeadersRequireRedirectCheck) {
-            try DownloadRequests.request(
-                path: DownloadRequests.coverPath(itemID: "li_1", updatedAt: 1), configuration: proxied,
-                accessToken: "tok")
+        for path in ["/api/items/li_1/file/13/download", DownloadRequests.coverPath(itemID: "li_1", updatedAt: 1)] {
+            let request = try DownloadRequests.request(path: path, configuration: proxied, accessToken: "tok")
+            #expect(request.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "proxy-secret")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer tok")
         }
     }
 

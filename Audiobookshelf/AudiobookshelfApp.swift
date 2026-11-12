@@ -1,3 +1,4 @@
+import ABSAppModel
 import ABSCore
 import ABSDownloads
 import ABSUI
@@ -11,13 +12,15 @@ struct AudiobookshelfApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
-        WindowGroup {
+        // Every window; Open in New Window opens one at a screen (``WindowRoute``).
+        WindowGroup(for: WindowRoute.self) { $windowRoute in
             RootView(
                 lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts,
                 library: environment.library,
                 imagePipeline: environment.images.pipeline
             )
             .environment(settings)
+            .environment(\.windowRoute, $windowRoute)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {

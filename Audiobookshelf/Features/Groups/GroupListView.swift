@@ -60,6 +60,7 @@ struct GroupListContent: View {
                         GroupCard(group: group, serverID: serverID) {
                             BrowsePresentation.open(GroupPresentation.route(kind, id: group.id), in: router)
                         }
+                        .openInNewWindowMenu(GroupPresentation.route(kind, id: group.id))
                         // Every successful refresh, the user's or a live update's, restarts these, so
                         // cards whose IDs survived it report appearing again (as in ``BrowseItemGrid``).
                         .task(id: model.refreshRevision) { model.itemAppeared(id: group.id) }
@@ -114,6 +115,7 @@ struct GroupCard: View {
         .itemHover()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: GroupPresentation.cardAccessibilityLabel(group, locale: locale)))
+        .cardInputLabels(title: group.name, label: GroupPresentation.cardAccessibilityLabel(group, locale: locale))
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
         .accessibilityAddTraits(.isButton)
     }

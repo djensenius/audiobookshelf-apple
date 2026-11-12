@@ -31,6 +31,7 @@
     },
     { "kind": "folder", "path": "AudiobookshelfShared", "target-membership": [ "Audiobookshelf", "AudiobookshelfWidgets" ] },
     { "kind": "folder", "path": "AudiobookshelfTests", "target-membership": [ "AudiobookshelfTests" ] },
+    { "kind": "folder", "path": "AudiobookshelfUITests", "target-membership": [ "AudiobookshelfUITests" ] },
     {
       "kind": "folder",
       "path": "AudiobookshelfWidgets",
@@ -54,6 +55,7 @@
       "children": [
         { "path": "<PRODUCTS>/Audiobookshelf.app", "id": "AB0000000000000000000011", "type": "wrapper.application", "index": false },
         { "path": "<PRODUCTS>/AudiobookshelfTests.xctest", "id": "AB0000000000000000000012", "type": "wrapper.cfbundle", "index": false },
+        { "path": "<PRODUCTS>/AudiobookshelfUITests.xctest", "id": "AB0000000000000000000014", "type": "wrapper.cfbundle", "index": false },
         { "path": "<PRODUCTS>/AudiobookshelfWidgets.appex", "id": "AB0000000000000000000013", "type": "wrapper.app-extension", "index": false, "target-membership": [ { "build-phase": "Audiobookshelf/copy/Embed Foundation Extensions", "code-sign-on-copy": true, "header-preservation": "remove-on-copy" } ] },
       ],
     },
@@ -95,6 +97,7 @@
         "CURRENT_PROJECT_VERSION": "1",
         "ENABLE_HARDENED_RUNTIME": "YES",
         "ENABLE_PREVIEWS": "YES",
+        "EXCLUDED_SOURCE_FILE_NAMES[config=Release]": "fixture-*",
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "Audiobookshelf/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Audiobookshelf",
@@ -153,6 +156,33 @@
         "TEST_HOST": "$(BUILT_PRODUCTS_DIR)/Audiobookshelf.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Audiobookshelf",
       },
     }, {
+      "name": "AudiobookshelfUITests",
+      "id": "AB0000000000000000000004",
+      "product": "Products/AudiobookshelfUITests.xctest",
+      "product-type": "bundle.ui-testing",
+      "dependencies": [
+        "Audiobookshelf",
+      ],
+      "build-phases": [
+        "compile-sources",
+        "frameworks",
+        "resources",
+      ],
+      "build-settings": {
+        "CODE_SIGN_STYLE": "Automatic",
+        "CURRENT_PROJECT_VERSION": "1",
+        "GENERATE_INFOPLIST_FILE": "YES",
+        "MARKETING_VERSION": "0.1.0",
+        "PRODUCT_BUNDLE_IDENTIFIER": "org.davidjensenius.AudiobookshelfUITests",
+        "PRODUCT_NAME": "$(TARGET_NAME)",
+        "SDKROOT": "auto",
+        "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator macosx",
+        "SUPPORTS_MACCATALYST": "NO",
+        "SWIFT_EMIT_LOC_STRINGS": "NO",
+        "TARGETED_DEVICE_FAMILY": "1,2",
+        "TEST_TARGET_NAME": "Audiobookshelf",
+      },
+    }, {
       "name": "AudiobookshelfWidgets",
       "id": "AB0000000000000000000003",
       "product": "Products/AudiobookshelfWidgets.appex",
@@ -175,6 +205,7 @@
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "AudiobookshelfWidgets/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Audiobookshelf",
+        "INFOPLIST_KEY_ITSAppUsesNonExemptEncryption": "NO",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
