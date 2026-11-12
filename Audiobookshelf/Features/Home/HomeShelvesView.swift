@@ -33,7 +33,8 @@ struct HomeShelvesView: View {
 }
 
 /// One section as a shelf of the cards its kind calls for. Opens a card in a new window itself
-/// (``OpenInNewWindow``), where the device has windows.
+/// (``OpenInNewWindow``), where the device has windows, and adds it to a playlist through `\.addToPlaylist`, while
+/// the account can edit playlists.
 struct HomeSectionRow: View {
     let section: HomeSection
     let context: ItemActionContext
@@ -44,6 +45,7 @@ struct HomeSectionRow: View {
     @Environment(Router.self) private var router: Router?
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    @Environment(\.addToPlaylist) private var addToPlaylist
     private var libraries = LibraryCoverSettings()
 
     var body: some View {
@@ -65,6 +67,7 @@ struct HomeSectionRow: View {
                 case .openDetails: open(ItemCardActions.route(for: item))
                 case .openInNewWindow:
                     OpenInNewWindow.open(ItemCardActions.route(for: item), from: router, with: openWindow)
+                case .addToPlaylist: addToPlaylist?(item)
                 default: perform(kind, item)
                 }
             }
@@ -80,6 +83,7 @@ struct HomeSectionRow: View {
     private var itemContext: ItemActionContext {
         var context = context
         context.canOpenInNewWindow = supportsMultipleWindows
+        context.canEditPlaylists = addToPlaylist != nil
         return context
     }
 }

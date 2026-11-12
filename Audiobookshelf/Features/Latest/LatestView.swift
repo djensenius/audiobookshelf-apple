@@ -39,6 +39,7 @@ struct LatestEpisodesContent: View {
     let model: LatestEpisodesModel
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
+    @Environment(\.addToPlaylist) private var addToPlaylist
     /// The episode whose Play is starting, so no other Play starts meanwhile.
     @State private var startingID: String?
     /// The episodes whose finished state is being changed.
@@ -54,7 +55,7 @@ struct LatestEpisodesContent: View {
     var body: some View {
         let list = model.list
         let messages = LatestPresentation.messages
-        let context = PodcastEpisodeActions.context(canPlay: playItem != nil)
+        let context = PodcastEpisodeActions.context(canPlay: playItem != nil, canEditPlaylists: addToPlaylist != nil)
         BrowseStateView(state: .resolve(list: list), messages: messages, retry: { retry() }) { failed in
             let placement = BrowsePresentation.failurePlacement(failed: failed, refreshFailed: refreshFailed)
             // One timeline for the list, so "3 days ago" stays current without a timer per row.
@@ -110,8 +111,13 @@ struct LatestEpisodesContent: View {
         BrowsePresentation.retry(model.list)
     }
 
-    /// Plays or marks `row`'s episode, as the podcast screen does; a failure shows the alert.
+    /// Plays or marks `row`'s episode, as the podcast screen does; a failure shows the alert. Add to playlist opens
+    /// the sheet for the episode.
     private func perform(_ kind: ItemActionKind, on row: LatestEpisode) {
+        guard kind != .addToPlaylist else {
+            addToPlaylist?(row.summary)
+            return
+        }
         let isFinished = model.itemProgress(for: row)?.isFinished == true
         let actions = itemActions
         let play = playItem
