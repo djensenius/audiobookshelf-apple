@@ -114,8 +114,8 @@ public final class NowPlayingBridge: NowPlayingCommandHandling {
 
     /// See ``NowPlayingController/requestSystemPrimary()``: iOS only, after a user-initiated play in
     /// the foreground; best effort.
-    public func requestSystemPrimary() async {
-        await controller.requestSystemPrimary()
+    public func requestSystemPrimary(while isStillWanted: @MainActor () -> Bool = { true }) async {
+        await controller.requestSystemPrimary(while: isStillWanted)
     }
 
     // MARK: State
