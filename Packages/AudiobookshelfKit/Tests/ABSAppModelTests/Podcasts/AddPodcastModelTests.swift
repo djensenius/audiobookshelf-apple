@@ -58,11 +58,11 @@ let podcastFolders = [
 @Suite struct AddPodcastModelTests {
     let service = FakeAddPodcastService()
 
-    func makeModel(region: String? = "ca") -> AddPodcastModel {
+    func makeModel(region: String? = "ca", service: (any AddPodcastService)? = nil) -> AddPodcastModel {
         let library = Library(
             id: "lib", name: "Podcasts", folders: podcastFolders, mediaType: .podcast,
             settings: LibrarySettings(podcastSearchRegion: region))
-        return AddPodcastModel(service: service, library: library)
+        return AddPodcastModel(service: service ?? self.service, library: library)
     }
 
     @Test func submitSearchesTheTrimmedTermInTheLibrarysRegion() async throws {
@@ -194,6 +194,23 @@ let podcastFolders = [
         call.reply.resume(returning: podcastFeed())
         await model.task?.value
         #expect(model.draft?.title == "Directory Title")
+    }
+
+    @Test func requestsUseTheServiceCurrentWhenTheyStart() async throws {
+        let reconnected = FakeAddPodcastService()
+        let current = Locked<any AddPodcastService>(service)
+        let model = makeModel(service: CurrentAddPodcastService { current.value })
+        var feeds = service.feeds.calls.makeAsyncIterator()
+        var creates = reconnected.creates.calls.makeAsyncIterator()
+        model.select(directoryResult("Show"))
+        try #require(await feeds.next()).reply.resume(returning: podcastFeed())
+        await model.task?.value
+        current.value = reconnected  // A same-account reconnect: the open form's create uses the new client.
+        let draft = try #require(model.draft)
+        let submit = Task { await draft.submit() }
+        try #require(await creates.next()).reply.resume(
+            returning: LibraryItem(id: "li", libraryId: "lib", mediaType: .podcast))
+        #expect(await submit.value == "li")
     }
 
     @Test(arguments: [nil, "", "  "])

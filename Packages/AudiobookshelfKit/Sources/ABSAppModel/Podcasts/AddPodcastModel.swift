@@ -27,10 +27,24 @@ extension APIClient: AddPodcastService {
     }
 }
 
+/// Sends each request to the service `current` returns when it starts, so reconnecting the same account (new headers
+/// or cookies) retargets the model and any open form without rebuilding them.
+public struct CurrentAddPodcastService: AddPodcastService {
+    let current: @MainActor @Sendable () throws -> any AddPodcastService
+    public init(_ current: @escaping @MainActor @Sendable () throws -> any AddPodcastService) { self.current = current }
+    public func searchPodcastDirectory(term: String, country: String?) async throws -> [PodcastDirectoryResult] {
+        try await current().searchPodcastDirectory(term: term, country: country)
+    }
+    public func podcastFeed(rssFeed: String) async throws -> PodcastFeed {
+        try await current().podcastFeed(rssFeed: rssFeed)
+    }
+    public func createPodcast(_ request: NewPodcastRequest) async throws -> LibraryItem {
+        try await current().createPodcast(request)
+    }
+}
+
 extension User {
-    /// Whether the user may add podcasts: admins and root only. The server's `PodcastController` refuses everyone
-    /// else's feed lookups and creates with 403, even with upload permission, and legacy `BookshelfNavBar.vue` shows
-    /// Add only to `getIsAdminOrUp`.
+    /// Admins and root only: the server's `PodcastController` refuses everyone else with 403 (legacy `getIsAdminOrUp`).
     public var canAddPodcasts: Bool {
         type == .admin || type == .root
     }
@@ -53,8 +67,7 @@ public enum AddPodcastAccess: Sendable, Hashable {
     /// Signed out, or the user, connection or library isn't known yet.
     case waiting
 
-    /// - Parameters:
-    ///   - storeConnectionID: The connection the library list belongs to; it must be the active one.
+    /// `storeConnectionID` is the connection the library list belongs to; it must be the active one.
     public static func resolve(user: User?, connectionID: UUID?, storeConnectionID: UUID?, library: Library?) -> Self {
         if let user, !user.canAddPodcasts { return .notAllowed }
         if let library, library.mediaType != .podcast { return .notPodcastLibrary }
@@ -76,17 +89,12 @@ public enum AddPodcastLookupError: Error, Sendable, Equatable {
     case feedFailed
 }
 
-/// The Add podcast screen (legacy `pages/bookshelf/add-podcast.vue`) for one library and account: search the iTunes
-/// directory, or look up a pasted RSS feed URL, then fill a ``NewPodcastDraft``.
-///
-/// Like legacy, ``submit()`` reads the field: text starting with `http:` or `https:` is looked up as a feed, anything
-/// else searched for. Searching happens only on submit, not while typing. Each submit or ``select(_:)`` supersedes
-/// the request before it: that request is cancelled, and its response is dropped if it still arrives, so results
-/// or a form never show for an earlier query.
+/// The Add podcast screen (legacy `add-podcast.vue`) for one library: ``submit()`` searches the iTunes directory, or
+/// looks up text starting with `http:`/`https:` as a feed, then fills a ``NewPodcastDraft``. Each submit or
+/// ``select(_:)`` cancels the request before it and drops its late response.
 @MainActor
 @Observable
 public final class AddPodcastModel {
-    /// The text as typed.
     public var query = ""
     /// The directory's podcasts for ``searchedTerm``.
     public private(set) var results: [PodcastDirectoryResult] = []
@@ -121,8 +129,7 @@ public final class AddPodcastModel {
         country = library.settings?.podcastSearchRegion
     }
 
-    /// Takes a refreshed library's folders and search region for later searches and forms; an open form keeps its
-    /// own.
+    /// Takes a refreshed library's folders and search region for later searches and forms.
     public func update(library: Library) {
         guard library.id == libraryID else { return }
         folders = library.folders ?? []

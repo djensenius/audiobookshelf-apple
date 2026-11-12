@@ -1,10 +1,8 @@
 import ABSCore
 import Foundation
 
-/// Adding a podcast (legacy `pages/bookshelf/add-podcast.vue` and `components/forms/NewPodcastForm.vue`).
-///
-/// The server's `PodcastController` answers ``feed(rssFeed:)`` and ``create(_:)`` with 403 unless the user is an
-/// admin or root (2.26.0 and later); upload permission alone isn't enough.
+/// Adding a podcast (legacy `add-podcast.vue`). The server's `PodcastController` answers ``feed(rssFeed:)`` and
+/// ``create(_:)`` with 403 unless the user is an admin or root; upload permission alone isn't enough.
 public enum PodcastEndpoints {
     /// `GET /api/search/podcast?term=`: podcasts from the iTunes directory. `country` is the iTunes store, usually
     /// the library's `podcastSearchRegion`; the server uses `us` without it. A blank term is a 400.
@@ -20,9 +18,8 @@ public enum PodcastEndpoints {
         Endpoint(.post, "/api/podcasts/feed", body: PodcastFeedRequest(rssFeed: rssFeed))
     }
 
-    /// `POST /api/podcasts`: creates the podcast's folder and library item and returns the expanded item. An
-    /// existing item at the path or an unusable path is a 400 with a plain-text message; an unknown library or
-    /// folder a 404.
+    /// `POST /api/podcasts`: creates the podcast's folder and item. An existing or unusable path is a 400 with a
+    /// plain-text message; an unknown library or folder a 404.
     public static func create(_ request: NewPodcastRequest) -> Endpoint<LibraryItem> {
         Endpoint(.post, "/api/podcasts", body: request)
     }

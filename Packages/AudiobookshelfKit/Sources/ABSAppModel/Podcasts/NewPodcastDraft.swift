@@ -11,11 +11,8 @@ public enum NewPodcastIssue: Sendable, Hashable, CaseIterable {
     case folderMissing
 }
 
-/// The New podcast form (legacy `components/forms/NewPodcastForm.vue`), filled from the directory entry the user
-/// picked and the feed the server parsed, then edited and submitted.
-///
-/// The podcast's folder on the server is the chosen library folder joined with the title, sanitized as legacy
-/// `$sanitizeFilename` does (see ``path``).
+/// The New podcast form (legacy `NewPodcastForm.vue`), filled from the picked directory entry and the parsed feed;
+/// the podcast's folder is the chosen library folder joined with the sanitized title (see ``path``).
 @MainActor
 @Observable
 public final class NewPodcastDraft: Identifiable {
@@ -38,7 +35,6 @@ public final class NewPodcastDraft: Identifiable {
     /// The parsed feed, for its episode count and list.
     public let feed: PodcastFeed
 
-    /// A request is running.
     public private(set) var isSubmitting = false
     /// Why the last submit failed; cleared by the next one.
     public private(set) var submitError: (any Error)?
@@ -52,13 +48,8 @@ public final class NewPodcastDraft: Identifiable {
     @ObservationIgnored private let explicit: Bool
     @ObservationIgnored private let type: String?
 
-    /// Fills the form as legacy does: the directory entry's values first, then the feed's. The first folder is
-    /// chosen.
-    ///
-    /// - Parameters:
-    ///   - feed: The server's parse of the feed; its URL is used when the directory entry has none.
-    ///   - directory: The directory entry the user picked; `nil` for a pasted RSS URL.
-    ///   - feedURL: The URL that was looked up, used when neither has one.
+    /// Fills the form as legacy does: the directory entry's values (`nil` for a pasted RSS URL) first, then the
+    /// feed's, then the looked-up `feedURL`. The first folder is chosen.
     public init(
         service: any AddPodcastService, libraryID: String, folders: [LibraryFolder], feed: PodcastFeed,
         directory: PodcastDirectoryResult? = nil, feedURL: String
@@ -122,9 +113,8 @@ public final class NewPodcastDraft: Identifiable {
             media: .init(metadata: metadata, autoDownloadEpisodes: autoDownloadEpisodes))
     }
 
-    /// Creates the podcast and returns its library item's ID, for the caller to open it. Returns `nil` without a
-    /// request while ``issues`` isn't empty or a submit is running, and `nil` with ``submitError`` set when the
-    /// server refuses.
+    /// Creates the podcast and returns its item's ID; `nil` without a request while ``canSubmit`` is false, or with
+    /// ``submitError`` set when the server refuses.
     @discardableResult
     public func submit() async -> String? {
         guard !isSubmitting, let request else { return nil }

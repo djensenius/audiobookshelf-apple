@@ -99,7 +99,6 @@ import Testing
         #expect(feed.metadata.explicit == "yes" && feed.metadata.isExplicit)
         // The string entry is skipped; the count is the server's.
         #expect(feed.episodes.map(\.title) == ["Episode Two", "Episode One"])
-        #expect(feed.episodes.first?.enclosureURL == "https://feeds.example.com/ep2.mp3")
         #expect(feed.numEpisodes == 3)
     }
 

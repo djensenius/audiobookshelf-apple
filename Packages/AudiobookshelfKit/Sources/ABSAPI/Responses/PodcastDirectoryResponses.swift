@@ -73,10 +73,6 @@ public struct PodcastDirectoryResult: Decodable, Sendable, Hashable {
 /// The response of ``PodcastEndpoints/feed(rssFeed:)``.
 public struct PodcastFeedResponse: Decodable, Sendable, Hashable {
     public let podcast: PodcastFeed
-
-    public init(podcast: PodcastFeed) {
-        self.podcast = podcast
-    }
 }
 
 /// A parsed RSS feed (server `podcastUtils` `RssPodcast`).
@@ -171,27 +167,17 @@ public struct PodcastFeedMetadata: Decodable, Sendable, Hashable {
 /// One episode of a parsed feed; only what the add-podcast screens show.
 public struct PodcastFeedEpisode: Decodable, Sendable, Hashable {
     public let title: String?
-    /// The audio file's URL.
-    public let enclosureURL: String?
 
-    public init(title: String? = nil, enclosureURL: String? = nil) {
+    public init(title: String? = nil) {
         self.title = title
-        self.enclosureURL = enclosureURL
     }
 
     enum CodingKeys: String, CodingKey {
-        case title, enclosure
-    }
-
-    enum EnclosureKeys: String, CodingKey {
-        case url
+        case title
     }
 
     public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        title = container.lenientString(forKey: .title)
-        let enclosure = try? container.nestedContainer(keyedBy: EnclosureKeys.self, forKey: .enclosure)
-        enclosureURL = enclosure?.lenientString(forKey: .url)
+        title = try decoder.container(keyedBy: CodingKeys.self).lenientString(forKey: .title)
     }
 }
 

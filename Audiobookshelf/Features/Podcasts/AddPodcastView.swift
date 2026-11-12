@@ -44,10 +44,14 @@ struct AddPodcastView: View {
         }
         .navigationTitle(Text(verbatim: L10n.string("HeaderAddPodcast")))
         .task(id: access) {
-            guard case .ready(let key) = access, built?.key != key else { return }
-            if let client = accounts?.client, let library {
-                built = (key, AddPodcastModel(service: client, library: library))
+            guard case .ready(let key) = access, built?.key != key, let library else { return }
+            let service = CurrentAddPodcastService { [weak accounts] in
+                guard accounts?.activeConnection?.id == key.connectionID, let client = accounts?.client else {
+                    throw CancellationError()
+                }
+                return client
             }
+            built = (key, AddPodcastModel(service: service, library: library))
         }
         // A refresh keeps the model, and any open form, and only updates the folders and search region.
         .onChange(of: library) { _, library in
