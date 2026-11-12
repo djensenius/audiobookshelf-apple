@@ -149,6 +149,12 @@ actor ConnectionCredentials: TokenProvider {
         (try load().session, generation, sessionOperation != 0)
     }
 
+    /// The custom headers and the ``generation`` that stored them, read together, so a token
+    /// read meanwhile can be matched with the headers it was saved with.
+    func loadConfiguration() throws(KeychainError) -> (customHeaders: [String: String], generation: Int) {
+        (try load().customHeaders, generation)
+    }
+
     /// Stores a new sign-in. Returns its generation and the session it replaced, for the server
     /// sign-out. Throws, keeping the previous session and custom headers in memory and in the
     /// Keychain, if the Keychain can't be written.

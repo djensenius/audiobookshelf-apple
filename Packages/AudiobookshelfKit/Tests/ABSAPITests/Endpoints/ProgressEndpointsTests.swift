@@ -179,6 +179,19 @@ private let server = "https://abs.example/abs"
         #expect(body["currentTime"] as? Double == 30)
     }
 
+    /// Mark finished and mark not finished (the item More menu) send only the finished group.
+    @Test(arguments: [true, false])
+    func clientSendsFinishedPatch(isFinished: Bool) async throws {
+        let stub = StubServer { _ in .text("OK", status: 200) }
+        _ = try await makeClient(stub).send(ProgressEndpoints.update(itemID: "li1", .finished(isFinished)))
+        let request = try #require(stub.requests.first)
+        #expect(request.httpMethod == "PATCH")
+        #expect(request.url?.path() == "/abs/api/me/progress/li1")
+        let body = try json(request.httpBody)
+        #expect(Set(body.keys) == ["isFinished"])
+        #expect(body["isFinished"] as? Bool == isFinished)
+    }
+
     @Test func clientDeletesProgress() async throws {
         let stub = StubServer { _ in .text("OK", status: 200) }
         _ = try await makeClient(stub).send(ProgressEndpoints.delete(id: "mp1"))
