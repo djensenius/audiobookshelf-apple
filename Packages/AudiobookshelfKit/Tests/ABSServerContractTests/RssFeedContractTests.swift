@@ -3,14 +3,21 @@ import ABSCore
 import Foundation
 import Testing
 
-/// Opens, reads and closes a feed for a seeded book as root, since every feed route is admin-only.
-/// The feed is closed again if the test fails part way.
+/// Opens, reads and closes a feed as root, since every feed route is admin-only. The feed is on a
+/// collection this test creates, not a seeded item: the expanded item suites read the seed items in
+/// parallel and expect no `rssFeed`. The feed is closed and the collection deleted even on failure.
 @Suite(.requiresServer, .tags(.serverContract))
 struct RssFeedContractTests {
     @Test func openCurrentAndClose() async throws {
-        let admin = try await ContractAdmin.shared.session()
-        let seed = try await ContractSeed.shared.data()
-        let target = RssFeedTarget(.item, id: seed.taleID)
+        try await CollectionContractFixture.withFixture { fixture in
+            try await openCurrentAndClose(fixture)
+        }
+    }
+
+    private func openCurrentAndClose(_ fixture: CollectionContractFixture) async throws {
+        let admin = fixture.admin
+        let collection = try await fixture.create(as: admin, books: [fixture.seed.taleID])
+        let target = RssFeedTarget(.collection, id: collection.id)
         let slug = "contract-" + UUID().uuidString.prefix(8).lowercased()
         let request = RssFeedOpenRequest(
             serverAddress: admin.server.configuration.baseURL.absoluteString, slug: slug,
@@ -19,8 +26,8 @@ struct RssFeedContractTests {
         #expect(try await admin.client.send(FeedEndpoints.current(target)).rssFeed == nil)
         let opened = try await admin.client.send(FeedEndpoints.open(target, request)).feed
         do {
-            #expect(opened.entityType == "libraryItem")
-            #expect(opened.entityId == seed.taleID)
+            #expect(opened.entityType == "collection")
+            #expect(opened.entityId == collection.id)
             #expect(opened.feedUrl.hasSuffix("/feed/\(slug)"))
             #expect(opened.meta?.preventIndexing == false)
             #expect(opened.meta?.ownerName == "Ada")
