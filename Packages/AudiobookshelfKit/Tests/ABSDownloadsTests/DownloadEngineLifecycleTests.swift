@@ -880,6 +880,24 @@ import Testing
         never.open()
     }
 
+    /// A quiesce cancels a launch's redirect check under way, so its request, which carries the
+    /// old token, can't follow a later redirect after the sign-out; no transfer starts either.
+    @Test func quiesceCancelsALaunchsRedirectCheck() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let preflight = HangingPreflight()
+        let engine = harness.makeEngine(preflight: preflight)
+        let start = Task { await engine.start(partIDs: [partID]) }
+        for await _ in preflight.arrivals { break }
+
+        _ = await engine.quiesce(connectionID: harness.connectionID)
+        await start.value
+
+        #expect(preflight.wasCancelled.withLock { $0 })
+        #expect(harness.requests.isEmpty)
+    }
+
     /// A pause whose seal failed, and whose previous blob couldn't be deleted, leaves a blob
     /// with the old credentials on an unflagged part: the discard deletes it too.
     @Test func discardResumeDataDeletesAnUnflaggedBlob() async throws {
@@ -2417,5 +2435,30 @@ import Testing
         let item = try await harness.localItems.item(serverConnectionID: harness.connectionID, libraryItemId: "li_1")
         #expect(item?.files.map(\.size) == [11])
         #expect(harness.requests.count == 1)
+    }
+}
+
+/// A redirect check that waits until it's cancelled (at most 5 s, then clears the request) and
+/// records whether it was.
+private final class HangingPreflight: DownloadRedirectPreflighting {
+    let arrivals: AsyncStream<Void>
+    private let arrived: AsyncStream<Void>.Continuation
+    let wasCancelled = Mutex(false)
+
+    init() {
+        (arrivals, arrived) = AsyncStream.makeStream()
+    }
+
+    func waitForNetwork(_ request: URLRequest) async -> Bool { true }
+
+    func check(_ request: URLRequest) async throws(DownloadRedirectPreflightError) -> URLRequest {
+        arrived.yield()
+        do {
+            try await Task.sleep(for: .seconds(5))
+        } catch {
+            wasCancelled.withLock { $0 = true }
+            throw .unreachable(.cancelled)
+        }
+        return request
     }
 }

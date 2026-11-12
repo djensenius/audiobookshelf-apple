@@ -189,6 +189,9 @@ public actor DownloadEngine {
     private var tasks: [UUID: URLSessionDownloadTask] = [:]
     /// A token per launch in progress; ``stop(partIDs:keepingResumeData:)`` removes it.
     private var launching: [UUID: UUID] = [:]
+    /// Each launch's redirect check in progress; cancelled where its marker is removed, so the
+    /// check's request can't follow a redirect with the old credentials after a sign-out.
+    private var preflights: [UUID: Task<URLRequest, any Error>] = [:]
     /// Parts to launch once the session is created again.
     private var deferredLaunches: Set<UUID> = []
     /// Parts being completed or failed for good; they keep their context (so a concurrent
@@ -472,6 +475,7 @@ public actor DownloadEngine {
         for partID in partIDs where !settling.contains(partID) {
             retries.removeValue(forKey: partID)?.cancel()
             launching[partID] = nil
+            preflights.removeValue(forKey: partID)?.cancel()
             deferredLaunches.remove(partID)
             authRetried.remove(partID)
             throttle.reset(partID)
@@ -697,6 +701,7 @@ public actor DownloadEngine {
             let retry = retries.removeValue(forKey: partID)
             retry?.cancel()
             let launch = launching.removeValue(forKey: partID)
+            preflights.removeValue(forKey: partID)?.cancel()
             let task = tasks.removeValue(forKey: partID)
             if let task {
                 ignoredTasks.insert(task.taskIdentifier)
@@ -1099,7 +1104,10 @@ public actor DownloadEngine {
                 accessToken: credentials.accessToken)
             fresh.apply(await networkAccess())
             unchecked = fresh
-            request = try await preflight.check(fresh)
+            let check = Task { [preflight] in try await preflight.check(fresh) }
+            preflights[partID] = check
+            defer { if preflights[partID] == check { preflights[partID] = nil } }
+            request = try await check.value
         } catch DownloadRedirectPreflightError.noNetwork(let code) {
             if launching[partID] == token, let unchecked {
                 await waitForNetwork(partID, launch: token, request: unchecked, code: code)

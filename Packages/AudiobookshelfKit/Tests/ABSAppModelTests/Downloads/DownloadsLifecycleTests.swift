@@ -79,6 +79,17 @@ private actor FakeEngine: DownloadsLifecycleEngine {
         calls.append("quiesce \(connectionID)")
         return quiesceResults.isEmpty ? true : quiesceResults.removeFirst()
     }
+
+    func quiesceGeneration() -> Int { 7 }
+
+    /// Each resume, in order, once recorded.
+    nonisolated let resumes = AsyncStream<Void>.makeStream()
+
+    func resume(recordID: UUID, unlessQuiescedSince generation: Int) -> Bool {
+        calls.append("resume \(recordID) since \(generation)")
+        resumes.continuation.yield()
+        return true
+    }
 }
 
 /// A manager that records its calls.
@@ -143,11 +154,6 @@ private actor FakeManager: DownloadsLifecycleManager {
             failingPauses -= 1
             throw .storeFailure
         }
-        return true
-    }
-
-    func resume(recordID: UUID) -> Bool {
-        calls.append("resume \(recordID)")
         return true
     }
 }
@@ -308,26 +314,62 @@ struct DownloadsLifecycleTests {
         #expect(pauses(recordsA).count == 2)
     }
 
-    /// A sign-in resumes the connection's paused cover refetches, which the user can't see to
-    /// resume, but leaves the user's paused downloads and other connections' refetches alone.
-    @Test func signInResumesOnlyItsPausedCoverRefetches() async {
-        func refetch(_ state: DownloadState, _ connectionID: UUID) -> DownloadRecordDTO {
-            var record = Self.record(state, connectionID: connectionID)
-            record.parts = [
-                DownloadPartDTO(
-                    id: UUID(), kind: .cover, serverPath: "/cover", filename: "cover.jpg", mimeType: "image/jpeg",
-                    expectedBytes: 0, destinationRelativePath: "cover.jpg")
-            ]
-            return record
-        }
-        let paused = refetch(.paused, connectionA)
-        let stored = recordsA + recordsB + [paused, refetch(.failed, connectionA), refetch(.paused, connectionB)]
+    /// A paused cover refetch of `connectionID`, which the user can't see to resume.
+    private static func refetch(_ state: DownloadState, _ connectionID: UUID) -> DownloadRecordDTO {
+        var record = record(state, connectionID: connectionID)
+        record.parts = [
+            DownloadPartDTO(
+                id: UUID(), kind: .cover, serverPath: "/cover", filename: "cover.jpg", mimeType: "image/jpeg",
+                expectedBytes: 0, destinationRelativePath: "cover.jpg")
+        ]
+        return record
+    }
+
+    /// A sign-in resumes the connection's paused cover refetches, but only after an activation
+    /// succeeds, so never before the folders are prepared; and it leaves the user's paused
+    /// downloads and other connections' refetches alone.
+    @Test func signInResumesOnlyItsPausedCoverRefetchesOnceActive() async {
+        let paused = Self.refetch(.paused, connectionA)
+        let stored =
+            recordsA + recordsB + [paused, Self.refetch(.failed, connectionA), Self.refetch(.paused, connectionB)]
         let lifecycle = makeLifecycle(records: { id in stored.filter { $0.key.serverConnectionID == id } })
+        await manager.failStarts(2)
 
         await lifecycle.sessionDidStart(context(connectionA))
-        await lifecycle.refetchResumes[connectionA]?.value
+        await lifecycle.handle(scenePhase: .active).value
+        await engine.set(activates: false)
+        await lifecycle.handle(scenePhase: .active).value
+        #expect(!calls.all.contains { $0.hasPrefix("resume") })
+        await engine.set(activates: true)
+        await lifecycle.handle(scenePhase: .active).value
+        await lifecycle.handle(scenePhase: .active).value
 
-        #expect(calls.all == ["resume \(paused.id)"])
+        #expect(calls.all.filter { $0.hasPrefix("resume") } == ["resume \(paused.id) since 7"])
+    }
+
+    @Test func signInWhileActiveResumesItsCoverRefetchesAtOnce() async {
+        let paused = Self.refetch(.paused, connectionA)
+        let stored = recordsA + [paused]
+        let lifecycle = makeLifecycle(records: { id in stored.filter { $0.key.serverConnectionID == id } })
+        await lifecycle.handle(scenePhase: .active).value
+
+        await lifecycle.sessionDidStart(context(connectionA))
+        for await _ in engine.resumes.stream { break }
+
+        #expect(calls.all.last == "resume \(paused.id) since 7")
+    }
+
+    /// A session that ends before an activation owes nothing: a sign-out's cleanup doesn't wait
+    /// for a resume, and none follows it.
+    @Test func endedSessionDoesNotResumeItsCoverRefetches() async {
+        let stored = recordsA + [Self.refetch(.paused, connectionA)]
+        let lifecycle = makeLifecycle(records: { id in stored.filter { $0.key.serverConnectionID == id } })
+        await lifecycle.sessionDidStart(context(connectionA))
+
+        await lifecycle.sessionWillEnd(.signOut)
+        await lifecycle.handle(scenePhase: .active).value
+
+        #expect(!calls.all.contains { $0.hasPrefix("resume") })
     }
 
     @Test func switchKeepsTheDownloads() async {
