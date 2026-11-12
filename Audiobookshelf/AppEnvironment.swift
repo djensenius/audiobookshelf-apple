@@ -37,7 +37,10 @@ final class AppEnvironment {
     /// The stable device ID for playback sessions (ADR 0007), kept in the same Keychain as the
     /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
     let deviceIdentifiers: any DeviceIdentifying
-    let player: any PlayerSlotState
+    /// The one player every scene and CarPlay share: ``playback``'s, idle between sessions.
+    let player: PlayerViewModel
+    /// Each signed-in account's playback scope and the player's playback (#183).
+    let playback: AppPlayback
     /// The download stack, or `nil` when the store couldn't be opened. Its lifecycle is
     /// launched here, so a launch without a window (CarPlay, a background wake) has an engine.
     let downloads: AppDownloads?
@@ -101,9 +104,13 @@ final class AppEnvironment {
         self.dataStack = dataStack
         self.accounts = accounts
         self.lifecycle = lifecycle
-        self.deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
-        // Replaced by the playback coordinator's view model with the player UI (#56).
-        self.player = PlaceholderPlayerState()
+        let deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
+        self.deviceIdentifiers = deviceIdentifiers
+        let playback = AppPlayback.make(
+            dataStack: dataStack, accounts: accounts, lifecycle: lifecycle, settings: settings,
+            deviceIdentifiers: deviceIdentifiers)
+        self.playback = playback
+        self.player = playback.player
         self.downloads = downloads
         downloads?.lifecycle.launch()
         self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }

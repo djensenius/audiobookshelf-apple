@@ -120,6 +120,37 @@ struct TestDownloads {
         }
     }
 
+    /// One player for every scene and CarPlay, idle until an account session binds it.
+    @Test func playerIsAnIdleProcessWidePlayerViewModel() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+
+            #expect(environment.player === environment.playback.player)
+            #expect(!environment.player.hasSession)
+            #expect(environment.player.errorMessageKey == nil)
+
+            await environment.lifecycle.start()
+
+            // Signed out: no scope, so nothing to play.
+            #expect(environment.lifecycle.gate == .connect)
+            #expect(environment.playback.participant?.playItem == nil)
+            #expect(!environment.player.hasSession)
+        }
+    }
+
+    /// The data environment's one progress writer, which the participant hands every account's
+    /// scope, so a retired scope's late write can't replace a newer one.
+    @Test func playbackHoldsOneWriter() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+
+            #expect(environment.playback.writer != nil)
+            #expect(environment.playback.participant != nil)
+        }
+    }
+
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
         try await withSettings { settings in
             let keychain = ConnectTestKeychain()
@@ -153,6 +184,10 @@ struct TestDownloads {
             #expect(environment.dataStack == nil)
             #expect(environment.accounts == nil)
             #expect(environment.downloads == nil)
+            // The player still exists, idle, with no scope to bind it.
+            #expect(environment.playback.participant == nil)
+            #expect(environment.playback.writer == nil)
+            #expect(!environment.player.hasSession)
 
             await environment.lifecycle.start()
 

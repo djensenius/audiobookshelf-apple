@@ -21,6 +21,7 @@ struct AudiobookshelfApp: App {
             )
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
+            .modifier(PlaybackEnvironment(participant: environment.playback.participant))
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {
