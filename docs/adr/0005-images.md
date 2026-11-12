@@ -528,6 +528,14 @@ static, unauthenticated remote images (none are planned).
     Cancelling the work releases the leases almost at once; the bound covers
     a decode that is slow to notice its cancellation. Deleting after the
     bound is still safe, since an open file stays readable after its unlink.
+  - **Removed connections (#421):** once per launch, the app reads the saved
+    connections from the store and deletes the cover folders of every other
+    server (`removeServers(keepingOnly:)`), which covers a removal whose
+    folder deletion was cut short by the app exiting. As with the settings
+    sweep, it is skipped if the store can't be read and never uses an
+    unloaded connection list. Servers given a request builder this launch
+    are kept even if they aren't in the list, so a connection saved during
+    the sweep keeps its covers.
 - **Rendering:** the pipeline returns `CGImage` plus scale. Each consumer wraps
   it:
   - SwiftUI: `Image(decorative:scale:)`;

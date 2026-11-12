@@ -313,6 +313,23 @@ public actor CoverFileStore {
         if isScanned, passes == completedPassCount { totalBytes = max(0, totalBytes - removed) }
     }
 
+    /// Deletes the folder of every server not in `kept`, for example of connections removed in
+    /// an earlier launch whose covers weren't deleted then (#421). Lists the folder off the actor
+    /// first; `willRemove` is asked about each server just before its folder is deleted, and
+    /// keeps it by returning `false`. Returns the servers removed.
+    @discardableResult
+    public func removeServers(
+        keepingOnly kept: Set<UUID>, willRemove: @Sendable (UUID) async -> Bool = { _ in true }
+    ) async -> Set<UUID> {
+        var removed: Set<UUID> = []
+        for serverID in await Self.serverFolders(in: directory, hook: listingHook).subtracting(kept) {
+            guard await willRemove(serverID) else { continue }
+            await removeServer(serverID)
+            removed.insert(serverID)
+        }
+        return removed
+    }
+
     /// Deletes a stored file that turned out not to decode, once its readers are done, but only
     /// if `url` still holds `version`: a newer write there is a healthy replacement, which a
     /// stale reader's failure must not delete.
@@ -450,6 +467,20 @@ public actor CoverFileStore {
         let listing = listing(of: folder, root: root, leases: leases)
         hook?()
         return listing
+    }
+
+    /// The servers with a folder in the cache, listed off the actor.
+    @concurrent
+    private static func serverFolders(in directory: URL, hook: (@Sendable () -> Void)?) async -> Set<UUID> {
+        let urls =
+            (try? FileManager.default.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: .skipsHiddenFiles)) ?? []
+        hook?()
+        return Set(
+            urls.compactMap { url in
+                guard (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { return nil }
+                return UUID(uuidString: url.lastPathComponent)
+            })
     }
 
     /// Measures and deletes a removed server's folder off the actor. Files retired and waiting

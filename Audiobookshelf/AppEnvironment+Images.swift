@@ -15,9 +15,10 @@ import Synchronization
 /// removed. ``trimmer`` trims the memory cache on memory warnings (iOS) or memory pressure
 /// (macOS), and when the app enters the background on iOS.
 ///
-/// Disk maintenance (#143) runs at `.background` priority, so it doesn't hold up the first
-/// frame: at launch it runs a full pass of the cover file store, and every time the app enters
-/// the background it runs another pass. The app registers no `BGTaskScheduler` tasks, so this
+/// Disk maintenance (#143, #421) runs at `.background` priority, so it doesn't hold up the
+/// first frame: at launch it deletes the covers of connections removed in an earlier launch,
+/// then runs a full pass of the cover file store, and every time the app enters the
+/// background it runs another pass. The app registers no `BGTaskScheduler` tasks, so this
 /// doesn't add one: on iOS the background pass asks for a little background time instead. At
 /// most one maintenance run is in flight, and the store joins concurrent passes into one.
 @MainActor
@@ -77,7 +78,7 @@ final class ImageServices {
         #elseif os(macOS)
             memoryPressure = Self.observeMemoryPressure(calling: trimmer)
         #endif
-        maintainDisk(inBackground: false)
+        maintainDisk(sweepingRemovalsOf: accounts, inBackground: false)
     }
 
     isolated deinit {
@@ -95,12 +96,12 @@ final class ImageServices {
         #if os(iOS)
             trimmer.didEnterBackground()
         #endif
-        maintainDisk(inBackground: true)
+        maintainDisk(sweepingRemovalsOf: nil, inBackground: true)
     }
 
-    /// Runs a full pass of the cover file store at `.background` priority, unless a run is
-    /// already in flight.
-    private func maintainDisk(inBackground: Bool) {
+    /// Runs a full pass of the cover file store at `.background` priority, after deleting the
+    /// covers of connections `accounts` no longer saves, unless a run is already in flight.
+    private func maintainDisk(sweepingRemovalsOf accounts: AccountManager?, inBackground: Bool) {
         guard maintenance == nil else { return }
         #if os(iOS)
             // Background time, so the pass can finish once the app is in the background; it
@@ -111,8 +112,11 @@ final class ImageServices {
                 }
             }
         #endif
-        let fileStore = self.fileStore
+        let (participant, fileStore) = (self.participant, self.fileStore)
         maintenance = Task(priority: .background) { [weak self] in
+            if let accounts {
+                await participant.sweepRemovedConnections { await accounts.savedConnectionIDs() }
+            }
             await fileStore.fullPass()
             self?.maintenance = nil
             self?.endMaintenanceTime()

@@ -5,7 +5,8 @@ import Testing
 
 @testable import ABSCore
 
-/// Removing servers from `CoverFileStore`: waiting for leases, and deleting off the actor (#143).
+/// Removing servers from `CoverFileStore` and `ImagePipeline`: waiting for leases, deleting off
+/// the actor, and sweeping the folders of connections removed in an earlier launch (#143, #421).
 /// Serialized, like the listing tests: a blocked deletion holds a thread of the shared pool.
 @Suite(.serialized, .timeLimit(.minutes(1))) struct CoverFileStoreMaintenanceTests {
     private let directory: TemporaryDirectory
@@ -136,6 +137,68 @@ import Testing
         #expect(files(serverID).count == 1)
     }
 
+    // MARK: - Sweep (#421)
+
+    @Test func sweepDeletesUnknownServersFoldersAndKeepsSavedOnes() async throws {
+        let saved = UUID()
+        try await seed([saved, serverID, otherServerID])
+        let store = store()
+        #expect(await store.size == 49_152)
+
+        let removed = await store.removeServers(keepingOnly: [saved])
+        #expect(removed == [serverID, otherServerID])
+        #expect(files(serverID).isEmpty)
+        #expect(files(otherServerID).isEmpty)
+        #expect(files(saved).count == 1)
+        #expect(await store.size == 16_384)
+    }
+
+    @Test func pipelineSweepKeepsAConnectionSavedDuringIt() async throws {
+        let saved = UUID()
+        try await seed([saved, serverID, otherServerID])
+        let gate = ListingGate()
+        let store = store(listing: gate)
+        let pipeline = ImagePipeline(
+            limits: .iPhone, fileStore: store, sessionConfiguration: ImageStubProtocol.configuration())
+
+        // Read before `otherServerID` was saved; it signs in while the folders are listed.
+        let sweep = Task { await pipeline.removeServers(keepingOnly: [saved]) }
+        #expect(await gate.waitForEntries(1))
+        await pipeline.setRequestBuilder(TestRequestBuilder(host: "unused.images.test"), for: otherServerID)
+        gate.release()
+        await sweep.value
+
+        #expect(files(serverID).isEmpty)
+        #expect(files(otherServerID).count == 1)
+        #expect(files(saved).count == 1)
+    }
+
+    @Test func pipelineSweepClearsMemoryAndBlocksTheRemovedServers() async throws {
+        try await seed([serverID])
+        let store = store()
+        let pipeline = ImagePipeline(
+            limits: .iPhone, fileStore: store, sessionConfiguration: ImageStubProtocol.configuration())
+        let box = PixelBox(width: 4, height: 4)
+        let space = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        let context = try #require(
+            CGContext(
+                data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        let bitmap = DecodedBitmap(try #require(context.makeImage()), ledger: nil)
+        // Cached in memory for a server with no session, as from a downloaded cover.
+        try await pipeline.cache(bitmap, for: MemoryKey(key: key("b", server: otherServerID), box: box))
+
+        await pipeline.removeServers(keepingOnly: [])
+
+        #expect(files(serverID).isEmpty)
+        #expect(pipeline.cachedImage(for: key("b", server: otherServerID), pixelBox: box) == nil)
+        await #expect(throws: ImagePipelineError.noRequest) {
+            try await pipeline.image(for: key("a"), pixelBox: box)
+        }
+        await #expect(throws: ImagePipelineError.noRequest) {
+            try await pipeline.cache(bitmap, for: MemoryKey(key: key("b", server: otherServerID), box: box))
+        }
+    }
 }
 
 /// Returns only when the task is cancelled: a lease timeout that never passes by itself.

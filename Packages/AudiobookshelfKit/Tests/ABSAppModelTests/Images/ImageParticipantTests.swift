@@ -14,6 +14,7 @@ private final class FakeBuilderSink: ImageRequestBuilderSink {
         case set(UUID, URLRequest?)
         case cleared(UUID)
         case removed(UUID)
+        case swept(keeping: Set<UUID>)
     }
 
     enum Call: Hashable {
@@ -47,6 +48,10 @@ private final class FakeBuilderSink: ImageRequestBuilderSink {
     func removeServer(_ serverID: UUID) async {
         await hold(.remove)
         events.append(.removed(serverID))
+    }
+
+    func removeServers(keepingOnly saved: Set<UUID>) async {
+        events.append(.swept(keeping: saved))
     }
 
     private func hold(_ call: Call) async {
@@ -269,5 +274,28 @@ private func settle() async {
         connections.saved = [identityA.connectionID]
         await settle()
         #expect(sink.removals == [identityB.connectionID])
+    }
+
+    // MARK: - Sweep (#421)
+
+    @Test func sweepKeepsTheSavedConnectionsOncePerLaunch() async {
+        let participant = ImageParticipant(sink: sink)
+        let saved: Set = [identityA.connectionID]
+
+        await participant.sweepRemovedConnections { saved }
+        await participant.sweepRemovedConnections { [] }
+
+        #expect(sink.events == [.swept(keeping: saved)])
+    }
+
+    @Test func sweepDeletesNothingWhenTheStoreCantBeRead() async {
+        let participant = ImageParticipant(sink: sink)
+
+        await participant.sweepRemovedConnections { nil }
+
+        #expect(sink.events.isEmpty)
+        // A later launch's read that works still sweeps.
+        await participant.sweepRemovedConnections { [identityA.connectionID] }
+        #expect(sink.events == [.swept(keeping: [identityA.connectionID])])
     }
 }

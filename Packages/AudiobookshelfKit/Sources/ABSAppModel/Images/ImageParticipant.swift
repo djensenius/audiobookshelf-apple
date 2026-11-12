@@ -10,6 +10,9 @@ public protocol ImageRequestBuilderSink: Sendable {
     func setRequestBuilder(_ builder: (any ImageRequestBuilding)?, for serverID: UUID) async
     /// Forgets a removed server and its cached covers.
     func removeServer(_ serverID: UUID) async
+    /// Forgets every server not in `saved`, as ``removeServer(_:)`` does, except those given a
+    /// builder since launch.
+    func removeServers(keepingOnly saved: Set<UUID>) async
 }
 
 extension ImagePipeline: ImageRequestBuilderSink {}
@@ -39,6 +42,8 @@ public final class ImageParticipant: SessionParticipant {
     private var connectionID: UUID?
     private var client: APIClient?
     private var removals: Task<Void, Never>?
+    /// Whether ``sweepRemovedConnections(savedConnections:)`` has run.
+    private var sweptRemovedConnections = false
     /// The latest pipeline call of each connection; the connection's next call waits for it.
     private var tails: [UUID: (call: Int, task: Task<Void, Never>)] = [:]
     private var nextCall = 0
@@ -106,6 +111,19 @@ public final class ImageParticipant: SessionParticipant {
                 known = saved
             }
         }
+    }
+
+    /// Deletes, once per launch, the covers of connections removed in an earlier launch: a
+    /// removal the app was terminated in after the store removed the connection, but before
+    /// ``remove(_:)`` ran, left them with no connection to follow (#421).
+    ///
+    /// - Parameter savedConnections: The saved connections read from the store, or `nil` if it
+    ///   can't be read, which skips the sweep (`AccountManager.savedConnectionIDs()`). Never a
+    ///   list that may not have loaded yet, which would delete every connection's covers.
+    public func sweepRemovedConnections(savedConnections: @MainActor () async -> Set<UUID>?) async {
+        guard !sweptRemovedConnections, let saved = await savedConnections() else { return }
+        sweptRemovedConnections = true
+        await sink.removeServers(keepingOnly: saved)
     }
 
     // MARK: - Builder

@@ -782,6 +782,15 @@ public final class AccountManager {
         settings.removeAccountData(keepingOnly: accounts.map { (serverID: $0.id.uuidString, userID: $0.userId) })
     }
 
+    /// The ids of the saved connections, read from the store as the settings sweep reads them,
+    /// plus the listed and active ones in case one was saved since; `nil` if the store can't be
+    /// read. For sweeping data of connections removed in an earlier launch (#421), which must
+    /// never go by ``connections`` alone: it's empty until it has loaded.
+    public func savedConnectionIDs() async -> Set<UUID>? {
+        guard let saved = try? await store.allConnections().filter({ !$0.isDisconnected }) else { return nil }
+        return Set((saved + connections + [activeConnection].compactMap(\.self)).map(\.id))
+    }
+
     private func reloadConnections() async {
         do {
             connections = try await store.allConnections().filter { !$0.isDisconnected }
