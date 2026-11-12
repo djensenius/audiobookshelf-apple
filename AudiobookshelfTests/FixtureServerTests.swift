@@ -7,7 +7,8 @@ import Testing
 
 /// The fixture server's replies decode through the production endpoints, so a model change that
 /// breaks a fixture fails here rather than in a UI test (docs/testing/ui-tests.md).
-@MainActor
+/// Serialized: ``FixtureServer/environment()`` empties the fixture cover cache another test loads into.
+@MainActor @Suite(.serialized)
 struct FixtureServerTests {
     private let client: APIClient
 
@@ -56,6 +57,22 @@ struct FixtureServerTests {
         let (data, response) = try await session.data(from: url)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
         #expect(data.starts(with: [0x89, 0x50, 0x4E, 0x47]))
+    }
+
+    /// Connect's first `/status` check, and the add-server flow's, go through the fixture
+    /// launch's injected session rather than the real network.
+    @Test(arguments: [false, true])
+    func connectFlowValidatesThroughTheFixtureSession(addingServer: Bool) async throws {
+        let environment = FixtureServer.environment()
+        let accounts = try #require(environment.accounts)
+        let model = ConnectFlowView.model(
+            accounts: accounts, lifecycle: addingServer ? environment.lifecycle : nil,
+            localNetwork: PreviewLocalNetworkAccess())
+        #expect(model.phase == .address)
+        model.address = FixtureServer.address
+        await model.submitAddress()
+        #expect(model.failure == nil)
+        #expect(model.phase == .login)
     }
 
     /// Fixture covers load without the network monitor and cache only in the fixture directory.
