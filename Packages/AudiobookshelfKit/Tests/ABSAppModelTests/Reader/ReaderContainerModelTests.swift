@@ -21,6 +21,10 @@ private func serverProgress(_ location: String?) -> MediaProgress {
         lastUpdate: Int(t0.timeIntervalSince1970 * 1000))
 }
 
+private enum ReaderTestFailure: Error {
+    case notReady
+}
+
 @MainActor
 @Suite struct ReaderContainerModelTests {
     let fetcher = FakeEbookFetcher()
@@ -44,6 +48,23 @@ private func serverProgress(_ location: String?) -> MediaProgress {
         #expect(fetcher.calls.value.isEmpty)
         #expect(ReaderContainerModel.opens(.epub))
         #expect(ReaderContainerModel.opens(.pdf))
+    }
+
+    @Test func theLoadedFileStaysPinnedUntilReleased() async throws {
+        let model = makeModel()
+        await model.load()
+        guard case .ready(let url) = model.content else { throw ReaderTestFailure.notReady }
+        #expect(EbookFileLoader.pins.isPinned(url))
+
+        model.releaseFile()
+        #expect(!EbookFileLoader.pins.isPinned(url))
+
+        // Closed before the load finished: nothing stays pinned.
+        let closed = makeModel()
+        closed.releaseFile()
+        await closed.load()
+        guard case .ready(let late) = closed.content else { throw ReaderTestFailure.notReady }
+        #expect(!EbookFileLoader.pins.isPinned(late))
     }
 
     @Test func withoutAProgressModelOpensAtTheServersPositionAndSavesNothing() async throws {

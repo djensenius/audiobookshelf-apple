@@ -4,6 +4,7 @@ import ABSData
 import ABSDownloads
 import CryptoKit
 import Foundation
+import Synchronization
 
 /// Fetches an ebook file from the server onto disk.
 public protocol EbookFileFetching: Sendable {
@@ -160,7 +161,9 @@ public enum EbookFileOrigin: Sendable, Hashable {
 /// Each connection has a folder named by its UUID, and each file is named by a SHA-256 of its
 /// item, `ino` and ``EbookFileRequest/version``, so server IDs never become path components. After
 /// each fetch, the least recently opened copies are deleted until the folder totals at most
-/// `maxTotalBytes`.
+/// `maxTotalBytes`, except copies still open: ``load(_:)`` pins the copy it returns, in a
+/// registry every loader in the process shares, until ``release(_:)``. Readers each have their
+/// own loader over the one cache, so one can't delete the book another is reading.
 public actor EbookFileLoader {
     public static let defaultMaxTotalBytes = 512 << 20
     /// The largest ebook fetched: 512 MiB, matching `MAX_BOOK_BYTES` in the EPUB host's
@@ -217,6 +220,8 @@ public actor EbookFileLoader {
             return (url, .downloaded)
         }
         let url = cacheURL(for: request)
+        // Pinned before it's looked for or written, so no other loader's prune deletes it between.
+        Self.pins.pin(url)
         if FileManager.default.fileExists(atPath: url.path) {
             // Marks it recently used for pruning.
             try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
@@ -242,6 +247,7 @@ public actor EbookFileLoader {
             }
         } catch {
             try? FileManager.default.removeItem(at: partial)
+            Self.pins.release(url)
             throw error
         }
         prune(keeping: url)
@@ -297,7 +303,17 @@ public actor EbookFileLoader {
         }
     }
 
-    /// Deletes the least recently used copies, other than `kept`, until the cache fits.
+    /// Lets the cache delete a copy ``load(_:)`` returned, once its reader is done with it. Once per
+    /// load; a downloaded copy, which isn't the cache's, isn't pinned.
+    public nonisolated func release(_ url: URL) {
+        Self.pins.release(url)
+    }
+
+    /// The cached copies open in this process, by every loader, with how many times each is open.
+    static let pins = EbookCachePins()
+
+    /// Deletes the least recently used copies, other than `kept` and pinned ones, until the cache
+    /// fits.
     private func prune(keeping kept: URL) {
         let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
         // Skips the hidden partial folder, whose files are still being written.
@@ -312,7 +328,9 @@ public actor EbookFileLoader {
         }
         var total = files.reduce(0) { $0 + $1.size }
         for file in files.sorted(by: { $0.date < $1.date }) where total > maxTotalBytes {
-            guard file.url.standardizedFileURL != kept.standardizedFileURL else { continue }
+            guard file.url.standardizedFileURL != kept.standardizedFileURL, !Self.pins.isPinned(file.url) else {
+                continue
+            }
             try? FileManager.default.removeItem(at: file.url)
             total -= file.size
         }
@@ -342,5 +360,28 @@ public actor EbookFileLoader {
             let item = try? await items.item(serverConnectionID: request.connectionID, libraryItemId: request.itemID)
             return downloadedFile(in: item, fileIno: request.fileIno, locations: locations)
         }
+    }
+}
+
+/// Counts how many times each cached ebook is open, across loaders.
+final class EbookCachePins: Sendable {
+    private let counts = Mutex<[String: Int]>([:])
+
+    private static func key(_ url: URL) -> String { url.standardizedFileURL.path }
+
+    func pin(_ url: URL) {
+        counts.withLock { $0[Self.key(url), default: 0] += 1 }
+    }
+
+    func release(_ url: URL) {
+        counts.withLock { counts in
+            let key = Self.key(url)
+            guard let count = counts[key] else { return }
+            counts[key] = count > 1 ? count - 1 : nil
+        }
+    }
+
+    func isPinned(_ url: URL) -> Bool {
+        counts.withLock { $0[Self.key(url)] != nil }
     }
 }

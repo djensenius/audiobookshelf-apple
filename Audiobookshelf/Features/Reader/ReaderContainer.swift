@@ -87,7 +87,10 @@ struct ReaderContainer: View {
         .task(id: source) {
             let source = source
             if modelSource != source {
-                if let model { Task { await model.flush() } }
+                if let model {
+                    model.releaseFile()
+                    Task { await model.flush() }
+                }
                 model = makeModel()
                 modelSource = source
                 serverURL = nil
@@ -103,8 +106,12 @@ struct ReaderContainer: View {
             if phase == .background, let model { Task { await model.flush() } }
         }
         // However it closes: the close button, or on Mac the window's close button or Command-W.
+        // The cache may then delete the file.
         .onDisappear {
-            if let model { Task { await model.flush() } }
+            if let model {
+                model.releaseFile()
+                Task { await model.flush() }
+            }
         }
     }
 
@@ -187,7 +194,7 @@ private struct ReaderContent: View {
                     model: model, fileURL: url,
                     payload: ReaderSettingsPayload(
                         settings: settings, resolvedAppearance: colorScheme == .dark ? .dark : .light,
-                        gap: layout.gap))
+                        layout: layout))
             case .comic, .unsupported:
                 ReaderUnsupportedView(model: model, serverURL: serverURL)
             }
@@ -339,13 +346,6 @@ extension ReaderTheme {
         case .black: .black
         case .sepia: Color(red: 244 / 255, green: 236 / 255, blue: 216 / 255)
         }
-    }
-}
-
-extension ReaderSpreadLayout {
-    /// The EPUB bridge's column gap: the hinge's width in a spanned spread, else epub.js's own.
-    var gap: Double {
-        if case .twoUp(let gap) = self { Double(gap) } else { 0 }
     }
 }
 

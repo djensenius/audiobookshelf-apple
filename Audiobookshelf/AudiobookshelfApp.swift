@@ -60,6 +60,8 @@ struct AudiobookshelfApp: App {
             // Each ebook opened with Read; reopening one brings its window forward.
             WindowGroup(id: ReaderWindow.id, for: ReaderPresentation.self) { $presentation in
                 ReaderWindow(presentation: presentation, store: environment.library?.store)
+                    // macOS can restore a reader window alone, without the window that starts it.
+                    .task { await environment.lifecycle.start() }
                     .environment(settings)
                     .environment(\.downloadedEbookFile, downloadedEbookFile)
                     .modifier(AppThemeModifier(settings: settings))

@@ -109,6 +109,8 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
         let first = try await loader.load(request("a"))
         try FileManager.default.setAttributes(
             [.modificationDate: Date(timeIntervalSince1970: 1)], ofItemAtPath: first.url.path)
+        // Closed; an open copy is pinned (loadersOverTheBudgetKeepEachOthersOpenFiles).
+        loader.release(first.url)
         let second = try await loader.load(request("b"))
 
         #expect(!FileManager.default.fileExists(atPath: first.url.path))
@@ -313,6 +315,31 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
         try handle.close()
         #expect(try await loader.load(request()) == (downloaded, .downloaded))
         #expect(fetcher.calls.value.isEmpty)
+    }
+
+    @Test func loadersOverTheBudgetKeepEachOthersOpenFiles() async throws {
+        let directory = readerTemporaryDirectory()
+        let fetcher = FakeEbookFetcher(body: Data(count: 8))
+        // Two readers, each with its own loader over the one cache, together over its 10 bytes.
+        let first = EbookFileLoader(directory: directory, fetcher: fetcher, maxTotalBytes: 10)
+        let second = EbookFileLoader(directory: directory, fetcher: fetcher, maxTotalBytes: 10)
+
+        async let one = first.load(request("li_1"))
+        async let two = second.load(request("li_2"))
+        let (a, b) = try await (one, two)
+
+        #expect(FileManager.default.fileExists(atPath: a.url.path))
+        #expect(FileManager.default.fileExists(atPath: b.url.path))
+
+        // Once closed, a copy can go.
+        first.release(a.url)
+        let c = try await first.load(request("li_3"))
+        #expect(!FileManager.default.fileExists(atPath: a.url.path))
+        #expect(FileManager.default.fileExists(atPath: b.url.path))
+        #expect(FileManager.default.fileExists(atPath: c.url.path))
+        second.release(b.url)
+        first.release(c.url)
+        #expect(!EbookFileLoader.pins.isPinned(b.url))
     }
 
     @Test func partialsFromEarlierLaunchesAreReclaimed() async throws {

@@ -40,6 +40,10 @@ public final class ReaderContainerModel {
     public private(set) var isChromeVisible = true
 
     @ObservationIgnored private let loader: EbookFileLoader
+    /// The loaded file, pinned in the cache until ``releaseFile()``.
+    @ObservationIgnored private var loadedFile: URL?
+    /// The reader has closed: a load finishing later releases its file at once.
+    @ObservationIgnored private var isReleased = false
     @ObservationIgnored private let progressModel: EbookProgressModel?
     @ObservationIgnored private let serverProgress: MediaProgress?
     /// Whether a location other than where the reader opened was reported.
@@ -100,6 +104,9 @@ public final class ReaderContainerModel {
             } onCancel: {
                 file.cancel()
             }
+            if let loadedFile { loader.release(loadedFile) }
+            loadedFile = isReleased ? nil : url
+            if isReleased { loader.release(url) }
             resumePoint = point
             if !turned {
                 location = point.location
@@ -140,6 +147,13 @@ public final class ReaderContainerModel {
 
     public func toggleChrome() {
         isChromeVisible.toggle()
+    }
+
+    /// Lets the cache delete the loaded file: call when the reader closes or is replaced.
+    public func releaseFile() {
+        isReleased = true
+        if let loadedFile { loader.release(loadedFile) }
+        loadedFile = nil
     }
 
     /// Sends unsent progress now: call when the reader closes and when the app moves to the
