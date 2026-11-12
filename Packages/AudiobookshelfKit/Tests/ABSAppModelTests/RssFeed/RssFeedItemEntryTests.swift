@@ -7,9 +7,10 @@ import Testing
 
 private let openFeed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
 
-private func book(tracks: Int, feed: RssFeed? = nil) -> LibraryItem {
+private func book(tracks: Int, audioFiles: Int = 0, feed: RssFeed? = nil) -> LibraryItem {
     let book = Book(
         id: "b-1", metadata: BookMetadata(title: "Book"),
+        audioFiles: (0..<audioFiles).map { AudioFile(ino: "ino-\($0)") },
         tracks: (0..<tracks).map { AudioTrack(index: $0 + 1, duration: 60) })
     return LibraryItem(id: "li-1", libraryId: "lib-1", mediaType: .book, media: .book(book), rssFeed: feed)
 }
@@ -37,6 +38,13 @@ private func podcast(pubDates: [String?]) -> LibraryItem {
         #expect(RssFeedItemEntry(item: book(tracks: 0)) == nil)
         #expect(RssFeedItemEntry(item: podcast(pubDates: [])) == nil)
         let entry = try #require(RssFeedItemEntry(item: book(tracks: 0, feed: openFeed)))
+        #expect(entry.isOpen)
+    }
+
+    /// Legacy checks `media.tracks`: scanned files that are all excluded publish nothing.
+    @Test func scannedFilesWithoutTracksPublishNothing() throws {
+        #expect(RssFeedItemEntry(item: book(tracks: 0, audioFiles: 2)) == nil)
+        let entry = try #require(RssFeedItemEntry(item: book(tracks: 0, audioFiles: 2, feed: openFeed)))
         #expect(entry.isOpen)
     }
 

@@ -15,7 +15,8 @@ public struct RssFeedItemEntry: Sendable, Hashable {
     public init?(item: LibraryItem?) {
         guard let item else { return nil }
         let episodes = item.podcast?.episodes ?? []
-        let hasTracks = !(item.book?.tracks ?? []).isEmpty || !(item.book?.audioFiles ?? []).isEmpty
+        // Legacy `media.tracks`: the publishable tracks, not every scanned file (some may be excluded).
+        let hasTracks = !(item.book?.tracks ?? []).isEmpty
         guard item.rssFeed != nil || hasTracks || !episodes.isEmpty else { return nil }
         target = RssFeedTarget(.item, id: item.id)
         isOpen = item.rssFeed != nil
