@@ -70,12 +70,14 @@ import Testing
         ("lpt1.txt", ""), ("Console", "Console"), ("com10", "com10"), ("Trailing. . ", "Trailing"), ("LPT1 ", ""),
         (" Leading", " Leading"), ("Émission ☕️", "Émission ☕️"), ("a/../b", "a..b"), ("/", ""), ("CON.", ""),
         ("con ", ""), ("CON.txt", ""), ("aux. .", ""), ("Console ", "Console"),
+        (".." + "a" + String(repeating: "\u{301}", count: 300), ""),
+        ("CON" + String(repeating: " ", count: 237) + "x", ""),
     ])
     func sanitizingMatchesLegacy(input: String, expected: String) {
         #expect(NewPodcastDraft.sanitizedFilename(input) == expected)
     }
 
-    @Test func longNamesAreShortenedBeforeTheirExtension() {
+    @Test(.timeLimit(.minutes(1))) func longNamesAreShortenedBeforeTheirExtension() {
         let long = String(repeating: "a", count: 250) + ".mp3"
         let sanitized = NewPodcastDraft.sanitizedFilename(long)
         #expect(sanitized.utf16.count == NewPodcastDraft.maxFilenameLength)
@@ -88,6 +90,7 @@ import Testing
         let dotted = NewPodcastDraft.sanitizedFilename("Mr. " + String(repeating: "語", count: 100))
         #expect(dotted == "Mr. " + String(repeating: "語", count: 83))
         #expect(NewPodcastDraft.sanitizedFilename(emoji).utf8.count <= NewPodcastDraft.maxFilenameBytes)
+        #expect(NewPodcastDraft.sanitizedFilename(String(repeating: "語", count: 500_000)).utf8.count == 255)
     }
 
     @Test func refreshedFoldersKeepAChoiceThatStillExists() {
