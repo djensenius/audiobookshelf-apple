@@ -105,11 +105,12 @@ public final class Router {
     }
 
     /// The sections the sidebar shows, in sidebar order: ``supportedSections`` once a library is
-    /// selected, and every section before that, so the sidebar is never empty while the scene
-    /// has no library yet. A user confirmed to have no libraries (``isLibraryChecked`` without a
-    /// library) gets none.
+    /// selected, and every section before that unless some were withheld
+    /// (``withholdSections(_:)``), so the sidebar is never empty while the scene has no library
+    /// yet. A user confirmed to have no libraries (``isLibraryChecked`` without a library) gets none.
     public var visibleSections: [AppTab] {
-        libraryID == nil && !isLibraryChecked ? AppTab.sections : AppTab.sections.filter(supportedSections.contains)
+        libraryID == nil && !isLibraryChecked && supportedSections.isEmpty
+            ? AppTab.sections : AppTab.sections.filter(supportedSections.contains)
     }
 
     /// Asks the scene to switch to library `id`, for a deep link that knows only the ID.
@@ -215,6 +216,17 @@ public final class Router {
         self.supportedSections =
             supportedSections ?? (kind == nil ? Set(AppTab.sections) : AppTab.sections(for: kind))
         isLibraryChecked = false
+    }
+
+    /// Hides `sections` from those shown now, such as Add podcast from a user known not to be
+    /// allowed it before the libraries load, without checking the library or changing it, and
+    /// repairs the selection as ``repairSections(supported:keepsLibraryPath:)`` does. An unchecked
+    /// library keeps its Library path, which may hold a launch link's screens.
+    func withholdSections(_ sections: Set<AppTab>) {
+        let shown = Set(visibleSections)
+        guard !shown.isDisjoint(with: sections) else { return }
+        supportedSections = shown.subtracting(sections)
+        repairSections(supported: supportedSections, keepsLibraryPath: !isLibraryChecked)
     }
 
     /// Shows no library, for a user confirmed to have none: resets the library-scoped paths and

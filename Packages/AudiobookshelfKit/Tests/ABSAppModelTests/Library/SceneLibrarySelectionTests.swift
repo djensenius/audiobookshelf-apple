@@ -315,6 +315,38 @@ private let pods = makeLibrary("pods", mediaType: .podcast)
         }
     }
 
+    /// A known permission applies before the libraries load, and while loading them fails: to a
+    /// restored library and to a scene with no library at all, leaving either unchecked. An
+    /// unknown user (`nil`) keeps Add podcast.
+    @Test(arguments: [(false, false), (nil, true)] as [(Bool?, Bool)])
+    func addPodcastFollowsAKnownPermissionBeforeTheLibrariesLoad(canAddPodcast: Bool?, shown: Bool) async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            var service = FakeLibraryService()
+            service.librariesHandler = { throw TestError.unexpected }
+            store.attach(client: service, connectionKey: key)
+            await store.refresh()
+            #expect(!store.hasLoaded && store.error != nil)
+
+            let restored = Router(identity: identityA)
+            restored.restoreLibrary(id: "pods", kind: .podcast)
+            restored.selectedTab = .addPodcast
+            restored[path: .addPodcast] = [.item(id: "li_new")]
+            SceneLibrarySelection.reconcile(restored, store: store, canAddPodcast: canAddPodcast)
+            #expect(restored.libraryID == "pods" && !restored.isLibraryChecked)
+            #expect(restored.visibleSections.contains(.addPodcast) == shown)
+            #expect(restored.visibleSections.contains(.latest))
+            #expect((restored.selectedTab == .addPodcast) == shown)
+            #expect(restored[path: .addPodcast].isEmpty == !shown)
+
+            let empty = Router(identity: identityA)
+            SceneLibrarySelection.reconcile(empty, store: store, canAddPodcast: canAddPodcast)
+            #expect(empty.libraryID == nil && !empty.isLibraryChecked)
+            #expect(empty.visibleSections.contains(.addPodcast) == shown)
+            #expect(empty.visibleSections.contains(.series))
+        }
+    }
+
     /// Losing the permission (a refreshed user, another account's role) while on Add podcast
     /// falls back to Library and drops the section's screens.
     @Test func losingThePermissionLeavesAddPodcast() async throws {

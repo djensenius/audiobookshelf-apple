@@ -17,7 +17,9 @@ import Foundation
 /// - Only a user's pick is saved as the account's last library.
 /// - Add podcast is hidden once the user is known not to be allowed to add podcasts
 ///   (`canAddPodcast` is `false`, see `User.canAddPodcasts`), as legacy `BookshelfNavBar.vue`
-///   does; while the user is unknown (`nil`, such as offline) the section is kept.
+///   does; while the user is unknown (`nil`, such as offline) the section is kept. A known
+///   permission applies before the libraries load too, or when loading them fails, with or
+///   without a library, leaving the library unchecked.
 ///
 /// Nothing happens while the store serves another account than the router's.
 @MainActor
@@ -53,6 +55,7 @@ public enum SceneLibrarySelection {
             if router.libraryID == nil, let initial = store.initialLibraryID {
                 router.restoreLibrary(id: initial, kind: nil)
             }
+            if canAddPodcast == false { router.withholdSections([.addPodcast]) }
             return
         }
         if let pending = router.pendingLibraryID {
