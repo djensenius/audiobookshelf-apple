@@ -26,6 +26,8 @@ public struct ProgressBadge: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(verbatim: L10n.string("LabelProgress")))
             .accessibilityValue(Text(verbatim: value))
+            // The finished check is an `Image`; like `MediaBadge`, it is a value, not a picture.
+            .accessibilityRemoveTraits(.isImage)
         }
     }
 }
