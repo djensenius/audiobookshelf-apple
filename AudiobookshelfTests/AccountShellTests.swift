@@ -563,6 +563,74 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
+    // MARK: Removing a saved server from the list
+
+    @Test func removingAnotherServerFromTheListKeepsTheSession() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let recorder = Recorder()
+        let (a, b, hosts) = try await twoServers(environment, recorder: recorder)
+        defer { cleanUp(hosts) }
+        let accounts = try #require(environment.accounts)
+        #expect(await accounts.hasSession(a.connectionID))
+        let before = recorder.events.count
+
+        let removed = try await #require(
+            AccountActions(lifecycle: lifecycle, accounts: accounts).removeServer(a.connectionID)
+        ).value
+
+        #expect(removed)
+        #expect(accounts.connections.map(\.id) == [b.connectionID])
+        #expect(await !accounts.hasSession(a.connectionID))
+        #expect(await accounts.hasSession(b.connectionID))
+        #expect(recorder.events.count == before)
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
+    }
+
+    @Test func theRunningServerHasNoRemoval() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        let accounts = try #require(environment.accounts)
+        let actions = AccountActions(lifecycle: lifecycle, accounts: accounts)
+
+        #expect(actions.canRemove(a.connectionID))
+        #expect(!actions.canRemove(b.connectionID))
+        #expect(actions.removeServer(b.connectionID) == nil)
+        // Without the saved accounts there's nothing to check the row against.
+        #expect(!AccountActions(lifecycle: lifecycle).canRemove(a.connectionID))
+        #expect(accounts.connections.count == 2)
+        #expect(lifecycle.gate == .ready(b, isOffline: false))
+    }
+
+    @Test func removalIsRefusedWhileSwitching() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let held = Self.host("hold-")
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder(), hostA: held)
+        defer {
+            ConnectTestProtocol.release(held)
+            cleanUp(hosts)
+        }
+        let accounts = try #require(environment.accounts)
+        let actions = AccountActions(lifecycle: lifecycle, accounts: accounts)
+        // Another window's switch to A, held at A's server.
+        let switching = Task { try await lifecycle.switchAccount(to: a.connectionID) }
+        await waitFor(.switching(from: b), in: lifecycle)
+
+        #expect(!actions.canRemove(a.connectionID) && !actions.canRemove(b.connectionID))
+        #expect(actions.removeServer(a.connectionID) == nil)
+        #expect(actions.removeServer(b.connectionID) == nil)
+
+        ConnectTestProtocol.release(held)
+        try await switching.value
+        #expect(lifecycle.gate == .ready(a, isOffline: false))
+        #expect(accounts.connections.count == 2)
+        // Ready again, on A: now B can go.
+        #expect(actions.canRemove(b.connectionID) && !actions.canRemove(a.connectionID))
+    }
+
     /// An expiry deletes the session but not `signedOutAt`: no switch, so nothing ends.
     @Test func aServerWhoseSessionWasDeletedIsntSwitchedTo() async throws {
         let environment = try makeEnvironment()

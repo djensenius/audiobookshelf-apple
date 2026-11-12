@@ -61,6 +61,33 @@ struct AccountActions {
         }
         return .switched(epoch: lifecycle.linkEpoch)
     }
+
+    /// Whether the server list offers to remove `connectionID`: a saved server other than the
+    /// running one (Log Out covers that), only while the session is ready, so not during another
+    /// window's switch.
+    func canRemove(_ connectionID: UUID) -> Bool {
+        guard let accounts, let running = lifecycle.readySession else { return false }
+        return connectionID != running.identity.connectionID && connectionID != accounts.activeConnection?.id
+    }
+
+    /// Forgets a saved server other than the running one, and its saved session, through
+    /// ``SessionLifecycle/removeAccount(_:)`` as the add-server sheet's backend does; the session
+    /// keeps running. As there, an OpenID end-session page isn't opened.
+    /// - Returns: The removal's task, which says whether it succeeded, or `nil` when
+    ///   ``canRemove(_:)`` refuses it.
+    @discardableResult
+    func removeServer(_ connectionID: UUID) -> Task<Bool, Never>? {
+        guard canRemove(connectionID) else { return nil }
+        return Task {
+            do {
+                _ = try await lifecycle.removeAccount(connectionID)
+                return true
+            } catch {
+                Log.ui.error("Couldn't remove a server: \(String(describing: type(of: error)), privacy: .public)")
+                return false
+            }
+        }
+    }
 }
 
 /// How ``AccountActions/switchAccount(to:)`` ended.

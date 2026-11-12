@@ -80,7 +80,9 @@ struct AccountView: View {
 }
 
 /// The saved servers (`Route.servers`): selecting one switches through the lifecycle; adding one
-/// signs in with the connect flow in a sheet, keeping the current account's session.
+/// signs in with the connect flow in a sheet, keeping the current account's session. Servers other
+/// than the running one can be removed, after a confirmation: swipe to delete or Edit on iOS, and
+/// the context menu everywhere (``AccountActions/canRemove(_:)``). Log Out covers the running one.
 struct ServersView: View {
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
@@ -88,13 +90,19 @@ struct ServersView: View {
     @State private var switchFailed = false
     @State private var switchFailure = SwitchFailure.other
     @State private var isAddingServer = false
+    /// The server waiting for the removal confirmation.
+    @State private var pendingRemoval: ServerConnectionDTO?
+    /// A removal in flight, so no switch or other removal starts meanwhile.
+    @State private var isRemoving = false
+    @State private var removeFailed = false
     /// Whether each connection has a saved session to switch to (``AccountManager/hasSession(_:)``).
     @State private var hasSession: [UUID: Bool] = [:]
 
     var body: some View {
+        let servers = accounts?.connections ?? []
         Form {
             Section {
-                ForEach(accounts?.connections ?? []) { server in
+                ForEach(servers) { server in
                     let isActive = server.id == accounts?.activeConnection?.id
                     Button {
                         switchServer(to: server.id)
@@ -102,10 +110,28 @@ struct ServersView: View {
                         row(server, isActive: isActive)
                     }
                     .disabled(
-                        isActive || switchingTo != nil || hasSession[server.id] != true
+                        isActive || switchingTo != nil || isRemoving || hasSession[server.id] != true
                             || lifecycle?.acceptsAccountChanges != true
                     )
                     .accessibilityAddTraits(isActive ? .isSelected : [])
+                    .contextMenu {
+                        if canRemove(server) {
+                            Button(role: .destructive) {
+                                pendingRemoval = server
+                            } label: {
+                                Label {
+                                    Text(verbatim: L10n.string("ButtonRemove"))
+                                } icon: {
+                                    Image(systemName: "trash")
+                                }
+                            }
+                        }
+                    }
+                    .deleteDisabled(!canRemove(server))
+                }
+                // Swipe to delete, and Edit's delete buttons; both ask first.
+                .onDelete { offsets in
+                    pendingRemoval = offsets.first.map { servers[$0] }.flatMap { canRemove($0) ? $0 : nil }
                 }
             }
             Section {
@@ -118,12 +144,39 @@ struct ServersView: View {
                         Image(systemName: "plus")
                     }
                 }
-                .disabled(switchingTo != nil || lifecycle?.acceptsAccountChanges != true)
+                .disabled(switchingTo != nil || isRemoving || lifecycle?.acceptsAccountChanges != true)
             }
         }
         .formStyle(.grouped)
         .navigationTitle(Text(verbatim: L10n.string("HeaderServers")))
+        #if os(iOS)
+            .toolbar {
+                if servers.contains(where: canRemove) {
+                    EditButton()
+                }
+            }
+        #endif
         .switchServerFailedAlert(isPresented: $switchFailed, failure: switchFailure)
+        .confirmationDialog(
+            Text(verbatim: L10n.string("MessageConfirmDeleteServerConfig")),
+            isPresented: Binding {
+                pendingRemoval != nil
+            } set: {
+                if !$0 { pendingRemoval = nil }
+            },
+            titleVisibility: .visible, presenting: pendingRemoval
+        ) { server in
+            Button(role: .destructive) {
+                remove(server)
+            } label: {
+                Text(verbatim: L10n.string("ButtonRemove"))
+            }
+        } message: { server in
+            Text(verbatim: L10n.string("MessageRemoveServerAccount", server.username, server.address))
+        }
+        .alert(Text(verbatim: L10n.string("MessageRemoveServerFailed")), isPresented: $removeFailed) {
+            Button(L10n.string("ButtonOk")) {}
+        }
         .task(id: accounts?.connections) {
             guard let accounts else { return }
             var sessions: [UUID: Bool] = [:]
@@ -139,6 +192,26 @@ struct ServersView: View {
                     accounts: accounts, lifecycle: lifecycle, onCancel: { isAddingServer = false },
                     onFinish: { isAddingServer = false })
             }
+        }
+    }
+
+    /// Whether `server` offers removal now: not the running server, nor while a switch, here or in
+    /// another window, or a removal runs.
+    private func canRemove(_ server: ServerConnectionDTO) -> Bool {
+        guard let lifecycle, switchingTo == nil, !isRemoving else { return false }
+        return AccountActions(lifecycle: lifecycle, accounts: accounts).canRemove(server.id)
+    }
+
+    /// Removes `server` once confirmed, unless that's no longer allowed: a switch may have started
+    /// while the dialog was open.
+    private func remove(_ server: ServerConnectionDTO) {
+        guard canRemove(server), let lifecycle,
+            let task = AccountActions(lifecycle: lifecycle, accounts: accounts).removeServer(server.id)
+        else { return }
+        isRemoving = true
+        Task {
+            if await !task.value { removeFailed = true }
+            isRemoving = false
         }
     }
 

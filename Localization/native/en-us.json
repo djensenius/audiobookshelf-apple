@@ -162,6 +162,8 @@
   "MessagePlaylistsListLoadFailed": "Couldn't load the playlists.",
   "MessagePodcastDetailNoEpisodes": "This podcast has no episodes.",
   "MessagePodcastDetailNoMatchingEpisodes": "No episodes match the filter or search.",
+  "MessageRemoveServerAccount": "Removes {0} on {1} and its saved login from this device. You stay signed in to the current server.",
+  "MessageRemoveServerFailed": "Couldn't remove the server. Try again.",
   "MessageSearchLibraryFailed": "Couldn't search the library.",
   "MessageSearchLibraryPrompt": "Search this library by title, author, series, narrator or tag.",
   "MessageSeriesDetailLoadFailed": "Couldn't load this series.",
