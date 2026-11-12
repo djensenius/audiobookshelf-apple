@@ -19,6 +19,9 @@ enum DeferredReportAdmission: Equatable, Sendable {
         /// The stored position is no longer the report's own: a later local edit, another
         /// device's newer progress merged over it, or a position that never committed.
         case positionSuperseded
+        /// The stored close is no longer the one the drain read: a capture settled it meanwhile,
+        /// perhaps a retired playback scope's over the same store. What it saved stands.
+        case closeChanged
     }
 
     case send

@@ -52,6 +52,31 @@ struct SessionCloseQueueTests {
         #expect(try await relaunched.sessionCloses(for: other.serverConnectionID).count == 1)
     }
 
+    /// An attempt is claimed only from the close as read: one removed since isn't recreated, and
+    /// one saved again since keeps what that save wrote.
+    @Test(arguments: [nil, "removed", "kept"])
+    func anAttemptIsClaimedOnlyFromTheCloseAsRead(change: String?) async throws {
+        let store = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
+        var read = close("s-1", at: t0)
+        read.lastAttemptAt = t0
+        try await store.saveSessionClose(read)
+        var kept = read
+        kept.attempts = 1
+        kept.lastAttemptAt = t0 + 30
+        switch change {
+        case "removed": try await store.deleteSessionClose(serverConnectionID: key.serverConnectionID, sessionID: "s-1")
+        case "kept": try await store.saveSessionClose(kept)
+        default: break
+        }
+
+        #expect(try await store.claimSessionCloseAttempt(read, at: t0 + 60) == (change == nil))
+
+        var attempted = read
+        attempted.lastAttemptAt = t0 + 60
+        let closes = try await store.sessionCloses(for: key.serverConnectionID)
+        #expect(closes == (change == "removed" ? [] : [change == nil ? attempted : kept]))
+    }
+
     /// The edit time is the token's only while that token is the latest committed position.
     @Test func committedEditBelongsOnlyToTheLatestToken() async throws {
         let store = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)

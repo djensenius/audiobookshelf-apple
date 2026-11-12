@@ -437,6 +437,69 @@ struct CloseRetryTests {
         #expect(try await f.listened("session-2", itemID: "b") == 20)
     }
 
+    /// A retired playback scope's capture goes on after its syncer detaches, unseen by the
+    /// replacement scope's ``CloseRetryQueue``, which shares the store: the replacement's pass
+    /// reads that close in flight. If it settles while the pass is suspended on an older close,
+    /// the pass's attempt claim finds the stored close changed. Acknowledged meanwhile, it isn't
+    /// recreated or resent; kept, it isn't resent before the delay its settlement saved, and the
+    /// next drain resends it once.
+    @Test(arguments: [CloseRetryFixture.Request.Outcome.acknowledged, .unapplied])
+    func aReplacementScopeLeavesARetiredScopesSettledCloseAlone(
+        outcome: CloseRetryFixture.Request.Outcome
+    ) async throws {
+        let f = try CloseRetryFixture()
+        try await f.stopSessionOne(.unapplied)
+        await f.s.coordinator.play(itemID: "b")
+        await f.s.play(for: 20)
+        let close = CloseRetryFixture.Request(outcome)
+        defer { close.release() }
+        await f.model.enqueue(close, for: .close)
+        let stored = Gate()
+        f.s.syncer.closeQueue.reached = { if $0 == .captureSaved { stored.open() } }
+        f.s.coordinator.stop()
+        await stored.wait()
+        await f.s.settle()
+        // The account switches away, the scope retiring with session 2's `/close` out, and back:
+        // a new scope over the same store and connection, its clock where the old one's is.
+        f.s.syncer.detach()
+        let r = try CloseRetryFixture(progressStore: f.s.store, connectionID: f.s.h.connectionID, model: f.model)
+        r.s.h.clock.advance(by: f.s.h.clock.now.timeIntervalSince(r.s.h.clock.now))
+        #expect(try await r.queued().map(\.sessionID) == ["session-1", "session-2"])
+        let queue = r.s.syncer.closeQueue
+        queue.reached = { step in
+            // The pass takes session 1 first; session 2's `/close` settles once its attempt is saved.
+            guard step == .attemptSaved else { return }
+            queue.reached = nil
+            f.s.h.clock.advance(by: r.s.h.clock.now.timeIntervalSince(f.s.h.clock.now))
+            close.release()
+            await f.s.coordinator.waitForPendingCloses()
+            await f.s.syncer.closeQueue.waitForCaptures()
+        }
+
+        // Both closes are due.
+        await r.drainWhenDue()
+
+        #expect(r.s.service.closes.map(\.id) == ["session-1"])
+        #expect(queue.verdicts.map(\.sessionID) == ["session-1", "session-2"])
+        #expect(r.verdicts == [.send, .skip(.closeChanged)])
+        let kept = try await r.queued()
+        if outcome == .acknowledged {
+            #expect(kept.isEmpty)
+        } else {
+            #expect(kept.map(\.sessionID) == ["session-2"])
+            #expect(kept.first?.attempts == 1 && kept.first?.lastAttemptAt == r.s.h.clock.now)
+        }
+        #expect(r.s.syncer.drainWake != nil)
+        #expect(try await f.listened("session-2", itemID: "b") == (outcome == .acknowledged ? 20 : 15))
+
+        await r.drainWhenDue()
+
+        #expect(
+            r.s.service.closes.map(\.id) == (outcome == .acknowledged ? ["session-1"] : ["session-1", "session-2"]))
+        #expect(try await r.queued().isEmpty)
+        #expect(try await f.listened("session-2", itemID: "b") == 20)
+    }
+
     /// A coordinator `/close` that failed before the capture looked leaves the capture's
     /// settlement as the close's first save. If that save fails, the close is held in memory,
     /// kept to retry, and the next drain saves it before anything else and resends it once due:

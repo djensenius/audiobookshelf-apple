@@ -219,6 +219,11 @@ extension ProgressSyncer {
             case .skip(.lookupFailed):
                 drainOutcome.failed = true
                 return false
+            case .skip(.closeChanged):
+                // Its settlement may have kept it with no drain to come (a retired scope's):
+                // the next drain reads it as saved.
+                drainOutcome.failed = true
+                continue
             case .skip(let reason):
                 // TODO(#383): carry the skipped listening time.
                 Self.logDroppedClose(close.timeListened, reason: "admission skipped it (\(reason))")
@@ -254,18 +259,19 @@ extension ProgressSyncer {
     }
 
     /// Saves a resend's attempt time before it goes out, as the coordinator's attempt is saved,
-    /// so a relaunch while it is out waits ``reconcileDelay`` for it. The save suspends, so
-    /// admission's checks run again after it, with nothing after them before the send; the mark
+    /// so a relaunch while it is out waits ``reconcileDelay`` for it. The save is a claim: it
+    /// happens only if the stored close is still the one the pass read, so a close that a
+    /// capture settled meanwhile (another scope's included, which ``CloseRetryQueue/capturing``
+    /// doesn't see) is neither recreated nor resent early. The save suspends, so admission's
+    /// checks run again after it, with nothing after them before the send; the mark
     /// is taken in the same turn as admission's last check, so a reset or discard of the row
     /// meanwhile skips it. Returns the verdict that stands, or `nil` when the save failed and
     /// nothing may be sent. A skip after the save leaves that attempt time, which can only delay
     /// the close's next resend.
     private func recordCloseAttempt(_ close: PendingSessionCloseDTO) async -> DeferredReportAdmission? {
         let mark = deferredReportMark(for: close.key)
-        var attempt = close
-        attempt.lastAttemptAt = clock.now()
         do {
-            try await store.saveSessionClose(attempt)
+            guard try await store.claimSessionCloseAttempt(close, at: clock.now()) else { return .skip(.closeChanged) }
         } catch {
             logger.error("Saving a close's attempt failed: \(Self.caseName(error), privacy: .public)")
             return nil

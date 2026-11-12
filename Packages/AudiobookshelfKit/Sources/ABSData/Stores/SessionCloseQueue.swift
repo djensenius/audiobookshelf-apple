@@ -81,6 +81,20 @@ extension LocalProgressStore {
         return try modelContext.fetch(descriptor).map(PendingSessionCloseDTO.init)
     }
 
+    /// Saves `attemptAt` as the close's latest attempt only if the stored close is still `read`,
+    /// in one turn of the store: a capture that settled the close since (removed it, or kept it
+    /// with a new attempt), in any playback scope sharing this store, wins. Returns whether the
+    /// attempt was saved.
+    public func claimSessionCloseAttempt(_ read: PendingSessionCloseDTO, at attemptAt: Date) throws -> Bool {
+        guard
+            let model = try fetchSessionClose(
+                serverConnectionID: read.key.serverConnectionID, sessionID: read.sessionID),
+            PendingSessionCloseDTO(model) == read
+        else { return false }
+        try commit { model.lastAttemptAt = attemptAt }
+        return true
+    }
+
     /// Removes the close; nothing to remove is not an error.
     public func deleteSessionClose(serverConnectionID: UUID, sessionID: String) throws {
         try commit {
