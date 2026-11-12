@@ -77,6 +77,7 @@ struct GroupDetailContent<Kind: GroupScreenKind>: View {
         ) {
             reload()
         }
+        .rssFeedEntry(RssFeedPresentation.target(Kind.summaryKind, id: model.groupID))
     }
 
     private func reload() {

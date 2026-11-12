@@ -1,0 +1,224 @@
+import ABSAPI
+import ABSCore
+import Foundation
+import Testing
+
+@testable import ABSAppModel
+
+/// An ``RssFeedService`` that records requests and answers from closures.
+private final class FakeRssFeedService: RssFeedService {
+    enum Request: Sendable, Equatable {
+        case current(RssFeedTarget)
+        case open(RssFeedTarget, RssFeedOpenRequest)
+        case close(String)
+    }
+
+    let server: URL
+    let requests = Locked<[Request]>([])
+    let current: @Sendable () async throws -> RssFeed?
+    let open: @Sendable (RssFeedOpenRequest) async throws -> RssFeed
+    let close: @Sendable () async throws -> Void
+
+    init(
+        server: String = "https://abs.example/abs/",
+        current: @escaping @Sendable () async throws -> RssFeed? = { nil },
+        open: @escaping @Sendable (RssFeedOpenRequest) async throws -> RssFeed = { feed(slug: $0.slug) },
+        close: @escaping @Sendable () async throws -> Void = {}
+    ) {
+        self.server = URL(string: server)!
+        self.current = current
+        self.open = open
+        self.close = close
+    }
+
+    func serverURL() async -> URL { server }
+
+    func currentFeed(for target: RssFeedTarget) async throws -> RssFeed? {
+        requests.value.append(.current(target))
+        return try await current()
+    }
+
+    func openFeed(for target: RssFeedTarget, _ request: RssFeedOpenRequest) async throws -> RssFeed {
+        requests.value.append(.open(target, request))
+        return try await open(request)
+    }
+
+    func closeFeed(id: String) async throws {
+        requests.value.append(.close(id))
+        try await close()
+    }
+}
+
+private func feed(slug: String) -> RssFeed {
+    RssFeed(id: "feed-\(slug)", entityType: "series", entityId: "series-1", feedUrl: "/feed/\(slug)")
+}
+
+@MainActor
+@Suite struct RssFeedModelTests {
+    private let target = RssFeedTarget(.series, id: "series-1")
+
+    @Test(arguments: [
+        (UserType.root, true), (.admin, true), (.user, false), (.guest, false), (.unknown("custom"), false),
+    ])
+    func onlyAdminsAndRootManageFeeds(type: UserType, expected: Bool) {
+        #expect(RssFeedModel.canManageFeeds(type) == expected)
+    }
+
+    @Test func offlineHasNoUserTypeAndCantManageFeeds() {
+        #expect(!RssFeedModel.canManageFeeds(nil))
+    }
+
+    @Test(arguments: [
+        ("  My Series ", "my-series"), ("Ça.va/bien:ok", "ca-va-bien-ok"), ("a.b.c", "a-b-c"),
+        ("snake_case--slug", "snake_case-slug"), ("what?#&=", "what"), ("Ünïcödé ñ", "unicode-n"),
+        ("e\u{301}te\u{301}", "ete"), ("日本語", ""), ("already-clean_1", "already-clean_1"),
+    ])
+    func sanitizeSlugKeepsOneSafePathSegment(input: String, expected: String) {
+        #expect(RssFeedModel.sanitizeSlug(input) == expected)
+    }
+
+    @Test func loadReadsTheOpenFeedAndItsAddress() async {
+        let open = RssFeed(
+            id: "feed-1", entityType: "series", entityId: "series-1", feedUrl: "/feed/my-feed",
+            meta: .init(preventIndexing: false, ownerEmail: "owner@example.com"))
+        let service = FakeRssFeedService(current: { open })
+        let model = RssFeedModel(target: target, service: service)
+        #expect(model.slug == "series-1")
+        await model.load()
+        #expect(model.loadState == .loaded)
+        #expect(model.feed == open)
+        #expect(model.feedURL?.absoluteString == "https://abs.example/abs/feed/my-feed")
+        #expect(service.requests.value == [.current(target)])
+    }
+
+    @Test func loadFailureIsReportedUntilARetrySucceeds() async {
+        let fails = Locked(true)
+        let model = RssFeedModel(
+            target: target,
+            service: FakeRssFeedService(current: {
+                if fails.value { throw TestError.offline }
+                return nil
+            }))
+        await model.load()
+        #expect(model.loadState == .failed)
+        #expect(model.feed == nil)
+        #expect(model.error == .loadFailed)
+        fails.value = false
+        await model.load()
+        #expect(model.loadState == .loaded)
+        #expect(model.error == nil)
+    }
+
+    @Test func openSendsTheTrimmedFieldsAndTheServerAddress() async {
+        let service = FakeRssFeedService()
+        let model = RssFeedModel(target: target, service: service)
+        await model.load()
+        model.slug = "my-feed"
+        model.preventIndexing = false
+        model.ownerName = "  Ada  "
+        model.ownerEmail = " ada@example.com "
+        #expect(model.previewURL == "https://abs.example/abs/feed/my-feed")
+        #expect(await model.open())
+        #expect(model.feed == feed(slug: "my-feed"))
+        #expect(model.feedURL?.absoluteString == "https://abs.example/abs/feed/my-feed")
+        #expect(model.error == nil)
+        let request = RssFeedOpenRequest(
+            serverAddress: "https://abs.example/abs", slug: "my-feed",
+            metadataDetails: .init(preventIndexing: false, ownerName: "Ada", ownerEmail: "ada@example.com"))
+        #expect(service.requests.value == [.current(target), .open(target, request)])
+    }
+
+    @Test func emptySlugIsRequiredAndSendsNothing() async {
+        let service = FakeRssFeedService()
+        let model = RssFeedModel(target: target, service: service)
+        for slug in ["", " ?? "] {
+            model.slug = slug
+            #expect(await !model.open())
+            #expect(model.error == .slugRequired)
+        }
+        #expect(service.requests.value.isEmpty)
+    }
+
+    /// Legacy: "Slug had to be modified - Run again". The second open sends the cleaned slug.
+    @Test func aSlugThatNeedsCleaningIsReplacedAndMustBeConfirmed() async {
+        let service = FakeRssFeedService()
+        let model = RssFeedModel(target: target, service: service)
+        model.slug = "My Feed!"
+        #expect(await !model.open())
+        #expect(model.error == .slugChanged)
+        #expect(model.slug == "my-feed")
+        #expect(service.requests.value.isEmpty)
+        #expect(await model.open())
+        #expect(model.feed?.feedUrl == "/feed/my-feed")
+    }
+
+    @Test(arguments: ["ada", "ada@", "@example.com", "ada@example", "a b@example.com", "ada@example..com"])
+    func aMalformedOwnerEmailSendsNothing(email: String) async {
+        let service = FakeRssFeedService()
+        let model = RssFeedModel(target: target, service: service)
+        model.ownerEmail = email
+        #expect(await !model.open())
+        #expect(model.error == .invalidOwnerEmail)
+        #expect(service.requests.value.isEmpty)
+    }
+
+    @Test func theServersReasonIsKeptWhenOpenFails() async {
+        let model = RssFeedModel(
+            target: target,
+            service: FakeRssFeedService(open: { _ in throw APIError.http(status: 400, message: "Slug already in use") })
+        )
+        #expect(await !model.open())
+        #expect(model.error == .openFailed(message: "Slug already in use"))
+        #expect(model.feed == nil)
+        #expect(!model.isWorking)
+
+        let offline = RssFeedModel(target: target, service: FakeRssFeedService(open: { _ in throw TestError.offline }))
+        #expect(await !offline.open())
+        #expect(offline.error == .openFailed(message: nil))
+    }
+
+    @Test func closeSendsTheFeedIDAndClearsIt() async {
+        let service = FakeRssFeedService(current: { feed(slug: "open") })
+        let model = RssFeedModel(target: target, service: service)
+        await model.load()
+        #expect(await !model.open())
+        #expect(await model.close())
+        #expect(model.feed == nil)
+        #expect(service.requests.value == [.current(target), .close("feed-open")])
+    }
+
+    @Test func aFailedCloseKeepsTheFeed() async {
+        let model = RssFeedModel(
+            target: target,
+            service: FakeRssFeedService(current: { feed(slug: "open") }, close: { throw APIError.notFound }))
+        #expect(await !model.close())
+        await model.load()
+        #expect(await !model.close())
+        #expect(model.error == .closeFailed)
+        #expect(model.feed == feed(slug: "open"))
+    }
+
+    @Test func aSecondOpenWhileOneIsRunningSendsNothing() async throws {
+        let gate = GatedCalls<String, RssFeed>()
+        let service = FakeRssFeedService(open: { try await gate.call($0.slug) })
+        let model = RssFeedModel(target: target, service: service)
+        let first = Task { await model.open() }
+        var calls = gate.calls.makeAsyncIterator()
+        let call = try #require(await calls.next())
+        #expect(model.isWorking)
+        #expect(await !model.open())
+        #expect(await !model.close())
+        call.reply.resume(returning: feed(slug: call.request))
+        #expect(await first.value)
+        #expect(!model.isWorking)
+        #expect(service.requests.value.count == 1)
+    }
+
+    @Test(arguments: [("http://10.0.0.2:13378", true), ("https://abs.example", false), ("HTTP://abs.local", true)])
+    func plainHTTPServersAreFlagged(server: String, insecure: Bool) async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(server: server))
+        #expect(!model.isInsecureServer)
+        await model.load()
+        #expect(model.isInsecureServer == insecure)
+    }
+}
