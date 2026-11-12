@@ -49,7 +49,25 @@ final class FakeProgressServer: ProgressSyncService, EbookProgressService {
     var heldCount: Int { held.value.count }
 
     func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
-        try await fetchProgress(itemID: itemID, episodeID: episodeID)
+        // The reader's GET (the syncer uses `fetchProgress`): answers what the server held when it
+        // arrived, even when held.
+        let answer = try await fetchProgress(itemID: itemID, episodeID: episodeID)
+        if holdReaderFetches.value {
+            await withCheckedContinuation { continuation in heldFetches.value.append(continuation) }
+        }
+        return answer
+    }
+
+    /// Holds the reader's GETs until ``releaseReaderFetches()``.
+    let holdReaderFetches = Locked(false)
+    private let heldFetches = Locked<[CheckedContinuation<Void, Never>]>([])
+    var heldFetchCount: Int { heldFetches.value.count }
+
+    func releaseReaderFetches() {
+        holdReaderFetches.value = false
+        let waiting = heldFetches.value
+        heldFetches.value = []
+        for continuation in waiting { continuation.resume() }
     }
 
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
@@ -475,6 +493,32 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(await eventually { service.server.value?.ebookLocation == "4" })
     }
 
+    /// A drain finishing after a failed local save doesn't hide that failure behind the row's
+    /// clean sync state; the next successful save clears it.
+    @Test func aFinishingDrainKeepsALocalSaveError() async throws {
+        service.holdPatches.value = true
+        let model = makeModel()
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        turn(model, to: 3)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+        #expect(await eventually { service.heldCount == 1 })
+
+        turn(model, to: 4)
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await model.flush()
+        #expect(model.lastError != nil)
+
+        service.releasePatches()
+        await model.drainTail?.value
+        #expect(model.lastError != nil)
+        #expect(try await store.progress(for: key)?.ebookLocation == "3")
+
+        await model.flush()
+        #expect(model.lastError == nil)
+        #expect(try await store.progress(for: key)?.ebookLocation == "4")
+    }
+
     /// The syncer fetches before sending: a dirty audio group from older offline listening
     /// doesn't overwrite a newer server position, while one newer than the server is still sent
     /// (negative control).
@@ -595,6 +639,55 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(row.ebookLocation == "3")
         #expect(row.currentTime == 0)
         #expect(row.duration == 0)
+    }
+
+    /// A turn still waiting when resume fetches a newer page from another device is older than
+    /// it: it doesn't take the fetched page as its baseline, so it isn't PATCHed over it.
+    @Test func aWaitingTurnDoesNotOverwriteANewerResumedPage() async throws {
+        let model = makeModel()
+        model.record(.page(4), progress: 0.3)
+        service.server.value = serverProgress("8", progress: 0.7, at: t0.addingTimeInterval(10))
+        time.value = t0.addingTimeInterval(20)
+
+        _ = await model.resume()
+        await model.flush()
+
+        #expect(!service.writes.value.contains { $0.update.ebookLocation == "4" })
+        #expect(service.server.value?.ebookLocation == "8")
+        #expect(try await store.progress(for: key)?.ebookLocation == "8")
+    }
+
+    /// A resume GET answered before a PATCH is acknowledged, and so not merged, doesn't win a
+    /// tie with the acknowledged row: the reader opens at the acknowledged page.
+    @Test func aResumeFetchOvertakenByAnAcknowledgementLosesTheTie() async throws {
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "4", progress: 0.3)), for: key,
+            serverProgress: ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "2", lastUpdate: t0),
+            now: t0.addingTimeInterval(5))
+        service.server.value = serverProgress("2", at: t0.addingTimeInterval(10))
+        service.holdReaderFetches.value = true
+        let model = makeModel()
+        let resume = Task { await model.resume() }
+        #expect(await eventually { service.heldFetchCount == 1 })
+
+        let patch = try #require(try await store.beginSend(for: key, now: t0.addingTimeInterval(10)))
+        try await store.completeSend(patch, serverLastUpdate: t0.addingTimeInterval(10))
+        #expect(try await store.progress(for: key)?.ebookSavedAt == t0.addingTimeInterval(10))
+        service.releaseReaderFetches()
+
+        #expect(await resume.value == EbookResumePoint(location: .page(4), progress: 0.3, source: .local))
+    }
+
+    /// The first online resume keeps the server's position locally, so reopening offline
+    /// without a page turn opens there too.
+    @Test func anOnlineResumeIsKeptForAnOfflineReopen() async throws {
+        service.server.value = serverProgress("6", progress: 0.5, at: t0)
+        #expect(await makeModel().resume().location == .page(6))
+
+        service.fetchFails.value = true
+        #expect(
+            await makeModel().resume() == EbookResumePoint(location: .page(6), progress: 0.5, source: .local))
     }
 
     @Test func resumeDoesNotMoveAnAlreadyTurnedPage() async throws {

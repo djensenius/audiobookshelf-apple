@@ -10,11 +10,14 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// A reader's position and its sync (#101, ADR 0003 and ADR 0008), for one ebook of one account.
 ///
 /// - **Resume.** ``resume()`` fetches the server's progress and merges it into the local row
-///   like `ProgressSyncer`'s pre-drain fetch (`captureProgressFetch`, then
-///   `applyServerProgress(source: .fetch)`), so a newer location from another device replaces an
-///   older unsent one instead of being PATCHed over later. It then opens at the newer valid
-///   location (``EbookResumePoint/resolve(kind:local:server:)``). If the merge replaced a valid
-///   local location with one this reader can't open, the replaced location is still offered.
+///   like a playback start (`captureStartProgress`, then `applyStartProgress`, which creates a
+///   clean row when there is none, so an offline reopen finds the position). A newer location
+///   from another device thus replaces an older unsent one instead of being PATCHed over later.
+///   A turn still waiting is saved before the merge, so it is dated against the server's value
+///   rather than taken as newer. It then opens at the newer valid location
+///   (``EbookResumePoint/resolve(kind:local:server:)``); a fetched value the store didn't take
+///   can't win a tie with the row. If the merge replaced a valid local location with one this
+///   reader can't open, the replaced location is still offered.
 /// - **Local first, debounced.** ``record(_:progress:)`` takes every page turn at once (for
 ///   ``location``) but saves it only after ``debounce`` without another turn (ADR 0003: ebook
 ///   location changes are debounced before they reach the store). Each save goes to
@@ -51,7 +54,8 @@ public final class EbookProgressModel {
     /// Whether the store holds an ebook change the server hasn't acknowledged, as of the last
     /// resume, save or drain. A page turn still waiting for the debounce isn't counted.
     public private(set) var hasUnsyncedChanges = false
-    /// The last failed local save, or the row's last sync error after a drain.
+    /// The last failed local save until a save succeeds, else the row's last sync error after a
+    /// drain.
     public private(set) var lastError: String?
 
     /// The waiting debounce. Readable for tests.
@@ -62,6 +66,8 @@ public final class EbookProgressModel {
     @ObservationIgnored private(set) var drainTail: Task<Void, Never>?
     /// The waiting turn, dated when it was recorded so a delayed or retried save keeps its age.
     @ObservationIgnored private var unsaved: (location: EbookLocation, progress: Double?, at: Date)?
+    /// The last local save's failure; a drain finishing meanwhile doesn't hide it.
+    @ObservationIgnored private var saveError: String?
     /// Counts updates of ``hasUnsyncedChanges`` from saves and drains, so ``resume()`` doesn't
     /// replace a newer one with the row it read before.
     @ObservationIgnored private var syncStateRevision = 0
@@ -124,21 +130,38 @@ public final class EbookProgressModel {
     @discardableResult
     public func resume() async -> EbookResumePoint {
         guard kind.isSupported else { return .beginning }
-        let capture = await store.captureProgressFetch(for: key)
+        let capture: PlaybackStartProgressCapture?
+        do {
+            capture = try await store.captureStartProgress(for: key)
+        } catch {
+            capture = nil
+            logger.error("Reading local ebook progress failed: \(Self.caseName(error), privacy: .public)")
+        }
         // The merge below may replace a valid local location with one this reader can't open.
         let beforeMerge = await readLocal()
+        // A fetched value the store didn't take (the row changed since the capture) is no newer
+        // than the row: it can't win a tie with it.
+        var unmerged: MediaProgress?
         do {
             let fetched = try await service.mediaProgress(itemID: key.libraryItemId, episodeID: key.episodeId)
+            // A turn not yet saved would be judged against the fetched baseline as if it were newer:
+            // save it first. The store then sees the row changed since the capture and leaves the
+            // merge to the next drain, which dates both. A turn that can't be saved keeps the old
+            // seed and baseline.
+            let saved = await enqueueSave().value
             if fetched == nil {
                 // The server has no progress: the known one is stale, to open at or to seed from.
                 knownServerProgress = nil
                 serverSeed = nil
             } else if let matching = fetched.flatMap({ Self.matching($0, key) }) {
                 knownServerProgress = matching
-                serverSeed = Self.baseline(matching) ?? serverSeed
-                if let baseline = Self.baseline(matching) {
-                    // Skipped by the store for a row edited since the capture.
-                    try await store.applyServerProgress([key: baseline], capturedAt: capture.generation, source: .fetch)
+                unmerged = matching
+                if saved {
+                    serverSeed = Self.baseline(matching) ?? serverSeed
+                    // Creates a clean row when there is none, so an offline reopen finds it.
+                    if let capture, try await store.applyStartProgress(matching, captured: capture) {
+                        unmerged = nil
+                    }
                 }
             }
         } catch {
@@ -154,7 +177,13 @@ public final class EbookProgressModel {
             local?.ebookLocation != nil && EbookLocation(local?.ebookLocation, style: style) == nil
                 && EbookLocation(beforeMerge?.ebookLocation, style: style) != nil
             ? beforeMerge : local
-        let point = EbookResumePoint.resolve(kind: kind, local: candidate, server: knownServerProgress)
+        var server = knownServerProgress
+        if let unmerged, let savedAt = candidate?.ebookSavedAt,
+            Self.baseline(unmerged).map({ $0.lastUpdate <= savedAt }) ?? true
+        {
+            server = nil
+        }
+        let point = EbookResumePoint.resolve(kind: kind, local: candidate, server: server)
         if location == nil {
             location = point.location
             progress = point.progress
@@ -244,7 +273,7 @@ public final class EbookProgressModel {
             guard let self else { return }
             syncStateRevision += 1
             hasUnsyncedChanges = row?.ebookDirty ?? false
-            lastError = row?.lastSyncError
+            lastError = saveError ?? row?.lastSyncError
         }
         drainTail = task
         return task
@@ -261,10 +290,12 @@ public final class EbookProgressModel {
                 edit, for: key, serverProgress: serverSeed, localLibraryItemID: localLibraryItemID, now: pending.at)
             syncStateRevision += 1
             hasUnsyncedChanges = row.ebookDirty
+            saveError = nil
             return true
         } catch {
             if unsaved == nil { unsaved = pending }
-            lastError = Self.caseName(error)
+            saveError = Self.caseName(error)
+            lastError = saveError
             logger.error("Saving ebook progress failed: \(Self.caseName(error), privacy: .public)")
             return false
         }
