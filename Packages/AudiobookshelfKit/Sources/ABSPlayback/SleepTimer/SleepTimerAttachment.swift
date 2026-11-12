@@ -1,0 +1,128 @@
+import ABSCore
+import Foundation
+import Observation
+
+/// Connects a ``SleepTimer`` to a ``PlaybackCoordinator`` and keeps the timer's options in step with ``AppSettings``.
+///
+/// - Installs the coordinator's ``PlaybackCoordinator/willResume`` hook, which calls
+///   ``SleepTimer/playbackWillStart(at:)``. The hook has one owner: a later attachment on the same coordinator replaces
+///   this one's, and any other feature that needs it must chain through the attachment's hook.
+/// - Passes item changes, landed seeks and pauses to the timer.
+/// - Applies changes to the sleep timer settings as they happen.
+///
+/// Create one per coordinator and keep it while the coordinator can play. ``detach()``, or releasing the attachment,
+/// disconnects and cancels the timer.
+@MainActor
+public final class SleepTimerAttachment {
+    private typealias Hook = @MainActor () -> TimeInterval
+
+    public let timer: SleepTimer
+    private weak var coordinator: PlaybackCoordinator?
+    private let settings: AppSettings
+    private let now: @Sendable () -> Date
+    private var observerToken: PlaybackObserverToken?
+    private var hook: Hook?
+    private var isDetached = false
+
+    /// - Parameters:
+    ///   - feedback: Plays the chime and the reset feedback; `nil` plays nothing.
+    ///   - shakeDetector: Detects shake to reset; `nil` disables it. Defaults to ``platformShakeDetector()``.
+    ///   - now: The wall-clock time that decides whether playback starts inside the automatic timer's window.
+    ///   - tickInterval: How often the countdown, fade and chime update (``SleepTimer``'s default).
+    public init(
+        coordinator: PlaybackCoordinator,
+        settings: AppSettings,
+        feedback: (any SleepTimerFeedback)? = SystemSleepTimerFeedback(),
+        shakeDetector: (any ShakeDetecting)? = SleepTimerAttachment.platformShakeDetector(),
+        clock: any Clock<Duration> = ContinuousClock(),
+        calendar: Calendar = .autoupdatingCurrent,
+        now: @escaping @Sendable () -> Date = { .now },
+        tickInterval: Duration = .milliseconds(500)
+    ) {
+        self.coordinator = coordinator
+        self.settings = settings
+        self.now = now
+        timer = SleepTimer(
+            control: coordinator, feedback: feedback, shakeDetector: shakeDetector,
+            options: Self.options(from: settings), clock: clock, calendar: calendar, tickInterval: tickInterval)
+        let timer = timer
+        observerToken = coordinator.addObserver { [weak timer] event in
+            switch event {
+            case .itemChanged(let key): timer?.itemDidChange(key?.rawValue)
+            case .didSeek(let time): timer?.didSeek(to: time)
+            case .paused: timer?.playbackDidPause()
+            default: break
+            }
+        }
+        let hook: Hook = { [weak self] in
+            guard let self, !isDetached else { return 0 }
+            return self.timer.playbackWillStart(at: self.now())
+        }
+        coordinator.willResume = hook
+        self.hook = hook
+        trackSettings()
+    }
+
+    isolated deinit {
+        detach()
+    }
+
+    /// `ShakeDetector` on iOS; `nil` on macOS, which has no accelerometer.
+    public static func platformShakeDetector() -> (any ShakeDetecting)? {
+        #if os(iOS)
+            ShakeDetector()
+        #else
+            nil
+        #endif
+    }
+
+    /// Stops passing events to the timer, removes the `willResume` hook unless another owner has replaced it, and
+    /// cancels the timer. Idempotent.
+    public func detach() {
+        guard !isDetached else { return }
+        isDetached = true
+        if let coordinator {
+            if let observerToken { coordinator.removeObserver(observerToken) }
+            if let hook, let current = coordinator.willResume, Self.isSame(current, hook) {
+                coordinator.willResume = nil
+            }
+        }
+        observerToken = nil
+        hook = nil
+        timer.cancel(at: now())
+    }
+
+    private func trackSettings() {
+        guard !isDetached else { return }
+        let options = withObservationTracking {
+            Self.options(from: settings)
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in self?.trackSettings() }
+        }
+        if timer.options != options { timer.options = options }
+    }
+
+    /// Reads every sleep timer setting, so that observation tracks them, then converts the stored snapshot, which
+    /// `AppSettings` writes before the change is applied here.
+    private static func options(from settings: AppSettings) -> SleepTimerOptions {
+        _ = (
+            settings.sleepTimerLength, settings.disableShakeToResetSleepTimer, settings.shakeSensitivity,
+            settings.disableSleepTimerFadeOut, settings.disableSleepTimerResetFeedback,
+            settings.enableSleepTimerAlmostDoneChime, settings.autoSleepTimer, settings.autoSleepTimerStartTime,
+            settings.autoSleepTimerEndTime, settings.autoSleepTimerAutoRewind, settings.autoSleepTimerAutoRewindTime
+        )
+        return SleepTimerOptions(settings: AppSettings.snapshot(from: settings.defaults))
+    }
+
+    /// Closures have no identity, so this compares their function and context pointers. The context is the
+    /// attachment's own allocation, alive while `hook` holds it, so equal bytes mean the same closure. A layout
+    /// mismatch can only report "different", which leaves an inert hook installed.
+    private static func isSame(_ lhs: @escaping Hook, _ rhs: @escaping Hook) -> Bool {
+        // A struct keeps the closure's own representation; passing the closure itself as a generic value would
+        // wrap it in a new reabstraction thunk.
+        struct Stored { let hook: Hook }
+        return withUnsafeBytes(of: Stored(hook: lhs)) { lhs in
+            withUnsafeBytes(of: Stored(hook: rhs)) { rhs in lhs.elementsEqual(rhs) }
+        }
+    }
+}

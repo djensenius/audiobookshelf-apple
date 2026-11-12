@@ -4,49 +4,39 @@ import Testing
 
 @testable import ABSPlayback
 
-/// Real timer and coordinator, with deterministic time, engine seeks and Now Playing publication.
-/// The observer wiring stays test-only: installing it per account belongs to #185.
+/// Real timer and coordinator, connected by a ``SleepTimerAttachment``, with deterministic time, engine seeks and Now
+/// Playing publication.
 @MainActor
 private final class CoordinatorTimerHarness {
     let b: BridgeHarness
     let clock = ManualClock()
     let feedback = FakeFeedback()
-    let timer: SleepTimer
+    let settings: ScratchSettings
+    let attachment: SleepTimerAttachment
     private(set) var willResumeCount = 0
 
     var h: CoordinatorHarness { b.h }
     var coordinator: PlaybackCoordinator { h.coordinator }
     var engine: CoordinatorTestEngine { h.engine }
+    var timer: SleepTimer { attachment.timer }
 
     init(automatic: Bool = false) throws {
         b = try BridgeHarness()
         let date = try makeDate(2026, 1, 15, 23, 0)
-        let autoSleep: AutoSleepPolicy =
-            if automatic {
-                AutoSleepPolicy(
-                    start: try #require(AutoSleepPolicy.TimeOfDay("22:00")),
-                    end: try #require(AutoSleepPolicy.TimeOfDay("06:00")),
-                    mode: .duration(70), rewindOnExpiry: 300)
-            } else {
-                .disabled
-            }
-        timer = SleepTimer(
-            control: b.coordinator, feedback: feedback,
-            options: SleepTimerOptions(playsResetFeedback: true, autoSleep: autoSleep),
-            clock: clock, calendar: .gregorianUTC, tickInterval: .seconds(1))
-        coordinator.willResume = { [weak self] in
-            guard let self else { return 0 }
-            willResumeCount += 1
-            return timer.playbackWillStart(at: date)
+        settings = try ScratchSettings()
+        if automatic {
+            settings.value.autoSleepTimer = true
+            settings.value.sleepTimerLength = 70_000
+            settings.value.autoSleepTimerAutoRewind = true
+            settings.value.autoSleepTimerAutoRewindTime = 300_000
         }
-        let timer = timer
-        _ = coordinator.addObserver { [weak timer] event in
-            switch event {
-            case .itemChanged(let key): timer?.itemDidChange(key?.rawValue)
-            case .didSeek(let time): timer?.didSeek(to: time)
-            case .paused: timer?.playbackDidPause()
-            default: break
-            }
+        attachment = SleepTimerAttachment(
+            coordinator: b.coordinator, settings: settings.value, feedback: feedback, shakeDetector: nil,
+            clock: clock, calendar: .gregorianUTC, now: { date }, tickInterval: .seconds(1))
+        let willResume = coordinator.willResume
+        coordinator.willResume = { [weak self] in
+            self?.willResumeCount += 1
+            return willResume?() ?? 0
         }
     }
 
