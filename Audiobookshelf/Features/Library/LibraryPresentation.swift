@@ -22,21 +22,28 @@ enum LibraryPresentation {
 
     /// The bookshelf of the key's library and account, of type `mediaType`, with the account's saved preferences for
     /// it. A preference the user changes is saved for the account the model was built for, never another one.
-    /// `pinnedFilter` (a filter route's) is shown and queried instead of the saved filter, and never saved.
+    /// `pinnedFilter` (a filter route's) is shown and queried instead of the saved filter, and never saved. Only the
+    /// fields the user changes are saved, and a save by another live model for the library (another screen's sort or
+    /// view) is taken without rebuilding.
     @MainActor
     static func makeModel(
         key: BrowseModelKey, mediaType: MediaType, services: LibraryStoreServices, store: LibraryStore,
         pinnedFilter: LibraryViewPreferences.Filter? = nil
     ) -> LibraryItemsModel {
         let connection = key.connection
-        return LibraryItemsModel(
+        let model = LibraryItemsModel(
             client: services, libraryID: key.libraryID, mediaType: mediaType,
             stored: store.viewPreferences(libraryID: key.libraryID), pinnedFilter: pinnedFilter,
             connectionKey: connection,
-            persist: { [weak store] libraryID, preferences in
-                store?.saveViewPreferences(preferences, libraryID: libraryID, connectionKey: connection)
+            persist: { [weak store] libraryID, previous, preferences in
+                store?.saveViewPreferences(
+                    preferences, changedFrom: previous, libraryID: libraryID, connectionKey: connection)
             },
             map: { ItemSummary(item: $0) })
+        store.observeViewPreferences(connectionKey: connection, owner: model) { [weak model] libraryID, preferences in
+            model?.applySaved(preferences, libraryID: libraryID)
+        }
+        return model
     }
 
     /// The host the screen's task keeps: `host` when built for `key` and `mediaType` (keeping what it loaded), else a

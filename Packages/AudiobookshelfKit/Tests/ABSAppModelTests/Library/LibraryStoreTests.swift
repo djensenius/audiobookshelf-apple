@@ -383,8 +383,8 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
             let model = LibraryBrowseModel(
                 client: FakeLibraryService(), libraryID: "books", mediaType: .book,
                 stored: store.viewPreferences(libraryID: "books"), pinnedFilter: .init(group: .narrators, value: "N"),
-                persist: { [weak store] id, preferences in
-                    store?.saveViewPreferences(preferences, libraryID: id, connectionKey: key)
+                persist: { [weak store] id, previous, preferences in
+                    store?.saveViewPreferences(preferences, changedFrom: previous, libraryID: id, connectionKey: key)
                 },
                 map: { Slim(id: $0.id) })
             await model.update { $0.viewMode = .list }?.value
@@ -396,6 +396,68 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
             await model.update { $0.selectSort(.size) }?.value
             #expect(store.viewPreferences(libraryID: "books") == nil)
             #expect(settings.libraryViewPreferences(for: serverA, libraryID: "books") == expected)
+        }
+    }
+
+    @Test func browseModelsOfALibrarySaveOnlyTheirChangesAndTakeEachOthers() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([makeLibrary("books"), makeLibrary("other")]), connectionKey: serverA)
+            let key = try #require(store.connectionKey)
+            let genre = LibraryViewPreferences.Filter(group: .genres, value: "G")
+            let narrator = LibraryViewPreferences.Filter(group: .narrators, value: "N")
+            store.saveViewPreferences(LibraryViewPreferences(filter: genre), libraryID: "books", connectionKey: key)
+            @MainActor func model(_ libraryID: String, pinned: LibraryViewPreferences.Filter? = nil)
+                -> LibraryBrowseModel<Slim>
+            {
+                let model = LibraryBrowseModel(
+                    client: FakeLibraryService(), libraryID: libraryID, mediaType: .book,
+                    stored: store.viewPreferences(libraryID: libraryID), pinnedFilter: pinned,
+                    persist: { [weak store] id, previous, preferences in
+                        store?.saveViewPreferences(
+                            preferences, changedFrom: previous, libraryID: id, connectionKey: key)
+                    },
+                    map: { Slim(id: $0.id) })
+                store.observeViewPreferences(connectionKey: key, owner: model) { [weak model] id, preferences in
+                    model?.applySaved(preferences, libraryID: id)
+                }
+                return model
+            }
+            let tab = model("books")
+            let route = model("books", pinned: narrator)
+            let other = model("other")
+            let otherAccountNotices = Locked(0)
+            store.observeViewPreferences(connectionKey: serverB, owner: other) { _, _ in otherAccountNotices.value += 1
+            }
+
+            // The route's sort shows in the tab, which keeps its saved filter; the route never saves its pin.
+            await route.update { $0.selectSort(.title) }?.value
+            #expect(tab.preferences == LibraryViewPreferences(sort: .title, descending: false, filter: genre))
+            #expect(store.viewPreferences(libraryID: "books")?.filter == genre)
+            // The tab's view mode shows in the route, which keeps its pin and its sort.
+            await tab.update { $0.viewMode = .list }?.value
+            #expect(
+                route.preferences
+                    == LibraryViewPreferences(sort: .title, descending: false, filter: narrator, viewMode: .list))
+            let saved = LibraryViewPreferences(sort: .title, descending: false, filter: genre, viewMode: .list)
+            #expect(store.viewPreferences(libraryID: "books") == saved)
+            // Another library and another account are untouched.
+            #expect(other.preferences == LibraryViewPreferences())
+            #expect(store.viewPreferences(libraryID: "other") == nil)
+            #expect(otherAccountNotices.value == 0)
+
+            // Two writers from the same old value keep each other's change.
+            store.saveViewPreferences(
+                LibraryViewPreferences(sort: .size, descending: false, filter: genre, viewMode: .list),
+                changedFrom: saved, libraryID: "books", connectionKey: key)
+            store.saveViewPreferences(
+                LibraryViewPreferences(
+                    sort: .title, descending: false, filter: genre, viewMode: .list, collapseSeries: true),
+                changedFrom: saved, libraryID: "books", connectionKey: key)
+            let merged = LibraryViewPreferences(
+                sort: .size, descending: false, filter: genre, viewMode: .list, collapseSeries: true)
+            #expect(store.viewPreferences(libraryID: "books") == merged)
+            #expect(tab.preferences == merged)
         }
     }
 

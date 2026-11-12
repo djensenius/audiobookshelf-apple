@@ -128,6 +128,45 @@ private func routeModel(
         }
     }
 
+    /// The Library tab's model and a route's model for the same library and account, built as the screens build
+    /// them, take each other's sort and view changes and never wipe each other's fields; the route never saves its pin.
+    @Test func theTabAndARouteShareSortAndViewButNotTheFilter() async throws {
+        let client = RecordingLibraryClient()
+        try await withStore(client) { store in
+            let saved = LibraryViewPreferences.Filter(group: .genres, value: "Romance")
+            store.saveViewPreferences(LibraryViewPreferences(filter: saved), libraryID: "lib_a", connectionKey: account)
+            let tabKey = try #require(BrowseModelKey(store: store, libraryID: "lib_a"))
+            let tab = try #require(LibraryPresentation.updated(nil, for: tabKey, mediaType: .book, store: store)).model
+            let route = try routeModel(store, "lib_a", kind: .narrators, value: "Stephen Fry")
+            let pin = LibraryFilterPresentation.filter(kind: .narrators, value: "Stephen Fry")
+            await tab.load()?.value
+            await route.load()?.value
+
+            // A sort chosen on the route reloads the tab with it and the tab's saved filter.
+            await route.update { $0.selectSort(.title) }?.value
+            #expect(tab.preferences == LibraryViewPreferences(sort: .title, descending: false, filter: saved))
+            #expect(tab.list.query.query.sort == LibrarySortKey.title.rawValue)
+            #expect(tab.list.query.query.filter == LibraryFilter(group: "genres", value: "Romance"))
+
+            // The tab's view mode shows on the route, which keeps its pin and the sort it chose.
+            #expect(tab.update { $0.viewMode = .list } == nil)
+            #expect(
+                route.preferences
+                    == LibraryViewPreferences(sort: .title, descending: false, filter: pin, viewMode: .list))
+            #expect(
+                store.viewPreferences(libraryID: "lib_a")
+                    == LibraryViewPreferences(sort: .title, descending: false, filter: saved, viewMode: .list))
+
+            // The tab's filter is saved and taken by neither the route's query nor its pin.
+            await tab.update { $0.filter = nil }?.value
+            #expect(route.preferences.filter == pin)
+            #expect(store.viewPreferences(libraryID: "lib_a")?.filter == nil)
+
+            // Another library is untouched.
+            #expect(store.viewPreferences(libraryID: "lib_p") == nil)
+        }
+    }
+
     @Test func eachRouteHasItsOwnModelAndPlacement() async throws {
         try await withStore(RecordingLibraryClient()) { store in
             let fry = LibraryFilterPresentation.modelKey(
