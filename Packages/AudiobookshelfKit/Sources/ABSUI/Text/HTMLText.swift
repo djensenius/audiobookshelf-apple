@@ -422,19 +422,33 @@ private struct OutputBuilder {
 
     mutating func appendText(_ text: String) {
         var chunk = ""
+        var leadingSpace = false
         for character in text {
             if character.isHTMLWhitespace {
                 pendingSpace = true
                 continue
             }
-            if pendingSpace, !chunk.isEmpty || (!isEmpty && !atLineStart && pendingBreaks == 0) {
+            if pendingSpace, !chunk.isEmpty {
                 chunk.append(" ")
+            } else if pendingSpace, !isEmpty, !atLineStart, pendingBreaks == 0 {
+                leadingSpace = true
             }
             pendingSpace = false
             chunk.append(character)
         }
         guard !chunk.isEmpty else { return }
         flushBreaks()
+        if leadingSpace {
+            // A space carried over from earlier text only keeps the styles shared by the text on
+            // both sides of it, so a styled run starts and ends at a visible character.
+            let previous = runs.last?.style ?? Style()
+            let current = style
+            let shared = Style(
+                bold: previous.bold && current.bold,
+                italic: previous.italic && current.italic,
+                link: previous.link == current.link ? current.link : nil)
+            append(" ", style: shared)
+        }
         append(chunk, style: style)
         isEmpty = false
         atLineStart = false

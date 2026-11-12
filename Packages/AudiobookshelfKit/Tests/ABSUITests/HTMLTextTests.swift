@@ -176,6 +176,64 @@ import Testing
         #expect(value.range(of: "after").map { value[$0].runs.compactMap(\.link) } == [])
     }
 
+    // MARK: Styled run boundaries
+
+    /// The text of each run that is bold, italic or a link, in order.
+    private func styledRuns(_ html: String) -> [String] {
+        let value = HTMLText.attributedString(from: html)
+        return value.runs.filter { $0.inlinePresentationIntent != nil || $0.link != nil }
+            .map { String(value[$0.range].characters) }
+    }
+
+    @Test func styledRunsStartAtTheirFirstVisibleCharacter() {
+        #expect(styledRuns(#"Read <a href="https://example.com">here</a>"#) == ["here"])
+        #expect(styledRuns("Read <b>this</b> now") == ["this"])
+        #expect(styledRuns("Read <i>this</i> now") == ["this"])
+        #expect(styledRuns(#"Read <a href="https://example.com">here</a> now"#) == ["here"])
+        #expect(styledRuns(#"<p>Intro</p> <a href="https://example.com">link</a>"#) == ["link"])
+        #expect(styledRuns(#" <a href="https://example.com"> link</a>"#) == ["link"])
+    }
+
+    @Test func backToBackStyledRunsKeepOneSpace() {
+        let html = "<b>a</b> <i>b</i>"
+        #expect(plain(html) == "a b")
+        #expect(styledRuns(html) == ["a", "b"])
+        let distinct = #"<a href="https://one.example">one</a> <a href="https://two.example">two</a>"#
+        #expect(plain(distinct) == "one two")
+        #expect(styledRuns(distinct) == ["one", "two"])
+        // The same link on both sides keeps the space inside one link run.
+        let same = #"<a href="https://one.example">one</a> <a href="https://one.example">two</a>"#
+        #expect(plain(same) == "one two")
+        #expect(styledRuns(same) == ["one two"])
+        #expect(links(same) == [URL(string: "https://one.example")])
+        // Bold on both sides keeps the space bold.
+        #expect(styledRuns("<b>a</b> <b>b</b>") == ["a b"])
+    }
+
+    @Test func spaceInsideStyledRunStaysStyled() throws {
+        #expect(styledRuns("x <b>a b</b> y") == ["a b"])
+        #expect(try intent(of: "a b", in: "x <b>a b</b> y") == .stronglyEmphasized)
+        #expect(try intent(of: "a ", in: "<b>a <i>b</i></b>") == .stronglyEmphasized)
+        #expect(try intent(of: "b", in: "<b>a <i>b</i></b>") == [.stronglyEmphasized, .emphasized])
+    }
+
+    @Test func runBoundariesDoNotChangePlainText() {
+        let cases: [(html: String, plain: String)] = [
+            (#"Read <a href="https://example.com">here</a>"#, "Read here"),
+            ("<b>a</b> <i>b</i>", "a b"),
+            ("<b>a</b><i>b</i>", "ab"),
+            ("<b>a b</b>", "a b"),
+            ("<b>a <i>b</i></b> c", "a b c"),
+            (" <b> a </b> ", "a"),
+            (#"<p>x</p> <a href="https://example.com">y</a>"#, "x\n\ny"),
+            ("<ul><li> <b>x</b></li></ul>", "• x"),
+            ("a<br> <i>b</i>", "a\nb"),
+        ]
+        for (html, expected) in cases {
+            #expect(plain(html) == expected, "\(html)")
+        }
+    }
+
     @Test func attributeValueMayContainAngleBracket() {
         #expect(links(#"<a title="a>b" href="https://example.com">x</a>"#) == [URL(string: "https://example.com")])
         #expect(plain(#"<a title="a>b" href="https://example.com">x</a>"#) == "x")
