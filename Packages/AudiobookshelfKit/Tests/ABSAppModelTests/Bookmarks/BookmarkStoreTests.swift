@@ -26,10 +26,12 @@ struct BookmarkStoreTests {
         let refresh = Task { try await store.refresh() }
         let load = try #require(await loads.next())
         #expect(store.isLoading)
+        #expect(!store.hasLoaded)
         load.reply.resume(returning: [bookmark("a", 20), bookmark("a", 3)])
         try await refresh.value
 
         #expect(!store.isLoading)
+        #expect(store.hasLoaded)
         #expect(store.bookmarks(itemID: "a").map(\.time) == [3, 20])
     }
 
@@ -77,7 +79,7 @@ struct BookmarkStoreTests {
         #expect(store.bookmarks(itemID: "item") == [bookmark("item", 30, "New", createdAt: 1_000)])
 
         write.reply.resume(returning: bookmark("item", 30, "New", createdAt: 1_000))
-        try await create.value
+        _ = try await create.value
         #expect(store.bookmarks(itemID: "item") == [bookmark("item", 30, "New", createdAt: 1_000)])
     }
 
@@ -156,15 +158,15 @@ struct BookmarkStoreTests {
         for _ in 0..<10 { await Task.yield() }
         #expect(service.peakWrites == 1)
 
-        first.reply.resume(throwing: BookmarkTestError.rejected)
-        await #expect(throws: BookmarkTestError.rejected) { try await create.value }
-        // The rename starts from the state the failed create left behind.
+        first.reply.resume(returning: nil)
+        _ = try await create.value
+        // The rename starts from the state the create left behind.
         let second = try #require(await writes.next())
         #expect(second.request == .rename(itemID: "item", time: 30, title: "Second"))
         #expect(store.bookmarks(itemID: "item").map(\.title) == ["Second"])
         second.reply.resume(throwing: BookmarkTestError.rejected)
         await #expect(throws: BookmarkTestError.rejected) { try await rename.value }
-        #expect(store.bookmarks(itemID: "item").isEmpty)
+        #expect(store.bookmarks(itemID: "item") == [bookmark("item", 30, "First")])
         #expect(service.peakWrites == 1)
     }
 
@@ -182,8 +184,8 @@ struct BookmarkStoreTests {
         #expect(service.peakWrites == 2)
         firstWrite.reply.resume(returning: nil)
         secondWrite.reply.resume(returning: nil)
-        try await first.value
-        try await second.value
+        _ = try await first.value
+        _ = try await second.value
     }
 
     @Test func staleSeedDropped() async throws {
@@ -225,19 +227,19 @@ struct BookmarkStoreTests {
         #expect(store.bookmarks(itemID: "other") == [bookmark("other", 1)])
 
         write.reply.resume(returning: nil)
-        try await create.value
+        _ = try await create.value
         #expect(store.bookmarks(itemID: "item") == [bookmark("item", 5), bookmark("item", 30, "Mine")])
     }
 
-    @Test func writeAfterSessionEndThrowsCancellation() async throws {
+    @Test func writeAfterSessionEndIsUnavailable() async throws {
         let store = try await makeBookmarkStore(FakeBookmarkService())
         await store.sessionWillEnd(.signOut)
 
         #expect(!store.isAvailable)
-        await #expect(throws: CancellationError.self) {
+        await #expect(throws: BookmarkStoreError.unavailable) {
             try await store.create(itemID: "item", time: 30, title: "Late")
         }
-        await #expect(throws: CancellationError.self) { try await store.refresh() }
+        await #expect(throws: BookmarkStoreError.unavailable) { try await store.refresh() }
         #expect(store.bookmarks(itemID: "item").isEmpty)
     }
 
@@ -257,8 +259,9 @@ struct BookmarkStoreTests {
         write.reply.resume(returning: nil)
         await #expect(throws: CancellationError.self) { try await create.value }
         load.reply.resume(returning: [bookmark("item", 1)])
-        try await refresh.value
+        await #expect(throws: CancellationError.self) { try await refresh.value }
         #expect(store.bookmarks(itemID: "item").isEmpty)
+        #expect(!store.hasLoaded)
     }
 
     @Test func offlineContextIsUnavailable() async throws {
@@ -267,7 +270,7 @@ struct BookmarkStoreTests {
 
         await store.sessionDidStart(bookmarkContext(client: try makeClient(), isOffline: true))
         #expect(!store.isAvailable)
-        await #expect(throws: CancellationError.self) {
+        await #expect(throws: BookmarkStoreError.unavailable) {
             try await store.create(itemID: "item", time: 30, title: "Offline")
         }
 
