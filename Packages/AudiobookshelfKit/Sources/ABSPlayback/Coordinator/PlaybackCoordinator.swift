@@ -1442,7 +1442,9 @@ public final class PlaybackCoordinator {
 
     private static func streamError(_ error: any Error) -> PlaybackCoordinatorError {
         if let error = error as? StreamResolutionError { return .streamUnavailable(error) }
-        return .unexpected(String(describing: error))
+        // A token refresh that failed otherwise (offline, a 5xx) is a session failure, so recovery
+        // retries a transient one.
+        return sessionError(error)
     }
 
     private nonisolated static func serverProgress(

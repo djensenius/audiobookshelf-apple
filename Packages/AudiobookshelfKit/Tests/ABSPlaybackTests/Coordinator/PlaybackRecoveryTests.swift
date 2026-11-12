@@ -538,6 +538,69 @@ struct PlaybackRecoveryTests {
         #expect(h.recoverySleep.durations == [.seconds(1), .seconds(2)])
     }
 
+    @Test func aTransientStreamResolutionFailureDuringARebuildIsRetried() async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        // The rebuilt stream's token refresh fails offline.
+        service.state.withLock { $0.resolveError = APIError.network(.notConnectedToInternet) }
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 2 && h.recoverySleep.waitingCount == 1 }
+        #expect(coordinator.error == nil)
+
+        service.state.withLock { $0.resolveError = nil }
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 3 && engine.isPlaybackRequested }
+
+        #expect(engine.loads.last?.time == 600)
+        #expect(coordinator.error == nil)
+        #expect(h.recoverySleep.durations == [.seconds(1), .seconds(2)])
+    }
+
+    @Test func aSupersededRebuildReturningLateLeavesTheNewItemsAttempt() async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        // A's rebuild holds at its load.
+        let gateA = Gate()
+        engine.loadGates = [gateA]
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        let loads = engine.loads.count
+        h.recoverySleep.fireOldest()
+        await settle { engine.loads.count == loads + 1 }
+
+        // B replaces it, fails, and its own rebuild holds at its load.
+        await coordinator.play(itemID: "B", startTime: 100)
+        #expect(coordinator.isPlaying)
+        let gateB = Gate()
+        engine.loadGates = [gateB]
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { engine.loads.count == loads + 3 }
+
+        // A's rebuild returns superseded; then B's rebuilt item fails before its attempt returns.
+        gateA.open()
+        for _ in 0..<200 { await Task.yield() }
+        var armed = true
+        _ = coordinator.addObserver { event in
+            guard case .loaded = event, armed else { return }
+            armed = false
+            engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        }
+        gateB.open()
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        // The same episode's second rebuild, not a fresh episode's first.
+        #expect(h.recoverySleep.durations == [.seconds(1), .seconds(1), .seconds(2)])
+        h.recoverySleep.fireOldest()
+        await settle { coordinator.phase == .loaded && engine.isPlaybackRequested }
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(engine.loads.last?.time == 100)
+        #expect(coordinator.error == nil)
+    }
+
     @Test(arguments: [false, true])
     func aPlayOfTheSameItemBetweenFailedRebuildsKeepsTheEpisode(startsElsewhere: Bool) async {
         let gate = await holdFirstRebuild(failing: .load)

@@ -261,9 +261,11 @@ final class PlaybackRecovery {
         await wait(delay)
         guard isCurrent(run, host) else { return false }
         self.episode?.failedDuringAttempt = false
-        attemptGeneration = host.generation() + 1
+        let attempt = host.generation() + 1
+        attemptGeneration = attempt
         let outcome = await host.rebuild(host.target(), self.episode?.wantsPlay ?? false)
-        attemptGeneration = nil
+        // A newer run's rebuild may have replaced the marker meanwhile.
+        if attemptGeneration == attempt { attemptGeneration = nil }
         guard run == token else { return false }
         switch outcome {
         case .superseded:
