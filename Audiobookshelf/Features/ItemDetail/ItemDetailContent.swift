@@ -4,18 +4,26 @@ import ABSUI
 import SwiftUI
 
 /// The loaded book: cover, title, actions, progress, metadata and description (legacy
-/// `index.vue`). Compact width, or any width too narrow for two columns (``ItemDetailLayout``),
-/// stacks everything; otherwise the cover, actions and progress sit beside the title, metadata
-/// and description.
+/// `index.vue`), then the chapters, tracks and ebook files full width. Compact width, or any
+/// width too narrow for two columns (``ItemDetailLayout``), stacks everything; otherwise the
+/// cover, actions and progress sit beside the title, metadata and description.
+///
+/// Play and chapters start playback through the environment's `playItem`, which is `nil` while
+/// signed out (and until the shell provides it), so both are disabled then, while a start is in
+/// progress, and while the item is gone from the server. A failed start shows an alert through
+/// `playFailure`.
 struct ItemDetailContent: View {
     let model: ItemDetailModel
     let details: ItemDetailModel.Details
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.playItem) private var playItem
     @State private var showsFullscreenCover = false
     /// Here rather than in ``ItemDetailActions``, which compact and regular width build in
     /// different places, so a size class change mid-start keeps it.
     @State private var isStarting = false
     @State private var playFailure: ItemDetailPlayFailure?
+    /// The chapter whose confirmation is showing.
+    @State private var pendingChapter: PendingChapter?
     @State private var goneState = ItemDetailGoneState()
     /// The scroll view's width, which doesn't depend on the layout chosen from it.
     @State private var width: CGFloat?
@@ -24,8 +32,12 @@ struct ItemDetailContent: View {
         let snapshot = ItemDetailGoneState.Snapshot(model: model)
         let isGone = goneState.isGone(snapshot)
         let refreshFailure = ItemDetailRefreshFailure(model: model, isGone: isGone)
-        let actions = ItemDetailActions(
-            model: model, isGone: isGone, isStarting: $isStarting, playFailure: $playFailure)
+        let canPlay = playItem != nil && !isStarting && !isGone
+        let actions = ItemDetailActions(model: model, canPlay: canPlay) {
+            // `0` for Play again, so a finished book starts over; `nil` resumes from the server's
+            // position.
+            play(startTime: model.playStartTime)
+        }
         ScrollView {
             VStack(alignment: .leading, spacing: ABSSpacing.large) {
                 if let refreshFailure {
@@ -57,6 +69,13 @@ struct ItemDetailContent: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
+                ItemDetailTables(
+                    model: model, bookTitle: details.title, canPlayChapters: model.canPlayChapters && canPlay
+                ) { chapter, presentation in
+                    pendingChapter = PendingChapter(
+                        chapter: chapter, startTime: model.startTime(for: chapter),
+                        message: presentation.confirmMessage)
+                }
             }
             .padding(ItemDetailLayout.padding)
             .frame(maxWidth: 1_000)
@@ -70,6 +89,11 @@ struct ItemDetailContent: View {
         .refreshable { await model.load() }
         .absBackground()
         .onChange(of: snapshot, initial: true) { _, snapshot in goneState.update(snapshot) }
+        // Drop a confirmation the item no longer matches.
+        .onChange(of: model.chapters) { pendingChapter = nil }
+        .onChange(of: isGone) { _, isGone in
+            if isGone { pendingChapter = nil }
+        }
         .alert(
             Text(verbatim: L10n.string("MessagePlaybackStartFailed")),
             isPresented: Binding {
@@ -82,6 +106,31 @@ struct ItemDetailContent: View {
         } message: { failure in
             Text(verbatim: failure.message)
         }
+        // A centred alert, as legacy `Dialog.confirm`; a confirmation dialog would be a popover
+        // anchored to the whole scroll view on iPad.
+        .alert(
+            Text(verbatim: pendingChapter?.message ?? ""),
+            isPresented: Binding {
+                pendingChapter != nil
+            } set: {
+                if !$0 { pendingChapter = nil }
+            },
+            presenting: pendingChapter
+        ) { pending in
+            Button {
+                // The item may have changed while the alert was up; play only the confirmed time.
+                guard canPlay, let startTime = model.chapterToPlay(confirming: pending.chapter),
+                    startTime == pending.startTime
+                else { return }
+                play(startTime: startTime)
+            } label: {
+                Text(verbatim: L10n.string("ButtonPlay"))
+            }
+            Button(role: .cancel) {
+            } label: {
+                Text(verbatim: L10n.string("ButtonCancel"))
+            }
+        }
         #if os(iOS)
             .fullScreenCover(isPresented: $showsFullscreenCover) { fullscreenCover }
         #else
@@ -89,6 +138,25 @@ struct ItemDetailContent: View {
                 fullscreenCover.frame(minWidth: 480, minHeight: 640)
             }
         #endif
+    }
+
+    /// Starts playback from `startTime`, or from the server's position when it's `nil`, and
+    /// shows an alert if that fails.
+    private func play(startTime: TimeInterval?) {
+        guard let playItem, !isStarting else { return }
+        let itemID = model.itemID
+        isStarting = true
+        Task {
+            defer { isStarting = false }
+            do {
+                try await playItem(itemID: itemID, startTime: startTime)
+            } catch {
+                guard let failure = ItemDetailPlayFailure(error: error) else { return }
+                Log.playback.error(
+                    "Couldn't play \(itemID, privacy: .private(mask: .hash)): \(failure.message, privacy: .private)")
+                playFailure = failure
+            }
+        }
     }
 
     private func cover(maxWidth: CGFloat) -> some View {
@@ -183,26 +251,30 @@ private struct ItemDetailHeader: View {
     }
 }
 
+/// A chapter waiting for the user to confirm playing it.
+private struct PendingChapter {
+    let chapter: ItemDetailModel.ChapterRow
+    /// ``ItemDetailModel/startTime(for:)`` when asked, which `message` shows.
+    let startTime: TimeInterval
+    /// The confirmation's question.
+    let message: String
+}
+
 /// Play (or Resume, Play again, Missing), Read and Download.
 ///
-/// Play goes through the environment's `playItem`, which is `nil` while signed out (and until
-/// the shell provides it), so the button is disabled then, and while the item is gone from the
-/// server. Read stays disabled until the ebook readers exist, and Download until downloads
-/// exist. A failed start shows an alert through `playFailure`.
+/// Play calls `onPlay`, which ``ItemDetailContent`` provides. Read stays disabled until the ebook
+/// readers exist, and Download until downloads exist.
 private struct ItemDetailActions: View {
     let model: ItemDetailModel
-    /// A reload answered 404 and none has succeeded since (``ItemDetailGoneState``).
-    let isGone: Bool
-    @Binding var isStarting: Bool
-    @Binding var playFailure: ItemDetailPlayFailure?
-    @Environment(\.playItem) private var playItem
+    /// There's a `playItem` action, no start in progress, and the item isn't gone from the server
+    /// (``ItemDetailGoneState``).
+    let canPlay: Bool
+    let onPlay: () -> Void
 
     var body: some View {
-        let play = ItemDetailPlayPresentation(
-            button: model.playButton, isMissing: model.isMissing,
-            canPlay: playItem != nil && !isStarting && !isGone)
+        let play = ItemDetailPlayPresentation(button: model.playButton, isMissing: model.isMissing, canPlay: canPlay)
         HStack(spacing: ABSSpacing.small) {
-            Button(action: start) {
+            Button(action: onPlay) {
                 Label {
                     Text(verbatim: L10n.string(play.titleKey))
                 } icon: {
@@ -241,26 +313,6 @@ private struct ItemDetailActions: View {
             }
         }
         .controlSize(.large)
-    }
-
-    private func start() {
-        guard let playItem else { return }
-        let itemID = model.itemID
-        // `0` for Play again, so a finished book starts over; `nil` resumes from the server's
-        // position.
-        let startTime = model.playStartTime
-        isStarting = true
-        Task {
-            defer { isStarting = false }
-            do {
-                try await playItem(itemID: itemID, startTime: startTime)
-            } catch {
-                guard let failure = ItemDetailPlayFailure(error: error) else { return }
-                Log.playback.error(
-                    "Couldn't play \(itemID, privacy: .private(mask: .hash)): \(failure.message, privacy: .private)")
-                playFailure = failure
-            }
-        }
     }
 }
 

@@ -3,9 +3,8 @@ import ABSUI
 import Observation
 import SwiftUI
 
-/// What ``PlayerSlot`` reads about playback. The player UI (#56) makes the shared player view
-/// model conform and `AppEnvironment` passes it to the shell, so the shell doesn't depend on
-/// playback until then; ``PlaceholderPlayerState`` stands in.
+/// What ``PlayerSlot`` reads about playback. ``PlayerViewModel`` conforms; until #183 builds it
+/// in `AppEnvironment` and passes it to the shell, ``PlaceholderPlayerState`` stands in.
 @MainActor
 protocol PlayerSlotState: AnyObject, Observable {
     /// Whether a playback session exists. The mini player shows only then.
@@ -14,7 +13,9 @@ protocol PlayerSlotState: AnyObject, Observable {
     var title: String { get }
 }
 
-/// A player state with nothing playing, until #56 provides the real one.
+extension PlayerViewModel: PlayerSlotState {}
+
+/// A player state with nothing playing, until #183 passes the real one.
 @MainActor @Observable
 final class PlaceholderPlayerState: PlayerSlotState {
     var hasSession: Bool
@@ -32,22 +33,49 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// - iOS: the mini player is the tab view's bottom accessory, which sits above the tab bar and
 ///   follows the sidebar layout too; the full player is a full-screen cover.
 /// - macOS: the mini player is a bar under the content. The full player is the Now Playing
-///   window, which #56 opens when `Router/isFullPlayerPresented` turns on.
+///   window, which #183 opens when `Router/isFullPlayerPresented` turns on.
 /// - Both: the queue is an inspector, which compact width shows as a sheet.
 ///
-/// The content of all three is a placeholder until #56.
+/// The mini and full players are ``MiniPlayerView`` and ``NowPlayingView`` when `player` is a
+/// ``PlayerViewModel``, else placeholders; #183 replaces the downcast. The queue inspector is a
+/// placeholder until #60.
+///
+/// Without a session the full player closes (on macOS, the flag resets for #183's window), also
+/// when it is opened with none. A queue auto-advance that passes through `.idle` would close it
+/// too (#60).
 struct PlayerSlot: ViewModifier {
     @Bindable var router: Router
     let player: any PlayerSlotState
 
     func body(content: Content) -> some View {
+        hosting(content)
+            .onChange(
+                of: Self.presentsWithoutSession(
+                    isPresented: router.isFullPlayerPresented, hasSession: player.hasSession),
+                initial: true
+            ) { _, stale in
+                if stale { router.isFullPlayerPresented = false }
+            }
+    }
+
+    /// Whether the full player is presented with nothing to play, so it must close: the session
+    /// ended while it was open, or it was opened without one.
+    nonisolated static func presentsWithoutSession(isPresented: Bool, hasSession: Bool) -> Bool {
+        isPresented && !hasSession
+    }
+
+    @ViewBuilder private func hosting(_ content: Content) -> some View {
         #if os(iOS)
             content
                 .tabViewBottomAccessory(isEnabled: player.hasSession) {
-                    MiniPlayerPlaceholder(router: router, player: player)
+                    miniPlayer
                 }
                 .fullScreenCover(isPresented: $router.isFullPlayerPresented) {
-                    FullPlayerPlaceholder(player: player)
+                    if let model = player as? PlayerViewModel {
+                        NowPlayingView(model: model)
+                    } else {
+                        FullPlayerPlaceholder(player: player)
+                    }
                 }
                 .inspector(isPresented: $router.isQueueInspectorPresented) {
                     QueueInspectorPlaceholder()
@@ -56,7 +84,7 @@ struct PlayerSlot: ViewModifier {
             content
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     if player.hasSession {
-                        MiniPlayerPlaceholder(router: router, player: player)
+                        miniPlayer
                             .background(.bar)
                     }
                 }
@@ -64,6 +92,14 @@ struct PlayerSlot: ViewModifier {
                     QueueInspectorPlaceholder()
                 }
         #endif
+    }
+
+    @ViewBuilder private var miniPlayer: some View {
+        if let model = player as? PlayerViewModel {
+            MiniPlayerView(model: model, router: router)
+        } else {
+            MiniPlayerPlaceholder(router: router, player: player)
+        }
     }
 }
 
