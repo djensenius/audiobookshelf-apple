@@ -2,6 +2,7 @@ import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSData
+import ABSDownloads
 import Foundation
 import Observation
 
@@ -27,18 +28,27 @@ final class AppEnvironment {
     /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
     let deviceIdentifiers: any DeviceIdentifying
     let player: any PlayerSlotState
+    /// The download stack, or `nil` when the store couldn't be opened. Its lifecycle is
+    /// launched here, so a launch without a window (CarPlay, a background wake) has an engine.
+    let downloads: AppDownloads?
 
     /// - Parameters:
     ///   - settings: The settings every scene shares.
     ///   - storeLocation: Where the store lives; tests and previews pass `.inMemory`.
+    ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:)``);
+    ///     tests pass a temporary directory.
+    ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
     init(
         settings: AppSettings = AppSettings(), storeLocation: DataStack.Location = .appGroup,
         keychain: any KeychainStoring = KeychainStore(),
-        sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() }
+        sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
+        downloadsRoot: URL = .applicationSupportDirectory,
+        makeDownloadSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession()
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
         let lifecycle: SessionLifecycle
+        var downloads: AppDownloads?
         do {
             let stack = try DataStack(location: storeLocation)
             let manager = AccountManager(
@@ -46,9 +56,15 @@ final class AppEnvironment {
                 validator: ServerValidator(sessionConfiguration: sessionConfiguration),
                 openID: OIDCLoginService(sessionConfiguration: sessionConfiguration),
                 sessionConfiguration: sessionConfiguration)
+            let built = AppDownloads.make(
+                dataStack: stack, accounts: manager, settings: settings, root: downloadsRoot,
+                makeSession: makeDownloadSession)
             dataStack = stack
             accounts = manager
-            lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))
+            lifecycle = SessionLifecycle(
+                source: AccountSessionAdapter(accounts: manager) { await built.lifecycle.connectionRemoved($0) })
+            lifecycle.register(built.lifecycle, stage: .connect)
+            downloads = built
         } catch {
             let reason = Log.redact(String(describing: error))
             Log.data.fault("The on-device store couldn't be opened: \(reason, privacy: .public)")
@@ -63,6 +79,8 @@ final class AppEnvironment {
         self.deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         // Replaced by the playback coordinator's view model with the player UI (#56).
         self.player = PlaceholderPlayerState()
+        self.downloads = downloads
+        downloads?.lifecycle.launch()
     }
 }
 
