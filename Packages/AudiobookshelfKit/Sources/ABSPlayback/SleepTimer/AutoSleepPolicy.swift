@@ -19,15 +19,11 @@ public struct AutoSleepPolicy: Sendable, Hashable {
             self.init(validHour: hour, minute: minute)
         }
 
-        /// Parses 24-hour `HH:mm`, the format of the `autoSleepTimerStartTime` and `autoSleepTimerEndTime` settings.
-        // TODO: Parse with `AppSettings.minutesSinceMidnight` (#142) after merging main.
+        /// Parses 24-hour `HH:mm`, the format of the `autoSleepTimerStartTime` and `autoSleepTimerEndTime` settings,
+        /// as strictly as ``AppSettings/minutesSinceMidnight(_:)``.
         public init?(_ text: String) {
-            let parts = text.split(separator: ":", omittingEmptySubsequences: false)
-            guard parts.count == 2,
-                parts.allSatisfy({ $0.utf8.count == 2 && $0.utf8.allSatisfy { (0x30...0x39).contains($0) } }),
-                let hour = Int(parts[0]), let minute = Int(parts[1])
-            else { return nil }
-            self.init(hour: hour, minute: minute)
+            guard let minutes = AppSettings.minutesSinceMidnight(text) else { return nil }
+            self.init(validHour: minutes / 60, minute: minutes % 60)
         }
 
         fileprivate init(validHour hour: Int, minute: Int) {
