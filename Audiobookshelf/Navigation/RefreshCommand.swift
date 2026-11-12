@@ -12,11 +12,16 @@ enum RefreshCommandPlacement: Hashable {
     case pushed(Route)
 
     /// Whether the screen is visible and tops the selected tab's stack; without a router (previews), if visible.
+    ///
+    /// - Parameter owner: The tab whose stack shows the screen (``EnvironmentValues/navigationTab``); it must be
+    ///   the selected one, so the same route or section open in a hidden tab's stack never counts. `nil` outside a
+    ///   tab's stack.
     @MainActor
-    func isFrontmost(in router: Router?, isVisible: Bool) -> Bool {
+    func isFrontmost(in router: Router?, owner: AppTab?, isVisible: Bool) -> Bool {
         guard isVisible else { return false }
         guard let router else { return true }
         let selected = router.selectedTab
+        if let owner, owner != selected { return false }
         let path = router[path: selected]
         switch self {
         case .root(let tab):
@@ -35,6 +40,11 @@ struct RefreshAction {
     var perform: @MainActor () -> Void
 }
 
+extension EnvironmentValues {
+    /// The tab whose `NavigationStack` shows the view (set by `MainTabView`); `nil` outside a tab's stack.
+    @Entry var navigationTab: AppTab?
+}
+
 extension FocusedValues {
     /// The focused scene's frontmost refresh (``RefreshCommandRegistry/frontmost(in:)``), if any.
     @Entry var refreshAction: RefreshAction?
@@ -48,6 +58,8 @@ extension FocusedValues {
 final class RefreshCommandRegistry {
     struct Entry {
         var placement: RefreshCommandPlacement
+        /// The tab whose stack shows the screen (``EnvironmentValues/navigationTab``).
+        var owner: AppTab?
         var isDisabled: Bool
         var perform: @MainActor () -> Void
     }
@@ -70,7 +82,7 @@ final class RefreshCommandRegistry {
 
     /// The refresh of the last registered screen that is frontmost in `router`, or `nil` when none is.
     func frontmost(in router: Router?) -> RefreshAction? {
-        entries.last { $0.entry.placement.isFrontmost(in: router, isVisible: true) }
+        entries.last { $0.entry.placement.isFrontmost(in: router, owner: $0.entry.owner, isVisible: true) }
             .map { RefreshAction(isDisabled: $0.entry.isDisabled, perform: $0.entry.perform) }
     }
 }
@@ -125,6 +137,7 @@ private struct RefreshCommand: ViewModifier {
     let isDisabled: Bool
     let refresh: @MainActor () -> Void
     @Environment(Router.self) private var router: Router?
+    @Environment(\.navigationTab) private var owner
     @Environment(RefreshCommandRegistry.self) private var registry: RefreshCommandRegistry?
     @State private var id = UUID()
     /// The latest `refresh`, so the registered action never runs an older screen's closure.
@@ -146,9 +159,10 @@ private struct RefreshCommand: ViewModifier {
             }
             .onChange(of: placement) { if isVisible { register() } }
             .onChange(of: isDisabled) { if isVisible { register() } }
+            .onChange(of: owner) { if isVisible { register() } }
             #if os(macOS)
                 .toolbar {
-                    if placement.isFrontmost(in: router, isVisible: isVisible) {
+                    if placement.isFrontmost(in: router, owner: owner, isVisible: isVisible) {
                         ToolbarItem(placement: .primaryAction) {
                             Button(action: refresh) {
                                 Label {
@@ -166,7 +180,8 @@ private struct RefreshCommand: ViewModifier {
 
     private func register() {
         let latest = latest
-        registry?.register(id, .init(placement: placement, isDisabled: isDisabled, perform: { latest.perform() }))
+        registry?.register(
+            id, .init(placement: placement, owner: owner, isDisabled: isDisabled, perform: { latest.perform() }))
     }
 }
 
