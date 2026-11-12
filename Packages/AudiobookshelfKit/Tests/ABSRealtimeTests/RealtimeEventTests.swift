@@ -61,14 +61,44 @@ enum RealtimeFixtures {
         #expect(update.progress.lastUpdate == 1_700_000_400_000)
     }
 
-    @Test func decodesPlaylistAdded() throws {
-        guard case .playlistAdded(let playlist) = try decode(#"["playlist_added",\#(RealtimeFixtures.playlist)]"#)
+    @Test func decodesPlaylistChanges() throws {
+        guard
+            case .playlistChanged(.added(let playlist, let libraryID), let userID) = try decode(
+                #"["playlist_added",\#(RealtimeFixtures.playlist)]"#)
         else {
-            Issue.record("Expected playlistAdded")
+            Issue.record("Expected a playlist addition")
             return
         }
         #expect(playlist.id == "pl-1")
         #expect(playlist.items.map(\.libraryItemId) == ["li-1"])
+        #expect(libraryID == "lib-1")
+        #expect(userID == "usr-1")
+        #expect(
+            try decode(#"["playlist_updated",\#(RealtimeFixtures.playlist)]"#)
+                == .playlistChanged(.updated(playlist, libraryID: "lib-1"), userID: "usr-1"))
+        // Removals send the whole expanded playlist.
+        #expect(
+            try decode(#"["playlist_removed",\#(RealtimeFixtures.playlist)]"#)
+                == .playlistChanged(.removed(id: "pl-1", libraryID: "lib-1"), userID: "usr-1"))
+    }
+
+    @Test func decodesCollectionChanges() throws {
+        // `toOldJSONExpanded()`: the collection with its books.
+        let collection = #"""
+            {"id":"col-1","libraryId":"lib-1","userId":"usr-1","name":"Classics","description":null,"cover":null,
+            "coverFullPath":null,"books":[],"lastUpdate":1,"createdAt":1}
+            """#
+        let expected = LibraryCollection(
+            id: "col-1", libraryId: "lib-1", userId: "usr-1", name: "Classics", books: [], lastUpdate: 1, createdAt: 1)
+        #expect(
+            try decode(#"["collection_added",\#(collection)]"#)
+                == .collectionChanged(.added(expected, libraryID: "lib-1")))
+        #expect(
+            try decode(#"["collection_updated",\#(collection)]"#)
+                == .collectionChanged(.updated(expected, libraryID: "lib-1")))
+        #expect(
+            try decode(#"["collection_removed",\#(collection)]"#)
+                == .collectionChanged(.removed(id: "col-1", libraryID: "lib-1")))
     }
 
     @Test func ignoresUnknownEvents() throws {
@@ -119,5 +149,16 @@ enum RealtimeFixtures {
         #expect(throws: (any Error).self) { try decode(#"["author_removed",{"libraryId":"lib-1"}]"#) }
         #expect(throws: (any Error).self) { try decode(#"["author_removed",{"id":"au-1"}]"#) }
         #expect(throws: (any Error).self) { try decode(#"["author_removed","au-1"]"#) }
+        // Group changes must name their library, and playlist changes their owner.
+        #expect(throws: (any Error).self) { try decode(#"["collection_added",{"id":"col-1","name":"C"}]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["collection_updated",{"id":"col-1","libraryId":"lib-1"}]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["collection_removed",{"id":"col-1"}]"#) }
+        let ownerless = RealtimeFixtures.playlist.replacingOccurrences(of: #""userId":"usr-1","#, with: "")
+        #expect(throws: (any Error).self) { try decode(#"["playlist_added",\#(ownerless)]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["playlist_updated",\#(ownerless)]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["playlist_removed",\#(ownerless)]"#) }
+        #expect(throws: (any Error).self) {
+            try decode(#"["playlist_removed",{"id":"pl-1","userId":"usr-1"}]"#)
+        }
     }
 }
