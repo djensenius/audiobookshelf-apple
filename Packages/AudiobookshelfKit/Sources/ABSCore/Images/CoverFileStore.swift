@@ -135,6 +135,11 @@ public actor CoverFileStore {
     private var touchedDuringListing: Set<String> = []
     /// Bumped by ``removeServer(_:)``, so fetches started before it can't write.
     private var serverGenerations: [UUID: Int] = [:]
+    /// Bumped by ``removeServer(_:)`` once it has moved the server's folder aside. Until then
+    /// (through the lease wait) the folder's files stay counted, so a pass drops a server's files
+    /// only if its folder moved while the pass ran, and ``retire(_:)`` subtracts a file exactly
+    /// once whenever it runs.
+    private var folderMoves: [UUID: Int] = [:]
     /// The write each path holds, by lease key; absent (`0`) for files from an earlier launch.
     private var versions: [String: Int] = [:]
     private var nextVersion = 1
@@ -142,8 +147,8 @@ public actor CoverFileStore {
     private(set) var evictionCount = 0
     /// The number of folder listings, for tests.
     private(set) var listingCount = 0
-    /// The server generations the last pass to set the size started and finished with: it
-    /// dropped the files of each server whose generation differs between the two.
+    /// The ``folderMoves`` the last pass to set the size started and finished with: it dropped
+    /// the files of each server whose count differs between the two.
     private var lastPass: (listed: [UUID: Int], finished: [UUID: Int])?
     /// Folders moved aside by ``removeServer(_:)`` and still being deleted, which a pass leaves
     /// alone; any other is left over from a removal the app was terminated in.
@@ -309,17 +314,19 @@ public actor CoverFileStore {
         // after the move would forget them while the file is still in the moved folder.
         let retired = leases.pendingDeletions(under: prefix)
         let isMoved = rename(folder.path, removing.path) == 0
-        // A pass listing the folder meanwhile drops these files itself, by their generation.
+        // Refuses writes whose generation was read during the lease wait.
         serverGenerations[serverID, default: 0] += 1
-        let moved = serverGenerations[serverID, default: 0]
+        // A pass listing the folder meanwhile drops these files itself, by their move count.
+        folderMoves[serverID, default: 0] += 1
+        let moved = folderMoves[serverID, default: 0]
         versions = versions.filter { !$0.key.hasPrefix(prefix) }
         let target = isMoved ? removing : folder
         removingFolders.insert(target.lastPathComponent)
         let removed = await Self.deleteFolder(
             target, as: serverID, root: root, excluding: retired, hook: deletionHook)
         removingFolders.remove(target.lastPathComponent)
-        // Only if the size still counts these files: the last pass listed the folder before the
-        // move (even during the lease wait) and didn't drop the server for a generation change.
+        // Only if the size still counts these files: the last pass finished before the move
+        // (even during the lease wait) and didn't drop the server for a move while it listed.
         if let lastPass, lastPass.listed[serverID, default: 0] == lastPass.finished[serverID, default: 0],
             lastPass.finished[serverID, default: 0] < moved
         {
@@ -368,7 +375,7 @@ public actor CoverFileStore {
     /// Resyncs the size with the folder, which the OS may have purged since the last pass, and
     /// evicts down to 90 % of the cap if it is over. Only ``fullPass()`` runs it, one at a time.
     private func runPass() async {
-        let generations = serverGenerations
+        let moves = folderMoves
         isListing = true
         listingCount += 1
         let listing = await Self.listFolder(directory, root: root, leases: leases, hook: listingHook)
@@ -380,16 +387,15 @@ public actor CoverFileStore {
         for (url, modified) in listing.partials where now().timeIntervalSince(modified) > 600 {
             try? FileManager.default.removeItem(at: url)
         }
-        // Servers removed while the folder was listed have no files left to count.
+        // Servers whose folder was moved aside while the folder was listed have no files left to
+        // count; a path touched before the move no longer exists, so it isn't measured again.
         var files = listing.files.filter { file in
-            let server = UUID(uuidString: file.url.deletingLastPathComponent().lastPathComponent)
-            let wasRemoved = server.map { serverGenerations[$0, default: 0] != generations[$0, default: 0] } ?? false
-            return !wasRemoved && !touched.contains(file.key)
+            moveCount(of: file.key) == moveCount(of: file.key, in: moves) && !touched.contains(file.key)
         }
         files += touched.compactMap { Self.file(at: URL(filePath: $0), root: root, leases: leases) }
         isScanned = true
         totalBytes = files.reduce(0) { $0 + $1.size }
-        lastPass = (generations, serverGenerations)
+        lastPass = (moves, folderMoves)
         if totalBytes > limit {
             // Read after the listing, so leases taken while it ran are kept.
             let leased = leases.leasedPaths
@@ -444,6 +450,14 @@ public actor CoverFileStore {
 
     private func touch(_ url: URL) {
         if isListing { touchedDuringListing.insert(leaseKey(url)) }
+    }
+
+    /// The ``folderMoves`` count (or `moves`') of the server whose folder holds the file at
+    /// lease key `path`; `0` for a file outside a server folder.
+    private func moveCount(of path: String, in moves: [UUID: Int]? = nil) -> Int {
+        let folder = URL(filePath: path).deletingLastPathComponent().lastPathComponent
+        guard let server = UUID(uuidString: folder) else { return 0 }
+        return (moves ?? folderMoves)[server, default: 0]
     }
 
     private func lease(_ url: URL) -> FileLease {

@@ -143,10 +143,67 @@ import Testing
         #expect(await listing.waitForEntries(2))
         let removal = Task { await store.removeServer(serverID) }
         await waiting.wait()
-        // The pass drops the removed server's files.
+        // The folder isn't moved yet, so the pass still counts the removed server's files.
         listing.release()
         await pass.value
+        #expect(await store.size == 49_152)
+        held = nil
+        await removal.value
+        #expect(files(serverID).isEmpty)
         #expect(await store.size == 16_384)
+    }
+
+    @Test func fileDiscardedDuringTheLeaseWaitAfterAPassIsSubtractedOnce() async throws {
+        try await seed([serverID, otherServerID])
+        let listing = ListingGate()
+        listing.release()
+        let waiting = Gate()
+        let store = store(listing: listing) {
+            waiting.open(); await untilCancelled()
+        }
+        #expect(await store.size == 32_768)
+        var held: LeasedFile? = try await store.insert(
+            moving: temporaryFile(), for: key("b"), pathExtension: "webp", generation: 0)
+        let (url, version) = try #require(held.map { ($0.url, $0.version) })
+
+        // A pass lists the folder and finishes while the removal waits for the lease; then a
+        // decode of the waiting folder's file fails.
+        listing.blocksAgain()
+        let pass = Task { await store.fullPass() }
+        #expect(await listing.waitForEntries(2))
+        let removal = Task { await store.removeServer(serverID) }
+        await waiting.wait()
+        listing.release()
+        await pass.value
+        await store.discard(url, version: version)
+        #expect(await store.size == 32_768)
+        held = nil
+        await removal.value
+        #expect(files(serverID).isEmpty)
+        #expect(await store.size == 16_384)
+    }
+
+    @Test func fileWrittenDuringAPassEndingInTheLeaseWaitIsSubtractedOnce() async throws {
+        try await seed([serverID, otherServerID])
+        let listing = ListingGate()
+        listing.release()
+        let waiting = Gate()
+        let store = store(listing: listing) {
+            waiting.open(); await untilCancelled()
+        }
+        #expect(await store.size == 32_768)
+
+        // Written while a pass lists the folder, so the pass measures it again afterwards.
+        listing.blocksAgain()
+        let pass = Task { await store.fullPass() }
+        #expect(await listing.waitForEntries(2))
+        var held: LeasedFile? = try await store.insert(
+            moving: temporaryFile(), for: key("b"), pathExtension: "webp", generation: 0)
+        let removal = Task { await store.removeServer(serverID) }
+        await waiting.wait()
+        listing.release()
+        await pass.value
+        #expect(await store.size == 49_152)
         held = nil
         await removal.value
         #expect(files(serverID).isEmpty)
