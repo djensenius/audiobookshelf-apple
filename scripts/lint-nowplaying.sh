@@ -3,7 +3,7 @@
 # - MediaPlayer (and its Now Playing symbols) is banned in every native source.
 # - NowPlaying / _NowPlaying_AppIntents may be imported only under ABSPlayback/NowPlaying/ and its
 #   tests, ABSPlaybackTests/NowPlaying/.
-# Scans the app, its tests, the widget/extension folder, Packages and Tools; legacy ios/ still imports
+# Scans the app, its tests, the shared and widget/extension folders, Packages and Tools; legacy ios/ still imports
 # MediaPlayer and is not scanned. Lines whose first token is a comment marker (//, /*, *) are
 # skipped for the MediaPlayer ban. Fails if grep itself errors (exit > 1). Runs on macOS /bin/bash 3.2 with BSD grep (grep -E only).
 set -euo pipefail
@@ -11,7 +11,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 dirs=()
-for d in Audiobookshelf AudiobookshelfTests AudiobookshelfUITests AudiobookshelfWidgets Packages Tools; do
+for d in Audiobookshelf AudiobookshelfShared AudiobookshelfTests AudiobookshelfUITests AudiobookshelfWidgets Packages Tools; do
   if [[ -d "$d" ]]; then dirs+=("$d"); fi
 done
 if ((${#dirs[@]} == 0)); then exit 0; fi
