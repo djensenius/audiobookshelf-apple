@@ -40,6 +40,12 @@ private struct YearInReviewContentView: View {
     @Environment(\.imagePipeline) private var pipeline
     @Environment(\.displayScale) private var displayScale
     @Environment(\.locale) private var locale
+    @Environment(\.openURL) private var openURL
+    @State private var layout = YearInReviewLayout.card
+    /// The confirmation shown under the card after copying or saving the image.
+    @State private var confirmationKey: String?
+    /// Why the last save to Photos failed; shown as an alert.
+    @State private var photoFailure: PhotoSaveOutcome?
     @State private var rendered = YearInReviewRenderSlot<YearInReviewShareImage>()
     /// A render started by the retry button; cancelled when the selection changes.
     @State private var retryTask: Task<Void, Never>?
@@ -53,7 +59,7 @@ private struct YearInReviewContentView: View {
     private var renderKey: YearInReviewRenderKey {
         YearInReviewRenderKey(
             content: model.content, year: model.year, variant: model.variant, scale: renderScale, locale: locale,
-            loadRevision: model.loadRevision)
+            loadRevision: model.loadRevision, layout: layout)
     }
 
     var body: some View {
@@ -64,6 +70,11 @@ private struct YearInReviewContentView: View {
                     RefreshFailedRow { Task { await model.load() } }
                 }
                 card
+                if let confirmationKey, shareImage != nil {
+                    Text(verbatim: L10n.string(confirmationKey))
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(ABSSpacing.large)
             .frame(maxWidth: 520)
@@ -86,6 +97,11 @@ private struct YearInReviewContentView: View {
                     }
                 }
             }
+            ToolbarItem(placement: .secondaryAction) {
+                if let shareImage {
+                    imageActions(shareImage)
+                }
+            }
             #if os(macOS)
                 // No pull to refresh on macOS.
                 ToolbarItem(placement: .primaryAction) {
@@ -104,7 +120,29 @@ private struct YearInReviewContentView: View {
             #endif
         }
         .refreshable { await model.load() }
+        .alert(
+            Text(verbatim: L10n.string("HeaderYearInReviewPhotosFailed")),
+            isPresented: Binding(get: { photoFailure != nil }, set: { if !$0 { photoFailure = nil } }),
+            presenting: photoFailure
+        ) { failure in
+            #if os(iOS)
+                if failure.offersSettings, let url = URL(string: UIApplication.openSettingsURLString) {
+                    Button {
+                        openURL(url)
+                    } label: {
+                        Text(verbatim: L10n.string("ButtonOpenSettings"))
+                    }
+                }
+            #endif
+            Button(role: .cancel) {
+            } label: {
+                Text(verbatim: L10n.string("ButtonOk"))
+            }
+        } message: { failure in
+            Text(verbatim: L10n.string(failure.messageKey))
+        }
         .task(id: renderKey) {
+            confirmationKey = nil
             retryTask?.cancel()
             retryTask = nil
             await render(renderKey)
@@ -136,7 +174,64 @@ private struct YearInReviewContentView: View {
                 }
                 .pickerStyle(.segmented)
             }
+            Picker(selection: $layout) {
+                ForEach(YearInReviewLayout.allCases) { layout in
+                    Text(verbatim: L10n.string(layout.labelKey)).tag(layout)
+                }
+            } label: {
+                Text(verbatim: L10n.string("LabelLayout"))
+            }
+            .pickerStyle(.segmented)
         }
+    }
+
+    /// Copy, and on iOS save to Photos (on macOS the share menu offers Photos).
+    private func imageActions(_ image: YearInReviewShareImage) -> some View {
+        Menu {
+            Button {
+                YearInReviewClipboard.copy(png: image.png)
+                confirm("MessageYearInReviewImageCopied")
+            } label: {
+                Label {
+                    Text(verbatim: L10n.string("ButtonYearInReviewCopyImage"))
+                } icon: {
+                    Image(systemName: "doc.on.doc")
+                }
+            }
+            #if os(iOS)
+                Button {
+                    Task { await saveToPhotos(image) }
+                } label: {
+                    Label {
+                        Text(verbatim: L10n.string("ButtonYearInReviewSaveToPhotos"))
+                    } icon: {
+                        Image(systemName: "photo.badge.plus")
+                    }
+                }
+            #endif
+        } label: {
+            Label {
+                Text(verbatim: L10n.string("LabelMore"))
+            } icon: {
+                Image(systemName: "ellipsis.circle")
+            }
+        }
+    }
+
+    #if os(iOS)
+        private func saveToPhotos(_ image: YearInReviewShareImage) async {
+            let outcome = await YearInReviewPhotoSaver(library: SystemPhotoLibrary()).save(png: image.png)
+            if outcome == .saved {
+                confirm(outcome.messageKey)
+            } else {
+                photoFailure = outcome
+            }
+        }
+    #endif
+
+    private func confirm(_ key: String) {
+        confirmationKey = key
+        AccessibilityNotification.Announcement(L10n.string(key)).post()
     }
 
     @ViewBuilder private var card: some View {
@@ -169,7 +264,7 @@ private struct YearInReviewContentView: View {
 
     private var summary: String {
         guard let content = model.content else { return "" }
-        return YearInReviewCard.summary(for: content, year: model.year, locale: locale)
+        return YearInReviewCard.summary(for: content, year: model.year, locale: locale, layout: layout)
     }
 
     static func labelKey(_ variant: YearInReviewVariant) -> String {
@@ -187,7 +282,8 @@ private struct YearInReviewContentView: View {
         guard let content = key.content else { return }
         let covers = await YearInReviewCovers.load(ids: content.coverItemIDs, serverID: serverID, pipeline: pipeline)
         guard !Task.isCancelled, key == renderKey else { return }
-        let card = YearInReviewCard(content: content, year: key.year, covers: covers, locale: key.locale)
+        let card = YearInReviewCard(
+            content: content, year: key.year, covers: covers, locale: key.locale, layout: key.layout)
         let image = YearInReviewShareImage.render(card, variant: key.variant, scale: key.scale)
         rendered.finish(image, for: key, current: renderKey)
     }
@@ -202,6 +298,7 @@ struct YearInReviewRenderKey: Hashable {
     var locale: Locale
     /// The model's ``YearInReviewModel/loadRevision``: bumped by each successful refresh.
     var loadRevision = 0
+    var layout = YearInReviewLayout.card
 
     /// Whether `other` shows the same card, perhaps from another load of the same stats.
     func isSameSelection(as other: Self) -> Bool {
