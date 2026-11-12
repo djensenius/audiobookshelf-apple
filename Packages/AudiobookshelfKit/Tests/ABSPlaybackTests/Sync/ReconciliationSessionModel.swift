@@ -161,19 +161,27 @@ actor ReconciliationSessionModel {
     }
 
     /// `PATCH /api/me/progress/:id`: sets the groups sent, creating the progress if absent, and
-    /// dates it with the server's clock (the body carries no `lastUpdate`). `isFinished: false`
-    /// resets the audio position, as both pinned servers do; there is no auto-finish.
+    /// dates it with the server's clock (the body carries no `lastUpdate`). As on both pinned
+    /// servers, `isFinished: false` resets the audio position of finished progress and changes
+    /// nothing on unfinished progress, and an audio PATCH that moves finished progress at least
+    /// 10 s from the end un-finishes it. There is no auto-finish.
     func update(
         _ client: SessionModelClient, itemID: String, episodeID: String?, _ update: MediaProgressUpdate
     ) async throws {
         try await perform(.patch) {
             let key = Key(user: client.userID, item: itemID, episode: episodeID)
+            if let row = progress[key], !row.isFinished, update == .finished(false) { return }
             var row =
                 progress[key]
                 ?? MediaProgress(id: "progress-\(itemID)", libraryItemId: itemID, episodeId: episodeID)
+            let moved = update.currentTime.map { $0 != row.currentTime } ?? false
             if let currentTime = update.currentTime { row.currentTime = currentTime }
             if let duration = update.duration { row.duration = duration }
             if let value = update.progress { row.progress = value }
+            if moved, row.isFinished, row.duration - row.currentTime >= 10 {
+                row.isFinished = false
+                row.finishedAt = nil
+            }
             if let finished = update.isFinished {
                 row.isFinished = finished
                 row.finishedAt = finished ? update.finishedAt ?? milliseconds : nil

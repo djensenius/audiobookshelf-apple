@@ -46,12 +46,14 @@ struct ProgressLateCloseTests {
         await s.play(for: 15, rate: 2)
     }
 
-    /// Session 1's report times out while the server still holds it. Released after session 2
-    /// took over, it answers 404 and leaves session 2's position alone, whether or not its
-    /// response would have been lost.
+    /// Session 1's report times out while the server still holds it. Held before its application
+    /// and released after session 2 took over, it answers 404. Applied before the takeover with
+    /// its response held until after, it only moved progress to where session 2 started from and
+    /// then passed, and losing its response resends nothing. Either way session 2's position stands.
     @Test(arguments: [Request.Outcome.acknowledged, .appliedResponseLost])
     func aHeldReportCannotRegressTheNextSession(outcome: Request.Outcome) async throws {
         let (s, model, client) = try Self.modelHarness()
+        let applied = outcome == .appliedResponseLost
         let late = Request(outcome)
         defer { late.release() }
         late.enter.open()
@@ -63,6 +65,12 @@ struct ProgressLateCloseTests {
         s.service.state.withLock { $0.abandonedSyncs = [late] }
         await s.play(for: 15)
         #expect(s.service.log.contains("sync 2 timed out"))
+        if applied {
+            late.apply.open()
+            await late.applicationFinished.wait()
+        }
+        #expect(try await model.lookup(client, id: "session-1").timeListening == (applied ? 30 : 15))
+        #expect(try await Self.serverTime(model, client) == (applied ? 30 : 15))
 
         try await Self.takeOver(s, model, heldClose: close)
         let newer = try #require(try await Self.serverTime(model, client))

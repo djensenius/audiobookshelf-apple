@@ -27,6 +27,14 @@ struct ReconciliationSessionModelTests {
         func report(_ position: Double, _ listened: Double) throws -> PlaybackSyncReport {
             try #require(PlaybackSyncReport(currentTime: position, timeListened: listened, duration: 3600))
         }
+
+        func patch(_ update: MediaProgressUpdate, _ item: String = "a") async throws {
+            try await progress.updateProgress(itemID: item, episodeID: nil, update)
+        }
+
+        func row(_ item: String = "a") async throws -> MediaProgress {
+            try #require(try await progress.fetchProgress(itemID: item, episodeID: nil))
+        }
     }
 
     @Test func takeoverSharesReportsAcrossItemsButNotUsersOrDevices() async throws {
@@ -258,5 +266,47 @@ struct ReconciliationSessionModelTests {
         await #expect(throws: APIError.notFound) { try await s.h.service.openSession(id: id) }
         let stored = try #require(try await s.h.service.listeningSessions(itemID: "a").sessions.first)
         #expect(stored.id == id && stored.timeListening == 15 && stored.currentTime == 30)
+    }
+
+    /// `isFinished: false` changes nothing on unfinished progress, `lastUpdate` included
+    /// (`ProgressContractTests.lastUpdate`). It still creates absent progress, and on finished
+    /// progress it resets the position (`finishedGroup`).
+    @Test func unfinishingChangesOnlyFinishedProgress() async throws {
+        let clock = TestClock()
+        let client = Adapters(ReconciliationSessionModel(clock: clock))
+        try await client.patch(.audio(currentTime: 12, duration: 50, progress: 0.24))
+        let unfinished = try await client.row()
+        clock.advance(by: 1)
+        try await client.patch(.finished(false))
+        #expect(try await client.row() == unfinished)
+
+        try await client.patch(.finished(false), "b")
+        let created = try await client.row("b")
+        #expect(!created.isFinished && created.currentTime == 0)
+        #expect(created.lastUpdate == Int(clock.now.timeIntervalSince1970 * 1000))
+
+        try await client.patch(.finished(true))
+        clock.advance(by: 1)
+        try await client.patch(.finished(false))
+        let reset = try await client.row()
+        #expect(!reset.isFinished && reset.finishedAt == nil && reset.currentTime == 0 && reset.progress == 0)
+        #expect(reset.lastUpdate == Int(clock.now.timeIntervalSince1970 * 1000))
+    }
+
+    /// An audio PATCH that moves finished progress away from the end un-finishes it
+    /// (`ProgressContractTests.audioUnfinishes`); exactly 10 s from the end is still away. The
+    /// same position, or one fewer than 10 s from the end, leaves it finished (`MediaProgressUpdate`).
+    @Test(arguments: [(20.0, false), (40, false), (10, true), (45, true)])
+    func movingFinishedProgressAwayFromTheEndUnfinishesIt(to time: Double, staysFinished: Bool) async throws {
+        let client = Adapters(ReconciliationSessionModel())
+        try await client.patch(.audio(currentTime: 10, duration: 50, progress: 0.2))
+        try await client.patch(.finished(true))
+        let finished = try await client.row()
+        try await client.patch(.audio(currentTime: time, duration: 50, progress: time / 50))
+        let row = try await client.row()
+        #expect(row.isFinished == staysFinished)
+        #expect(row.finishedAt == (staysFinished ? finished.finishedAt : nil))
+        #expect(row.currentTime == time)
+        if !staysFinished { #expect(row.progress == time / 50) }
     }
 }
