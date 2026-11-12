@@ -71,8 +71,9 @@ final class FakeProgressServer: ProgressSyncService, EbookProgressService {
     }
 
     let fetches = Locked(0)
-    /// Runs once, during the first GET after a PATCH (its confirmation), before that GET answers.
-    let duringConfirmation = Locked<(@Sendable () async throws -> Void)?>(nil)
+    /// Runs once, during the first GET after a PATCH (its confirmation), before that GET answers;
+    /// a value it returns replaces the answer.
+    let duringConfirmation = Locked<(@Sendable () async throws -> MediaProgress?)?>(nil)
 
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
         fetches.value += 1
@@ -80,7 +81,7 @@ final class FakeProgressServer: ProgressSyncService, EbookProgressService {
         let answer = server.value
         if !writes.value.isEmpty, let during = duringConfirmation.value {
             duringConfirmation.value = nil
-            try await during()
+            return try await during() ?? answer
         }
         return answer
     }
@@ -592,6 +593,7 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
                 ebookProgress: 0.8, lastUpdate: t0.addingTimeInterval(60))
             try await store.applyServerProgress(
                 [key: socket], capturedAt: await store.captureGeneration(), source: .socket)
+            return nil
         }
 
         await syncer.drainPendingProgress()
@@ -614,6 +616,30 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         await syncer.drainPendingProgress()
         #expect(service.fetches.value - fetches == 2)
         #expect(await store.needsEbookFetch == [key])
+    }
+
+    /// While an audio send awaits confirmation, a socket reports page 4 (t+60), matching the row,
+    /// then the confirmation GET answers page 7 (t+30). The replayed socket can't restore page 4,
+    /// so it requests a fetch, which does.
+    @Test func aHeldSocketDifferingFromTheConfirmationRequestsAFetch() async throws {
+        try await cleanRow("4", progress: 0.3)
+        try await store.recordEdit(
+            ProgressEdit(audio: .init(currentTime: 30, duration: 600, progress: 0.05)), for: key, now: t0)
+        let (store, server) = (store, service.server)
+        service.duringConfirmation.value = {
+            server.value = serverProgress("4", progress: 0.3, at: t0.addingTimeInterval(60))
+            let socket = ProgressBaseline(
+                currentTime: 30, progress: 0.05, duration: 600, isFinished: false, ebookLocation: "4",
+                ebookProgress: 0.3, lastUpdate: t0.addingTimeInterval(60))
+            try await store.applyServerProgress(
+                [key: socket], capturedAt: await store.captureGeneration(), source: .socket)
+            return serverProgress("7", progress: 0.6, at: t0.addingTimeInterval(30))
+        }
+
+        await syncer.drainPendingProgress()
+        #expect(service.duringConfirmation.value == nil)
+        #expect(try await row().ebookLocation == "4")
+        #expect(await store.needsEbookFetch.isEmpty)
     }
 
     // MARK: - Resume
@@ -717,6 +743,26 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(service.fetches.value == fetches)
     }
 
+    /// The row is deleted while the resume GET (page 6, with audio) is held: the store rejects
+    /// that answer, so it is neither where the reader opens nor the seed of the next turn's row.
+    @Test func aResumeAnswerRejectedForADeletedRowIsDropped() async throws {
+        try await cleanRow("4", progress: 0.3)
+        var answer = serverProgress("6", progress: 0.5, at: t0.addingTimeInterval(10))
+        answer.currentTime = 300
+        service.server.value = answer
+        service.holdReaderFetches.value = true
+        let model = makeModel()
+        let resume = Task { await model.resume() }
+        #expect(await eventually { service.heldFetchCount == 1 })
+        #expect(try await store.deleteProgress(for: key))
+        service.releaseReaderFetches()
+
+        #expect(await resume.value.location == nil)
+        turn(model, to: 2)
+        await model.saveTail?.value
+        #expect(try await row().currentTime == 0)
+    }
+
     @Test func resumeDoesNotMoveAnAlreadyTurnedPage() async throws {
         service.server.value = serverProgress("8", at: t0)
         let model = makeModel()
@@ -795,6 +841,31 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await row().ebookLocation == "4")
         await model.flush()
         #expect(service.server.value?.ebookLocation == "4")
+    }
+
+    /// A flush's save succeeds, then a turn queues a save that fails before the flush's drain
+    /// starts: the drain waits for that save and sends nothing, since page 4 isn't saved.
+    @Test func aFlushDoesNotSendWhileALaterTurnIsUnsaved() async throws {
+        let model = makeModel()
+        turn(model, to: 3)
+        let saved = try #require(model.saveTail)
+        #expect(await saved.value)
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        let flushing = Task { await model.flush() }
+        // The flush's save (nothing new) finishes on the next main-actor turn; turn before the
+        // flush resumes to queue its drain.
+        while model.saveTail == saved { await Task.yield() }
+        await Task.yield()
+        turn(model, to: 4)
+        await flushing.value
+
+        // The flush's save succeeded and queued the drain; page 4's save failed.
+        #expect(model.drainTail != nil)
+        #expect(model.lastError != nil)
+        #expect(service.writes.value.isEmpty)
+        #expect(try await row().ebookLocation == "3")
+        await model.flush()
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["4"])
     }
 
     /// Before any resume: seeded page 2, page 3 saved and held, page 4 turned; a later-dated

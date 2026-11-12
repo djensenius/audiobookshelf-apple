@@ -205,8 +205,10 @@ public final class EbookProgressModel {
                 return
             }
             guard let matching = Self.matching(fetched, key) else { return }
-            knownServerProgress = matching
-            try await store.applyStartProgress(matching, captured: capture)
+            // Rejected when the row changed or was deleted meanwhile: then it is no fallback or
+            // seed. While a row exists, neither is used.
+            let applied = try await store.applyStartProgress(matching, captured: capture)
+            knownServerProgress = applied ? matching : nil
         } catch {
             logger.info("Ebook progress unavailable: \(Self.caseName(error), privacy: .public)")
         }
@@ -242,7 +244,8 @@ public final class EbookProgressModel {
         let (syncer, store, key) = (syncer, store, key)
         let task = Task { @MainActor [weak self] in
             await previous?.value
-            _ = await saves?.value
+            // Save before send: nothing goes out while the latest turn isn't saved.
+            guard await saves?.value ?? true else { return }
             await syncer.drainPendingProgress()
             let row: LocalMediaProgressDTO?
             do {

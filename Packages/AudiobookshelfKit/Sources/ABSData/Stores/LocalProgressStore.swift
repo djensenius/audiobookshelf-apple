@@ -499,10 +499,16 @@ public enum SessionUploadResult: Sendable, Equatable {
                 // Server times are milliseconds, so a pre-PATCH snapshot can tie the fetch; only a
                 // strictly newer one can have been emitted after it.
                 if let latest = awaiting.latest, rowGenerations[raw] ?? 0 <= latest.capturedAt,
-                    latest.server.lastUpdate > server.lastUpdate,
-                    merge(latest.server, into: row, source: .socket)
+                    latest.server.lastUpdate > server.lastUpdate
                 {
-                    merged.insert(key)
+                    if merge(latest.server, into: row, source: .socket) { merged.insert(key) }
+                    // The replay skips ebook values: one that differs from the confirmed row
+                    // requests a fetch, even if it matched the row when it arrived.
+                    if row.ebookLocation != latest.server.ebookLocation
+                        || row.ebookProgress != latest.server.ebookProgress
+                    {
+                        ebookFetches[raw] = key
+                    }
                 }
             }
             return merged
