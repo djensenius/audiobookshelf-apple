@@ -99,6 +99,7 @@ all of these with `NSAllowsArbitraryLoads` (`ios/App/App/Info.plist`).
 | --- | --- |
 | Bundle ID (app, iOS and macOS) | `org.davidjensenius.Audiobookshelf` |
 | Bundle ID (app tests) | `org.davidjensenius.AudiobookshelfTests` |
+| Bundle ID (widget extension, iOS and macOS) | `org.davidjensenius.Audiobookshelf.Widgets` |
 | Team | `9JALHNGRBQ`, automatic signing for Debug and Release (Xcode Cloud manages distribution signing) |
 | App Group | `group.org.davidjensenius.Audiobookshelf` (iOS and macOS) |
 | Keychain access group | `$(AppIdentifierPrefix)org.davidjensenius.Audiobookshelf` |
@@ -115,6 +116,9 @@ Entitlements:
   Used only by `mise run test:app`, which signs the macOS test host ad hoc with no team.
   App Group and keychain access group entitlements need a provisioning profile; an ad hoc
   signed app that claims them is killed at launch, so the ad hoc host doesn't claim them.
+- `AudiobookshelfWidgets/AudiobookshelfWidgets-iOS.entitlements`,
+  `AudiobookshelfWidgets.entitlements` and `AudiobookshelfWidgets-AdHoc.entitlements`: the
+  same for the widget extension, without network client or user-selected files.
 
 iOS background audio (`UIBackgroundModes` = `audio`) stays in the `Info.plist` fragment.
 

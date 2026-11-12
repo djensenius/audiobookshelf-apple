@@ -62,6 +62,7 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     /// Includes interrupted and superseded seeks, so tests can drain gated calls.
     private(set) var returnedSeekCount = 0
     private(set) var stopCount = 0
+    private(set) var unloadCount = 0
     private(set) var playCount = 0
     private(set) var volumes: [Float] = []
     private(set) var volumeAtPause: Float?
@@ -145,6 +146,18 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
     func stop() {
         generation += 1
         stopCount += 1
+        isPlaybackRequested = false
+        isAudioSessionActive = false
+        timeline = nil
+        currentTime = 0
+        pendingSeekTarget = nil
+        state = .idle
+    }
+
+    /// As ``stop()``, but counted apart: the real engine keeps the audio session active.
+    func unload() {
+        generation += 1
+        unloadCount += 1
         isPlaybackRequested = false
         isAudioSessionActive = false
         timeline = nil
