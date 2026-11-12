@@ -1,0 +1,36 @@
+{
+  "libraries": [
+    {
+      "id": "lib_sample",
+      "name": "LibriVox",
+      "folders": [
+        {
+          "id": "fol_sample",
+          "fullPath": "/audiobooks",
+          "libraryId": "lib_sample"
+        }
+      ],
+      "displayOrder": 1,
+      "icon": "audiobookshelf",
+      "mediaType": "book",
+      "provider": "google",
+      "settings": {
+        "coverAspectRatio": 1,
+        "disableWatcher": false,
+        "skipMatchingMediaWithAsin": false,
+        "skipMatchingMediaWithIsbn": false,
+        "autoScanCronExpression": null,
+        "audiobooksOnly": false,
+        "hideSingleBookSeries": false,
+        "onlyShowLaterBooksInContinueSeries": false,
+        "metadataPrecedence": [],
+        "markAsFinishedPercentComplete": null,
+        "markAsFinishedTimeRemaining": 10
+      },
+      "lastScan": 1700000000000,
+      "lastScanVersion": "2.26.0",
+      "createdAt": 1700000000000,
+      "lastUpdate": 1700000000000
+    }
+  ]
+}

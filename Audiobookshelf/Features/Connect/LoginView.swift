@@ -85,6 +85,7 @@ struct LoginView: View {
                 ConnectButtonLabel(
                     title: L10n.string("ButtonLogin"), isRunning: model.phase == .signingIn(.password))
             }
+            .accessibilityIdentifier("connect.signIn")
             .disabled(!model.canSignIn)
         }
         .disabled(model.isBusy)

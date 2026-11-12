@@ -15,11 +15,12 @@ replacing the Nuxt/Capacitor app this repository was forked from. Track work on 
 
 | Path | What it is |
 | --- | --- |
-| `Audiobookshelf.xcodeproj/project.xcproj` | Xcode 27.2 JSON project: app target `Audiobookshelf` (iOS, iPadOS, native macOS; no Catalyst), widget extension `AudiobookshelfWidgets` (embedded in the app) and test target `AudiobookshelfTests` |
+| `Audiobookshelf.xcodeproj/project.xcproj` | Xcode 27.2 JSON project: app target `Audiobookshelf` (iOS, iPadOS, native macOS; no Catalyst), widget extension `AudiobookshelfWidgets` (embedded in the app), test target `AudiobookshelfTests` and UI test target `AudiobookshelfUITests` |
 | `Audiobookshelf/` | App sources (synchronized folder), `Info.plist` fragment (ATS, background audio, CarPlay scene), entitlements (`Audiobookshelf.entitlements` macOS, `Audiobookshelf-iOS.entitlements` iOS, `Audiobookshelf-AdHoc.entitlements` for ad hoc `test:app`) |
 | `AudiobookshelfShared/` | Sources compiled into both the app and the widget extension (synchronized folder), such as the playback App Intents in `Intents/`; imports only system frameworks, not `AudiobookshelfKit` |
 | `AudiobookshelfWidgets/` | Widget extension sources (synchronized folder), `Info.plist` fragment, `PrivacyInfo.xcprivacy`, entitlements (`AudiobookshelfWidgets.entitlements` macOS, `-iOS` iOS, `-AdHoc` for ad hoc `test:app`) |
 | `AudiobookshelfTests/` | App tests (Swift Testing), hosted in the app |
+| `AudiobookshelfUITests/` | UI tests (XCTest) against the Debug-only fixture server; see [docs/testing/ui-tests.md](docs/testing/ui-tests.md) |
 | `Localization/native/` | Native-only string keys merged into the String Catalog ([docs/localization.md](docs/localization.md)) |
 | `Packages/AudiobookshelfKit/` | Local Swift package with all feature code; one `AudiobookshelfKit` library product exposes every module |
 
@@ -100,6 +101,7 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer) |
 | `mise run strings` / `strings:check` | Generate or verify ABSUI's `Localizable.xcstrings` from `strings/*.json` and `Localization/native/`; see [docs/localization.md](docs/localization.md) |
 | `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |
+| `mise run test:ui` | UI tests against the fixture server on macOS (`ABS_UI_PLATFORM=ios` for the simulator; local only, not in CI); see [docs/testing/ui-tests.md](docs/testing/ui-tests.md) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
 
 Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing.
