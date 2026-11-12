@@ -12,6 +12,8 @@ final class PlaybackHistoryLog {
         let name: PlaybackHistoryEventName
         let media: PlaybackHistoryMedia
         let position: TimeInterval?
+        /// A result already known (no `/sync` triggered), which the batch's result doesn't replace.
+        var sync: PlaybackHistorySyncResult? = nil
         /// Tells this event from an equal one, such as a replacement session's under a reused ID.
         let id = UUID()
     }
@@ -33,7 +35,8 @@ final class PlaybackHistoryLog {
         tail = Task {
             await previous?.value
             for event in events {
-                await recorder.record(event.name, for: event.media, at: event.position, sync: sync, details: details)
+                await recorder.record(
+                    event.name, for: event.media, at: event.position, sync: event.sync ?? sync, details: details)
             }
         }
     }

@@ -180,7 +180,11 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.pause).isEmpty)
     }
 
-    @Test func finishedIsRecordedWhenAnotherEndedObserverStopsFirst() async throws {
+    /// A harness whose syncer sees each event after an observer that stops on the events
+    /// `stopsOn` matches. The syncer holds its source weakly: keep the returned one alive.
+    private static func harness(
+        stoppingFirstOn stopsOn: @escaping @MainActor (PlaybackCoordinatorEvent) -> Bool
+    ) throws -> (SyncHarness, HistorySpy, ObserverFirstSource) {
         let spy = HistorySpy()
         var wrapped: ObserverFirstSource?
         let s = try SyncHarness(history: spy) { coordinator in
@@ -190,19 +194,71 @@ struct PlaybackHistoryReportingTests {
         }
         let source = try #require(wrapped)
         source.before = { [coordinator = s.coordinator] event in
-            if case .ended = event { coordinator.stop() }
+            if stopsOn(event) { coordinator.stop() }
         }
+        return (s, spy, source)
+    }
+
+    @Test func finishedIsRecordedWhenAnotherEndedObserverStopsFirst() async throws {
+        let (s, spy, source) = try Self.harness { if case .ended = $0 { true } else { false } }
         await s.coordinator.play(itemID: "a", startTime: 3590)
         await s.play(for: 2)
         s.h.engine.finish()
         await s.coordinator.waitForPendingCloses()
         await Self.settle(s)
+        withExtendedLifetime(source) {}
 
         #expect(s.h.service.closes.count == 1)
         #expect(spy.entries.filter { $0.name != .play }.map(\.name) == [.finished, .stop])
         #expect(spy.entries(.finished).map(\.position) == [3600])
         #expect(spy.entries(.finished).map(\.sync) == [.succeeded])
         #expect(spy.entries(.stop).map(\.sync) == [.succeeded])
+    }
+
+    @Test func pauseIsRecordedWhenAnotherObserverStopsFirst() async throws {
+        let (s, spy, source) = try Self.harness { if case .paused = $0 { true } else { false } }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 6)
+        s.coordinator.pause()
+        await s.coordinator.waitForPendingCloses()
+        await Self.settle(s)
+        withExtendedLifetime(source) {}
+
+        #expect(spy.entries.map(\.name) == [.play, .pause, .stop])
+        #expect(spy.entries(.pause).map(\.position) == [6])
+        // The `/close` carries the pause's report.
+        #expect(spy.entries(.pause).map(\.sync) == [.succeeded])
+        #expect(spy.entries(.stop).map(\.sync) == [.succeeded])
+    }
+
+    @Test func seekIsRecordedWhenAnotherObserverStopsFirst() async throws {
+        let (s, spy, source) = try Self.harness {
+            // Not the load's own seek: the user's.
+            if case .didSeek(let time) = $0 { time == 100 } else { false }
+        }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 6)
+        await s.coordinator.seek(to: 100)
+        await s.coordinator.waitForPendingCloses()
+        await Self.settle(s)
+        withExtendedLifetime(source) {}
+
+        #expect(spy.entries.map(\.name) == [.play, .seek, .stop])
+        #expect(spy.entries(.seek).map(\.position) == [100])
+        #expect(spy.entries(.seek).map(\.sync) == [.notAttempted])
+        #expect(spy.entries(.stop).map(\.position) == [100])
+    }
+
+    @Test func playIsRecordedWhenAnotherObserverStopsFirst() async throws {
+        let (s, spy, source) = try Self.harness { if case .playbackStarted = $0 { true } else { false } }
+        await s.coordinator.play(itemID: "a", startTime: 120)
+        await s.coordinator.waitForPendingCloses()
+        await Self.settle(s)
+        withExtendedLifetime(source) {}
+
+        #expect(spy.entries.map(\.name) == [.play, .stop])
+        #expect(spy.entries.map(\.position) == [120, 120])
+        #expect(spy.entries(.play).map(\.sync) == [.notAttempted])
     }
 
     nonisolated static let closeOutcomes: [(String, PlaybackHistorySyncResult)] = [

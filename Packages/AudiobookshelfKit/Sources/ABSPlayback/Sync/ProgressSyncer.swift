@@ -165,10 +165,11 @@ public final class ProgressSyncer {
     /// History events (pause, finished, save) waiting for their session's queued `/sync`.
     private var queuedHistory: [String: [PlaybackHistoryLog.Event]] = [:]
     /// A closed session's history (its queued triggers, then Stop) and its `/close`, held until
-    /// the close's `sessionWillClose` reaches this syncer. An `.ended` delivered before that (an
-    /// observer that ran first stopped on the end) is the session's Finished, recorded before Stop.
+    /// the close's `sessionWillClose` reaches this syncer. An event delivered before that (an
+    /// observer that ran first stopped on it) is the session's, recorded before Stop.
     private struct ClosingHistory {
         let sessionID: String
+        let position: Double
         let duration: Double
         var events: [PlaybackHistoryLog.Event]
         let close: PlaybackCloseResult<Bool>?
@@ -368,17 +369,19 @@ public final class ProgressSyncer {
                 queuePosition(session.key, time: time, duration: source?.duration ?? 0)
             }
         case .playbackStarted:
-            if let event = historyEvent(.play, at: source?.currentTime) {
+            if current == nil {
+                holdBeforeStop(.play, sync: .notAttempted)
+            } else if let event = historyEvent(.play, at: source?.currentTime) {
                 history?.record([event], sync: .notAttempted)
             }
             isPlaying = true
             lastSyncAt = now
             lastTick = source?.confirmedPlaybackTime.map { (now, $0) }
         case .paused, .ended:
-            if case .ended = event, current == nil { noteEndAfterClose() }
             // Pausing while already paused (a sleep timer cancelling its resume) isn't history.
             let historyName: PlaybackHistoryEventName? =
                 if case .ended = event { .finished } else { isPlaying ? .pause : nil }
+            if current == nil, let historyName { holdBeforeStop(historyName) }
             creditPlayedTime()
             isPlaying = false
             lastTick = nil
@@ -388,8 +391,12 @@ public final class ProgressSyncer {
             chapterIndex = source?.chapterIndex
             lastTick = isPlaying ? (now, time) : nil
             if loadedTime != time {
-                if time != source?.resumeRewindLanding, let event = historyEvent(.seek, at: time) {
-                    history?.record([event], sync: .notAttempted)
+                if time != source?.resumeRewindLanding {
+                    if current == nil {
+                        holdBeforeStop(.seek, at: time, sync: .notAttempted)
+                    } else if let event = historyEvent(.seek, at: time) {
+                        history?.record([event], sync: .notAttempted)
+                    }
                 }
                 requestSync()
             }
@@ -500,7 +507,9 @@ public final class ProgressSyncer {
     ) {
         guard !events.isEmpty else { return }
         closingHistory.append(
-            ClosingHistory(sessionID: closing.sessionID, duration: closing.duration, events: events, close: close))
+            ClosingHistory(
+                sessionID: closing.sessionID, position: closing.currentTime, duration: closing.duration,
+                events: events, close: close))
     }
 
     /// Records a closed session's held history with its `/close`'s result.
@@ -514,12 +523,16 @@ public final class ProgressSyncer {
         }
     }
 
-    /// The end reached this syncer after the session closed (stopped by an observer that ran
-    /// first): it's the closed session's Finished, at its duration, before its Stop.
-    private func noteEndAfterClose() {
+    /// An event that reached this syncer after its session closed (stopped by an observer that
+    /// ran first) goes before the closed session's Stop: Pause and Finished with the `/close`'s
+    /// result (it carries their report), others with `sync`. `position` defaults to the closing
+    /// position, or the duration for Finished.
+    private func holdBeforeStop(
+        _ name: PlaybackHistoryEventName, at position: Double? = nil, sync: PlaybackHistorySyncResult? = nil
+    ) {
         guard var held = closingHistory.first, let stop = held.events.last else { return }
-        held.events.insert(
-            .init(name: .finished, media: stop.media, position: held.duration), at: held.events.count - 1)
+        let at = position ?? (name == .finished ? held.duration : held.position)
+        held.events.insert(.init(name: name, media: stop.media, position: at, sync: sync), at: held.events.count - 1)
         closingHistory[0] = held
     }
 
