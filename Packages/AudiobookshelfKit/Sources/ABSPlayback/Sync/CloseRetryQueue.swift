@@ -164,6 +164,10 @@ extension ProgressSyncer {
     /// The drain's close step: resends each retained close that is due and admitted, settling
     /// it by the result. Returns `false` when the drain should stop.
     func retryRetainedCloses() async -> Bool {
+        // A close still being captured when the queue is read may settle while this pass is
+        // suspended on an earlier one, so the copy read here is stale: the whole pass leaves it
+        // alone. A settlement that keeps it schedules another drain.
+        let capturedWhenRead = closeQueue.capturing
         let closes: [PendingSessionCloseDTO]
         do {
             closes = try await store.sessionCloses(for: service.serverConnectionID)
@@ -172,7 +176,8 @@ extension ProgressSyncer {
             drainOutcome.failed = true
             return false
         }
-        for close in closes where !closeQueue.capturing.contains(close.sessionID) {
+        for close in closes
+        where !capturedWhenRead.contains(close.sessionID) && !closeQueue.capturing.contains(close.sessionID) {
             await waitForPendingWrites()
             guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return false }
             if let last = close.lastAttemptAt, clock.now() < last + closeRetryDelay(afterAttempts: close.attempts) {
