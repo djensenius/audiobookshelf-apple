@@ -76,9 +76,48 @@ enum RealtimeFixtures {
         #expect(try decode(#"["pong"]"#) == nil)
     }
 
+    @Test func decodesAuthorChanges() throws {
+        // `toOldJSON()` for additions, `toOldJSONExpanded(numBooks)` for updates.
+        let fields = #"""
+            "id":"au-1","asin":null,"name":"Ursula K. Le Guin","description":"Earthsea.",
+            "imagePath":"/metadata/authors/au-1.jpg","libraryId":"lib-1","addedAt":1,"updatedAt":2
+            """#
+        let expected = Author(
+            id: "au-1", name: "Ursula K. Le Guin", description: "Earthsea.", imagePath: "/metadata/authors/au-1.jpg",
+            libraryId: "lib-1", addedAt: 1, updatedAt: 2)
+        #expect(try decode(#"["author_added",{\#(fields)}]"#) == .authorChanged(.added(expected, libraryID: "lib-1")))
+
+        guard
+            case .authorChanged(.updated(let updated, let libraryID)) = try decode(
+                #"["author_updated",{\#(fields),"numBooks":4}]"#)
+        else {
+            Issue.record("Expected an author update")
+            return
+        }
+        #expect(updated.numBooks == 4)
+        #expect(libraryID == "lib-1")
+
+        // Scans send only the ID and library of a removed author; deletions send the whole author.
+        #expect(
+            try decode(#"["author_removed",{"id":"au-1","libraryId":"lib-1"}]"#)
+                == .authorChanged(.removed(id: "au-1", libraryID: "lib-1")))
+        #expect(
+            try decode(#"["author_removed",{\#(fields)}]"#)
+                == .authorChanged(.removed(id: "au-1", libraryID: "lib-1")))
+    }
+
     @Test func throwsOnMalformedPayloads() {
         #expect(throws: (any Error).self) { try decode(#"["user_updated",{"id":"usr-1"}]"#) }
         #expect(throws: (any Error).self) { try decode(#"["user_item_progress_updated",{"id":"mp-1"}]"#) }
         #expect(throws: (any Error).self) { try decode(#"["init"]"#) }
+        // Author changes must name their library.
+        #expect(throws: (any Error).self) { try decode(#"["author_added",{"id":"au-1","name":"A"}]"#) }
+        #expect(throws: (any Error).self) {
+            try decode(#"["author_updated",{"id":"au-1","name":"A","libraryId":null}]"#)
+        }
+        #expect(throws: (any Error).self) { try decode(#"["author_updated",{"id":"au-1","libraryId":"lib-1"}]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["author_removed",{"libraryId":"lib-1"}]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["author_removed",{"id":"au-1"}]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["author_removed","au-1"]"#) }
     }
 }
