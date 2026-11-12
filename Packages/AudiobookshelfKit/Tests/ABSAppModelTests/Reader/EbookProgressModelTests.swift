@@ -842,6 +842,135 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await store.progress(for: key)?.ebookLocation == "4")
     }
 
+    /// A resume GET held while an audio-only update merges a baseline (still page 2) dated t+60:
+    /// the store rejects the held page 7, dated t+60 too. It ties the accepted baseline, so it
+    /// can't beat the unsent page 5 from t+10.
+    @Test func aRejectedFetchTiedWithTheAcceptedBaselineLosesToAnUnsentPage() async throws {
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "5", progress: 0.4)), for: key,
+            serverProgress: ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "2", lastUpdate: t0),
+            now: t0.addingTimeInterval(10))
+        service.server.value = serverProgress("7", progress: 0.6, at: t0.addingTimeInterval(60))
+        service.holdReaderFetches.value = true
+        let model = makeModel()
+        let resume = Task { await model.resume() }
+        #expect(await eventually { service.heldFetchCount == 1 })
+
+        let audioOnly = ProgressBaseline(
+            currentTime: 120, progress: 0.2, duration: 600, isFinished: false, ebookLocation: "2",
+            lastUpdate: t0.addingTimeInterval(60))
+        let merged = try await store.applyServerProgress(
+            [key: audioOnly], capturedAt: await store.captureGeneration(), source: .socket)
+        #expect(merged.contains(key))
+        #expect(try await store.progress(for: key)?.serverBaseline?.lastUpdate == t0.addingTimeInterval(60))
+        service.releaseReaderFetches()
+
+        #expect(await resume.value == EbookResumePoint(location: .page(5), progress: 0.4, source: .local))
+    }
+
+    /// The row's failed PATCH sent ("3", 0.2); a held GET returns another device's ("3", 0.8), and
+    /// a later local ("5", 0.4) makes the store reject it. The same location at another progress
+    /// isn't an echo of the send: the newer server value wins.
+    @Test func aFetchAtASentLocationWithOtherProgressIsNotAnEcho() async throws {
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "3", progress: 0.2)), for: key,
+            serverProgress: ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "2", lastUpdate: t0),
+            now: t0.addingTimeInterval(5))
+        let patch = try #require(try await store.beginSend(for: key, now: t0.addingTimeInterval(5)))
+        #expect(patch.values.ebook?.ebookLocation == "3")
+        service.server.value = serverProgress("3", progress: 0.8, at: t0.addingTimeInterval(20))
+        service.holdReaderFetches.value = true
+        let model = makeModel()
+        let resume = Task { await model.resume() }
+        #expect(await eventually { service.heldFetchCount == 1 })
+
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "5", progress: 0.4)), for: key, now: t0.addingTimeInterval(10))
+        service.releaseReaderFetches()
+
+        #expect(await resume.value == EbookResumePoint(location: .page(3), progress: 0.8, source: .server))
+    }
+
+    /// While ("3", 0.2)'s PATCH is in flight, a later ("3", 0.4) is saved; resume fetches the
+    /// PATCH's value dated after it. The store keeps 0.4 (the group is in flight), and the reader
+    /// opens at it, not at the raw server progress at the same location.
+    @Test func resumeKeepsAnInFlightRowsProgressAtTheSameLocation() async throws {
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "3", progress: 0.2)), for: key,
+            serverProgress: ProgressBaseline(
+                currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "2", lastUpdate: t0),
+            now: t0.addingTimeInterval(5))
+        _ = try #require(try await store.beginSend(for: key, now: t0.addingTimeInterval(5)))
+        try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "3", progress: 0.4)), for: key, now: t0.addingTimeInterval(10))
+        service.server.value = serverProgress("3", progress: 0.2, at: t0.addingTimeInterval(20))
+        let model = makeModel()
+
+        #expect(await model.resume() == EbookResumePoint(location: .page(3), progress: 0.4, source: .local))
+        #expect(try await store.progress(for: key)?.ebookProgress == 0.4)
+    }
+
+    /// With page 2's PATCH held, turns to pages 3 and 4 made while the clock stands still (or
+    /// steps back) are each saved: the later turn isn't dropped as older than the earlier one.
+    @Test(arguments: [0.0, -5.0])
+    func turnsAtARepeatedOrEarlierTimeAreAllSaved(laterOffset: TimeInterval) async throws {
+        service.server.value = serverProgress("1", at: t0)
+        let model = makeModel()
+        _ = await model.resume()
+        service.holdPatches.value = true
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        time.value = t0.addingTimeInterval(10)
+        turn(model, to: 2)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+        #expect(await eventually { service.heldCount == 1 })
+
+        turn(model, to: 3)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+        #expect(await stored("3"))
+        time.value = t0.addingTimeInterval(10 + laterOffset)
+        turn(model, to: 4)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+
+        #expect(await stored("4"))
+        service.releasePatches()
+        await model.flush()
+        #expect(service.writes.value.last?.update.ebookLocation == "4")
+    }
+
+    /// A turn to page 4 waits while the server's progress at the known page 2 moves from 0.2 to
+    /// 0.25 (another device, dated after the turn): that's a newer server edit, and the turn
+    /// isn't saved or sent over it.
+    @Test func aTurnOlderThanAServerProgressChangeAtTheSameLocationIsNotSent() async throws {
+        service.server.value = serverProgress("2", progress: 0.2, at: t0)
+        let model = makeModel()
+        _ = await model.resume()
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        time.value = t0.addingTimeInterval(10)
+        turn(model, to: 4)
+        #expect(await sleeps.next() == .seconds(2))
+
+        let elsewhere = ProgressBaseline(
+            currentTime: 0, progress: 0, duration: 0, isFinished: false, ebookLocation: "2", ebookProgress: 0.25,
+            lastUpdate: t0.addingTimeInterval(20))
+        service.server.value = serverProgress("2", progress: 0.25, at: t0.addingTimeInterval(20))
+        let merged = try await store.applyServerProgress(
+            [key: elsewhere], capturedAt: await store.captureGeneration(), source: .socket)
+        #expect(merged.contains(key))
+        time.value = t0.addingTimeInterval(30)
+        clock.advance(by: .seconds(2))
+        await model.flush()
+
+        #expect(!service.writes.value.contains { $0.update.ebookLocation == "4" })
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.ebookLocation == "2")
+        #expect(row.ebookProgress == 0.25)
+    }
+
     /// The first online resume keeps the server's position locally, so reopening offline
     /// without a page turn opens there too.
     @Test func anOnlineResumeIsKeptForAnOfflineReopen() async throws {

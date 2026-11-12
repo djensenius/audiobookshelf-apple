@@ -69,12 +69,16 @@ public final class EbookProgressModel {
     @ObservationIgnored private var saveTail: Task<Bool, Never>?
     /// The latest drain; the next drain waits for it. Readable for tests.
     @ObservationIgnored private(set) var drainTail: Task<Void, Never>?
-    /// The waiting turn, dated when it was recorded so a delayed or retried save keeps its age.
+    /// The waiting turn, dated and ordered when it was recorded so a delayed or retried save keeps
+    /// its age and its place.
     @ObservationIgnored private var unsaved:
-        (location: EbookLocation, progress: Double?, at: Date, knownLocations: [String?]?)?
-    /// The server ebook locations accounted for: the row's baseline, unsent and in-flight values
-    /// as last read, and the locations saved since. A turn takes a copy; `nil` before the first read.
-    @ObservationIgnored private var knownLocations: [String?]?
+        (
+            location: EbookLocation, progress: Double?, at: Date, intent: EbookTurnIntent,
+            knownPositions: [EbookPosition]?
+        )?
+    /// The server ebook positions accounted for: the row's baseline, unsent and in-flight values
+    /// as last read, and the values saved since. A turn takes a copy; `nil` before the first read.
+    @ObservationIgnored private var knownPositions: [EbookPosition]?
     /// Awaited by a save after it took the waiting turn, before writing it. Settable for tests,
     /// to turn a page during a local save.
     @ObservationIgnored var willSave: (@MainActor () async -> Void)?
@@ -130,8 +134,8 @@ public final class EbookProgressModel {
         Task {
             do {
                 try await store.recordEbookTurn(
-                    ebook, for: key, knownLocations: pending.knownLocations, serverProgress: seed,
-                    localLibraryItemID: itemID, now: pending.at)
+                    ebook, for: key, intent: pending.intent, knownPositions: pending.knownPositions,
+                    serverProgress: seed, localLibraryItemID: itemID, now: pending.at)
             } catch {
                 logger.error("Saving ebook progress on close failed: \(Self.caseName(error), privacy: .public)")
             }
@@ -194,26 +198,34 @@ public final class EbookProgressModel {
                 && EbookLocation(beforeMerge?.ebookLocation, style: style) != nil
             ? beforeMerge : local
         var server = knownServerProgress
-        if let unmerged, let savedAt = candidate?.ebookSavedAt,
-            Self.baseline(unmerged).map({ $0.lastUpdate <= savedAt }) ?? true
+        // Nor can it win against the server progress the row accepted since: a tie with that
+        // baseline's date is the accepted value's.
+        if let unmerged,
+            let floor = [candidate?.ebookSavedAt, candidate?.serverBaseline?.lastUpdate].compactMap({ $0 }).max(),
+            Self.baseline(unmerged).map({ $0.lastUpdate <= floor }) ?? true
         {
             server = nil
         }
         // A fetched value the store didn't take that echoes one of the row's own sends still
-        // awaiting acknowledgement isn't another device's page: its server date is the PATCH's,
-        // not the page's. A newer unsent location the row holds stays ahead of it.
+        // awaiting acknowledgement (the same position, as the store matches a send) isn't another
+        // device's page: its server date is the PATCH's, not the page's. A newer unsent location
+        // the row holds stays ahead of it.
         if let unmerged, let candidate, candidate.ebookDirty,
             EbookLocation(candidate.ebookLocation, style: style) != nil,
-            candidate.unacknowledgedSends.contains(where: { $0.ebook?.ebookLocation == unmerged.ebookLocation })
+            candidate.unacknowledgedSends.contains(where: { send in
+                guard let sent = send.ebook else { return false }
+                return EbookPosition(location: sent.ebookLocation, progress: sent.ebookProgress).acknowledgeable
+                    .contains { $0.matches(unmerged.ebookPosition) }
+            })
         {
             server = nil
         }
-        // The store merged the fetched value: the row holds its decision. A location it kept over
-        // the fetched one (a newer unsent turn, or one whose PATCH is in flight) mustn't lose to
-        // the raw value's date. The server stays a fallback when the row has nothing this reader
-        // can open, and the source of a location the row took from it.
-        if merged, EbookLocation(candidate?.ebookLocation, style: style) != nil,
-            candidate?.ebookLocation != server?.ebookLocation
+        // The store merged the fetched value: the row holds its decision. A position it kept over
+        // the fetched one (a newer unsent turn, or one whose PATCH is in flight), even at the same
+        // location, mustn't lose to the raw value's date. The server stays a fallback when the row
+        // has nothing this reader can open, and the source of a position the row took from it.
+        if merged, let candidate, EbookLocation(candidate.ebookLocation, style: style) != nil,
+            server.map({ !candidate.ebookPosition.matches($0.ebookPosition) }) ?? true
         {
             server = nil
         }
@@ -237,7 +249,7 @@ public final class EbookProgressModel {
         guard location != self.location || progress != self.progress else { return }
         self.location = location
         self.progress = progress
-        unsaved = (location, progress, now(), knownLocations)
+        unsaved = (location, progress, now(), EbookTurnIntent.next(), knownPositions)
         debounceTask?.cancel()
         let (clock, debounce) = (clock, debounce)
         debounceTask = Task { [weak self] in
@@ -276,17 +288,19 @@ public final class EbookProgressModel {
         }
     }
 
-    /// Takes the server ebook locations a row accounts for: its baseline's, its unsent value and
+    /// Takes the server ebook positions a row accounts for: its baseline's, its unsent value and
     /// its sends' (whose acknowledgement moves the baseline). Without a row, the seed's, which a
     /// first save copies into the new row's baseline.
     private func noteRead(_ row: LocalMediaProgressDTO?) {
         guard let row else {
-            knownLocations = [serverSeed?.ebookLocation]
+            knownPositions = [serverSeed?.ebookPosition ?? EbookPosition(location: nil, progress: nil)]
             return
         }
-        knownLocations =
-            [row.serverBaseline?.ebookLocation, row.ebookLocation]
-            + row.unacknowledgedSends.compactMap(\.ebook).map(\.ebookLocation)
+        knownPositions =
+            [row.serverBaseline?.ebookPosition].compactMap { $0 } + row.ebookPosition.acknowledgeable
+            + row.unacknowledgedSends.compactMap(\.ebook).map {
+                EbookPosition(location: $0.ebookLocation, progress: $0.ebookProgress)
+            }
     }
 
     /// Queues ``save()`` behind the previous save only. Its value is whether to drain.
@@ -337,20 +351,21 @@ public final class EbookProgressModel {
         do {
             guard
                 let row = try await store.recordEbookTurn(
-                    ebook, for: key, knownLocations: pending.knownLocations, serverProgress: serverSeed,
-                    localLibraryItemID: localLibraryItemID, now: pending.at)
+                    ebook, for: key, intent: pending.intent, knownPositions: pending.knownPositions,
+                    serverProgress: serverSeed, localLibraryItemID: localLibraryItemID, now: pending.at)
             else {
-                // A newer server location was merged since the turn: it wins, as it would have had
-                // the turn been saved at once.
-                logger.info("Dropped an ebook turn older than the server's location")
+                // A later turn was saved first, or a newer server position was merged since the
+                // turn: it wins, as it would have had the turn been saved at once.
+                logger.info("Dropped an ebook turn older than the saved position")
                 saveError = nil
                 return true
             }
-            knownLocations = (knownLocations ?? []) + [ebook.location]
-            // A turn recorded during this save took its snapshot before this location: the
+            let saved = EbookPosition(location: ebook.location, progress: ebook.progress).acknowledgeable
+            knownPositions = (knownPositions ?? []) + saved
+            // A turn recorded during this save took its snapshot before this position: the
             // acknowledgement of this save mustn't drop it as another device's newer page.
-            if var waiting = unsaved, let known = waiting.knownLocations {
-                waiting.knownLocations = known + [ebook.location]
+            if var waiting = unsaved, let known = waiting.knownPositions {
+                waiting.knownPositions = known + saved
                 unsaved = waiting
             }
             syncStateRevision += 1

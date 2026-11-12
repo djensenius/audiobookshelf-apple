@@ -126,6 +126,9 @@ public enum SessionUploadResult: Sendable, Equatable {
 
     // In memory only: no fetch or PATCH outlives the process.
     private var generation: UInt64 = 0
+    /// The latest ebook turn saved per row key, so an earlier one saved after it is dropped. In
+    /// memory: turns waiting to be saved don't outlive the process.
+    private var latestEbookTurns: [String: EbookTurnIntent] = [:]
     private var rowGenerations: [String: UInt64] = [:]
     /// Weak registrations are swept on every capture; storage is bounded by overlapping starts,
     /// not every media key ever seen. Abandoned/failed starts need no asynchronous cleanup task.
@@ -278,44 +281,44 @@ public enum SessionUploadResult: Sendable, Equatable {
             now: now, playbackToken: nil)
     }
 
-    /// Records an ebook location turned at `now` and saved later, unless it was superseded
-    /// meanwhile. The check and the write are one step on this actor. A turn is dropped when:
-    /// - the server's ebook location changed to one dated at or after the turn: a merge in between
-    ///   would have taken that location over the turn (the server wins ties), so saving the turn
-    ///   now would mark it dirty against that value and PATCH over it;
-    /// - the row holds an unsent ebook edit turned after it, for example by another reader of the
-    ///   same media: the turn's date, taken when it was made, orders it before that edit.
+    /// Records an ebook turn made at `now` and saved later, unless it was superseded meanwhile.
+    /// The checks and the write are one step on this actor. A turn is dropped when:
+    /// - a later turn of the same media was saved first, for example by another reader: `intent`
+    ///   orders them by when they were made, whatever the wall clock did;
+    /// - the server's ebook position changed to one dated at or after the turn: a merge in between
+    ///   would have taken that position over the turn (the server wins ties), so saving the turn
+    ///   now would mark it dirty against that value and PATCH over it.
     ///
     /// - Parameters:
-    ///   - knownLocations: The server ebook locations the editor accounted for when the turn was
-    ///     made: the row's ``LocalMediaProgressDTO/serverBaseline`` location as last read, and the
-    ///     locations it saved since, whose acknowledgement moves the baseline too. `nil` when
-    ///     unknown, which never drops the turn.
+    ///   - intent: When the turn was made, from ``EbookTurnIntent/next()``.
+    ///   - knownPositions: The server ebook positions the editor accounted for when the turn was
+    ///     made: the row's ``LocalMediaProgressDTO/serverBaseline`` as last read, and the values
+    ///     it saved since, whose acknowledgement moves the baseline too. Compared with
+    ///     ``EbookPosition/matches(_:)``. `nil` when unknown, which never drops the turn.
     ///   - serverProgress, localLibraryItemID: As for ``recordEdit(_:for:serverProgress:localLibraryItemID:now:)``.
-    /// - Returns: The saved row, or `nil` when the turn was dropped: the row's baseline is dated
-    ///   at or after `now` and holds a location not in `knownLocations`, or its unsent ebook edit
-    ///   is dated after `now`.
+    /// - Returns: The saved row, or `nil` when the turn was dropped.
     @discardableResult
     public func recordEbookTurn(
         _ ebook: ProgressEdit.Ebook,
         for key: MediaKey,
-        knownLocations: [String?]?,
+        intent: EbookTurnIntent,
+        knownPositions: [EbookPosition]?,
         serverProgress: ProgressBaseline? = nil,
         localLibraryItemID: UUID? = nil,
         now: Date
     ) throws -> LocalMediaProgressDTO? {
-        if let row = try fetchRow(key) {
-            let state = ProgressSyncState(row)
-            if row.ebookDirty, let savedAt = state.savedAt(.ebook), savedAt > now { return nil }
-            if let knownLocations, let baseline = state.serverBaseline, baseline.lastUpdate >= now,
-                baseline.ebookLocationIsUnknown != true, !knownLocations.contains(baseline.ebookLocation)
-            {
-                return nil
-            }
+        if let latest = latestEbookTurns[key.rawValue], latest > intent { return nil }
+        if let knownPositions, let row = try fetchRow(key), let baseline = ProgressSyncState(row).serverBaseline,
+            baseline.lastUpdate >= now, baseline.ebookLocationIsUnknown != true,
+            !knownPositions.contains(where: { $0.matches(baseline.ebookPosition) })
+        {
+            return nil
         }
-        return try recordEdit(
+        let saved = try recordEdit(
             ProgressEdit(ebook: ebook), for: key, serverProgress: serverProgress,
             localLibraryItemID: localLibraryItemID, now: now, playbackToken: nil)
+        latestEbookTurns[key.rawValue] = intent
+        return saved
     }
 
     @discardableResult

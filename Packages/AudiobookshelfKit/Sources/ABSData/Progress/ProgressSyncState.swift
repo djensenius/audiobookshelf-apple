@@ -503,7 +503,8 @@ struct ProgressSyncState: Sendable, Equatable {
             finishedAt: finishedAt, ebookLocation: ebookLocation, ebookProgress: ebookProgress, lastUpdate: lastUpdate)
     }
 
-    // Comparisons allow 1 s for `currentTime` and `duration` and 0.001 for `ebookProgress`. Audio
+    // Comparisons allow 1 s for `currentTime` and `duration` and 0.001 for `ebookProgress`
+    // (``EbookPosition``). Audio
     // `progress` isn't compared: the server rewrites it (1 when finishing or auto-finishing, 0
     // when un-finishing) and ignores a sent value equal to its old `currentTime / duration`.
     // Dates compare exactly at the server's resolution, whole milliseconds.
@@ -559,12 +560,7 @@ struct ProgressSyncState: Sendable, Equatable {
     }
 
     private static func ebookMatches(_ server: ProgressBaseline, _ location: String?, _ progress: Double?) -> Bool {
-        guard server.ebookLocation == location else { return false }
-        switch (server.ebookProgress, progress) {
-        case (nil, nil): return true
-        case (let lhs?, let rhs?): return abs(lhs - rhs) <= 0.001
-        default: return false
-        }
+        server.ebookPosition.matches(EbookPosition(location: location, progress: progress))
     }
 
     private static func datesMatch(_ lhs: Date?, _ rhs: Date?) -> Bool {
