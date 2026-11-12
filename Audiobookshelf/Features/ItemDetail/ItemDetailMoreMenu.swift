@@ -12,7 +12,8 @@ extension View {
 }
 
 /// The book screen's More menu (legacy `ItemMoreMenuModal.vue`): the entries
-/// ``ItemDetailModel/menuActions(canEditPlaylists:canShare:)`` offers. Progress actions go through
+/// ``ItemDetailMenuPresentation/actions(for:isGone:canEditPlaylists:canShare:canRoute:)`` offers;
+/// a 404 is remembered (``ItemDetailGoneState``) until the item loads again. Progress actions go through
 /// the environment's `itemActions`, which update the progress cache at once and roll back on
 /// failure; a failure shows an alert. Marking finished over progress and discarding ask first, in
 /// a centred alert as legacy `Dialog.confirm` did. Share links to the web client, so it needs
@@ -32,18 +33,23 @@ private struct ItemDetailMoreMenu: ViewModifier {
     @State private var failureKey: String?
     @State private var showsFailure = false
     @State private var showsDetails = false
+    @State private var goneState = ItemDetailGoneState()
 
     /// The playlist editor doesn't exist yet.
     private static let canEditPlaylists = false
 
     private var actions: [ItemDetailMenuAction] {
-        model.menuActions(canEditPlaylists: Self.canEditPlaylists, canShare: serverURL != nil)
-            .filter { $0 != .history || router != nil }
+        ItemDetailMenuPresentation.actions(
+            for: model, isGone: goneState.isGone(ItemDetailGoneState.Snapshot(model: model)),
+            canEditPlaylists: Self.canEditPlaylists, canShare: serverURL != nil, canRoute: router != nil)
     }
 
     func body(content: Content) -> some View {
         let actions = actions
         content
+            .onChange(of: ItemDetailGoneState.Snapshot(model: model), initial: true) { _, snapshot in
+                goneState.update(snapshot)
+            }
             .toolbar {
                 if !actions.isEmpty {
                     ToolbarItem(placement: .primaryAction) {

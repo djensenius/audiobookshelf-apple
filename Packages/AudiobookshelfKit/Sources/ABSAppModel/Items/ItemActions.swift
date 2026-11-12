@@ -229,6 +229,8 @@ public final class ProgressItemActions: ItemActionPerforming {
         else { throw CancellationError() }
         do {
             if let id = try await writer.progressID(itemID: target.libraryItemID, episodeID: target.episodeID) {
+                // Signed out or switched account during the lookup: don't delete through the old writer.
+                guard cache.isCurrent(session) else { throw CancellationError() }
                 do {
                     try await writer.deleteProgress(id: id)
                 } catch APIError.notFound {

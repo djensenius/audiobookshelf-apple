@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSUI
@@ -22,6 +23,25 @@ private final class RecordingMenuActions: ItemActionPerforming {
     private func record(_ name: String, _ target: ItemActionTarget) throws {
         calls.append((name, target))
         if let error { throw error }
+    }
+}
+
+/// Serves the item until told to fail.
+private actor SwitchableItemService: ItemDetailService {
+    let item: ABSCore.LibraryItem
+    private var error: (any Error)?
+
+    init(item: ABSCore.LibraryItem) {
+        self.item = item
+    }
+
+    func fail(with error: (any Error)?) {
+        self.error = error
+    }
+
+    func item(id: String) async throws -> ABSCore.LibraryItem {
+        if let error { throw error }
+        return item
     }
 }
 
@@ -79,6 +99,42 @@ private let english = Locale(identifier: "en")
             #expect(await ItemDetailMenuPresentation.perform(action, on: book, actions: actions) == nil)
         }
         #expect(actions.calls.count == 4)
+    }
+
+    @Test func goneItemKeepsProgressActionsOffUntilItLoads() async {
+        let service = SwitchableItemService(item: ItemDetailPreviewData.book)
+        let cache = ProgressCache()
+        cache.apply(ItemDetailPreviewData.inProgress)
+        let model = ItemDetailModel(itemID: ItemDetailPreviewData.book.id, service: service, cache: cache)
+        var gone = ItemDetailGoneState()
+        // What the menu offers, and what a confirmed action is checked against.
+        func actions() -> [ItemDetailMenuAction] {
+            let snapshot = ItemDetailGoneState.Snapshot(model: model)
+            gone.update(snapshot)
+            return ItemDetailMenuPresentation.actions(
+                for: model, isGone: gone.isGone(snapshot), canEditPlaylists: false, canShare: false, canRoute: true)
+        }
+        await model.load()
+        #expect(actions().contains(.discardProgress))
+
+        await service.fail(with: APIError.notFound)
+        await model.load()
+        #expect(actions() == [.details, .history])
+
+        // A retry that times out hides the model's 404, but the item is still known to be gone:
+        // a discard confirmed now is no longer offered, so it isn't sent.
+        await service.fail(with: APIError.timedOut)
+        await model.load()
+        #expect(actions() == [.details, .history])
+        #expect(!actions().contains(.discardProgress))
+
+        await service.fail(with: nil)
+        await model.load()
+        #expect(actions().contains(.discardProgress))
+        #expect(
+            ItemDetailMenuPresentation.actions(
+                for: model, isGone: false, canEditPlaylists: false, canShare: false, canRoute: false
+            ).contains(.history) == false)
     }
 
     @Test func discardIsDestructive() {

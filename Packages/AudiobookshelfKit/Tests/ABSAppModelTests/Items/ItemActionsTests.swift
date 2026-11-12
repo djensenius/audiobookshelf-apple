@@ -35,6 +35,9 @@ private struct GatedWriter: ProgressWriting {
     let serverProgressIDs = Locked<[String: String?]>([:])
     /// Thrown by the next progress ID lookups.
     let resolveError = Locked<TestError?>(nil)
+    /// While set, progress ID lookups are held in `lookups` until the test replies.
+    let holdsLookups = Locked(false)
+    let lookups = GatedCalls<String, String?>()
     /// The most requests in flight at once, for the per-key serialization.
     let concurrency = Concurrency()
     /// Each write as it arrives, and the test's own markers, in order.
@@ -49,6 +52,7 @@ private struct GatedWriter: ProgressWriting {
 
     func progressID(itemID: String, episodeID: String?) async throws -> String? {
         if let error = resolveError.value { throw error }
+        if holdsLookups.value { return try await lookups.call(itemID) }
         if let id = serverProgressIDs.value[itemID] { return id }
         return "mp-\(itemID)"
     }
@@ -512,6 +516,29 @@ private func makeActions(_ cache: ProgressCache, _ writer: any ProgressWriting) 
         #expect(delete.request == "srv-uuid")
         delete.reply.resume(returning: ())
         try await discard.value
+        #expect(cache.progress(libraryItemID: "item") == nil)
+    }
+
+    @Test func discardSignedOutDuringLookupSendsNoDelete() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress())
+        let writer = GatedWriter()
+        writer.holdsLookups.value = true
+        let actions = makeActions(cache, writer)
+        var lookups = writer.lookups.calls.makeAsyncIterator()
+        // Answers a delete, should one be sent, so the test fails rather than hangs.
+        let deletes = Task { for await call in writer.deletes.calls { call.reply.resume(returning: ()) } }
+        defer { deletes.cancel() }
+
+        let discard = Task { try await actions.discardProgress(ItemActionTarget(libraryItemID: "item")) }
+        let lookup = try #require(await lookups.next())
+        // Sign-out or an account switch clears the cache while the lookup is pending.
+        cache.clear()
+        lookup.reply.resume(returning: "mp-item")
+
+        let result = await discard.result
+        #expect(throws: CancellationError.self) { try result.get() }
+        #expect(!writer.log.value.contains { $0.hasPrefix("delete") })
         #expect(cache.progress(libraryItemID: "item") == nil)
     }
 

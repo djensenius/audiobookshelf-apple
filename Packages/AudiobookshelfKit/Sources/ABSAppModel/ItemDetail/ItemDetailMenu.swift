@@ -19,18 +19,19 @@ extension ItemDetailModel {
     /// The More menu's entries for the loaded book and the user's progress, in menu order.
     ///
     /// - Nothing until a book has loaded (podcasts have their own screen).
-    /// - A book missing or invalid on the server, or gone (the last load answered 404), offers
-    ///   only Share, More info and History: its progress and playlists can't change.
+    /// - A book missing or invalid on the server, or gone, offers only Share, More info and
+    ///   History: its progress and playlists can't change. `isGone` is the screen's remembered
+    ///   404 (the app's `ItemDetailGoneState`), which holds through a pending retry and a retry
+    ///   that fails another way, until a load succeeds; a current 404 counts as gone either way.
     /// - Mark as finished, or Mark as not finished once finished.
     /// - Discard progress with any progress above 0, ebook progress included (legacy
     ///   `progressPercent > 0`).
     /// - Hide from Continue Listening while in progress and not hidden, as on cards
     ///   (`ItemAction.available`).
     /// - Add to playlist and Share only when the caller can perform them.
-    public func menuActions(canEditPlaylists: Bool, canShare: Bool) -> [ItemDetailMenuAction] {
+    public func menuActions(canEditPlaylists: Bool, canShare: Bool, isGone: Bool) -> [ItemDetailMenuAction] {
         guard let item, item.book != nil else { return [] }
-        // TODO(#345): share the gone check with the app's `ItemDetailGoneState` once slice A lands.
-        let present = !item.isMissing && !item.isInvalid && (error as? APIError) != .notFound
+        let present = !item.isMissing && !item.isInvalid && !isGone && (error as? APIError) != .notFound
         var actions: [ItemDetailMenuAction] = []
         if present {
             actions.append(isFinished ? .markNotFinished : .markFinished)

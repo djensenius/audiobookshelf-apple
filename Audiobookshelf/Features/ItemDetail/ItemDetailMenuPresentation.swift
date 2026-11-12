@@ -5,6 +5,19 @@ import SwiftUI
 /// What the book screen's More menu shows for each ``ItemDetailMenuAction`` and how it performs
 /// the progress actions. Built apart from the view so the rules can be tested.
 enum ItemDetailMenuPresentation {
+    /// The entries to offer, and to recheck when a confirmed action runs: the model's
+    /// ``ItemDetailModel/menuActions(canEditPlaylists:canShare:isGone:)``, without History when
+    /// there is no router to push it on (previews). `isGone` is the screen's
+    /// ``ItemDetailGoneState``, so a retry that fails after a 404 doesn't bring the progress
+    /// actions back for a deleted item.
+    @MainActor
+    static func actions(
+        for model: ItemDetailModel, isGone: Bool, canEditPlaylists: Bool, canShare: Bool, canRoute: Bool
+    ) -> [ItemDetailMenuAction] {
+        model.menuActions(canEditPlaylists: canEditPlaylists, canShare: canShare, isGone: isGone)
+            .filter { $0 != .history || canRoute }
+    }
+
     /// The key of the entry's title (legacy `ItemMoreMenuModal.vue` wording).
     static func titleKey(for action: ItemDetailMenuAction) -> String {
         switch action {

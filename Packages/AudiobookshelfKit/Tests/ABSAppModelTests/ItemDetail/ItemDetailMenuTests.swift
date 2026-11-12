@@ -48,23 +48,26 @@ private func loadedModel(
 @Suite struct ItemDetailMenuTests {
     @Test func notLoadedHasNoActions() async {
         let model = ItemDetailModel(itemID: "li-1", service: MenuItemService(item: makeBook()), cache: ProgressCache())
-        #expect(model.menuActions(canEditPlaylists: true, canShare: true).isEmpty)
+        #expect(model.menuActions(canEditPlaylists: true, canShare: true, isGone: false).isEmpty)
 
         let podcast = LibraryItem(
             id: "li-1", libraryId: "lib", mediaType: .podcast,
             media: .podcast(Podcast(id: "pod", metadata: PodcastMetadata(title: "Show"))))
-        #expect(await loadedModel(podcast).menuActions(canEditPlaylists: true, canShare: true).isEmpty)
+        #expect(await loadedModel(podcast).menuActions(canEditPlaylists: true, canShare: true, isGone: false).isEmpty)
     }
 
     @Test func unstartedOffersMarkFinishedDetailsHistory() async {
         let model = await loadedModel()
-        #expect(model.menuActions(canEditPlaylists: false, canShare: false) == [.markFinished, .details, .history])
+        #expect(
+            model.menuActions(canEditPlaylists: false, canShare: false, isGone: false) == [
+                .markFinished, .details, .history,
+            ])
     }
 
     @Test func inProgressAddsDiscardAndHide() async {
         let model = await loadedModel(progress: progress(0.4))
         #expect(
-            model.menuActions(canEditPlaylists: false, canShare: false) == [
+            model.menuActions(canEditPlaylists: false, canShare: false, isGone: false) == [
                 .markFinished, .discardProgress, .hideFromContinueListening, .details, .history,
             ])
     }
@@ -72,27 +75,32 @@ private func loadedModel(
     @Test func finishedOffersMarkNotFinishedAndDiscard() async {
         let model = await loadedModel(progress: progress(1, finished: true))
         #expect(
-            model.menuActions(canEditPlaylists: false, canShare: false) == [
+            model.menuActions(canEditPlaylists: false, canShare: false, isGone: false) == [
                 .markNotFinished, .discardProgress, .details, .history,
             ])
     }
 
     @Test func hiddenProgressOmitsHide() async {
         let model = await loadedModel(progress: progress(0.4, hidden: true))
-        #expect(!model.menuActions(canEditPlaylists: false, canShare: false).contains(.hideFromContinueListening))
-        #expect(model.menuActions(canEditPlaylists: false, canShare: false).contains(.discardProgress))
+        #expect(
+            !model.menuActions(canEditPlaylists: false, canShare: false, isGone: false).contains(
+                .hideFromContinueListening))
+        #expect(model.menuActions(canEditPlaylists: false, canShare: false, isGone: false).contains(.discardProgress))
     }
 
     @Test func ebookOnlyProgressOffersDiscard() async {
         let model = await loadedModel(progress: progress(0, ebook: 0.25))
-        #expect(model.menuActions(canEditPlaylists: false, canShare: false).contains(.discardProgress))
+        #expect(model.menuActions(canEditPlaylists: false, canShare: false, isGone: false).contains(.discardProgress))
         #expect(model.confirmationMessageKey(for: .markFinished) == "MessageConfirmMarkAsFinished")
     }
 
     @Test func missingItemOffersNoProgressActions() async {
         for item in [makeBook(isMissing: true), makeBook(isInvalid: true)] {
             let model = await loadedModel(item, progress: progress(0.4))
-            #expect(model.menuActions(canEditPlaylists: true, canShare: true) == [.share, .details, .history])
+            #expect(
+                model.menuActions(canEditPlaylists: true, canShare: true, isGone: false) == [
+                    .share, .details, .history,
+                ])
         }
 
         // Deleted on the server since it loaded: the reload answered 404.
@@ -104,27 +112,34 @@ private func loadedModel(
         service.fails.value = .notFound
         await model.load()
         #expect(model.hasLoaded)
-        #expect(model.menuActions(canEditPlaylists: true, canShare: false) == [.details, .history])
+        #expect(model.menuActions(canEditPlaylists: true, canShare: false, isGone: false) == [.details, .history])
 
-        // Another failure keeps the actions.
+        // A retry that fails another way leaves the model's 404 behind, so the screen passes the
+        // 404 it remembers (`ItemDetailGoneState`): still only Share, More info and History.
         service.fails.value = .timedOut
         await model.load()
-        #expect(model.menuActions(canEditPlaylists: false, canShare: false).first == .markFinished)
+        #expect(
+            model.menuActions(canEditPlaylists: true, canShare: true, isGone: true) == [.share, .details, .history])
+
+        // Loaded again: the actions come back.
+        service.fails.value = nil
+        await model.load()
+        #expect(model.menuActions(canEditPlaylists: false, canShare: false, isGone: false).first == .markFinished)
     }
 
     @Test func playlistOnlyWhenEditable() async {
         let model = await loadedModel()
-        #expect(!model.menuActions(canEditPlaylists: false, canShare: true).contains(.addToPlaylist))
+        #expect(!model.menuActions(canEditPlaylists: false, canShare: true, isGone: false).contains(.addToPlaylist))
         #expect(
-            model.menuActions(canEditPlaylists: true, canShare: true) == [
+            model.menuActions(canEditPlaylists: true, canShare: true, isGone: false) == [
                 .markFinished, .addToPlaylist, .share, .details, .history,
             ])
     }
 
     @Test func shareOnlyWhenAvailable() async {
         let model = await loadedModel()
-        #expect(!model.menuActions(canEditPlaylists: false, canShare: false).contains(.share))
-        #expect(model.menuActions(canEditPlaylists: false, canShare: true).contains(.share))
+        #expect(!model.menuActions(canEditPlaylists: false, canShare: false, isGone: false).contains(.share))
+        #expect(model.menuActions(canEditPlaylists: false, canShare: true, isGone: false).contains(.share))
     }
 
     @Test func confirmationKeys() async {
