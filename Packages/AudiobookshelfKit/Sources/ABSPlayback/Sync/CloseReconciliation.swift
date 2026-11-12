@@ -43,7 +43,8 @@ extension ProgressSyncer {
     /// ``reconcileTolerance``, a record holding all of these and the close applied it. One at
     /// `ackedTotal`, or at `ackedTotal + inFlightTotal`, didn't, unless it also matches the close
     /// applied without the `/sync`; any other can't tell. (`inFlightTotal` is 0 whenever an
-    /// earlier report's outcome is unknown too: the second match would prove nothing then.)
+    /// earlier report's outcome is unknown too, unreconciled or its lookup failed: the second
+    /// match would prove nothing then.)
     /// The server stores no record before the session has listening time: with nothing
     /// acknowledged and every record on the page, a missing one shows nothing applied, the
     /// `/sync` included.

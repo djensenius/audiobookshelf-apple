@@ -230,6 +230,58 @@ struct CloseReconciliationTests {
         #expect(f.s.syncer.closeQueue.carried.map(\.seconds) == (earlierUnknown ? [] : [5]))
     }
 
+    /// A snapshot dropped after its lookup failed leaves its outcome unknown for good: here the
+    /// lost 10 s were applied, so the stored 30 s also match 15 acked plus an unapplied 15 s
+    /// `/sync` still out at the close. The `/sync` isn't allowed for, so only "applied" holds and
+    /// the close's 5 s aren't carried a second time.
+    @Test func aSyncStillOutIsNotAllowedForAfterAFailedLookup() async throws {
+        let f = try CloseRetryFixture()
+        let late = CloseRetryFixture.Request(.unapplied)
+        defer { late.release() }
+        await f.s.coordinator.play(itemID: "a")
+        await f.s.play(for: 15)
+        let lost = CloseRetryFixture.Request(.appliedResponseLost)
+        lost.release()
+        await f.model.enqueue(lost, for: .sync)
+        await f.s.play(for: 10)
+        await f.s.syncer.flush()
+        f.s.h.clock.advance(by: f.s.syncer.reconcileDelay)
+        let lookup = CloseRetryFixture.Request(.unapplied)
+        lookup.release()
+        await f.model.enqueue(lookup, for: .lookup)
+        await f.s.syncer.flush()
+        #expect(f.s.service.log.filter { $0.hasPrefix("lookup") }.count == 1)
+        await f.model.enqueue(late, for: .sync)
+        await f.s.play(for: 15, settling: false)
+        await late.arrived.wait()
+        late.enter.open()
+        late.apply.open()
+        await late.applicationFinished.wait()
+        await f.s.play(for: 5, settling: false)
+        let close = CloseRetryFixture.Request(.appliedResponseLost)
+        close.release()
+        await f.model.enqueue(close, for: .close)
+        f.s.coordinator.stop()
+        late.respond.open()
+        await f.s.coordinator.waitForPendingCloses()
+        await f.s.settle()
+        await f.s.syncer.closeQueue.waitForCaptures()
+
+        let kept = try #require(try await f.queued().first)
+        #expect(kept.timeListened == 5)
+        #expect(kept.ackedTotal == 15)
+        #expect(kept.inFlightTotal == 0)
+        #expect(try await f.listened("session-1") == 30)
+
+        await f.model.restart()
+        await f.drainWhenDue()
+
+        #expect(f.verdicts == [.send])
+        #expect(f.s.service.closes.map(\.id) == ["session-1"])
+        #expect(try await f.queued().isEmpty)
+        #expect(f.s.syncer.closeQueue.carried.isEmpty)
+    }
+
     /// A close whose resend admission keeps holding back (here, every read of the server's
     /// progress fails) stays until its session must have ended, `closeSessionLifetime` after its
     /// capture. Then the drain settles it by the stored record, resending nothing.

@@ -116,6 +116,9 @@ public final class ProgressSyncer {
         /// An ambiguously failed report's listening time, how much of it was already a resend
         /// (which isn't resent again), and the monotonic time the client gave up on it.
         var unreconciled: (delta: TimeInterval, resent: TimeInterval, failedAt: TimeInterval)?
+        /// A snapshot was dropped after its lookup failed, its outcome unknown: the server may hold
+        /// more than `ackedTotal` until a later lookup reads its total.
+        var hasUnknownOutcome = false
         /// Of `listened`, the time a reconciliation recovered: already sent once, so a later
         /// ambiguous failure doesn't resend it. Consumed and restored together with `listened`.
         var recovered: TimeInterval = 0
@@ -218,11 +221,14 @@ public final class ProgressSyncer {
             guard let self else { return nil }
             // Read before closeReport ends the session: a 404's lookup compares with them. A
             // `/sync` still out may apply after the close; the lookup allows for that only when
-            // no earlier report's outcome is unknown too, so either outcome tells.
+            // no earlier report's outcome is unknown too (unreconciled, or dropped after a failed
+            // lookup), so either outcome tells.
             let session = current?.sessionID == closing.sessionID ? current : nil
             let ackedTotal = session?.ackedTotal ?? 0
             var inFlightTotal: TimeInterval = 0
-            if let session, session.unreconciled == nil, let sync = inFlightSync, sync.sessionID == session.sessionID {
+            if let session, session.unreconciled == nil, !session.hasUnknownOutcome,
+                let sync = inFlightSync, sync.sessionID == session.sessionID
+            {
                 inFlightTotal = sync.listened
             }
             guard let handoff = closeReport(for: closing) else { return nil }
@@ -647,6 +653,7 @@ public final class ProgressSyncer {
         do {
             serverTotal = try await service.openSession(id: sessionID).timeListening
         } catch {
+            if current?.ownership == ownership { current?.hasUnknownOutcome = true }
             logDroppedSnapshot(snapshot.delta, reason: "the session lookup failed (\(Self.caseName(error)))")
             return
         }
@@ -656,6 +663,7 @@ public final class ProgressSyncer {
         }
         let acked = session.ackedTotal
         current?.ackedTotal = serverTotal
+        current?.hasUnknownOutcome = false
         if serverTotal >= acked + snapshot.delta - Self.reconcileTolerance {
             return
         }
