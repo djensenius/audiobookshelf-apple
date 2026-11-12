@@ -48,6 +48,20 @@ private struct FeatureClient: LibraryService, ItemDetailService, SearchService, 
     func playlistDetail(id: String) async throws -> Playlist { throw reached() }
 }
 
+/// A client that knows its server address.
+private struct AddressedClient: LibraryService, ServerURLProviding {
+    var library = FakeLibraryService()
+    let url: URL
+
+    func libraries() async throws -> [Library] { try await library.libraries() }
+    func library(id: String) async throws -> LibraryWithFilterData { try await library.library(id: id) }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
+        try await library.items(libraryID: libraryID, query: query)
+    }
+    func serverURL() async -> URL { url }
+}
+
 /// A feature request and the fake client method it must reach.
 struct StoreServiceForwarding: Sendable, CustomTestStringConvertible {
     let method: String
@@ -165,6 +179,29 @@ private let forwardings: [StoreServiceForwarding] = [
             }
             // Library requests still reach the client.
             #expect(try await services.libraries().isEmpty)
+        }
+    }
+
+    @Test func serverURLComesFromTheCurrentClient() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let url = try #require(URL(string: "https://abs.example.com/audiobookshelf"))
+            await store.connect(client: AddressedClient(url: url), connectionKey: serverA)
+            let services = try #require(store.makeServices())
+            #expect(try await services.serverURL() == url)
+
+            // A reconnect of the same account to a new address is followed.
+            let moved = try #require(URL(string: "https://new.example.com"))
+            await store.connect(client: AddressedClient(url: moved), connectionKey: serverA)
+            #expect(try await services.serverURL() == moved)
+
+            // A client that can't tell, and no client at all.
+            await store.connect(client: FakeLibraryService(), connectionKey: serverA)
+            await #expect(throws: LibraryStoreError.serviceUnavailable("ServerURLProviding")) {
+                try await services.serverURL()
+            }
+            store.clear()
+            await #expect(throws: CancellationError.self) { try await services.serverURL() }
         }
     }
 }

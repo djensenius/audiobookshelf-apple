@@ -26,19 +26,40 @@ import SwiftUI
 /// The gate must not switch away on
 /// ``AccountState/restoring``, which resuming a saved server passes through. Removing the view
 /// cancels the flow, but a resume it started isn't stopped and can still make that account
-/// active. Showing this flow while already signed in requires a lifecycle-managed account
-/// change; that account-page integration is separate.
+/// active.
+///
+/// While signed in (adding a server from the server list), pass the `lifecycle`: each sign-in is
+/// then a lifecycle-managed account change, which keeps the other accounts' sessions. The flow
+/// starts at a new server's address, and `onCancel` adds a Cancel button where there's no Back.
 struct ConnectFlowView: View {
     @State private var model: ConnectViewModel
+    private let lifecycle: SessionLifecycle?
     private let onFinish: () -> Void
+    private let onCancel: (() -> Void)?
 
-    init(accounts: AccountManager, onFinish: @escaping () -> Void = {}) {
-        _model = State(initialValue: ConnectViewModel(accounts: accounts))
+    init(
+        accounts: AccountManager, lifecycle: SessionLifecycle? = nil, onCancel: (() -> Void)? = nil,
+        onFinish: @escaping () -> Void = {}
+    ) {
+        let model = ConnectViewModel(accounts: accounts, lifecycle: lifecycle)
+        if lifecycle != nil { model.startAddingServer() }
+        _model = State(initialValue: model)
+        self.lifecycle = lifecycle
         self.onFinish = onFinish
+        self.onCancel = onCancel
     }
 
     var body: some View {
-        ConnectFlowStack(model: model, onFinish: onFinish)
+        // While another window's account change runs, nothing here may start one; its own
+        // sign-in moves the gate off ready too, so that only counts when idle.
+        ConnectFlowStack(
+            model: model, onFinish: onFinish, onCancel: onCancel,
+            isEnabled: model.isBusy || lifecycle?.acceptsAccountChanges != false
+        )
+        // In the add-server sheet, a sign-in (an OpenID one waits for the browser) keeps running
+        // when the stack disappears; Cancel stops it, so a swipe can't dismiss the sheet meanwhile.
+        .interactiveDismissDisabled(model.isBusy)
+        .onChange(of: model.isStale) { if model.isStale { onCancel?() } }
     }
 }
 
@@ -46,11 +67,15 @@ struct ConnectFlowView: View {
 struct ConnectFlowStack: View {
     let model: ConnectViewModel
     var onFinish: () -> Void = {}
+    var onCancel: (() -> Void)?
+    /// Whether the steps' controls take input; the toolbar's Back and Cancel always do.
+    var isEnabled = true
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
             content
+                .disabled(!isEnabled)
                 .navigationTitle(Text(verbatim: title))
                 .toolbar {
                     DiagnosticsToolbar()
@@ -60,6 +85,12 @@ struct ConnectFlowStack: View {
                                 model.goBack()
                             } label: {
                                 Text(verbatim: L10n.string(model.isBusy ? "ButtonCancel" : "ButtonBack"))
+                            }
+                        }
+                    } else if let onCancel, !model.isBusy {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button(action: onCancel) {
+                                Text(verbatim: L10n.string("ButtonCancel"))
                             }
                         }
                     }

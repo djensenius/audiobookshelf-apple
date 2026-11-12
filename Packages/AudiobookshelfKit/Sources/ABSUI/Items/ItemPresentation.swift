@@ -129,7 +129,8 @@ private struct ItemHoverModifier: ViewModifier {
 }
 
 extension View {
-    func itemHover() -> some View {
+    /// The pointer feedback of ABSUI's cards and rows, for app cards that sit beside them.
+    public func itemHover() -> some View {
         modifier(ItemHoverModifier())
     }
 }
