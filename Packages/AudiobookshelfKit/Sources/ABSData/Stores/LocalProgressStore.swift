@@ -681,6 +681,8 @@ public enum SessionUploadResult: Sendable, Equatable {
             mergedAt[key.rawValue] = nil
             awaitingFetch[key.rawValue] = nil
             ebookSentLast.remove(key.rawValue)
+            // Ebook edits reserved before the deletion are discarded with the row; later ones stay.
+            committedEbookEdits[key] = ebookEditSequence.withLock { $0 }
         }
         return deleted
     }

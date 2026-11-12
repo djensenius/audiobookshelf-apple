@@ -311,6 +311,24 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(model.lastError == nil)
     }
 
+    /// A turn whose save failed is discarded with the row: retrying it neither recreates the row
+    /// nor sends it. A later turn is saved and sent.
+    @Test func aFailedTurnIsDiscardedWithItsRow() async throws {
+        try await cleanRow("2")
+        let model = makeModel()
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        turn(model, to: 4)
+        #expect(await model.saveTail?.value == false)
+        #expect(try await store.deleteProgress(for: key))
+
+        await model.flush()
+        #expect(try await store.progress(for: key) == nil)
+        #expect(service.writes.value.isEmpty)
+        turn(model, to: 5)
+        await model.flush()
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["5"])
+    }
+
     /// A turn made while the debounced task waits for a save cancels that task, so the new turn
     /// gets its own quiet period before anything is sent.
     @Test func aNewTurnCancelsADrainWaitingForItsSave() async throws {
@@ -710,6 +728,17 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
 
         #expect(await makeModel(kind).resume() == expected)
         #expect(try await row().currentTime == 200)
+    }
+
+    /// A newer location that is valid for no format replaces a clean row's page, and the reader
+    /// opens at the start rather than at the page the row held before.
+    @Test(arguments: ["2.5", "", "0"])
+    func aMalformedMergedLocationIsNotRestored(location: String) async throws {
+        try await cleanRow("4", progress: 0.3)
+        service.server.value = serverProgress(location, progress: 0.5, at: t0.addingTimeInterval(60))
+
+        #expect(await makeModel().resume() == .beginning)
+        #expect(try await row().ebookLocation == location)
     }
 
     /// A newer server value that clears the location clears a clean row, and the reader opens at
