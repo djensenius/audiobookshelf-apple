@@ -30,6 +30,7 @@ final class FakeAudioEngine: AudioEngineProtocol {
         isPlaybackRequested = false
     }
     func stop() { calls.append("stop") }
+    func unload() { calls.append("unload") }
     func seek(to time: Double) async -> SeekResult {
         calls.append("seek")
         if seekResult == .completed { currentTime = time }

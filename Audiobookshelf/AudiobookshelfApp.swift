@@ -23,6 +23,7 @@ struct AudiobookshelfApp: App {
         .commands {
             SearchCommands()
             RefreshCommands()
+            GoCommands()
         }
         // The system relaunches the app for finished background downloads; this waits until
         // the download engine has processed every event before the system suspends it again.
