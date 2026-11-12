@@ -59,6 +59,9 @@ final class FakeProgressServer: ProgressSyncService, EbookProgressService {
 
     func syncSession(id: String, report: PlaybackSyncReport) async throws {}
 
+    /// No playback sessions: none is ever open.
+    func openSession(id: String) async throws -> PlaybackSession { throw APIError.notFound }
+
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {
         let row = try await store.progress(for: key)
         writes.value.append(Write(update: update, localLocation: row?.ebookLocation, localDirty: row?.ebookDirty))
