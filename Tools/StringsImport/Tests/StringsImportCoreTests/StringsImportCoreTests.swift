@@ -524,8 +524,77 @@ import Testing
         #expect(mentioned.isDisjoint(with: ["ButtonInComment", "LabelInDocComment", "LabelOptedOut", "HeaderNotAKey"]))
     }
 
+    /// Comments are blanked out wherever they are, and only comments: line numbers are kept.
+    @Test func ignoresCommentsButNotCodeAroundThem() {
+        let source = file(
+            #"""
+            let value = 0 // L10n.string("LabelRemoved")
+            /* explanation */ L10n.string("LabelMissing")
+            /*
+             L10n.string("LabelInBlock")
+             let old = "HeaderInBlock" /* nested */ "HeaderNested"
+            */
+            let url = "https://abs.example.com"; let key = "ButtonAfterURL"
+            let raw = #"a // "b" "#; let next = "ToastAfterRaw"
+            let text = """
+                /* not a comment */ "LabelInMultiline"
+                """
+            let x = 1 /* a */ + 2 /* "LabelInInline" */; let y = "NoteAfterInline"
+            """#)
+        let (required, mentioned) = SourceScanner.keyReferences(in: [source])
+        #expect(
+            required.map(\.description) == [
+                "Audiobookshelf/Features/A/A.swift:2: LabelMissing",
+                "Audiobookshelf/Features/A/A.swift:7: ButtonAfterURL",
+                "Audiobookshelf/Features/A/A.swift:8: ToastAfterRaw",
+                "Audiobookshelf/Features/A/A.swift:10: LabelInMultiline",
+                "Audiobookshelf/Features/A/A.swift:12: NoteAfterInline",
+            ])
+        #expect(
+            mentioned.isDisjoint(with: [
+                "LabelRemoved", "LabelInBlock", "HeaderInBlock", "HeaderNested", "LabelInInline",
+            ]))
+    }
+
+    /// A call wrapped after `(` still has its literal checked, key prefix or not, at the literal's line.
+    @Test func findsKeysInWrappedCalls() {
+        let source = file(
+            """
+            let summary = L10n.string(
+                "MesageStatsChartSummary", count)
+            let title = L10n.attributed(
+
+                "LabelWrapped")
+            let opted = L10n.string(
+                "NotAKeyOptedOut") // l10n-ignore: an example
+            let notLiteral = L10n.string(
+                key)
+            """)
+        let (required, mentioned) = SourceScanner.keyReferences(in: [source])
+        #expect(
+            required.map(\.description) == [
+                "Audiobookshelf/Features/A/A.swift:2: MesageStatsChartSummary",
+                "Audiobookshelf/Features/A/A.swift:5: LabelWrapped",
+            ])
+        #expect(!mentioned.contains("NotAKeyOptedOut"))
+    }
+
+    /// No hard-coded string hides in a block comment's lines, and none is hidden by one.
+    @Test func flagsHardCodedStringsOnlyOutsideComments() {
+        let source = file(
+            """
+            /*
+            Text("Hello")
+            */
+            /* why */ Text("Shown")
+            """)
+        #expect(SourceScanner.hardCodedStrings(in: source, keys: []).map(\.line) == [4])
+    }
+
     @Test(arguments: [
         #"Text("Hello")"#,
+        #"Text("Hello") // a trailing comment"#,
+        #"Text("\(name.replacingOccurrences(of: "\"", with: "")) books")"#,
         #"Text(verbatim: "Hello")"#,
         #"Button("Play") { play() }"#,
         #"Label("Downloads", systemImage: "arrow.down")"#,
@@ -558,6 +627,8 @@ import Testing
         #"Image(systemName: "play.fill")"#,
         #"MyText("Hello")"#,
         #"// Text("Hello") in a comment"#,
+        #"let x = 1 /* Text("Hello") */"#,
+        #"Text("\(name.replacingOccurrences(of: "\"", with: ""))")"#,
         #"Text(verbatim: "https://abs.example.com") // l10n-ignore: an example"#,
     ])
     func allowsKeysSymbolsAndOptOuts(line: String) {

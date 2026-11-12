@@ -3,6 +3,14 @@ import Foundation
 /// Scans the native Swift sources for the string keys they use and for hard-coded user-facing
 /// strings. A line containing ``ignoreMarker`` (or following a comment line that does) is skipped
 /// by both scans.
+///
+/// Comments are blanked out first by a small lexer (``SourceFile/codeText``) that knows string
+/// literals (multi-line `"""` and raw `#"…"#` ones included), their interpolations and nested
+/// block comments, so a `//` inside a string isn't a comment and a quote inside a comment isn't a
+/// string. It is not a Swift parser: regex literals (`/"/`) aren't recognized, so a quote in one
+/// can misread the rest of that line (a single-line string ends at its line); the hard-coded string
+/// scan looks only at a view or modifier and its literal on one line; and a key passed through a
+/// variable is found only if it has a key prefix (``isKeyShaped(_:)``).
 public enum SourceScanner {
     /// Swift sources whose keys must exist in the source strings files.
     public static let keyPaths = ["Audiobookshelf", "Packages/AudiobookshelfKit/Sources"]
@@ -21,18 +29,29 @@ public enum SourceScanner {
             self.text = text
         }
 
-        /// Code lines with their 1-based numbers: comment lines and opted-out lines are dropped.
-        var codeLines: [(number: Int, text: Substring)] {
-            var result: [(Int, Substring)] = []
+        /// The 1-based numbers of the opted-out lines: those containing ``ignoreMarker``, and the
+        /// line after a comment-only line that does. Found before comments are blanked.
+        var ignoredLines: Set<Int> {
+            var result: Set<Int> = []
             var ignoreNext = false
             for (index, line) in text.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
                 let trimmed = line.drop { $0.isWhitespace }
                 let isComment = trimmed.hasPrefix("//") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("*")
-                let ignored = ignoreNext || line.contains(ignoreMarker)
+                if ignoreNext || line.contains(ignoreMarker) { result.insert(index + 1) }
                 ignoreNext = isComment && line.contains(ignoreMarker)
-                if !isComment, !ignored { result.append((index + 1, line)) }
             }
             return result
+        }
+
+        /// The text with every comment's characters replaced by spaces (newlines kept), so offsets
+        /// and line numbers match ``text``.
+        var codeText: String { String(decoding: SourceLexer.blankingComments(Array(text.utf8)), as: UTF8.self) }
+
+        /// The lines of ``codeText`` with their 1-based numbers, opted-out lines dropped.
+        var codeLines: [(number: Int, text: Substring)] {
+            let ignored = ignoredLines
+            return codeText.split(separator: "\n", omittingEmptySubsequences: false).enumerated()
+                .compactMap { index, line in ignored.contains(index + 1) ? nil : (index + 1, line) }
         }
     }
 
@@ -95,25 +114,67 @@ public enum SourceScanner {
         var required: [KeyReference] = []
         var mentioned: Set<String> = []
         for file in files {
+            let code = Array(file.codeText.utf8)
+            let ignored = file.ignoredLines
+            // Calls may wrap after `(`, so they're matched in the whole text, at the literal's line.
+            var callKeys: [Int: Set<String>] = [:]
+            for (line, literal) in l10nCallKeys(in: code) where !ignored.contains(line) {
+                mentioned.insert(literal)
+                callKeys[line, default: []].insert(literal)
+            }
             for (number, line) in file.codeLines {
                 guard line.contains("\"") else { continue }
-                var keys: Set<String> = []
+                var keys = callKeys[number] ?? []
                 for literal in identifierLiterals(in: line) {
                     mentioned.insert(literal)
                     if isKeyShaped(literal) { keys.insert(literal) }
-                }
-                // Checked first: Regex is slow in debug builds.
-                let calls =
-                    line.contains("L10n.") ? line.matches(of: /L10n\.(?:string|attributed|plural)\(\s*"([^"\\]+)"/) : []
-                for match in calls {
-                    let literal = String(match.output.1)
-                    mentioned.insert(literal)
-                    keys.insert(literal)
                 }
                 required += keys.sorted().map { KeyReference(key: $0, path: file.path, line: number) }
             }
         }
         return (required, mentioned)
+    }
+
+    /// The literal first arguments of `L10n.string(`, `L10n.attributed(` and `L10n.plural(` in
+    /// `code` (comments blanked), with the 1-based line of each literal. Whitespace and newlines may
+    /// come between `(` and the literal. Found without Regex, which is slow in debug builds.
+    static func l10nCallKeys(in code: [UInt8]) -> [(line: Int, key: String)] {
+        let prefix = Array("L10n.".utf8)
+        let names = ["string(", "attributed(", "plural("].map { Array($0.utf8) }
+        var result: [(Int, String)] = []
+        var line = 1
+        var index = 0
+        while index < code.count {
+            if code[index] == UInt8(ascii: "\n") { line += 1 }
+            guard code[index...].starts(with: prefix) else {
+                index += 1
+                continue
+            }
+            index += prefix.count
+            guard let name = names.first(where: { code[index...].starts(with: $0) }) else { continue }
+            index += name.count
+            while index < code.count,
+                code[index] == UInt8(ascii: " ") || code[index] == UInt8(ascii: "\t")
+                    || code[index] == UInt8(ascii: "\n") || code[index] == UInt8(ascii: "\r")
+            {
+                if code[index] == UInt8(ascii: "\n") { line += 1 }
+                index += 1
+            }
+            guard index < code.count, code[index] == UInt8(ascii: "\""),
+                !code[index...].starts(with: Array("\"\"\"".utf8))
+            else { continue }
+            var end = index + 1
+            while end < code.count, ![UInt8(ascii: "\""), UInt8(ascii: "\\"), UInt8(ascii: "\n")].contains(code[end]) {
+                end += 1
+            }
+            if end > index + 1, end < code.count, code[end] == UInt8(ascii: "\"") {
+                result.append((line, String(decoding: code[(index + 1)..<end], as: UTF8.self)))
+                index = end + 1
+            } else {
+                index += 1
+            }
+        }
+        return result
     }
 
     /// The contents of `"…"` spans in `line` that are identifiers (`"LabelFoo"`), found without
@@ -197,13 +258,16 @@ public enum SourceScanner {
                 index = line.index(after: index)
                 guard index < line.endIndex else { return nil }
                 if line[index] == "(" {
-                    // Skip the interpolation, nested parentheses and strings included.
+                    // Skip the interpolation, nested parentheses and strings (and their escapes) included.
                     var depth = 1
                     var inString = false
                     while depth > 0 {
                         index = line.index(after: index)
                         guard index < line.endIndex else { return nil }
                         switch line[index] {
+                        case "\\" where inString:
+                            index = line.index(after: index)
+                            guard index < line.endIndex else { return nil }
                         case "\"": inString.toggle()
                         case "(" where !inString: depth += 1
                         case ")" where !inString: depth -= 1
