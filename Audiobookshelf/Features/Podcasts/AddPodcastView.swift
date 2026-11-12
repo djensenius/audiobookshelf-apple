@@ -188,8 +188,7 @@ private struct AddPodcastResultRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: ABSSpacing.medium) {
             CoverView(
-                key: AddPodcastPresentation.coverKey(
-                    url: result.cover, id: result.itunesID ?? result.feedURL, serverID: serverID),
+                key: AddPodcastPresentation.coverKey(url: result.cover, serverID: serverID),
                 title: result.title, author: result.artistName, shape: .square, accessibility: .hidden
             )
             .frame(width: 64)
@@ -239,10 +238,11 @@ enum AddPodcastPresentation {
         return (access, library)
     }
 
-    /// The external artwork at `url`, cached under `id`; `nil` without a URL or while signed out.
-    static func coverKey(url: String?, id: String?, serverID: UUID?) -> ImageKey? {
+    /// The external artwork at `url`; `nil` without a URL or while signed out. The entity ID is fixed so no feed URL
+    /// (which may carry a private token) reaches the cache file name; the key's hash of `url` tells covers apart.
+    static func coverKey(url: String?, serverID: UUID?) -> ImageKey? {
         guard let url, let externalURL = URL(string: url), let serverID else { return nil }
-        return CoverRef(entityID: "add-podcast-\(id ?? url)", externalURL: externalURL).key(serverID: serverID)
+        return CoverRef(entityID: "add-podcast", externalURL: externalURL).key(serverID: serverID)
     }
 }
 

@@ -30,8 +30,7 @@ struct NewPodcastForm: View {
             Section {
                 HStack(alignment: .top, spacing: ABSSpacing.medium) {
                     CoverView(
-                        key: AddPodcastPresentation.coverKey(
-                            url: draft.imageURL, id: draft.feedURL, serverID: serverID),
+                        key: AddPodcastPresentation.coverKey(url: draft.imageURL, serverID: serverID),
                         title: draft.title, author: draft.author, shape: .square, accessibility: .hidden
                     )
                     .frame(width: 80)
