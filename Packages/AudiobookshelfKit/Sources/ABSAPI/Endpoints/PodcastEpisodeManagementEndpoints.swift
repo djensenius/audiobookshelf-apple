@@ -2,8 +2,9 @@ import Foundation
 
 /// Server-side episode management for a podcast in the library (legacy
 /// `components/tables/podcast/EpisodesTable.vue`, `PodcastEpisodesFeedModal.vue` and the episode
-/// page), as the server's `PodcastController` handles it at v2.26.0. The feed lookup and the
-/// download stay on origin: their bodies hold feed and episode URLs.
+/// page), as the server's `PodcastController` handles it at v2.26.0. Every request stays on
+/// origin: the feed lookup and the download carry feed and episode URLs, and the queue clear and
+/// removal change the server, so a redirect to another host must not count as success.
 public enum PodcastEpisodeManagementEndpoints {
     /// `POST /api/podcasts/feed` with `{"rssFeed": url}`: the feed's episodes, for choosing new
     /// ones. Admin and root only (403 otherwise); 400 for an invalid URL and 404 when the feed
@@ -23,7 +24,7 @@ public enum PodcastEpisodeManagementEndpoints {
     /// `GET /api/podcasts/:id/clear-queue`: drops the podcast's queued episode downloads. Admin and
     /// root only (403 otherwise).
     public static func clearDownloadQueue(podcastID: String) -> Endpoint<EmptyResponse> {
-        Endpoint(.get, "/api/podcasts/\(pathSegment(podcastID))/clear-queue")
+        Endpoint(.get, "/api/podcasts/\(pathSegment(podcastID))/clear-queue", staysOnOrigin: true)
     }
 
     /// `DELETE /api/podcasts/:id/episode/:episodeId`: removes the episode from the library and,
@@ -34,7 +35,7 @@ public enum PodcastEpisodeManagementEndpoints {
     {
         Endpoint(
             .delete, "/api/podcasts/\(pathSegment(podcastID))/episode/\(pathSegment(episodeID))",
-            query: deleteFile ? [URLQueryItem(name: "hard", value: "1")] : [])
+            query: deleteFile ? [URLQueryItem(name: "hard", value: "1")] : [], staysOnOrigin: true)
     }
 
     struct FeedRequest: Encodable, Sendable {

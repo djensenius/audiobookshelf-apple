@@ -37,7 +37,6 @@ import Testing
         let object = try #require(try body(request) as? [String: Any])
         #expect(object.count == 1)
         #expect(object["rssFeed"] as? String == "https://example.com/feed.xml")
-        #expect(PodcastEpisodeManagementEndpoints.feedEpisodes(rssFeed: "x").staysOnOrigin)
     }
 
     /// The server's parse at v2.26.0: blank strings read as missing, the enclosure URL is trimmed,
@@ -85,7 +84,6 @@ import Testing
         let feed = try #require(JSONSerialization.jsonObject(with: fixture) as? [String: Any])
         let original = try #require((feed["podcast"] as? [String: Any])?["episodes"] as? NSArray)
         #expect(sent == NSArray(array: Array(original.prefix(2))))
-        #expect(PodcastEpisodeManagementEndpoints.downloadEpisodes(podcastID: "p", episodes: []).staysOnOrigin)
     }
 
     @Test func clearDownloadQueueRequest() async throws {
@@ -108,6 +106,37 @@ import Testing
         #expect(request.url?.absoluteString.contains("/abs/api/podcasts/li-1/episode/ep%2F1") == true)
         #expect(request.url?.query() == (deleteFile ? "hard=1" : nil))
         #expect(request.httpBody == nil)
+    }
+
+    /// Each request carries URLs or changes the server, so none follows a redirect off the origin.
+    @Test func everyEndpointStaysOnOrigin() {
+        #expect(PodcastEpisodeManagementEndpoints.feedEpisodes(rssFeed: "x").staysOnOrigin)
+        #expect(PodcastEpisodeManagementEndpoints.downloadEpisodes(podcastID: "p", episodes: []).staysOnOrigin)
+        #expect(PodcastEpisodeManagementEndpoints.clearDownloadQueue(podcastID: "p").staysOnOrigin)
+        #expect(
+            PodcastEpisodeManagementEndpoints.removeEpisode(podcastID: "p", episodeID: "e", deleteFile: true)
+                .staysOnOrigin)
+        #expect(
+            PodcastEpisodeManagementEndpoints.removeEpisode(podcastID: "p", episodeID: "e", deleteFile: false)
+                .staysOnOrigin)
+    }
+
+    /// A clear or removal redirected to another host is refused before that host is contacted, so
+    /// its 2xx can't read as success.
+    @Test(arguments: [307, 308])
+    func crossOriginRedirectOfAMutationIsRefused(status: Int) async throws {
+        let other = StubServer { _ in .text("OK", status: 200) }
+        let origin = StubServer { _ in .redirect(to: "https://\(other.host)/x", status: status) }
+        let client = try makeClient(origin)
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await client.send(PodcastEpisodeManagementEndpoints.clearDownloadQueue(podcastID: "li-1"))
+        }
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await client.send(
+                PodcastEpisodeManagementEndpoints.removeEpisode(podcastID: "li-1", episodeID: "ep-1", deleteFile: true))
+        }
+        #expect(other.requests.isEmpty)
+        #expect(origin.requests.count == 2)
     }
 
     @Test func rawJSONRoundTrips() throws {
