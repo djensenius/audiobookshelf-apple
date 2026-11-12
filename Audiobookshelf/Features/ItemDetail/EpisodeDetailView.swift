@@ -27,7 +27,7 @@ struct EpisodeDetailView: View {
     var body: some View {
         Group {
             if let host, host.key == key {
-                EpisodeDetailScreen(model: host.model, serverURL: host.serverURL)
+                EpisodeDetailScreen(model: host.model, serverURL: host.serverURL, playlists: host.services)
             } else if key == nil || unavailableKey == key {
                 ErrorStateView(title: L10n.string("MessageEpisodeDetailUnavailable"), systemImage: "waveform")
                     .navigationTitle(Text(verbatim: L10n.string("LabelEpisode")))
@@ -83,6 +83,8 @@ struct EpisodeDetailScreen: View {
     let model: EpisodeDetailModel
     /// The server's address, for the More menu's Share; without it there is no Share.
     var serverURL: URL?
+    /// The account's playlist writes, for the More menu's Add to playlist; without them there is no Add to playlist.
+    var playlists: (any PlaylistEditingService)?
 
     var body: some View {
         content
@@ -90,7 +92,7 @@ struct EpisodeDetailScreen: View {
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
-            .episodeDetailMoreMenu(model: model, serverURL: serverURL)
+            .episodeDetailMoreMenu(model: model, serverURL: serverURL, playlists: playlists)
     }
 
     @ViewBuilder private var content: some View {
