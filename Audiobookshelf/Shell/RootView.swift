@@ -23,6 +23,9 @@ struct RootView: View {
     var library: LibraryParticipant?
     /// Given to the signed-in shell as `\.imagePipeline`; screens outside it see `nil`.
     var imagePipeline: ImagePipeline?
+    /// The account session's playback, given to the signed-in shell as `\.playItem`,
+    /// `\.bookmarkStore` and `\.sleepTimer` (``PlaybackEnvironment``).
+    var playback: PlaybackSessionParticipant?
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var links = SceneLinks()
@@ -75,6 +78,18 @@ struct RootView: View {
         return store
     }
 
+    /// `participant` while the active account is `identity`'s, `nil` otherwise. During a switch
+    /// the outgoing shell stays up after `accounts` moved on, and must not play, bookmark or time
+    /// with the next account's session.
+    static func playback(
+        _ participant: PlaybackSessionParticipant?, accounts: AccountManager?, for identity: SessionIdentity
+    ) -> PlaybackSessionParticipant? {
+        guard let accounts, let active = accounts.activeConnection,
+            active.id == identity.connectionID, active.userId == identity.userID
+        else { return nil }
+        return participant
+    }
+
     /// One link waits at a time: the last one received wins, including over a confirmed server
     /// switch's link (``SceneLinks``).
     private func receive(_ link: DeepLink) {
@@ -115,6 +130,7 @@ struct RootView: View {
             )
             .environment(\.imagePipeline, imagePipeline)
             .id(identity)
+            .modifier(PlaybackEnvironment(participant: Self.playback(playback, accounts: accounts, for: identity)))
             // Only while the store serves this shell's account: during a switch the outgoing
             // shell stays up after the store attached the next account, and must not build
             // services or read progress for it with its own library and item IDs.

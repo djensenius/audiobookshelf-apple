@@ -50,6 +50,13 @@ struct AppPlayback {
                 return accounts.features
             },
             requestSignOut: { [weak lifecycle] in lifecycle?.requestSignOut(of: $0) },
+            // Each session's bookmarks are unavailable while the session is offline.
+            makeBookmarks: { [weak lifecycle] in
+                BookmarkStore(isOffline: {
+                    guard let gate = lifecycle?.gate, case .ready(_, let isOffline) = gate else { return false }
+                    return isOffline
+                })
+            },
             makeScope: { Self.makeScope(for: $0, settings: settings, policy: policy) })
         lifecycle.register(participant, stage: .progressSource)
         return AppPlayback(current: current, player: player, writer: writer, participant: participant)
@@ -82,12 +89,18 @@ struct AppPlayback {
     }
 }
 
-/// Sets `\.playItem` to the signed-in account's, or `nil` between sessions. A view modifier, so it
-/// follows the participant as each session starts and ends.
+/// Sets `\.playItem`, `\.bookmarkStore` and `\.sleepTimer` from the running account session's
+/// playback, each `nil` between sessions; the sleep timer is `nil` until the scope has one (#185).
+/// A view modifier, so it follows the participant as each session starts and ends. The signed-in
+/// shell passes the participant only while it serves the shell's account
+/// (``RootView/playback(_:accounts:for:)``).
 struct PlaybackEnvironment: ViewModifier {
     let participant: PlaybackSessionParticipant?
 
     func body(content: Content) -> some View {
-        content.environment(\.playItem, participant?.playItem)
+        content
+            .environment(\.playItem, participant?.playItem)
+            .environment(\.bookmarkStore, participant?.bookmarks)
+            .environment(\.sleepTimer, participant?.sleepTimer)
     }
 }

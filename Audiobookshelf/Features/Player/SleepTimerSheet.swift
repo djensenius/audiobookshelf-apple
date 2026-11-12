@@ -4,8 +4,9 @@ import ABSUI
 import SwiftUI
 
 extension EnvironmentValues {
-    /// The sleep timer for the player, or `nil` until the app installs one (#183): then the
-    /// toolbar's sleep timer button is disabled.
+    /// The sleep timer for the player, from the account session's playback scope. It is `nil`
+    /// while signed out and until the scope has one (#185): then the toolbar's sleep timer
+    /// button is disabled.
     @Entry var sleepTimer: SleepTimer? = nil
 }
 

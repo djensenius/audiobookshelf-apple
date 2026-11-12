@@ -703,6 +703,25 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
+    // MARK: Playback
+
+    @Test func theSignedInShellGetsTheActiveAccountsPlayback() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let participant = try #require(environment.playback.participant)
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        #expect(RootView.playback(participant, accounts: accounts, for: b) === participant)
+        #expect(participant.playItem != nil && participant.bookmarks != nil)
+        // The outgoing shell of a switch, still up for A after accounts moved to B, gets none.
+        #expect(RootView.playback(participant, accounts: accounts, for: a) == nil)
+        #expect(RootView.playback(participant, accounts: nil, for: b) == nil)
+
+        _ = await environment.lifecycle.signOut()
+        #expect(RootView.playback(participant, accounts: accounts, for: b) == nil)
+        #expect(participant.playItem == nil && participant.bookmarks == nil)
+    }
+
     // MARK: Server switch for a link
 
     @Test func aLinkForAnotherServerSwitchesOnlyOnceConfirmed() async throws {

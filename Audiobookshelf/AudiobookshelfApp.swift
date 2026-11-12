@@ -17,11 +17,10 @@ struct AudiobookshelfApp: App {
             RootView(
                 lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts,
                 library: environment.library,
-                imagePipeline: environment.images.pipeline
+                imagePipeline: environment.images.pipeline, playback: environment.playback.participant
             )
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
-            .modifier(PlaybackEnvironment(participant: environment.playback.participant))
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {
@@ -63,6 +62,7 @@ struct AudiobookshelfApp: App {
                     .environment(settings)
                     .environment(\.imagePipeline, environment.images.pipeline)
                     .environment(\.libraryStore, environment.library?.store)
+                    .modifier(PlaybackEnvironment(participant: environment.playback.participant))
                     .modifier(AppThemeModifier(settings: settings))
             }
             .restorationBehavior(.disabled)
