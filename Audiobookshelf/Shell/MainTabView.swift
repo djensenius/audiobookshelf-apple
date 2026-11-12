@@ -53,6 +53,7 @@ struct MainTabView<Root: View>: View {
             .tabBarMinimizeBehavior(.onScrollDown)
         #endif
         .modifier(PlayerSlot(router: router, player: player))
+        .modifier(SceneLibrarySync(router: router))
         .onChange(of: horizontalSizeClass) { _, sizeClass in
             router.normalize(isCompact: sizeClass == .compact)
         }
@@ -69,6 +70,12 @@ struct MainTabView<Root: View>: View {
                 root(tab, router.librarySection)
                     .navigationDestination(for: Route.self) { route in
                         RouteDestination(route: route)
+                    }
+                    .toolbar {
+                        // The sidebar header picks the library in regular width.
+                        if horizontalSizeClass == .compact, tab.isLibraryScoped, tab != .search {
+                            LibraryPickerToolbar()
+                        }
                     }
             }
             // Screens and their pushed routes know which tab's stack they're on, so a hidden tab's copy of the same

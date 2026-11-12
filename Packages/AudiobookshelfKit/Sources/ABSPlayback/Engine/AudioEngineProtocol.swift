@@ -96,6 +96,10 @@ public enum AudioEngineEvent: Sendable, Hashable {
     /// The last track played to its end.
     case endOfMedia
     case failed(AudioEngineError)
+    /// The audio output went away (``AudioEngineProtocol/pauseForOutputLoss()``), even if nothing
+    /// was playing, so a play intent held outside the engine (recovery, a resume awaiting its
+    /// seek) is dropped rather than restarting audio on the speaker.
+    case outputLost
 }
 
 /// Activates the platform audio session around playback. Implemented by `AudioSessionController` on
@@ -122,6 +126,9 @@ public protocol AudioEngineProtocol: AnyObject, Observable {
     var defaultRate: Float { get }
     /// Whether the user asked to play; stays `true` while buffering or seeking.
     var isPlaybackRequested: Bool { get }
+    /// ``isPlaybackRequested`` when the latest ``AudioEngineEvent/failed(_:)`` happened: the
+    /// failure clears it, and recovery resumes only playback that was wanted.
+    var wasPlaybackRequestedAtFailure: Bool { get }
     /// Target of the latest seek until a seek to it completes.
     var pendingSeekTarget: Double? { get }
     /// Whether the engine has activated its audio session to play: set once activation succeeds,
@@ -136,6 +143,8 @@ public protocol AudioEngineProtocol: AnyObject, Observable {
     func load(_ source: AudioEngineSource, at time: Double) async throws(AudioEngineError)
     func play()
     func pause()
+    /// Pauses because the output went away, then reports ``AudioEngineEvent/outputLost``.
+    func pauseForOutputLoss()
     /// Clears the queue and deactivates the audio session.
     func stop()
     /// Clears the queue as ``stop()`` does but leaves the audio session active, for switching
