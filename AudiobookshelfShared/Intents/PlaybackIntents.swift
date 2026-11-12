@@ -56,15 +56,14 @@ enum PlaybackIntentError: Error, Equatable, CustomLocalizedStringResourceConvert
 }
 
 // Every playback intent is an ``AudioPlaybackIntent``, so it runs in the app process even when a
-// widget or control in the extension starts it. They're hidden from Shortcuts until the app
-// registers its player with ``PlaybackIntentRouter`` (#183).
+// widget or control in the extension starts it. Until the app registers its player with
+// ``PlaybackIntentRouter`` (#183), each fails with ``PlaybackIntentError/playerUnavailable``.
 
 /// Resumes the current book or episode, or the last one played.
 struct ResumeListeningIntent: AudioPlaybackIntent {
     static let title = LocalizedStringResource("IntentResumeListeningTitle", table: "AppIntents")
     static let description = IntentDescription(
         LocalizedStringResource("IntentResumeListeningDescription", table: "AppIntents"))
-    static let isDiscoverable = false
 
     @MainActor
     func perform() async throws -> some IntentResult {
@@ -77,7 +76,6 @@ struct ResumeListeningIntent: AudioPlaybackIntent {
 struct PauseIntent: AudioPlaybackIntent {
     static let title = LocalizedStringResource("IntentPauseTitle", table: "AppIntents")
     static let description = IntentDescription(LocalizedStringResource("IntentPauseDescription", table: "AppIntents"))
-    static let isDiscoverable = false
 
     @MainActor
     func perform() async throws -> some IntentResult {
@@ -91,7 +89,6 @@ struct TogglePlaybackIntent: AudioPlaybackIntent {
     static let title = LocalizedStringResource("IntentTogglePlaybackTitle", table: "AppIntents")
     static let description = IntentDescription(
         LocalizedStringResource("IntentTogglePlaybackDescription", table: "AppIntents"))
-    static let isDiscoverable = false
 
     @MainActor
     func perform() async throws -> some IntentResult {
@@ -116,7 +113,6 @@ enum JumpDirection: String, AppEnum {
 struct JumpIntent: AudioPlaybackIntent {
     static let title = LocalizedStringResource("IntentJumpTitle", table: "AppIntents")
     static let description = IntentDescription(LocalizedStringResource("IntentJumpDescription", table: "AppIntents"))
-    static let isDiscoverable = false
 
     @Parameter(title: LocalizedStringResource("IntentJumpDirection", table: "AppIntents"), default: .forward)
     var direction: JumpDirection
@@ -157,7 +153,6 @@ struct SetSleepTimerIntent: AudioPlaybackIntent {
     static let title = LocalizedStringResource("IntentSetSleepTimerTitle", table: "AppIntents")
     static let description = IntentDescription(
         LocalizedStringResource("IntentSetSleepTimerDescription", table: "AppIntents"))
-    static let isDiscoverable = false
 
     @Parameter(title: LocalizedStringResource("IntentSleepTimerLength", table: "AppIntents"), default: .minutes)
     var length: SleepTimerLength
@@ -187,7 +182,6 @@ struct SetPlaybackSpeedIntent: AudioPlaybackIntent {
     static let title = LocalizedStringResource("IntentSetPlaybackSpeedTitle", table: "AppIntents")
     static let description = IntentDescription(
         LocalizedStringResource("IntentSetPlaybackSpeedDescription", table: "AppIntents"))
-    static let isDiscoverable = false
 
     @Parameter(
         title: LocalizedStringResource("IntentPlaybackSpeed", table: "AppIntents"), default: 1,
