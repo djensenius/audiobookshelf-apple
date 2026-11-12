@@ -15,6 +15,8 @@ struct SleepTimerSlotPresentation: Equatable {
     let countdownText: String?
     /// Whether the running timer started automatically, marked with a filled moon.
     let isAutomatic: Bool
+    /// The moon, filled for the automatic timer.
+    var symbolName: String { isAutomatic ? "moon.zzz.fill" : "moon.zzz" }
     let accessibilityLabel: String
     /// "15 minutes remaining", by the minute until the last minute, so VoiceOver doesn't read a new
     /// value every second; `nil` when no timer runs.
@@ -31,7 +33,11 @@ struct SleepTimerSlotPresentation: Equatable {
         countdownText = Self.countdown(remaining, locale: locale)
         self.isAutomatic = isAutomatic
         let value = L10n.string("LabelTimeRemaining", Self.spokenRemaining(remaining, locale: locale), locale: locale)
-        accessibilityValue = isAutomatic ? "\(L10n.string("LabelAutoSleepTimer", locale: locale)), \(value)" : value
+        accessibilityValue =
+            isAutomatic
+            ? [L10n.string("LabelAutoSleepTimer", locale: locale), value].formatted(
+                .list(type: .and, width: .narrow).locale(locale))
+            : value
     }
 
     /// The time left as a timestamp, rounded up so a 15-minute timer starts at `15:00`.
@@ -48,7 +54,8 @@ struct SleepTimerSlotPresentation: Equatable {
 }
 
 /// The toolbar's sleep timer button: the moon when idle, the countdown while a timer runs (a
-/// filled moon before it for the automatic timer). Disabled without a timer. It reads the
+/// filled moon before it for the automatic timer), and only the moon in a vertical bar (iPhone
+/// Duo, ADR 0004), where the countdown would clip. Disabled without a timer. It reads the
 /// countdown itself, so only this button redraws every tick.
 struct SleepTimerSlot: View {
     let model: PlayerViewModel
@@ -62,23 +69,24 @@ struct SleepTimerSlot: View {
         Button {
             sheet = .sleepTimer
         } label: {
-            if let countdown = presentation.countdownText {
-                HStack(spacing: ABSSpacing.xSmall) {
-                    if presentation.isAutomatic {
-                        Image(systemName: "moon.zzz.fill")
-                    }
-                    Text(verbatim: countdown)
-                        .monospacedDigit()
+            #if os(iOS)
+                if #available(iOS 27.1, *) {
+                    VerticalBarAwareSlotLabel(presentation: presentation)
+                } else {
+                    SleepTimerSlotLabel(presentation: presentation, iconOnly: false)
                 }
-            } else {
-                Label {
-                    Text(verbatim: presentation.accessibilityLabel)
-                } icon: {
-                    Image(systemName: "moon.zzz")
-                }
-            }
+            #else
+                SleepTimerSlotLabel(presentation: presentation, iconOnly: false)
+            #endif
         }
         .help(Text(verbatim: presentation.accessibilityLabel))
+        .accessibilityShowsLargeContentViewer {
+            Label {
+                Text(verbatim: presentation.countdownText ?? presentation.accessibilityLabel)
+            } icon: {
+                Image(systemName: presentation.symbolName)
+            }
+        }
         .accessibilityLabel(Text(verbatim: presentation.accessibilityLabel))
         .accessibilityValue(Text(verbatim: presentation.accessibilityValue ?? ""))
         .accessibilityAddTraits(presentation.countdownText == nil ? [] : .updatesFrequently)
@@ -86,10 +94,47 @@ struct SleepTimerSlot: View {
     }
 }
 
+/// The slot's label: the countdown while a timer runs, unless `iconOnly`, else the moon.
+private struct SleepTimerSlotLabel: View {
+    let presentation: SleepTimerSlotPresentation
+    let iconOnly: Bool
+
+    var body: some View {
+        if let countdown = presentation.countdownText, !iconOnly {
+            HStack(spacing: ABSSpacing.xSmall) {
+                if presentation.isAutomatic {
+                    Image(systemName: presentation.symbolName)
+                }
+                Text(verbatim: countdown)
+                    .monospacedDigit()
+            }
+        } else {
+            Label {
+                Text(verbatim: presentation.accessibilityLabel)
+            } icon: {
+                Image(systemName: presentation.symbolName)
+            }
+        }
+    }
+}
+
+#if os(iOS)
+    /// Shows only the moon when the bar is vertical; the time left stays in the accessibility value.
+    @available(iOS 27.1, *)
+    private struct VerticalBarAwareSlotLabel: View {
+        let presentation: SleepTimerSlotPresentation
+        @Environment(\.toolbarVerticalEdge) private var verticalEdge
+
+        var body: some View {
+            SleepTimerSlotLabel(presentation: presentation, iconOnly: verticalEdge != nil)
+        }
+    }
+#endif
+
 /// The sleep timer sheet (port of `SleepTimerModal.vue`). Idle, it lists the lengths to start;
 /// while a timer runs, the time left with −/+ 5 minutes and Cancel Timer (Disable Auto Timer, after
 /// a confirmation, for the automatic timer). For two minutes after the timer paused playback, it
-/// offers to restart it.
+/// offers to restart or cancel it.
 struct SleepTimerSheet: View {
     let model: PlayerViewModel
     let close: () -> Void
@@ -129,16 +174,13 @@ private struct SleepTimerPanel: View {
             switch state {
             case .idle:
                 lengths
-            case .restartable:
+            case .restartable(let isAutomatic):
                 Section {
-                    Text(
-                        verbatim: L10n.string(
-                            "MessageSleepTimerCanRestart",
-                            MinutesFormatting.string(
-                                minutes: Int(SleepTimer.gracePeriod / 60), spoken: true, locale: locale)))
+                    Text(verbatim: L10n.string("MessageSleepTimerCanRestart"))
                     Button {
-                        panel.restart()
-                        close()
+                        // Past the deadline the grace task hasn't noticed yet, the restart fails and the
+                        // state turns idle, showing the lengths.
+                        if panel.restart() { close() }
                     } label: {
                         Label {
                             Text(verbatim: L10n.string("ButtonRestartSleepTimer"))
@@ -149,6 +191,7 @@ private struct SleepTimerPanel: View {
                 } footer: {
                     shakeHint
                 }
+                cancelSection(isAutomatic: isAutomatic)
                 lengths
             case .running(let isAutomatic, let isEndOfChapter):
                 Section {
@@ -170,18 +213,7 @@ private struct SleepTimerPanel: View {
                 } footer: {
                     shakeHint
                 }
-                Section {
-                    Button(role: .destructive) {
-                        if panel.needsCancelConfirmation {
-                            confirmsCancel = true
-                        } else {
-                            panel.cancel()
-                            close()
-                        }
-                    } label: {
-                        Text(verbatim: L10n.string(isAutomatic ? "ButtonDisableAutoTimer" : "ButtonCancelTimer"))
-                    }
-                }
+                cancelSection(isAutomatic: isAutomatic)
             }
         }
         .alert(Text(verbatim: L10n.string("HeaderConfirm")), isPresented: $confirmsCancel) {
@@ -197,6 +229,22 @@ private struct SleepTimerPanel: View {
             Button(L10n.string("ButtonOk")) {}
         } message: {
             Text(verbatim: L10n.string("MessageSleepTimerEndOfChapterUnavailable"))
+        }
+    }
+
+    /// Cancel Timer, or Disable Auto Timer after a confirmation (D18).
+    private func cancelSection(isAutomatic: Bool) -> some View {
+        Section {
+            Button(role: .destructive) {
+                if panel.needsCancelConfirmation {
+                    confirmsCancel = true
+                } else {
+                    panel.cancel()
+                    close()
+                }
+            } label: {
+                Text(verbatim: L10n.string(isAutomatic ? "ButtonDisableAutoTimer" : "ButtonCancelTimer"))
+            }
         }
     }
 
@@ -314,6 +362,13 @@ private struct SleepTimerCountdown: View {
 
 #Preview("No timer") {
     SleepTimerSheet(model: .preview(), close: {})
+}
+
+#Preview("Running, xxxLarge") {
+    let fixture = SleepTimerPreviewFixture(.running)
+    SleepTimerSheet(model: fixture.model, close: {})
+        .environment(\.sleepTimer, fixture.timer)
+        .dynamicTypeSize(.xxxLarge)
 }
 
 #Preview("Running, accessibility size") {

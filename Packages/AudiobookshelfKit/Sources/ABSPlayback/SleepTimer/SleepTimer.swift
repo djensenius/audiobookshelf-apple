@@ -58,6 +58,8 @@ public final class SleepTimer {
     public private(set) var isAutomatic = false
     /// Whether the timer recently paused playback and a reset or play would restart it.
     public private(set) var canRestart = false
+    /// Whether the timer that can restart started automatically: cancelling it suppresses the automatic timer.
+    public var canRestartAutomatic: Bool { canRestart && expiredRun?.isAutomatic == true }
     public var isRunning: Bool { mode != nil }
     /// Takes effect at the next tick; changes to the shake sensitivity apply immediately.
     public var options: SleepTimerOptions {

@@ -157,7 +157,7 @@
   "MessageSeriesDetailNotFound": "This series isn't on the server anymore.",
   "MessageSeriesListLoadFailed": "Couldn't load the series.",
   "MessageShakeToResetHint": "Shake your device to restart the timer.",
-  "MessageSleepTimerCanRestart": "The sleep timer paused playback. Restart it within {0} to keep listening.",
+  "MessageSleepTimerCanRestart": "The sleep timer paused playback. Restart it soon to keep listening.",
   "MessageSleepTimerEndOfChapterUnavailable": "There's no chapter end ahead to stop at.",
   "MessageStatsChartSummary": "Listened {0} in the last 7 days, a daily average of {1}.",
   "MessageStatsLoadFailed": "Couldn't load your stats.",

@@ -19,11 +19,13 @@ import Testing
         let running = SleepTimerSlotPresentation(remaining: 899.5, isAutomatic: false, locale: locale)
         #expect(running.countdownText == "15:00")
         #expect(running.isAutomatic == false)
+        #expect(running.symbolName == "moon.zzz")
         #expect(running.accessibilityLabel == "Sleep timer")
         #expect(running.accessibilityValue == "15 minutes remaining")
 
         let automatic = SleepTimerSlotPresentation(remaining: 3_600, isAutomatic: true, locale: locale)
         #expect(automatic.isAutomatic)
+        #expect(automatic.symbolName == "moon.zzz.fill")
         #expect(automatic.accessibilityLabel == "Sleep timer")
         #expect(automatic.accessibilityValue == "Auto sleep timer, 1 hour remaining")
     }

@@ -1,5 +1,7 @@
 import ABSCore
 import Foundation
+import Observation
+import Synchronization
 import Testing
 
 @testable import ABSAppModel
@@ -39,7 +41,23 @@ private final class Harness {
         clock.advance(by: .seconds(seconds))
         timer.tick()
     }
+
+    /// Plays a running timer of up to 80 seconds to its end, 20 seconds a tick (the most one counts).
+    func expire() {
+        for _ in 0..<4 { play(20) }
+        #expect(playback.isPlaying == false, "The timer paused playback")
+    }
 }
+
+/// An automatic 1-minute timer whose window spans the day.
+private func autoSleepOptions() throws -> SleepTimerOptions {
+    let window = try AutoSleepPolicy(
+        start: #require(.init(hour: 0, minute: 0)), end: #require(.init(hour: 23, minute: 59)), mode: .duration(60))
+    return SleepTimerOptions(fadesOut: false, autoSleep: window)
+}
+
+/// 2023-11-14 12:00 UTC.
+private let noon = Date(timeIntervalSince1970: 1_699_963_200)
 
 extension Calendar {
     fileprivate static let utc: Calendar = {
@@ -47,6 +65,13 @@ extension Calendar {
         calendar.timeZone = TimeZone(identifier: "UTC") ?? .gmt
         return calendar
     }()
+}
+
+/// Set from an observation's `onChange`, which may run on any thread.
+private final class Flag: Sendable {
+    private let value = Mutex(false)
+    var isSet: Bool { value.withLock { $0 } }
+    func set() { value.withLock { $0 = true } }
 }
 
 @MainActor
@@ -144,13 +169,8 @@ extension Calendar {
     }
 
     @Test func automaticCancelNeedsConfirmation() throws {
-        let window = try AutoSleepPolicy(
-            start: #require(.init(hour: 0, minute: 0)), end: #require(.init(hour: 23, minute: 59)),
-            mode: .duration(900))
-        let harness = try Harness(options: SleepTimerOptions(fadesOut: false, autoSleep: window))
+        let harness = try Harness(options: autoSleepOptions())
         harness.load()
-        // 2023-11-14 12:00 UTC.
-        let noon = Date(timeIntervalSince1970: 1_699_963_200)
         _ = harness.timer.playbackWillStart(at: noon)
         #expect(harness.panel.state == .running(isAutomatic: true, isEndOfChapter: false))
         #expect(harness.panel.needsCancelConfirmation)
@@ -161,6 +181,61 @@ extension Calendar {
         // Cancelled, the automatic timer stays off for the rest of its window.
         _ = harness.timer.playbackWillStart(at: noon.addingTimeInterval(60))
         #expect(harness.panel.state == .idle)
+    }
+
+    @Test func cancellingExpiredAutomaticTimerSuppressesIt() throws {
+        let harness = try Harness(options: autoSleepOptions())
+        harness.load()
+        _ = harness.timer.playbackWillStart(at: noon)
+        harness.expire()
+        #expect(harness.panel.state == .restartable(isAutomatic: true))
+        #expect(harness.panel.needsCancelConfirmation)
+
+        harness.panel.cancel()
+        #expect(harness.panel.state == .idle)
+        _ = harness.timer.playbackWillStart(at: noon.addingTimeInterval(600))
+        #expect(harness.panel.state == .idle, "Suppressed until the window ends")
+    }
+
+    @Test func shakeToResetFollowsOptions() throws {
+        let harness = try Harness(options: SleepTimerOptions(shakeSensitivity: .medium))
+        #expect(harness.panel.shakeToResetEnabled)
+        harness.timer.options.shakeSensitivity = nil
+        #expect(harness.panel.shakeToResetEnabled == false)
+    }
+
+    @Test func stateIgnoresTicks() throws {
+        let harness = try Harness()
+        harness.load()
+        harness.panel.start(minutes: 15)
+        let stateChanged = Flag(), remainingChanged = Flag()
+        withObservationTracking {
+            _ = harness.panel.state
+        } onChange: {
+            stateChanged.set()
+        }
+        withObservationTracking {
+            _ = harness.panel.remaining
+        } onChange: {
+            remainingChanged.set()
+        }
+        harness.play(1)
+        #expect(harness.panel.remaining == 899)
+        #expect(remainingChanged.isSet, "The countdown ticked")
+        #expect(stateChanged.isSet == false, "The sheet doesn't redraw every tick")
+    }
+
+    @Test func restartAfterGraceDeadlineFails() async throws {
+        let harness = try Harness()
+        harness.load()
+        harness.panel.start(minutes: 1)
+        harness.expire()
+        // Back after the deadline, before the grace task has run: the sheet still offers a restart.
+        harness.clock.advance(by: .seconds(SleepTimer.gracePeriod + 1))
+        #expect(harness.panel.state == .restartable(isAutomatic: false))
+        #expect(harness.panel.restart() == false)
+        #expect(harness.playback.isPlaying == false)
+        #expect(await eventually { harness.panel.state == .idle }, "The grace task catches up")
     }
 
     @Test func restartableStateDuringGrace() async throws {
@@ -176,14 +251,10 @@ extension Calendar {
 
         harness.playback.play()
         harness.panel.start(minutes: 1)
-        harness.play(5)
-        harness.play(5)
-        harness.play(20)
-        harness.play(20)
-        harness.play(20)
-        #expect(harness.playback.isPlaying == false)
-        #expect(harness.panel.state == .restartable)
+        harness.expire()
+        #expect(harness.panel.state == .restartable(isAutomatic: false))
         #expect(harness.panel.remaining == nil)
+        #expect(harness.panel.needsCancelConfirmation == false)
 
         #expect(harness.panel.restart())
         #expect(harness.panel.state == .running(isAutomatic: false, isEndOfChapter: false))

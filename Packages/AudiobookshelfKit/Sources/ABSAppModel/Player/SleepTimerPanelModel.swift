@@ -1,19 +1,19 @@
 import ABSPlayback
 import Foundation
-import Observation
 
 /// The sleep timer sheet's state and commands (port of `SleepTimerModal.vue`), over a ``SleepTimer`` and the
 /// player it controls. Holds no state of its own: everything is read from the timer and the player when asked,
 /// so views can make one per body.
 ///
 /// ``state`` doesn't change as the countdown ticks; ``remaining`` and ``offersEndOfChapter`` do (they read the
-/// countdown and the playback time), so read them only in small leaf views.
+/// countdown and the playback time), so read them only in small leaf views. Not `@Observable`: it stores no
+/// state, and views observe the timer and the player through it.
 @MainActor
-@Observable
 public final class SleepTimerPanelModel {
     /// What the running timer's −/+ buttons subtract and add, in seconds (D15).
     public static let adjustment: TimeInterval = 300
-    /// The duration presets, in minutes: legacy's (``SettingsViewModel/durationPresetMinutes``) up to two hours.
+    /// The duration presets, in minutes: legacy's (``SettingsViewModel/durationPresetMinutes``) up to two hours, as
+    /// #58 asks. Settings keeps legacy's list, so a stored length still matches its presets.
     public static let presetMinutes = SettingsViewModel.durationPresetMinutes + [120]
     /// The custom time stepper's range, in minutes, as in Settings.
     public static let customMinutesRange = SettingsViewModel.customMinutesRange
@@ -24,8 +24,9 @@ public final class SleepTimerPanelModel {
         case idle
         /// A timer runs; `isAutomatic` when the auto sleep timer started it.
         case running(isAutomatic: Bool, isEndOfChapter: Bool)
-        /// The timer recently paused playback and ``restart()`` would restart it (the grace period).
-        case restartable
+        /// The timer recently paused playback and ``restart()`` would restart it (the grace period);
+        /// `isAutomatic` when the auto sleep timer had started it.
+        case restartable(isAutomatic: Bool)
     }
 
     public let timer: SleepTimer
@@ -40,7 +41,7 @@ public final class SleepTimerPanelModel {
         if let mode = timer.mode {
             return .running(isAutomatic: timer.isAutomatic, isEndOfChapter: mode == .endOfChapter)
         }
-        return timer.canRestart ? .restartable : .idle
+        return timer.canRestart ? .restartable(isAutomatic: timer.canRestartAutomatic) : .idle
     }
 
     /// Seconds until the running timer pauses playback; `nil` when none runs. Changes every tick.
@@ -61,8 +62,9 @@ public final class SleepTimerPanelModel {
         return timer.start(.duration(TimeInterval(minutes) * 60))
     }
 
-    /// Starts an end-of-chapter timer. `false` when there's no chapter end ahead (under 10 seconds left and no
-    /// next chapter), for the sheet to say so rather than hide the option (D16).
+    /// Starts an end-of-chapter timer. `false` when there's no chapter or track end ahead (playback is at the end
+    /// of the media; with under 10 seconds of the last chapter left it stops at the end of the media), for the
+    /// sheet to say so rather than hide the option (D16).
     @discardableResult
     public func startEndOfChapter() -> Bool {
         timer.start(.endOfChapter)
@@ -78,15 +80,17 @@ public final class SleepTimerPanelModel {
         timer.subtract(Self.adjustment)
     }
 
-    /// Whether cancelling needs confirming: cancelling the automatic timer keeps it off until its window ends
-    /// (D18, `MessageConfirmDisableAutoTimer`).
-    public var needsCancelConfirmation: Bool { timer.isAutomatic }
+    /// Whether cancelling needs confirming: cancelling the automatic timer, running or restartable, keeps it off
+    /// until its window ends (D18, `MessageConfirmDisableAutoTimer`).
+    public var needsCancelConfirmation: Bool { timer.isAutomatic || timer.canRestartAutomatic }
 
+    /// Cancels the running timer, or ends the grace period of one that expired.
     public func cancel() {
         timer.cancel()
     }
 
-    /// Restarts the timer that recently expired, resuming playback. `false` when the grace period is over.
+    /// Restarts the timer that recently expired, resuming playback. `false` when the grace period is over, which
+    /// ``state`` may not show yet: the timer notices at its next turn on the main actor.
     @discardableResult
     public func restart() -> Bool {
         timer.reset()
