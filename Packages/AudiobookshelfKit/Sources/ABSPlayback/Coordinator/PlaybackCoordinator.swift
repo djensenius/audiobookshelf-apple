@@ -316,12 +316,14 @@ public final class PlaybackCoordinator {
                 // `play()` for this item starts the engine after its catch-up seek; a start time
                 // retargets that seek (a later seek replaces it).
                 playWhenLoaded = true
+                recovery.notePlayIntent(true)
                 if let startTime { await seek(to: startTime) }
                 return
             case .loaded:
                 return await resumeLoaded(rewindingBy: nil, startingAt: startTime)
             case .starting:
                 playWhenLoaded = true
+                recovery.notePlayIntent(true)
                 if let startTime {
                     pendingStartTime = startTime
                     pendingJumpOffset = 0
@@ -575,9 +577,12 @@ public final class PlaybackCoordinator {
         guard !isRetired, let key = mediaKey else { return }
         switch phase {
         case .idle: return
-        case .starting: playWhenLoaded = true
+        case .starting,
+            .loaded where isFinishingLoad:
+            playWhenLoaded = true
+            // A recovery rebuild that fails carries this on to the next attempt.
+            recovery.notePlayIntent(true)
         case .unloaded: await play(itemID: key.libraryItemId, episodeID: key.episodeId)
-        case .loaded where isFinishingLoad: playWhenLoaded = true
         case .loaded: await resumeLoaded(rewindingBy: seconds, startingAt: nil)
         }
     }
@@ -885,6 +890,8 @@ public final class PlaybackCoordinator {
     // MARK: Engine events
 
     private func handle(_ event: AudioEngineEvent) {
+        // In every phase: a recovery rebuild may be starting, or waiting between attempts.
+        if event == .outputLost { return outputLost() }
         guard phase == .loaded else { return }
         switch event {
         case .tick(let time):
@@ -928,11 +935,17 @@ public final class PlaybackCoordinator {
             self.error = error
             emit(.failed(error))
         case .outputLost:
-            // The engine paused; plays held outside it must not restart on the speaker.
-            recovery.notePlayIntent(false)
-            resumeIntent += 1
-            resumingIntent = nil
+            break
         }
+    }
+
+    /// The engine paused for a lost output: plays held outside it (recovery's, a resume awaiting
+    /// its seek, a start's) must not restart on the speaker.
+    private func outputLost() {
+        recovery.notePlayIntent(false)
+        resumeIntent += 1
+        resumingIntent = nil
+        playWhenLoaded = false
     }
 
     // MARK: Auto-advance
@@ -1044,13 +1057,21 @@ public final class PlaybackCoordinator {
 
     private func fail(_ error: PlaybackCoordinatorError, generation failed: Int) {
         guard failed == generation else { return }
-        pendingJumpOffset = 0
         if failed == recoveryAttempt {
             // Recovery decides whether to try again or surface it; the kept audio session stays.
             recoveryAttemptError = error
-            if phase == .starting { phase = .unloaded }
+            if phase != .loaded {
+                // Seeks and jumps during the attempt (its `/play` or load) are where the next
+                // one, or a retry, starts.
+                let base = Self.clamp(pendingStartTime ?? unloadedPosition, to: unloadedDuration)
+                unloadedPosition = Self.clamp(base + pendingJumpOffset, to: unloadedDuration)
+                pendingStartTime = unloadedPosition
+                if phase == .starting { phase = .unloaded }
+            }
+            pendingJumpOffset = 0
             return
         }
+        pendingJumpOffset = 0
         self.error = error
         if phase == .starting { phase = .unloaded }
         releaseKeptAudioSession()

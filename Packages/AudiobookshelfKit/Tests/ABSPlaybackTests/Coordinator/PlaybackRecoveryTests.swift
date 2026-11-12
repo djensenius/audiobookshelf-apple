@@ -353,6 +353,126 @@ struct PlaybackRecoveryTests {
         #expect(coordinator.error == nil)
     }
 
+    /// Where a held rebuild fails, once released.
+    enum RebuildFailure: Sendable, CaseIterable {
+        case start, load
+    }
+
+    /// Network loss during A at 600, then the first rebuild's backoff fires with its `/play` held
+    /// (and the rebuild failing at `failure`, once released); returns the held start's gate.
+    private func holdFirstRebuild(failing failure: RebuildFailure? = nil) async -> Gate {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let gate = Gate()
+        service.state.withLock {
+            $0.startGates["A"] = gate
+            if failure == .start { $0.startError = .network(.networkConnectionLost) }
+        }
+        if failure == .load { engine.loadError = .itemFailed(trackIndex: 0, Self.failure(.network)) }
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { coordinator.phase == .starting && service.state.withLock { $0.startGates.isEmpty } }
+        return gate
+    }
+
+    /// Opens the held rebuild, lets its load fail, and runs the next rebuild with a working load.
+    private func failHeldRebuildAndRetry(_ gate: Gate) async {
+        gate.open()
+        await settle { coordinator.phase == .unloaded && h.recoverySleep.waitingCount == 1 }
+        engine.loadError = nil
+        service.state.withLock { $0.startError = nil }
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 3 && coordinator.phase == .loaded }
+        for _ in 0..<200 { await Task.yield() }
+    }
+
+    @Test(arguments: [false, true])
+    func aLostOutputWhileARebuildStartsOrWaitsKeepsItPaused(betweenAttempts: Bool) async {
+        let gate = await holdFirstRebuild(failing: betweenAttempts ? .load : nil)
+        if betweenAttempts {
+            gate.open()
+            await settle { coordinator.phase == .unloaded && h.recoverySleep.waitingCount == 1 }
+            engine.loadError = nil
+        }
+
+        // Unplugged while no item is loaded: the coming rebuild must not play on the speaker.
+        engine.pauseForOutputLoss()
+        #expect(!coordinator.isPlaybackRequested)
+        if betweenAttempts { h.recoverySleep.fireOldest() } else { gate.open() }
+        await settle { coordinator.phase == .loaded }
+        for _ in 0..<200 { await Task.yield() }
+
+        #expect(!engine.isPlaybackRequested)
+        #expect(coordinator.currentTime == 600)
+        #expect(coordinator.error == nil)
+    }
+
+    @Test(arguments: RebuildFailure.allCases, [false, true])
+    func aPauseThenPlayDuringAFailingRebuildPlaysTheNextOne(failure: RebuildFailure, samePlay: Bool) async {
+        let gate = await holdFirstRebuild(failing: failure)
+
+        coordinator.pause()
+        if samePlay {
+            await coordinator.play(itemID: "A")
+        } else {
+            await coordinator.resume()
+        }
+        #expect(coordinator.isPlaybackRequested)
+        await failHeldRebuildAndRetry(gate)
+
+        #expect(engine.isPlaybackRequested)
+        #expect(coordinator.currentTime == 600)
+        #expect(coordinator.error == nil)
+    }
+
+    @Test(arguments: RebuildFailure.allCases, [false, true])
+    func aSeekDuringAFailingRebuildIsWhereTheNextOneStarts(failure: RebuildFailure, jumps: Bool) async {
+        let gate = await holdFirstRebuild(failing: failure)
+
+        _ = await coordinator.seek(to: 1200)
+        if jumps { _ = await coordinator.jump(by: 30) }
+        let target: Double = jumps ? 1230 : 1200
+        await failHeldRebuildAndRetry(gate)
+
+        #expect(engine.loads.last?.time == target)
+        #expect(coordinator.currentTime == target)
+        #expect(engine.isPlaybackRequested)
+        #expect(coordinator.error == nil)
+    }
+
+    @Test func aSeekDuringTheLastFailingRebuildIsWhereARetryStarts() async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        engine.loadError = .itemFailed(trackIndex: 0, Self.failure(.network))
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        for starts in 2...3 {
+            await settle { h.recoverySleep.waitingCount == 1 }
+            h.recoverySleep.fireOldest()
+            await settle { service.starts.count == starts && coordinator.phase == .unloaded }
+        }
+        // The third, last rebuild: the user seeks while its `/play` is held, and it fails.
+        let gate = Gate()
+        service.state.withLock {
+            $0.startGates["A"] = gate
+            $0.startError = .network(.networkConnectionLost)
+        }
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { coordinator.phase == .starting && service.state.withLock { $0.startGates.isEmpty } }
+        _ = await coordinator.seek(to: 1200)
+        gate.open()
+        await settle { coordinator.error != nil }
+
+        #expect(coordinator.error == .recoveryExhausted)
+        #expect(coordinator.currentTime == 1200)
+        engine.loadError = nil
+        service.state.withLock { $0.startError = nil }
+        await coordinator.resume()
+        await settle { coordinator.phase == .loaded && engine.isPlaybackRequested }
+        #expect(engine.loads.last?.time == 1200)
+    }
+
     @Test(arguments: [false, true])
     func aPauseDuringASeekThatTookOverRecoveryKeepsItPaused(outputLost: Bool) async {
         h.recoverySleep.isManual = true
