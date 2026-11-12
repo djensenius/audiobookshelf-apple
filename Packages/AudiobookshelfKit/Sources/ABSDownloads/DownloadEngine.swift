@@ -219,7 +219,7 @@ public actor DownloadEngine {
     private var quiescingConnections: [UUID] = []
     /// Connections quiesced without a session: their transfers that survived a relaunch (any
     /// task this engine didn't create) are cancelled, not adopted, and their results dropped,
-    /// for the rest of the process. Only in memory: TODO(#N) keep it across a relaunch.
+    /// for the rest of the process. Only in memory: TODO(#411) keep it across a relaunch.
     private var survivorsToStop: Set<UUID> = []
     /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
     private var createdTasks: Set<Int> = []
