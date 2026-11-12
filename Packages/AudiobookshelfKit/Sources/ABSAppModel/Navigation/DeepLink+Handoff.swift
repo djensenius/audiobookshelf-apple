@@ -10,10 +10,11 @@ extension DeepLink {
     /// would, so ``Router/open(_:)`` stays the only way into navigation.
     ///
     /// The activity carries `item` (required), `episode` and `position` (seconds). A `library`
-    /// entry is ignored, because opening an item doesn't need it. The activity has no account
-    /// identity yet (ADR 0004, "Handoff"), so the link names no server and the account that is
-    /// active here opens it. A `server` entry, whatever it holds, is ignored too: it would be
-    /// the sending device's connection ID, which means nothing on this one.
+    /// entry is ignored, because opening an item doesn't need it. The link names no server, so
+    /// the account that is active here opens it; ``HandoffActivity`` also reads the optional
+    /// `serverAddress` and `userID` pair and resolves it to a connection here (ADR 0004,
+    /// "Handoff"). A `server` entry, whatever it holds, is ignored: it would be the sending
+    /// device's connection ID, which means nothing on this one.
     ///
     /// An activity with a `position` becomes a `play` link, so continuing a player screen asks
     /// before it plays and never resumes silently (``PlayLinkDecision``); without one it opens
@@ -21,15 +22,19 @@ extension DeepLink {
     ///
     /// The values are checked like a URL's. The result is `nil` without `userInfo`, when `item`
     /// is missing, or when `item` or `episode` isn't a valid ID (the same rules as
-    /// ``init(url:)``); an empty `episode` counts as absent. A `position` that isn't a number
-    /// from 0 to ``maxStartTime`` (a Boolean isn't one) is ignored, and the activity still opens
-    /// the item.
+    /// ``init(url:)``); an empty `episode` counts as absent. It is `nil` too when only one of
+    /// `serverAddress` and `userID` is present, or either is invalid. A `position` that isn't a
+    /// number from 0 to ``maxStartTime`` (a Boolean isn't one) is ignored, and the activity
+    /// still opens the item.
     public init?(handoff userInfo: [AnyHashable: Any]?) {
         guard let userInfo else { return nil }
         let item = Self.handoffID(userInfo["item"])
         let episode = Self.handoffID(userInfo["episode"])
         // An episode we can't read rejects the activity instead of opening the item without it.
         guard case .valid(let itemID) = item, !episode.isInvalid else { return nil }
+        // So is an account it can't name: opening it on whichever account is active could show
+        // another user's library (``HandoffActivity``).
+        guard Self.handoffAccount(userInfo) != .invalid else { return nil }
 
         if let position = Self.handoffPosition(userInfo["position"]) {
             self.init(.play(PlayLink(itemID: itemID, episodeID: episode.id, startTime: position)))
