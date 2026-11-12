@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import ABSUI
 import SwiftUI
 
@@ -41,12 +42,23 @@ struct ConnectFlowView: View {
         accounts: AccountManager, lifecycle: SessionLifecycle? = nil, onCancel: (() -> Void)? = nil,
         onFinish: @escaping () -> Void = {}
     ) {
-        let model = ConnectViewModel(accounts: accounts, lifecycle: lifecycle)
-        if lifecycle != nil { model.startAddingServer() }
-        _model = State(initialValue: model)
+        _model = State(initialValue: Self.model(accounts: accounts, lifecycle: lifecycle))
         self.lifecycle = lifecycle
         self.onFinish = onFinish
         self.onCancel = onCancel
+    }
+
+    /// The flow's model: it validates new servers with the manager's own validator, so the
+    /// session configuration the app injected (a fixture launch's stub) also covers the first
+    /// `/status` check. With a `lifecycle`, it starts at a new server's address.
+    static func model(
+        accounts: AccountManager, lifecycle: SessionLifecycle?,
+        localNetwork: any LocalNetworkAccessChecking = SystemLocalNetworkAccess()
+    ) -> ConnectViewModel {
+        let model = ConnectViewModel(
+            accounts: accounts, validator: accounts.validator, localNetwork: localNetwork, lifecycle: lifecycle)
+        if lifecycle != nil { model.startAddingServer() }
+        return model
     }
 
     var body: some View {

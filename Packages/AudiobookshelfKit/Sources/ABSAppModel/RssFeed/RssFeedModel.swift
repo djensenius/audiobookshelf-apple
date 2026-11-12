@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSRealtime
 import Foundation
 import Observation
 
@@ -47,8 +48,10 @@ public enum RssFeedModelError: Error, Sendable, Hashable {
 /// manage feeds (``canManageFeeds(_:)``); the server refuses everyone else.
 ///
 /// ``load()`` fetches the current feed and the server address. ``open()`` validates the fields
-/// first and ``close()`` needs an open feed; while either runs, both return `false`. Live
-/// `rss_feed_open` and `rss_feed_closed` events aren't followed; load again to catch up.
+/// first and ``close()`` needs an open feed; while either runs, both return `false`. ``apply(_:)``
+/// follows live `rss_feed_open` and `rss_feed_closed` events (``RealtimeBridge/onRssFeedChange``)
+/// for this entity. The latest change wins: a load, open or close whose request started before a
+/// live change, or before another open or close finished, doesn't overwrite the newer state.
 @MainActor
 @Observable
 public final class RssFeedModel {
@@ -57,9 +60,15 @@ public final class RssFeedModel {
     }
 
     public let target: RssFeedTarget
+    /// A podcast with episodes that have no publication date, which some podcast apps need
+    /// (legacy `NoteRSSFeedPodcastAppsPubDate`).
+    public let hasEpisodesWithoutPubDate: Bool
     public private(set) var loadState: LoadState = .idle
-    /// The open feed, or `nil` when none is.
+    /// The open feed, or `nil` when none is (or none is known yet: see ``hasKnownState``).
     public private(set) var feed: RssFeed?
+    /// ``feed`` is known: a load, open, close or live change set it, or ``seed(from:)`` carried it
+    /// over. Until then `nil` means unknown, not closed. A later failed load keeps it.
+    public private(set) var hasKnownState = false
     /// The address the client connects to, which new feeds' links are built on; set by ``load()``.
     public private(set) var serverURL: URL?
     /// Defaults to the entity's ID, as in legacy.
@@ -77,11 +86,23 @@ public final class RssFeedModel {
     public private(set) var failureCount = 0
 
     @ObservationIgnored private let service: any RssFeedService
+    /// Bumped by each live change and each finished open or close, so a request that started
+    /// earlier keeps the newer state.
+    @ObservationIgnored private var changeGeneration = 0
 
-    public init(target: RssFeedTarget, service: any RssFeedService) {
+    public init(target: RssFeedTarget, service: any RssFeedService, hasEpisodesWithoutPubDate: Bool = false) {
         self.target = target
         self.service = service
+        self.hasEpisodesWithoutPubDate = hasEpisodesWithoutPubDate
         slug = target.id
+    }
+
+    /// Starts from what `previous`, an earlier model for the same target, last knew, until this
+    /// one's own load answers. Does nothing for another target or when `previous` knew nothing.
+    public func seed(from previous: RssFeedModel) {
+        guard previous.target == target, previous.hasKnownState else { return }
+        feed = previous.feed
+        hasKnownState = true
     }
 
     /// Whether a user of this type can open and close feeds (server `isAdminOrUp`). `nil`, such as
@@ -111,9 +132,14 @@ public final class RssFeedModel {
     /// clears an earlier load failure.
     public func load() async {
         loadState = .loading
+        let generation = changeGeneration
         serverURL = await service.serverURL()
         do {
-            feed = try await service.currentFeed(for: target)
+            let current = try await service.currentFeed(for: target)
+            if generation == changeGeneration {
+                feed = current
+                hasKnownState = true
+            }
             loadState = .loaded
             if error == .loadFailed { error = nil }
         } catch {
@@ -138,8 +164,10 @@ public final class RssFeedModel {
         let request = RssFeedOpenRequest(
             serverAddress: Self.serverAddress(serverURL), slug: slug,
             metadataDetails: .init(preventIndexing: preventIndexing, ownerName: ownerName, ownerEmail: ownerEmail))
+        let generation = changeGeneration
         do {
-            feed = try await service.openFeed(for: target, request)
+            let opened = try await service.openFeed(for: target, request)
+            if generation == changeGeneration { settle(opened) }
             return true
         } catch {
             self.error = .openFailed(message: Self.serverMessage(error))
@@ -155,16 +183,48 @@ public final class RssFeedModel {
         isWorking = true
         defer { isWorking = false }
         error = nil
+        let generation = changeGeneration
         do {
             try await service.closeFeed(id: feed.id)
-            self.feed = nil
+            if generation == changeGeneration { settle(nil) }
             return true
         } catch APIError.notFound {
-            self.feed = nil
+            if generation == changeGeneration { settle(nil) }
             return true
         } catch {
             self.error = .closeFailed
             return false
+        }
+    }
+
+    /// Follows a live open or close of this entity's feed (legacy item page `rssFeedOpen` and
+    /// `rssFeedClosed`); other entities' changes are ignored, as is the close of a feed other than
+    /// the one shown.
+    public func apply(_ change: RssFeedChange) {
+        let changed = change.feed
+        guard changed.entityId == target.id, changed.entityType == Self.entityType(target.kind) else { return }
+        switch change {
+        case .opened:
+            settle(changed)
+        case .closed:
+            guard feed == nil || feed?.id == changed.id else { return }
+            settle(nil)
+        }
+    }
+
+    /// Records `feed` as the newest known state, so requests already running don't replace it.
+    private func settle(_ feed: RssFeed?) {
+        self.feed = feed
+        hasKnownState = true
+        changeGeneration += 1
+    }
+
+    /// The server's `entityType` for a target kind.
+    nonisolated static func entityType(_ kind: RssFeedTarget.Kind) -> String {
+        switch kind {
+        case .item: "libraryItem"
+        case .collection: "collection"
+        case .series: "series"
         }
     }
 

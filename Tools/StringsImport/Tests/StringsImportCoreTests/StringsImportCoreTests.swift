@@ -708,7 +708,8 @@ import Testing
         #expect(files.map(\.path) == ["Audiobookshelf/Features/A/A.swift", "Audiobookshelf/Features/A/B.swift"])
     }
 
-    /// Every key the app uses exists, and Features/ has no hard-coded strings (what `strings:check` enforces).
+    /// Every key the app uses exists, and Features/ and ABSUI have no hard-coded strings beyond the
+    /// baseline, which has no stale entries (what `strings:check` enforces).
     @Test func repositorySourcesPass() throws {
         let root = URL(filePath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -720,7 +721,11 @@ import Testing
         let sources = try SourceScanner.load(root: root, paths: SourceScanner.keyPaths)
         #expect(sources.count > 100)
         #expect(SourceScanner.keyReferences(in: sources).required.filter { !keys.contains($0.key) } == [])
-        let features = sources.filter { $0.path.hasPrefix(SourceScanner.featuresPath + "/") }
-        #expect(features.flatMap { SourceScanner.hardCodedStrings(in: $0, keys: keys) } == [])
+        let scanned = sources.filter { SourceScanner.scansForHardCodedStrings($0.path) }
+        #expect(scanned.contains { $0.path.hasPrefix("Packages/AudiobookshelfKit/Sources/ABSUI/") })
+        let (new, stale) = try HardCodedBaseline.load(root: root)
+            .match(scanned.flatMap { SourceScanner.hardCodedStrings(in: $0, keys: keys) })
+        #expect(new == [])
+        #expect(stale.map(\.entry) == [])
     }
 }

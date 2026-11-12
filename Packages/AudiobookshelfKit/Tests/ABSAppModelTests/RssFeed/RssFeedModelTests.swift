@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSRealtime
 import Foundation
 import Testing
 
@@ -241,5 +242,146 @@ private func feed(slug: String) -> RssFeed {
         #expect(!model.isInsecureServer)
         await model.load()
         #expect(model.isInsecureServer == insecure)
+    }
+
+    // MARK: Live changes
+
+    @Test func aLiveOpenOrCloseOfThisEntityIsShown() async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService())
+        await model.load()
+        let opened = feed(slug: "elsewhere")
+        model.apply(.opened(opened))
+        #expect(model.feed == opened)
+        model.apply(.closed(opened))
+        #expect(model.feed == nil)
+    }
+
+    @Test func otherEntitiesChangesAreIgnored() async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(current: { feed(slug: "open") }))
+        await model.load()
+        // Same ID, another kind of entity; then this kind, another ID.
+        let collection = RssFeed(id: "feed-col", entityType: "collection", entityId: "series-1", feedUrl: "/feed/c")
+        let otherSeries = RssFeed(id: "feed-other", entityType: "series", entityId: "series-2", feedUrl: "/feed/o")
+        for change in [
+            RssFeedChange.opened(collection), .closed(collection), .opened(otherSeries), .closed(otherSeries),
+        ] {
+            model.apply(change)
+        }
+        #expect(model.feed == feed(slug: "open"))
+    }
+
+    @Test func theCloseOfAnotherFeedKeepsTheOneShown() async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(current: { feed(slug: "open") }))
+        await model.load()
+        model.apply(.closed(feed(slug: "older")))
+        #expect(model.feed == feed(slug: "open"))
+    }
+
+    @Test(arguments: [RssFeedTarget.Kind.item, .collection, .series])
+    func eachKindMatchesTheServersEntityType(kind: RssFeedTarget.Kind) {
+        let model = RssFeedModel(target: RssFeedTarget(kind, id: "id-1"), service: FakeRssFeedService())
+        let type = ["item": "libraryItem", "collection": "collection", "series": "series"][kind.rawValue]!
+        let opened = RssFeed(id: "feed-1", entityType: type, entityId: "id-1", feedUrl: "/feed/one")
+        model.apply(.opened(opened))
+        #expect(model.feed == opened)
+    }
+
+    /// The fetch started before the change, so its answer is older and doesn't replace it.
+    @Test(arguments: [true, false])
+    func aLoadThatStartedBeforeALiveChangeKeepsTheChange(opens: Bool) async throws {
+        let gate = GatedCalls<Void, RssFeed?>()
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(current: { try await gate.call(()) }))
+        let load = Task { await model.load() }
+        var calls = gate.calls.makeAsyncIterator()
+        let call = try #require(await calls.next())
+        let live = feed(slug: "live")
+        model.apply(opens ? .opened(live) : .closed(live))
+        call.reply.resume(returning: opens ? nil : live)
+        await load.value
+        #expect(model.loadState == .loaded)
+        #expect(model.feed == (opens ? live : nil))
+    }
+
+    /// The open was sent, then the feed closed elsewhere before its answer came back.
+    @Test func anOpenAnsweredAfterALiveCloseKeepsTheClose() async throws {
+        let gate = GatedCalls<String, RssFeed>()
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(open: { try await gate.call($0.slug) }))
+        let open = Task { await model.open() }
+        var calls = gate.calls.makeAsyncIterator()
+        let call = try #require(await calls.next())
+        let opened = feed(slug: call.request)
+        model.apply(.closed(opened))
+        call.reply.resume(returning: opened)
+        #expect(await open.value)
+        #expect(model.feed == nil)
+        #expect(model.hasKnownState)
+    }
+
+    /// The close was sent, then another feed opened for the entity before its answer came back.
+    @Test(arguments: [false, true])
+    func aCloseAnsweredAfterALiveReplacementKeepsTheReplacement(notFound: Bool) async throws {
+        let gate = GatedCalls<Void, Void>()
+        let model = RssFeedModel(
+            target: target,
+            service: FakeRssFeedService(current: { feed(slug: "open") }, close: { try await gate.call(()) }))
+        await model.load()
+        let close = Task { await model.close() }
+        var calls = gate.calls.makeAsyncIterator()
+        let call = try #require(await calls.next())
+        let replacement = feed(slug: "replacement")
+        model.apply(.opened(replacement))
+        if notFound {
+            call.reply.resume(throwing: APIError.notFound)
+        } else {
+            call.reply.resume(returning: ())
+        }
+        #expect(await close.value)
+        #expect(model.feed == replacement)
+    }
+
+    @Test func aLoadThatStartedBeforeAnOpenKeepsTheOpenFeed() async throws {
+        let gate = GatedCalls<Void, RssFeed?>()
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(current: { try await gate.call(()) }))
+        let load = Task { await model.load() }
+        var calls = gate.calls.makeAsyncIterator()
+        let call = try #require(await calls.next())
+        model.slug = "mine"
+        #expect(await model.open())
+        call.reply.resume(returning: nil)
+        await load.value
+        #expect(model.feed == feed(slug: "mine"))
+    }
+
+    /// Before a load answers, `nil` means unknown; a live close makes it known, and a failed load
+    /// after it keeps that.
+    @Test func aLiveCloseMakesTheStateKnownWithoutALoad() async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService(current: { throw TestError.offline }))
+        #expect(!model.hasKnownState)
+        model.apply(.closed(feed(slug: "open")))
+        #expect(model.hasKnownState)
+        await model.load()
+        #expect(model.loadState == .failed)
+        #expect(model.hasKnownState)
+        #expect(model.feed == nil)
+    }
+
+    @Test func aNewModelStartsFromWhatTheLastOneKnew() async {
+        let closed = RssFeedModel(target: target, service: FakeRssFeedService(current: { feed(slug: "open") }))
+        await closed.load()
+        #expect(await closed.close())
+
+        let next = RssFeedModel(target: target, service: FakeRssFeedService())
+        next.seed(from: closed)
+        #expect(next.hasKnownState)
+        #expect(next.feed == nil)
+
+        let unknown = RssFeedModel(target: target, service: FakeRssFeedService())
+        let other = RssFeedModel(target: RssFeedTarget(.series, id: "series-2"), service: FakeRssFeedService())
+        other.apply(.opened(RssFeed(id: "f2", entityType: "series", entityId: "series-2", feedUrl: "/feed/two")))
+        for previous in [unknown, other] {
+            let fresh = RssFeedModel(target: target, service: FakeRssFeedService())
+            fresh.seed(from: previous)
+            #expect(!fresh.hasKnownState)
+        }
     }
 }
