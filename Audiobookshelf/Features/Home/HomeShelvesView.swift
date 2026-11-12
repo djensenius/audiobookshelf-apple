@@ -32,7 +32,8 @@ struct HomeShelvesView: View {
     }
 }
 
-/// One section as a shelf of the cards its kind calls for.
+/// One section as a shelf of the cards its kind calls for. Opens a card in a new window itself
+/// (``OpenInNewWindow``), where the device has windows.
 struct HomeSectionRow: View {
     let section: HomeSection
     let context: ItemActionContext
@@ -40,6 +41,9 @@ struct HomeSectionRow: View {
     let perform: (ItemActionKind, ItemSummary) -> Void
     @Environment(\.serverID) private var serverID
     @Environment(\.locale) private var locale
+    @Environment(Router.self) private var router: Router?
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     private var libraries = LibraryCoverSettings()
 
     var body: some View {
@@ -54,18 +58,29 @@ struct HomeSectionRow: View {
     @ViewBuilder private func card(for entry: HomeEntry) -> some View {
         switch entry {
         case .item(let item):
-            ItemCard(item: item, serverID: serverID, librarySettings: libraries.current, context: context) { kind in
-                if kind == .openDetails {
-                    open(ItemCardActions.route(for: item))
-                } else {
-                    perform(kind, item)
+            ItemCard(
+                item: item, serverID: serverID, librarySettings: libraries.current, context: itemContext
+            ) { kind in
+                switch kind {
+                case .openDetails: open(ItemCardActions.route(for: item))
+                case .openInNewWindow:
+                    OpenInNewWindow.open(ItemCardActions.route(for: item), from: router, with: openWindow)
+                default: perform(kind, item)
                 }
             }
         case .series(let series):
             SeriesCard(series: series, serverID: serverID) { open(HomePresentation.route(for: entry)) }
+                .openInNewWindowMenu(HomePresentation.route(for: entry))
         case .author(let author):
             AuthorCard(author: author, serverID: serverID) { open(HomePresentation.route(for: entry)) }
+                .openInNewWindowMenu(HomePresentation.route(for: entry))
         }
+    }
+
+    private var itemContext: ItemActionContext {
+        var context = context
+        context.canOpenInNewWindow = supportsMultipleWindows
+        return context
     }
 }
 
