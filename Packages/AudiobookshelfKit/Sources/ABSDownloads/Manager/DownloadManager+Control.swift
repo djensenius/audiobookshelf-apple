@@ -8,7 +8,7 @@ extension DownloadManager {
     /// Pauses a download: its record becomes `paused` and the engine stops its transfers,
     /// keeping their resume data. Reported with ``DownloadManagerEvent/recordChanged(_:)``.
     ///
-    /// - Returns: `false` when the record doesn't exist: it completed or was cancelled.
+    /// - Returns: `false` when the record doesn't exist (it completed or was cancelled) or has failed.
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or saved.
     @discardableResult
     public func pause(recordID: UUID) async throws(DownloadManagerError) -> Bool {
@@ -27,6 +27,16 @@ extension DownloadManager {
     @discardableResult
     public func resume(recordID: UUID) async throws(DownloadManagerError) -> Bool {
         try await control(recordID, from: [.paused, .failed]) { try await $0.resume(recordID: $1) }
+    }
+
+    /// Resumes a paused download, as ``resume(recordID:)`` does, unless a quiesce of its server
+    /// is under way or began since `generation`, as
+    /// ``DownloadEngine/resume(recordID:unlessQuiescedSince:)`` does.
+    @discardableResult
+    public func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws(DownloadManagerError) -> Bool {
+        try await control(recordID, from: [.paused]) {
+            try await $0.resume(recordID: $1, unlessQuiescedSince: generation)
+        }
     }
 
     /// Retries a download that failed for good (or is paused), as ``resume(recordID:)`` does:
@@ -74,26 +84,45 @@ extension DownloadManager {
     }
 
     /// Pauses, then resumes, a record that is still `downloading`, for
-    /// ``restartActiveTransfers()``; its caller holds the item.
+    /// ``restartActiveTransfers()``; its caller holds the item. A sign-out's quiesce of its
+    /// server that begins meanwhile passes over it while it is paused, so then it stays paused.
     private func restart(_ recordID: UUID) async throws(DownloadManagerError) {
+        let generation = await engine.quiesceGeneration()
         // Paused or cancelled by the user meanwhile: not restarted.
-        guard try await read({ try await self.store.record(id: recordID) })?.state == .downloading,
+        guard let record = try await read({ try await self.store.record(id: recordID) }),
+            record.state == .downloading,
             try await read({ try await self.engine.pause(recordID: recordID) })
         else { return }
         var failure: DownloadManagerError?
         for _ in 0..<2 {
             do throws(DownloadManagerError) {
-                _ = try await read { try await self.engine.resume(recordID: recordID) }
+                _ = try await read {
+                    try await self.engine.resume(recordID: recordID, unlessQuiescedSince: generation)
+                }
                 failure = nil
                 break
             } catch {
                 failure = error
             }
         }
-        if failure != nil {
-            // Not left paused, as if by the user.
+        let connectionID = record.key.serverConnectionID
+        if failure != nil, await engine.hasQuiesced(connectionID: connectionID, since: generation) {
+            // A guarded resume that queued the record but couldn't pause it again: paused, as
+            // the quiesce leaves its other records.
             _ = try? await read {
+                try await self.store.setState(.paused, forRecord: recordID, expecting: [.queued])
+            }
+        } else if failure != nil {
+            // Not left paused, as if by the user.
+            let queued = try? await read {
                 try await self.store.setState(.queued, forRecord: recordID, expecting: [.paused])
+            }
+            // Checked again once queued, as the engine's resume does: a quiesce that began
+            // before the write may have passed over the paused record.
+            if queued == true, await engine.hasQuiesced(connectionID: connectionID, since: generation) {
+                _ = try? await read {
+                    try await self.store.setState(.paused, forRecord: recordID, expecting: [.queued])
+                }
             }
         }
         await refresh(recordID, announce: true)
