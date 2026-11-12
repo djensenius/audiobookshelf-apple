@@ -86,6 +86,13 @@ public enum ServerProgressSource: Sendable, Equatable {
     case socket
 }
 
+/// How merging server progress moved a row's audio position, read in the same save (#384).
+/// `from` is `nil` for a row the merge created.
+public struct ServerAudioPositionChange: Sendable, Equatable {
+    public let from: Double?
+    public let to: Double
+}
+
 /// The server's per-session answer to `POST /api/session/local-all`.
 public enum SessionUploadResult: Sendable, Equatable {
     case success
@@ -186,16 +193,24 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// ignores unknown rows.
     @discardableResult
     public func applyStartProgress(_ progress: MediaProgress, captured: PlaybackStartProgressCapture) throws -> Bool {
-        guard startCaptures[captured.id]?.value === captured else { return false }
+        try applyStartProgressChange(progress, captured: captured) != nil
+    }
+
+    /// ``applyStartProgress(_:captured:)``, returning how it moved the row's audio position, or
+    /// `nil` when it applied nothing.
+    public func applyStartProgressChange(
+        _ progress: MediaProgress, captured: PlaybackStartProgressCapture
+    ) throws -> ServerAudioPositionChange? {
+        guard startCaptures[captured.id]?.value === captured else { return nil }
         defer { startCaptures[captured.id] = nil }
         let key = captured.key
         guard progress.libraryItemId == key.libraryItemId,
             (progress.episodeId ?? "") == (key.episodeId ?? ""),
             let lastUpdate = progress.lastUpdate,
             !hasChanged(key, since: captured.generation)
-        else { return false }
+        else { return nil }
         let row = try fetchRow(key)
-        guard row?.persistentModelID == captured.row else { return false }
+        guard row?.persistentModelID == captured.row else { return nil }
         let server = ProgressBaseline(
             currentTime: progress.currentTime, progress: progress.progress, duration: progress.duration,
             isFinished: progress.isFinished,
@@ -203,7 +218,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
             lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
         if row != nil {
-            return try applyServerProgress([key: server], capturedAt: captured.generation, source: .fetch).contains(key)
+            return try applyServerProgressChanges([key: server], capturedAt: captured.generation, source: .fetch)[key]
         }
         try commit {
             let row = LocalMediaProgress(
@@ -221,7 +236,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         generation += 1
         mergedAt[key.rawValue] = generation
-        return true
+        return .init(from: nil, to: server.currentTime)
     }
 
     /// Tests an authoritative absent lookup without synthesizing a baseline or confirming a
@@ -403,14 +418,27 @@ public enum SessionUploadResult: Sendable, Equatable {
         capturedAt: ProgressGeneration,
         source: ServerProgressSource
     ) throws -> Set<MediaKey> {
+        Set(try applyServerProgressChanges(updates, capturedAt: capturedAt, source: source).keys)
+    }
+
+    /// ``applyServerProgress(_:capturedAt:source:)``, returning how it moved each merged row's
+    /// audio position.
+    public func applyServerProgressChanges(
+        _ updates: [MediaKey: ProgressBaseline],
+        capturedAt: ProgressGeneration,
+        source: ServerProgressSource
+    ) throws -> [MediaKey: ServerAudioPositionChange] {
         var recorded: [String: ProgressBaseline] = [:]
         var confirmed: Set<String> = []
-        let merged = try commit {
+        let changes = try commit {
             var merged: Set<MediaKey> = []
+            var changes: [MediaKey: ServerAudioPositionChange] = [:]
             let rows = try fetchRows(of: Set(updates.keys.map(\.serverConnectionID)))
             for (key, server) in updates {
                 let raw = key.rawValue
                 guard let row = rows[raw] else { continue }
+                let before = row.currentTime
+                defer { if merged.contains(key) { changes[key] = .init(from: before, to: row.currentTime) } }
                 if hasChanged(key, since: capturedAt) { continue }
                 let takingTies = source == .fetch && capturedAt.value >= mergedAt[raw] ?? 0
                 guard let awaiting = awaitingFetch[raw] else {
@@ -433,7 +461,7 @@ public enum SessionUploadResult: Sendable, Equatable {
                     merged.insert(key)
                 }
             }
-            return merged
+            return changes
         }
         for (raw, server) in recorded {
             awaitingFetch[raw]?.latest = (server, capturedAt.value)
@@ -441,11 +469,11 @@ public enum SessionUploadResult: Sendable, Equatable {
         for raw in confirmed {
             awaitingFetch[raw] = nil
         }
-        if !merged.isEmpty {
+        if !changes.isEmpty {
             generation += 1
-            for key in merged { mergedAt[key.rawValue] = generation }
+            for key in changes.keys { mergedAt[key.rawValue] = generation }
         }
-        return merged
+        return changes
     }
 
     /// Takes a snapshot of the row's next dirty group (audio, then finished, then ebook) for a

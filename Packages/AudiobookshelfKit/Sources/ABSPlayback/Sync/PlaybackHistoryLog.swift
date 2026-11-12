@@ -41,32 +41,16 @@ final class PlaybackHistoryLog {
     func record(_ events: [Event], after close: PlaybackCloseResult<Bool>) {
         guard !events.isEmpty else { return }
         let id = UUID()
-        waiting[id] = Task { [weak self] in
+        // Holds the log until the events join the queue: its syncer may be gone by then.
+        waiting[id] = Task {
             let sync: PlaybackHistorySyncResult
             do {
                 sync = try await close.wait() ? .succeeded : .notAttempted
             } catch {
                 sync = .failed(message: ProgressSyncer.caseName(error))
             }
-            self?.waiting[id] = nil
-            self?.record(events, sync: sync)
-        }
-    }
-
-    /// Records a `sync` event when `store` now holds the server's position for the media, and
-    /// it differs by a second or more from `local`, the position playback is at.
-    func recordServerProgress(
-        _ media: PlaybackHistoryMedia, at position: TimeInterval, replacing local: TimeInterval,
-        in store: LocalProgressStore, details: String
-    ) {
-        let previous = tail
-        let recorder = recorder
-        tail = Task {
-            await previous?.value
-            guard abs(position - local) >= 1,
-                let saved = try? await store.progress(for: media.key)?.currentTime, abs(saved - position) < 0.001
-            else { return }
-            await recorder.record(.sync, for: media, at: position, sync: .notAttempted, details: details)
+            waiting[id] = nil
+            record(events, sync: sync)
         }
     }
 

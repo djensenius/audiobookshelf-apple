@@ -464,13 +464,22 @@ public final class ProgressSyncer {
         return .init(name: name, media: .init(key: session.key, displayTitle: session.title), position: position)
     }
 
-    /// Server progress for the loaded session's media was saved; it's history if it replaced
-    /// the position playback is at.
-    private func noteServerProgress(for key: MediaKey, at position: Double) {
-        guard let history, let session = current, session.key == key, session.hasLoaded, let source else { return }
-        history.recordServerProgress(
-            .init(key: key, displayTitle: session.title), at: position, replacing: source.currentTime,
-            in: store, details: "Fetched from the server")
+    /// Server progress for the loaded session's media was saved; it's history if the save moved
+    /// the stored position by a second or more (a created row moved it from 0).
+    private func noteServerProgress(for key: MediaKey, _ change: ServerAudioPositionChange?) {
+        guard let change, abs(change.to - (change.from ?? 0)) >= 1,
+            let event = historyEvent(.sync, at: change.to), current?.key == key, current?.hasLoaded == true
+        else { return }
+        history?.record([event], sync: .notAttempted, details: "Fetched from the server")
+    }
+
+    /// Takes the first `count` triggers still queued for `sessionID`; later ones wait for their
+    /// own report.
+    private func takeQueuedHistory(_ sessionID: String, upTo count: Int) -> [PlaybackHistoryLog.Event] {
+        guard let queued = queuedHistory[sessionID] else { return [] }
+        let taken = Array(queued.prefix(count))
+        queuedHistory[sessionID] = queued.count > taken.count ? Array(queued.dropFirst(taken.count)) : nil
+        return taken
     }
 
     /// Waits until the history events handed over so far are recorded (tests).
@@ -535,9 +544,13 @@ public final class ProgressSyncer {
     /// Sends the latest saved trigger for `sessionID`, if it is still current.
     private func sendSync(sessionID: String) async {
         await waitForPendingWrites()
-        let historyEvents = queuedHistory.removeValue(forKey: sessionID) ?? []
+        // Until the `/sync` starts, a close may take these triggers and report them itself.
+        let historyCount = queuedHistory[sessionID]?.count ?? 0
+        var historyEvents: [PlaybackHistoryLog.Event]?
         var historyResult = PlaybackHistorySyncResult.notAttempted
-        defer { history?.record(historyEvents, sync: historyResult) }
+        defer {
+            history?.record(historyEvents ?? takeQueuedHistory(sessionID, upTo: historyCount), sync: historyResult)
+        }
         var ignoringBackoff = false
         if queuedSyncSessionID == sessionID {
             queuedSyncSessionID = nil
@@ -605,6 +618,7 @@ public final class ProgressSyncer {
         let outcome: SessionAudioOutcome
         // No suspension between the guard above and the call: a close sees it in flight.
         let done = PlaybackCloseResult<Void>()
+        historyEvents = takeQueuedHistory(sessionID, upTo: historyCount)
         inFlightSync = (sessionID, done)
         do {
             defer {
@@ -1023,9 +1037,7 @@ public final class ProgressSyncer {
             // No suspension between ownership admission and submission. Already-submitted
             // actor work is not retroactively cancelled; atomic store provenance still applies.
             activeProgressIntakeSubmitted?()
-            if try await store.applyStartProgress(progress, captured: capture) {
-                noteServerProgress(for: session.key, at: progress.currentTime)
-            }
+            noteServerProgress(for: session.key, try await store.applyStartProgressChange(progress, captured: capture))
         } catch {
             logger.error("Refreshing active progress failed: \(String(describing: error), privacy: .public)")
         }
@@ -1072,10 +1084,10 @@ public final class ProgressSyncer {
             finishedAt: progress.finishedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
             ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
             lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
-        let merged = try await store.applyServerProgress(
+        let merged = try await store.applyServerProgressChanges(
             [key: baseline], capturedAt: capturedAt, source: .fetch)
-        if merged.contains(key) { noteServerProgress(for: key, at: progress.currentTime) }
-        return merged.contains(key)
+        noteServerProgress(for: key, merged[key])
+        return merged[key] != nil
     }
 
     /// Retry this exact local outcome before taking another PATCH. If the store released the

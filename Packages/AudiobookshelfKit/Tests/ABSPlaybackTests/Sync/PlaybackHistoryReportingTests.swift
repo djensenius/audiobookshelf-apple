@@ -19,12 +19,14 @@ final class HistorySpy: PlaybackHistoryRecording {
         let details: String?
     }
 
-    private let state = Mutex<(entries: [Entry], hold: Gate?)>(([], nil))
+    private let state = Mutex<(entries: [Entry], hold: Gate?, recorded: Gate?)>(([], nil, nil))
 
     var entries: [Entry] { state.withLock { $0.entries } }
     func entries(_ name: PlaybackHistoryEventName) -> [Entry] { entries.filter { $0.name == name } }
 
     func hold(_ gate: Gate?) { state.withLock { $0.hold = gate } }
+    /// Opens `gate` once the next entry is recorded.
+    func signal(_ gate: Gate) { state.withLock { $0.recorded = gate } }
 
     func record(
         _ name: PlaybackHistoryEventName, for media: PlaybackHistoryMedia, at position: TimeInterval?,
@@ -33,7 +35,12 @@ final class HistorySpy: PlaybackHistoryRecording {
         if let gate = state.withLock({ $0.hold }) { await gate.wait() }
         let entry = Entry(
             name: name, key: media.key, title: media.displayTitle, position: position, sync: sync, details: details)
-        state.withLock { $0.entries.append(entry) }
+        let recorded = state.withLock {
+            $0.entries.append(entry)
+            defer { $0.recorded = nil }
+            return $0.recorded
+        }
+        recorded?.open()
     }
 }
 
@@ -168,6 +175,90 @@ struct PlaybackHistoryReportingTests {
         #expect(s.service.reports.isEmpty)
         #expect(spy.entries.filter { $0.name != .play }.map(\.name) == [.pause, .stop])
         #expect(spy.entries(.pause).map(\.sync) == [.succeeded])
+    }
+
+    @Test func aPauseClosedWhileItsSyncIsPreparedCarriesTheCloseResult() async throws {
+        let (s, spy) = try Self.harness()
+        let preparing = Gate()
+        let preparation = Gate()
+        defer { preparation.open() }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 6)
+        s.syncer.beforeSessionAudioPreparation = {
+            preparing.open()
+            await preparation.wait()
+        }
+        s.coordinator.pause()
+        await preparing.wait()
+        // The session closes while the pause's `/sync` is still being prepared, so never sent.
+        s.coordinator.stop()
+        await s.coordinator.waitForPendingCloses()
+        preparation.open()
+        await Self.settle(s)
+        s.syncer.beforeSessionAudioPreparation = nil
+
+        #expect(s.service.reports.isEmpty)
+        #expect(spy.entries.filter { $0.name != .play }.map(\.name) == [.pause, .stop])
+        #expect(spy.entries(.pause).map(\.sync) == [.succeeded])
+    }
+
+    @Test func closeEventsAreRecordedAfterTheLogIsReleased() async throws {
+        let spy = HistorySpy()
+        let recorded = Gate()
+        spy.signal(recorded)
+        let close = PlaybackCloseResult<Bool>()
+        let media = PlaybackHistoryMedia(key: .init(serverConnectionID: UUID(), libraryItemId: "a"), displayTitle: "A")
+        var log: PlaybackHistoryLog? = PlaybackHistoryLog(spy)
+        log?.record([.init(name: .stop, media: media, position: 6)], after: close)
+        // The playback scope released its syncer before its `/close` answered.
+        log = nil
+        close.resolve(.success(true))
+        await recorded.wait()
+
+        #expect(spy.entries.map(\.name) == [.stop])
+        #expect(spy.entries.map(\.sync) == [.succeeded])
+    }
+
+    @Test func serverProgressIsASyncOnlyWhenItMovesTheStoredPosition() async throws {
+        let (s, spy) = try Self.harness()
+        await ActiveRefreshFixture.loadPaused(s)
+        for _ in 0..<2 {
+            s.h.clock.advance(by: 60)
+            let response = ActiveRefreshFixture.reply(s, time: 900)
+            s.service.state.withLock { $0.serverProgress[s.h.key("a")] = response }
+            await s.syncer.drainPendingProgress()
+            await Self.settle(s)
+        }
+
+        #expect(s.service.state.withLock { $0.fetches.count } == 2)
+        // Playback stays where it was; the second fetch moved nothing.
+        #expect(spy.entries(.sync).map(\.position) == [900])
+    }
+
+    @Test func aSyncIsRecordedEvenWhenAnEarlierRecordIsSlow() async throws {
+        let (s, spy) = try Self.harness()
+        let gate = Gate()
+        defer { gate.open() }
+        await ActiveRefreshFixture.loadPaused(s)
+        spy.hold(gate)
+        await s.coordinator.seek(to: 300)
+        await s.settle()
+        s.h.clock.advance(by: 60)
+        let response = ActiveRefreshFixture.reply(s, time: 900)
+        s.service.state.withLock { $0.serverProgress[s.h.key("a")] = response }
+        await s.syncer.drainPendingProgress()
+        await s.settle()
+        #expect(try await s.store.progress(for: s.h.key("a"))?.currentTime == 900)
+        s.service.state.withLock { $0.serverProgress[s.h.key("a")] = nil }
+        // A later seek saves over the server's position before history catches up.
+        await s.coordinator.seek(to: 50)
+        await s.settle()
+        #expect(try await s.store.progress(for: s.h.key("a"))?.currentTime == 50)
+        gate.open()
+        await Self.settle(s)
+
+        #expect(spy.entries.map(\.name) == [.seek, .sync, .seek])
+        #expect(spy.entries(.sync).map(\.position) == [900])
     }
 
     @Test(arguments: [900.0, 0])
