@@ -102,9 +102,9 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     }
 
     /// Throws ``APIError/notAuthenticated`` without a client or features.
-    public func refreshStreamAccess() async throws {
+    public func refreshStreamAccess(replacing rejected: String?) async throws {
         guard let service = sessionService() else { throw APIError.notAuthenticated }
-        try await service.refreshStreamAccess()
+        try await service.refreshStreamAccess(replacing: rejected)
     }
 
     // MARK: ProgressSyncService

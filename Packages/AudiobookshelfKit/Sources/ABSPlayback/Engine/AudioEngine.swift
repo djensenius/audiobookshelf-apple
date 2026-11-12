@@ -174,6 +174,11 @@ public final class AudioEngine: AudioEngineProtocol {
         refreshState()
     }
 
+    public func pauseForOutputLoss() {
+        pause()
+        onEvent?(.outputLost)
+    }
+
     public func stop() {
         loadGeneration += 1
         reset()

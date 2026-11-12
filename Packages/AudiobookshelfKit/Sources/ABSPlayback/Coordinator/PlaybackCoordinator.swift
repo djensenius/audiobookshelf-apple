@@ -220,6 +220,8 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private let recovery: PlaybackRecovery
     @ObservationIgnored private var recoveryAttempt: Int?
     @ObservationIgnored private var recoveryAttemptError: PlaybackCoordinatorError?
+    /// The access token in the loaded stream's URLs: the one a 401 rejected.
+    @ObservationIgnored private var streamAccessToken: String?
 
     /// The last-played record is saved at most this often from time updates.
     static let lastPlayedSaveInterval: TimeInterval = 15
@@ -407,8 +409,9 @@ public final class PlaybackCoordinator {
         guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
 
         let source: AudioEngineSource
+        let stream: ResolvedStream
         do {
-            let stream = try await resolveStream(for: session)
+            stream = try await resolveStream(for: session)
             source = try makeSource(session: session, stream: stream)
         } catch {
             closeInBackground(sessionID: session.id, report: nil)
@@ -423,6 +426,7 @@ public final class PlaybackCoordinator {
         guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
         // From here the coordinator owns the session: whoever replaces it closes it.
         self.session = session
+        streamAccessToken = stream.accessToken
         // From here teardown can capture this known session without waiting for the engine load.
         opening.resolve(.success(()))
         pendingOpenings[openingID] = nil
@@ -669,8 +673,15 @@ public final class PlaybackCoordinator {
             let target = engine.timeline?.clamp(time) ?? max(time, 0)
             reachedEnd = false
             awaitingSeekLanding = true
-            // A seek during recovery takes over, and plays once it lands if recovery would have.
-            let playsAfterRecovery = recovery.yieldToSeek()
+            // A seek during recovery takes over, and plays once it lands if recovery would have: a
+            // resume intent, so a pause (or lost output) meanwhile cancels it.
+            var resume: Int?
+            if recovery.yieldToSeek() {
+                resumeIntent += 1
+                resume = resumeIntent
+                resumingIntent = resume
+            }
+            defer { if let resume, resumingIntent == resume { resumingIntent = nil } }
             let result = await engine.seek(to: target)
             guard current == generation, phase == .loaded else { return nil }
             guard result == .completed else {
@@ -683,7 +694,7 @@ public final class PlaybackCoordinator {
                 emit(.didSeek(time: landed))
                 saveLastPlayed()
             }
-            if playsAfterRecovery, current == generation, phase == .loaded, !isFinishingLoad,
+            if let resume, resume == resumeIntent, current == generation, phase == .loaded, !isFinishingLoad,
                 !engine.isPlaybackRequested
             {
                 startEngine()
@@ -739,7 +750,8 @@ public final class PlaybackCoordinator {
         switch phase {
         case .starting: return playWhenLoaded
         case .loaded where isFinishingLoad: return playWhenLoaded
-        case .loaded: return engine.isPlaybackRequested || resumingIntent != nil
+        case .loaded:
+            return engine.isPlaybackRequested || resumingIntent != nil || recovery.wantsPlay(at: generation)
         case .idle, .unloaded: return false
         }
     }
@@ -885,6 +897,8 @@ public final class PlaybackCoordinator {
                 if lastPlayedSavedAt.map({ date.timeIntervalSince($0) >= Self.lastPlayedSaveInterval }) ?? true {
                     saveLastPlayed()
                 }
+            } else {
+                recovery.notePlaybackStopped()
             }
             emit(.tick(time: time))
         case .trackChanged:
@@ -906,6 +920,11 @@ public final class PlaybackCoordinator {
             let error = PlaybackCoordinatorError(engineError: failure)
             self.error = error
             emit(.failed(error))
+        case .outputLost:
+            // The engine paused; plays held outside it must not restart on the speaker.
+            recovery.notePlayIntent(false)
+            resumeIntent += 1
+            resumingIntent = nil
         }
     }
 
@@ -1046,9 +1065,9 @@ public final class PlaybackCoordinator {
             rebuild: { [weak self] target, playing in
                 await self?.rebuildForRecovery(at: target, playing: playing) ?? .superseded
             },
-            refresh: { [sessions] in
+            refresh: { [weak self, sessions] in
                 do {
-                    try await sessions.refreshStreamAccess()
+                    try await sessions.refreshStreamAccess(replacing: self?.streamAccessToken)
                     return nil
                 } catch let error as APIError {
                     // Reported as a session failure so an expired session leads to sign-in.
@@ -1059,6 +1078,14 @@ public final class PlaybackCoordinator {
             },
             giveUp: { [weak self] error in
                 guard let self else { return }
+                if phase == .loaded {
+                    // Terminal: unload at the latest intended position, which releases the audio
+                    // session; as after a failed load, the item stays and play retries it there.
+                    let target = currentTime
+                    saveLastPlayed()
+                    tearDown(reason: .loadFailed)
+                    pendingStartTime = target
+                }
                 self.error = error
                 releaseKeptAudioSession()
                 emit(.failed(error))

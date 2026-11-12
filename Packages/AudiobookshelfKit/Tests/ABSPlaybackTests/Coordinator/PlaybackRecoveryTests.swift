@@ -205,6 +205,8 @@ struct PlaybackRecoveryTests {
         engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 401))))
         await settle { service.starts.count == 2 && engine.isPlaybackRequested }
         #expect(service.state.withLock { $0.refreshes } == 1)
+        // The token the rejected stream used, so one another request already replaced is reused.
+        #expect(service.state.withLock { $0.refreshedTokens } == ["token-A-1"])
         #expect(coordinator.error == nil)
         #expect(engine.loads.last?.time == 600)
 
@@ -228,6 +230,30 @@ struct PlaybackRecoveryTests {
         // Reported as a session failure, so the account scope asks to sign in again.
         #expect(coordinator.error == .sessionStartFailed(.sessionExpired))
         #expect(service.starts == ["A"])
+    }
+
+    @Test func givingUpWhileLoadedReleasesTheAudioSessionAndKeepsThePosition() async {
+        h.recoverySleep.elapsesImmediately = true
+        await playAt600()
+        service.state.withLock { $0.refreshError = .sessionExpired }
+        let stops = engine.stopCount
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 401))))
+        await settle { coordinator.error != nil }
+
+        // Unloaded as after a failed load: the session is closed and the audio session released.
+        #expect(coordinator.phase == .unloaded)
+        #expect(engine.stopCount == stops + 1)
+        #expect(!engine.isAudioSessionActive)
+        await settle { service.closes == ["A-1"] }
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(coordinator.currentTime == 600)
+
+        // Play retries it where it failed.
+        service.state.withLock { $0.refreshError = nil }
+        await coordinator.resume()
+        #expect(service.starts == ["A", "A"])
+        #expect(engine.loads.last?.time == 600)
     }
 
     // MARK: - Supersession
@@ -298,11 +324,82 @@ struct PlaybackRecoveryTests {
         engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
         await settle { h.recoverySleep.waitingCount == 1 }
 
+        // Recovery's intent is the coordinator's while the failed engine holds none, so a toggle
+        // pauses the pending restart rather than resuming.
+        #expect(coordinator.isPlaybackRequested)
         coordinator.pause()
+        #expect(!coordinator.isPlaybackRequested)
         h.recoverySleep.fireOldest()
         await settle { engine.seeks.last == 600 && engine.pendingSeekTarget == nil }
         for _ in 0..<200 { await Task.yield() }
 
         #expect(!engine.isPlaybackRequested)
+    }
+
+    @Test func aLostOutputDuringRecoveryKeepsItPaused() async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        // Headphones unplugged during the backoff: the retry must not play on the speaker.
+        engine.pauseForOutputLoss()
+        #expect(!coordinator.isPlaybackRequested)
+        h.recoverySleep.fireOldest()
+        await settle { engine.seeks.last == 600 && engine.pendingSeekTarget == nil }
+        for _ in 0..<200 { await Task.yield() }
+
+        #expect(!engine.isPlaybackRequested)
+        #expect(coordinator.error == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func aPauseDuringASeekThatTookOverRecoveryKeepsItPaused(outputLost: Bool) async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        let gate = Gate()
+        engine.seekGates = [gate]
+
+        let seek = Task { await coordinator.seek(to: 1200) }
+        await settle { engine.seeks.last == 1200 }
+        // The seek carries recovery's intent to play.
+        #expect(coordinator.isPlaybackRequested)
+        if outputLost { engine.pauseForOutputLoss() } else { coordinator.pause() }
+        #expect(!coordinator.isPlaybackRequested)
+        gate.open()
+        #expect(await seek.value == 1200)
+        for _ in 0..<200 { await Task.yield() }
+
+        #expect(!engine.isPlaybackRequested)
+        #expect(coordinator.currentTime == 1200)
+    }
+
+    // MARK: - Episode interval
+
+    @Test(arguments: [false, true])
+    func aPauseRestartsTheThirtySecondInterval(systemPause: Bool) async {
+        h.recoverySleep.elapsesImmediately = true
+        await playAt600()
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { engine.isPlaybackRequested }
+        engine.onEvent?(.tick(601))
+
+        if systemPause {
+            // An interruption pauses the engine directly; the player reports the rate change.
+            engine.pause()
+            engine.onEvent?(.tick(601))
+        } else {
+            coordinator.pause()
+        }
+        h.clock.advance(by: 30)
+        engine.play()
+        engine.onEvent?(.tick(602))
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { engine.isPlaybackRequested }
+
+        // Thirty seconds passed, but not of playback: the budget carries on.
+        #expect(h.recoverySleep.durations == [.milliseconds(500), .seconds(1)])
     }
 }

@@ -30,6 +30,10 @@ final class FakeAudioEngine: AudioEngineProtocol {
         calls.append("pause")
         isPlaybackRequested = false
     }
+    func pauseForOutputLoss() {
+        calls.append("outputLost")
+        isPlaybackRequested = false
+    }
     func stop() { calls.append("stop") }
     func unload() { calls.append("unload") }
     func seek(to time: Double) async -> SeekResult {
@@ -85,11 +89,12 @@ struct AudioInterruptionHandlerTests {
         handler.handle(.oldDeviceUnavailable)
         handler.handle(.interruptionEnded(shouldResume: true))
 
-        #expect(engine.calls == ["pause"])
+        // Reported even when paused, so a play held elsewhere (recovery) is dropped too.
+        #expect(engine.calls == ["pause", "outputLost"])
 
         engine.play()
         handler.handle(.oldDeviceUnavailable)
-        #expect(engine.calls == ["pause", "play", "pause"])
+        #expect(engine.calls == ["pause", "outputLost", "play", "outputLost"])
     }
 
     @Test func userPlayAndPauseClearLateResume() {

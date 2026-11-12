@@ -52,9 +52,11 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
             throw StreamResolutionError.resolution(error)
         }
         var urls: [URL] = []
+        var streamToken: String?
         for track in plan.tracks {
             if track.authentication == .accessTokenQuery {
                 let token = try await accessToken()
+                streamToken = token
                 guard let url = track.authorizedURL(accessToken: token) else {
                     throw StreamResolutionError.missingAccessToken
                 }
@@ -70,7 +72,7 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
                 HeaderStreamingTransport(
                     customHeaders: configuration.customHeaders, configuration: streamingConfiguration())
             }
-        return ResolvedStream(plan: plan, urls: urls, transport: transport)
+        return ResolvedStream(plan: plan, urls: urls, transport: transport, accessToken: streamToken)
     }
 
     /// A token for a URL the player loads outside the client; no tokens, or a session the server
@@ -87,11 +89,13 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
         _ = try await client.send(SessionEndpoints.close(sessionID: id, report: report))
     }
 
-    /// Replaces the stored access token through the client's single-flight refresh; a token
-    /// another caller already replaced isn't refreshed again. ``APIError/notAuthenticated`` when
-    /// signed out.
-    public func refreshStreamAccess() async throws {
-        guard let token = await client.currentAccessToken() else { throw APIError.notAuthenticated }
+    /// Replaces `rejected` (else the stored token) through the client's single-flight refresh; a
+    /// token another caller already replaced isn't refreshed again. ``APIError/notAuthenticated``
+    /// when signed out.
+    public func refreshStreamAccess(replacing rejected: String?) async throws {
+        var token = rejected
+        if token == nil { token = await client.currentAccessToken() }
+        guard let token else { throw APIError.notAuthenticated }
         _ = try await client.accessToken(replacing: token)
     }
 }

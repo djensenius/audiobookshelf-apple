@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSCore
 import Foundation
+import Observation
 
 private let logger = Log.playback
 
@@ -86,6 +87,7 @@ struct PlaybackRecoveryHost {
 ///   attempt reads afresh. A stale recovery seek never writes a position: the coordinator
 ///   publishes only the user's.
 @MainActor
+@Observable
 final class PlaybackRecovery {
     /// Segment-readiness backoff.
     static let retryDelays: [Duration] = [.milliseconds(500), .seconds(1), .seconds(2), .seconds(4), .seconds(8)]
@@ -112,13 +114,14 @@ final class PlaybackRecovery {
         var failedDuringAttempt = false
     }
 
-    var host: PlaybackRecoveryHost?
+    @ObservationIgnored var host: PlaybackRecoveryHost?
     private let wait: @Sendable (Duration) async -> Void
+    // Observed, as ``wantsPlay(at:)`` feeds the coordinator's play intent.
     private var episode: Episode?
-    private var token = 0
     private var isRunning = false
+    @ObservationIgnored private var token = 0
     /// The generation of the rebuild in flight: failures at it are its new item's.
-    private var attemptGeneration: Int?
+    @ObservationIgnored private var attemptGeneration: Int?
 
     init(wait: @escaping @Sendable (Duration) async -> Void) {
         self.wait = wait
@@ -162,9 +165,24 @@ final class PlaybackRecovery {
         return episode.wantsPlay
     }
 
-    /// A pause or resume changes whether recovery plays when it succeeds.
+    /// A pause or resume changes whether recovery plays when it succeeds; a pause also ends the
+    /// confirmed playback interval.
     func notePlayIntent(_ wantsPlay: Bool) {
         episode?.wantsPlay = wantsPlay
+        if !wantsPlay { notePlaybackStopped() }
+    }
+
+    /// Whether a run in flight for the item at `generation` will play it once it succeeds: the
+    /// user's play intent while the engine, having failed, holds none.
+    func wantsPlay(at generation: Int) -> Bool {
+        guard isRunning, let episode else { return false }
+        return episode.generation == generation && episode.wantsPlay
+    }
+
+    /// Playback left the playing state (a pause, a system pause, buffering): the
+    /// ``episodeReset`` interval must start again.
+    func notePlaybackStopped() {
+        if episode?.playingSince != nil { episode?.playingSince = nil }
     }
 
     /// A tick while playing at `generation`: ends the episode after ``episodeReset`` of it.

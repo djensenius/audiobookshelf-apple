@@ -146,6 +146,11 @@ final class CoordinatorTestEngine: AudioEngineProtocol {
         state = .paused
     }
 
+    func pauseForOutputLoss() {
+        pause()
+        onEvent?(.outputLost)
+    }
+
     func stop() {
         generation += 1
         stopCount += 1
@@ -254,6 +259,8 @@ final class StubSessionService: PlaybackSessionService {
         var canceledResolutions = 0
         var closeError: APIError?
         var refreshes = 0
+        /// The `rejected` token of each refresh.
+        var refreshedTokens: [String?] = []
         var refreshError: APIError?
         var starts: [String] = []
         var closes: [String] = []
@@ -352,7 +359,8 @@ final class StubSessionService: PlaybackSessionService {
                 startOffset: track.startOffset ?? 0, duration: track.duration, authentication: .session)
         }
         return ResolvedStream(
-            plan: StreamPlan(kind: .directPlay, transport: .urlAsset, tracks: tracks), urls: tracks.map(\.url))
+            plan: StreamPlan(kind: .directPlay, transport: .urlAsset, tracks: tracks), urls: tracks.map(\.url),
+            accessToken: "token-\(session.id)")
     }
 
     func closeSession(id: String, report: PlaybackSyncReport?) async throws {
@@ -376,9 +384,10 @@ final class StubSessionService: PlaybackSessionService {
         if let error { throw error }
     }
 
-    func refreshStreamAccess() async throws {
+    func refreshStreamAccess(replacing rejected: String?) async throws {
         let error = state.withLock {
             $0.refreshes += 1
+            $0.refreshedTokens.append(rejected)
             $0.log.append("refresh")
             return $0.refreshError
         }

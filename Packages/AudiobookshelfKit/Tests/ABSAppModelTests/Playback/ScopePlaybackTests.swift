@@ -43,6 +43,8 @@ private final class InstantEngine: AudioEngineProtocol {
         if timeline != nil { state = .paused }
     }
 
+    func pauseForOutputLoss() { pause() }
+
     func stop() {
         isPlaybackRequested = false
         isAudioSessionActive = false
@@ -88,7 +90,7 @@ private struct BookServer: PlaybackSessionService, ProgressSyncService {
     }
 
     func closeSession(id: String, report: PlaybackSyncReport?) async throws {}
-    func refreshStreamAccess() async throws {}
+    func refreshStreamAccess(replacing rejected: String?) async throws {}
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? { nil }
     func syncSession(id: String, report: PlaybackSyncReport) async throws {}
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {}

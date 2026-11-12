@@ -24,8 +24,10 @@ public protocol PlaybackSessionService: Sendable {
     /// `POST /api/session/:id/close`, applying `report` first when given.
     func closeSession(id: String, report: PlaybackSyncReport?) async throws
     /// Refreshes the access token after the stream got a 401 (ADR 0007's 401 path), joining a
-    /// refresh in flight. Throws the ``APIError``: ``APIError/sessionExpired`` leads to sign-in.
-    func refreshStreamAccess() async throws
+    /// refresh in flight. `rejected` is the stream's token (``ResolvedStream/accessToken``): once
+    /// another caller has replaced it, its replacement is kept. `nil` replaces the stored token.
+    /// Throws the ``APIError``: ``APIError/sessionExpired`` leads to sign-in.
+    func refreshStreamAccess(replacing rejected: String?) async throws
 }
 
 /// A session's stream plan with the URL to load for each of its tracks.
@@ -36,11 +38,16 @@ public struct ResolvedStream: Sendable, Hashable {
     /// For ``StreamPlan/Transport/customHeaderResourceLoader``, the transport that loads `urls`
     /// with the connection's custom headers; `nil` for plain `AVURLAsset`s.
     public let transport: HeaderStreamingTransport?
+    /// The access token in token-fallback URLs (``TrackAuthentication/accessTokenQuery``), if any.
+    public let accessToken: String?
 
-    public init(plan: StreamPlan, urls: [URL], transport: HeaderStreamingTransport? = nil) {
+    public init(
+        plan: StreamPlan, urls: [URL], transport: HeaderStreamingTransport? = nil, accessToken: String? = nil
+    ) {
         self.plan = plan
         self.urls = urls
         self.transport = transport
+        self.accessToken = accessToken
     }
 }
 

@@ -68,6 +68,7 @@ struct APIPlaybackSessionServiceTests {
     @Test func tokenFallbackAddsTheAccessToken() async throws {
         let stream = try await service().resolveStream(for: episodeSession(index: nil))
         #expect(stream.urls.map(\.absoluteString) == ["https://abs.example/abs/api/items/li-9/file/77?token=a%2Bb"])
+        #expect(stream.accessToken == "a+b")
     }
 
     @Test func tokenFallbackWithoutTokensFails() async throws {
@@ -117,17 +118,29 @@ struct APIPlaybackSessionServiceTests {
         let (service, tokens, server) = try await refreshingService(
             accessToken: jwt(expiringAt: pinnedNow.addingTimeInterval(3600)), refresh: .issuing(fresh))
 
-        try await service.refreshStreamAccess()
+        try await service.refreshStreamAccess(replacing: nil)
 
         #expect(server.requests.map { $0.url?.path() } == ["/abs/auth/refresh"])
         #expect(tokens.current?.accessToken == fresh)
+    }
+
+    @Test func refreshStreamAccessKeepsATokenAnotherCallerAlreadyReplaced() async throws {
+        // The stream used `old`; another request has since replaced it, so nothing is refreshed.
+        let current = jwt(expiringAt: pinnedNow.addingTimeInterval(3600))
+        let (service, tokens, server) = try await refreshingService(
+            accessToken: current, refresh: .issuing(jwt(expiringAt: pinnedNow.addingTimeInterval(7200))))
+
+        try await service.refreshStreamAccess(replacing: jwt(expiringAt: pinnedNow.addingTimeInterval(-60)))
+
+        #expect(server.requests.isEmpty)
+        #expect(tokens.current?.accessToken == current)
     }
 
     @Test func refreshStreamAccessReportsARejectedRefresh() async throws {
         let (service, _, _) = try await refreshingService(
             accessToken: jwt(expiringAt: pinnedNow.addingTimeInterval(3600)), refresh: .rejected)
 
-        await #expect(throws: APIError.sessionExpired) { try await service.refreshStreamAccess() }
+        await #expect(throws: APIError.sessionExpired) { try await service.refreshStreamAccess(replacing: nil) }
     }
 
     @Test func tokenFallbackPropagatesCancellation() async throws {
