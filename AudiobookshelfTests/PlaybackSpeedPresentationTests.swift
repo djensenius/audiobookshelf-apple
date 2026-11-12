@@ -15,6 +15,11 @@ import Testing
         #expect(PlaybackSpeedPresentation.label(1.0 + 0.1 * 7, locale: locale) == "1.7×")
     }
 
+    @Test func rateLabelShowsTwoDecimals() {
+        // An off-grid rate saved elsewhere keeps its second decimal.
+        #expect(PlaybackSpeedPresentation.label(1.25, locale: locale) == "1.25×")
+    }
+
     @Test func rateLabelFollowsLocale() {
         #expect(PlaybackSpeedPresentation.label(1.5, locale: Locale(identifier: "de_DE")) == "1,5×")
     }

@@ -13,24 +13,25 @@ public enum PlaybackSpeed {
     /// How close two rates must be to count as the same, as for a preset's checkmark.
     public static let tolerance: Double = 1e-6
 
-    /// `rate` rounded to the nearest 0.1 and clamped to ``range``; a non-finite or non-positive rate,
-    /// which settings would reject, gives `1`.
+    /// `rate` rounded to the nearest 0.1 (half up, D1) and clamped to ``range``; a non-finite or
+    /// non-positive rate, which settings would reject, gives `1`.
     public static func normalized(_ rate: Double) -> Double {
         guard rate.isFinite, rate > 0 else { return 1 }
-        return clamped(tenths: (rate / step).rounded())
+        return clamped(tenths: (rate * tenthsPerUnit).rounded())
     }
 
     /// The next rate on the 0.1 grid above or below `rate`, or `nil` at the end of ``range``.
     /// A rate between grid points moves to the nearest one in that direction (1.25 steps up to 1.3
-    /// and down to 1.2). A rate outside ``range`` is clamped first; a non-finite or non-positive one
-    /// counts as `1`.
+    /// and down to 1.2). A rate outside ``range`` steps to the nearer bound (0.25 up to 0.5, 12 down
+    /// to 10) and not past it; a non-finite or non-positive one counts as `1`.
     public static func stepped(_ rate: Double, up: Bool) -> Double? {
-        let base = rate.isFinite && rate > 0 ? min(max(rate, range.lowerBound), range.upperBound) : 1
-        let tenths = base / step
+        guard rate.isFinite, rate > 0 else { return stepped(1, up: up) }
+        if rate < range.lowerBound - tolerance { return up ? range.lowerBound : nil }
+        if rate > range.upperBound + tolerance { return up ? nil : range.upperBound }
+        let tenths = rate * tenthsPerUnit
         // The tolerance absorbs a grid rate stored as, say, 1.2000000000000002.
         let next = up ? (tenths + tolerance).rounded(.down) + 1 : (tenths - tolerance).rounded(.up) - 1
-        let result = next * step
-        guard result >= range.lowerBound - tolerance, result <= range.upperBound + tolerance else { return nil }
+        guard next >= minTenths, next <= maxTenths else { return nil }
         return clamped(tenths: next)
     }
 
@@ -44,10 +45,14 @@ public enum PlaybackSpeed {
         abs(lhs - rhs) < tolerance
     }
 
-    /// Whole `tenths` as a rate in ``range``; dividing the integer by 10 gives the closest double to
-    /// the decimal, unlike repeated additions of 0.1.
+    /// Tenths of a rate per unit of rate: the inverse of ``step``, as one scale for both directions.
+    private static let tenthsPerUnit: Double = 10
+    private static let minTenths = range.lowerBound * tenthsPerUnit
+    private static let maxTenths = range.upperBound * tenthsPerUnit
+
+    /// Whole `tenths` as a rate in ``range``; dividing the integer gives the closest double to the
+    /// decimal, unlike repeated additions of 0.1.
     private static func clamped(tenths: Double) -> Double {
-        let bounded = min(max(tenths, range.lowerBound / step), range.upperBound / step).rounded()
-        return bounded / 10
+        min(max(tenths.rounded(), minTenths), maxTenths) / tenthsPerUnit
     }
 }

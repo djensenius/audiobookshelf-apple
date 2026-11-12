@@ -92,9 +92,10 @@ private struct PresetRow: View {
     }
 }
 
-/// The − and + buttons with the rate between them. VoiceOver reads the rate as one adjustable
-/// element (swipe up or down to step); the buttons stay for Voice Control, Switch Control, the
-/// keyboard and the pointer.
+/// The − and + buttons with the rate between them, or, when that row is wider than the sheet (the
+/// largest accessibility sizes on an iPhone), the rate above the buttons. VoiceOver reads the rate
+/// as one adjustable element (swipe up or down to step); the buttons stay for Voice Control, Switch
+/// Control, the keyboard and the pointer.
 private struct SpeedStepper: View {
     let model: PlayerViewModel
     let rate: Double
@@ -102,30 +103,57 @@ private struct SpeedStepper: View {
     @ScaledMetric(relativeTo: .title2) private var valueWidth = 88
 
     var body: some View {
-        let label = PlaybackSpeedPresentation.label(rate, locale: locale)
-        HStack(spacing: ABSSpacing.large) {
-            stepButton(up: false)
-            Text(verbatim: label)
-                .font(.title2.monospacedDigit())
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .frame(minWidth: valueWidth)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Text(verbatim: L10n.string("LabelPlaybackSpeed")))
-                .accessibilityValue(Text(verbatim: label))
-                .accessibilityAdjustableAction { direction in
-                    switch direction {
-                    case .increment: model.stepRate(up: true)
-                    case .decrement: model.stepRate(up: false)
-                    @unknown default: break
-                    }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: ABSSpacing.large) {
+                stepButton(up: false)
+                value
+                stepButton(up: true)
+            }
+            VStack(spacing: ABSSpacing.small) {
+                value
+                HStack(spacing: ABSSpacing.large) {
+                    stepButton(up: false)
+                    stepButton(up: true)
                 }
-            stepButton(up: true)
+            }
         }
         .padding(.vertical, ABSSpacing.medium)
         .padding(.horizontal, ABSSpacing.large)
         .frame(maxWidth: .infinity)
         .background(.bar)
+        .background {
+            // ⌘= for increase too: "+" is ⇧= on a US keyboard, so ⌘+ alone needs Shift.
+            Button {
+                model.stepRate(up: true)
+            } label: {
+                EmptyView()
+            }
+            .keyboardShortcut("=", modifiers: .command)
+            .disabled(!model.canStepRate(up: true))
+            .opacity(0)
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private var value: some View {
+        let label = PlaybackSpeedPresentation.label(rate, locale: locale)
+        return Text(verbatim: label)
+            .font(.title2.monospacedDigit())
+            .lineLimit(1)
+            .minimumScaleFactor(0.5)
+            // Capped so the scaled width alone can't push the row past the sheet.
+            .frame(minWidth: min(valueWidth, 120))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text(verbatim: L10n.string("LabelPlaybackSpeed")))
+            .accessibilityValue(Text(verbatim: label))
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: model.stepRate(up: true)
+                case .decrement: model.stepRate(up: false)
+                @unknown default: break
+                }
+            }
     }
 
     private func stepButton(up: Bool) -> some View {
@@ -144,7 +172,7 @@ private struct SpeedStepper: View {
         }
         .buttonStyle(.bordered)
         .buttonRepeatBehavior(.enabled)
-        // ⌘+ and ⌘− on a hardware keyboard (iPad) and the Mac.
+        // ⌘+ (with ⌘= in the stepper) and ⌘− on a hardware keyboard (iPad) and the Mac.
         .keyboardShortcut(up ? "+" : "-", modifiers: .command)
         .disabled(!model.canStepRate(up: up))
     }
@@ -173,4 +201,9 @@ private struct SpeedStepper: View {
 #Preview("Sheet, accessibility size") {
     PlaybackSpeedSheet(model: .preview(), close: {})
         .dynamicTypeSize(.accessibility3)
+}
+
+#Preview("Sheet, largest accessibility size") {
+    PlaybackSpeedSheet(model: .preview(), close: {})
+        .dynamicTypeSize(.accessibility5)
 }

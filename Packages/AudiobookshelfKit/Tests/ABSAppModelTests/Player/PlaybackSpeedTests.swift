@@ -38,11 +38,16 @@ private func withPlayer(_ body: @MainActor (PlayerViewModel, FakePlaybackControl
         // A grid rate a hair off still counts as on the grid.
         #expect(PlaybackSpeed.stepped(10.000_000_000_000_002, up: true) == nil)
         #expect(PlaybackSpeed.stepped(0.499_999_999_999_999_9, up: false) == nil)
-        // Outside the range, the rate is clamped first.
-        #expect(PlaybackSpeed.stepped(12, up: true) == nil)
-        #expect(PlaybackSpeed.stepped(12, up: false) == 9.9)
+    }
+
+    @Test func outOfRangeStepsToTheBound() {
+        // Toward the range, the first step lands on the bound rather than past it.
+        #expect(PlaybackSpeed.stepped(0.25, up: true) == 0.5)
+        #expect(PlaybackSpeed.stepped(12, up: false) == 10)
+        #expect(PlaybackSpeed.stepped(10.04, up: false) == 10)
+        // Away from it, there's nothing to step to.
         #expect(PlaybackSpeed.stepped(0.25, up: false) == nil)
-        #expect(PlaybackSpeed.stepped(0.25, up: true) == 0.6)
+        #expect(PlaybackSpeed.stepped(12, up: true) == nil)
     }
 
     @Test func stepMovesOffGridRateToNearestInDirection() {
@@ -62,6 +67,16 @@ private func withPlayer(_ body: @MainActor (PlayerViewModel, FakePlaybackControl
         #expect(PlaybackSpeed.normalized(0.1) == 0.5)
         #expect(PlaybackSpeed.normalized(32) == 10)
         #expect(PlaybackSpeed.normalized(1.7000000000000004) == 1.7)
+    }
+
+    @Test func normalizedRoundsHalfTenthsUp() {
+        // `rate / 0.1` gives 11.499999999999998 for 1.15, which would round down; `rate * 10` is 11.5.
+        #expect(PlaybackSpeed.normalized(1.15) == 1.2)
+        #expect(PlaybackSpeed.normalized(1.45) == 1.5)
+        #expect(PlaybackSpeed.normalized(2.15) == 2.2)
+        #expect(PlaybackSpeed.normalized(1.35) == 1.4)
+        // Below the range, half tenths still clamp to its bound.
+        #expect(PlaybackSpeed.normalized(0.35) == 0.5)
     }
 
     @Test func presetMatchingTolerance() {
