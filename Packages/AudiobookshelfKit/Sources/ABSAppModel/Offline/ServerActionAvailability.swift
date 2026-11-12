@@ -22,7 +22,7 @@ public struct ServerActionAvailability: Sendable, Hashable {
     public func reasonKey(for kind: ItemActionKind, isDownloaded: Bool) -> String? {
         guard let reasonKey else { return nil }
         switch kind {
-        case .play, .openDetails:
+        case .play, .openDetails, .openInNewWindow:
             return isDownloaded ? nil : reasonKey
         case .markFinished, .markNotFinished, .hideFromContinueListening, .addToPlaylist:
             return reasonKey
