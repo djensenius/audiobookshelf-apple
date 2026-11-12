@@ -130,6 +130,43 @@ private func makeLossyModel(
         #expect(model.items == items(1...40))
     }
 
+    @Test func pagingChangesApplyWithoutBreakingThePageOffsets() async {
+        // Serves items by offset, so a page size mismatch between pages would skip or repeat items.
+        let all = items(1...100)
+        let limits = Mutex<[Int]>([])
+        let model = Model(query: "a") { _, page, limit in
+            limits.withLock { $0.append(limit) }
+            let results = Array(all.dropFirst(page * limit).prefix(limit))
+            return PagedResults(results: results, total: all.count, limit: limit, page: page)
+        }
+        // Nothing requested yet: both apply now.
+        model.setPaging(pageSize: 40, prefetchThreshold: 20)
+        #expect(model.pageSize == 40)
+        await model.loadNextPage()?.value
+        #expect(model.items == items(1...40))
+        model.itemAppeared(at: 19)
+        #expect(!model.isLoading)
+
+        // Mid-list, the threshold applies to the next appearance; the page size waits for a restart.
+        model.setPaging(pageSize: 30, prefetchThreshold: 30)
+        #expect(model.pageSize == 40)
+        model.itemAppeared(at: 10)
+        #expect(model.isLoading)
+        await model.loadNextPage()?.value
+        #expect(model.items == items(1...80))
+
+        await model.refresh()?.value
+        #expect(model.pageSize == 30)
+        #expect(model.items == items(1...30))
+        #expect(limits.withLock { $0 } == [40, 40, 30])
+
+        // Setting the current size back drops the waiting one.
+        model.setPaging(pageSize: 50, prefetchThreshold: 5)
+        model.setPaging(pageSize: 30, prefetchThreshold: 5)
+        await model.reset()?.value
+        #expect(model.pageSize == 30)
+    }
+
     @Test func skipsDuplicateItems() async {
         // An item was added on the server between pages, shifting item 20 onto page 1.
         let server = PageServer(pages: [items(1...20), items(20...39)], total: 40)

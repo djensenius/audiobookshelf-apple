@@ -144,9 +144,9 @@ struct BrowsePagingFooter: View {
     }
 }
 
-/// Item cards in a grid that open their screen and perform their context-menu actions through the environment
-/// (``ItemCardActions``), with an alert when an action fails. `badge` puts a label (a sequence) on a card's cover;
-/// VoiceOver skips it and reads the series from the card's label (``SeriesPresentation/card(for:in:)``).
+/// Item cards in a grid that open their screen and perform their context-menu actions through
+/// ``ItemCardActionsHost``. `badge` puts a label (a sequence) on a card's cover; VoiceOver skips it and reads the
+/// series from the card's label (``SeriesPresentation/card(for:in:)``).
 struct BrowseItemGrid<Element: Identifiable>: View {
     let elements: [Element]
     let item: (Element) -> ItemSummary
@@ -154,8 +154,36 @@ struct BrowseItemGrid<Element: Identifiable>: View {
     var onAppear: (Element) -> Void = { _ in }
     /// Cards call `onAppear` again when this changes, as cards a refresh kept don't appear again to page on.
     var appearanceID = 0
-    @Environment(Router.self) private var router: Router?
     @Environment(\.serverID) private var serverID
+
+    var body: some View {
+        ItemCardActionsHost { context, perform in
+            ItemGrid(elements: elements) { element in
+                let summary = item(element)
+                ItemCard(item: summary, serverID: serverID, context: context) { perform($0, summary) }
+                    .overlay(alignment: .topLeading) {
+                        if let badge = badge(element) {
+                            Text(verbatim: badge)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, ABSSpacing.xSmall)
+                                .background(.black.opacity(0.7), in: .rect(cornerRadius: ABSRadius.small))
+                                .padding(ABSSpacing.xSmall)
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    .task(id: appearanceID) { onAppear(element) }
+            }
+        }
+    }
+}
+
+/// Item cards or rows that open their screen and perform their context-menu actions through the environment
+/// (``ItemCardActions``), with an alert when an action fails. `content` gets the actions to offer and the handler.
+struct ItemCardActionsHost<Content: View>: View {
+    @ViewBuilder let content:
+        (_ context: ItemActionContext, _ perform: @escaping (ItemActionKind, ItemSummary) -> Void) -> Content
+    @Environment(Router.self) private var router: Router?
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
     /// The key of the message for the last failed action, kept while the alert is dismissed.
@@ -163,30 +191,13 @@ struct BrowseItemGrid<Element: Identifiable>: View {
     @State private var showsFailure = false
 
     var body: some View {
-        ItemGrid(elements: elements) { element in
-            let summary = item(element)
-            ItemCard(
-                item: summary, serverID: serverID, context: ItemCardActions.actionContext(canPlay: playItem != nil)
-            ) { perform($0, on: summary) }
-            .overlay(alignment: .topLeading) {
-                if let badge = badge(element) {
-                    Text(verbatim: badge)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, ABSSpacing.xSmall)
-                        .background(.black.opacity(0.7), in: .rect(cornerRadius: ABSRadius.small))
-                        .padding(ABSSpacing.xSmall)
-                        .accessibilityHidden(true)
-                }
+        content(ItemCardActions.actionContext(canPlay: playItem != nil)) { perform($0, on: $1) }
+            .alert(
+                Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
+                presenting: failureKey
+            ) { _ in
+                Button(L10n.string("ButtonOk")) {}
             }
-            .task(id: appearanceID) { onAppear(element) }
-        }
-        .alert(
-            Text(verbatim: failureKey.map { L10n.string($0) } ?? ""), isPresented: $showsFailure,
-            presenting: failureKey
-        ) { _ in
-            Button(L10n.string("ButtonOk")) {}
-        }
     }
 
     private func perform(_ kind: ItemActionKind, on item: ItemSummary) {

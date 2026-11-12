@@ -12,13 +12,21 @@ struct LibraryView: View {
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
     @State private var host: LibraryModelHost?
+    /// The screen's width once measured; the grid's columns decide the paging.
+    @State private var width: CGFloat?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         let libraryID = router?.libraryID
         let key = BrowseModelKey(store: store, libraryID: libraryID)
         let mediaType = libraryID.flatMap { store?.mediaType(libraryID: $0) }
+        let model = host?.model(for: key)
+        let paging = model.map {
+            LibraryPresentation.paging(
+                width: width, dynamicTypeSize: dynamicTypeSize, viewMode: $0.preferences.viewMode)
+        }
         Group {
-            if let host, let model = host.model(for: key) {
+            if let host, let model {
                 LibraryContent(model: model)
                     // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
                     .environment(\.itemProgressReader, host.progressReader)
@@ -30,19 +38,33 @@ struct LibraryView: View {
             }
         }
         .navigationTitle(Text(verbatim: L10n.string(AppTab.library.titleKey)))
-        .task(id: LibraryTaskID(key: key, mediaType: mediaType)) {
+        .onGeometryChange(for: CGFloat.self) {
+            $0.size.width
+        } action: {
+            width = $0
+        }
+        .onChange(of: paging) { _, paging in
+            if let paging, let model { paging.apply(to: model) }
+        }
+        // The first page waits for the width, so it is sized for the grid's columns.
+        .task(id: LibraryTaskID(key: key, mediaType: mediaType, isMeasured: width != nil)) {
             host = LibraryPresentation.updated(host, for: key, mediaType: mediaType, store: store)
-            if let model = host?.model, model.items.isEmpty, !model.reachedEnd {
+            guard let model = host?.model, width != nil else { return }
+            LibraryPresentation.paging(
+                width: width, dynamicTypeSize: dynamicTypeSize, viewMode: model.preferences.viewMode
+            ).apply(to: model)
+            if model.items.isEmpty, !model.reachedEnd {
                 await model.load()?.value
             }
         }
     }
 }
 
-/// What the Library screen's task runs for: a new key, or the library's type once it is known.
+/// What the Library screen's task runs for: a new key, the library's type once it is known, or the first width.
 private struct LibraryTaskID: Hashable {
     let key: BrowseModelKey?
     let mediaType: MediaType?
+    let isMeasured: Bool
 }
 
 /// The items of one model as a grid or list, with the count in the title area; previews give it a fixture service.

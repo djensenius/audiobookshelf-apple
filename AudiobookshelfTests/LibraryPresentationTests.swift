@@ -3,6 +3,7 @@ import ABSAppModel
 import ABSCore
 import ABSUI
 import Foundation
+import SwiftUI
 import Testing
 
 @testable import Audiobookshelf
@@ -234,6 +235,77 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
         }
     }
 
+    /// Negative control: comparing only the library ID in ``LibraryPresentation/updated(_:for:mediaType:store:)`` keeps
+    /// the first account's model, and this test fails.
+    @Test func accountSwitchWithTheSameLibraryGetsANewModelWithThatAccountsPreferences() async throws {
+        let client = GatedLibraryClient(items: ["lib_a": books("a", 3, in: "lib_a")])
+        try await withStore(client) { store in
+            store.saveViewPreferences(
+                LibraryViewPreferences(viewMode: .list), libraryID: "lib_a", connectionKey: account)
+            let (firstKey, first) = try makeHost(store, "lib_a")
+            await first.model.load()?.value
+            #expect(first.model.preferences.viewMode == .list)
+
+            await store.connect(client: client, connectionKey: otherAccount)
+            store.saveViewPreferences(
+                LibraryViewPreferences(sort: .title, descending: false), libraryID: "lib_a",
+                connectionKey: otherAccount)
+            let (key, second) = try makeHost(store, "lib_a", replacing: first)
+            #expect(key.libraryID == firstKey.libraryID)
+            #expect(key.connection == otherAccount)
+            #expect(second.model !== first.model)
+            #expect(second.model.list.connectionKey == otherAccount)
+            #expect(second.model.preferences.viewMode == .grid)
+            #expect(second.model.preferences.sort == .title)
+            #expect(shownIDs(first, for: key).isEmpty)
+        }
+    }
+
+    @Test func pagingFollowsTheGridsColumns() {
+        let defaults = LibraryPaging(pageSize: 20, prefetchThreshold: 5)
+        #expect(LibraryPresentation.paging(columns: 0) == defaults)
+        #expect(LibraryPresentation.paging(columns: 1) == defaults)
+        #expect(LibraryPresentation.paging(columns: 3) == LibraryPaging(pageSize: 20, prefetchThreshold: 6))
+        #expect(LibraryPresentation.paging(columns: 5) == LibraryPaging(pageSize: 20, prefetchThreshold: 10))
+        #expect(LibraryPresentation.paging(columns: 10) == LibraryPaging(pageSize: 40, prefetchThreshold: 20))
+        #expect(LibraryPresentation.paging(columns: 16) == LibraryPaging(pageSize: 64, prefetchThreshold: 32))
+
+        // Widths as `ItemGrid` fits 140-point cells with 16-point spacing and padding.
+        let paging = { (width: CGFloat?, size: DynamicTypeSize, mode: LibraryViewMode) in
+            LibraryPresentation.paging(width: width, dynamicTypeSize: size, viewMode: mode)
+        }
+        #expect(ItemGridMetrics.columnCount(width: 375, dynamicTypeSize: .large) == 2)
+        #expect(ItemGridMetrics.columnCount(width: 1_440, dynamicTypeSize: .large) == 9)
+        #expect(ItemGridMetrics.columnCount(width: 0, dynamicTypeSize: .large) == 1)
+        #expect(paging(nil, .large, .grid) == defaults)
+        #expect(paging(375, .large, .grid) == defaults)
+        #expect(paging(1_440, .large, .grid) == LibraryPaging(pageSize: 36, prefetchThreshold: 18))
+        #expect(paging(2_400, .large, .grid) == LibraryPaging(pageSize: 60, prefetchThreshold: 30))
+        // Larger text gets fewer, wider columns; the list is one column at any width.
+        #expect(paging(1_440, .accessibility3, .grid) == LibraryPaging(pageSize: 24, prefetchThreshold: 12))
+        #expect(paging(2_400, .large, .list) == defaults)
+    }
+
+    @Test func wideGridPrefetchesTwoRowsBeforeTheEnd() async throws {
+        let client = GatedLibraryClient(items: ["lib_a": books("a", 50, in: "lib_a")])
+        try await withStore(client) { store in
+            let model = try makeHost(store, "lib_a").host.model
+            LibraryPresentation.paging(columns: 10).apply(to: model)
+            await model.load()?.value
+            #expect(model.items.count == 40)
+
+            // Index 19 is 21 from the end of 40: not yet. Index 20 is the threshold, 20 from the end.
+            model.list.itemAppeared(id: "a19")
+            #expect(!model.isLoading)
+            model.list.itemAppeared(id: "a20")
+            #expect(model.isLoading)
+            await model.list.loadNextPage()?.value
+            #expect(model.items.count == 50)
+            #expect(await client.requests.map { $0.query.limit } == [40, 40])
+            #expect(await client.requests.map { $0.query.page } == [0, 1])
+        }
+    }
+
     @Test func collapsedSeriesOpensTheSeries() async throws {
         let collapsed = ABSCore.LibraryItem(
             id: "a0", libraryId: "lib_a", mediaType: .book, media: SampleLibrary.princessOfMars.media,
@@ -291,8 +363,8 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
         #expect(LibraryPresentation.countText(total: nil, mediaType: .book) == nil)
         #expect(LibraryPresentation.countText(total: 1, mediaType: .book, locale: english) == "1 book")
         #expect(LibraryPresentation.countText(total: 1_234, mediaType: .book, locale: english) == "1,234 books")
-        #expect(LibraryPresentation.countText(total: 1, mediaType: .podcast, locale: english) == "1 podcast")
-        #expect(LibraryPresentation.countText(total: 7, mediaType: .podcast, locale: english) == "7 podcasts")
+        #expect(LibraryPresentation.countText(total: 1, mediaType: .podcast, locale: english) == "1 Podcast")
+        #expect(LibraryPresentation.countText(total: 7, mediaType: .podcast, locale: english) == "7 Podcasts")
     }
 
     @Test func everyMessageKeyIsInTheCatalog() {
@@ -302,10 +374,7 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
         let messages = [LibraryPresentation.messages(for: .book), LibraryPresentation.messages(for: .podcast)]
         let keys =
             messages.flatMap { [$0.failed, $0.empty] }
-            + [
-                "LabelLibraryBookCount", "LabelLibraryBookCountOne", "LabelLibraryPodcastCount",
-                "LabelLibraryPodcastCountOne",
-            ]
+            + ["LabelSearchOneBook", "SharedBookCount", "LabelPodcast", "LabelPodcasts"]
         for key in keys {
             #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
         }

@@ -2,6 +2,7 @@ import ABSAppModel
 import ABSCore
 import ABSUI
 import Foundation
+import SwiftUI
 
 /// The bookshelf of one library: its items as cards or rows, a page at a time.
 typealias LibraryItemsModel = LibraryBrowseModel<ItemSummary>
@@ -56,17 +57,42 @@ enum LibraryPresentation {
         .resolve(list: model.list)
     }
 
-    /// The item count in the title area ("12 books", "1 podcast"); `nil` until a page told the total.
+    /// The item count in the title area ("12 books", "1 book"; "7 Podcasts" as the legacy toolbar writes it, with
+    /// the translated label after the number); `nil` until a page told the total.
     static func countText(total: Int?, mediaType: MediaType, locale: Locale? = nil) -> String? {
         guard let total else { return nil }
-        let isPodcast = mediaType == .podcast
-        let key =
-            switch (isPodcast, total == 1) {
-            case (false, false): "LabelLibraryBookCount"
-            case (false, true): "LabelLibraryBookCountOne"
-            case (true, false): "LabelLibraryPodcastCount"
-            case (true, true): "LabelLibraryPodcastCountOne"
-            }
-        return L10n.string(key, total.formatted(.number.locale(locale ?? .current)), locale: locale)
+        let number = total.formatted(.number.locale(locale ?? .current))
+        if mediaType == .podcast {
+            return "\(number) \(L10n.string(total == 1 ? "LabelPodcast" : "LabelPodcasts", locale: locale))"
+        }
+        return total == 1
+            ? L10n.string("LabelSearchOneBook", locale: locale) : L10n.string("SharedBookCount", number, locale: locale)
+    }
+
+    /// How a list of `columns` columns pages: enough per page to fill a few rows, and the next page asked for two
+    /// rows before the end, so a wide grid (12–16 columns on a Mac) neither waits at its last row nor needs
+    /// several requests to fill the screen. One column keeps the defaults (20, prefetching 5 from the end).
+    static func paging(columns: Int) -> LibraryPaging {
+        let columns = max(1, columns)
+        return LibraryPaging(pageSize: max(20, 4 * columns), prefetchThreshold: max(5, 2 * columns))
+    }
+
+    /// The paging for a screen `width` points wide (`nil` before it was measured) in `viewMode`: the grid's columns
+    /// as ``ItemGrid`` fits them, or one column for the list.
+    static func paging(width: CGFloat?, dynamicTypeSize: DynamicTypeSize, viewMode: LibraryViewMode) -> LibraryPaging {
+        guard let width, viewMode == .grid else { return paging(columns: 1) }
+        return paging(columns: ItemGridMetrics.columnCount(width: width, dynamicTypeSize: dynamicTypeSize))
+    }
+}
+
+/// The page size and prefetch threshold of the Library screen's list.
+struct LibraryPaging: Hashable {
+    let pageSize: Int
+    let prefetchThreshold: Int
+
+    /// Applies to `model`'s list: the threshold now, the page size now or from its next first page.
+    @MainActor
+    func apply(to model: LibraryItemsModel) {
+        model.list.setPaging(pageSize: pageSize, prefetchThreshold: prefetchThreshold)
     }
 }

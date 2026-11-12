@@ -43,14 +43,19 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
     /// Every page has been loaded.
     public private(set) var reachedEnd = false
 
-    public let pageSize: Int
-    public let prefetchThreshold: Int
+    /// Items per page; ``setPaging(pageSize:prefetchThreshold:)`` changes it.
+    public private(set) var pageSize: Int
+    /// How close to the end an appearing item triggers the next page.
+    public var prefetchThreshold: Int
     /// The account the model loads for, when created by `LibraryStore`.
     public let connectionKey: LibraryConnectionKey?
     /// How many pages that add no item load automatically in a row.
     public let maxEmptyPagesInARow = 3
 
     @ObservationIgnored private let fetchPage: PageFetcher
+    /// A page size waiting for the list to start over: pages are offsets of `page * limit`, so the
+    /// size can't change between pages of one generation.
+    @ObservationIgnored private var pendingPageSize: Int?
     @ObservationIgnored private var nextPage = 0
     /// Rows received, including duplicates and rows that failed to decode, compared with
     /// `total` to detect the end.
@@ -127,8 +132,28 @@ public final class ItemListModel<Query: Hashable & Sendable, Item: Identifiable 
         return loadNextPage()
     }
 
+    /// Changes the paging, for example when a wider window shows more columns. The threshold
+    /// applies to the next appearing item. The page size applies right away if no page was
+    /// requested yet, and otherwise from the next first page (``reset()``, ``refresh()`` or
+    /// ``setQuery(_:)``), as offsets of the loaded pages depend on it.
+    public func setPaging(pageSize: Int, prefetchThreshold: Int) {
+        self.prefetchThreshold = prefetchThreshold
+        if nextPage == 0, loadTask == nil, items.isEmpty, refreshRollback == nil {
+            self.pageSize = pageSize
+            pendingPageSize = nil
+        } else if pageSize != self.pageSize {
+            pendingPageSize = pageSize
+        } else {
+            pendingPageSize = nil
+        }
+    }
+
     private func restart() {
         generation += 1
+        if let pendingPageSize {
+            pageSize = pendingPageSize
+            self.pendingPageSize = nil
+        }
         loadTask?.cancel()
         loadTask = nil
         isLoading = false
