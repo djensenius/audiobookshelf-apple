@@ -56,6 +56,7 @@ struct SeriesListContent: View {
                         SeriesCard(series: series, serverID: serverID) {
                             BrowsePresentation.open(.series(id: series.id), in: router)
                         }
+                        .openInNewWindowMenu(.series(id: series.id))
                         .task(id: refreshes) { model.itemAppeared(id: series.id) }
                     }
                     BrowsePagingFooter(
