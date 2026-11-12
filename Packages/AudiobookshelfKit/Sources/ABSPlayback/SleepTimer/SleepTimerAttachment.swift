@@ -14,14 +14,13 @@ import Observation
 /// disconnects and cancels the timer.
 @MainActor
 public final class SleepTimerAttachment {
-    private typealias Hook = @MainActor () -> TimeInterval
-
     public let timer: SleepTimer
     private weak var coordinator: PlaybackCoordinator?
     private let settings: AppSettings
     private let now: @Sendable () -> Date
     private var observerToken: PlaybackObserverToken?
-    private var hook: Hook?
+    /// Owns the coordinator's `willResume`. The coordinator holds it weakly; unlike `self`, it is still alive in `deinit`.
+    private let hookOwner = HookOwner()
     private var isDetached = false
 
     /// - Parameters:
@@ -54,12 +53,11 @@ public final class SleepTimerAttachment {
             default: break
             }
         }
-        let hook: Hook = { [weak self] in
-            guard let self, !isDetached else { return 0 }
-            return self.timer.playbackWillStart(at: self.now())
-        }
-        coordinator.willResume = hook
-        self.hook = hook
+        coordinator.setWillResume(
+            { [weak self] in
+                guard let self, !isDetached else { return 0 }
+                return self.timer.playbackWillStart(at: self.now())
+            }, owner: hookOwner)
         trackSettings()
     }
 
@@ -83,12 +81,9 @@ public final class SleepTimerAttachment {
         isDetached = true
         if let coordinator {
             if let observerToken { coordinator.removeObserver(observerToken) }
-            if let hook, let current = coordinator.willResume, Self.isSame(current, hook) {
-                coordinator.willResume = nil
-            }
+            coordinator.clearWillResume(ownedBy: hookOwner)
         }
         observerToken = nil
-        hook = nil
         timer.cancel(at: now())
     }
 
@@ -114,15 +109,5 @@ public final class SleepTimerAttachment {
         return SleepTimerOptions(settings: AppSettings.snapshot(from: settings.defaults))
     }
 
-    /// Closures have no identity, so this compares their function and context pointers. The context is the
-    /// attachment's own allocation, alive while `hook` holds it, so equal bytes mean the same closure. A layout
-    /// mismatch can only report "different", which leaves an inert hook installed.
-    private static func isSame(_ lhs: @escaping Hook, _ rhs: @escaping Hook) -> Bool {
-        // A struct keeps the closure's own representation; passing the closure itself as a generic value would
-        // wrap it in a new reabstraction thunk.
-        struct Stored { let hook: Hook }
-        return withUnsafeBytes(of: Stored(hook: lhs)) { lhs in
-            withUnsafeBytes(of: Stored(hook: rhs)) { rhs in lhs.elementsEqual(rhs) }
-        }
-    }
+    private final class HookOwner {}
 }

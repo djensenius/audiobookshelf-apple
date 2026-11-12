@@ -262,6 +262,27 @@ struct PlaybackCoordinatorSleepTimerTests {
         #expect(h.engine.playCount == plays)
     }
 
+    @Test func willResumeIsClearedOnlyByItsOwner() throws {
+        let h = try CoordinatorHarness()
+        let owner = NSObject()
+        let other = NSObject()
+
+        h.coordinator.setWillResume({ 1 }, owner: owner)
+        h.coordinator.clearWillResume(ownedBy: other)
+        #expect(h.coordinator.willResume?() == 1, "Another owner keeps the hook")
+        h.coordinator.clearWillResume(ownedBy: owner)
+        #expect(h.coordinator.willResume == nil)
+
+        h.coordinator.setWillResume({ 1 }, owner: owner)
+        h.coordinator.willResume = { 2 }
+        h.coordinator.clearWillResume(ownedBy: owner)
+        #expect(h.coordinator.willResume?() == 2, "A direct assignment ends the ownership")
+
+        h.coordinator.setWillResume({ 3 }, owner: other)
+        h.coordinator.clearWillResume(ownedBy: owner)
+        #expect(h.coordinator.willResume?() == 3, "A later owner takes over")
+    }
+
     @Test func everyPauseIsPublishedWithoutChangingSavedPauseTime() async throws {
         let h = try CoordinatorHarness()
         h.coordinator.pause()

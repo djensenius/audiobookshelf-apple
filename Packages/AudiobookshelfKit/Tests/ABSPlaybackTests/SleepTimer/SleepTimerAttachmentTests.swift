@@ -100,6 +100,36 @@ struct SleepTimerAttachmentTests {
         attachment.detach()
     }
 
+    @Test func everySleepTimerSettingUpdatesOptions() async throws {
+        let t = try AttachmentHarness()
+        let attachment = try t.attach()
+        let timer = attachment.timer
+        let settings = t.settings.value
+        // Each change must alter the options: the sensitivity before shake is disabled, the rewind time after the
+        // rewind is enabled.
+        let changes: [(name: String, apply: () -> Void)] = [
+            ("sleepTimerLength", { settings.sleepTimerLength = 600_000 }),
+            ("shakeSensitivity", { settings.shakeSensitivity = .high }),
+            ("disableShakeToResetSleepTimer", { settings.disableShakeToResetSleepTimer = true }),
+            ("disableSleepTimerFadeOut", { settings.disableSleepTimerFadeOut = true }),
+            ("disableSleepTimerResetFeedback", { settings.disableSleepTimerResetFeedback = true }),
+            ("enableSleepTimerAlmostDoneChime", { settings.enableSleepTimerAlmostDoneChime = true }),
+            ("autoSleepTimer", { settings.autoSleepTimer = true }),
+            ("autoSleepTimerStartTime", { settings.autoSleepTimerStartTime = "21:00" }),
+            ("autoSleepTimerEndTime", { settings.autoSleepTimerEndTime = "07:00" }),
+            ("autoSleepTimerAutoRewind", { settings.autoSleepTimerAutoRewind = true }),
+            ("autoSleepTimerAutoRewindTime", { settings.autoSleepTimerAutoRewindTime = 120_000 }),
+        ]
+        for change in changes {
+            let before = timer.options
+            change.apply()
+            await until { timer.options != before }
+            #expect(timer.options != before, "\(change.name) didn't update the options")
+            #expect(timer.options == SleepTimerOptions(settings: AppSettings.snapshot(from: t.settings.defaults)))
+        }
+        attachment.detach()
+    }
+
     @Test(arguments: [(hour: 23, starts: true), (hour: 12, starts: false)])
     func autoSleepStartsInsideWindowFromSettings(hour: Int, starts: Bool) async throws {
         let t = try AttachmentHarness()
