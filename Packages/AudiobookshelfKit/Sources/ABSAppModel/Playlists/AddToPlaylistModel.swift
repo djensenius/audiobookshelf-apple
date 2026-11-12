@@ -33,7 +33,8 @@ public struct PlaylistEntryKey: Sendable, Hashable {
 /// - Toggles are optimistic: the row changes at once and takes the server's playlist when the
 ///   request succeeds, or goes back to what it was and sets ``failure`` when it fails. A second
 ///   toggle of a playlist with a request in flight is ignored.
-/// - Removing a playlist's last member deletes it on the server, so its row is dropped.
+/// - Removing a playlist's last member deletes it on the server, so its row is dropped; so is the row of a
+///   playlist whose removal fails with 404, because the server deleted it already.
 /// - Rows are ordered once per load, checked playlists first (legacy re-sorted on every change,
 ///   which would move a row under the user's finger). A created playlist goes first.
 ///
@@ -141,11 +142,15 @@ public final class AddToPlaylistModel {
                 isRemoving
                 ? try await service.removeFromPlaylist(id: id, items: references)
                 : try await service.addToPlaylist(id: id, items: references)
-            if updated.items.isEmpty {
+            // Only a removal deletes the playlist on the server; an add never leaves it empty.
+            if isRemoving, updated.items.isEmpty {
                 playlists.removeAll { $0.id == id }
             } else {
                 replace(updated)
             }
+        } catch APIError.notFound where isRemoving {
+            // The server deleted the playlist already, so there is nothing to remove the entries from.
+            playlists.removeAll { $0.id == id }
         } catch {
             replace(previous)
             if !(error is CancellationError) { failure = isRemoving ? .remove : .add }
