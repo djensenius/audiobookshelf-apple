@@ -23,6 +23,10 @@ private func book(_ index: Int, missing: Bool = false) -> ItemSummary {
 
 private func books(_ count: Int) -> [ItemSummary] { (0..<count).map { book($0) } }
 
+private func collapsedSeries(_ index: Int) -> ItemSummary {
+    ItemSummary(id: "series-\(index)", itemID: "s\(index)", seriesID: "s\(index)", kind: .series, title: "Saga")
+}
+
 private func section(_ id: String, rows count: Int) -> CarPlaySection {
     CarPlaySection(
         id: id,
@@ -63,6 +67,72 @@ private let books3 = CarPlayDestination.items(libraryID: "lib")
         let list = builder.items(books(2), reachedEnd: false, in: books3, title: "Books")
         #expect(list.rows.map(\.id) == ["b0", "b1", "more-2"])
         #expect(builder.rowsNeeded(offset: 2) == 6)
+    }
+
+    @Test func everyLibraryCategoryIsReachableAtTheSmallestLimit() {
+        let builder = builder(items: 2)
+        var texts: [String] = []
+        var offset: Int? = 0
+        var pages = 0
+        while let current = offset, pages < 10 {
+            let list = builder.library(library, offset: current)
+            pages += 1
+            offset = nil
+            for row in list.rows {
+                if case .more(let destination, let next) = row.action {
+                    #expect(destination == .library(id: "lib", mediaType: .book))
+                    offset = next
+                } else {
+                    texts.append(row.text)
+                }
+            }
+            #expect(list.rows.count <= 2)
+        }
+        #expect(texts == ["Books", "Series", "Authors"])
+    }
+
+    @Test func moreSkipsItemsLeftOutAsRowsSoLoadingMovesOn() {
+        // Limit 4, depth 3: collapsed series can't open their books, so only the book is a row.
+        let builder = builder(items: 4, depth: 3)
+        let loaded = (0..<4).map(collapsedSeries) + [book(4)]
+        let first = builder.items(loaded, reachedEnd: false, in: books3, title: "Books")
+        #expect(first.rows.map(\.id) == ["b4", "more-5"])
+        #expect(first.rows.last?.action == .more(books3, offset: 5))
+        #expect(builder.rowsNeeded(offset: 5) > loaded.count)
+        let more = loaded + (5..<9).map { book($0) }
+        let second = builder.items(more, reachedEnd: true, in: books3, title: "Books", offset: 5)
+        #expect(second.offset == 5)
+        #expect(second.rows.map(\.id) == ["b5", "b6", "b7", "b8"])
+    }
+
+    @Test func pagingThroughAMixedModelShowsEveryRowOnce() {
+        // The delegate's loop: load until `rowsNeeded`, build the page, follow "More…".
+        let builder = builder(items: 4, depth: 3)
+        let all = (0..<23).map { $0 % 3 == 0 ? book($0) : collapsedSeries($0) }
+        let pageSize = 5
+        var loaded = 0
+        var offset: Int? = 0
+        var shown: [String] = []
+        var pages = 0
+        while let current = offset, pages < 50 {
+            while loaded < min(builder.rowsNeeded(offset: current), all.count) { loaded += pageSize }
+            loaded = min(loaded, all.count)
+            let list = builder.items(
+                Array(all.prefix(loaded)), reachedEnd: loaded == all.count, in: books3, title: "Books",
+                offset: current)
+            pages += 1
+            offset = nil
+            for row in list.rows {
+                if case .more(_, let next) = row.action {
+                    #expect(next > current)
+                    offset = next
+                } else {
+                    shown.append(row.id)
+                }
+            }
+        }
+        #expect(pages < 50)
+        #expect(shown == all.filter { $0.kind == .book }.map(\.id))
     }
 
     // MARK: Item limits and trimming
@@ -133,6 +203,19 @@ private let books3 = CarPlayDestination.items(libraryID: "lib")
         let tooDeep = builder.items(
             books(2), reachedEnd: true, in: .seriesBooks(libraryID: "lib", seriesID: "s"), title: "Saga")
         #expect(tooDeep.sections.isEmpty)
+    }
+
+    @Test func aLevelFourListNeverOpensAnotherList() {
+        let builder = builder()
+        let nested = [collapsedSeries(0), book(1)]
+        for parent: CarPlayDestination in [
+            .authorBooks(libraryID: "lib", authorID: "a"), .seriesBooks(libraryID: "lib", seriesID: "s"),
+        ] {
+            let list = builder.items(nested, reachedEnd: true, in: parent, title: "Books")
+            #expect(list.depth == 4)
+            #expect(list.rows.map(\.id) == ["b1"])
+            #expect(list.rows.allSatisfy { if case .open = $0.action { false } else { true } })
+        }
     }
 
     // MARK: Rows

@@ -14,12 +14,16 @@ import Foundation
 ///
 /// Tapping a book or episode plays it; Now Playing then fills the fifth level. A row that would
 /// open a list deeper than ``CarPlayLimits/maximumDepth`` is left out, and a list deeper than it
-/// has no rows.
+/// has no rows. A row only opens the next level down, so a list's depth is its real place in the
+/// stack: a collapsed series in a series' or author's books (level 4) is left out rather than
+/// opening a fifth list, and its books stay reachable from the Series category.
 ///
 /// Every list holds at most ``CarPlayLimits/maximumItemCount`` rows in at most
 /// ``CarPlayLimits/maximumSectionCount`` sections. A paged list that has more rows, or whose
 /// model hasn't reached its end, shows one row fewer and ends with a "More…" row
 /// (``CarPlayRow/Action/more(_:offset:)``) that shows the list again from the next row.
+/// Offsets count the model's loaded items (libraries, items, series, authors), including those
+/// left out as rows, so they match ``rowsNeeded(offset:)``.
 public struct CarPlayContentBuilder: Sendable {
     public let limits: CarPlayLimits
     public let labels: CarPlayLabels
@@ -61,8 +65,10 @@ public struct CarPlayContentBuilder: Sendable {
         return result
     }
 
-    /// How many rows a paged list must have loaded to fill the page from `offset`: load pages of
-    /// the model until it has that many, or reached its end, before building the page.
+    /// How many items a paged list's model must have loaded to build the page from `offset`: load
+    /// pages of the model until it has that many, or reached its end, before building the page.
+    /// Offsets count the model's items, so a page whose items are all left out as rows still
+    /// moves "More…" past them.
     public func rowsNeeded(offset: Int) -> Int {
         max(0, offset) + limits.maximumItemCount
     }
@@ -90,7 +96,7 @@ public struct CarPlayContentBuilder: Sendable {
 
     /// The Library tab's root: one row per library, in the given order.
     public func libraries(_ libraries: [Library], offset: Int = 0) -> CarPlayList {
-        let rows = libraries.compactMap { library -> CarPlayRow? in
+        let rows = libraries.map { library -> CarPlayRow? in
             let destination = CarPlayDestination.library(id: library.id, mediaType: library.mediaType)
             guard canOpen(destination) else { return nil }
             return CarPlayRow(id: library.id, text: library.name, action: .open(destination))
@@ -98,8 +104,9 @@ public struct CarPlayContentBuilder: Sendable {
         return page(.libraries, title: labels.libraries, rows: rows, reachedEnd: true, offset: offset)
     }
 
-    /// A library's categories: Books, Series and Authors, or Podcasts for a podcast library.
-    public func library(_ library: Library) -> CarPlayList {
+    /// A library's categories: Books, Series and Authors, or Podcasts for a podcast library. Paged
+    /// like the other lists, so every category is reachable at any item limit.
+    public func library(_ library: Library, offset: Int = 0) -> CarPlayList {
         let id = library.id
         let categories: [(String, CarPlayDestination)] =
             switch library.mediaType {
@@ -110,11 +117,13 @@ public struct CarPlayContentBuilder: Sendable {
                     (labels.authors, .authors(libraryID: id)),
                 ]
             }
-        let rows = categories.compactMap { text, destination -> CarPlayRow? in
+        let rows = categories.map { text, destination -> CarPlayRow? in
             guard canOpen(destination) else { return nil }
             return CarPlayRow(id: "\(destination.depth)-\(text)", text: text, action: .open(destination))
         }
-        return list(.library(id: id, mediaType: library.mediaType), title: library.name, rows: rows)
+        return page(
+            .library(id: id, mediaType: library.mediaType), title: library.name, rows: rows, reachedEnd: true,
+            offset: offset)
     }
 
     /// A page of items: books and episodes play, collapsed series and podcasts open their books or
@@ -123,15 +132,16 @@ public struct CarPlayContentBuilder: Sendable {
         _ items: [ItemSummary], reachedEnd: Bool, in destination: CarPlayDestination, title: String, offset: Int = 0
     ) -> CarPlayList {
         let libraryID = destination.libraryID ?? ""
-        let rows = items.compactMap { item -> CarPlayRow? in
+        let rows = items.map { item -> CarPlayRow? in
             switch item.kind {
             case .book, .episode:
                 return itemRow(item, in: destination, progress: nil)
             case .series:
                 guard let seriesID = item.seriesID else { return nil }
-                return openRow(item, .seriesBooks(libraryID: libraryID, seriesID: seriesID))
+                return openRow(item, .seriesBooks(libraryID: libraryID, seriesID: seriesID), from: destination)
             case .podcast:
-                return openRow(item, .podcastEpisodes(libraryID: libraryID, itemID: item.itemID))
+                return openRow(
+                    item, .podcastEpisodes(libraryID: libraryID, itemID: item.itemID), from: destination)
             }
         }
         return page(destination, title: title, rows: rows, reachedEnd: reachedEnd, offset: offset)
@@ -141,7 +151,7 @@ public struct CarPlayContentBuilder: Sendable {
     public func series(
         _ series: [SeriesSummary], reachedEnd: Bool, libraryID: String, offset: Int = 0
     ) -> CarPlayList {
-        let rows = series.compactMap { series -> CarPlayRow? in
+        let rows = series.map { series -> CarPlayRow? in
             let destination = CarPlayDestination.seriesBooks(libraryID: libraryID, seriesID: series.id)
             guard canOpen(destination) else { return nil }
             return CarPlayRow(
@@ -155,7 +165,7 @@ public struct CarPlayContentBuilder: Sendable {
     public func authors(
         _ authors: [AuthorSummary], reachedEnd: Bool, libraryID: String, offset: Int = 0
     ) -> CarPlayList {
-        let rows = authors.compactMap { author -> CarPlayRow? in
+        let rows = authors.map { author -> CarPlayRow? in
             let destination = CarPlayDestination.authorBooks(libraryID: libraryID, authorID: author.id)
             guard canOpen(destination) else { return nil }
             let image = serverID.flatMap { author.imageKey(serverID: $0, bucket: imageBucket) }
@@ -173,8 +183,12 @@ public struct CarPlayContentBuilder: Sendable {
             isEnabled: !item.isMissing && item.hasAudio, action: .play(itemID: item.itemID, episodeID: item.episodeID))
     }
 
-    private func openRow(_ item: ItemSummary, _ destination: CarPlayDestination) -> CarPlayRow? {
-        guard canOpen(destination) else { return nil }
+    /// A row opening `destination` from the list `parent`, or `nil` unless `destination` is the
+    /// next level down (so pushing it puts it at its own depth) and within the limit.
+    private func openRow(
+        _ item: ItemSummary, _ destination: CarPlayDestination, from parent: CarPlayDestination
+    ) -> CarPlayRow? {
+        guard destination.depth == parent.depth + 1, canOpen(destination) else { return nil }
         return CarPlayRow(id: item.id, text: item.title, image: imageKey(item.cover), action: .open(destination))
     }
 
@@ -190,21 +204,24 @@ public struct CarPlayContentBuilder: Sendable {
             destination: destination, title: title, sections: trimmed([CarPlaySection(id: "rows", rows: rows)]))
     }
 
-    /// The rows from `offset`. All of them when they fit and the model reached its end; otherwise
-    /// one row fewer than the limit, then "More…" pointing at the next row.
+    /// The rows from `offset`. `rows` has one entry per loaded model item, `nil` for an item left
+    /// out, and offsets index it. All the rows when they fit and the model reached its end;
+    /// otherwise one row fewer than the limit, then "More…" pointing past the last item shown, or
+    /// past the loaded items when they ran out, so "More…" always moves forward.
     private func page(
-        _ destination: CarPlayDestination, title: String, rows: [CarPlayRow], reachedEnd: Bool, offset: Int
+        _ destination: CarPlayDestination, title: String, rows: [CarPlayRow?], reachedEnd: Bool, offset: Int
     ) -> CarPlayList {
         guard canOpen(destination) else { return CarPlayList(destination: destination, title: title, sections: []) }
         let start = min(max(offset, 0), rows.count)
-        let remaining = rows[start...]
+        let remaining = rows[start...].enumerated().compactMap { index, row in row.map { (start + index, $0) } }
         let limit = limits.maximumItemCount
         var shown: [CarPlayRow]
         if reachedEnd, remaining.count <= limit {
-            shown = Array(remaining)
+            shown = remaining.map(\.1)
         } else {
-            shown = Array(remaining.prefix(limit - 1))
-            let next = start + shown.count
+            let page = remaining.prefix(limit - 1)
+            shown = page.map(\.1)
+            let next = page.count == limit - 1 ? (page.last.map { $0.0 + 1 } ?? start) : rows.count
             shown.append(CarPlayRow(id: "more-\(next)", text: labels.more, action: .more(destination, offset: next)))
         }
         return CarPlayList(

@@ -96,7 +96,8 @@ public struct CarPlayRow: Sendable, Hashable, Identifiable {
         case open(CarPlayDestination)
         /// Plays the item through the app's playback entry point, then shows Now Playing.
         case play(itemID: String, episodeID: String?)
-        /// Shows the same list again from `offset`, in place: the template's sections are
+        /// Shows the same list again from `offset` (an index into the list's model items, those
+        /// left out as rows included), in place: the template's sections are
         /// replaced, so paging never adds a level. The delegate loads more items first when the
         /// list needs them (``CarPlayContentBuilder/rowsNeeded(offset:)``).
         case more(CarPlayDestination, offset: Int)
@@ -142,7 +143,7 @@ public struct CarPlayList: Sendable, Hashable {
     public let destination: CarPlayDestination
     public let title: String
     public let sections: [CarPlaySection]
-    /// The index of the first row shown, when the list is paged with "More…".
+    /// The index of the model item the page starts from, when the list is paged with "More…".
     public let offset: Int
 
     public init(destination: CarPlayDestination, title: String, sections: [CarPlaySection], offset: Int = 0) {
