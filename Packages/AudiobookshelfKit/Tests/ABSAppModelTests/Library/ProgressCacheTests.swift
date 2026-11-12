@@ -296,6 +296,126 @@ private func progress(
         #expect(cache.progress(libraryItemID: "x")?.currentTime == 7)
     }
 
+    // MARK: Optimistic removal
+
+    @Test func optimisticRemovalClearsAndRollbackRestores() throws {
+        let cache = ProgressCache()
+        let previous = progress("book", currentTime: 5, lastUpdate: 10)
+        cache.apply(previous)
+        let removal = try #require(
+            cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: cache.sessionToken()))
+        #expect(cache.progress(libraryItemID: "book") == nil)
+
+        #expect(cache.rollbackOptimistic(removal, to: previous, token: cache.sessionToken()))
+        #expect(cache.progress(libraryItemID: "book") == previous)
+        // The rollback doesn't count as a local change: a list row dated like it still lands.
+        let row = progress("book", currentTime: 6, lastUpdate: 10)
+        cache.seed([row], token: cache.beginSeed())
+        #expect(cache.progress(libraryItemID: "book") == row)
+    }
+
+    @Test func removalRollbackSkippedAfterNewerApply() throws {
+        let cache = ProgressCache()
+        let previous = progress("book", currentTime: 5, lastUpdate: 10)
+        cache.apply(previous)
+        let removal = try #require(
+            cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: cache.sessionToken()))
+        let newer = progress("book", currentTime: 9, lastUpdate: 20)
+        #expect(cache.apply(newer))
+
+        #expect(!cache.rollbackOptimistic(removal, to: previous, token: cache.sessionToken()))
+        #expect(cache.progress(libraryItemID: "book") == newer)
+    }
+
+    @Test func removalRollbackSkippedAfterNewerRemoval() throws {
+        let cache = ProgressCache()
+        let previous = progress("book", currentTime: 5, lastUpdate: 10)
+        cache.apply(previous)
+        let removal = try #require(
+            cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: cache.sessionToken()))
+        // The server deleted it meanwhile (the socket): still nil, but a newer revision.
+        cache.remove(libraryItemID: "book")
+
+        #expect(!cache.rollbackOptimistic(removal, to: previous, token: cache.sessionToken()))
+        #expect(cache.progress(libraryItemID: "book") == nil)
+    }
+
+    @Test func removalRollbackSkippedAfterASecondRemoval() throws {
+        let cache = ProgressCache()
+        let previous = progress("book", currentTime: 5, lastUpdate: 10)
+        cache.apply(previous)
+        let session = cache.sessionToken()
+        // Two discards on the same key, for example from two action instances: the value is nil
+        // after both, so only the revision tells them apart.
+        let first = try #require(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: session))
+        let second = try #require(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: session))
+
+        #expect(!cache.rollbackOptimistic(first, to: previous, token: session))
+        #expect(cache.progress(libraryItemID: "book") == nil)
+        #expect(cache.commitOptimistic(second, token: session))
+    }
+
+    @Test func seedRequestedBeforeRemovalDoesNotRestore() throws {
+        let cache = ProgressCache()
+        let row = progress("book", currentTime: 5, lastUpdate: 10)
+        cache.apply(row)
+        let token = cache.beginSeed()
+        let session = cache.sessionToken()
+        let removal = try #require(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: session))
+        #expect(cache.commitOptimistic(removal, token: session))
+
+        #expect(cache.seed([row], token: token))
+        #expect(cache.progress(libraryItemID: "book") == nil)
+    }
+
+    @Test func seedRequestedDuringRemovalKeepsItRemoved() throws {
+        let cache = ProgressCache()
+        let row = progress("book", currentTime: 5, lastUpdate: 10)
+        cache.apply(row)
+        let session = cache.sessionToken()
+        let removal = try #require(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: session))
+        // Requested before the DELETE answered, so the server may still list the progress.
+        let token = cache.beginSeed()
+        #expect(cache.commitOptimistic(removal, token: session))
+
+        #expect(cache.seed([row], token: token))
+        #expect(cache.progress(libraryItemID: "book") == nil)
+    }
+
+    @Test func seedRequestedAfterCommittedRemovalTakesServerRows() throws {
+        let cache = ProgressCache()
+        cache.apply(progress("book", currentTime: 5, lastUpdate: 10))
+        let session = cache.sessionToken()
+        let removal = try #require(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: session))
+        #expect(cache.commitOptimistic(removal, token: session))
+
+        // For example the user started listening again on another device.
+        let row = progress("book", currentTime: 1, lastUpdate: 30)
+        #expect(cache.seed([row], token: cache.beginSeed()))
+        #expect(cache.progress(libraryItemID: "book") == row)
+    }
+
+    @Test func removalWithStaleSessionTokenIsIgnored() throws {
+        let cache = ProgressCache()
+        let stale = cache.sessionToken()
+        cache.clear()
+        let current = progress("book", currentTime: 5, lastUpdate: 10)
+        cache.apply(current)
+
+        #expect(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: stale) == nil)
+        #expect(cache.progress(libraryItemID: "book") == current)
+
+        // A removal from before a clear can't commit or roll back into the next account either.
+        let session = cache.sessionToken()
+        let removal = try #require(cache.applyOptimisticRemoval(libraryItemID: "book", episodeID: nil, token: session))
+        cache.clear()
+        let next = progress("book", currentTime: 7, lastUpdate: 40)
+        cache.apply(next)
+        #expect(!cache.commitOptimistic(removal, token: session))
+        #expect(!cache.rollbackOptimistic(removal, to: current, token: session))
+        #expect(cache.progress(libraryItemID: "book") == next)
+    }
+
     @Test func clearKeepsObserversOfMissingProgressAttached() {
         let cache = ProgressCache()
         cache.apply(progress("a", lastUpdate: 1))

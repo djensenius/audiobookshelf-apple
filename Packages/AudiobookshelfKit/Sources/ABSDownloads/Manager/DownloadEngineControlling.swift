@@ -13,6 +13,8 @@ public protocol DownloadEngineControlling: Sendable {
     func start(partIDs: [UUID]) async
     /// See ``DownloadEngine/stop(partIDs:keepingResumeData:)``.
     func stop(partIDs: [UUID], keepingResumeData: Bool) async
+    /// See ``DownloadEngine/attachSurvivingTransfers()``.
+    func attachSurvivingTransfers() async -> Bool
     /// See ``DownloadEngine/pause(recordID:)``.
     func pause(recordID: UUID) async throws -> Bool
     /// See ``DownloadEngine/resume(recordID:)``.

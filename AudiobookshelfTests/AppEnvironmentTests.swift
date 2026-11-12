@@ -39,6 +39,19 @@ import Testing
         }
     }
 
+    @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
+        try await withSettings { settings in
+            let keychain = ConnectTestKeychain()
+            let environment = AppEnvironment(settings: settings, storeLocation: .inMemory, keychain: keychain)
+
+            let identifier = await environment.deviceIdentifiers.deviceIdentifier()
+
+            let stored = try #require(try keychain.data(for: DeviceIdentifierStore.item))
+            #expect(String(decoding: stored, as: UTF8.self) == identifier)
+            #expect(await environment.deviceIdentifiers.deviceIdentifier() == identifier)
+        }
+    }
+
     @Test func aStoreThatCantBeOpenedShowsStoreUnavailable() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(
             path: "AppEnvironmentTests-\(UUID().uuidString)", directoryHint: .isDirectory)
@@ -107,8 +120,9 @@ import Testing
     }
 
     @Test(arguments: [
-        "HeaderBrowse", "LabelMiniPlayerAccessibility", "LabelMiniPlayerHint", "MessageStoreUnavailable",
-        "MessageStoreUnavailableHelp",
+        "ButtonSwitchServer", "HeaderBrowse", "HeaderOpenLinkOnAnotherServer", "LabelMiniPlayerAccessibility",
+        "LabelMiniPlayerHint", "MessageStoreUnavailable", "MessageStoreUnavailableHelp", "MessageSwitchServerForLink",
+        "MessageSwitchServerSignedOut",
     ])
     func shellStringsResolve(key: String) {
         #expect(L10n.string(key) != key)
