@@ -21,7 +21,9 @@ public struct EPUBLocationsKey: Sendable, Hashable, Codable {
 /// in `localStorage`. Each connection has a folder named by its UUID, and each entry a file named
 /// by a SHA-256 of its item ID and `ino`, so server IDs never become path components.
 ///
-/// An entry over `maxEntryBytes` isn't stored. After each store, the least recently used entries
+/// Locations over `maxEntryBytes`, or an entry whose file would be over ``maxFileBytes``, aren't
+/// stored; a file over ``maxFileBytes`` is deleted when read, so every stored entry reads back.
+/// After each store, the least recently used entries
 /// (by modification date, which reads update) are deleted until the files total at most
 /// `maxTotalBytes`. An entry that doesn't decode, belongs to another key, isn't a JSON array of
 /// strings or is over the limit is deleted when read.
@@ -49,7 +51,7 @@ public actor EPUBLocationsCache {
     public func locations(for key: EPUBLocationsKey) -> String? {
         let url = fileURL(for: key)
         guard let size = Self.size(of: url) else { return nil }
-        guard size <= maxEntryBytes + Self.entryOverhead, let data = try? Data(contentsOf: url),
+        guard size <= maxFileBytes, let data = try? Data(contentsOf: url),
             let entry = try? JSONDecoder().decode(Entry.self, from: data), entry.key == key,
             isValid(entry.locations)
         else {
@@ -64,7 +66,9 @@ public actor EPUBLocationsCache {
     /// aren't a JSON array of strings are not saved, and the older entry is removed.
     public func store(_ locations: String, for key: EPUBLocationsKey) {
         let url = fileURL(for: key)
-        guard isValid(locations), let data = try? JSONEncoder().encode(Entry(key: key, locations: locations)) else {
+        guard isValid(locations), let data = try? JSONEncoder().encode(Entry(key: key, locations: locations)),
+            data.count <= maxFileBytes
+        else {
             try? FileManager.default.removeItem(at: url)
             return
         }
@@ -104,8 +108,13 @@ public actor EPUBLocationsCache {
         directory.appending(path: connectionID.uuidString, directoryHint: .isDirectory)
     }
 
-    /// Room for the key fields and JSON escaping around the locations.
-    private static let entryOverhead = 64 << 10
+    /// The largest entry file, which `store` writes and `locations(for:)` reads.
+    nonisolated var maxFileBytes: Int { Self.maxFileBytes(maxEntryBytes: maxEntryBytes) }
+
+    /// Locations that are a JSON array of strings at most double when encoded as a JSON string:
+    /// only `"`, `\`, `/` and whitespace between elements are escaped, each to two bytes. Then
+    /// 64 KiB for the key fields and the envelope.
+    private static func maxFileBytes(maxEntryBytes: Int) -> Int { 2 * maxEntryBytes + (64 << 10) }
 
     private func isValid(_ locations: String) -> Bool {
         let data = Data(locations.utf8)

@@ -121,7 +121,7 @@ import Testing
         let cache = makeCache()
         await cache.store(locations, for: key())
         let url = await cache.fileURL(for: key())
-        try Data(count: 1_000 + (64 << 10) + 1).write(to: url)
+        try Data(count: cache.maxFileBytes + 1).write(to: url)
 
         #expect(await cache.locations(for: key()) == nil)
         #expect(!FileManager.default.fileExists(atPath: url.path))
@@ -142,6 +142,39 @@ import Testing
         await cache.store(big, for: key())
         #expect(await cache.locations(for: key()) == nil)
         #expect(files().isEmpty)
+    }
+
+    /// Locations just under the entry limit, every character of whose CFIs JSON escapes, are
+    /// stored and read back rather than deleted as oversized.
+    @Test func locationsNearTheEntryLimitRoundTrip() async throws {
+        let cache = makeCache(
+            maxEntryBytes: EPUBLocationsCache.defaultMaxEntryBytes,
+            maxTotalBytes: EPUBLocationsCache.defaultMaxTotalBytes)
+        let cfi = #""epubcfi(/6/4!/4/2:300)""#
+        let count = (cache.maxEntryBytes - 2) / (cfi.utf8.count + 1)
+        let near = "[" + Array(repeating: cfi, count: count).joined(separator: ",") + "]"
+        #expect(near.utf8.count > cache.maxEntryBytes - cfi.utf8.count - 1)
+        #expect(near.utf8.count <= cache.maxEntryBytes)
+
+        await cache.store(near, for: key())
+
+        let size = try #require(
+            try FileManager.default.attributesOfItem(atPath: await cache.fileURL(for: key()).path)[.size] as? Int)
+        #expect(size > cache.maxEntryBytes + (64 << 10))
+        #expect(await cache.locations(for: key()) == near)
+        #expect(await cache.locations(for: key()) == near)
+    }
+
+    /// An entry whose file would be over the read limit (here, a huge item ID) isn't stored, so
+    /// nothing is written that a read would delete.
+    @Test func anEntryWhoseFileWouldBeTooLargeIsNotStored() async {
+        let cache = makeCache(maxEntryBytes: 100)
+        let huge = key(String(repeating: "x", count: cache.maxFileBytes))
+
+        await cache.store(locations, for: huge)
+
+        #expect(files().isEmpty)
+        #expect(await cache.locations(for: huge) == nil)
     }
 
     @Test func theLeastRecentlyUsedEntriesAreEvicted() async throws {
