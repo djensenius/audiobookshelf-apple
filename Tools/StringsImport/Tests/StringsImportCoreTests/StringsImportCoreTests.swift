@@ -605,6 +605,10 @@ import Testing
         #"Text("\(count) books")"#,
         #"Section("Recent") {"#,
         #"x.alert("Error", isPresented: $shown) {"#,
+        // Escaped letters are letters.
+        #"Text("\u{65}")"#,
+        #"Text(verbatim: "\u{48}\u{69}")"#,
+        #"Text("\u{2022} more")"#,
     ])
     func flagsHardCodedStrings(line: String) {
         let found = SourceScanner.hardCodedStrings(in: file("\n" + line), keys: [])
@@ -615,6 +619,11 @@ import Testing
     @Test(arguments: [
         #"Text(verbatim: L10n.string("ButtonCancel"))"#,
         #"Text(verbatim: "•")"#,
+        // Escaped symbols aren't letters, whatever their hex digits.
+        #"Text(verbatim: "\u{202F}")"#,
+        #"Text(verbatim: "\u{00B7}\u{2014}")"#,
+        #"Text(verbatim: "\n\t\\")"#,
+        #"Text(verbatim: "\"\u{2026}\"")"#,
         #"Text(verbatim: "+" + count.formatted())"#,
         #"Text("\(a) – \(b)")"#,
         #"Text("\(L10n.string("LabelTitle")): \(title)")"#,

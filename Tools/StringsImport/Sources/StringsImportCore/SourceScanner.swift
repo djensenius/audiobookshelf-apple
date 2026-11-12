@@ -274,6 +274,13 @@ public enum SourceScanner {
                         default: break
                         }
                     }
+                } else if line[index] == "u" {
+                    // `\u{…}`: its scalar, so `\u{202F}` is a symbol and `\u{65}` a letter.
+                    guard let (scalar, end) = unicodeEscape(after: index, in: line) else { return nil }
+                    text.unicodeScalars.append(scalar)
+                    index = end
+                } else if let escaped = simpleEscapes[line[index]] {
+                    text.append(escaped)
                 }
             } else {
                 text.append(character)
@@ -281,5 +288,24 @@ public enum SourceScanner {
             index = line.index(after: index)
         }
         return nil
+    }
+
+    /// Swift's single-character escapes and what they stand for.
+    private static let simpleEscapes: [Character: Character] = [
+        "0": "\0", "\\": "\\", "t": "\t", "n": "\n", "r": "\r", "\"": "\"", "'": "'",
+    ]
+
+    /// The scalar of the `\u{…}` escape whose `u` is at `u`, and the index of its `}`; `nil` if
+    /// it's malformed.
+    private static func unicodeEscape(
+        after u: Substring.Index, in line: Substring
+    ) -> (Unicode.Scalar, Substring.Index)? {
+        let open = line.index(after: u)
+        guard open < line.endIndex, line[open] == "{",
+            let close = line[open...].firstIndex(of: "}"),
+            let value = UInt32(line[line.index(after: open)..<close], radix: 16),
+            let scalar = Unicode.Scalar(value)
+        else { return nil }
+        return (scalar, close)
     }
 }
