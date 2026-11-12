@@ -12,7 +12,7 @@ enum PlayerSheet: String, Identifiable {
 
 /// The view for each ``PlayerSheet``. Each sheet and its toolbar slot live in their own file
 /// (`ChaptersSheet.swift`, `BookmarksSheet.swift`, `PlaybackSpeedSheet.swift`,
-/// `SleepTimerSheet.swift`) and apply ``SwiftUICore/View/playerSheetStyle(title:onDone:)``
+/// `SleepTimerSheet.swift`) and apply ``SwiftUICore/View/playerSheetStyle(title:detents:onDone:)``
 /// themselves, so changing one sheet doesn't touch this host or the player.
 struct PlayerSheetContent: View {
     let sheet: PlayerSheet
@@ -32,15 +32,19 @@ struct PlayerSheetContent: View {
 
 extension View {
     /// The player sheets' frame: a navigation bar with `title` and a Done button. On iOS the sheet
-    /// has medium and large detents and the trailing placement (vertical on the iPhone Duo's outer
-    /// display, ADR 0004); on macOS, where sheets don't resize to their content, a fixed size.
-    func playerSheetStyle(title: String, onDone: @escaping () -> Void) -> some View {
-        modifier(PlayerSheetStyle(title: title, onDone: onDone))
+    /// has `detents` and the trailing placement (vertical on the iPhone Duo's outer display,
+    /// ADR 0004); on macOS, where sheets don't resize to their content, a fixed size, ignoring
+    /// `detents`.
+    func playerSheetStyle(
+        title: String, detents: Set<PresentationDetent> = [.medium, .large], onDone: @escaping () -> Void
+    ) -> some View {
+        modifier(PlayerSheetStyle(title: title, detents: detents, onDone: onDone))
     }
 }
 
 private struct PlayerSheetStyle: ViewModifier {
     let title: String
+    let detents: Set<PresentationDetent>
     let onDone: () -> Void
 
     func body(content: Content) -> some View {
@@ -59,7 +63,7 @@ private struct PlayerSheetStyle: ViewModifier {
                 }
         }
         #if os(iOS)
-            .presentationDetents([.medium, .large])
+            .presentationDetents(detents)
             .presentationDragIndicator(.visible)
             .presentationPlacement(.trailing)
         #else

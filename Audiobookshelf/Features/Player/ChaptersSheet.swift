@@ -21,8 +21,9 @@ struct ChaptersSlot: View {
     }
 }
 
-/// A chapter row's text (D5): the start in media time, as the scrubber's elapsed time, and the
-/// duration at the playback rate, as its remaining time.
+/// A chapter row's text (D5). The start is in media time, as the scrubber's elapsed time shows the
+/// position over the whole item, so a row's start is what the player shows on reaching it; the
+/// duration is at the playback rate, as the scrubber's remaining time.
 struct ChapterRowPresentation: Equatable {
     /// The server's title, or "Chapter 3" when it's blank.
     let title: String
@@ -52,49 +53,88 @@ struct ChapterRowPresentation: Equatable {
 
 /// The chapter list (port of `ChaptersModal.vue`): each chapter's title, start and duration, with
 /// the current chapter marked and scrolled to when the sheet opens. Choosing a chapter seeks to its
-/// start without changing play or pause, and closes the sheet.
+/// start without changing play or pause, and closes the sheet. Without chapters (the item changed
+/// while it was open) it says so.
 struct ChaptersSheet: View {
     let model: PlayerViewModel
     let close: () -> Void
     @Environment(\.locale) private var locale
+
+    var body: some View {
+        let rate = model.rate
+        let chapters = model.chapters.map {
+            ChaptersList.Entry(
+                row: $0, presentation: ChapterRowPresentation(row: $0, position: $0.id + 1, rate: rate, locale: locale))
+        }
+        Group {
+            if chapters.isEmpty {
+                ContentUnavailableView {
+                    Label {
+                        Text(verbatim: L10n.string("MessageNoChapters"))
+                    } icon: {
+                        Image(systemName: "list.bullet")
+                    }
+                }
+            } else {
+                ChaptersList(model: model, chapters: chapters, close: close)
+            }
+        }
+        .playerSheetStyle(title: L10n.string("HeaderChapters"), onDone: close)
+    }
+}
+
+/// The list itself. It reads the playback time once per tick for the current chapter and passes
+/// each row whether it's current, so a tick redraws only the rows whose mark changed.
+private struct ChaptersList: View {
+    struct Entry {
+        let row: PlayerChapterRow
+        let presentation: ChapterRowPresentation
+    }
+
+    let model: PlayerViewModel
+    let chapters: [Entry]
+    let close: () -> Void
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .subheadline) private var columnWidth = 64
 
     var body: some View {
-        let rate = model.rate
+        let current = model.currentChapterIndex
         let isAccessibilitySize = dynamicTypeSize.isAccessibilitySize
         ScrollViewReader { proxy in
             List {
                 Section {
-                    ForEach(model.chapters) { row in
+                    ForEach(chapters, id: \.row.id) { entry in
                         ChapterRow(
-                            model: model, id: row.id,
-                            presentation: ChapterRowPresentation(
-                                row: row, position: row.id + 1, rate: rate, locale: locale),
+                            presentation: entry.presentation, isCurrent: entry.row.id == current,
                             columnWidth: isAccessibilitySize ? nil : columnWidth
                         ) {
-                            select(row)
+                            select(entry.row)
                         }
+                        .equatable()
                     }
                 } header: {
                     if !isAccessibilitySize {
-                        ChapterColumns(
-                            columnWidth: columnWidth, start: L10n.string("LabelStart"),
-                            duration: L10n.string("LabelDuration")
-                        ) {
-                            Text(verbatim: L10n.string("LabelChapters"))
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            ChapterColumns(
+                                columnWidth: columnWidth, start: L10n.string("LabelStart"),
+                                duration: L10n.string("LabelDuration")
+                            ) {
+                                Text(verbatim: L10n.string("LabelChapters"))
+                            }
+                            // Lines the columns up with the rows' current-chapter checkmark.
+                            Image(systemName: "checkmark").hidden()
                         }
                         .accessibilityHidden(true)
                     }
                 }
             }
-            .onAppear {
-                // Read here rather than in the body, so playback ticks don't redraw the list.
+            .task {
+                // A turn later, once the list in the presented sheet has laid out its rows.
+                await Task.yield()
                 guard let current = model.currentChapterIndex else { return }
                 proxy.scrollTo(current, anchor: .center)
             }
         }
-        .playerSheetStyle(title: L10n.string("HeaderChapters"), onDone: close)
     }
 
     private func select(_ row: PlayerChapterRow) {
@@ -103,39 +143,48 @@ struct ChaptersSheet: View {
     }
 }
 
-/// One chapter. It reads the playback time for its current-chapter mark, so a tick redraws only
-/// the visible rows, not the list.
-private struct ChapterRow: View {
-    let model: PlayerViewModel
-    let id: Int
+/// One chapter. Equatable without its action, so a tick that doesn't change its inputs skips it.
+private struct ChapterRow: View, Equatable {
     let presentation: ChapterRowPresentation
+    let isCurrent: Bool
     /// The width of each time column, or `nil` to stack the times under the title.
     let columnWidth: CGFloat?
     let action: () -> Void
 
+    nonisolated static func == (lhs: ChapterRow, rhs: ChapterRow) -> Bool {
+        lhs.presentation == rhs.presentation && lhs.isCurrent == rhs.isCurrent && lhs.columnWidth == rhs.columnWidth
+    }
+
     var body: some View {
-        let isCurrent = model.currentChapterIndex == id
         Button(action: action) {
-            Group {
-                if let columnWidth {
-                    ChapterColumns(
-                        columnWidth: columnWidth, start: presentation.startText, duration: presentation.durationText
-                    ) {
-                        title
-                    }
-                } else {
-                    VStack(alignment: .leading, spacing: 4) {
-                        title
-                        HStack(spacing: 16) {
-                            Text(verbatim: presentation.startText)
-                            Text(verbatim: presentation.durationText)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Group {
+                    if let columnWidth {
+                        ChapterColumns(
+                            columnWidth: columnWidth, start: presentation.startText,
+                            duration: presentation.durationText
+                        ) {
+                            title
                         }
-                        .font(.subheadline.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 4) {
+                            title
+                            HStack(spacing: 16) {
+                                Text(verbatim: presentation.startText)
+                                Text(verbatim: presentation.durationText)
+                            }
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Image(systemName: "checkmark")
+                    .foregroundStyle(ABSColor.accent)
+                    .opacity(isCurrent ? 1 : 0)
+                    .accessibilityHidden(true)
             }
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .frame(minHeight: 44)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -144,6 +193,7 @@ private struct ChapterRow: View {
         // On the button itself, so VoiceOver keeps its action.
         .accessibilityLabel(Text(verbatim: presentation.accessibilityLabel))
         .accessibilityValue(Text(verbatim: isCurrent ? L10n.string("LabelCurrentChapter") : ""))
+        .accessibilityAddTraits(isCurrent ? .isSelected : [])
     }
 
     private var title: some View {
@@ -178,6 +228,10 @@ private struct ChapterColumns<Title: View>: View {
 
 #Preview("Playing") {
     ChaptersSheet(model: .preview(at: 4_000, playing: true), close: {})
+}
+
+#Preview("No chapters") {
+    ChaptersSheet(model: .preview(loaded: false), close: {})
 }
 
 #Preview("Accessibility size") {

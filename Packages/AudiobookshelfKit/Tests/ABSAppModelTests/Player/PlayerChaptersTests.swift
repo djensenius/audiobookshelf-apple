@@ -42,6 +42,17 @@ private let fixtureRows = FakePlaybackControl.chapters.enumerated().map {
         }
     }
 
+    @Test func loadedTimelineWinsOverSession() async throws {
+        try await withPlayer { model, playback in
+            playback.load(FakePlaybackControl.bookSession(), at: 120)
+            playback.timeline = PlaybackTimeline(
+                tracks: [AudioTrack(index: 1, startOffset: 0, duration: 400, mimeType: "audio/mpeg")],
+                chapters: [Chapter(id: 0, start: 0, end: 200, title: "Loaded")])
+            #expect(model.chapters.map(\.title) == ["Loaded"])
+            #expect(model.currentChapterIndex == 0)
+        }
+    }
+
     @Test func chaptersFallBackToSessionWhenUnloaded() async throws {
         try await withPlayer { model, playback in
             playback.start(FakePlaybackControl.bookSession(), at: 260)
@@ -102,6 +113,19 @@ private let fixtureRows = FakePlaybackControl.chapters.enumerated().map {
                 ]), at: 120)
             #expect(model.currentChapterIndex == nil)
             playback.currentTime = 150
+            #expect(model.currentChapterIndex == 1)
+
+            // Before a first chapter that starts after 0 there's none.
+            playback.load(
+                FakePlaybackControl.bookSession(chapters: [
+                    Chapter(id: 0, start: 50, end: 100, title: "One"),
+                    Chapter(id: 1, start: 100, end: 300, title: "Two"),
+                ]), at: 10)
+            #expect(model.currentChapterIndex == nil)
+            // At and past the end of the media, the last chapter, even though it ends earlier.
+            playback.currentTime = 400
+            #expect(model.currentChapterIndex == 1)
+            playback.currentTime = 1_000
             #expect(model.currentChapterIndex == 1)
         }
     }

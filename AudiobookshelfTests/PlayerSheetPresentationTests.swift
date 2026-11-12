@@ -26,6 +26,7 @@ import Testing
         // The start stays in media time, like the scrubber's elapsed time; the duration is at the
         // rate, like its remaining time.
         let fast = ChapterRowPresentation(row: row(start: 300, end: 390), position: 1, rate: 1.5, locale: locale)
+        // D5: the start is media time, as the scrubber's elapsed time shows it, not 3:20.
         #expect(fast.startText == "5:00")
         #expect(fast.durationText == "1:00")
         #expect(fast.accessibilityLabel == "Intro, starts at 5 minutes, duration 1 minute")
