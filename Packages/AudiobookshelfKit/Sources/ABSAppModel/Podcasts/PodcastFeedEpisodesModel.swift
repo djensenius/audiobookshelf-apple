@@ -53,7 +53,7 @@ public final class PodcastFeedEpisodesModel {
     public private(set) var selection: Set<Int> = []
     public private(set) var isDownloading = false
 
-    @ObservationIgnored private let libraryURLs: Set<String>
+    @ObservationIgnored private var libraryURLs: Set<String>
     @ObservationIgnored private let service: any PodcastEpisodeManagementService
 
     /// - Parameters:
@@ -65,7 +65,17 @@ public final class PodcastFeedEpisodesModel {
         self.podcastID = podcastID
         self.feedURL = feedURL
         self.service = service
-        libraryURLs = Set(libraryEpisodes.compactMap { Self.normalized($0.enclosure?.url) })
+        libraryURLs = Self.libraryURLs(libraryEpisodes)
+    }
+
+    /// Marks the feed against the podcast's episodes as they are now (after a reload, once the
+    /// server has downloaded queued episodes), dropping newly marked rows from the selection.
+    public func updateLibraryEpisodes(_ libraryEpisodes: [PodcastEpisode]) {
+        libraryURLs = Self.libraryURLs(libraryEpisodes)
+        rows = rows.map {
+            Row(id: $0.id, episode: $0.episode, isInLibrary: libraryURLs.contains($0.episode.enclosureURL))
+        }
+        selection.formIntersection(selectableIDs)
     }
 
     /// The rows that can be selected.
@@ -140,6 +150,10 @@ public final class PodcastFeedEpisodesModel {
             }
         }
         .map(\.element)
+    }
+
+    private static func libraryURLs(_ episodes: [PodcastEpisode]) -> Set<String> {
+        Set(episodes.compactMap { normalized($0.enclosure?.url) })
     }
 
     private static func normalized(_ url: String?) -> String? {

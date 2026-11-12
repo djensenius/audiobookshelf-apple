@@ -18,22 +18,22 @@ extension View {
 /// The podcast screen's server-side episode management, offered as
 /// ``PodcastEpisodeManagementAccess`` allows on the signed-in account's user (none offline or
 /// without an account, as in previews):
-/// - Find Episodes in Feed opens ``PodcastEpisodesFeedSheet``; queued episodes are announced in
-///   an alert, as legacy's toast did.
+/// - Find Episodes in Feed opens ``PodcastEpisodesFeedSheet`` and reloads the podcast, so
+///   episodes the server has downloaded since are marked; queued episodes are announced in an
+///   alert, as legacy's toast did. The sheet closes on a reconnect or when access is lost.
 /// - Clear Download Queue asks first (legacy `MessageConfirmDeleteEpisodeDownloadQueue`).
 /// - Removing an episode, started from its row, asks whether to keep the audio file or delete it
 ///   too (`?hard=1`; legacy always deleted it), then reloads the podcast.
 ///
-/// One clear or removal runs at a time (``PodcastEpisodeActionsModel``); the menu is disabled
-/// meanwhile. Results and failures show in an alert.
+/// One clear or removal runs at a time (``PodcastEpisodeActionsModel``, which also rechecks
+/// `access`); the menu and the removal choices are disabled meanwhile. Results and failures show
+/// in an alert.
 private struct PodcastEpisodeManagementMenu: ViewModifier {
     let model: PodcastDetailModel
     let access: PodcastEpisodeManagementAccess
     @Binding var removing: PodcastEpisode?
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var actions: PodcastEpisodeActionsModel?
-    @State private var feed: PodcastFeedEpisodesModel?
-    @State private var showsFeed = false
     @State private var confirmsClear = false
     /// The last result's message, kept while the alert is dismissed.
     @State private var message: String?
@@ -53,18 +53,20 @@ private struct PodcastEpisodeManagementMenu: ViewModifier {
                 if let actions {
                     actions.replaceService(client)
                 } else {
-                    actions = PodcastEpisodeActionsModel(podcastID: model.itemID, service: client)
+                    actions = PodcastEpisodeActionsModel(podcastID: model.itemID, access: access, service: client)
                 }
             }
-            .sheet(isPresented: $showsFeed) {
-                if let feed {
+            .onChange(of: access) { actions?.access = access }
+            .onChange(of: model.allEpisodes) { actions?.feed?.updateLibraryEpisodes(model.allEpisodes) }
+            .sheet(isPresented: feedBinding) {
+                if let feed = actions?.feed {
                     PodcastEpisodesFeedSheet(model: feed) { count in
                         show(L10n.string("MessageEpisodesQueuedForDownload", count.formatted()))
                     }
                 }
             }
             .confirmationDialog(
-                Text(verbatim: L10n.string("HeaderConfirm")), isPresented: $confirmsClear, titleVisibility: .visible
+                Text(verbatim: L10n.string("HeaderConfirm")), isPresented: clearBinding, titleVisibility: .visible
             ) {
                 Button(L10n.string("ButtonPodcastClearDownloadQueue"), role: .destructive) {
                     Task { await clearQueue() }
@@ -80,9 +82,11 @@ private struct PodcastEpisodeManagementMenu: ViewModifier {
                 Button(L10n.string("ButtonRemoveFromServer"), role: .destructive) {
                     Task { await remove(episode, deleteFile: false) }
                 }
+                .disabled(!(actions?.canRemoveEpisodes ?? false))
                 Button(L10n.string("ButtonPodcastRemoveAndDeleteFile"), role: .destructive) {
                     Task { await remove(episode, deleteFile: true) }
                 }
+                .disabled(!(actions?.canRemoveEpisodes ?? false))
                 Button(L10n.string("ButtonCancel"), role: .cancel) {}
             } message: { episode in
                 Text(verbatim: L10n.string("MessageConfirmRemoveServerEpisode", episode.title))
@@ -90,6 +94,23 @@ private struct PodcastEpisodeManagementMenu: ViewModifier {
             .alert(Text(verbatim: message ?? ""), isPresented: $showsMessage, presenting: message) { _ in
                 Button(L10n.string("ButtonOk")) {}
             }
+    }
+
+    /// The clear confirmation, closed once clearing isn't allowed (access lost meanwhile).
+    private var clearBinding: Binding<Bool> {
+        Binding {
+            confirmsClear && access.canClearDownloadQueue
+        } set: {
+            confirmsClear = $0
+        }
+    }
+
+    private var feedBinding: Binding<Bool> {
+        Binding {
+            actions?.feed != nil
+        } set: { isPresented in
+            if !isPresented { actions?.closeFeed() }
+        }
     }
 
     private var removingBinding: Binding<Bool> {
@@ -123,12 +144,12 @@ private struct PodcastEpisodeManagementMenu: ViewModifier {
     }
 
     private func openFeed() {
-        guard let client = accounts?.client, let podcast = model.podcast,
-            let feedURL = PodcastEpisodeManagementAccess.feedURL(of: podcast)
+        guard let podcast = model.podcast,
+            actions?.openFeed(podcast: podcast, libraryEpisodes: model.allEpisodes) != nil
         else { return }
-        feed = PodcastFeedEpisodesModel(
-            podcastID: model.itemID, feedURL: feedURL, libraryEpisodes: model.allEpisodes, service: client)
-        showsFeed = true
+        // The episodes may be from before the server downloaded queued ones; the reload marks
+        // them through `onChange(of: model.allEpisodes)`.
+        Task { await model.detail.load() }
     }
 
     private func clearQueue() async {
@@ -138,7 +159,7 @@ private struct PodcastEpisodeManagementMenu: ViewModifier {
 
     private func remove(_ episode: PodcastEpisode, deleteFile: Bool) async {
         removing = nil
-        guard access.canRemoveEpisodes, let result = await actions?.removeEpisode(episode.id, deleteFile: deleteFile)
+        guard let result = await actions?.removeEpisode(episode.id, deleteFile: deleteFile)
         else { return }
         if result {
             AccessibilityNotification.Announcement(L10n.string("MessagePodcastEpisodeRemoved")).post()

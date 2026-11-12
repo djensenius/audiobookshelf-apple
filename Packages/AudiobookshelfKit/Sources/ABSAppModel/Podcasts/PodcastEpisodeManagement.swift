@@ -83,37 +83,78 @@ public struct PodcastEpisodeManagementAccess: Sendable, Hashable {
     }
 }
 
-/// Clears a podcast's download queue and removes its episodes from the server, one action at a
-/// time (``isBusy``). The caller checks ``PodcastEpisodeManagementAccess`` first and reloads the
-/// item after a removal.
+/// Clears a podcast's download queue, removes its episodes from the server and opens its feed
+/// episodes (``feed``), as ``access`` allows them now. Clearing and removing run one at a time
+/// (``isBusy``); the caller reloads the item after a removal.
+///
+/// The feed is made with the current service, and closed when the service is replaced (a
+/// reconnect) or Find Episodes is no longer allowed, so a stale sheet can't download.
 @MainActor
 @Observable
 public final class PodcastEpisodeActionsModel {
     public let podcastID: String
     /// An action is in flight; the actions are disabled meanwhile.
     public private(set) var isBusy = false
+    /// What the signed-in user may do now; losing Find Episodes closes the feed.
+    public var access: PodcastEpisodeManagementAccess {
+        didSet {
+            if !access.canFindEpisodes { feed = nil }
+        }
+    }
+    /// The open feed episodes sheet's model; `nil` when it's closed.
+    public private(set) var feed: PodcastFeedEpisodesModel?
 
     @ObservationIgnored private var service: any PodcastEpisodeManagementService
 
-    public init(podcastID: String, service: any PodcastEpisodeManagementService) {
+    public init(
+        podcastID: String, access: PodcastEpisodeManagementAccess, service: any PodcastEpisodeManagementService
+    ) {
         self.podcastID = podcastID
+        self.access = access
         self.service = service
     }
 
-    /// Uses `service` (the account's new client) for later actions.
+    /// Clearing the queue is allowed and nothing is running.
+    public var canClearDownloadQueue: Bool { access.canClearDownloadQueue && !isBusy }
+    /// Removing an episode is allowed and nothing is running.
+    public var canRemoveEpisodes: Bool { access.canRemoveEpisodes && !isBusy }
+
+    /// Uses `service` (the account's new client) for later actions, and closes the feed made
+    /// with the old one.
     public func replaceService(_ service: any PodcastEpisodeManagementService) {
         self.service = service
+        feed = nil
     }
 
-    /// Clears the download queue; `nil` if another action was running, else whether it worked.
+    /// Opens `podcast`'s feed episodes, marking `libraryEpisodes`; `nil` (and nothing opened)
+    /// when Find Episodes isn't allowed or the podcast has no feed URL.
+    @discardableResult
+    public func openFeed(podcast: Podcast, libraryEpisodes: [PodcastEpisode]) -> PodcastFeedEpisodesModel? {
+        guard access.canFindEpisodes, let feedURL = PodcastEpisodeManagementAccess.feedURL(of: podcast) else {
+            return nil
+        }
+        let feed = PodcastFeedEpisodesModel(
+            podcastID: podcastID, feedURL: feedURL, libraryEpisodes: libraryEpisodes, service: service)
+        self.feed = feed
+        return feed
+    }
+
+    public func closeFeed() {
+        feed = nil
+    }
+
+    /// Clears the download queue; `nil` if it isn't allowed now or another action was running,
+    /// else whether it worked.
     public func clearDownloadQueue() async -> Bool? {
-        await run { [podcastID] service in try await service.clearDownloadQueue(podcastID: podcastID) }
+        guard access.canClearDownloadQueue else { return nil }
+        return await run { [podcastID] service in try await service.clearDownloadQueue(podcastID: podcastID) }
     }
 
-    /// Removes `episodeID` and, with `deleteFile`, its audio file; `nil` if another action was
-    /// running, else whether it worked.
+    /// Removes `episodeID` and, with `deleteFile`, its audio file; `nil` if it isn't allowed now
+    /// or another action was running, else whether it worked.
     public func removeEpisode(_ episodeID: String, deleteFile: Bool) async -> Bool? {
-        await run { [podcastID] service in
+        guard access.canRemoveEpisodes else { return nil }
+        return await run { [podcastID] service in
             try await service.removeEpisode(podcastID: podcastID, episodeID: episodeID, deleteFile: deleteFile)
         }
     }

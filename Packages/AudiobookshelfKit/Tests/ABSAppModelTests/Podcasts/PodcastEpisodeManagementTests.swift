@@ -43,6 +43,9 @@ private func user(
         permissions: UserPermissions(update: update, delete: delete))
 }
 
+private let everything = PodcastEpisodeManagementAccess(
+    canFindEpisodes: true, canClearDownloadQueue: true, canRemoveEpisodes: true)
+
 @Suite struct PodcastEpisodeManagementAccessTests {
     @Test(arguments: [UserType.admin, .root])
     func adminsWithPermissionsGetEverything(type: UserType) {
@@ -152,6 +155,27 @@ private func user(
         #expect(model.selection.isEmpty)
     }
 
+    /// Episodes the server downloaded after the sheet opened are marked once the podcast
+    /// reloads, and leave the selection.
+    @Test func updatedLibraryEpisodesAreMarkedAndDeselected() async {
+        let model = makeModel(
+            library: ["https://x/0.mp3"],
+            feed: [
+                feedEpisode("https://x/1.mp3", publishedAt: 3), feedEpisode("https://x/2.mp3", publishedAt: 2),
+                feedEpisode("https://x/0.mp3", publishedAt: 1),
+            ])
+        await model.load()
+        model.toggleAll()
+        #expect(model.selection == [0, 1])
+        model.updateLibraryEpisodes([
+            PodcastEpisode(id: "ep-0", enclosure: PodcastEpisodeEnclosure(url: "https://x/0.mp3")),
+            PodcastEpisode(id: "ep-1", enclosure: PodcastEpisodeEnclosure(url: " https://x/1.mp3 ")),
+        ])
+        #expect(model.rows.map(\.isInLibrary) == [true, false, true])
+        #expect(model.selection == [1])
+        #expect(model.isAllSelected)
+    }
+
     @Test func everythingInTheLibraryOffersNoSelection() async {
         let model = makeModel(library: ["a"], feed: [feedEpisode("a")])
         await model.load()
@@ -255,7 +279,7 @@ private func user(
     @Test func clearAndRemoveReachTheService() async {
         let log = Locked<[String]>([])
         let model = PodcastEpisodeActionsModel(
-            podcastID: "li-1",
+            podcastID: "li-1", access: everything,
             service: FakeEpisodeManagementService(
                 clear: { log.value.append("clear \($0)") },
                 remove: { log.value.append("remove \($0) \($1) \($2)") }))
@@ -267,7 +291,7 @@ private func user(
 
     @Test func failuresReportFalse() async {
         let model = PodcastEpisodeActionsModel(
-            podcastID: "li-1",
+            podcastID: "li-1", access: everything,
             service: FakeEpisodeManagementService(
                 clear: { _ in throw TestError.offline }, remove: { _, _, _ in throw TestError.offline }))
         #expect(await model.clearDownloadQueue() == false)
@@ -279,17 +303,88 @@ private func user(
         let gate = GatedCalls<String, Void>()
         let removed = Locked(false)
         let model = PodcastEpisodeActionsModel(
-            podcastID: "li-1",
+            podcastID: "li-1", access: everything,
             service: FakeEpisodeManagementService(
                 clear: { try await gate.call($0) }, remove: { _, _, _ in removed.value = true }))
         let first = Task { await model.clearDownloadQueue() }
         var calls = gate.calls.makeAsyncIterator()
         let call = try #require(await calls.next())
         #expect(model.isBusy)
+        #expect(!model.canClearDownloadQueue)
+        #expect(!model.canRemoveEpisodes)
         #expect(await model.removeEpisode("ep-1", deleteFile: true) == nil)
         #expect(!removed.value)
         call.reply.resume()
         #expect(await first.value == true)
         #expect(!model.isBusy)
+        #expect(model.canClearDownloadQueue)
+        #expect(model.canRemoveEpisodes)
+    }
+
+    /// Access lost while a confirmation was open (a same-account reconnect clearing the user)
+    /// sends nothing.
+    @Test func clearAndRemoveRecheckAccess() async {
+        let log = Locked<[String]>([])
+        let model = PodcastEpisodeActionsModel(
+            podcastID: "li-1", access: everything,
+            service: FakeEpisodeManagementService(
+                clear: { log.value.append("clear \($0)") }, remove: { _, episode, _ in log.value.append(episode) }))
+        model.access = PodcastEpisodeManagementAccess(
+            canFindEpisodes: true, canClearDownloadQueue: false, canRemoveEpisodes: true)
+        #expect(!model.canClearDownloadQueue)
+        #expect(await model.clearDownloadQueue() == nil)
+        model.access = .none
+        #expect(!model.canRemoveEpisodes)
+        #expect(await model.removeEpisode("ep-1", deleteFile: true) == nil)
+        #expect(log.value.isEmpty)
+    }
+
+    @Test func feedOpensOnlyWhenAllowedWithAFeedURL() {
+        let model = PodcastEpisodeActionsModel(
+            podcastID: "li-1",
+            access: PodcastEpisodeManagementAccess(
+                canFindEpisodes: false, canClearDownloadQueue: true, canRemoveEpisodes: true),
+            service: FakeEpisodeManagementService())
+        #expect(model.openFeed(podcast: podcast(), libraryEpisodes: []) == nil)
+        #expect(model.feed == nil)
+        model.access = everything
+        #expect(model.openFeed(podcast: podcast(feedURL: " "), libraryEpisodes: []) == nil)
+        let feed = model.openFeed(podcast: podcast(), libraryEpisodes: [])
+        #expect(feed != nil)
+        #expect(model.feed === feed)
+        #expect(feed?.feedURL == "https://example.com/feed.xml")
+        model.closeFeed()
+        #expect(model.feed == nil)
+    }
+
+    @Test func feedClosesWhenFindingIsNoLongerAllowed() {
+        let model = PodcastEpisodeActionsModel(
+            podcastID: "li-1", access: everything, service: FakeEpisodeManagementService())
+        model.openFeed(podcast: podcast(), libraryEpisodes: [])
+        model.access = PodcastEpisodeManagementAccess(
+            canFindEpisodes: true, canClearDownloadQueue: false, canRemoveEpisodes: false)
+        #expect(model.feed != nil)
+        model.access = .none
+        #expect(model.feed == nil)
+    }
+
+    /// A reconnect closes the feed made with the old client; a reopened feed uses the new one.
+    @Test func feedClosesOnReconnectAndReopensWithTheNewService() async {
+        let log = Locked<[String]>([])
+        let model = PodcastEpisodeActionsModel(
+            podcastID: "li-1", access: everything,
+            service: FakeEpisodeManagementService(feed: { _ in
+                log.value.append("old")
+                return []
+            }))
+        model.openFeed(podcast: podcast(), libraryEpisodes: [])
+        model.replaceService(
+            FakeEpisodeManagementService(feed: { _ in
+                log.value.append("new")
+                return []
+            }))
+        #expect(model.feed == nil)
+        await model.openFeed(podcast: podcast(), libraryEpisodes: [])?.load()
+        #expect(log.value == ["new"])
     }
 }
