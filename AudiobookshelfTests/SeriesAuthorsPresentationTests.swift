@@ -370,6 +370,55 @@ private func book(_ id: String, kind: ItemKind = .book, episodeID: String? = nil
         #expect(commands([(seriesA, true), (seriesA, false)]) == 1)  // Home, hidden Series tab
     }
 
+    /// View ▸ Refresh runs only the frontmost screen's action, never a hidden tab's that is still registered (macOS
+    /// keeps hidden tabs appeared), and is disabled while that screen loads (#393).
+    @Test func refreshCommandRunsOnlyTheFrontmostScreen() {
+        let router = Router()
+        let registry = RefreshCommandRegistry()
+        var runs: [String] = []
+        func register(_ name: String, _ placement: RefreshCommandPlacement, loading: Bool = false) -> UUID {
+            let id = UUID()
+            registry.register(id, .init(placement: placement, isDisabled: loading, perform: { runs.append(name) }))
+            return id
+        }
+        func refresh() -> Bool? {
+            let action = registry.frontmost(in: router)
+            action?.perform()
+            return action?.isDisabled
+        }
+
+        #expect(refresh() == nil)
+        let home = register("home", .root(.home))
+        _ = register("series tab", .root(.series))
+        _ = register("authors tab", .root(.authors), loading: true)
+        #expect(refresh() == false)
+        #expect(runs == ["home"])
+
+        // Home pushes a series: its screen is frontmost; Home is covered (and has disappeared).
+        router[path: .home] = [.series(id: "ser_1")]
+        registry.unregister(home)
+        let series = register("series", .pushed(.series(id: "ser_1")), loading: true)
+        #expect(refresh() == true)
+        #expect(runs == ["home", "series"])
+        // Loaded: enabled again.
+        registry.register(series, .init(placement: .pushed(.series(id: "ser_1")), isDisabled: false, perform: {}))
+        #expect(refresh() == false)
+
+        // Another tab: its root, not the hidden Home stack's series.
+        runs = []
+        router.selectedTab = .series
+        #expect(refresh() == false)
+        router.selectedTab = .authors
+        #expect(refresh() == true)
+        #expect(runs == ["series tab", "authors tab"])
+
+        // The pushed screen gone: nothing in Home.
+        router.selectedTab = .home
+        registry.unregister(series)
+        #expect(refresh() == nil)
+        #expect(runs == ["series tab", "authors tab"])
+    }
+
     @Test func failedRefreshShowsAboveTheItemsAndAFailedPageAfterThem() async throws {
         #expect(BrowsePresentation.failurePlacement(failed: false, refreshFailed: false) == nil)
         #expect(BrowsePresentation.failurePlacement(failed: false, refreshFailed: true) == nil)
