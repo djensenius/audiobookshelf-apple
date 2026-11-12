@@ -23,6 +23,8 @@ struct SceneRouterHost: View {
     /// The screens with a Refresh command, for View ▸ Refresh.
     @State private var refreshCommands = RefreshCommandRegistry()
     @SceneStorage private var snapshot: Data?
+    /// The screen this window was opened for, by Open in New Window; cleared once it's applied.
+    @Environment(\.windowRoute) private var windowRoute
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.scenePhase) private var scenePhase
 
@@ -65,8 +67,11 @@ struct SceneRouterHost: View {
 
     private func restoreOnce() {
         let isCompact = horizontalSizeClass == .compact
-        if navigation.restoreOnce(from: snapshot, isCompact: isCompact, opening: pendingLink) {
+        let window = windowRoute.wrappedValue
+        if navigation.restoreOnce(from: snapshot, window: window, isCompact: isCompact, opening: pendingLink) {
             pendingLink = nil
+            // From now on an ordinary window, restored from its own saved state.
+            if window != nil { windowRoute.wrappedValue = nil }
         }
     }
 
