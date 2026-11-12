@@ -1107,7 +1107,12 @@ public actor DownloadEngine {
             let check = Task { [preflight] in try await preflight.check(fresh) }
             preflights[partID] = check
             defer { if preflights[partID] == check { preflights[partID] = nil } }
-            request = try await check.value
+            // A cancelled launch (a retry task's) still cancels its check, as when it ran inline.
+            request = try await withTaskCancellationHandler {
+                try await check.value
+            } onCancel: {
+                check.cancel()
+            }
         } catch DownloadRedirectPreflightError.noNetwork(let code) {
             if launching[partID] == token, let unchecked {
                 await waitForNetwork(partID, launch: token, request: unchecked, code: code)
