@@ -156,17 +156,23 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
     let syncer: ProgressSyncer
     let clock = ManualClock()
     let time = Locked(t0)
+    /// The syncer's backoff sleeps, in seconds.
+    let wakes = Locked<[TimeInterval]>([])
 
     init() throws {
         container = try DataStack(location: .inMemory).container
         store = LocalProgressStore(modelContainer: container)
-        let time = time
+        let (time, wakes) = (time, wakes)
         service = FakeProgressServer(serverConnectionID: connection, store: store, now: { time.value })
         // Drain retries wait until the syncer goes away.
         syncer = ProgressSyncer(
             source: source, service: service, store: store,
             clock: ProgressSyncClock(
-                now: { time.value }, uptime: { 0 }, sleep: { _ in try await Task.sleep(for: .seconds(86_400)) }))
+                now: { time.value }, uptime: { 0 },
+                sleep: { seconds in
+                    wakes.value.append(seconds)
+                    try await Task.sleep(for: .seconds(86_400))
+                }))
     }
 
     func makeModel(
@@ -603,9 +609,10 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(await store.needsEbookFetch.isEmpty)
     }
 
-    /// A request no GET answers (here the server answers for another item) is fetched at most
-    /// twice in one drain, so the drain ends.
-    @Test func anUnansweredEbookFetchRequestIsBounded() async throws {
+    /// A request no GET answers (here the server answers for another item, as when updates arrive
+    /// during both GETs) is fetched at most twice in one drain, so the drain ends, and drains
+    /// again after a backoff.
+    @Test func anUnansweredEbookFetchRequestIsBoundedAndRetried() async throws {
         try await cleanRow("2")
         try await apply(serverProgress("9", progress: 0.8, at: t0.addingTimeInterval(20)), source: .socket)
         var other = serverProgress("9", progress: 0.8, at: t0.addingTimeInterval(20))
@@ -616,6 +623,7 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         await syncer.drainPendingProgress()
         #expect(service.fetches.value - fetches == 2)
         #expect(await store.needsEbookFetch == [key])
+        #expect(await eventually { !wakes.value.isEmpty })
     }
 
     /// While an audio send awaits confirmation, a socket reports page 4 (t+60), matching the row,
@@ -763,6 +771,19 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await row().currentTime == 0)
     }
 
+    /// Without a turn, a later resume moves the reader to the refreshed page.
+    @Test func aSecondResumeBeforeATurnUpdatesTheLocation() async throws {
+        try await cleanRow("3", progress: 0.2)
+        let model = makeModel()
+        _ = await model.resume()
+        #expect(model.location == .page(3))
+        service.server.value = serverProgress("8", progress: 0.7, at: t0.addingTimeInterval(60))
+
+        #expect(await model.resume().location == .page(8))
+        #expect(model.location == .page(8))
+        #expect(model.progress == 0.7)
+    }
+
     @Test func resumeDoesNotMoveAnAlreadyTurnedPage() async throws {
         service.server.value = serverProgress("8", at: t0)
         let model = makeModel()
@@ -866,6 +887,34 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await row().ebookLocation == "3")
         await model.flush()
         #expect(service.writes.value.map(\.update.ebookLocation) == ["4"])
+    }
+
+    /// Page 4 saved and its flush queued behind a held confirmation; page 5's save then fails.
+    /// The queued flush checks the latest save, so it doesn't send page 4.
+    @Test func aQueuedFlushChecksSavesMadeWhileItWaited() async throws {
+        let model = makeModel()
+        let gate = Locked<CheckedContinuation<Void, Never>?>(nil)
+        service.duringConfirmation.value = {
+            await withCheckedContinuation { gate.value = $0 }
+            return nil
+        }
+        turn(model, to: 3)
+        let first = Task { await model.flush() }
+        #expect(await eventually { gate.value != nil })
+        turn(model, to: 4)
+        let queued = model.drainTail
+        let second = Task { await model.flush() }
+        while model.drainTail == queued { await Task.yield() }
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        turn(model, to: 5)
+        #expect(await model.saveTail?.value == false)
+        gate.value?.resume()
+        await first.value
+        await second.value
+
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3"])
+        await model.flush()
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3", "5"])
     }
 
     /// Before any resume: seeded page 2, page 3 saved and held, page 4 turned; a later-dated

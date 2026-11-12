@@ -64,6 +64,8 @@ public final class EbookProgressModel {
     /// The latest turn not yet saved, dated and ordered when it was recorded; kept after a failed
     /// save. The store drops it if another reader's later turn for the key was saved meanwhile.
     @ObservationIgnored private var unsaved: Unsaved?
+    /// Whether ``record(_:progress:)`` took a turn; until then each resume sets the location.
+    @ObservationIgnored private var turned = false
     /// The last local save's failure; a drain finishing meanwhile doesn't hide it.
     @ObservationIgnored private var saveError: String?
     /// Counts updates of ``hasUnsyncedChanges`` from saves and drains, so ``resume()`` doesn't
@@ -121,8 +123,8 @@ public final class EbookProgressModel {
         }
     }
 
-    /// Where to open: the row's location (see the type's documentation). Sets ``location`` unless
-    /// a page was already turned.
+    /// Where to open: the row's location (see the type's documentation). Sets ``location`` until
+    /// a page is turned.
     @discardableResult
     public func resume() async -> EbookResumePoint {
         guard kind.isSupported else { return .beginning }
@@ -136,7 +138,7 @@ public final class EbookProgressModel {
         let local = await readLocal()
         let point = EbookResumePoint.resolve(
             kind: kind, local: local, replaced: before, server: local == nil ? knownServerProgress : nil)
-        if location == nil {
+        if !turned {
             location = point.location
             progress = point.progress
         }
@@ -155,6 +157,7 @@ public final class EbookProgressModel {
         guard location != self.location || progress != self.progress else { return }
         self.location = location
         self.progress = progress
+        turned = true
         unsaved = Unsaved(
             edit: .init(location: location.stored, progress: progress), at: now(),
             token: store.reserveEbookEdit(for: key))
@@ -244,8 +247,15 @@ public final class EbookProgressModel {
         let (syncer, store, key) = (syncer, store, key)
         let task = Task { @MainActor [weak self] in
             await previous?.value
-            // Save before send: nothing goes out while the latest turn isn't saved.
-            guard await saves?.value ?? true else { return }
+            // Save before send: nothing goes out while the latest turn isn't saved, including
+            // one saved while this drain waited.
+            var awaited = saves
+            while true {
+                guard await awaited?.value ?? true else { return }
+                let latest = self?.saveTail
+                if latest == awaited { break }
+                awaited = latest
+            }
             await syncer.drainPendingProgress()
             let row: LocalMediaProgressDTO?
             do {

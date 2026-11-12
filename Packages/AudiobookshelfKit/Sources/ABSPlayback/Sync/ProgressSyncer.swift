@@ -948,6 +948,11 @@ public final class ProgressSyncer {
                 return
             }
         }
+        // Updates during both GETs leave a request the bound skipped: drain again after a backoff.
+        if await store.needsEbookFetch.contains(where: { $0.serverConnectionID == service.serverConnectionID }) {
+            drainOutcome.failed = true
+            return
+        }
         drainOutcome.completed = true
         await refreshActiveProgress(unlessAttempted: attemptedKeys)
     }
