@@ -28,10 +28,8 @@ struct LibraryView: View {
                 width: width, dynamicTypeSize: dynamicTypeSize, viewMode: $0.preferences.viewMode)
         }
         Group {
-            if let host, let model {
+            if let model {
                 LibraryContent(model: model, filterModel: filterHost?.model(for: key))
-                    // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
-                    .environment(\.itemProgressReader, host.progressReader)
             } else {
                 // Until the library's type is known, the placeholder waits for (or retries) the libraries.
                 BrowsePlaceholder(

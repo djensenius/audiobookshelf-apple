@@ -257,6 +257,20 @@ public final class LibraryStore {
         return LibraryStoreServices(store: self, connectionKey: connectionKey)
     }
 
+    /// The progress actions (``ProgressItemActions``) for the account the store serves, or `nil`
+    /// when it serves none. They change ``progress`` and write through the store's current client
+    /// (``LibraryStoreServices``), so a reconnect retargets them; offline without a client, or
+    /// after a ``clear()`` or an account switch, a write fails and is rolled back.
+    ///
+    /// Build one per account session and share it between screens: its per-item queue keeps
+    /// actions on the same item in order only within one instance.
+    public func makeItemActions(localSync: (any ItemActionLocalSync)? = nil) -> ProgressItemActions? {
+        guard let connectionKey else { return nil }
+        return ProgressItemActions(
+            cache: progress, writer: LibraryStoreServices(store: self, connectionKey: connectionKey),
+            localSync: localSync)
+    }
+
     /// The store's current client as `Service` and ``clear()`` generation while it still serves
     /// `connectionKey`. Throws ``LibraryStoreError/serviceUnavailable(_:)`` when the client isn't a
     /// `Service`, logging it once per service.
@@ -590,5 +604,23 @@ extension LibraryStoreServices: PlaylistEditingService {
     }
     public func deletePlaylist(id: String) async throws {
         try await send((any PlaylistEditingService).self) { try await $0.deletePlaylist(id: id) }
+    }
+}
+
+// MARK: ProgressWriting
+
+/// Lets ``LibraryStore/makeItemActions(localSync:)``'s actions write through the store's current
+/// client, so they follow a reconnect and stop at a clear or an account switch.
+extension LibraryStoreServices: ProgressWriting {
+    public func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        try await send((any ProgressWriting).self) {
+            try await $0.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
+        }
+    }
+    public func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        try await send((any ProgressWriting).self) { try await $0.progressID(itemID: itemID, episodeID: episodeID) }
+    }
+    public func deleteProgress(id: String) async throws {
+        try await send((any ProgressWriting).self) { try await $0.deleteProgress(id: id) }
     }
 }

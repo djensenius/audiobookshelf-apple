@@ -76,6 +76,25 @@ private struct AddressedClient: LibraryService, ServerURLProviding {
     func serverURL() async -> URL { url }
 }
 
+/// A client that records each progress write and deletion as `name:item` or `name:delete:id`.
+private struct WritingClient: LibraryService, ProgressWriting {
+    var name: String
+    let writes: Locked<[String]>
+    var library = FakeLibraryService()
+
+    func libraries() async throws -> [Library] { try await library.libraries() }
+    func library(id: String) async throws -> LibraryWithFilterData { try await library.library(id: id) }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
+        try await library.items(libraryID: libraryID, query: query)
+    }
+    func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        writes.value.append("\(name):\(itemID)")
+    }
+    func progressID(itemID: String, episodeID: String?) async throws -> String? { "progress-\(itemID)" }
+    func deleteProgress(id: String) async throws { writes.value.append("\(name):delete:\(id)") }
+}
+
 /// A feature request and the fake client method it must reach.
 struct StoreServiceForwarding: Sendable, CustomTestStringConvertible {
     let method: String
@@ -234,6 +253,36 @@ private let forwardings: [StoreServiceForwarding] = [
             }
             store.clear()
             await #expect(throws: CancellationError.self) { try await services.serverURL() }
+        }
+    }
+
+    /// The store's item actions change its progress cache and write through the account's
+    /// current client, follow a reconnect, and stop at an account switch.
+    @Test func itemActionsWriteThroughTheCurrentClient() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            #expect(store.makeItemActions() == nil)
+            let writes = Locked<[String]>([])
+            await store.connect(client: WritingClient(name: "old", writes: writes), connectionKey: serverA)
+            let actions = try #require(store.makeItemActions())
+
+            try await actions.markFinished(ItemActionTarget(libraryItemID: "li", duration: 60))
+            #expect(store.progress.progress(libraryItemID: "li")?.isFinished == true)
+            #expect(writes.value == ["old:li"])
+
+            // The same account reconnects with a new client.
+            await store.connect(client: WritingClient(name: "new", writes: writes), connectionKey: serverA)
+            try await actions.discardProgress(ItemActionTarget(libraryItemID: "li"))
+            #expect(store.progress.progress(libraryItemID: "li") == nil)
+            #expect(writes.value == ["old:li", "new:delete:progress-li"])
+
+            // Another account: the old actions write nothing.
+            await store.connect(client: WritingClient(name: "other", writes: writes), connectionKey: serverB)
+            await #expect(throws: CancellationError.self) {
+                try await actions.markFinished(ItemActionTarget(libraryItemID: "li"))
+            }
+            #expect(store.progress.progress(libraryItemID: "li") == nil)
+            #expect(writes.value.count == 2)
         }
     }
 }

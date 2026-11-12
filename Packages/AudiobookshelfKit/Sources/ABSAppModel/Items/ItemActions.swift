@@ -90,7 +90,8 @@ extension APIClient: ProgressWriting {
 /// - Optimistic ordering is tracked separately from server timestamps. A full progress seed
 ///   requested after a successful action reconciles its authoritative row, even with clock skew.
 /// - The per-key queue belongs to this instance: inject one instance per account and share it
-///   between screens (#181), or actions from two instances on the same key can interleave.
+///   between screens (``LibraryStore/makeItemActions(localSync:)``; the app shell does), or
+///   actions from two instances on the same key can interleave.
 /// - After the server accepted marking finished or not finished, or discarding, and the change
 ///   was committed, `localSync` (``ItemActionLocalSync``) updates the local playback database,
 ///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
