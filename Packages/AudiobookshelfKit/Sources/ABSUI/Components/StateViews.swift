@@ -17,7 +17,7 @@ public struct LoadingView: View {
     }
 }
 
-/// A full-screen error with an optional Retry button.
+/// A full-screen error with an optional Retry button at least 44×44 points.
 public struct ErrorStateView: View {
     private let title: String
     private let message: String?
@@ -56,6 +56,8 @@ public struct ErrorStateView: View {
             if let retry {
                 Button(action: retry) {
                     Text(verbatim: L10n.string("ButtonRetry"))
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(.rect)
                 }
                 .buttonStyle(.borderedProminent)
             }
