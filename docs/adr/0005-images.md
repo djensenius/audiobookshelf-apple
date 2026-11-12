@@ -552,7 +552,10 @@ static, unauthenticated remote images (none are planned).
     `URLSession` drops `Authorization` on a redirect; foreground hops that leave
     the origin are refused, and a background session's off-origin response is
     discarded. Like every download, its redirects are checked in the foreground
-    first, so a hop off the origin is refused before custom headers reach it (#145).
+    first, so a hop off the origin is refused before the token reaches it (#145).
+    A background transfer still follows a redirect the check didn't see, so
+    downloads from a server that needs custom headers are refused until they run
+    in the foreground (follow-up #467).
   - It stores the result as `cover.jpg` in the item's download folder, which is
     not a cache directory. It records the relative path and
     `LocalLibraryItem.coverUpdatedAt` in ABSData, which is what

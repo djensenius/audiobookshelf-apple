@@ -145,6 +145,11 @@ private actor FakeManager: DownloadsLifecycleManager {
         }
         return true
     }
+
+    func resume(recordID: UUID) -> Bool {
+        calls.append("resume \(recordID)")
+        return true
+    }
 }
 
 @MainActor
@@ -301,6 +306,28 @@ struct DownloadsLifecycleTests {
 
         #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)"])
         #expect(pauses(recordsA).count == 2)
+    }
+
+    /// A sign-in resumes the connection's paused cover refetches, which the user can't see to
+    /// resume, but leaves the user's paused downloads and other connections' refetches alone.
+    @Test func signInResumesOnlyItsPausedCoverRefetches() async {
+        func refetch(_ state: DownloadState, _ connectionID: UUID) -> DownloadRecordDTO {
+            var record = Self.record(state, connectionID: connectionID)
+            record.parts = [
+                DownloadPartDTO(
+                    id: UUID(), kind: .cover, serverPath: "/cover", filename: "cover.jpg", mimeType: "image/jpeg",
+                    expectedBytes: 0, destinationRelativePath: "cover.jpg")
+            ]
+            return record
+        }
+        let paused = refetch(.paused, connectionA)
+        let stored = recordsA + recordsB + [paused, refetch(.failed, connectionA), refetch(.paused, connectionB)]
+        let lifecycle = makeLifecycle(records: { id in stored.filter { $0.key.serverConnectionID == id } })
+
+        await lifecycle.sessionDidStart(context(connectionA))
+        await lifecycle.refetchResumes[connectionA]?.value
+
+        #expect(calls.all == ["resume \(paused.id)"])
     }
 
     @Test func switchKeepsTheDownloads() async {

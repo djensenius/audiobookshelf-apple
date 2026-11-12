@@ -24,6 +24,8 @@ public protocol DownloadsLifecycleManager: Sendable {
     func start() async throws
     /// See ``DownloadManager/pause(recordID:)``.
     func pause(recordID: UUID) async throws(DownloadManagerError) -> Bool
+    /// See ``DownloadManager/resume(recordID:)``.
+    func resume(recordID: UUID) async throws(DownloadManagerError) -> Bool
 }
 
 extension DownloadManager: DownloadsLifecycleManager {}
@@ -47,7 +49,8 @@ extension DownloadManager: DownloadsLifecycleManager {}
 ///   (``DownloadEngine/quiesce(connectionID:pausing:)``): every transfer stops and its resume
 ///   data is discarded (ADR 0003), since resume data is sealed to the credentials it was made
 ///   with and couldn't be used after signing in again. The records stay paused after signing in
-///   again; the user resumes them. This is local only, so it is also safe for an expiry. A switch
+///   again; the user resumes them. Cover refetches (``DownloadRecordDTO/isCoverOnly``) are hidden
+///   from the user, so a new session of the connection resumes them. This is local only, so it is also safe for an expiry. A switch
 ///   keeps them running: the other connection's credentials stay saved. A removal does the same
 ///   as a sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted. An
 ///   expiry does the same in ``connectionExpired(_:)``, whatever the session's end says (a
@@ -85,6 +88,9 @@ public final class DownloadsLifecycle: SessionParticipant {
     private var cleanups: [UUID: Task<Void, Never>] = [:]
     /// Connections whose cleanup couldn't stop their transfers; tried again after activating.
     private var unfinishedCleanups: Set<UUID> = []
+    /// Each connection's resume of its cover refetches after a sign-in; its next cleanup waits
+    /// for it, so a resume can't follow the cleanup's pauses. Internal for tests.
+    private(set) var refetchResumes: [UUID: Task<Void, Never>] = [:]
 
     /// - Parameters:
     ///   - engine: the app's ``DownloadEngine``.
@@ -205,6 +211,20 @@ public final class DownloadsLifecycle: SessionParticipant {
             if cleanups[id] == pending { break }
         }
         unfinishedCleanups.remove(id)
+        // In its own task, so a resume waiting for its item doesn't hold up the sign-in.
+        let records = records
+        let manager = manager
+        refetchResumes[id] = Task {
+            do {
+                for record in try await records(id) where record.isCoverOnly && record.state == .paused {
+                    _ = try await manager.resume(recordID: record.id)
+                }
+            } catch {
+                Log.downloads.error(
+                    "Couldn't resume a signed-in server's cover downloads: \(Log.redact(String(describing: error)), privacy: .public)"
+                )
+            }
+        }
     }
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
@@ -228,8 +248,10 @@ public final class DownloadsLifecycle: SessionParticipant {
         let manager = manager
         let engine = engine
         let previous = cleanups[connectionID]
+        let resuming = refetchResumes.removeValue(forKey: connectionID)
         let cleanup = Task {
             await previous?.value
+            await resuming?.value
             // Paused within the quiesce, so a failure's replay can't queue a record again after
             // the read; pausing seals resume data with the old credentials, so it's discarded after.
             // A pause that isn't saved leaves a record the next activation would restart. One a

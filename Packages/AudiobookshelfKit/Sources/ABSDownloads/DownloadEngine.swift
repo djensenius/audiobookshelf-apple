@@ -40,8 +40,10 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     /// The background session kept disconnecting; downloads wait for the next
     /// ``DownloadEngine/activate()``.
     case sessionLost
-    /// No longer reported: downloads from connections with custom headers were refused before
-    /// the foreground redirect check (#145). Kept so stored failures still read.
+    /// The connection sends custom headers. A background session follows a redirect of the
+    /// transfer itself, or of a resumed transfer's `Range` request, without asking its delegate,
+    /// so the redirect check can't keep them on the server. Refused until such downloads run in
+    /// the foreground (follow-up #467).
     case customHeadersUnsupported
 }
 
@@ -120,6 +122,9 @@ public actor DownloadEngine {
     /// transfer, or a declared length, over this fails the part for good with
     /// ``DownloadFailureCode/tooLarge``, as it goes rather than once the body is on disk.
     static let maxCoverBytes: Int64 = 20 * 1024 * 1024
+
+    /// A launch for a connection with custom headers (``DownloadFailureCode/customHeadersUnsupported``).
+    private struct CustomHeadersRefused: Error {}
 
     private struct PartContext {
         var recordID: UUID
@@ -643,6 +648,9 @@ public actor DownloadEngine {
         // adopts one meanwhile, even one that begins while the records are being paused or
         // after this call's attachment failed.
         survivorsToStop.insert(connectionID)
+        // The pauses can wait on each other (the manager holds a podcast's item for each of its
+        // episodes), so every transfer stops with the old credentials first, without a wait.
+        let cancelled = cancelTransfers(of: connectionID)
         defer {
             if let index = quiescingConnections.firstIndex(of: connectionID) {
                 quiescingConnections.remove(at: index)
@@ -670,12 +678,33 @@ public actor DownloadEngine {
             .union(contexts.filter { $0.value.connectionID == connectionID }.keys)
             .filter {
                 tasks[$0] != nil || launching[$0] != nil || stopping[$0] != nil || retries[$0] != nil
-                    || deferredLaunches.contains($0)
+                    || deferredLaunches.contains($0) || cancelled.contains($0)
             }
         await stop(partIDs: Array(parts), keepingResumeData: false)
         await waitForFailuresForGood(of: connectionID)
         let discarded = await discardResumeData(connectionID: connectionID)
         return records != nil && discarded
+    }
+
+    /// Cancels `connectionID`'s transfers, launches and retries at once, dropping their resume
+    /// data, as the start of ``stop(partIDs:keepingResumeData:)`` does. Their parts' states are
+    /// left to the stops that follow, which find no transfer to wait for.
+    ///
+    /// - Returns: the parts it cancelled something of.
+    private func cancelTransfers(of connectionID: UUID) -> Set<UUID> {
+        var cancelled: Set<UUID> = []
+        for (partID, context) in contexts where context.connectionID == connectionID && !settling.contains(partID) {
+            let retry = retries.removeValue(forKey: partID)
+            retry?.cancel()
+            let launch = launching.removeValue(forKey: partID)
+            let task = tasks.removeValue(forKey: partID)
+            if let task {
+                ignoredTasks.insert(task.taskIdentifier)
+                task.cancel()
+            }
+            if retry != nil || launch != nil || task != nil { cancelled.insert(partID) }
+        }
+        return cancelled
     }
 
     private func waitForFailuresForGood(of connectionID: UUID) async {
@@ -1063,6 +1092,8 @@ public actor DownloadEngine {
         do {
             let credentials = try await credentials.credentials(
                 for: context.connectionID, replacing: rejectedAccessToken)
+            // Before any request is made, so the headers never reach the preflight or a transfer.
+            guard credentials.configuration.customHeaders.isEmpty else { throw CustomHeadersRefused() }
             var fresh = try DownloadRequests.request(
                 path: context.serverPath, configuration: credentials.configuration,
                 accessToken: credentials.accessToken)
@@ -1078,6 +1109,14 @@ public actor DownloadEngine {
             if launching[partID] == token {
                 await failPermanently(
                     partID, code: .offOrigin, message: "The download is redirected to another server.",
+                    activationOwnsSession: activationOwnsSession)
+            }
+            return
+        } catch is CustomHeadersRefused {
+            if launching[partID] == token {
+                await failPermanently(
+                    partID, code: .customHeadersUnsupported,
+                    message: "Downloads aren't available yet for servers that need custom headers.",
                     activationOwnsSession: activationOwnsSession)
             }
             return
