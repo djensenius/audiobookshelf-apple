@@ -31,6 +31,8 @@ final class FakeBookmarkService: BookmarkWriting, BookmarkReading {
     var sentWrites: Int { counters.withLock { $0.sent } }
     /// Writes whose task was cancelled while in flight.
     var cancelledWrites: Int { counters.withLock { $0.cancelled } }
+    /// Loads sent so far.
+    var sentLoads: Int { counters.withLock { $0.loads } }
 
     func createBookmark(itemID: String, time: Double, title: String) async throws -> AudioBookmark {
         let reply = try await write(.create(itemID: itemID, time: time, title: title))

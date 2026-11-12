@@ -9,6 +9,8 @@ public enum BookmarkStoreError: Error, Sendable, Hashable {
     case unavailable
     /// The bookmark to rename isn't in the list any more.
     case notFound
+    /// ``BookmarkStore/add(itemID:time:title:)`` found a bookmark already at that time.
+    case alreadyExists
 }
 
 /// The signed-in user's bookmarks, keyed by item, with optimistic writes.
@@ -22,7 +24,8 @@ public enum BookmarkStoreError: Error, Sendable, Hashable {
 /// first. A response is dropped when a response to a later load was already applied or
 /// ``clear()`` ran since, and it doesn't undo a write that finished after the load started.
 ///
-/// Writes (``create(itemID:time:title:)``, ``rename(_:to:)``, ``delete(_:)``):
+/// Writes (``create(itemID:time:title:)``, ``add(itemID:time:title:)``, ``rename(_:to:)``,
+/// ``delete(_:)``):
 /// - Change the list right away, send the request, then keep the server's copy or, if it fails,
 ///   put the previous entry back and rethrow.
 /// - Writes on the same item run one after the other, in call order; other items don't wait.
@@ -74,6 +77,8 @@ public final class BookmarkStore: SessionParticipant {
 
     private enum Write {
         case create(String)
+        /// A create that refuses to rename an existing bookmark.
+        case add(String)
         case rename(String)
         case delete
     }
@@ -243,6 +248,18 @@ public final class BookmarkStore: SessionParticipant {
         return saved ?? AudioBookmark(libraryItemId: itemID, title: title, time: time)
     }
 
+    /// Adds a bookmark at `time` only if none is there, and returns the server's copy.
+    ///
+    /// The check runs in the item's write queue, after the writes queued before it, so it sees
+    /// their optimistic entries: of two adds at the same time, from any window, the second throws
+    /// ``BookmarkStoreError/alreadyExists`` instead of renaming the first. It checks the list as
+    /// loaded, so call it after a load. Throws like ``create(itemID:time:title:)`` otherwise.
+    @discardableResult
+    public func add(itemID: String, time: Double, title: String) async throws -> AudioBookmark {
+        let saved = try await run(Key(itemID: itemID, time: time), .add(title))
+        return saved ?? AudioBookmark(libraryItemId: itemID, title: title, time: time)
+    }
+
     /// Renames the bookmark. Throws like ``create(itemID:time:title:)``, and
     /// ``BookmarkStoreError/notFound`` when the bookmark isn't in the list any more.
     public func rename(_ bookmark: AudioBookmark, to title: String) async throws {
@@ -287,6 +304,9 @@ public final class BookmarkStore: SessionParticipant {
             var bookmark = before ?? AudioBookmark(libraryItemId: key.itemID, time: key.time)
             bookmark.title = title
             optimistic = bookmark
+        case .add(let title):
+            guard before == nil else { throw BookmarkStoreError.alreadyExists }
+            optimistic = AudioBookmark(libraryItemId: key.itemID, title: title, time: key.time)
         case .rename(let title):
             guard var bookmark = before else { throw BookmarkStoreError.notFound }
             bookmark.title = title
@@ -301,7 +321,7 @@ public final class BookmarkStore: SessionParticipant {
         let saved: AudioBookmark?
         do {
             switch write {
-            case .create(let title):
+            case .create(let title), .add(let title):
                 saved = try await service.createBookmark(itemID: key.itemID, time: key.time, title: title)
             case .rename(let title):
                 saved = try await service.renameBookmark(itemID: key.itemID, time: key.time, title: title)
