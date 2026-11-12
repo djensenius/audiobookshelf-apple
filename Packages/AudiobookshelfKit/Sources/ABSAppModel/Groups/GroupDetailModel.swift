@@ -134,6 +134,9 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
     @ObservationIgnored private let service: any GroupsService
     @ObservationIgnored private let cache: ProgressCache
     @ObservationIgnored private var sequence = 0
+    /// Bumped whenever ``detail`` or ``isNotFound`` is set: by a load, ``apply(_:)`` or an edit. An
+    /// edit rolls back only while the revision it showed is current, so a newer state survives.
+    @ObservationIgnored private(set) var revision = 0
 
     public init(id: String, service: any GroupsService, cache: ProgressCache, userID: String? = nil) {
         groupID = id
@@ -162,11 +165,19 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
         await load()
     }
 
-    /// Loads the group. A response to an older call that arrives after a newer one started is
-    /// dropped.
+    /// Loads the group. A response to an older call that arrives after a newer one started, or
+    /// after the server pushed the group, is dropped.
     public func load() async {
+        await loadReportingFailure()
+    }
+
+    /// ``load()``, returning its error when it failed (a cancellation included) and was the
+    /// latest load; `nil` when it succeeded or a newer load, edit or pushed update superseded it.
+    @discardableResult
+    func loadReportingFailure() async -> (any Error)? {
         sequence += 1
         let sequence = sequence
+        let started = revision
         isLoading = true
         let result: Result<GroupDetail, any Error>
         do {
@@ -174,20 +185,27 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
         } catch {
             result = .failure(error)
         }
-        guard sequence == self.sequence else { return }
+        guard sequence == self.sequence else { return nil }
         isLoading = false
+        // An update the server pushed while the request ran is newer than its answer, which may
+        // have been read before it: keep the pushed state.
+        guard revision == started else { return nil }
         switch result {
         case .success(let loaded):
+            revision += 1
             detail = loaded
             error = nil
             isNotFound = false
+            return nil
         case .failure(let error):
-            if error is CancellationError { return }
+            if error is CancellationError { return error }
             self.error = error
             if error as? APIError == .notFound {
+                revision += 1
                 isNotFound = true
                 detail = nil
             }
+            return error
         }
     }
 
@@ -201,12 +219,35 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
         switch change {
         case .added(let group, _), .updated(let group, _):
             guard group.id == groupID else { return }
+            revision += 1
             detail = group
         case .removed(let id, _):
             guard id == groupID else { return }
+            revision += 1
             isNotFound = true
             detail = nil
         }
+    }
+
+    // MARK: Edits
+
+    /// Shows `detail` for an edit: its optimistic result, the server's answer or a rollback. A
+    /// load in flight is dropped, as it may have been answered before the edit.
+    func showEdited(_ detail: GroupDetail) {
+        sequence += 1
+        revision += 1
+        isLoading = false
+        self.detail = detail
+    }
+
+    /// The group was deleted by an edit (deleting it, or removing its last member): it shows as
+    /// not found, as after a removal the server pushed.
+    func showDeleted() {
+        sequence += 1
+        revision += 1
+        isLoading = false
+        isNotFound = true
+        detail = nil
     }
 
     // MARK: Progress and play-all
