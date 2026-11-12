@@ -77,6 +77,22 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    /// The library that decides the players' cover shape (#336): the session's, else its item's.
+    @Test func theLibraryComesFromTheCurrentItemsSession() async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.restore(restoredRecord())
+            #expect(model.libraryID == nil)
+            playback.load(FakePlaybackControl.bookSession())
+            #expect(model.libraryID == "lib")
+            playback.load(
+                PlaybackSession(
+                    id: "sess_other", libraryId: "lib_square", libraryItemId: "li_other", mediaType: .book,
+                    duration: 60,
+                    audioTracks: [AudioTrack(index: 1, startOffset: 0, duration: 60, mimeType: "audio/mpeg")]))
+            #expect(model.libraryID == "lib_square")
+        }
+    }
+
     @Test func restoredOnlyShowsTheRecordOverTheWholeItem() async throws {
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = true

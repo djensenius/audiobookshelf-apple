@@ -65,12 +65,6 @@ private final class FakeProgressEntry {
         #expect(ItemPresentation.title(.markNotFinished) == "Mark as Not Finished")
     }
 
-    @Test func podcastsAndEpisodesGetSquareCovers() {
-        #expect(ItemPresentation.defaultShape(frankenstein) == .book)
-        #expect(ItemPresentation.defaultShape(ItemSummary(item: SampleLibrary.episodeItems[0])) == .square)
-        #expect(ItemPresentation.defaultShape(ItemSummary(item: SampleLibrary.podcast)) == .square)
-    }
-
     @Test func gridColumnsGetWiderAtLargerTextSizes() {
         let sizes: [DynamicTypeSize] = [.large, .xxxLarge, .accessibility1, .accessibility5]
         let widths = sizes.map(ItemGridMetrics.minimumCellWidth)
@@ -113,10 +107,15 @@ private final class FakeProgressEntry {
         return CGSize(width: image.width, height: image.height)
     }
 
+    /// A library with standard (1.6) book covers.
+    private let standard = LibrarySettings(coverAspectRatio: 0)
+
     // macOS has no Dynamic Type, so these compare layouts that don't depend on the text size.
     @Test func cardHeightHoldsTheCoverTheTitleAndTheMissingIndicator() throws {
         let serverID = UUID()
-        func card(_ item: ItemSummary) -> some View { ItemCard(item: item, serverID: serverID) { _ in } }
+        func card(_ item: ItemSummary) -> some View {
+            ItemCard(item: item, serverID: serverID, librarySettings: standard) { _ in }
+        }
         let plain = try renderedSize(card(frankenstein), width: 160)
         // A 1.6 cover at 160 pt wide is 256 pt tall; the title and subtitle add to it.
         #expect(plain.width == 160 && plain.height > 256 + 20)
@@ -126,17 +125,23 @@ private final class FakeProgressEntry {
 
     @Test func squareCoversMakeShorterCardsThanBookCovers() throws {
         let serverID = UUID()
-        func card(_ item: ItemSummary) -> some View { ItemCard(item: item, serverID: serverID) { _ in } }
-        let book = try renderedSize(card(frankenstein), width: 160)
-        let episode = try renderedSize(card(ItemSummary(item: SampleLibrary.episodeItems[0])), width: 160)
+        func card(_ item: ItemSummary, _ settings: LibrarySettings?) -> some View {
+            ItemCard(item: item, serverID: serverID, librarySettings: settings) { _ in }
+        }
+        let book = try renderedSize(card(frankenstein, standard), width: 160)
+        let episode = try renderedSize(card(ItemSummary(item: SampleLibrary.episodeItems[0]), standard), width: 160)
         #expect(episode.height < book.height)
+        let squareBook = try renderedSize(card(frankenstein, LibrarySettings(coverAspectRatio: 1)), width: 160)
+        #expect(squareBook.height < book.height)
     }
 
     @Test func aShelfWithItemsIsTallerThanAnEmptyOne() throws {
         let serverID = UUID()
         let books = SampleLibrary.books.map { ItemSummary(item: $0) }
         let full = try renderedSize(
-            ShelfRow(title: "Shelf", elements: books) { ItemCard(item: $0, serverID: serverID) { _ in } }, width: 360)
+            ShelfRow(title: "Shelf", elements: books) {
+                ItemCard(item: $0, serverID: serverID, librarySettings: standard) { _ in }
+            }, width: 360)
         let empty = try renderedSize(
             ShelfRow(title: "Shelf", elements: [ItemSummary]()) { ItemCard(item: $0, serverID: serverID) { _ in } },
             width: 360)

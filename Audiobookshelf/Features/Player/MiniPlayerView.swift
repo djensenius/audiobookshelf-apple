@@ -18,6 +18,7 @@ struct MiniPlayerView: View {
     #endif
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @ScaledMetric(relativeTo: .body) private var coverHeight: CGFloat = 40
+    private var libraries = LibraryCoverSettings()
 
     /// What the mini player shows for its placement and text size.
     enum Layout: Equatable {
@@ -77,7 +78,8 @@ struct MiniPlayerView: View {
             HStack(spacing: 10) {
                 if layout.showsCoverAndAuthor {
                     CoverView(
-                        key: model.coverKey, title: model.title, author: model.author, shape: model.coverShape,
+                        key: model.coverKey, title: model.title, author: model.author,
+                        shape: model.coverShape(in: libraries),
                         accessibility: .hidden
                     )
                     .frame(height: coverHeight)
@@ -157,12 +159,11 @@ extension PlayerViewModel {
         }
     }
 
-    /// The shape of the playing item's cover, the same in the mini and full players.
-    var coverShape: CoverShape { Self.coverShape(isPodcastEpisode: isPodcastEpisode) }
-
-    /// Square artwork for a podcast episode, else a book cover.
-    nonisolated static func coverShape(isPodcastEpisode: Bool) -> CoverShape {
-        isPodcastEpisode ? .square : .book
+    /// The shape of the playing item's cover, the same in the mini and full players: square for a
+    /// podcast episode, else the book covers of the item's library, or of the scene's current
+    /// library when the item's isn't known (a restored item before its session starts).
+    func coverShape(in libraries: LibraryCoverSettings) -> CoverShape {
+        CoverShape(isPodcast: isPodcastEpisode, librarySettings: libraries.settings(forLibrary: libraryID))
     }
 }
 

@@ -18,6 +18,7 @@ struct NowPlayingView: View {
     let model: PlayerViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var sheet: PlayerSheet?
+    private var libraries = LibraryCoverSettings()
 
     var body: some View {
         NavigationStack {
@@ -58,7 +59,7 @@ struct NowPlayingView: View {
 
     private var cover: some View {
         CoverView(
-            key: model.coverKey, title: model.title, author: model.author, shape: model.coverShape
+            key: model.coverKey, title: model.title, author: model.author, shape: model.coverShape(in: libraries)
         )
         .clipShape(.rect(cornerRadius: 8))
         .shadow(radius: 8, y: 4)

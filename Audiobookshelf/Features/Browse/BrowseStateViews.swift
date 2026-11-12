@@ -145,24 +145,27 @@ struct BrowseItemGrid<Element: Identifiable>: View {
     /// Cards call `onAppear` again when this changes, as cards a refresh kept don't appear again to page on.
     var appearanceID = 0
     @Environment(\.serverID) private var serverID
+    private var libraries = LibraryCoverSettings()
 
     var body: some View {
         ItemCardActionsHost { context, perform in
             ItemGrid(elements: elements) { element in
                 let summary = item(element)
-                ItemCard(item: summary, serverID: serverID, context: context) { perform($0, summary) }
-                    .overlay(alignment: .topLeading) {
-                        if let badge = badge(element) {
-                            Text(verbatim: badge)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, ABSSpacing.xSmall)
-                                .background(.black.opacity(0.7), in: .rect(cornerRadius: ABSRadius.small))
-                                .padding(ABSSpacing.xSmall)
-                                .accessibilityHidden(true)
-                        }
+                ItemCard(
+                    item: summary, serverID: serverID, librarySettings: libraries.current, context: context
+                ) { perform($0, summary) }
+                .overlay(alignment: .topLeading) {
+                    if let badge = badge(element) {
+                        Text(verbatim: badge)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, ABSSpacing.xSmall)
+                            .background(.black.opacity(0.7), in: .rect(cornerRadius: ABSRadius.small))
+                            .padding(ABSSpacing.xSmall)
+                            .accessibilityHidden(true)
                     }
-                    .task(id: appearanceID) { onAppear(element) }
+                }
+                .task(id: appearanceID) { onAppear(element) }
             }
         }
     }

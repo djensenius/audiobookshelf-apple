@@ -19,15 +19,16 @@ public struct ItemCard: View {
     /// - Parameters:
     ///   - serverID: The connection the cover loads from; `nil` shows the placeholder.
     ///   - progress: Overrides the environment's ``ItemProgressReader``.
-    ///   - shape: The cover shape; podcasts and episodes default to square.
+    ///   - librarySettings: The item's library's settings, for the cover shape
+    ///     (``CoverShape/init(kind:librarySettings:)``); `nil` gives square covers, as in the legacy app.
     public init(
-        item: ItemSummary, serverID: UUID?, progress: ItemProgress? = nil, shape: CoverShape? = nil,
+        item: ItemSummary, serverID: UUID?, progress: ItemProgress? = nil, librarySettings: LibrarySettings? = nil,
         context: ItemActionContext = ItemActionContext(), perform: @escaping (ItemActionKind) -> Void
     ) {
         self.item = item
         self.serverID = serverID
         self.progress = progress
-        self.shape = shape ?? ItemPresentation.defaultShape(item)
+        self.shape = CoverShape(kind: item.kind, librarySettings: librarySettings)
         self.context = context
         self.perform = perform
     }

@@ -15,6 +15,20 @@ public enum CoverShape: Sendable, Hashable {
         case .square: 1
         }
     }
+
+    /// The cover of an item in a library with `librarySettings`: square for a podcast or episode,
+    /// else the library's book covers (legacy `libraries/getBookCoverAspectRatio`). Book covers
+    /// are `.book` only for the standard setting (`coverAspectRatio` `0`); any other value, a
+    /// missing setting or unknown library (`nil`) is square, as in the legacy app.
+    public init(isPodcast: Bool, librarySettings: LibrarySettings?) {
+        self = !isPodcast && librarySettings?.coverAspectRatio == 0 ? .book : .square
+    }
+
+    /// The cover of an item of `kind`; see ``init(isPodcast:librarySettings:)``. A collapsed series
+    /// has book covers.
+    public init(kind: ItemKind, librarySettings: LibrarySettings?) {
+        self.init(isPodcast: kind == .podcast || kind == .episode, librarySettings: librarySettings)
+    }
 }
 
 /// How a ``CoverView`` presents itself to VoiceOver.
