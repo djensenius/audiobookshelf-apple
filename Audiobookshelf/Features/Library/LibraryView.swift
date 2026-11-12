@@ -83,6 +83,10 @@ struct LibraryContent: View {
     let model: LibraryItemsModel
     /// The filter sheet's choices; without it there is no filter button.
     var filterModel: LibraryFilterModel?
+    /// Where the screen sits, for ⌘R and ⌥⌘F: the Library tab's root, or a pushed filter route.
+    var placement: RefreshCommandPlacement = .root(.library)
+    /// The failed and empty messages, if not the library type's (``LibraryPresentation/messages(for:)``).
+    var messages: BrowseMessages?
     @State private var showsFilter = false
     @Environment(Router.self) private var router: Router?
     /// Between `onAppear` and `onDisappear`, which a covered stack screen or hidden tab isn't (as in `RefreshCommand`).
@@ -93,7 +97,7 @@ struct LibraryContent: View {
     @State private var refreshes = 0
 
     var body: some View {
-        let messages = LibraryPresentation.messages(for: model.mediaType)
+        let messages = messages ?? LibraryPresentation.messages(for: model.mediaType)
         BrowseStateView(state: LibraryPresentation.state(of: model), messages: messages, retry: { retry() }) {
             failed in
             let placement = BrowsePresentation.failurePlacement(failed: failed, refreshFailed: refreshFailed)
@@ -127,7 +131,7 @@ struct LibraryContent: View {
         .toolbar {
             LibraryToolbar(
                 model: model, filterModel: filterModel, showsFilter: $showsFilter,
-                isFrontmost: RefreshCommandPlacement.root(.library).isFrontmost(in: router, isVisible: isVisible))
+                isFrontmost: placement.isFrontmost(in: router, isVisible: isVisible))
         }
         .sheet(isPresented: $showsFilter) {
             if let filterModel {
@@ -142,7 +146,7 @@ struct LibraryContent: View {
             if isGone { showsFilter = false }
         }
         .refreshable { await refresh() }
-        .refreshCommand(.root(.library), isDisabled: model.isLoading) { Task { await refresh() } }
+        .refreshCommand(placement, isDisabled: model.isLoading) { Task { await refresh() } }
         .onChange(of: model.error == nil) { _, cleared in
             if cleared { refreshFailed = false }
         }

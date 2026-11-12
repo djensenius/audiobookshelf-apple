@@ -142,6 +142,8 @@ public actor DownloadEngine {
     /// Test seams, optional so production makes no actor hop for them.
     private let beforeStoppingSiblings: (@Sendable (UUID) async -> Void)?
     private let afterPermanentFailure: (@Sendable (UUID) async -> Void)?
+    /// Between a failure replay's record write and its start.
+    private let beforeReplayStart: (@Sendable (UUID) async -> Void)?
     private let startFoundSettling: (@Sendable (Set<UUID>) async -> Void)?
     private let adoptionStarted: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
@@ -196,12 +198,18 @@ public actor DownloadEngine {
     /// A part gets one stale-failure replay per user resume; a replay's own failure stays final.
     /// One `Int` per part that was ever replayed, kept until the engine goes away.
     private var replayedResumeGenerationByPart: [UUID: Int] = [:]
+    /// The parts failing for good, by record (a part twice while its replay's launch fails it
+    /// again), and those whose failure overlapped another part's of the same record. A plain
+    /// start's replay of an overlapping failure leaves the record `failed`, so it can't strand
+    /// the other part as failed. Only failures under way.
+    private var failingForGood: [UUID: [UUID]] = [:]
+    private var overlappingFailures: Set<UUID> = []
     /// Records whose `failed` state couldn't be saved after a part failed for good. Their parts
     /// can't launch until ``reconcile()`` saves it.
     private var pendingRecordFailures: Set<UUID> = []
-    /// Parts being failed for good, from the start of their handling until its replay, with
-    /// their connections, and the ``quiesce(connectionID:)`` calls waiting for them.
-    private var failingForGood: [UUID: UUID] = [:]
+    /// The connections of the failures for good under way, from the start of their handling
+    /// until their replay has started, and the ``quiesce(connectionID:)`` calls waiting for them.
+    private var failingConnections: [UUID] = []
     private var failureWaiters: [CheckedContinuation<Void, Never>] = []
     /// Internal so tests can tell when ``quiesce(connectionID:)`` waits for a failure.
     var failureWaiterCount: Int { failureWaiters.count }
@@ -273,6 +281,7 @@ public actor DownloadEngine {
         cancelKeepingResumeData: @escaping @Sendable (URLSessionDownloadTask) async -> Data?,
         beforeStoppingSiblings: (@Sendable (UUID) async -> Void)? = nil,
         afterPermanentFailure: (@Sendable (UUID) async -> Void)? = nil,
+        beforeReplayStart: (@Sendable (UUID) async -> Void)? = nil,
         startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
         adoptionStarted: (@Sendable (UUID) async -> Void)? = nil
     ) {
@@ -295,6 +304,7 @@ public actor DownloadEngine {
         self.cancelKeepingResumeData = cancelKeepingResumeData
         self.beforeStoppingSiblings = beforeStoppingSiblings
         self.afterPermanentFailure = afterPermanentFailure
+        self.beforeReplayStart = beforeReplayStart
         self.startFoundSettling = startFoundSettling
         self.adoptionStarted = adoptionStarted
         registry.register(self)
@@ -356,7 +366,8 @@ public actor DownloadEngine {
     /// and `failed` records, and a `failed` state the engine couldn't save is dropped.
     ///
     /// A plain start of some parts of a record doesn't restart the siblings that a failure it
-    /// overlaps stopped; only ``resume(recordID:)`` does.
+    /// overlaps stopped; only ``resume(recordID:)`` does. If another part of the record fails for
+    /// good during that failure, the record stays `failed` and the start is dropped.
     public func start(partIDs: [UUID]) async {
         await start(partIDs: partIDs, resumingRecordID: nil, resettingBudgetOf: nil)
     }
@@ -562,7 +573,7 @@ public actor DownloadEngine {
     }
 
     private func waitForFailuresForGood(of connectionID: UUID) async {
-        while failingForGood.values.contains(connectionID) {
+        while failingConnections.contains(connectionID) {
             await withCheckedContinuation { failureWaiters.append($0) }
         }
     }
@@ -1424,7 +1435,9 @@ public actor DownloadEngine {
     /// A start of the part that overlapped the failure (a plain ``start(partIDs:)``, or
     /// ``resume(recordID:)`` before, during or after any part of it) is replayed once the
     /// failure is settled: the part restarts with a fresh retry budget, and for a resume so do
-    /// the siblings the failure stopped. A part is replayed once per resume. If activation is
+    /// the siblings the failure stopped. A part is replayed once per resume. A plain start's
+    /// replay leaves the record `failed` when another part of it failed for good while this
+    /// failure was under way: restarting only this part would strand that one. If activation is
     /// handling the failure while reattaching a task, the replay reuses its session instead of
     /// awaiting the activation task that is already handling it.
     private func failPermanently(
@@ -1432,9 +1445,20 @@ public actor DownloadEngine {
         activationOwnsSession: Bool = false
     ) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
-        failingForGood[partID] = context.connectionID
+        // Noted before any await, so a sibling's failure that begins later sees this one.
+        let concurrentFailures = failingForGood[context.recordID, default: []].filter { $0 != partID }
+        if !concurrentFailures.isEmpty {
+            overlappingFailures.formUnion(concurrentFailures)
+            overlappingFailures.insert(partID)
+        }
+        failingForGood[context.recordID, default: []].append(partID)
+        // One entry per failure under way (a part twice while its replay's launch fails it
+        // again), until its replay has started, for quiesce(connectionID:).
+        failingConnections.append(context.connectionID)
         defer {
-            failingForGood[partID] = nil
+            if let index = failingConnections.firstIndex(of: context.connectionID) {
+                failingConnections.remove(at: index)
+            }
             let waiters = failureWaiters
             failureWaiters.removeAll()
             for waiter in waiters { waiter.resume() }
@@ -1475,30 +1499,48 @@ public actor DownloadEngine {
             }
             // F1's `failed` write is enqueued at the store before the `queued` of any resume that
             // registers after it, so a `failed` seen here is newer than a resume's `queued`: only
-            // a replay due to a plain start may overwrite it (its own failure made it `failed`).
+            // a replay due to a plain start may overwrite it (its own failure made it `failed`),
+            // and only when no other part failed for good meanwhile. Its record write was then a
+            // no-op, so queuing the record and restarting this part alone would strand that part.
+            // A sibling failure that begins after this check writes `failed` after the `queued`.
             let replayable: Set<DownloadState> =
-                resumeNeedsReplay ? [.queued, .downloading] : [.queued, .downloading, .failed]
+                resumeNeedsReplay || overlappingFailures.contains(partID)
+                ? [.queued, .downloading] : [.queued, .downloading, .failed]
             do {
                 guard try await store.setState(.queued, forRecord: context.recordID, expecting: replayable)
                 else {
+                    endFailingForGood(partID, recordID: context.recordID)
                     if let afterPermanentFailure { await afterPermanentFailure(partID) }
                     return
                 }
             } catch {
                 logError("Couldn't resume a download after its failure settled", error)
+                endFailingForGood(partID, recordID: context.recordID)
                 if let afterPermanentFailure { await afterPermanentFailure(partID) }
                 return
             }
             if resumeNeedsReplay {
                 replayedResumeGenerationByPart[partID] = resumeGeneration
             }
+            if let beforeReplayStart { await beforeReplayStart(partID) }
             // The replay carries the user's reset for the part it skipped: its budget was
             // persisted as used up by this failure, after any reset the start made.
             await start(
                 partIDs: replayParts, resumingRecordID: nil, resettingBudgetOf: [partID],
                 activationOwnsSession: activationOwnsSession)
         }
+        endFailingForGood(partID, recordID: context.recordID)
         if let afterPermanentFailure { await afterPermanentFailure(partID) }
+    }
+
+    /// Ends one of `partID`'s failures for good in ``failingForGood``. It stays there until its
+    /// replay has started, so a sibling that fails meanwhile leaves the record `failed` too.
+    private func endFailingForGood(_ partID: UUID, recordID: UUID) {
+        if let index = failingForGood[recordID]?.firstIndex(of: partID) {
+            failingForGood[recordID]?.remove(at: index)
+        }
+        if failingForGood[recordID]?.isEmpty == true { failingForGood[recordID] = nil }
+        if failingForGood[recordID]?.contains(partID) != true { overlappingFailures.remove(partID) }
     }
 
     // MARK: - Helpers

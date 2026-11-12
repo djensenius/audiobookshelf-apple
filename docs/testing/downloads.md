@@ -203,9 +203,14 @@ iOS.
   while the siblings are stopping, or after) restarts the part that failed, with a fresh
   retry count, and every sibling the failure stopped, once the failure is settled. A
   plain `start(partIDs:)` that overlaps the failure restarts only the parts it named, not
-  the siblings (starting a `failed` record's parts without `resume(recordID:)` is not
-  supported, and a sibling that fails for good while such a start is replaying stays
-  failed). The replay happens once per part for each resume: if the restarted part
+  the siblings. If another part fails for good while that failure is under way (its write of
+  the download's `failed` state changes nothing, because the download is already failed), the
+  replay doesn't queue the download again: restarting only the named parts would leave the
+  other part failed and the download unfinished. The download stays failed, and
+  `resume(recordID:)` restarts every part (`plainStartReplayDoesNotStrandASiblingsNewerFailure`).
+  A pause or deletion while a replay is pending, before or after it queues the download, is
+  respected: nothing restarts. A resume that begins while the siblings are stopping restarts
+  each part once. The replay happens once per part for each resume: if the restarted part
   fails for good again, that failure is final and fails the download, even while the
   resume is still starting. A newer failure of another part (the download is `failed`
   again) is not overwritten by the replay of an older resume.

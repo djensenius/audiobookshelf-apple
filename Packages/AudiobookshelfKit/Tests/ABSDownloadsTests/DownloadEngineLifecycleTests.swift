@@ -864,6 +864,135 @@ import Testing
         }
     }
 
+    /// The replay window's second half: a resume overlapped A's failure, and its replay has
+    /// queued the record but not started the parts yet. A pause or delete there is respected:
+    /// the replay's start launches nothing.
+    @Test(arguments: FailureInterruption.allCases)
+    func pauseOrDeleteBetweenReplayWriteAndStartIsRespected(_ interruption: FailureInterruption) async throws {
+        let failure = StubGate()
+        let never = StubGate()
+        let failing = UUID()
+        let sibling = UUID()
+        let harness = try await DownloadHarness { request in
+            request.url?.path().contains("/file/1/") == true
+                ? .status(404, body: Data(), gate: failure) : .status(200, gate: never)
+        }
+        let record = try await harness.addRecord(parts: [failing, sibling])
+        let seams = FailureSeams()
+        seams.hold(failing)
+        let (replayWrites, replayWritten) = AsyncStream.makeStream(of: UUID.self)
+        let releaseReplay = StubGate()
+        let engine = harness.makeEngine(
+            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure,
+            beforeReplayStart: { partID in
+                replayWritten.yield(partID)
+                await withCheckedContinuation { continuation in
+                    releaseReplay.run { continuation.resume() }
+                }
+            })
+        await engine.start(partIDs: [failing, sibling])
+        await harness.waitForRequests(2)
+        failure.open()
+        #expect(await seams.nextHeld() == failing)
+
+        #expect(try await engine.resume(recordID: record.id))
+        seams.release()
+        #expect(await replayWrites.first { _ in true } == failing)
+        #expect(try await harness.store.record(id: record.id)?.state == .queued)
+        switch interruption {
+        case .pause:
+            #expect(try await engine.pause(recordID: record.id))
+        case .delete:
+            try await harness.store.deleteRecord(record.id)
+        }
+
+        releaseReplay.open()
+        #expect(await seams.nextSettled() == failing)
+        #expect(harness.requests.count == 2)
+        let activeTasks = await harness.session?.session.allTasks.filter {
+            $0.state == .running || $0.state == .suspended
+        }
+        #expect(activeTasks?.isEmpty == true)
+        switch interruption {
+        case .pause:
+            #expect(try await harness.store.record(id: record.id)?.state == .paused)
+            #expect(try await harness.store.part(id: failing)?.state == .queued)
+            #expect(try await harness.store.part(id: sibling)?.state == .queued)
+        case .delete:
+            #expect(try await harness.store.record(id: record.id) == nil)
+        }
+        never.open()
+    }
+
+    /// Window "i": a resume that begins while A's failure stops its siblings bumps its generation
+    /// after the failure began. Its own start skips A, which is settling, and starts B once B's
+    /// stop is done; the replay then starts A with a fresh budget and skips B, which is already
+    /// launching or running, so B isn't launched twice.
+    @Test func resumeDuringSiblingStopsLaunchesEachPartOnce() async throws {
+        let replay = StubGate()
+        let resumed = StubGate()
+        let never = StubGate()
+        let counter = PathCounter()
+        let harness = try await DownloadHarness { request in
+            let count = counter.next(request)
+            if request.url?.path().contains("/file/1/") == true {
+                return count <= 3 ? .status(503) : .status(200, gate: replay)
+            }
+            return count == 1 ? .status(200, gate: never) : .status(200, gate: resumed)
+        }
+        let failing = UUID()
+        let sibling = UUID()
+        let record = try await harness.addRecord(parts: [failing, sibling])
+        let (cancelling, cancelStarted) = AsyncStream.makeStream(of: Void.self)
+        let releaseCancel = StubGate()
+        let cancelHeld = Mutex(false)
+        let seams = FailureSeams()
+        let engine = harness.makeEngine(
+            retryPolicy: RetryPolicy(baseDelay: .zero, maxDelay: .zero, maxRetries: 2),
+            cancel: { task in
+                if !cancelHeld.withLock({ held in
+                    defer { held = true }
+                    return held
+                }) {
+                    cancelStarted.yield()
+                    await withCheckedContinuation { continuation in releaseCancel.run { continuation.resume() } }
+                }
+                return await task.cancelByProducingResumeData()
+            },
+            afterPermanentFailure: seams.afterPermanentFailure, startFoundSettling: seams.startFoundSettling)
+        await engine.start(partIDs: [failing, sibling])
+
+        // A used up its retries and failed for good; its stop of B is under way.
+        _ = await cancelling.first { _ in true }
+        #expect(try await harness.store.part(id: failing)?.retryCount == 3)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+
+        let resuming = Task { try await engine.resume(recordID: record.id) }
+        #expect(await seams.nextFoundSettling() == [failing])
+        releaseCancel.open()
+        #expect(try await resuming.value)
+        #expect(await seams.nextSettled() == failing)
+
+        await harness.waitForRequests(file: 1, count: 4)
+        await harness.waitForRequests(file: 2, count: 2)
+        #expect(try await harness.store.record(id: record.id)?.state == .downloading)
+        let failingPart = try #require(try await harness.store.part(id: failing))
+        #expect(failingPart.state == .running)
+        #expect(failingPart.retryCount == 0)
+        #expect(try await harness.store.part(id: sibling)?.state == .running)
+        let siblingTasks = await harness.session?.session.allTasks.filter {
+            $0.taskDescription == sibling.uuidString && ($0.state == .running || $0.state == .suspended)
+        }
+        #expect(siblingTasks?.count == 1)
+
+        replay.open()
+        resumed.open()
+        never.open()
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requestCount(file: 1) == 4)
+        #expect(harness.requestCount(file: 2) == 2)
+    }
+
     /// A part A that failed for good while a resume was pending, replayed, and then failed again,
     /// the resume still pending (it is held at its read). The replay's attempt was launched for
     /// that resume, so its failure is final.
@@ -1050,6 +1179,64 @@ import Testing
         #expect(try await store.part(id: third)?.state == .queued)
         #expect(harness.requests.count == 2)
         never.open()
+    }
+
+    /// A plain start of A overlaps A's failure for good, and sibling B fails for good while A is
+    /// held before its siblings stop (B's write of the record's `failed` is a no-op: A's came
+    /// first). A's replay must not queue the record and restart A only: B would stay failed and
+    /// the download never complete. The record stays failed, and a resume restarts both. (A
+    /// transfer's events are handled one at a time, so B fails from its retry's launch.)
+    @Test func plainStartReplayDoesNotStrandASiblingsNewerFailure() async throws {
+        let failing = StubGate()
+        let counter = PathCounter()
+        let harness = try await DownloadHarness { request in
+            let count = counter.next(request)
+            if request.url?.path().contains("/file/1/") == true {
+                return count == 1 ? .status(404, body: Data(), gate: failing) : .status(200)
+            }
+            return count == 1 ? .status(503) : .status(200)
+        }
+        let first = UUID()
+        let second = UUID()
+        let record = try await harness.addRecord(parts: [first, second])
+        let clock = FiringClock()
+        let seams = FailureSeams()
+        seams.hold(first)
+        let engine = harness.makeEngine(
+            retryPolicy: RetryPolicy(baseDelay: .zero, maxDelay: .zero, maxRetries: 1), clock: clock,
+            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure,
+            startFoundSettling: seams.startFoundSettling)
+        await engine.start(partIDs: [first, second])
+        await harness.waitForRequests(2)
+        _ = await clock.started.first { _ in true }
+        failing.open()
+        #expect(await seams.nextHeld() == first)
+
+        // The plain start finds A settling and leaves it to the replay.
+        await engine.start(partIDs: [first])
+        #expect(await seams.nextFoundSettling() == [first])
+
+        // B's retry can't save its state and has no retries left: B fails for good.
+        await harness.store.failNextCommit(with: TestError())
+        clock.fire()
+        #expect(await seams.nextSettled() == second)
+        #expect(try await harness.store.part(id: second)?.state == .failed)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+
+        seams.release()
+        #expect(await seams.nextSettled() == first)
+        #expect(try await harness.store.record(id: record.id)?.state == .failed)
+        #expect(try await harness.store.part(id: first)?.state == .failed)
+        #expect(try await harness.store.part(id: second)?.state == .failed)
+        #expect(harness.requests.count == 2)
+        let activeTasks = await harness.session?.session.allTasks.filter {
+            $0.state == .running || $0.state == .suspended
+        }
+        #expect(activeTasks?.isEmpty == true)
+
+        #expect(try await engine.resume(recordID: record.id))
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 4)
     }
 
     /// Two parts fail for good while a resume is pending (A's transfer failed, B's retry can't

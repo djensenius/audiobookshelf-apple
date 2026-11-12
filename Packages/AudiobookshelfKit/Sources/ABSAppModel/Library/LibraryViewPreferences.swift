@@ -151,6 +151,21 @@ public struct LibraryViewPreferences: Sendable, Hashable, Codable {
         }
     }
 
+    /// These preferences with each field that differs between `previous` and `changed` taken from
+    /// `changed`: a writer's change merged into the latest stored value, so it never overwrites a
+    /// field another writer saved meanwhile.
+    public func merging(_ changed: LibraryViewPreferences, from previous: LibraryViewPreferences)
+        -> LibraryViewPreferences
+    {
+        var result = self
+        if changed.sort != previous.sort { result.sort = changed.sort }
+        if changed.descending != previous.descending { result.descending = changed.descending }
+        if changed.filter != previous.filter { result.filter = changed.filter }
+        if changed.viewMode != previous.viewMode { result.viewMode = changed.viewMode }
+        if changed.collapseSeries != previous.collapseSeries { result.collapseSeries = changed.collapseSeries }
+        return result
+    }
+
     // MARK: Repair
 
     /// The preferences as they apply to a library of `mediaType`, which are the stored ones
