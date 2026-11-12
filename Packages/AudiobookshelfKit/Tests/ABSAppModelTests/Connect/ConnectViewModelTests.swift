@@ -443,6 +443,25 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.phase == .servers && model.failure == .notAudiobookshelf)
     }
 
+    @Test func addingAServerWhileSignedInHasNoWayBackToTheList() async {
+        backend.connections = [connection()]
+        let (model, _) = model()
+        model.addServer()
+        #expect(model.phase == .address && model.canGoBack)
+
+        let (adding, _) = self.model()
+        adding.startAddingServer()
+        #expect(adding.phase == .address && !adding.canGoBack)
+        adding.goBack()
+        #expect(adding.phase == .address)
+        // From the login step, Back returns to the address, not the list.
+        adding.address = "https://new.example.com"
+        await adding.submitAddress()
+        #expect(adding.phase == .login && adding.canGoBack)
+        adding.goBack()
+        #expect(adding.phase == .address && !adding.canGoBack)
+    }
+
     @Test func removingTheLastServerShowsTheAddress() async {
         let saved = connection()
         backend.connections = [saved]
@@ -669,11 +688,12 @@ private func connection(username: String = "david", address: String = "https://a
             }
         }
         while backend.signInStarts == 0 { await Task.yield() }
-        #expect(model.phase == .signingIn(openID ? .openID : .password))
+        #expect(model.phase == .signingIn(openID ? .openID : .password) && model.canGoBack)
         if cancelCaller {
             task.cancel()
         } else {
-            model.cancel()
+            // The toolbar's Cancel.
+            model.goBack()
             #expect(model.phase == .login && !model.isBusy)
         }
         open.yield()
