@@ -136,6 +136,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// The send in flight per row, with the row it was taken from: a row deleted meanwhile and
     /// recreated for the same key isn't the one the response settles.
     private var inFlight: [String: (token: UUID, groups: ProgressGroups, row: PersistentIdentifier)] = [:]
+    /// Rejections whose cleanup wasn't saved; their send stays in flight. Kept here, not by the
+    /// caller, so ``beginSend(for:now:)`` retries the cleanup even after that caller retired.
+    private var pendingRejections: [String: (patch: ProgressPatch, error: String)] = [:]
     /// Rows acknowledged without a server time that wait for a fetch issued after the
     /// acknowledgement, with the latest socket value received meanwhile and its capture.
     /// Rows whose latest send was an ebook one: their next send goes back to audio or finished.
@@ -447,11 +450,13 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Takes a snapshot of the row's next dirty group (audio, then finished, then ebook) for a
     /// PATCH and records it as unacknowledged. Returns `nil` when there is no row, nothing is
     /// dirty, or a PATCH for the row is already in flight. Settle every returned patch with
-    /// ``completeSend(_:serverLastUpdate:)`` or ``failSend(_:error:)``, then call this again for
-    /// the next group.
+    /// ``completeSend(_:serverLastUpdate:)``, ``failSend(_:error:)`` or ``rejectSend(_:error:)``,
+    /// then call this again for the next group. A rejection whose cleanup wasn't saved is saved
+    /// first; if that fails again, this throws.
     public func beginSend(for key: MediaKey, now: Date = .now) throws -> ProgressPatch? {
         try retrySessionAudioSettlements(for: key.serverConnectionID)
         guard !sessionAudioSends.values.contains(where: { $0.key == key }) else { return nil }
+        if let pending = pendingRejections[key.rawValue] { try rejectSend(pending.patch, error: pending.error) }
         guard inFlight[key.rawValue] == nil else { return nil }
         let taken: (ProgressSend, PersistentIdentifier)? = try commit {
             guard let row = try fetchRow(key) else { return nil }
@@ -507,6 +512,28 @@ public enum SessionUploadResult: Sendable, Equatable {
     public func failSend(_ patch: ProgressPatch, error: String?) throws -> Bool {
         guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
         try settle(patch.key, sentFrom: flight.row) { $0.lastSyncError = error }
+        return true
+    }
+
+    /// The server rejected the PATCH for good (for example, the item is gone), so resending it
+    /// can't succeed. Its groups stop being dirty unless edited since ``beginSend(for:now:)``,
+    /// so the row no longer keeps the connection retained; a later edit sends again. The
+    /// baseline is unchanged, and `error` is kept in `lastSyncError`. Returns `false`, changing
+    /// nothing, when `patch` is not the row's send in flight. If the cleanup can't be saved, the
+    /// send stays in flight, so the row isn't PATCHed again with the same values, and this
+    /// throws. The store keeps the outcome: retry it, or the next ``beginSend(for:now:)`` for
+    /// the key does, from any caller.
+    @discardableResult
+    public func rejectSend(_ patch: ProgressPatch, error: String) throws -> Bool {
+        guard let flight = inFlight[patch.key.rawValue], flight.token == patch.token else { return false }
+        pendingRejections[patch.key.rawValue] = (patch, error)
+        try settle(patch.key, sentFrom: flight.row, retainingOnFailure: true) { row in
+            var state = ProgressSyncState(row)
+            state.reject(patch.values)
+            state.write(to: row)
+            row.lastSyncError = error
+        }
+        pendingRejections[patch.key.rawValue] = nil
         return true
     }
 
@@ -723,10 +750,12 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// if that save, or the lookup telling the rows apart, fails, the send stays in flight (its
     /// groups still excluded from merges) until a retried outcome saves the shield. Once the lookup
     /// found the send's own row, or none, the send is settled even when the save fails: it stays
-    /// recorded in the row, so a later fetch still recognises its echo.
+    /// recorded in the row, so a later fetch still recognises its echo. With `retainingOnFailure`,
+    /// a failed save always leaves the send in flight, for an outcome that must not be lost.
     @discardableResult
     private func settle(
-        _ key: MediaKey, sentFrom rowID: PersistentIdentifier, applying outcome: (LocalMediaProgress) -> Void
+        _ key: MediaKey, sentFrom rowID: PersistentIdentifier, retainingOnFailure: Bool = false,
+        applying outcome: (LocalMediaProgress) -> Void
     ) throws -> Bool {
         var ownRowOrNone = false
         do {
@@ -748,7 +777,7 @@ public enum SessionUploadResult: Sendable, Equatable {
             settle(key)
             return applied
         } catch {
-            if ownRowOrNone { settle(key) }
+            if ownRowOrNone, !retainingOnFailure { settle(key) }
             throw error
         }
     }

@@ -61,6 +61,12 @@ actor ReconciliationSessionModel {
         requests[operation, default: []].append(request)
     }
 
+    /// ABS keeps open sessions in memory, so a server restart forgets them; stored sessions
+    /// and progress survive. Later `/sync` and `/close` for a forgotten session answer 404.
+    func restart() {
+        open.removeAll()
+    }
+
     private var milliseconds: Int { Int(clock.now.timeIntervalSince1970 * 1000) }
 
     private func perform<Value: Sendable>(
