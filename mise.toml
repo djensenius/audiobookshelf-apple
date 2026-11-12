@@ -58,6 +58,17 @@ description = "Rewrite Audiobookshelf.xcodeproj/project.xcproj in canonical form
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "scripts/xcprojformatter.sh --update Audiobookshelf.xcodeproj"
 
+[tasks."release:version"]
+description = "Set MARKETING_VERSION for every target (mise run release:version 1.2.0), then check project.xcproj"
+usage = 'arg "<version>" help="MAJOR.MINOR.PATCH, for example 1.2.0"'
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+scripts/set-version.sh "$usage_version"
+mise run xcproj:check
+"""
+
 [tasks."build:kit:extension"]
 description = "Build AudiobookshelfKit as application-extension-only code for the iOS Simulator (widgets/extensions)"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
@@ -133,9 +144,15 @@ xcodebuild test -project Audiobookshelf.xcodeproj -scheme Audiobookshelf -destin
 """
 
 [tasks."test:tools"]
-description = "Run repository tool tests (Tools/StringsImport)"
+description = "Run repository tool tests (Tools/StringsImport, and the release scripts in test:release)"
+depends = ["test:release"]
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "swift test --package-path Tools/StringsImport --scratch-path .build/strings-import"
+
+[tasks."test:release"]
+description = "Test scripts/set-version.sh and the What to Test notes in ci_scripts/ci_post_xcodebuild.sh"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "python3 scripts/test-release-tests.py"
 
 [tasks.test]
 description = "Run package, tool, and app tests"

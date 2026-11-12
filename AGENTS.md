@@ -97,10 +97,11 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run test:kit:ios` | Four iOS-only `ShakeDetectorTests` via the package scheme; required in PR CI, separate from `test` (see below) |
 | `mise run test:kit:ios:runner` | Bounded fake-CLI/result regressions for the iOS gate; also run by `lint:repo`, without Xcode or a simulator |
 | `mise run test:server` / `server:run` | Opt-in `ABSServerContractTests` against a real Audiobookshelf server in Docker (`ABS_SERVER_VERSION` picks the release, default 2.26.0), or start the same seeded server for manual use; `test:kit` compiles the suite and skips it; see [docs/testing/server-contracts.md](docs/testing/server-contracts.md) |
-| `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer) |
+| `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer), plus `test:release` (the release scripts) |
 | `mise run strings` / `strings:check` | Generate or verify ABSUI's `Localizable.xcstrings` from `strings/*.json` and `Localization/native/`; see [docs/localization.md](docs/localization.md) |
 | `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
+| `mise run release:version <x.y.z>` | Set `MARKETING_VERSION` for every target, then `xcproj:check` ([docs/release.md](docs/release.md#versioning)) |
 
 Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing.
 

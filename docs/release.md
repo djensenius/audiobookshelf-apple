@@ -1,16 +1,20 @@
 # Releases (Xcode Cloud and TestFlight)
 
 Xcode Cloud builds every push to `main` and sends iOS and macOS builds to internal
-TestFlight testers. There is no Fastlane, and nothing uploads from a developer Mac.
-GitHub Actions only lints, builds and tests (see `.github/workflows/`).
+TestFlight testers. A second workflow builds `v*` tags and sends them to external
+testers through Beta App Review ([Releasing a version](#releasing-a-version)). There is
+no Fastlane, and nothing uploads from a developer Mac. GitHub Actions only lints, builds
+and tests (see `.github/workflows/`).
 
-The Xcode Cloud workflow lives in App Store Connect, not in this repository. The
+The Xcode Cloud workflows live in App Store Connect, not in this repository. The
 repository provides:
 
 | Path | Purpose |
 | --- | --- |
 | `ci_scripts/ci_post_clone.sh` | Prints the Xcode version. Holds the opt-in `.xcproj` fallback (below). Installs nothing. |
 | `ci_scripts/ci_post_xcodebuild.sh` | Writes `TestFlight/WhatToTest.en-US.txt` after archive actions |
+| `CHANGELOG.md` | Release notes ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)); its topmost section with entries becomes "What to Test" |
+| `scripts/set-version.sh` (`mise run release:version`) | Sets `MARKETING_VERSION` ([Versioning](#versioning)) |
 | `Audiobookshelf.xcodeproj/xcshareddata/xcschemes/Audiobookshelf.xcscheme` | Shared scheme; its Archive action uses Release |
 
 ## Referring to builds
@@ -35,8 +39,7 @@ So the project needs no build-number step:
 - Scripts don't edit the build number. **Never run `agvtool`**: it can't read
   `project.xcproj`, and it leaves an empty `project.pbxproj` that breaks the project
   (see [the research notes](research/xcode-project-and-ci.md)).
-- To release a new version, change `MARKETING_VERSION` in `project.xcproj` and run
-  `mise run xcproj:format`.
+- To release a new version, run `mise run release:version <x.y.z>` ([Versioning](#versioning)).
 - Mac App Store builds need a build number that always goes up, even across versions.
   The Xcode Cloud counter does that, as long as nobody uploads a build by hand. If a
   manual upload ever happens, set a higher next number in App Store Connect › your app ›
@@ -44,6 +47,66 @@ So the project needs no build-number step:
 
 Check this on the first build: TestFlight must show the Xcode Cloud build number, not
 `(1)`. If it shows `(1)`, see [Troubleshooting](#troubleshooting).
+
+## Versioning
+
+`MARKETING_VERSION` is the version TestFlight and the App Store show (`1.0.0` in
+`1.0.0 (42)`). Every target carries it (the app, the widget extension and the test
+target), and they must match, or App Store Connect rejects the upload. Set it with:
+
+```sh
+mise run release:version 1.0.0
+```
+
+The task runs `scripts/set-version.sh 1.0.0`, then `mise run xcproj:check`. The script:
+
+- accepts only `MAJOR.MINOR.PATCH` without leading zeros or suffixes (`1.0.0`, not `v1.0`,
+  `1.0.0-beta` or `01.0.0`): `CFBundleShortVersionString` allows three integers only. It
+  exits 64 and changes nothing otherwise;
+- reads `project.xcproj` as JSON, sets every `MARKETING_VERSION` key, conditional ones
+  such as `MARKETING_VERSION[config=Debug]` included, and rewrites the file with the
+  pinned `xcprojformatter`, so nothing else changes;
+- changes nothing when the version is already set, and leaves the project untouched on
+  any error;
+- never touches `CURRENT_PROJECT_VERSION` (see [Build numbers](#build-numbers)) and never
+  runs `agvtool`.
+
+`mise run test:release` (part of `mise run test:tools`) checks all of this on a copy of
+the project.
+
+## Releasing a version
+
+A release goes from a `v<x.y.z>` tag to external TestFlight testers. Submitting that build
+to the App Store is a separate, manual step in App Store Connect.
+
+1. On a branch from `main`, move the `## [Unreleased]` entries in `CHANGELOG.md` into a
+   new `## [x.y.z] - YYYY-MM-DD` section, leave `## [Unreleased]` empty above it, and add
+   the version's link at the bottom.
+2. Run `mise run release:version x.y.z`. Commit both changes, open a PR and merge it.
+3. Tag the merge commit and push the tag:
+
+   ```sh
+   git fetch origin
+   git tag -a vx.y.z -m "x.y.z" origin/main
+   git push origin vx.y.z
+   ```
+
+   The tag must match `MARKETING_VERSION`. Nothing checks this yet, so look before you
+   push.
+4. The `Release (tags)` workflow ([checklist](#release-workflow-checklist)) archives iOS
+   and macOS. "What to Test" comes from the `x.y.z` section, because the empty
+   `Unreleased` section is passed over. Both builds go to the external group, and the
+   first build of each version waits for Beta App Review.
+5. Record the **TestFlight build number**, for example "1.0.0 (57)", in the release issue
+   and wherever the release is discussed. Use the same build when you submit to the App
+   Store.
+6. After an App Store release, the next build needs a higher version: run
+   `mise run release:version` with the next version on `main` before more user-facing
+   changes land.
+
+The push of the release commit to `main` also produces an internal build of the same
+commit. The tag build has a higher build number; testers and reports should use the
+number from the tag build.
 
 ## What to Test notes
 
@@ -55,17 +118,21 @@ to Test" field
 
 The notes contain:
 
-- a `Build <CI_BUILD_NUMBER> (<short commit>)` line;
-- the last 20 non-merge commits. Tags aren't used, because the repository still has
-  old upstream tags (`v0.9.x-beta`). Each commit is its subject line plus its body, without
-  blank lines and without `Co-authored-by`, `Copilot-Session` and `Signed-off-by`
-  trailers;
+- a `Build <CI_BUILD_NUMBER> (<short commit>)` line and a blank line;
+- the topmost `## ` section of `CHANGELOG.md` that has entries: its title without
+  brackets (`Unreleased`, or `1.0.0 - 2026-11-12`), then its `### ` subheadings and
+  entries. Blank lines and link definitions are dropped, and an entry that wraps onto
+  indented lines is joined into one line;
+- if `CHANGELOG.md` is missing or no section has entries, the last 20 non-merge commits
+  instead. Each commit is its subject line plus its body, without blank lines and
+  without `Co-authored-by`, `Copilot-Session` and `Signed-off-by` trailers;
 - at most 4,000 bytes (TestFlight's limit is 4,000 characters). The text is cut at a
   line break.
 
 The notes are optional, so the script never fails the build. It prints
 `Skipping What to Test notes: <reason>`, writes nothing and exits 0 when:
 
+- `CI_XCODEBUILD_ACTION` is set to something other than `archive`;
 - `CI_APP_STORE_SIGNED_APP_PATH` isn't a directory. Apple's example uses this check:
   the App Store-signed export only exists after a successful archive whose deployment
   preparation targets TestFlight or the App Store;
@@ -74,7 +141,7 @@ The notes are optional, so the script never fails the build. It prints
 - `git log` fails, or the notes can't be written. It writes `WhatToTest.en-US.txt.tmp`
   first and moves it into place, and removes the temp file on failure.
 
-If the clone is shallow, it runs `git fetch --deepen=100`. Prompts are off
+For the commit fallback, if the clone is shallow, it runs `git fetch --deepen=100`. Prompts are off
 (`GIT_TERMINAL_PROMPT=0`, SSH `BatchMode=yes`), and the connection gives up after a
 20-second SSH connect timeout or 30 seconds below 1,000 bytes/s over HTTP. If the fetch
 fails, it prints a warning and uses whatever history is there. `TestFlight/` is in
@@ -181,6 +248,36 @@ the app › Xcode Cloud):
 - [ ] Post the iOS and macOS TestFlight build numbers in the PR for issue #20. If you
       needed the `.xcproj` fallback, say so there too.
 
+### Release workflow checklist
+
+The second workflow builds `v*` tags for external testers (issue #110). Create it the same
+way as `TestFlight (main)`, or duplicate that workflow and change it:
+
+- [ ] Name it `Release (tags)`.
+- [ ] Environment: the same Xcode and macOS as `TestFlight (main)`. Add
+      `ABS_CONVERT_PROJECT` = `1` only if that workflow needs it.
+- [ ] Start condition: **Tag Changes** only, restricted to custom tags matching `v*`.
+      Remove the Branch Changes condition. The repository still has old upstream tags
+      such as `v0.9.x-beta`; they only start a build if someone pushes them again, so
+      don't.
+- [ ] Action: Archive, platform **iOS**, scheme `Audiobookshelf`, deployment preparation
+      **TestFlight and App Store**.
+- [ ] Action: Archive, platform **macOS**, scheme `Audiobookshelf`, deployment preparation
+      **TestFlight and App Store**.
+- [ ] In App Store Connect › TestFlight, create an external group (for example `Beta`)
+      and fill in Test Information: beta app description, feedback email, contact
+      details and privacy policy URL. Beta App Review needs them.
+- [ ] Post-actions: **TestFlight External Testing** to that group, once for the iOS
+      archive and once for the macOS archive. Optionally also TestFlight Internal
+      Testing to `Internal`.
+- [ ] Signing and export compliance: as for `TestFlight (main)`; nothing to set up.
+- [ ] Do a first release with [Releasing a version](#releasing-a-version). Check:
+  - the build starts from the tag, not from `main`;
+  - TestFlight shows `x.y.z (N)`, with N the Xcode Cloud build number;
+  - "What to Test" shows the `x.y.z` section of `CHANGELOG.md`;
+  - the build is submitted for Beta App Review and reaches the external group.
+- [ ] Record the TestFlight build number in issue #110.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -191,7 +288,8 @@ the app › Xcode Cloud):
 | Signing fails with an App Group or keychain-group entitlement error | The App ID is missing the App Groups capability, or the group isn't assigned to it. Fix it in the developer portal (ADR 0002 checklist), then rebuild. |
 | macOS upload is rejected because the build number is too low | A build was uploaded outside Xcode Cloud. Raise Next Build Number in App Store Connect › Xcode Cloud › Settings › Build Number. |
 | TestFlight shows build `(1)` for every build | Xcode Cloud didn't apply its build number. Don't use `agvtool`. Add a CI-only text edit of `"CURRENT_PROJECT_VERSION": "1"` in `project.xcproj` to `ci_post_clone.sh` (in the checkout only, never committed), and record it here. |
-| "What to Test" is empty or old | Check the `ci_post_xcodebuild.sh` log for `Wrote …/WhatToTest.en-US.txt` or a `Skipping What to Test notes: …` line, which gives the reason. Notes are only written after a successful archive for TestFlight. |
+| "What to Test" is empty or old | Check the `ci_post_xcodebuild.sh` log for `Wrote …/WhatToTest.en-US.txt` or a `Skipping What to Test notes: …` line, which gives the reason. Notes are only written after a successful archive for TestFlight. If the log says `CHANGELOG.md is missing or has no entries`, the notes list commits instead; add entries to `CHANGELOG.md`. |
+| Upload rejected because the version is closed or already released | App Store Connect doesn't take new builds for a version that is already on the App Store. Run `mise run release:version` with the next version and merge it. |
 | Package resolution fails | Xcode Cloud doesn't resolve packages automatically. Only the local `AudiobookshelfKit` package is used today. If a remote package is added, commit `Audiobookshelf.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`. |
 
 ## References
