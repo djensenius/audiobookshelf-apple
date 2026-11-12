@@ -281,17 +281,91 @@ struct EbookActionsModelTests {
         #expect(reloads == 0)
     }
 
-    @Test func applyFailureDoesNotReload() async {
-        let service = FakeEbookActionsService(error: APIError.forbidden(message: "Forbidden"))
-        let model = EbookActionsModel(itemID: "li1", service: service)
+    /// The server refused it, so nothing changed: no reload, and the same entries stay offered.
+    @Test(arguments: [
+        APIError.forbidden(message: "Forbidden"), .unauthorized(message: nil), .notFound,
+        .http(status: 400, message: "Invalid ebook file id"), .notAuthenticated,
+    ])
+    func rejectedChangeDoesNotReload(error: APIError) async {
+        let model = EbookActionsModel(itemID: "li1", service: FakeEbookActionsService(error: error))
         var reloads = 0
         let outcome = await model.apply(makeB, offered: [makeB]) {
             reloads += 1
             return true
         }
-        #expect(outcome == .statusChangeFailed(message: nil))
+        #expect(outcome == .statusChangeFailed(message: EbookActionsModel.serverMessage(error)))
         #expect(reloads == 0)
         #expect(!model.needsReload)
+    }
+
+    /// The server may have flipped the file before the reply was lost: reload while busy, and hide
+    /// the entries if that reload fails, as after a success.
+    @Test(arguments: [
+        APIError.timedOut, .network(.networkConnectionLost), .http(status: 502, message: nil),
+        .invalidResponse, .decoding("empty"),
+    ])
+    func ambiguousFailureReloadsWhileBusy(error: APIError) async {
+        let model = EbookActionsModel(itemID: "li1", service: FakeEbookActionsService(error: error))
+        var busyDuringReload: Bool?
+        let outcome = await model.apply(makeB, offered: [makeB]) {
+            busyDuringReload = model.isBusy
+            return false
+        }
+        #expect(outcome == .statusChangeFailed(message: nil))
+        #expect(busyDuringReload == true)
+        #expect(model.needsReload)
+        #expect(model.offeredStatusChanges(authorization: auth(update: true), item: twoFiles, isGone: false).isEmpty)
+    }
+
+    @Test func cancellationIsAmbiguous() async {
+        let model = EbookActionsModel(itemID: "li1", service: FakeEbookActionsService(error: CancellationError()))
+        var reloads = 0
+        _ = await model.apply(makeB, offered: [makeB]) {
+            reloads += 1
+            return true
+        }
+        #expect(reloads == 1)
+        #expect(!model.needsReload)
+    }
+
+    // MARK: Reconnect
+
+    /// A reconnect gives the model the new client; a pending reload and an action in flight are
+    /// kept, so nothing stale is offered and nothing overlaps.
+    @Test func replacingTheServiceKeepsState() async {
+        // A change whose reload failed stays hidden across the reconnect.
+        let first = FakeEbookActionsService()
+        let model = EbookActionsModel(itemID: "li1", service: first)
+        #expect(await model.apply(makeB, offered: [makeB]) { false } == .statusChanged(makeB))
+        let second = FakeEbookActionsService(holdsFirstCall: true)
+        model.replaceService(second)
+        #expect(model.needsReload)
+        #expect(model.offeredStatusChanges(authorization: auth(update: true), item: twoFiles, isGone: false).isEmpty)
+
+        // An action in flight on the old client still blocks one on the new client.
+        let sending = Task { await model.send(to: "Kindle") }
+        var yields = 0
+        while !model.isBusy, yields < 1_000 {
+            await Task.yield()
+            yields += 1
+        }
+        guard model.isBusy else {
+            Issue.record("The send never started.")
+            second.release()
+            _ = await sending.value
+            return
+        }
+        let third = FakeEbookActionsService()
+        model.replaceService(third)
+        #expect(model.isBusy)
+        #expect(await model.send(to: "Kobo") == .ignored)
+        second.release()
+        #expect(await sending.value == .sent(deviceName: "Kindle"))
+
+        #expect(await model.send(to: "Kobo") == .sent(deviceName: "Kobo"))
+        #expect(first.calls == ["toggle li1 b"])
+        #expect(second.calls == ["send li1 Kindle"])
+        #expect(third.calls == ["send li1 Kobo"])
     }
 
     // MARK: Busy

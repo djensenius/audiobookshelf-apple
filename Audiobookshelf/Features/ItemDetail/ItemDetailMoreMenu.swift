@@ -21,17 +21,18 @@ extension View {
 ///
 /// The ebook entries (``ItemDetailEbookEntries``) follow, gated by ``EbookActionsModel`` on the
 /// signed-in account's authorization and the loaded item; they're hidden offline and without an
-/// account (previews). The model is made per client and item model, so a reused view never acts
-/// on the previous book. A send is announced as it starts; its result shows in an alert, as a
-/// failure does (with the server's explanation when it's worth showing); a status change, which
-/// is checked against the item as it is when tapped, reloads the item and is announced.
+/// account (previews). The model is made per item model, so a reused view never acts on the
+/// previous book, and keeps its state when a reconnect replaces the client. A send is announced
+/// as it starts; its result shows in an alert, as a failure does (with the server's explanation
+/// when it's worth showing); a status change, which is checked against the item as it is when
+/// tapped, reloads the item and is announced.
 private struct ItemDetailMoreMenu: ViewModifier {
     let model: ItemDetailModel
     let serverURL: URL?
     @Environment(Router.self) private var router: Router?
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var showsDetails = false
-    /// For the account's client; replaced if the client changes.
+    /// For the item model; given the account's new client when it changes.
     @State private var ebookActions: EbookActionsModel?
     /// The last ebook action's alert, kept while it's dismissed.
     @State private var ebookFeedback: EbookActionsPresentation.Feedback?
@@ -49,8 +50,9 @@ private struct ItemDetailMoreMenu: ViewModifier {
     func body(content: Content) -> some View {
         let canShare = serverURL != nil
         let canRoute = router != nil
-        // Read once, so the menu depends on it explicitly and its closures capture this one.
-        let ebookActions = ebookActions.flatMap { $0.itemID == model.itemID ? $0 : nil }
+        // Read once, so the menu depends on it explicitly and its closures capture this one. Hidden
+        // without a client, while the model is kept for the next one.
+        let ebookActions = ebookActions.flatMap { $0.itemID == model.itemID && accounts?.client != nil ? $0 : nil }
         content
             .modifier(
                 DetailMoreMenu(model: model) { [model] isGone in
@@ -71,7 +73,15 @@ private struct ItemDetailMoreMenu: ViewModifier {
             .task(
                 id: EbookActionsKey(client: accounts?.client.map(ObjectIdentifier.init), model: ObjectIdentifier(model))
             ) {
-                self.ebookActions = accounts?.client.map { EbookActionsModel(itemID: model.itemID, service: $0) }
+                guard let client = accounts?.client else { return }
+                // Same item model, new client (a reconnect): keep the busy and needs-reload state,
+                // so the reconnect never re-offers a stale change or overlaps an action in flight.
+                // An account switch recreates the whole screen (ADR 0004).
+                if let ebookActions = self.ebookActions, ebookActions.itemID == model.itemID {
+                    ebookActions.replaceService(client)
+                } else {
+                    self.ebookActions = EbookActionsModel(itemID: model.itemID, service: client)
+                }
             }
             .onChange(of: model.loadedRevision) {
                 // Only a load that installed an item makes the files current after a failed

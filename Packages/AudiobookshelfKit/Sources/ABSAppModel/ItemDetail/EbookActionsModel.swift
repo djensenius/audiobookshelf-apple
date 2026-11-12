@@ -41,6 +41,10 @@ extension APIClient: EbookActionsService {
 /// One action runs at a time (``isBusy``), a status change through its reload. A tap is checked
 /// against the changes offered at that moment and dropped if the item changed meanwhile. Each
 /// action returns an ``Outcome`` for the view to show and announce.
+///
+/// The model belongs to one item model, not one client: a reconnect to the same account swaps
+/// the client in with ``replaceService(_:)``, keeping ``isBusy`` and ``needsReload``, so the
+/// reconnect neither re-offers a stale change nor lets a new action overlap one in flight.
 @MainActor
 @Observable
 public final class EbookActionsModel {
@@ -89,10 +93,16 @@ public final class EbookActionsModel {
     /// The reload after a status change failed, so the item's files may be stale.
     public private(set) var needsReload = false
 
-    @ObservationIgnored private let service: any EbookActionsService
+    @ObservationIgnored private var service: any EbookActionsService
 
     public init(itemID: String, service: any EbookActionsService) {
         self.itemID = itemID
+        self.service = service
+    }
+
+    /// Uses `service` (the account's new client) for later actions. An action in flight finishes
+    /// on the old one; ``isBusy`` and ``needsReload`` are kept.
+    public func replaceService(_ service: any EbookActionsService) {
         self.service = service
     }
 
@@ -150,6 +160,10 @@ public final class EbookActionsModel {
     /// Applies `change` if `offered` (what the menu would offer now) still contains it, then
     /// awaits `reload`, which returns whether the item loaded, before the entries are enabled
     /// again. A failed reload sets ``needsReload``.
+    ///
+    /// The toggle isn't idempotent, so a failure reloads too unless the server certainly didn't
+    /// apply it (``wasRejected(_:)``): after a timeout, a lost connection or a 5xx it may have,
+    /// and offering the old direction again would undo it.
     public func apply(
         _ change: StatusChange, offered: [StatusChange], reload: () async -> Bool
     ) async -> Outcome {
@@ -159,10 +173,25 @@ public final class EbookActionsModel {
         do {
             try await service.toggleEbookFileStatus(itemID: itemID, fileID: change.id)
         } catch {
+            if !Self.wasRejected(error) { needsReload = !(await reload()) }
             return .statusChangeFailed(message: Self.serverMessage(error))
         }
         needsReload = !(await reload())
         return .statusChanged(change)
+    }
+
+    /// The request certainly didn't change anything: it never left (no URL, encoding, no
+    /// session), or the server answered with a 3xx it wasn't followed through, 401, 403, 404 or
+    /// another 4xx. Anything else (timeouts, connection loss, cancellation, 5xx, an unreadable
+    /// reply) leaves it unknown.
+    static func wasRejected(_ error: any Error) -> Bool {
+        switch error as? APIError {
+        case .invalidURL, .encoding, .notAuthenticated, .sessionExpired, .redirectRefused, .unauthorized,
+            .forbidden, .notFound:
+            true
+        case .http(let status, _): (400..<500).contains(status)
+        case .network, .timedOut, .invalidResponse, .decoding, nil: false
+        }
     }
 
     /// The server's explanation of a failure, worth showing: only a 400's plain text (the
