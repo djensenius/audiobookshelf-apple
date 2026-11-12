@@ -200,6 +200,39 @@ import Testing
         #expect(events.map(\.serverConnectionID) == [created.id])
     }
 
+    /// The cleanup pass's removal only deletes a connection that is still disconnected as it
+    /// read it, and that nothing retains (here a pending session, which `remove` checks too).
+    @Test func removeIfDisconnectedOnlyDeletesAnUnchangedDisconnectedConnection() async throws {
+        let (store, container) = try makeStore()
+        let created = try await login(store)
+        #expect(try await store.removeIfDisconnected(id: created.id, disconnectedAt: nil) == false)
+        let context = ModelContext(container)
+        RetainedRecord.pendingSession.insert(connectionID: created.id, into: context)
+        try context.save()
+        #expect(try await store.remove(id: created.id, now: now) == .disconnected)
+        #expect(try await store.removeIfDisconnected(id: created.id, disconnectedAt: now) == false)
+
+        try context.delete(model: PendingLocalSession.self)
+        try context.save()
+        // Read before a later removal: another disconnection time.
+        #expect(
+            try await store.removeIfDisconnected(id: created.id, disconnectedAt: now.addingTimeInterval(-1)) == false)
+        // Logged in to since it was read.
+        _ = try await login(store, at: now.addingTimeInterval(60))
+        #expect(try await store.removeIfDisconnected(id: created.id, disconnectedAt: now) == false)
+        #expect(try await store.connection(id: created.id)?.isDisconnected == false)
+
+        RetainedRecord.pendingSession.insert(connectionID: created.id, into: context)
+        try context.save()
+        let later = now.addingTimeInterval(120)
+        #expect(try await store.remove(id: created.id, now: later) == .disconnected)
+        try context.delete(model: PendingLocalSession.self)
+        try context.save()
+        #expect(try await store.removeIfDisconnected(id: created.id, disconnectedAt: later))
+        #expect(try await store.connection(id: created.id) == nil)
+        #expect(try await store.removeIfDisconnected(id: created.id, disconnectedAt: later) == false)
+    }
+
     @Test func failedSaveIsRolledBackAndNotCommittedLater() async throws {
         let (store, _) = try makeStore()
         let created = try await login(store)
