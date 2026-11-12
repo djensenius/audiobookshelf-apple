@@ -109,7 +109,8 @@ public final class DownloadsLifecycle: SessionParticipant {
         }
         lastPhase = phase
         return Task { [sweep] in
-            // Outside the chain, so a background phase deactivates without waiting for the sweep.
+            // Outside the chain, so a background phase deactivates without waiting for the sweep,
+            // which only follows an activation that succeeded.
             if await phase.value { await sweep() }
         }
     }

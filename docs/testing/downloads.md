@@ -11,10 +11,11 @@ release that changes downloads, the session identifier, or the app's scene setup
 the manager and controller without a scene, so a CarPlay-only launch or a background
 relaunch has an engine. `DownloadsLifecycle` gets every scene phase from the app, in
 order: `.active` calls `activate()` and, when that succeeds, sweeps orphaned files;
-`.background` calls `deactivate()`. Until an engine exists, the static `DownloadEngine.handleBackgroundEvents()` waits up to 10 seconds for
-one, then returns; the events stay in `nsurlsessiond` for the next session. To pause or
-resume a download, the app calls `pause(recordID:)` or `resume(recordID:)`, which set the
-record's state before stopping or starting its parts. The engine only starts a part after
+`.background` calls `deactivate()`. Until an engine exists, the static
+`DownloadEngine.handleBackgroundEvents()` waits up to 10 seconds for one, then returns;
+the events stay in `nsurlsessiond` for the next session. To pause or resume a download,
+the app calls `pause(recordID:)` or `resume(recordID:)`, which set the record's state
+before stopping or starting its parts. The engine only starts a part after
 `DownloadStore.beginRunning` accepts it, which refuses parts of paused, failed and
 completed downloads; a transfer that survived a relaunch is only adopted the same way, and
 otherwise cancelled, keeping its resume data.
@@ -125,8 +126,10 @@ paused after signing back in.
    the server list. Its downloads stop and its resume data is deleted.
 4. Quit the app, connect to CarPlay with the phone locked, and start the app from the
    CarPlay screen only. In Console.app, check that the engine is created (its session
-   is recreated and stored downloads are tracked) without a window scene. Then unlock
-   the phone and open the app: the first `.active` activates the engine once.
+   is recreated and stored downloads are tracked) without a window scene. Then verify
+   whether the engine activates while only CarPlay is connected: the app's `scenePhase`
+   combines every scene, so note what it reports. Unlock the phone and open the app: the
+   engine is active afterwards, whichever phases came first.
 5. Switch between the app and the Home Screen a few times during a download. Each time
    the app comes back, the transfers resume and the clean-up runs; going to the
    background never leaves the engine active.

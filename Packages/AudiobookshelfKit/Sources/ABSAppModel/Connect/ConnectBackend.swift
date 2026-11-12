@@ -120,6 +120,8 @@ extension ConnectBackend {
         if let lifecycle {
             _ = try await lifecycle.removeAccount(id)
         } else {
+            // Skips the session source's removal effects (`onRemoved` in the app). The app always
+            // passes a lifecycle; only previews and tests don't.
             _ = try await accounts.remove(id)
         }
     }
