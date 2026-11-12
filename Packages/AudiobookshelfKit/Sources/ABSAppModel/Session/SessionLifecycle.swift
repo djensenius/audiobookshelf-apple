@@ -310,6 +310,41 @@ public final class SessionLifecycle {
         return try result.get()
     }
 
+    /// Forgets a saved connection other than the active one, keeping the session running, as
+    /// the server list does. Unlike ``removeAccount(_:)``, it never ends a session or signs out.
+    /// - Parameters:
+    ///   - connectionID: The connection to forget.
+    ///   - origin: The session the removal was chosen from. At its turn, the removal does nothing
+    ///     unless that session still runs.
+    /// - Throws: ``AccountRemovalError/active`` when, at its turn, `connectionID` is the running
+    ///   session's or the source's active connection, say after a switch queued before it from
+    ///   another window; ``AccountRemovalError/originEnded`` when `origin` no longer runs. Either
+    ///   way nothing is removed. Otherwise, whatever the source's removal throws.
+    public func removeInactiveAccount(_ connectionID: UUID, from origin: ReadySession? = nil) async throws {
+        if rejectReentrant("removeInactiveAccount(_:from:)") { return }
+        let result: Result<Void, any Error> = await serialized {
+            guard await self.isStillRunning(origin, strictly: true) else {
+                return .failure(AccountRemovalError.originEnded)
+            }
+            if self.session?.context.identity.connectionID == connectionID
+                || self.source.phase.identity?.connectionID == connectionID
+            {
+                Log.auth.info("Didn't remove the active account")
+                return .failure(AccountRemovalError.active)
+            }
+            let result: Result<Void, any Error>
+            do {
+                _ = try await self.source.remove(connectionID)
+                result = .success(())
+            } catch {
+                result = .failure(error)
+            }
+            await self.reconcile()
+            return result
+        }
+        try result.get()
+    }
+
     /// Signs in to another account while signed in: flushes and ends the session with
     /// ``SessionEndReason/switch``, shows ``AuthGate/switching(from:)``, runs `body` (the
     /// connect flow's sign-in), then follows wherever the account ended up, whether `body`
@@ -687,6 +722,14 @@ public final class SessionLifecycle {
     private func serialized<T: Sendable>(_ body: @escaping @MainActor @Sendable () async -> T) async -> T {
         await enqueue(body).value
     }
+}
+
+/// Why ``SessionLifecycle/removeInactiveAccount(_:from:)`` removed nothing.
+public enum AccountRemovalError: Error, Sendable, Equatable {
+    /// The connection is the active one; signing out of it is Log Out's job.
+    case active
+    /// The session the removal was chosen from no longer runs.
+    case originEnded
 }
 
 /// The ``SessionLifecycle`` transition the current task belongs to, including the participant

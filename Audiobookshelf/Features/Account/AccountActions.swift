@@ -78,16 +78,17 @@ struct AccountActions {
     }
 
     /// Forgets a saved server other than the running one, and its saved session, through
-    /// ``SessionLifecycle/removeAccount(_:)`` as the add-server sheet's backend does; the session
-    /// keeps running. As there, an OpenID end-session page isn't opened.
+    /// ``SessionLifecycle/removeInactiveAccount(_:from:)``; the session keeps running. Chosen from
+    /// the ready session, the removal fails, rather than signing out, if a change queued before it
+    /// (say, another window's switch to this server) made the server active or ended that session.
     /// - Returns: The removal's task, which says whether it succeeded, or `nil` when
     ///   ``canRemove(_:)`` refuses it.
     @discardableResult
     func removeServer(_ connectionID: UUID) -> Task<Bool, Never>? {
-        guard canRemove(connectionID) else { return nil }
+        guard canRemove(connectionID), let origin = lifecycle.readySession else { return nil }
         return Task {
             do {
-                _ = try await lifecycle.removeAccount(connectionID)
+                try await lifecycle.removeInactiveAccount(connectionID, from: origin)
                 return true
             } catch {
                 Log.ui.error("Couldn't remove a server: \(String(describing: type(of: error)), privacy: .public)")

@@ -642,6 +642,34 @@ private final class Recorder: SessionParticipant {
         #expect(actions.canRemove(b.connectionID) && !actions.canRemove(a.connectionID))
     }
 
+    /// Another window's switch to A is queued before the removal, while the session is still
+    /// ready, so the removal passes ``AccountActions/canRemove(_:)`` but is refused at its turn.
+    @Test func aRemovalQueuedBehindASwitchToItsServerFails() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let held = Self.host("hold-")
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder(), hostA: held)
+        defer {
+            ConnectTestProtocol.release(held)
+            cleanUp(hosts)
+        }
+        let accounts = try #require(environment.accounts)
+        let actions = AccountActions(lifecycle: lifecycle, accounts: accounts)
+        let switching = Task { try await lifecycle.switchAccount(to: a.connectionID) }
+        // The switch's task runs first, so the removal queues behind it.
+        let removal = try #require(actions.removeServer(a.connectionID))
+        await waitFor(.switching(from: b), in: lifecycle)
+
+        ConnectTestProtocol.release(held)
+        try await switching.value
+        let removed = await removal.value
+
+        #expect(!removed)
+        #expect(lifecycle.gate == .ready(a, isOffline: false))
+        #expect(accounts.connections.count == 2)
+        #expect(await accounts.hasSession(a.connectionID))
+    }
+
     /// An expiry deletes the session but not `signedOutAt`: no switch, so nothing ends.
     @Test func aServerWhoseSessionWasDeletedIsntSwitchedTo() async throws {
         let environment = try makeEnvironment()

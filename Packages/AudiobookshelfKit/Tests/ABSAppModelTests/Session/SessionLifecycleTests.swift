@@ -770,6 +770,72 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
     }
 
+    @Test func removingAnInactiveAccountLeavesTheSession() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let fromA = try #require(harness.lifecycle.readySession)
+
+        try await harness.lifecycle.removeInactiveAccount(identityB.connectionID, from: fromA)
+
+        #expect(harness.log.entries == ["accounts.remove(b)"])
+        #expect(harness.lifecycle.gate == .ready(identityA, isOffline: false))
+    }
+
+    /// The removal is queued, while the gate was still ready, behind another window's switch to
+    /// the same account; with or without the session it was chosen from.
+    @Test(arguments: [false, true])
+    func anInactiveRemovalQueuedBehindASwitchToItsAccountIsRefused(fromOrigin: Bool) async throws {
+        let harness = Harness()
+        try await harness.started()
+        let fromA = try #require(harness.lifecycle.readySession)
+        let lifecycle = harness.lifecycle
+        // Holds the switch while B's session starts, inside its transition.
+        let held = Gate()
+        harness.library.connectGate = held
+        let switching = Task { try await lifecycle.switchAccount(to: identityB.connectionID, from: fromA) }
+        #expect(await eventually { harness.log.entries.contains("library.connect(b)") })
+        var submitted = false
+        let removal = Task { () -> (any Error)? in
+            submitted = true
+            do {
+                // Queued before this task suspends.
+                try await lifecycle.removeInactiveAccount(identityB.connectionID, from: fromOrigin ? fromA : nil)
+                return nil
+            } catch {
+                return error
+            }
+        }
+        #expect(await eventually { submitted })
+
+        held.open()
+        try await switching.value
+        let error = await removal.value
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        let expected: AccountRemovalError = fromOrigin ? .originEnded : .active
+        #expect(error as? AccountRemovalError == expected)
+        #expect(harness.log.count(of: "accounts.remove(b)") == 0)
+        #expect(harness.log.count(of: "accounts.logout") == 0)
+        #expect(!harness.log.entries.contains("library.clear(removed)"))
+        #expect(harness.source.phase == .active(identityB, isOffline: false))
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
+    @Test func anInactiveRemovalChosenFromAnAccountThatHasGoneIsRefused() async throws {
+        let harness = Harness()
+        try await harness.started()
+        let fromA = try #require(harness.lifecycle.readySession)
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        await #expect(throws: AccountRemovalError.originEnded) {
+            try await harness.lifecycle.removeInactiveAccount(identityA.connectionID, from: fromA)
+        }
+
+        #expect(harness.log.count(of: "accounts.remove(a)") == 0)
+        #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
+    }
+
     @Test func accountChangeEndsTheSessionThenStartsTheAccountThatSignedIn() async throws {
         let harness = Harness()
         try await harness.started()
