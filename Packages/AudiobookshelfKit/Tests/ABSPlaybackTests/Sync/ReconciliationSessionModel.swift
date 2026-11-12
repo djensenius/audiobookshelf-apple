@@ -16,7 +16,7 @@ struct SessionModelClient: Sendable {
 /// explore client-visible ambiguity, NOT a proof of server ordering after cancellation.
 actor ReconciliationSessionModel {
     enum Operation: Hashable, Sendable {
-        case start, sync, close, lookup, records, progress
+        case start, sync, close, lookup, records, progress, patch
     }
 
     enum Failure: Error, Equatable { case responseLost, notApplied }
@@ -158,6 +158,37 @@ actor ReconciliationSessionModel {
 
     func lookup(_ client: SessionModelClient, id: String) async throws -> PlaybackSession {
         try await perform(.lookup) { try requireOpen(id, userID: client.userID) }
+    }
+
+    /// `PATCH /api/me/progress/:id`: sets the groups sent, creating the progress if absent, and
+    /// dates it with the server's clock (the body carries no `lastUpdate`). `isFinished: false`
+    /// resets the audio position, as both pinned servers do; there is no auto-finish.
+    func update(
+        _ client: SessionModelClient, itemID: String, episodeID: String?, _ update: MediaProgressUpdate
+    ) async throws {
+        try await perform(.patch) {
+            let key = Key(user: client.userID, item: itemID, episode: episodeID)
+            var row =
+                progress[key]
+                ?? MediaProgress(id: "progress-\(itemID)", libraryItemId: itemID, episodeId: episodeID)
+            if let currentTime = update.currentTime { row.currentTime = currentTime }
+            if let duration = update.duration { row.duration = duration }
+            if let value = update.progress { row.progress = value }
+            if let finished = update.isFinished {
+                row.isFinished = finished
+                row.finishedAt = finished ? update.finishedAt ?? milliseconds : nil
+                if finished {
+                    row.progress = 1
+                } else {
+                    row.currentTime = 0
+                    row.progress = 0
+                }
+            }
+            if let location = update.ebookLocation { row.ebookLocation = location }
+            if let value = update.ebookProgress { row.ebookProgress = value }
+            row.lastUpdate = milliseconds
+            progress[key] = row
+        }
     }
 
     func fetchProgress(
