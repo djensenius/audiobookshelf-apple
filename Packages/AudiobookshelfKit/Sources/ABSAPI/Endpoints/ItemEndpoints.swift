@@ -1,7 +1,7 @@
 import ABSCore
 import Foundation
 
-/// Read endpoints for single library items, series, collections, and playlists.
+/// Endpoints for single library items, series, collections, and playlists.
 public enum ItemEndpoints {
     /// `GET /api/items/:id?expanded=1&include=rssfeed`: the full item with tracks.
     public static func item(id: String) -> Endpoint<LibraryItem> {
@@ -15,6 +15,13 @@ public enum ItemEndpoints {
     /// the ebook file with inode `fileID`.
     public static func ebook(itemID: String, fileID: String? = nil) -> Endpoint<Data> {
         Endpoint(.get, ebookPath(itemID: itemID, fileID: fileID))
+    }
+
+    /// `PATCH /api/items/:id/ebook/:fileID/status`: makes the ebook file with inode `fileID` the
+    /// primary ebook if it's supplementary, else makes it supplementary (leaving the book without
+    /// a primary ebook). No body; needs the user's update permission (403 without it).
+    public static func toggleEbookFileStatus(itemID: String, fileID: String) -> Endpoint<EmptyResponse> {
+        Endpoint(.patch, "\(ebookPath(itemID: itemID, fileID: fileID))/status")
     }
 
     /// `GET /api/series/:id`.
