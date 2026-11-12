@@ -20,6 +20,8 @@ public protocol HeldPlayIntent: AnyObject {
     func cancelHeldPlayIntent() -> Bool
     /// Restores it after an interruption ends with a resumption recommended.
     func resumeHeldPlayIntent()
+    /// Forgets it after an interruption ends without a resumption, so a later one can't restore it.
+    func discardHeldPlayIntent()
 }
 
 extension PlaybackCoordinator: HeldPlayIntent {}
@@ -31,7 +33,8 @@ extension PlaybackCoordinator: HeldPlayIntent {}
 /// - Resumption recommended (`shouldResume`): resume if the flag is still set.
 ///   ``AudioEngineProtocol/play()`` re-applies the default rate.
 /// - A play held outside the engine (``heldPlayIntent``, such as a recovering item's) is cancelled
-///   at the start too, and restored through it instead of the engine.
+///   at the start too, and restored through it instead of the engine; an end without a
+///   resumption discards it.
 /// - The flag is cleared by the session becoming active again, by an unplugged output, and by any
 ///   user play or pause (``userDidChangePlayback()``), so a late recommendation never restarts
 ///   playback the user paused.
@@ -68,7 +71,10 @@ public final class AudioInterruptionHandler {
             let resume = resumeAfterInterruption && shouldResume
             let held = resumeHeldIntent
             userDidChangePlayback()
-            guard resume else { return }
+            guard resume else {
+                heldPlayIntent?.discardHeldPlayIntent()
+                return
+            }
             if held, let heldPlayIntent {
                 heldPlayIntent.resumeHeldPlayIntent()
             } else if !engine.isPlaybackRequested {

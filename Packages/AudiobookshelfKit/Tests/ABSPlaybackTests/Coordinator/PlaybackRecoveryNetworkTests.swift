@@ -334,6 +334,14 @@ struct PlaybackRecoveryNetworkTests {
 
         #expect(!engine.isPlaybackRequested)
         #expect(!coordinator.isPlaybackRequested)
+
+        // A second call, with no play in between, has nothing to restore.
+        handler.handle(.interruptionBegan)
+        handler.handle(.interruptionEnded(shouldResume: true))
+        await drain()
+
+        #expect(!engine.isPlaybackRequested)
+        #expect(!coordinator.isPlaybackRequested)
     }
 
     /// A call while the previous item plays and the next one awaits its streaming check: the

@@ -1045,6 +1045,12 @@ public final class PlaybackCoordinator {
         }
     }
 
+    /// The interruption ended without a resumption: what it cancelled stays cancelled, and a later
+    /// interruption's end doesn't restore it.
+    public func discardHeldPlayIntent() {
+        dropHeldPlay()
+    }
+
     /// A user pause, lost output or stop: nothing an interruption cancelled is restored.
     private func dropHeldPlay() {
         heldPlay = nil
