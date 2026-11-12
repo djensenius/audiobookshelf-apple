@@ -115,6 +115,7 @@ struct GroupCard: View {
         .itemHover()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: GroupPresentation.cardAccessibilityLabel(group, locale: locale)))
+        .cardInputLabels(title: group.name, label: GroupPresentation.cardAccessibilityLabel(group, locale: locale))
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
         .accessibilityAddTraits(.isButton)
     }

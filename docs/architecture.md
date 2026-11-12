@@ -134,8 +134,15 @@ the ended item is selected again, unloaded at its end, unless the user asked for
 another item meanwhile; seeks and jumps made for the removed item are dropped (#338). The coordinator and the advancer hold each other weakly, so
 the owner must retain the advancer.
 
-App wiring (the advancer, `UIApplication.beginBackgroundTask`, progress and
-connection hooks), account-removal composition and queue UI are not built yet.
+Each `PlaybackScope` owns its connection's live queue (loaded from
+`UserDefaultsPlaybackQueueStore`) and an attached advancer, whose podcast
+fallback reads through the scope's services. `retire(reason:)` detaches the
+advancer and freezes the queue (`editQueue` does nothing after it), so a later
+scope of the connection loads exactly what was saved. `PlaybackSessionParticipant`
+publishes it per session as `PlaybackQueueControl` (read-only `items` plus play
+next, add last, remove, move and clear), `nil` between sessions. App wiring
+(`UIApplication.beginBackgroundTask`, progress and connection hooks),
+account-removal composition and queue UI are not built yet.
 The queue makes no progress-sync or exactly-once delivery guarantee.
 
 ## App target layout
