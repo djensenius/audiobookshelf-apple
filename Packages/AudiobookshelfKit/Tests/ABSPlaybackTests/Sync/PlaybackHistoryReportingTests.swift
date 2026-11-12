@@ -261,6 +261,21 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.play).map(\.sync) == [.notAttempted])
     }
 
+    @Test func startServerProgressIsASyncWhenAnotherLoadedObserverStopsFirst() async throws {
+        let (s, spy, source) = try Self.harness { if case .loaded = $0 { true } else { false } }
+        let response = ActiveRefreshFixture.reply(s, time: 900)
+        s.h.service.state.withLock { $0.progress["a"] = response }
+        await s.coordinator.play(itemID: "a")
+        await s.coordinator.waitForPendingCloses()
+        await Self.settle(s)
+        withExtendedLifetime(source) {}
+
+        #expect(spy.entries.map(\.name) == [.sync, .stop])
+        #expect(spy.entries.map(\.position) == [900, 900])
+        #expect(spy.entries(.sync).map(\.details) == ["Fetched from the server"])
+        #expect(spy.entries(.sync).map(\.sync) == [.notAttempted])
+    }
+
     nonisolated static let closeOutcomes: [(String, PlaybackHistorySyncResult)] = [
         ("acknowledged", .succeeded), ("failed", .failed(message: "http")), ("signOut", .notAttempted),
     ]

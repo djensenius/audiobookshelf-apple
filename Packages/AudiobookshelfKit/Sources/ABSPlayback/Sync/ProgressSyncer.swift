@@ -359,7 +359,13 @@ public final class ProgressSyncer {
             loadedTime = nil
         case .loaded(let time):
             current?.hasLoaded = true
-            if let key = current?.key { noteServerProgress(for: key, source?.startProgressChange) }
+            if let key = current?.key {
+                noteServerProgress(for: key, source?.startProgressChange)
+            } else if let change = source?.startProgressChange, Self.movesStoredPosition(change) {
+                // An observer that ran first stopped on the load: the start's change is the closed
+                // session's, before its Stop.
+                holdBeforeStop(.sync, at: change.to, sync: .notAttempted, details: Self.fetchedDetails)
+            }
             loadedTime = time
             lastSyncAt = now
             chapterIndex = source?.chapterIndex
@@ -496,10 +502,18 @@ public final class ProgressSyncer {
     /// Server progress for the loaded session's media was saved; it's history if the save moved
     /// the stored position by a second or more (a created row moved it from 0).
     private func noteServerProgress(for key: MediaKey, _ change: ServerAudioPositionChange?) {
-        guard let change, abs(change.to - (change.from ?? 0)) >= 1,
+        guard let change, Self.movesStoredPosition(change),
             let event = historyEvent(.sync, at: change.to), current?.key == key, current?.hasLoaded == true
         else { return }
-        history?.record([event], sync: .notAttempted, details: "Fetched from the server")
+        history?.record([event], sync: .notAttempted, details: Self.fetchedDetails)
+    }
+
+    private static let fetchedDetails = "Fetched from the server"
+
+    /// Whether saved server progress moved the stored position by a second or more (a created
+    /// row moved it from 0).
+    private static func movesStoredPosition(_ change: ServerAudioPositionChange) -> Bool {
+        abs(change.to - (change.from ?? 0)) >= 1
     }
 
     private func holdClosingHistory(
@@ -528,11 +542,14 @@ public final class ProgressSyncer {
     /// result (it carries their report), others with `sync`. `position` defaults to the closing
     /// position, or the duration for Finished.
     private func holdBeforeStop(
-        _ name: PlaybackHistoryEventName, at position: Double? = nil, sync: PlaybackHistorySyncResult? = nil
+        _ name: PlaybackHistoryEventName, at position: Double? = nil, sync: PlaybackHistorySyncResult? = nil,
+        details: String? = nil
     ) {
         guard var held = closingHistory.first, let stop = held.events.last else { return }
         let at = position ?? (name == .finished ? held.duration : held.position)
-        held.events.insert(.init(name: name, media: stop.media, position: at, sync: sync), at: held.events.count - 1)
+        held.events.insert(
+            .init(name: name, media: stop.media, position: at, sync: sync, details: details),
+            at: held.events.count - 1)
         closingHistory[0] = held
     }
 
