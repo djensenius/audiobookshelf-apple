@@ -210,6 +210,10 @@ public actor DownloadManager {
                 let tooLarge = record.parts.contains { DownloadEngine.failedAsTooLarge($0.lastError) }
                 await dropFailedRefetch(record.id, code: tooLarge ? .tooLarge : nil)
             }
+            // A refetch left paused by a deletion of its local item that failed to delete it.
+            for record in records where record.isCoverOnly && record.state == .paused {
+                await cancelOrphanedRefetch(record.id)
+            }
         }
         try locations.prepare()
     }

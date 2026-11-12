@@ -116,4 +116,9 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
         try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
             .updateProgress(itemID: itemID, episodeID: episodeID, update)
     }
+
+    public func openSession(id: String) async throws -> PlaybackSession {
+        try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
+            .openSession(id: id)
+    }
 }
