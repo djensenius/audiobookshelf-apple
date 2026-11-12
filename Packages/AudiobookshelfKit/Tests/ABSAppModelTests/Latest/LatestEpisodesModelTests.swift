@@ -111,6 +111,26 @@ private func makeModel(
         #expect(model.list.items.count == 6)
     }
 
+    /// A new episode shifts the server's pages while the list is open: page 2 starts with page 1's last episode
+    /// again. It shows once, another podcast's episode with the same ID still shows, and paging carries on to the
+    /// end.
+    @Test func aShiftedPageBoundaryAddsNoDuplicateRow() async throws {
+        let requests = Locked<[RecentRequest]>([])
+        let pages = [
+            F.episodes(1...3), [F.recent("e3"), F.recent("e3", item: "other"), F.recent("e4")], [F.recent("e5")],
+        ]
+        let model = makeModel(pages: pages, requests: requests)
+        await model.list.loadNextPage()?.value
+        await model.list.loadNextPage()?.value
+        #expect(model.list.items.map(\.id) == ["pod-e1", "pod-e2", "pod-e3", "other-e3", "pod-e4"])
+        #expect(!model.list.reachedEnd, "Page 2 was full, so there may be more")
+
+        await model.list.loadNextPage()?.value
+        #expect(model.list.items.map(\.id) == ["pod-e1", "pod-e2", "pod-e3", "other-e3", "pod-e4", "pod-e5"])
+        #expect(model.list.reachedEnd)
+        #expect(requests.value.map(\.page) == [0, 1, 2])
+    }
+
     @Test func aFullLastPageEndsWithTheEmptyPageAfterIt() async throws {
         let model = makeModel(pages: [F.episodes(1...3)])
         await model.list.loadNextPage()?.value

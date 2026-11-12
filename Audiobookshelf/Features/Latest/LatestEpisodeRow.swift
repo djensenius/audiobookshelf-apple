@@ -13,6 +13,8 @@ struct LatestEpisodeRow: View {
     let model: LatestEpisodesModel
     let row: LatestEpisode
     let context: ItemActionContext
+    /// What "3 days ago" is relative to: the list's minute timeline, so the text moves on while the list stays open.
+    let now: Date
     /// This episode's Play is starting.
     let isStarting: Bool
     /// Another episode's Play is starting, so this one can't start too.
@@ -29,7 +31,7 @@ struct LatestEpisodeRow: View {
         let progress = model.itemProgress(for: row)
         let actions = PodcastEpisodeActions.available(
             for: row.summary, progress: progress, context: context, isGone: false)
-        let published = LatestPresentation.publishedText(row.episode.publishedAt, now: .now, locale: locale)
+        let published = LatestPresentation.publishedText(row.episode.publishedAt, now: now, locale: locale)
         let badges = PodcastDetailPresentation.badges(row.episode, locale: locale)
         let summary = PodcastDetailPresentation.summaryText(row.episode)
         let spokenSummary = summary.map { PodcastDetailPresentation.spokenSummary($0) }

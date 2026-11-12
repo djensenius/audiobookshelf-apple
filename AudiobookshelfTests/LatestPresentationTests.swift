@@ -59,6 +59,20 @@ private func recent(_ id: String, explicit: Bool = false) -> RecentEpisode {
         #expect(LatestPresentation.publishedText(0, now: now, locale: english) == nil)
     }
 
+    /// The text follows `now`, so the list's minute timeline moves it on: a day's boundary, then the next.
+    @Test func publishedTextMovesOnAcrossADayBoundary() {
+        let published = Date(timeIntervalSince1970: 1_700_000_000)
+        let publishedAt = Int(published.timeIntervalSince1970) * 1_000
+        func text(hoursLater hours: Double, minutes: Double) -> String? {
+            let now = published.addingTimeInterval(hours * 3_600 + minutes * 60)
+            return LatestPresentation.publishedText(publishedAt, now: now, locale: english)
+        }
+        #expect(text(hoursLater: 23, minutes: 59) == "23 hours ago")
+        #expect(text(hoursLater: 24, minutes: 1) == "yesterday")
+        #expect(text(hoursLater: 47, minutes: 59) == "yesterday")
+        #expect(text(hoursLater: 48, minutes: 1) == "2 days ago")
+    }
+
     @Test func detailsValueReadsThePodcastThenTheEpisodesDetails() throws {
         let row = try #require(LatestEpisode(recent("e1", explicit: true)))
         let value = LatestPresentation.detailsValue(

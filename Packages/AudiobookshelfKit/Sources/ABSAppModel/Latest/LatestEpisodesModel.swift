@@ -33,6 +33,9 @@ public struct LatestEpisode: Sendable, Hashable, Identifiable {
             return nil
         }
         let metadata = recent.podcast?.metadata
+        // Unversioned: the response carries no `updatedAt` for the podcast or its library item, and `coverPath`
+        // keeps its name when the cover is replaced. A changed cover can stay stale here until the image cache
+        // evicts this key; legacy's Latest row doesn't version it either.
         var cover: CoverRef?
         if let path = Self.nonEmpty(recent.podcast?.coverPath) {
             let url = URL(string: path)

@@ -57,31 +57,35 @@ struct LatestEpisodesContent: View {
         let context = PodcastEpisodeActions.context(canPlay: playItem != nil)
         BrowseStateView(state: .resolve(list: list), messages: messages, retry: { retry() }) { failed in
             let placement = BrowsePresentation.failurePlacement(failed: failed, refreshFailed: refreshFailed)
-            ScrollView(.vertical) {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    if placement == .top {
-                        BrowseFailureRow(messageKey: messages.failed, retry: { Task { await refresh() } })
-                    }
-                    ForEach(list.items) { row in
-                        LatestEpisodeRow(
-                            model: model, row: row, context: context, isStarting: startingID == row.id,
-                            isOtherStarting: startingID != nil && startingID != row.id,
-                            isUpdating: updatingIDs.contains(row.id)
-                        ) { kind in
-                            perform(kind, on: row)
+            // One timeline for the list, so "3 days ago" stays current without a timer per row.
+            TimelineView(.everyMinute) { timeline in
+                ScrollView(.vertical) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        if placement == .top {
+                            BrowseFailureRow(messageKey: messages.failed, retry: { Task { await refresh() } })
                         }
-                        .padding(.horizontal, ABSSpacing.large)
-                        .task(id: refreshes) { list.itemAppeared(id: row.id) }
-                        Divider()
-                            .padding(.leading, ABSSpacing.large)
+                        ForEach(list.items) { row in
+                            LatestEpisodeRow(
+                                model: model, row: row, context: context, now: timeline.date,
+                                isStarting: startingID == row.id,
+                                isOtherStarting: startingID != nil && startingID != row.id,
+                                isUpdating: updatingIDs.contains(row.id)
+                            ) { kind in
+                                perform(kind, on: row)
+                            }
+                            .padding(.horizontal, ABSSpacing.large)
+                            .task(id: refreshes) { list.itemAppeared(id: row.id) }
+                            Divider()
+                                .padding(.leading, ABSSpacing.large)
+                        }
+                        BrowsePagingFooter(
+                            isLoading: list.isLoading, failed: placement == .footer, messageKey: messages.failed,
+                            retry: { retry() })
                     }
-                    BrowsePagingFooter(
-                        isLoading: list.isLoading, failed: placement == .footer, messageKey: messages.failed,
-                        retry: { retry() })
+                    .padding(.vertical, ABSSpacing.large)
+                    .frame(maxWidth: 1_000)
+                    .frame(maxWidth: .infinity)
                 }
-                .padding(.vertical, ABSSpacing.large)
-                .frame(maxWidth: 1_000)
-                .frame(maxWidth: .infinity)
             }
         }
         .refreshable { await refresh() }
