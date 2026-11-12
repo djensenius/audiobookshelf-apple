@@ -151,7 +151,8 @@ PATCH that changes nothing leaves the row, `lastUpdate` included, as it was. `is
 follows the contract above and acts only when it changes the state (finishing stores progress 1
 and `finishedAt`; un-finishing resets finished progress to 0); finishing finished progress keeps
 its `finishedAt` unless a date is sent. An audio PATCH that moves finished progress at least
-10 s from the end un-finishes it. A queued
+10 s from the end un-finishes it, and on existing progress a `progress` equal to the stored
+position's ratio is ignored, as on the server. A queued
 `fetchErrors` or `patchErrors` entry fails before reaching the model. Legacy recording
 accessors remain recording-only; tests using this model inspect `fetchProgress`, `openSession`
 and `listeningSessions`. Unconfigured fake defaults are unchanged.

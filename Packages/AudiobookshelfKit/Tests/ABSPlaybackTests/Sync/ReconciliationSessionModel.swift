@@ -165,20 +165,25 @@ actor ReconciliationSessionModel {
     /// changed. As on both pinned servers, `isFinished` acts only when it changes the state:
     /// `false` resets the audio position of finished progress, and `true` keeps the `finishedAt`
     /// of finished progress unless a date is sent. An audio PATCH that moves finished progress at
-    /// least 10 s from the end un-finishes it. There is no auto-finish.
+    /// least 10 s from the end un-finishes it, and on existing progress a `progress` equal to the
+    /// stored position's ratio is ignored, so repeating a finished position keeps progress 1.
+    /// There is no auto-finish.
     func update(
         _ client: SessionModelClient, itemID: String, episodeID: String?, _ update: MediaProgressUpdate
     ) async throws {
         try await perform(.patch) {
             let key = Key(user: client.userID, item: itemID, episode: episodeID)
             let existing = progress[key]
+            // The server compares a sent `progress` with the existing position's ratio, not with
+            // the stored progress, and ignores an equal one.
+            let ratio = existing.map { $0.duration > 0 ? max(0, min($0.currentTime / $0.duration, 1)) : 0 }
             var row =
                 existing
                 ?? MediaProgress(id: "progress-\(itemID)", libraryItemId: itemID, episodeId: episodeID)
             let moved = update.currentTime.map { $0 != row.currentTime } ?? false
             if let currentTime = update.currentTime { row.currentTime = currentTime }
             if let duration = update.duration { row.duration = duration }
-            if let value = update.progress { row.progress = value }
+            if let value = update.progress, value != ratio { row.progress = value }
             if moved, row.isFinished, row.duration - row.currentTime >= 10 {
                 row.isFinished = false
                 row.finishedAt = nil

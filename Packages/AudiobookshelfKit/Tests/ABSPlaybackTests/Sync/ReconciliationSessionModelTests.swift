@@ -324,17 +324,22 @@ struct ReconciliationSessionModelTests {
     /// An audio PATCH that moves finished progress away from the end un-finishes it
     /// (`ProgressContractTests.audioUnfinishes`); exactly 10 s from the end is still away. The
     /// same position, or one fewer than 10 s from the end, leaves it finished (`MediaProgressUpdate`).
+    /// The same position changes nothing, not even progress 1: the server ignores a `progress`
+    /// equal to the stored position's ratio (`MediaProgress.applyProgressUpdate`).
     @Test(arguments: [(20.0, false), (40, false), (10, true), (45, true)])
     func movingFinishedProgressAwayFromTheEndUnfinishesIt(to time: Double, staysFinished: Bool) async throws {
-        let client = Adapters(ReconciliationSessionModel())
+        let clock = TestClock()
+        let client = Adapters(ReconciliationSessionModel(clock: clock))
         try await client.patch(.audio(currentTime: 10, duration: 50, progress: 0.2))
         try await client.patch(.finished(true))
         let finished = try await client.row()
+        clock.advance(by: 1)
         try await client.patch(.audio(currentTime: time, duration: 50, progress: time / 50))
         let row = try await client.row()
         #expect(row.isFinished == staysFinished)
         #expect(row.finishedAt == (staysFinished ? finished.finishedAt : nil))
         #expect(row.currentTime == time)
-        if !staysFinished { #expect(row.progress == time / 50) }
+        #expect(row.progress == (time == 10 ? 1 : time / 50))
+        #expect(row.lastUpdate == (time == 10 ? finished.lastUpdate : Int(clock.now.timeIntervalSince1970 * 1000)))
     }
 }
