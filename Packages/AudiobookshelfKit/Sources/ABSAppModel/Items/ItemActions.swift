@@ -132,7 +132,9 @@ public final class ProgressItemActions: ItemActionPerforming {
     /// so a write from the session it replaces can't land after a newer one. A stale instance
     /// queues nothing new (``enqueue(_:operation:)`` rejects it), so its tails are final.
     func continueQueue(of predecessor: ProgressItemActions) {
-        inheritedTails = predecessor.tails.mapValues(\.task)
+        // The predecessor's own tail on a key already chained on what it inherited for the key;
+        // keys it never acted on keep the inherited tail, across any number of restarts.
+        inheritedTails = predecessor.inheritedTails.merging(predecessor.tails.mapValues(\.task)) { $1 }
     }
 
     public func markFinished(_ target: ItemActionTarget) async throws {

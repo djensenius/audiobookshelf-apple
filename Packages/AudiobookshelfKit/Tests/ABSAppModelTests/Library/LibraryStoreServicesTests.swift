@@ -386,4 +386,36 @@ private let forwardings: [StoreServiceForwarding] = [
             #expect(writes.value == ["old:li", "new:li"])
         }
     }
+
+    /// Across two restarts where the middle session never acts on the item, the third session's
+    /// write still waits for the first session's.
+    @Test func writesWaitForAWriteFromTwoSessionsAgo() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let writes = Locked<[String]>([])
+            let gate = GatedCalls<String, Void>()
+            var calls = gate.calls.makeAsyncIterator()
+            let first = GatedWritingClient(gate: gate, client: WritingClient(name: "first", writes: writes))
+            await store.connect(client: first, connectionKey: serverA)
+            let window = try #require(store.sessionItemActions())
+            let finish = Task { try await window.markFinished(ItemActionTarget(libraryItemID: "x")) }
+            let held = try #require(await calls.next())
+
+            store.clear()
+            await store.connect(client: WritingClient(name: "second", writes: writes), connectionKey: serverA)
+            try await window.markFinished(ItemActionTarget(libraryItemID: "y"))
+            #expect(writes.value == ["second:y"])
+
+            store.clear()
+            await store.connect(client: WritingClient(name: "third", writes: writes), connectionKey: serverA)
+            let reset = Task { try await window.markNotFinished(ItemActionTarget(libraryItemID: "x")) }
+            for _ in 0..<50 { await Task.yield() }
+            #expect(writes.value == ["second:y"])
+
+            held.reply.resume()
+            _ = await finish.result
+            try await reset.value
+            #expect(writes.value == ["second:y", "first:x", "third:x"])
+        }
+    }
 }
