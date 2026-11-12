@@ -34,8 +34,9 @@ Store Connect's.
 > - Sign in with a username and password or your server's single sign-on (OpenID
 >   Connect).
 >
-> You need an Audiobookshelf server (https://www.audiobookshelf.org). The app connects
-> only to the servers you add. It has no account of its own, no analytics and no ads.
+> You need an Audiobookshelf server (https://www.audiobookshelf.org). The app talks to
+> the servers you add, and to the cover-image hosts and sign-in provider your server
+> points it to. It has no account of its own, no analytics and no ads.
 
 Check the feature list against the build being submitted, and drop anything that isn't
 in it yet. These claims are left out until their features ship, so add each one only
@@ -61,7 +62,21 @@ developer or a third party can access. This app:
 - lets the user export logs with the system share sheet. The user picks where the file
   goes; nothing is uploaded automatically.
 
-The privacy policy must say the same. Revisit the label if a feature ever sends data
+One exception reaches hosts other than the user's server: cover images. When the
+server gives an item an absolute cover URL (an external `coverPath`, as podcasts often
+have), the app loads it from that host (`CoverRef`, `MediaURLBuilder.imageRequest`). A
+cover request to the server may also redirect to another host
+(`ImageSessionDelegate`). Either way the request goes only to a public `https` host
+(`ImageDestination.isAllowed`), with no Audiobookshelf token, custom headers or
+cookies. That host still sees the device's IP address and the image URL, which can
+reveal the item being viewed. Single sign-on works the same way: it opens the identity
+provider the server is configured with. Neither is tracking, and the developer has no
+relationship with these hosts and can't access what they receive, so the answer stays
+"No". The listing and the privacy policy must still mention them.
+
+The privacy policy must say the same, including that exception: the app fetches cover
+images from hosts the user's server names, and those hosts receive the device's IP
+address and the image address, under their own privacy policies. Revisit the label if a feature ever sends data
 anywhere other than the user's server.
 
 ## Privacy manifests
