@@ -22,14 +22,17 @@ enum LibraryPresentation {
 
     /// The bookshelf of the key's library and account, of type `mediaType`, with the account's saved preferences for
     /// it. A preference the user changes is saved for the account the model was built for, never another one.
+    /// `pinnedFilter` (a filter route's) is shown and queried instead of the saved filter, and never saved.
     @MainActor
     static func makeModel(
-        key: BrowseModelKey, mediaType: MediaType, services: LibraryStoreServices, store: LibraryStore
+        key: BrowseModelKey, mediaType: MediaType, services: LibraryStoreServices, store: LibraryStore,
+        pinnedFilter: LibraryViewPreferences.Filter? = nil
     ) -> LibraryItemsModel {
         let connection = key.connection
         return LibraryItemsModel(
             client: services, libraryID: key.libraryID, mediaType: mediaType,
-            stored: store.viewPreferences(libraryID: key.libraryID), connectionKey: connection,
+            stored: store.viewPreferences(libraryID: key.libraryID), pinnedFilter: pinnedFilter,
+            connectionKey: connection,
             persist: { [weak store] libraryID, preferences in
                 store?.saveViewPreferences(preferences, libraryID: libraryID, connectionKey: connection)
             },
@@ -41,13 +44,16 @@ enum LibraryPresentation {
     /// the sorts, filters and query; `host` stays only if it was built for `key`.
     @MainActor
     static func updated(
-        _ host: LibraryModelHost?, for key: BrowseModelKey?, mediaType: MediaType?, store: LibraryStore?
+        _ host: LibraryModelHost?, for key: BrowseModelKey?, mediaType: MediaType?, store: LibraryStore?,
+        pinnedFilter: LibraryViewPreferences.Filter? = nil
     ) -> LibraryModelHost? {
         guard let key, let store else { return nil }
         guard let mediaType else { return host?.key == key ? host : nil }
-        if let host, host.key == key, host.model.mediaType == mediaType { return host }
+        if let host, host.key == key, host.model.mediaType == mediaType, host.model.pinnedFilter == pinnedFilter {
+            return host
+        }
         return LibraryModelHost(key: key, store: store) { services in
-            makeModel(key: key, mediaType: mediaType, services: services, store: store)
+            makeModel(key: key, mediaType: mediaType, services: services, store: store, pinnedFilter: pinnedFilter)
         }
     }
 
