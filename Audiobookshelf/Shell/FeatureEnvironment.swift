@@ -25,4 +25,6 @@ extension EnvironmentValues {
     @Entry var itemActions: any ItemActionPerforming = NoOpItemActions()
     /// Plays an item or episode; `nil` while signed out.
     @Entry var playItem: PlayItemAction?
+    /// Queues downloads (Download Series); `nil` where the app has no download stack.
+    @Entry var downloadAccess: DownloadAccess?
 }

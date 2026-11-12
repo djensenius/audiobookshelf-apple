@@ -5,6 +5,7 @@
   "ButtonCopyFeedURL": "Copy Feed URL",
   "ButtonDeletePlaylist": "Delete Playlist",
   "ButtonDone": "Done",
+  "ButtonDownloadSeries": "Download Series",
   "ButtonEdit": "Edit",
   "ButtonExport": "Export",
   "ButtonGoToPodcast": "Go to Podcast",
@@ -305,6 +306,11 @@
   "MessageSearchLibraryPrompt": "Search this library by title, author, series, narrator or tag.",
   "MessageSeriesDetailLoadFailed": "Couldn't load this series.",
   "MessageSeriesDetailNotFound": "This series isn't on the server anymore.",
+  "MessageSeriesDownloadListFailed": "Couldn't list the books in this series to download.",
+  "MessageSeriesDownloadQueueFailed": {
+    "one": "Couldn't queue {0} book for download.",
+    "other": "Couldn't queue {0} books for download."
+  },
   "MessageSeriesListLoadFailed": "Couldn't load the series.",
   "MessageShakeToResetHint": "Shake your device to restart the timer.",
   "MessageSleepTimerCanRestart": "The sleep timer paused playback. Restart it soon to keep listening.",
