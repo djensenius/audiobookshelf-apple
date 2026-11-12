@@ -2,6 +2,7 @@ import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSData
+import ABSDownloads
 import Foundation
 import Observation
 
@@ -15,12 +16,16 @@ import Observation
 @MainActor
 final class AppEnvironment {
     /// Built on first use, so a process that never asks for it opens no store. A Debug build
-    /// launched with `-ABSFixtures` gets ``FixtureServer``'s in-memory environment instead.
+    /// launched with `-ABSFixtures` gets ``FixtureServer``'s in-memory environment instead. The
+    /// app test host (`mise run test:app`) leaves out the download stack: its store holds the
+    /// app's real downloads, which it mustn't restart or sweep, and tests build their own.
     static let shared: AppEnvironment = {
         #if DEBUG
             if FixtureServer.isEnabled { return FixtureServer.environment() }
         #endif
-        return AppEnvironment()
+        return AppEnvironment(
+            downloadsRoot: ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
+                ? .applicationSupportDirectory : nil)
     }()
 
     let settings: AppSettings
@@ -33,6 +38,9 @@ final class AppEnvironment {
     /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
     let deviceIdentifiers: any DeviceIdentifying
     let player: any PlayerSlotState
+    /// The download stack, or `nil` when the store couldn't be opened. Its lifecycle is
+    /// launched here, so a launch without a window (CarPlay, a background wake) has an engine.
+    let downloads: AppDownloads?
     /// The shared library and its session participant (#181), or `nil` without ``accounts``.
     let library: LibraryParticipant?
     /// The cover image pipeline and its session participant (#182).
@@ -41,16 +49,22 @@ final class AppEnvironment {
     /// - Parameters:
     ///   - settings: The settings every scene shares.
     ///   - storeLocation: Where the store lives; tests and previews pass `.inMemory`.
+    ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:)``);
+    ///     tests pass a temporary directory, and `nil` leaves out the download stack.
+    ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
     ///   - covers: Where the cover pipeline fetches and caches covers.
     init(
         settings: AppSettings = AppSettings(), storeLocation: DataStack.Location = .appGroup,
         keychain: any KeychainStoring = KeychainStore(),
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
+        downloadsRoot: URL? = .applicationSupportDirectory,
+        makeDownloadSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession(),
         covers: CoverSource = .app
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
         let lifecycle: SessionLifecycle
+        var downloads: AppDownloads?
         do {
             let stack = try DataStack(location: storeLocation)
             let manager = AccountManager(
@@ -58,9 +72,24 @@ final class AppEnvironment {
                 validator: ServerValidator(sessionConfiguration: sessionConfiguration),
                 openID: OIDCLoginService(sessionConfiguration: sessionConfiguration),
                 sessionConfiguration: sessionConfiguration, settings: settings)
+            downloads = downloadsRoot.map {
+                AppDownloads.make(
+                    dataStack: stack, accounts: manager, settings: settings, root: $0, makeSession: makeDownloadSession)
+            }
             dataStack = stack
             accounts = manager
             lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))
+            if let downloads {
+                lifecycle.register(downloads.lifecycle, stage: .connect)
+                // A removal stops the downloads once the credentials are deleted, active or not.
+                manager.credentialsRemoved = { [weak downloadsLifecycle = downloads.lifecycle] in
+                    await downloadsLifecycle?.connectionRemoved($0)
+                }
+                // So does every expiry, whether or not a session of it is ending.
+                manager.credentialsExpired = { [weak downloadsLifecycle = downloads.lifecycle] in
+                    downloadsLifecycle?.connectionExpired($0)
+                }
+            }
         } catch {
             let reason = Log.redact(String(describing: error))
             Log.data.fault("The on-device store couldn't be opened: \(reason, privacy: .public)")
@@ -75,6 +104,8 @@ final class AppEnvironment {
         self.deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         // Replaced by the playback coordinator's view model with the player UI (#56).
         self.player = PlaceholderPlayerState()
+        self.downloads = downloads
+        downloads?.lifecycle.launch()
         self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
 
         // Images (#182).

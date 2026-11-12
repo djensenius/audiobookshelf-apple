@@ -34,9 +34,16 @@ struct AudiobookshelfApp: App {
         .backgroundTask(.urlSession(DownloadEngine.sessionIdentifier)) {
             await DownloadEngine.handleBackgroundEvents()
         }
-        // In the background, transfers the system cancels wait for the next activation.
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background { Task { await DownloadEngine.deactivate() } }
+        // Every phase from launch on, in order: activating resumes transfers and sweeps orphaned
+        // downloads; in the background, transfers the system cancels wait for the next
+        // activation. Without a store there's no stack; the registry's engine, if any, is still
+        // deactivated as before.
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if let downloads = environment.downloads {
+                downloads.lifecycle.handle(scenePhase: SessionScenePhase(phase))
+            } else if phase == .background {
+                Task { await DownloadEngine.deactivate() }
+            }
         }
         // Keeps less of the cover cache in memory while in the background.
         .onChange(of: scenePhase) { _, phase in
