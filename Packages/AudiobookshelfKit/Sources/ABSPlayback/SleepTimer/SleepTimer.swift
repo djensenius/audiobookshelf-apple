@@ -151,6 +151,9 @@ public final class SleepTimer {
     /// reset or play takes it over. A reset's `undo` can restore it with no task behind it; the next play or reset
     /// then delivers the seek.
     @ObservationIgnored private var queuedFadeRewind: (from: Double, to: Double)?
+    /// The expiry's seek back to the fade while it's in flight, so a restart that seeks there again and fails can
+    /// give it back as ``queuedFadeRewind``; the restart takes it over, and the expiry's task then stands down.
+    @ObservationIgnored private var fadeSeek: (expiry: Int, from: Double, to: Double)?
     @ObservationIgnored private var itemID: String?
     /// Changes when a run begins or stops, or playback plays or pauses, so a reset's resume can tell it was overtaken.
     @ObservationIgnored private var runID = 0
@@ -359,6 +362,7 @@ public final class SleepTimer {
         awaitsTimelineForAutoStart = false
         pendingRewind = nil
         queuedFadeRewind = nil
+        fadeSeek = nil
         endGrace()
         publish(remaining: remaining)
         updateShakeDetection()
@@ -408,7 +412,13 @@ public final class SleepTimer {
     /// Returns the resumption, or `nil` when nothing restarted.
     private func restartExpiredRun() -> Task<RestartResult, Never>? {
         guard let expiredRun = restartableRun, let graceEnd else { return nil }
-        let rewind = pendingRewind, fadeRewind = queuedFadeRewind
+        // The expiry's seek in flight, unless a seek of the user's superseded it: the restart's own seek replaces
+        // it, so a failure gives it back as queued.
+        let inFlightFade = fadeSeek.flatMap { seek in
+            control.pendingSeekTarget.map { abs($0 - seek.to) < Self.retainedSeekTolerance } == true
+                ? (from: seek.from, to: seek.to) : nil
+        }
+        let rewind = pendingRewind, fadeRewind = queuedFadeRewind ?? inFlightFade
         let time = time(rewoundBy: takeRewind())
         guard begin(expiredRun.mode, isAutomatic: expiredRun.isAutomatic, identity: expiredRun.identity, at: time)
         else {
@@ -416,6 +426,7 @@ public final class SleepTimer {
             return nil
         }
         _ = takeQueuedFadeRewind()
+        if inFlightFade != nil { fadeSeek = nil }
         let position = control.intendedTime
         // A seek in flight (the expiry's own back to the fade, say) is sought again and awaited, so the play follows
         // where it lands and a seek that doesn't land fails the restart rather than resuming before it.
@@ -546,6 +557,7 @@ public final class SleepTimer {
         if !run.wasCutShort { startGrace(for: run) }
         stopRun()
         expiryID += 1
+        fadeSeek = nil
         let rewind = run.isAutomatic ? options.autoSleep.rewindOnExpiry : nil
         guard let fadeStart = run.fadeStart, fadeStart < control.currentTime else {
             pendingRewind = rewind.map { ($0, control.currentTime) }
@@ -561,9 +573,13 @@ public final class SleepTimer {
         Task { [weak self, control] in
             guard self?.startsFadeRewind(of: id, item: item, from: pausedAt) == true else { return }
             let landed = await control.seek(to: fadeStart)
-            guard let self, isCurrent(item) else { return }
+            guard let self else { return }
+            // A restart that took the seek over keeps the rewind where it put it.
+            let isOwn = fadeSeek?.expiry == id
+            if isOwn { fadeSeek = nil }
+            guard isCurrent(item) else { return }
             let at = landed ?? (Self.isRetaining(control, seekTo: fadeStart) ? fadeStart : pausedAt)
-            if expiryID == id { pendingRewind?.at = at }
+            if expiryID == id, isOwn { pendingRewind?.at = at }
             if let landed { didSeek(to: landed) }
         }
     }
@@ -571,12 +587,13 @@ public final class SleepTimer {
     /// Whether expiry `id`'s queued seek back to the fade starts now: not once a reset or a play took it over, nor
     /// when another item, or a seek that landed or is in flight, came first (which drops the automatic rewind).
     private func startsFadeRewind(of id: Int, item: String?, from pausedAt: Double) -> Bool {
-        guard expiryID == id, queuedFadeRewind != nil else { return false }
+        guard expiryID == id, let queued = queuedFadeRewind else { return false }
         queuedFadeRewind = nil
         guard isCurrent(item), Self.isStill(control, at: pausedAt) else {
             pendingRewind = nil
             return false
         }
+        fadeSeek = (id, queued.from, queued.to)
         return true
     }
 

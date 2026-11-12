@@ -1323,6 +1323,49 @@ struct SleepTimerTests {
         #expect(harness.timer.canRestart)
     }
 
+    /// A restart that took over the expiry's seek in flight, and whose own seek fails, gives that seek back: retried,
+    /// it lands where the fade began (after the automatic rewind), not where playback paused.
+    @Test(arguments: [false, true])
+    func aRetryAfterAFailedRestartDuringTheExpirySeekLandsAtTheFadeStart(automatic: Bool) async throws {
+        let harness = try expiringHarness(automatic: automatic)
+        harness.control.holdsSeeks = true
+        await harness.play(from: 1000, to: 1070)
+        await until { harness.control.seeks == [1010] }
+        harness.control.holdsSeeks = false
+        harness.control.seeksLand = false
+        let target: Double = automatic ? 710 : 1010
+        #expect(await harness.timer.restart() == .failed)
+        await harness.control.finishSeek()
+        #expect(harness.control.seeks == [1010, target])
+        #expect(harness.control.currentTime == 1070)
+
+        harness.control.seeksLand = true
+        #expect(await harness.timer.restart() == .resumed)
+        #expect(harness.control.seeks == [1010, target, target])
+        #expect(harness.control.currentTime == target)
+        #expect(harness.control.plays == 1)
+    }
+
+    /// A seek of the user's after a failed restart that took over the expiry's seek wins: the retry resumes there.
+    @Test func aUserSeekAfterAFailedRestartDuringTheExpirySeekWins() async throws {
+        let harness = try expiringHarness(automatic: false)
+        harness.control.holdsSeeks = true
+        await harness.play(from: 1000, to: 1070)
+        await until { harness.control.seeks == [1010] }
+        harness.control.holdsSeeks = false
+        harness.control.seeksLand = false
+        #expect(await harness.timer.restart() == .failed)
+        await harness.control.finishSeek()
+        harness.control.seeksLand = true
+        harness.control.currentTime = 1200
+        harness.timer.didSeek(to: 1200)
+
+        #expect(await harness.timer.restart() == .resumed)
+        #expect(harness.control.seeks == [1010, 1010], "Nothing seeks back to the fade")
+        #expect(harness.control.currentTime == 1200)
+        #expect(harness.control.plays == 1)
+    }
+
     /// A restart whose play was accepted but never starts (the engine fails afterwards, say) leaves the restarted
     /// timer inert, as any pause does: it neither counts down nor pauses again until playback plays.
     @Test func aRestartedTimerOverPlaybackThatNeverStartsDoesNotCountDown() async throws {
