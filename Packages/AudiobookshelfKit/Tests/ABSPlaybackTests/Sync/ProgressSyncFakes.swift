@@ -45,11 +45,16 @@ final class StubProgressSyncService: ProgressSyncService {
         var fetchGates: [Gate] = []
         var fetchErrors: [APIError?] = []
         /// Explicit sequential canonical replies, including post-PATCH values. Without a session
-        /// client PATCH is recording-only; an empty queue falls back to serverProgress.
+        /// client PATCH is recording-only; an empty queue falls back to serverProgress. With one,
+        /// a queued reply stands in for the model's; an empty queue asks the model.
         var fetchReplies: [MediaProgress?] = []
         var fetchStarted: Gate?
         var patchGates: [Gate] = []
         var patchStarted: Gate?
+        /// The syncer's retried `/close`s (#382); the coordinator's go to `StubSessionService`.
+        var closes: [(id: String, report: PlaybackSyncReport?)] = []
+        /// Each retried `/close` takes the next (`nil` succeeds); an error never reaches the model.
+        var closeErrors: [APIError?] = []
         var log: [String] = []
         var canceledCalls: [String] = []
         var syncWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
@@ -65,6 +70,7 @@ final class StubProgressSyncService: ProgressSyncService {
     var reports: [PlaybackSyncReport] { state.withLock { $0.syncs.map(\.report) } }
     var patches: [Patch] { state.withLock { $0.patches } }
     var log: [String] { state.withLock { $0.log } }
+    var closes: [(id: String, report: PlaybackSyncReport?)] { state.withLock { $0.closes } }
 
     /// Snapshot at request time, then hold response delivery independently of local writes.
     /// The existing recording fixture starts with no canonical rows; explicit ServerSync
@@ -73,13 +79,18 @@ final class StubProgressSyncService: ProgressSyncService {
         let key = MediaKey(
             serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
         if let client = state.withLock({ $0.sessionClient }) {
-            let error = state.withLock { state in
+            let (error, reply): (APIError?, MediaProgress??) = state.withLock { state in
                 state.fetches.append(key)
                 state.log.append("get \(itemID)")
-                return state.fetchErrors.isEmpty ? nil : state.fetchErrors.removeFirst()
+                return (
+                    state.fetchErrors.isEmpty ? nil : state.fetchErrors.removeFirst(),
+                    state.fetchReplies.isEmpty ? .none : .some(state.fetchReplies.removeFirst())
+                )
             }
             // A queued error never reaches the model, like a failed connection.
             if let error { throw error }
+            // A queued reply stands in for the model's, like a misbehaving server.
+            if let reply { return reply }
             return try await client.model.fetchProgress(client, itemID: itemID, episodeID: episodeID)
         }
         let (progress, gate, error, started) = state.withLock { state in
@@ -197,6 +208,17 @@ final class StubProgressSyncService: ProgressSyncService {
         if let client = state.withLock({ $0.sessionClient }) {
             try await client.model.update(client, itemID: itemID, episodeID: episodeID, update)
         }
+    }
+
+    func closeSession(id: String, report: PlaybackSyncReport?) async throws {
+        let (client, error) = state.withLock { state in
+            state.closes.append((id, report))
+            state.log.append("close \(id)")
+            return (state.sessionClient, state.closeErrors.isEmpty ? nil : state.closeErrors.removeFirst())
+        }
+        // A queued error never reaches the model, like a failed connection.
+        if let error { throw error }
+        if let client { try await client.model.close(client, id: id, report: report) }
     }
 }
 

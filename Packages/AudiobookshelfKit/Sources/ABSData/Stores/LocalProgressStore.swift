@@ -104,7 +104,7 @@ public enum SessionUploadResult: Sendable, Equatable {
     case failure(String?)
 }
 
-/// The only writer of `LocalMediaProgress` and `PendingLocalSession` (ADR 0003).
+/// The only writer of `LocalMediaProgress`, `PendingLocalSession` and `PendingSessionClose` (ADR 0003).
 ///
 /// Progress follows the ADR 0003 sync rules: local edits mark only the field groups they touch,
 /// each PATCH carries one dirty group (audio, then finished, then ebook; #53), at most one PATCH
@@ -115,6 +115,9 @@ public enum SessionUploadResult: Sendable, Equatable {
 @ModelActor public actor LocalProgressStore: StoreActor {
     private nonisolated let playbackWriterID = UUID()
     private nonisolated let playbackSequence = Mutex<UInt64>(0)
+    /// Each row's latest committed change (``rowChangeStamp(for:)``), by key; a deleted key keeps
+    /// its stamp, so one entry per key changed in this process.
+    private nonisolated let rowChanges = Mutex<(last: UInt64, byKey: [String: UInt64])>((0, [:]))
     /// One successful watermark per key, never pending reservations or a history of tokens.
     private var committedPlaybackPositions:
         [MediaKey: (sequence: UInt64, row: PersistentIdentifier, audio: ProgressSend.Audio)] = [:]
@@ -241,6 +244,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         generation += 1
         mergedAt[key.rawValue] = generation
+        stampRowChange(key.rawValue)
         return .init(from: nil, to: server.currentTime)
     }
 
@@ -276,6 +280,32 @@ public enum SessionUploadResult: Sendable, Equatable {
             ProgressEdit(audio: audio), for: key, serverProgress: nil, localLibraryItemID: nil,
             now: now, playbackToken: token)
         return .committed
+    }
+
+    /// The audio edit time `token`'s position committed with, while it is still this writer's
+    /// latest committed playback position for `key`; otherwise `nil`. Unlike the token, the time
+    /// survives a relaunch: ``isLatestPlaybackPosition(currentTime:editedAt:for:)`` checks it.
+    public func committedPlaybackEdit(_ token: PlaybackPositionToken, for key: MediaKey) -> Date? {
+        guard token.writer == playbackWriterID, token.key == key,
+            let committed = committedPlaybackPositions[key], committed.sequence == token.sequence
+        else { return nil }
+        return committed.audio.editedAt
+    }
+
+    /// Whether the row's audio is still the position committed at `editedAt` (#382): no later
+    /// local edit (each one moves the edit time forward) and no server value merged over it.
+    /// The duration isn't compared, because the server may report the session's own.
+    public func isLatestPlaybackPosition(currentTime: Double, editedAt: Date, for key: MediaKey) throws -> Bool {
+        guard let row = try fetchRow(key) else { return false }
+        return row.audioEditedAt == editedAt && row.currentTime == currentTime
+    }
+
+    /// Moves with each committed change to `key`'s row: any local edit, a merged server value, a
+    /// send's settlement, a deletion (#382). It never moves back, a deleted key's included, and
+    /// is read without awaiting the actor, so a caller that took it before a store read can tell
+    /// without suspending again whether the row changed since.
+    public nonisolated func rowChangeStamp(for key: MediaKey) -> UInt64 {
+        rowChanges.withLock { $0.byKey[key.rawValue] ?? 0 }
     }
 
     /// Records a local change, creating the row when needed.
@@ -476,7 +506,10 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         if !changes.isEmpty {
             generation += 1
-            for key in changes.keys { mergedAt[key.rawValue] = generation }
+            for key in changes.keys {
+                mergedAt[key.rawValue] = generation
+                stampRowChange(key.rawValue)
+            }
         }
         return changes
     }
@@ -623,6 +656,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         if deleted {
             invalidateStartCaptures(for: key.rawValue)
+            stampRowChange(key.rawValue)
             rowGenerations[key.rawValue] = nil
             mergedAt[key.rawValue] = nil
             awaitingFetch[key.rawValue] = nil
@@ -645,6 +679,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         for key in keys {
             invalidateStartCaptures(for: key)
+            stampRowChange(key)
             awaitingFetch[key] = nil
             mergedAt[key] = nil
             if inFlight[key] == nil { rowGenerations[key] = nil }
@@ -781,6 +816,15 @@ public enum SessionUploadResult: Sendable, Equatable {
     private func advance(_ key: MediaKey) {
         generation += 1
         rowGenerations[key.rawValue] = generation
+        stampRowChange(key.rawValue)
+    }
+
+    /// Moves `raw`'s ``rowChangeStamp(for:)``, after its change committed.
+    private func stampRowChange(_ raw: String) {
+        rowChanges.withLock {
+            $0.last += 1
+            $0.byKey[raw] = $0.last
+        }
     }
 
     /// Merges `server` into the row (except groups in flight); `false` when the

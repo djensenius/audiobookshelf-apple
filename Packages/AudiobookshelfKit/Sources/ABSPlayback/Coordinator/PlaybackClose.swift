@@ -26,7 +26,8 @@ public struct PlaybackCloseHandoff: Sendable {
     /// Resolved once the closing session's `/sync` in flight returned.
     let sessionSync: PlaybackCloseResult<Void>?
     /// The `/close` result the coordinator resolves (``PlaybackCloseOperation/transport``), so
-    /// the reporter can record it in playback history.
+    /// the reporter can retry a close the server didn't acknowledge (#382) and record it in
+    /// playback history.
     let transport = PlaybackCloseResult<Bool>()
 
     init(

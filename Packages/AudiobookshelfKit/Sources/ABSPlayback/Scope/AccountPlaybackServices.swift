@@ -101,6 +101,12 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
         _ = try await client().send(SessionEndpoints.close(sessionID: id, report: report))
     }
 
+    /// Throws ``APIError/notAuthenticated`` without a client or features.
+    public func refreshStreamAccess(replacing rejected: String?) async throws {
+        guard let service = sessionService() else { throw APIError.notAuthenticated }
+        try await service.refreshStreamAccess(replacing: rejected)
+    }
+
     // MARK: ProgressSyncService
 
     public func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
