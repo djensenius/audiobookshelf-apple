@@ -168,8 +168,8 @@ struct SocketClientTests {
 
         clock.advance(by: .seconds(30))
         connection.push(#"42["playlist_added",\#(RealtimeFixtures.playlist)]"#)
-        guard case .playlistAdded = await harness.nextEvent() else {
-            Issue.record("Expected playlistAdded")
+        guard case .playlistChanged(.added, _) = await harness.nextEvent() else {
+            Issue.record("Expected a playlist addition")
             return
         }
         #expect(clock.pendingDelays == [.seconds(15)])
@@ -226,8 +226,8 @@ struct SocketClientTests {
         connection.push(Data([0x01, 0x02, 0x03]))
         connection.push(#"451-["baz",{"_placeholder":true,"num":0}]"#)
         connection.push(#"42["playlist_added",\#(RealtimeFixtures.playlist)]"#)
-        guard case .playlistAdded = await harness.nextEvent() else {
-            Issue.record("Expected playlistAdded")
+        guard case .playlistChanged(.added, _) = await harness.nextEvent() else {
+            Issue.record("Expected a playlist addition")
             return
         }
         #expect(!connection.isClosed)
@@ -263,8 +263,8 @@ struct SocketClientTests {
         first.push("1")
         _ = await harness.handshake(second)
         second.push(#"42["playlist_added",\#(RealtimeFixtures.playlist)]"#)
-        guard case .playlistAdded = await harness.nextEvent() else {
-            Issue.record("Expected playlistAdded")
+        guard case .playlistChanged(.added, _) = await harness.nextEvent() else {
+            Issue.record("Expected a playlist addition")
             return
         }
         #expect(!second.isClosed)
@@ -423,8 +423,8 @@ struct SocketClientTests {
             return
         }
         #expect(update.progress.id == "mp-1")
-        guard case .playlistAdded(let playlist) = await harness.nextEvent() else {
-            Issue.record("Expected playlistAdded")
+        guard case .playlistChanged(.added(let playlist, _), _) = await harness.nextEvent() else {
+            Issue.record("Expected a playlist addition")
             return
         }
         #expect(playlist.name == "Road trip")

@@ -249,6 +249,8 @@ final class DownloadHarness: Sendable {
     let requestStream: AsyncStream<URLRequest>
     /// How many tasks have completed; ``completionStream`` yields after each.
     let completions = Mutex(0)
+    /// Each completed task's `URLError` code, `nil` for a success (or another error), in order.
+    let completionErrors = Mutex<[URLError.Code?]>([])
     let completionStream: AsyncStream<Void>
     private let completionContinuation: AsyncStream<Void>.Continuation
 
@@ -355,7 +357,8 @@ final class DownloadHarness: Sendable {
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadSessionFactory {
         { [self] delegate in
-            let session = StubDownloadSession(delegate: delegate) { [weak self] in
+            let session = StubDownloadSession(delegate: delegate) { [weak self] error in
+                self?.completionErrors.withLock { $0.append((error as? URLError)?.code) }
                 self?.completions.withLock { $0 += 1 }
                 self?.completionContinuation.yield()
             }

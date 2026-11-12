@@ -310,8 +310,10 @@ public final class RealtimeBridge: SessionParticipant {
             if user.id == identity?.userID { onUserUpdated?(user) }
         case .userItemProgressUpdated(let update):
             apply(update)
-        case .playlistAdded:
-            break
+        case .collectionChanged(let change):
+            deliver(.collection(change))
+        case .playlistChanged(let change, let userID):
+            deliver(.playlist(change, userID: userID))
         case .authorChanged(let change):
             deliver(.author(change))
         }

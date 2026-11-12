@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSCore
 import Foundation
 import Synchronization
@@ -149,5 +150,68 @@ import Testing
         let tasks = await harness.session?.session.allTasks ?? []
         #expect(tasks.allSatisfy { $0.state != .running })
         never.open()
+    }
+
+    /// Deleting a podcast while its cover is fetched again (a cover-only record) cancels that
+    /// transfer: its task completes cancelled, the record goes with its transfer marker and
+    /// resume data, the request stays the only one, and no cover file is ever written for the
+    /// deleted podcast.
+    @Test func deletingAPodcastCancelsItsCoverRefetch() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { request in
+            request.url?.path().hasSuffix("/cover") == true
+                ? .status(200, body: Self.cover, contentType: "image/jpeg", gate: gate) : .status(404)
+        }
+        let podcast = LibraryItemFixtures.podcast()
+        var episode = try DownloadPlanner(locations: harness.locations).plan(
+            item: podcast, episodeID: "ep_1", connectionID: harness.connectionID, existingCoverPath: nil)
+        episode.parts.removeAll { $0.kind == .cover }
+        for index in episode.parts.indices {
+            episode.parts[index].state = .completed
+            episode.parts[index].bytesWritten = episode.parts[index].expectedBytes
+        }
+        let local = try await harness.localItems.upsertFromDownload(episode)
+        try #require(local.coverRelativePath == nil)
+        let itemKey = MediaKey(serverConnectionID: harness.connectionID, libraryItemId: podcast.id)
+        let partID = UUID()
+        let destination = "\(local.relativeDirectory)/cover-\(partID.uuidString.lowercased()).jpg"
+        let refetch = try #require(
+            try await harness.store.insertRecordIfSignedIn(
+                DownloadRecordDTO(
+                    key: itemKey, mediaType: .podcast, title: local.title, relativeDirectory: local.relativeDirectory,
+                    media: LocalMediaSnapshot(metadata: local.media.metadata),
+                    parts: [
+                        DownloadPartDTO(
+                            id: partID, kind: .cover,
+                            serverPath: DownloadRequests.coverPath(itemID: podcast.id, updatedAt: 0),
+                            filename: DownloadLayout.coverFilename, mimeType: "image/jpeg", expectedBytes: 0,
+                            bytesWritten: 0, destinationRelativePath: destination, state: .queued)
+                    ])))
+        try #require(refetch.isCoverOnly)
+        let engine = harness.makeEngine()
+        let manager = DownloadManager(
+            store: harness.store, localItems: harness.localItems, engine: engine, locations: harness.locations,
+            capacity: FakeCapacity(), clock: harness.clock)
+        try await manager.start()
+        let events = await manager.events()
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        try #require(harness.locations.transferStart(partID: partID) != nil)
+
+        #expect(try await manager.deleteLocalItem(id: local.id))
+
+        // Waits for the task's completion, with the reply let through, so a transfer left
+        // running would finish rather than stay pending, then for the engine to handle it.
+        gate.open()
+        await harness.waitForCompletions(1)
+        await engine.processPendingEvents()
+        #expect(harness.completionErrors.withLock { $0 } == [.cancelled])
+        #expect(try await harness.store.record(id: refetch.id) == nil)
+        #expect(harness.locations.transferStart(partID: partID) == nil)
+        #expect(!FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path()))
+        #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
+        #expect(harness.requests.count == 1)
+        #expect(!harness.fileExists(destination))
+        #expect(!harness.fileExists(local.relativeDirectory))
     }
 }
