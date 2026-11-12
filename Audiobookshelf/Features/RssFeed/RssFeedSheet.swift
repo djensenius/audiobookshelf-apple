@@ -46,13 +46,13 @@ enum RssFeedPresentation {
         state == .idle || state == .loading
     }
 
-    /// Whether the entry shows a feed as open: the sheet's model once it has loaded or seen a feed,
-    /// else what the screen fetched (`include=rssfeed`).
+    /// Whether the entry shows a feed as open: the sheet's model once it knows the feed's state
+    /// (loaded, opened, closed, a live change, or carried over from the last sheet), else what the
+    /// screen fetched (`include=rssfeed`).
     @MainActor
     static func showsOpen(fetched: Bool, model: RssFeedModel?) -> Bool {
-        guard let model else { return fetched }
-        if model.feed != nil { return true }
-        return model.loadState == .loaded ? false : fetched
+        guard let model, model.hasKnownState else { return fetched }
+        return model.feed != nil
     }
 }
 
@@ -93,9 +93,11 @@ private struct RssFeedEntry: ViewModifier {
                 if let target, let client, shows {
                     ToolbarItem(placement: .primaryAction) {
                         Button {
-                            // A fresh sheet each time, as before; the entry keeps the last one's state.
-                            model = RssFeedModel(
+                            // A fresh sheet each time, as before, starting from what the last one knew.
+                            let fresh = RssFeedModel(
                                 target: target, service: client, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate)
+                            if let model { fresh.seed(from: model) }
+                            model = fresh
                             isPresented = true
                         } label: {
                             Label {

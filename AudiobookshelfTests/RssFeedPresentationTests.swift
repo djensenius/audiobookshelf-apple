@@ -111,5 +111,15 @@ private struct StubRssFeedService: RssFeedService {
         let openedLive = RssFeedModel(target: target, service: StubRssFeedService(open: nil))
         openedLive.apply(.opened(feed))
         #expect(RssFeedPresentation.showsOpen(fetched: false, model: openedLive))
+
+        // A live close before any load answers.
+        let closedLive = RssFeedModel(target: target, service: StubRssFeedService(open: feed))
+        closedLive.apply(.closed(feed))
+        #expect(!RssFeedPresentation.showsOpen(fetched: true, model: closedLive))
+
+        // The next sheet starts from the last one's state, not the screen's stale fetch.
+        let reopened = RssFeedModel(target: target, service: StubRssFeedService(open: feed))
+        reopened.seed(from: closedNow)
+        #expect(!RssFeedPresentation.showsOpen(fetched: true, model: reopened))
     }
 }
