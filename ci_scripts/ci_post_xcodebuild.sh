@@ -15,9 +15,8 @@ skip() {
 if [ -n "${CI_XCODEBUILD_ACTION:-}" ] && [ "$CI_XCODEBUILD_ACTION" != "archive" ]; then
   skip "not an archive action ($CI_XCODEBUILD_ACTION)"
 fi
-# Gate on the
-# App Store-signed export, as Apple's example does: it exists only after a
-# successful archive whose distribution preparation targets TestFlight.
+# Gate on the App Store-signed export, as Apple's example does: it exists only
+# after a successful archive whose distribution preparation targets TestFlight.
 if [ -z "${CI_APP_STORE_SIGNED_APP_PATH:-}" ] || [ ! -d "$CI_APP_STORE_SIGNED_APP_PATH" ]; then
   skip "no TestFlight archive (CI_APP_STORE_SIGNED_APP_PATH is not a directory)"
 fi
