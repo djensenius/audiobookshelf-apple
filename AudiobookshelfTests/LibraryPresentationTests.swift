@@ -418,6 +418,8 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
         #expect(descending.compactMap(\.arrowSymbol) == ["arrow.down"])
     }
 
+    /// Each choice reloads; the test waits for each reload (`load()` returns the one in flight),
+    /// as a reload the next choice cancelled can still reach the client after it.
     @Test func choosingASortFlipsOrSetsTheDirectionAndSavesIt() async throws {
         let client = GatedLibraryClient(items: ["lib_a": books("a", 3, in: "lib_a")])
         try await withStore(client) { store in
@@ -426,17 +428,22 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
 
             LibraryPresentation.selectSort(.addedAt, in: model)
             #expect(model.preferences.sort == .addedAt && !model.preferences.descending)
+            await model.load()?.value
             LibraryPresentation.selectSort(.title, in: model)
             #expect(model.preferences.sort == .title && !model.preferences.descending)
+            await model.load()?.value
             LibraryPresentation.selectSort(.title, in: model)
             #expect(model.preferences.descending)
             await model.load()?.value
 
             let saved = try #require(store.viewPreferences(libraryID: "lib_a"))
             #expect(saved.sort == .title && saved.descending)
-            let request = try #require(await client.requests.last)
-            #expect(request.query.sort == LibrarySortKey.title.rawValue)
-            #expect(request.query.descending)
+            let requests = await client.requests.map { [$0.query.sort, "\($0.query.descending)"] }
+            #expect(
+                requests == [
+                    [LibrarySortKey.addedAt.rawValue, "false"], [LibrarySortKey.title.rawValue, "false"],
+                    [LibrarySortKey.title.rawValue, "true"],
+                ])
         }
     }
 
