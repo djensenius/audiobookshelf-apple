@@ -28,9 +28,16 @@ enum RssFeedPresentation {
         hasClient && RssFeedModel.canManageFeeds(userType)
     }
 
-    /// Legacy shows Yes or No for prevent indexing; a feed without the flag was opened with the default, on.
+    /// What VoiceOver announces for a failure: the message, then the server's reason.
+    static func announcement(for error: RssFeedModelError, locale: Locale? = nil) -> String {
+        let message = message(for: error)
+        return [L10n.string(message.key, locale: locale), message.detail].compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// Legacy's Yes or No for prevent indexing. The server blocks indexing (`itunes:block`) only when the
+    /// flag is set, so a missing flag reads No.
     static func preventIndexingKey(_ feed: RssFeed) -> String {
-        feed.meta?.preventIndexing ?? true ? "ButtonYes" : "LabelNo"
+        feed.meta?.preventIndexing == true ? "ButtonYes" : "LabelNo"
     }
 
     /// Nothing but progress shows until the current feed is known, so the form never flashes before an
@@ -90,44 +97,58 @@ struct RssFeedSheet: View {
     @State private var model: RssFeedModel
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    /// The feed that was just closed, shown while the sheet goes away instead of the open form.
+    @State private var closedFeed: RssFeed?
+
+    private static let errorID = "rss-feed-error"
 
     init(model: RssFeedModel) {
         _model = State(initialValue: model)
     }
 
     var body: some View {
+        let feed = model.feed ?? closedFeed
         NavigationStack {
-            Form {
-                if let error = model.error {
-                    RssFeedErrorSection(error: error)
+            ScrollViewReader { proxy in
+                Form {
+                    if let error = model.error {
+                        RssFeedErrorSection(error: error)
+                            .id(Self.errorID)
+                    }
+                    if RssFeedPresentation.isLoading(model.loadState) {
+                        ProgressView {
+                            Text(verbatim: L10n.string("MessageLoading"))
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else if let feed {
+                        openFeed(feed)
+                    } else if model.loadState == .failed {
+                        Button {
+                            Task { await model.load() }
+                        } label: {
+                            Text(verbatim: L10n.string("ButtonRetry"))
+                        }
+                    } else {
+                        RssFeedOpenForm(model: model)
+                    }
                 }
-                if RssFeedPresentation.isLoading(model.loadState) {
-                    ProgressView {
-                        Text(verbatim: L10n.string("MessageLoading"))
-                    }
-                    .frame(maxWidth: .infinity)
-                } else if let feed = model.feed {
-                    openFeed(feed)
-                } else if model.loadState == .failed {
-                    Button {
-                        Task { await model.load() }
-                    } label: {
-                        Text(verbatim: L10n.string("ButtonRetry"))
-                    }
-                } else {
-                    RssFeedOpenForm(model: model)
+                .formStyle(.grouped)
+                .disabled(model.isWorking || closedFeed != nil)
+                // A failure, such as a slug that was changed and must be checked, is announced and scrolled
+                // to, as the message can be off screen at large text sizes.
+                .onChange(of: model.failureCount) {
+                    guard let error = model.error else { return }
+                    withAnimation { proxy.scrollTo(Self.errorID, anchor: .top) }
+                    AccessibilityNotification.Announcement(RssFeedPresentation.announcement(for: error)).post()
                 }
             }
-            .formStyle(.grouped)
-            .disabled(model.isWorking)
-            .navigationTitle(
-                Text(verbatim: L10n.string(model.feed == nil ? "HeaderOpenRSSFeed" : "HeaderRSSFeedIsOpen"))
-            )
+            .navigationTitle(Text(verbatim: L10n.string(feed == nil ? "HeaderOpenRSSFeed" : "HeaderRSSFeedIsOpen")))
             #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar { toolbar }
+            .toolbar { toolbar(feed: feed) }
         }
+        .interactiveDismissDisabled(model.isWorking)
         .task { await model.load() }
         .task(id: copied) {
             guard copied else { return }
@@ -137,15 +158,16 @@ struct RssFeedSheet: View {
     }
 
     @ToolbarContentBuilder
-    private var toolbar: some ToolbarContent {
+    private func toolbar(feed: RssFeed?) -> some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
             Button {
                 dismiss()
             } label: {
-                Text(verbatim: L10n.string(model.feed == nil ? "ButtonCancel" : "ButtonDone"))
+                Text(verbatim: L10n.string(feed == nil ? "ButtonCancel" : "ButtonDone"))
             }
+            .disabled(model.isWorking)
         }
-        if model.feed == nil, model.loadState == .loaded {
+        if feed == nil, model.loadState == .loaded {
             ToolbarItem(placement: .confirmationAction) {
                 if model.isWorking {
                     ProgressView()
@@ -163,7 +185,7 @@ struct RssFeedSheet: View {
     @ViewBuilder
     private func openFeed(_ feed: RssFeed) -> some View {
         Section {
-            if let url = model.feedURL {
+            if let url = model.serverURL.flatMap(feed.url(on:)) {
                 Text(verbatim: url.absoluteString)
                     .textSelection(.enabled)
                     .font(.callout.monospaced())
@@ -210,6 +232,7 @@ struct RssFeedSheet: View {
             Button(role: .destructive) {
                 Task {
                     guard await model.close() else { return }
+                    closedFeed = feed
                     AccessibilityNotification.Announcement(L10n.string("ToastRSSFeedCloseSuccess")).post()
                     dismiss()
                 }

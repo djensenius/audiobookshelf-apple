@@ -40,7 +40,19 @@ import Testing
         #expect(L10n.string(message.key, locale: Locale(identifier: "en")) != message.key)
     }
 
-    @Test(arguments: [(Bool?.some(true), "ButtonYes"), (false, "LabelNo"), (nil, "ButtonYes")])
+    @Test func theAnnouncementAddsTheServersReason() {
+        let english = Locale(identifier: "en")
+        let failed = L10n.string("MessageRSSFeedOpenFailed", locale: english)
+        #expect(
+            RssFeedPresentation.announcement(for: .openFailed(message: "Slug already in use"), locale: english)
+                == failed + " Slug already in use")
+        #expect(RssFeedPresentation.announcement(for: .openFailed(message: nil), locale: english) == failed)
+        #expect(
+            RssFeedPresentation.announcement(for: .slugChanged, locale: english)
+                == L10n.string("MessageRSSFeedSlugChanged", locale: english))
+    }
+
+    @Test(arguments: [(Bool?.some(true), "ButtonYes"), (false, "LabelNo"), (nil, "LabelNo")])
     func preventIndexingReadsYesOrNo(flag: Bool?, key: String) {
         let feed = RssFeed(
             id: "f", entityType: "series", entityId: "s", feedUrl: "/feed/s", meta: .init(preventIndexing: flag))

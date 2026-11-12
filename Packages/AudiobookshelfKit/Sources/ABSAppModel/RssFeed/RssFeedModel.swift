@@ -70,7 +70,11 @@ public final class RssFeedModel {
     /// Opening or closing.
     public private(set) var isWorking = false
     /// The last failure, cleared when the next open or close starts.
-    public var error: RssFeedModelError?
+    public private(set) var error: RssFeedModelError? {
+        didSet { if error != nil { failureCount += 1 } }
+    }
+    /// Counts failures, so a view can announce one that repeats the last ``error``.
+    public private(set) var failureCount = 0
 
     @ObservationIgnored private let service: any RssFeedService
 
@@ -143,7 +147,8 @@ public final class RssFeedModel {
         }
     }
 
-    /// Closes the open feed; `true` when it closed.
+    /// Closes the open feed; `true` when it closed. A feed the server no longer has (404), for example
+    /// closed elsewhere, counts as closed.
     @discardableResult
     public func close() async -> Bool {
         guard !isWorking, let feed else { return false }
@@ -152,6 +157,9 @@ public final class RssFeedModel {
         error = nil
         do {
             try await service.closeFeed(id: feed.id)
+            self.feed = nil
+            return true
+        } catch APIError.notFound {
             self.feed = nil
             return true
         } catch {

@@ -187,10 +187,31 @@ private func feed(slug: String) -> RssFeed {
         #expect(service.requests.value == [.current(target), .close("feed-open")])
     }
 
+    @Test func aFeedTheServerNoLongerHasClosesWithoutAnError() async {
+        let service = FakeRssFeedService(current: { feed(slug: "open") }, close: { throw APIError.notFound })
+        let model = RssFeedModel(target: target, service: service)
+        await model.load()
+        #expect(await model.close())
+        #expect(model.feed == nil)
+        #expect(model.error == nil)
+        #expect(service.requests.value == [.current(target), .close("feed-open")])
+    }
+
+    @Test func aRepeatedFailureIsCountedAgain() async {
+        let model = RssFeedModel(target: target, service: FakeRssFeedService())
+        model.ownerEmail = "ada"
+        #expect(model.failureCount == 0)
+        await model.open()
+        await model.open()
+        #expect(model.error == .invalidOwnerEmail)
+        #expect(model.failureCount == 2)
+    }
+
     @Test func aFailedCloseKeepsTheFeed() async {
         let model = RssFeedModel(
             target: target,
-            service: FakeRssFeedService(current: { feed(slug: "open") }, close: { throw APIError.notFound }))
+            service: FakeRssFeedService(
+                current: { feed(slug: "open") }, close: { throw APIError.forbidden(message: nil) }))
         #expect(await !model.close())
         await model.load()
         #expect(await !model.close())
