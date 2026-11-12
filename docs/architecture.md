@@ -69,7 +69,7 @@ models in a view).
 | `ABSPlayback` | Playback engine, `PlaybackCoordinator`, progress sync, connection-scoped queue core (`ABSPlayback/Queue/`), sleep timer, Now Playing adapter (`ABSPlayback/NowPlaying/`) | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSDownloads` | Background `URLSession` downloads | `ABSCore`, `ABSAPI`, `ABSData` |
 | `ABSUI` | Design system, shared components, covers, localized strings | `ABSCore` |
-| `ABSAppModel` | Account and library state, routing (`Router`, `Route`, `DeepLink`, `AppTab` in `ABSAppModel/Navigation/`), feature view models, realtime bridge, `DownloadedCoverLookup` implementation | everything above except `ABSUI` |
+| `ABSAppModel` | Account and library state, routing (`Router`, `Route`, `DeepLink`, `AppTab` in `ABSAppModel/Navigation/`), feature view models, realtime bridge, `DownloadedCoverLookup` implementation, CBZ reading (`ABSAppModel/Reader/`) | everything above except `ABSUI`; ZIPFoundation (ADR 0008) |
 
 Rules:
 
