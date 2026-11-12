@@ -124,14 +124,18 @@ public struct PlaybackCommandsModel {
     // MARK: Sleep timer
 
     /// Whether `command` is enabled now: starting a timer needs an item, and End of Chapter a chapter
-    /// playing (``SleepTimerPanelModel/offersEndOfChapter``). Cancel needs a timer running or in its
-    /// grace period, and isn't offered for the automatic timer, whose cancel the sleep timer sheet
-    /// confirms first (D18).
+    /// playing (``SleepTimerPanelModel/offersEndOfChapter``) that ends after the playback position.
+    /// At the end of the media the last chapter is still playing but has no end ahead, so the timer
+    /// can't start; the sheet says so (D16), and the menu disables the item instead. Cancel needs a
+    /// timer running or in its grace period, and isn't offered for the automatic timer, whose cancel
+    /// the sleep timer sheet confirms first (D18).
     public func isEnabled(_ command: SleepTimerCommand) -> Bool {
         guard let panel = sleepTimerPanel else { return false }
         switch command {
         case .minutes: return activePlayer != nil
-        case .endOfChapter: return activePlayer != nil && panel.offersEndOfChapter
+        case .endOfChapter:
+            guard let player = activePlayer else { return false }
+            return hasChapterEndAhead(player)
         case .cancel: return panel.state != .idle && !panel.needsCancelConfirmation
         }
     }
@@ -150,5 +154,13 @@ public struct PlaybackCommandsModel {
     private var sleepTimerPanel: SleepTimerPanelModel? {
         guard let sleepTimer, let player else { return nil }
         return SleepTimerPanelModel(timer: sleepTimer, player: player)
+    }
+
+    /// Whether the chapter playing ends after the playback position, as the sleep timer needs to start
+    /// at end of chapter. Reads the playback time.
+    private func hasChapterEndAhead(_ player: PlayerViewModel) -> Bool {
+        let time = player.playback.currentTime
+        guard let end = player.playback.timeline?.endOfChapter(at: time) else { return false }
+        return end > time
     }
 }

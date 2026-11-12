@@ -256,6 +256,24 @@ struct PlaybackCommandsModelTests {
         #expect(harness.timer.mode == nil)
     }
 
+    @Test func endOfChapterNeedsTheChapterEndAhead() throws {
+        let harness = try Harness()
+        let model = harness.model()
+        // At the end of the book the last chapter is still current, so the sheet offers End of Chapter and says it
+        // can't start (D16); the menu can't say so, and disables it.
+        harness.load(at: 400)
+        #expect(SleepTimerPanelModel(timer: harness.timer, player: harness.player).offersEndOfChapter)
+        #expect(!model.isEnabled(.endOfChapter))
+        model.perform(.endOfChapter)
+        #expect(harness.timer.mode == nil)
+
+        // A second before it, the timer stops at the end of the media.
+        harness.load(at: 399)
+        #expect(model.isEnabled(.endOfChapter))
+        model.perform(.endOfChapter)
+        #expect(harness.timer.mode == .endOfChapter)
+    }
+
     @Test func cancelWorksAfterItemCloses() throws {
         let harness = try Harness()
         let model = harness.model()
