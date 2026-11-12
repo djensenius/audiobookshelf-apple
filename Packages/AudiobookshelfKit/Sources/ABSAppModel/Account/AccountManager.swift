@@ -392,6 +392,7 @@ public final class AccountManager {
             id = try? await store.connectionToRestore()?.id
         }
         guard let id else { return nil }
+        forgetDownloadClient(id)
         let signedOutAt = await saveSignOut(of: id)
         let credentials = self.credentials(for: id)
         // Not a session that a sign-in started after this call saved, whichever reached the
@@ -441,6 +442,7 @@ public final class AccountManager {
     public func remove(_ id: UUID) async throws -> URL? {
         removing.insert(id)
         defer { removing.remove(id) }
+        forgetDownloadClient(id)
         let wasActive = activeConnection?.id == id
         let activeClient = wasActive ? client : nil
         // Signed out first, so a restore or switch that's reading the session stops at once; put
@@ -513,6 +515,53 @@ public final class AccountManager {
     /// Whether a sign-in, restore or switch began since the last ``logout()``: its end-session URL
     /// would then end or interrupt that in the shared browser.
     public var hasBegunSinceLogout: Bool { operation != latestLogout }
+
+    // MARK: - Downloads
+
+    /// Clients for download credentials of saved connections that aren't active, so a
+    /// connection's download parts share one client and join its single refresh.
+    @ObservationIgnored private var downloadClients: [UUID: APIClient] = [:]
+    /// Counts ``logout()`` and ``remove(_:)`` calls per connection, so a lookup that overlapped
+    /// one doesn't keep a client.
+    @ObservationIgnored private var downloadClientResets: [UUID: Int] = [:]
+
+    /// The client for a connection's download credentials (`AccountDownloadCredentials`): the
+    /// active client, or for another saved connection that is connected, not signed out, not
+    /// being removed and has a saved session, a client over its credentials (shared with the
+    /// app's own clients, so a refresh is saved and joined), kept until ``logout()`` or
+    /// ``remove(_:)`` of it. Reads the store, not ``connections``, so it works in a background
+    /// wake before the session is restored. `nil` otherwise.
+    public func downloadClient(for id: UUID) async -> APIClient? {
+        if activeConnection?.id == id, let client {
+            // Kept, so a sign-in's new custom headers are used once another connection is active.
+            downloadClients[id] = client
+            return client
+        }
+        guard !removing.contains(id) else { return nil }
+        let reset = downloadClientResets[id, default: 0]
+        // Read each time: an expiry whose delete failed saves a sign-out without a logout.
+        guard let connection = try? await store.connection(id: id), !connection.isDisconnected,
+            connection.signedOutAt == nil, downloadClientResets[id, default: 0] == reset, !removing.contains(id)
+        else { return nil }
+        if activeConnection?.id == id, let client { return client }
+        if let cached = downloadClients[id] { return cached }
+        let credentials = self.credentials(for: id)
+        guard let saved = try? await credentials.load(), saved.session != nil,
+            downloadClientResets[id, default: 0] == reset, !removing.contains(id)
+        else { return nil }
+        if activeConnection?.id == id, let client { return client }
+        if let cached = downloadClients[id] { return cached }
+        guard let created = makeClient(connection, customHeaders: saved.customHeaders, credentials: credentials) else {
+            return nil
+        }
+        downloadClients[id] = created
+        return created
+    }
+
+    private func forgetDownloadClient(_ id: UUID) {
+        downloadClients[id] = nil
+        downloadClientResets[id, default: 0] += 1
+    }
 
     // MARK: - Private
 
