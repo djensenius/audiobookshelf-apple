@@ -29,7 +29,7 @@ private func serverProgress(_ location: String?) -> MediaProgress {
         _ kind: ReaderKind = .pdf, progress: EbookProgressModel? = nil, server: MediaProgress? = nil
     ) -> ReaderContainerModel {
         ReaderContainerModel(
-            request: request(), kind: kind,
+            request: request(ext: kind == .epub ? "epub" : "pdf"), kind: kind,
             loader: EbookFileLoader(directory: readerTemporaryDirectory(), fetcher: fetcher), progress: progress,
             serverProgress: server)
     }
@@ -120,6 +120,33 @@ private func serverProgress(_ location: String?) -> MediaProgress {
         await model.flush()
         #expect(harness.service.writes.value.map(\.update.ebookLocation) == ["4", "3"])
     }
+
+    /// epub.js reports where it rendered the book on opening: the first page of an unread book, or
+    /// the start of the page holding the saved CFI. Neither is a turn.
+    @Test(arguments: [nil, "epubcfi(/6/4!/4/2/1:120)"])
+    func anEPUBsOpeningLocationIsNotSaved(saved: String?) async throws {
+        let harness = try ProgressHarness()
+        let model = makeModel(.epub, progress: harness.makeProgressModel(kind: .epub), server: nil)
+        harness.service.server.value = serverProgress(saved)
+        await model.load()
+        #expect(model.resumePoint.location == saved.map { .cfi($0) })
+
+        let pageStart = EbookLocation.cfi("epubcfi(/6/4!/4/2/1:0)")
+        model.recordOpening(pageStart, progress: 0.1)
+        model.record(pageStart, progress: 0.1)
+        await model.flush()
+        #expect(model.location == pageStart)
+        #expect(try await harness.row()?.ebookDirty != true)
+        #expect(harness.service.writes.value.isEmpty)
+
+        let turned = EbookLocation.cfi("epubcfi(/6/6!/4/2/1:0)")
+        model.record(turned, progress: 0.2)
+        // Once turned, an opening report changes nothing.
+        model.recordOpening(pageStart, progress: 0.1)
+        await model.flush()
+        #expect(model.location == turned)
+        #expect(harness.service.writes.value.map(\.update.ebookLocation) == [turned.stored])
+    }
 }
 
 /// A real store and syncer over ``FakeProgressServer``, as in `EbookProgressModelTests`.
@@ -140,9 +167,9 @@ private struct ProgressHarness {
                 now: { t0 }, uptime: { 0 }, sleep: { _ in try await Task.sleep(for: .seconds(86_400)) }))
     }
 
-    func makeProgressModel() -> EbookProgressModel {
+    func makeProgressModel(kind: ReaderKind = .pdf) -> EbookProgressModel {
         EbookProgressModel(
-            key: key, kind: .pdf, store: store, service: service, syncer: syncer, clock: ManualClock(), now: { t0 })
+            key: key, kind: kind, store: store, service: service, syncer: syncer, clock: ManualClock(), now: { t0 })
     }
 
     func row() async throws -> LocalMediaProgressDTO? {

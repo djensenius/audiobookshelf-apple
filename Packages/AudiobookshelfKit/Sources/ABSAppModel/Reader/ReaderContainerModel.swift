@@ -12,7 +12,9 @@ import Observation
 ///   closing and backgrounding. Without one (until the account's progress store and syncer are
 ///   wired, #184), the reader opens at the server's position as known and saves nothing.
 /// - **Opening.** A reader reports where it opened; that report is the resume point, not a
-///   turn, so opening a book doesn't mark its progress changed.
+///   turn, so opening a book doesn't mark its progress changed. A reader that renders the book
+///   somewhere else on opening (epub.js reports the start of the page holding the saved CFI, or
+///   the first page's CFI for an unread book) reports it through ``recordOpening(_:progress:)``.
 @MainActor
 @Observable
 public final class ReaderContainerModel {
@@ -40,8 +42,10 @@ public final class ReaderContainerModel {
     @ObservationIgnored private let loader: EbookFileLoader
     @ObservationIgnored private let progressModel: EbookProgressModel?
     @ObservationIgnored private let serverProgress: MediaProgress?
-    /// Whether a location other than the resume point was reported.
+    /// Whether a location other than where the reader opened was reported.
     @ObservationIgnored private var turned = false
+    /// Where the reader rendered the book on opening, if it said (``recordOpening(_:progress:)``).
+    @ObservationIgnored private var openedAt: EbookLocation?
 
     /// - Parameters:
     ///   - progress: The book's progress model; `nil` opens at `serverProgress` and saves nothing.
@@ -113,11 +117,21 @@ public final class ReaderContainerModel {
         return EbookResumePoint.resolve(kind: kind, local: nil, server: serverProgress)
     }
 
+    /// Where the reader rendered the book on opening, before any turn: shown, but not saved, and
+    /// not a turn when reported again. Ignored once the reader has turned.
+    public func recordOpening(_ location: EbookLocation, progress: Double?) {
+        guard !turned, location.isValid(for: kind) else { return }
+        openedAt = location
+        self.location = location
+        self.progress = EbookResumePoint.normalized(progress)
+    }
+
     /// A location the reader reports. One that isn't valid for the format is ignored; the resume
-    /// point before any other location is where the reader opened, not a turn.
+    /// point or the opening location before any other location is where the reader opened, not a
+    /// turn.
     public func record(_ location: EbookLocation, progress: Double?) {
         guard location.isValid(for: kind) else { return }
-        if !turned, location == resumePoint.location { return }
+        if !turned, location == resumePoint.location || location == openedAt { return }
         turned = true
         self.location = location
         self.progress = EbookResumePoint.normalized(progress)

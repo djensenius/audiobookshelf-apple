@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSData
@@ -40,8 +41,10 @@ enum ReaderCaches {
 /// chrome (close, title and the reader settings). Full screen on iPhone and iPad, a window on Mac.
 ///
 /// It needs the scene's library store serving the presentation's connection, for the account's
-/// client and known progress. Progress is flushed when the reader closes and when the app moves to
-/// the background.
+/// client and known progress. The reader follows the store: signing out or switching accounts
+/// drops the book (the "not signed in" state), and the account's client attaching again reopens
+/// it. Progress is flushed when the reader closes, when the app moves to the background, and
+/// when the account goes.
 struct ReaderContainer: View {
     let presentation: ReaderPresentation
     let onClose: () -> Void
@@ -50,8 +53,25 @@ struct ReaderContainer: View {
     @Environment(\.downloadedEbookFile) private var downloadedEbookFile
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: ReaderContainerModel?
+    /// The account ``model`` was built for.
+    @State private var modelSource: Source?
     @State private var isUnavailable = false
     @State private var serverURL: URL?
+
+    /// The book, and the client of the account serving it, if the store is on its connection.
+    private struct Source: Hashable {
+        let presentation: ReaderPresentation
+        let client: ObjectIdentifier?
+    }
+
+    private var servingClient: APIClient? {
+        guard let store, store.connectionKey?.connectionID == presentation.connectionID else { return nil }
+        return store.client as? APIClient
+    }
+
+    private var source: Source {
+        Source(presentation: presentation, client: servingClient.map(ObjectIdentifier.init))
+    }
 
     var body: some View {
         Group {
@@ -64,12 +84,19 @@ struct ReaderContainer: View {
                 LoadingView()
             }
         }
-        .task(id: presentation) {
-            if model == nil {
+        .task(id: source) {
+            let source = source
+            if modelSource != source {
+                if let model { Task { await model.flush() } }
                 model = makeModel()
-                isUnavailable = model == nil
+                modelSource = source
+                serverURL = nil
             }
-            await model?.load()
+            isUnavailable = model == nil
+            guard let model else { return }
+            await model.load()
+            // The account may have changed while it loaded; the next run replaces the model.
+            guard !Task.isCancelled, self.source == source else { return }
             serverURL = try? await store?.makeServices()?.serverURL()
         }
         .onChange(of: scenePhase) { _, phase in
@@ -78,9 +105,8 @@ struct ReaderContainer: View {
     }
 
     private func makeModel() -> ReaderContainerModel? {
-        guard let store, store.connectionKey?.connectionID == presentation.connectionID,
-            let fetcher = store.client as? any EbookFileFetching
-        else { return nil }
+        guard let store, let client = servingClient else { return nil }
+        let fetcher = APIEbookFileFetcher(client: client)
         let kind = presentation.kind
         let serverProgress = store.progress.progress(libraryItemID: presentation.itemID)
         let key = MediaKey(serverConnectionID: presentation.connectionID, libraryItemId: presentation.itemID)
@@ -129,6 +155,9 @@ private struct ReaderContent: View {
             }
         }
         .animation(.default, value: model.isChromeVisible)
+        // Native text and controls follow the reader's theme, not the app's appearance; "match
+        // system" was resolved from the appearance outside.
+        .environment(\.colorScheme, theme.colorScheme)
         #if os(iOS)
             .statusBarHidden(!model.isChromeVisible)
         #endif
@@ -290,6 +319,14 @@ extension PDFReaderBackground {
 }
 
 extension ReaderTheme {
+    /// The appearance of native views over the page.
+    var colorScheme: ColorScheme {
+        switch self {
+        case .light, .sepia: .light
+        case .dark, .black: .dark
+        }
+    }
+
     /// The page colour behind the reader and its safe areas.
     var chromeBackground: Color {
         switch self {

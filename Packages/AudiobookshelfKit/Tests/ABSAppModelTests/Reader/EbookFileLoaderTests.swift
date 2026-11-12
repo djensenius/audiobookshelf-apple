@@ -7,22 +7,25 @@ import Testing
 
 @testable import ABSAppModel
 
-/// Serves ebook bytes and records each request as `itemID|ino`.
+/// Serves ebook bytes, ignoring the size limit, and records each request as `itemID|ino`.
 final class FakeEbookFetcher: EbookFileFetching {
     struct Failure: Error {}
 
     let calls = Locked<[String]>([])
     let fails = Locked(false)
+    let caps = Locked<[Int]>([])
     let body: Data
 
     init(body: Data = Data("book".utf8)) {
         self.body = body
     }
 
-    func ebookData(itemID: String, fileIno: String?) async throws -> Data {
+    func downloadEbook(itemID: String, fileIno: String?, to destination: URL, maxBytes: Int) async throws {
         calls.value.append("\(itemID)|\(fileIno ?? "-")")
+        caps.value.append(maxBytes)
+        try Data(body.prefix(2)).write(to: destination)
         if fails.value { throw Failure() }
-        return body
+        try body.write(to: destination)
     }
 }
 
@@ -150,28 +153,111 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
         #expect(EbookFileLoader.endpoint(itemID: "li_1", fileIno: nil).path == "/api/items/li_1/ebook")
     }
 
-    @Test func theAPIClientSendsCredentialsToTheServerAndRefusesARedirect() async throws {
+    private func stubFetcher(
+        host: String, handler: @escaping StubURLProtocol.Handler
+    ) throws -> APIEbookFileFetcher {
+        StubURLProtocol.register(host: host, handler: handler)
+        let client = APIClient(
+            configuration: try APIClientConfiguration(
+                baseURL: try #require(URL(string: "https://\(host)")), customHeaders: ["X-Proxy": "secret"]),
+            tokenProvider: FixedTokens(), sessionConfiguration: StubURLProtocol.sessionConfiguration())
+        return APIEbookFileFetcher(client: client, sessionConfiguration: StubURLProtocol.sessionConfiguration())
+    }
+
+    @Test func theFetcherSendsCredentialsToTheServerAndRefusesARedirect() async throws {
         let host = "\(UUID().uuidString.lowercased()).stub.test"
-        StubURLProtocol.register(host: host) { request in
+        let fetcher = try stubFetcher(host: host) { request in
             switch request.url?.path() {
             case "/api/items/li_1/ebook/ino_1": StubResponse(status: 200, body: Data("bytes".utf8))
             default: StubResponse(status: 302, headers: ["Location": "https://elsewhere.test/book.epub"])
             }
         }
-        let client = APIClient(
-            configuration: try APIClientConfiguration(
-                baseURL: try #require(URL(string: "https://\(host)")), customHeaders: ["X-Proxy": "secret"]),
-            tokenProvider: FixedTokens(), sessionConfiguration: StubURLProtocol.sessionConfiguration())
-        let loader = EbookFileLoader(directory: readerTemporaryDirectory(), fetcher: client)
+        let loader = EbookFileLoader(directory: readerTemporaryDirectory(), fetcher: fetcher)
 
         let loaded = try await loader.load(request())
-        await #expect(throws: APIError.self) { try await loader.load(request("li_2")) }
+        await #expect(throws: APIError.redirectRefused(status: 302)) { try await loader.load(request("li_2")) }
 
         #expect(try Data(contentsOf: loaded.url) == Data("bytes".utf8))
         #expect(!FileManager.default.fileExists(atPath: loader.cacheURL(for: request("li_2")).path))
         let sent = try #require(StubURLProtocol.requests(host: host).first)
         #expect(sent.value(forHTTPHeaderField: "Authorization") == "Bearer access")
         #expect(sent.value(forHTTPHeaderField: "X-Proxy") == "secret")
+        #expect(sent.httpShouldHandleCookies == false)
+    }
+
+    @Test func theFetcherStopsAtTheSizeLimit() async throws {
+        let host = "\(UUID().uuidString.lowercased()).stub.test"
+        let fetcher = try stubFetcher(host: host) { _ in StubResponse(status: 200, body: Data(count: 10)) }
+        let directory = readerTemporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appending(path: "book")
+
+        await #expect(throws: EbookFileLoadError.tooLarge) {
+            try await fetcher.downloadEbook(itemID: "li_1", fileIno: nil, to: destination, maxBytes: 9)
+        }
+        try await fetcher.downloadEbook(itemID: "li_1", fileIno: nil, to: destination, maxBytes: 10)
+        #expect(try Data(contentsOf: destination).count == 10)
+    }
+
+    @Test func writingStopsAtTheLimit() async throws {
+        let directory = readerTemporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appending(path: "book")
+        let bytes = AsyncThrowingStream<UInt8, any Error> { continuation in
+            for byte in 0..<200_000 { continuation.yield(UInt8(truncatingIfNeeded: byte)) }
+            continuation.finish()
+        }
+
+        await #expect(throws: EbookFileLoadError.tooLarge) {
+            try await EbookFileLoader.write(bytes, to: destination, maxBytes: 100_000)
+        }
+        // It stops writing at the limit rather than reading the whole body first.
+        #expect(try Data(contentsOf: destination).count <= 100_000)
+    }
+
+    @Test func aFileOverTheLimitIsNotCached() async throws {
+        let fetcher = FakeEbookFetcher(body: Data(count: 10))
+        let directory = readerTemporaryDirectory()
+        let loader = EbookFileLoader(directory: directory, fetcher: fetcher, maxTotalBytes: 9)
+
+        await #expect(throws: EbookFileLoadError.tooLarge) { try await loader.load(request()) }
+
+        #expect(!FileManager.default.fileExists(atPath: loader.cacheURL(for: request()).path))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.appending(path: ".partial").path) == [])
+    }
+
+    @Test(arguments: [(Int.max, 512 * 1024 * 1024), (1000, 1000)])
+    func aFetchIsCappedAtTheBookLimit(cacheBytes: Int, cap: Int) async throws {
+        let fetcher = FakeEbookFetcher()
+        let loader = EbookFileLoader(directory: readerTemporaryDirectory(), fetcher: fetcher, maxTotalBytes: cacheBytes)
+
+        _ = try await loader.load(request())
+
+        #expect(EbookFileLoader.maxBookBytes == 512 * 1024 * 1024)
+        #expect(fetcher.caps.value == [cap])
+    }
+
+    @Test func aFailedFetchLeavesNoPartialFile() async throws {
+        let fetcher = FakeEbookFetcher()
+        fetcher.fails.value = true
+        let directory = readerTemporaryDirectory()
+        let loader = EbookFileLoader(directory: directory, fetcher: fetcher)
+
+        await #expect(throws: FakeEbookFetcher.Failure.self) { try await loader.load(request()) }
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.appending(path: ".partial").path) == [])
+    }
+
+    @Test(arguments: [1e100, -1e100, .nan, .infinity, -.infinity])
+    func anUnrepresentableModificationTimeFallsBack(mtimeMs: Double) {
+        let metadata = FileMetadata(
+            filename: "Book.epub", ext: ".epub", path: "/b/Book.epub", relPath: "Book.epub", size: 42,
+            mtimeMs: mtimeMs)
+        let file = EbookFile(ino: "ino_9", metadata: metadata, updatedAt: 77)
+
+        #expect(EbookFileRequest(connectionID: connection, itemID: "li_9", file: file).version == "42-77")
+        #expect(EbookFileRequest.wholeMilliseconds(mtimeMs) == nil)
+        #expect(EbookFileRequest.wholeMilliseconds(-1_234.9) == -1_234)
     }
 
     @Test func findsTheDownloadedEbookFile() throws {
