@@ -146,13 +146,14 @@ ordering is unspecified on the server (the model has a deterministic fixture tie
 The model uses fixed 3600-second media and does not simulate auto-finish, ebook intent,
 permissions, local uploads, transport admission races or asynchronous database writes.
 `PATCH /api/me/progress/:id` (#380) sets the groups sent, creating the row if absent, and, only
-when something changed, dates it with the model's clock (the body carries no `lastUpdate`): a
-PATCH that changes nothing leaves the row, `lastUpdate` included, as it was. `isFinished`
-follows the contract above and acts only when it changes the state (finishing stores progress 1
-and `finishedAt`; un-finishing resets finished progress to 0); finishing finished progress keeps
-its `finishedAt` unless a date is sent. An audio PATCH that moves finished progress at least
-10 s from the end un-finishes it, and on existing progress a `progress` equal to the stored
-position's ratio is ignored, as on the server. A queued
+when something changed or a `progress` was written, dates it with the model's clock (the body
+carries no `lastUpdate`): a PATCH that changes nothing leaves the row, `lastUpdate` included, as
+it was. `isFinished` follows the contract above and acts only when it changes the state
+(finishing stores progress 1 and `finishedAt`; un-finishing resets finished progress to 0);
+finishing finished progress keeps its `finishedAt` unless a date is sent. An audio PATCH that
+moves finished progress at least 10 s from the end un-finishes it. On existing progress a
+`progress` equal to the stored position's ratio is ignored and any other is written, even one
+equal to the stored progress, as on the server. A queued
 `fetchErrors` or `patchErrors` entry fails before reaching the model. Legacy recording
 accessors remain recording-only; tests using this model inspect `fetchProgress`, `openSession`
 and `listeningSessions`. Unconfigured fake defaults are unchanged.

@@ -342,4 +342,20 @@ struct ReconciliationSessionModelTests {
         #expect(row.progress == (time == 10 ? 1 : time / 50))
         #expect(row.lastUpdate == (time == 10 ? finished.lastUpdate : Int(clock.now.timeIntervalSince1970 * 1000)))
     }
+
+    /// A `progress` other than the stored position's ratio is written even when it equals the
+    /// stored progress, so it dates the progress: `MediaProgress.applyProgressUpdate` marks
+    /// `extraData` changed and the save moves `lastUpdate`. Here, progress 1 at the same position
+    /// of finished progress keeps every value but `lastUpdate`.
+    @Test func aProgressOtherThanThePositionRatioDatesProgress() async throws {
+        let clock = TestClock()
+        let client = Adapters(ReconciliationSessionModel(clock: clock))
+        try await client.patch(.audio(currentTime: 10, duration: 50, progress: 0.2))
+        try await client.patch(.finished(true))
+        var expected = try await client.row()
+        clock.advance(by: 1)
+        try await client.patch(.audio(currentTime: 10, duration: 50, progress: 1))
+        expected.lastUpdate = Int(clock.now.timeIntervalSince1970 * 1000)
+        #expect(try await client.row() == expected)
+    }
 }
