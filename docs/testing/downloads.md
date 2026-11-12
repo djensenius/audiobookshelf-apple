@@ -113,8 +113,8 @@ its restart pass, the part waits for the next time the app comes to the foregrou
 
 ## (c) Sign-out, removal and a CarPlay-only launch
 
-Signing out, an expired session (also one that expires while it's being restored, or of a
-server that isn't active) or removing a server pauses that connection's queued and
+Signing out, an expired session (also one that expires while it's being restored, during a
+switch, or of a server that isn't active) or removing a server pauses that connection's queued and
 running downloads, then deletes its resume data (ADR 0003). The paused downloads stay
 paused after signing back in.
 

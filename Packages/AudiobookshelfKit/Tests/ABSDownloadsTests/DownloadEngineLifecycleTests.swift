@@ -692,6 +692,59 @@ import Testing
         #expect(try await harness.store.part(id: partID)?.hasResumeData == true)
     }
 
+    /// Resume data that couldn't be deleted (here, a read-only folder) stays flagged, both when
+    /// its transfer is stopped and in the discard, so the quiesce reports it and a later one
+    /// deletes it.
+    @Test func quiesceThatCouldNotDeleteABlobKeepsItFlaggedForALaterOne() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID)
+        let folder = blob.deletingLastPathComponent().path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == true)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(!FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        never.open()
+    }
+
+    /// With a session but no readable downloads, the transfers the engine knows of are still
+    /// stopped: they run with the old credentials. The quiesce reports it didn't finish.
+    @Test func quiesceThatCouldNotReadTheDownloadsStillStopsKnownTransfers() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let failsReads = Mutex(false)
+        let engine = harness.makeEngine(readRecords: { store in
+            if failsReads.withLock({ $0 }) { throw TestError() }
+            return try await store.allRecords()
+        })
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        #expect(try await harness.store.part(id: partID)?.state == .running)
+        failsReads.withLock { $0 = true }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+        let tasks = await harness.session?.session.allTasks ?? []
+        #expect(tasks.allSatisfy { $0.state != .running })
+        never.open()
+    }
+
     /// A part failing for good stops its siblings and may replay a start that overlapped it,
     /// after which its transfer would run with the old token: the quiesce waits for it, then
     /// stops what it started. In production the sign-out pauses the record first.

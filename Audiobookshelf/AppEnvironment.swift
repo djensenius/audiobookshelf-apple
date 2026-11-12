@@ -73,7 +73,7 @@ final class AppEnvironment {
                 manager.credentialsRemoved = { [weak downloadsLifecycle = downloads.lifecycle] in
                     await downloadsLifecycle?.connectionRemoved($0)
                 }
-                // So does an expiry without a running session of it (during a restore, say).
+                // So does every expiry, whether or not a session of it is ending.
                 manager.credentialsExpired = { [weak downloadsLifecycle = downloads.lifecycle] in
                     downloadsLifecycle?.connectionExpired($0)
                 }

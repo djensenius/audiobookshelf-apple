@@ -475,7 +475,8 @@ public actor DownloadEngine {
                 task.cancel()
             }
         }
-        if !keepingResumeData { vault.delete(partID: partID) }
+        // A blob that couldn't be deleted stays flagged, so a later discard deletes it.
+        if !keepingResumeData, !vault.delete(partID: partID) { hasResumeData = true }
         if let hasResumeData { contexts[partID]?.hasResumeData = hasResumeData }
         await persistIdle(partID) {
             try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
@@ -542,7 +543,8 @@ public actor DownloadEngine {
     /// parts' resume-data flags are written, so a part that failed or started since the
     /// downloads were read keeps its state.
     ///
-    /// - Returns: `false`, deleting nothing, when the downloads couldn't be read.
+    /// - Returns: `false` when the downloads couldn't be read (deleting nothing) or a blob couldn't
+    ///   be deleted (its part stays flagged).
     @discardableResult
     public func discardResumeData(connectionID: UUID) async -> Bool {
         let records: [DownloadRecordDTO]
@@ -552,13 +554,18 @@ public actor DownloadEngine {
             logError("Couldn't read downloads; not deleting a server's resume data", error)
             return false
         }
+        var deleted = true
         for part in records.flatMap(\.parts)
         where part.state != .completed && (part.hasResumeData || contexts[part.id]?.hasResumeData == true) {
-            vault.delete(partID: part.id)
+            guard vault.delete(partID: part.id) else {
+                Log.downloads.error("Couldn't delete resume data; it stays flagged")
+                deleted = false
+                continue
+            }
             contexts[part.id]?.hasResumeData = false
             await persist { _ = try await $0.updatePart(partID: part.id, hasResumeData: false) }
         }
-        return true
+        return deleted
     }
 
     /// Stops every transfer of `connectionID`'s downloads, whatever their record's state, then
@@ -570,9 +577,10 @@ public actor DownloadEngine {
     ///   nothing starts them again. It runs first; from then until this returns, a failure's
     ///   replay doesn't queue a record of the connection again (one left `failed` stays so).
     /// - Returns: `false` when there is no session (the downloads couldn't be read, or another
-    ///   process holds it) or the downloads couldn't be read, at any step. The resume data is
-    ///   still deleted where it can be, and the transfers that survived a relaunch are cancelled once the
-    ///   session is created; a later call tries the rest again.
+    ///   process holds it), the downloads couldn't be read at any step, or resume data couldn't
+    ///   be deleted. The transfers the engine knows of are still stopped, the resume data is
+    ///   still deleted where it can be, and the transfers that survived a relaunch are cancelled
+    ///   once the session is created; a later call tries the rest again.
     public func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void = {}) async -> Bool {
         quiescingConnections.append(connectionID)
         defer {
@@ -586,17 +594,17 @@ public actor DownloadEngine {
             await discardResumeData(connectionID: connectionID)
             return false
         }
-        let records: [DownloadRecordDTO]
+        // Without the records, the transfers the engine knows of are still stopped.
+        let records: [DownloadRecordDTO]?
         do {
             records = try await loadRecords()
         } catch {
-            logError("Couldn't read downloads; not stopping a server's downloads", error)
-            await discardResumeData(connectionID: connectionID)
-            return false
+            logError("Couldn't read downloads; stopping only a server's known transfers", error)
+            records = nil
         }
         await waitForFailuresForGood(of: connectionID)
         // Only parts with something under way, so an idle part keeps its state.
-        let parts = Set(records.filter { $0.key.serverConnectionID == connectionID }.flatMap(\.parts).map(\.id))
+        let parts = Set((records ?? []).filter { $0.key.serverConnectionID == connectionID }.flatMap(\.parts).map(\.id))
             .union(contexts.filter { $0.value.connectionID == connectionID }.keys)
             .filter {
                 tasks[$0] != nil || launching[$0] != nil || stopping[$0] != nil || retries[$0] != nil
@@ -604,7 +612,8 @@ public actor DownloadEngine {
             }
         await stop(partIDs: Array(parts), keepingResumeData: false)
         await waitForFailuresForGood(of: connectionID)
-        return await discardResumeData(connectionID: connectionID)
+        let discarded = await discardResumeData(connectionID: connectionID)
+        return records != nil && discarded
     }
 
     private func waitForFailuresForGood(of connectionID: UUID) async {

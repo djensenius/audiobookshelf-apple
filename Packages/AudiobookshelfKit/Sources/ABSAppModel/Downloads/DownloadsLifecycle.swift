@@ -50,8 +50,8 @@ extension DownloadManager: DownloadsLifecycleManager {}
 ///   again; the user resumes them. This is local only, so it is also safe for an expiry. A switch
 ///   keeps them running: the other connection's credentials stay saved. A removal does the same
 ///   as a sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted. An
-///   expiry without a running session of the connection (during a restore, or of another
-///   connection) does the same in ``connectionExpired(_:)``.
+///   expiry does the same in ``connectionExpired(_:)``, whatever the session's end says (a
+///   switch can be under way, or there may be no session of it, during a restore).
 /// - A cleanup runs in its own task, so it outlives the session teardown's time budget; a new
 ///   session of the same connection waits for it in ``sessionDidStart(_:)``, so it can't pause
 ///   or discard what that session starts. A cleanup that couldn't stop the transfers (the engine
@@ -185,13 +185,12 @@ public final class DownloadsLifecycle: SessionParticipant {
         await stopDownloads(of: connectionID)
     }
 
-    /// Pauses an expired connection's queued and downloading records, then quiesces it, when no
-    /// session of it is running: one is (and its ``sessionWillEnd(_:)`` does this) unless the
-    /// expiry came during a restore or to another connection. A session of it that starts
-    /// later waits for this. Call it once the connection's tokens are deleted
+    /// Pauses an expired connection's queued and downloading records, then quiesces it, after
+    /// its previous cleanup, for every expiry: its running session may end with a switch
+    /// already under way, or there may be none (a restore, another connection). A session of
+    /// it that starts later waits for this. Call it once the connection's tokens are deleted
     /// (``AccountManager/credentialsExpired``).
     public func connectionExpired(_ connectionID: UUID) {
-        guard connectionID != self.connectionID else { return }
         _ = startCleanup(of: connectionID)
     }
 

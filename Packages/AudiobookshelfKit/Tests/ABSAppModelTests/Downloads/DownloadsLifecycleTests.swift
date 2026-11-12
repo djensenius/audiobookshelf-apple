@@ -442,15 +442,19 @@ struct DownloadsLifecycleTests {
         #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)", "started"])
     }
 
-    /// The running session's end cleans up its own expiry.
-    @Test func expiryOfTheRunningSessionsConnectionLeavesItToTheSessionEnd() async {
+    /// An expiry during a switch's teardown: the session still ends with `.switch`, which
+    /// keeps the downloads, so the expiry cleans up itself.
+    @Test func expiryOfTheRunningSessionsConnectionCleansUpEvenIfItEndsWithASwitch() async {
         let lifecycle = makeLifecycle()
         await lifecycle.sessionDidStart(context(connectionA))
 
         lifecycle.connectionExpired(connectionA)
-        for _ in 0..<10 { await Task.yield() }
+        await lifecycle.sessionWillEnd(.switch)
+        await lifecycle.sessionDidStart(context(connectionB))
+        // Signing in to it again waits for the cleanup.
+        await lifecycle.sessionDidStart(context(connectionA))
 
-        #expect(calls.all.isEmpty)
+        #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)"])
     }
 
     /// Once a session of the connection starts, its downloads are that session's.
