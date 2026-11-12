@@ -65,10 +65,11 @@ import Testing
     }
 
     @Test(arguments: [
-        ("Plain Title", "Plain Title"), ("a:b:c", "a - bc"), ("What? Why*|\"/\\<>", "What Why"),
-        ("line\nbreak\r\ttab\u{0}", "linebreaktab"), ("c1\u{85}\u{9F}x", "c1x"), ("...", ""), ("CON", ""),
-        ("lpt1.txt", ""), ("Console", "Console"), ("com10", "com10"), ("Trailing. . ", "Trailing"),
-        (" Leading", " Leading"), ("Émission ☕️", "Émission ☕️"), ("a/../b", "a..b"), ("/", ""),
+        ("Plain Title", "Plain Title"), ("a:b:c", "a - bc"), ("What? Why*|\"/\\<>", "What Why"), ("CON", ""),
+        ("line\nbreak\r\ttab\u{0}", "linebreaktab"), ("c1\u{85}\u{9F}x", "c1x"), ("...", ""), ("CON ", ""),
+        ("lpt1.txt", ""), ("Console", "Console"), ("com10", "com10"), ("Trailing. . ", "Trailing"), ("LPT1 ", ""),
+        (" Leading", " Leading"), ("Émission ☕️", "Émission ☕️"), ("a/../b", "a..b"), ("/", ""), ("CON.", ""),
+        ("con ", ""), ("CON.txt", ""), ("aux. .", ""), ("Console ", "Console"),
     ])
     func sanitizingMatchesLegacy(input: String, expected: String) {
         #expect(NewPodcastDraft.sanitizedFilename(input) == expected)

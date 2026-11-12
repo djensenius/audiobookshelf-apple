@@ -145,8 +145,7 @@ public final class NewPodcastDraft: Identifiable {
 
     // MARK: Paths
 
-    /// Legacy `Path.join(folder, $sanitizeFilename(title))`: the folder without trailing slashes, a slash, and the
-    /// sanitized title; `nil` when nothing of the title is left.
+    /// Legacy `Path.join(folder, $sanitizeFilename(title))`; `nil` when nothing of the title is left.
     public nonisolated static func podcastPath(folder: String, title: String) -> String? {
         let name = sanitizedFilename(title)
         guard !name.isEmpty else { return nil }
@@ -161,9 +160,9 @@ public final class NewPodcastDraft: Identifiable {
     nonisolated static let maxFilenameBytes = 255
 
     /// A port of legacy `$sanitizeFilename` (`plugins/init.client.js`): the first `:` becomes ` - `; `/ ? < > \ : * |
-    /// "`, control characters and line breaks are removed; a name of only dots or a reserved Windows device name
-    /// becomes empty; trailing dots and spaces are removed; and a name over 240 UTF-16 code units (or, unlike legacy,
-    /// 255 UTF-8 bytes) is shortened by whole characters before its extension.
+    /// "`, control characters and line breaks are removed; a name of only dots becomes empty; trailing dots and spaces
+    /// are removed, then (unlike legacy) a reserved Windows device name becomes empty; and a name over 240 UTF-16
+    /// code units (or, unlike legacy, 255 UTF-8 bytes) is shortened by whole characters before its extension.
     public nonisolated static func sanitizedFilename(_ input: String) -> String {
         var name = input
         if let colon = name.firstIndex(of: ":") { name.replaceSubrange(colon...colon, with: " - ") }
@@ -176,8 +175,8 @@ public final class NewPodcastDraft: Identifiable {
                     return !illegal.contains(Character(scalar))
                 }))
         if name.allSatisfy({ $0 == "." }) { name = "" }
-        if name.wholeMatch(of: /(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?/) != nil { name = "" }
         while let last = name.last, last == "." || last == " " { name.removeLast() }
+        if name.wholeMatch(of: /(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?/) != nil { name = "" }
         let fits = { (name: String) in name.utf16.count <= maxFilenameLength && name.utf8.count <= maxFilenameBytes }
         if !fits(name) {
             let (base, ext) = splitExtension(name)
