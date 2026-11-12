@@ -25,8 +25,7 @@ private final class FakeProgressEntry {
                 == "The Gods of Mars, Edgar Rice Burroughs, Barsoom #2")
         #expect(
             ItemPresentation.accessibilityLabel(frankenstein)
-                == "Frankenstein; or, The Modern Prometheus, Mary Shelley, Abridged"
-        )
+                == "Frankenstein; or, The Modern Prometheus, Mary Shelley")
     }
 
     @Test func itemRowAccessibilityLabelSpeaksDuration() {
@@ -60,10 +59,11 @@ private final class FakeProgressEntry {
         func value(_ item: ItemSummary, _ progress: ItemProgress?) -> String {
             ItemPresentation.accessibilityValue(item, progress: progress, locale: locale)
         }
-        #expect(value(frankenstein, nil) == "")
-        #expect(value(frankenstein, ItemProgress(fraction: 0)) == "")
-        #expect(value(frankenstein, ItemProgress(fraction: 0.42)) == "Progress, 42%")
-        #expect(value(frankenstein, ItemProgress(fraction: 1, isFinished: true)) == "Finished")
+        // Frankenstein is abridged: the badge is spoken after the progress.
+        #expect(value(frankenstein, nil) == "Abridged")
+        #expect(value(frankenstein, ItemProgress(fraction: 0)) == "Abridged")
+        #expect(value(frankenstein, ItemProgress(fraction: 0.42)) == "Progress, 42%, Abridged")
+        #expect(value(frankenstein, ItemProgress(fraction: 1, isFinished: true)) == "Finished, Abridged")
         #expect(value(ItemSummary(item: SampleLibrary.missing), nil) == "Missing")
     }
 
@@ -195,18 +195,87 @@ private final class FakeProgressEntry {
         )
     }
 
-    // MARK: Explicit, abridged and missing are spoken
+    // MARK: Explicit, abridged and missing are spoken as values
 
-    @Test func labelSpeaksExplicitAndAbridgedOnlyWhenSet() {
-        func label(explicit: Bool, abridged: Bool) -> String {
-            ItemPresentation.accessibilityLabel(
-                ItemSummary(
-                    id: "i", itemID: "i", kind: .book, title: "T", subtitle: "A", seriesText: "S #1",
-                    isExplicit: explicit, isAbridged: abridged))
+    @Test func badgesAreSpokenInTheValueOnlyWhenSet() {
+        let locale = Locale(identifier: "en_US")
+        func item(explicit: Bool, abridged: Bool) -> ItemSummary {
+            ItemSummary(
+                id: "i", itemID: "i", kind: .book, title: "T", subtitle: "A", seriesText: "S #1",
+                isExplicit: explicit, isAbridged: abridged)
         }
-        #expect(label(explicit: false, abridged: false) == "T, A, S #1")
-        #expect(label(explicit: true, abridged: false) == "T, A, S #1, Explicit")
-        #expect(label(explicit: false, abridged: true) == "T, A, S #1, Abridged")
-        #expect(label(explicit: true, abridged: true) == "T, A, S #1, Explicit, Abridged")
+        func value(explicit: Bool, abridged: Bool, _ progress: ItemProgress? = nil) -> String {
+            ItemPresentation.accessibilityValue(
+                item(explicit: explicit, abridged: abridged), progress: progress, locale: locale)
+        }
+        #expect(ItemPresentation.accessibilityLabel(item(explicit: true, abridged: true)) == "T, A, S #1")
+        #expect(value(explicit: false, abridged: false) == "")
+        #expect(value(explicit: true, abridged: false) == "Explicit")
+        #expect(value(explicit: false, abridged: true) == "Abridged")
+        #expect(
+            value(explicit: true, abridged: true, ItemProgress(fraction: 0.45)) == "Progress, 45%, Explicit, Abridged")
+        #expect(
+            value(explicit: true, abridged: false, ItemProgress(fraction: 1, isFinished: true)) == "Finished, Explicit")
+    }
+
+    // MARK: Series, authors and shelves
+
+    @Test func seriesAndAuthorCardsSpeakNameAndBookCount() {
+        let english = Locale(identifier: "en_US")
+        let series = SeriesSummary(series: SampleLibrary.series[0])
+        #expect(
+            ItemPresentation.accessibilityLabel(series, locale: english)
+                == "\(series.name), \(ItemPresentation.bookCount(series.bookCount, locale: english))")
+        #expect(
+            ItemPresentation.accessibilityLabel(SeriesSummary(id: "s", name: "Barsoom", bookCount: 1), locale: english)
+                == "Barsoom, 1 book")
+        #expect(
+            ItemPresentation.accessibilityLabel(
+                AuthorSummary(id: "a", name: "Mary Shelley", bookCount: 2), locale: english)
+                == "Mary Shelley, 2 books")
+        #expect(ItemPresentation.accessibilityLabel(AuthorSummary(id: "a", name: "Mary Shelley")) == "Mary Shelley")
+    }
+
+    @Test func showAllNamesItsShelf() {
+        #expect(
+            ItemPresentation.showAllAccessibilityLabel(shelfTitle: "Continue Listening")
+                == "Show All, Continue Listening")
+    }
+
+    // MARK: Progress badge, colour and motion
+
+    @Test func progressBadgeIsReadAsAValue() {
+        let locale = Locale(identifier: "en_US")
+        #expect(ItemPresentation.progressBadgeValue(nil, locale: locale) == nil)
+        #expect(ItemPresentation.progressBadgeValue(ItemProgress(fraction: 0), locale: locale) == nil)
+        #expect(ItemPresentation.progressBadgeValue(ItemProgress(fraction: 0.45), locale: locale) == "45%")
+        #expect(
+            ItemPresentation.progressBadgeValue(ItemProgress(fraction: 1, isFinished: true), locale: locale)
+                == "Finished")
+    }
+
+    @Test func aFinishedCardAddsACheckWhenColourCannotTellIt() {
+        let finished = ItemProgress(fraction: 1, isFinished: true)
+        #expect(ItemPresentation.showsFinishedCheck(finished, differentiateWithoutColor: true))
+        #expect(!ItemPresentation.showsFinishedCheck(finished, differentiateWithoutColor: false))
+        #expect(!ItemPresentation.showsFinishedCheck(ItemProgress(fraction: 0.99), differentiateWithoutColor: true))
+        #expect(!ItemPresentation.showsFinishedCheck(nil, differentiateWithoutColor: true))
+    }
+
+    @Test func theProgressRingMovesAtOnceWithReduceMotion() {
+        #expect(ProgressRing.animation(reduceMotion: true) == nil)
+        #expect(ProgressRing.animation(reduceMotion: false) != nil)
+    }
+
+    // MARK: Accessibility text sizes
+
+    @Test func aRowStacksItsCoverAboveTheTextAtAccessibilitySizes() throws {
+        let serverID = UUID()
+        func row(_ size: DynamicTypeSize) -> some View {
+            ItemRow(item: frankenstein, serverID: serverID) { _ in }.environment(\.dynamicTypeSize, size)
+        }
+        let large = try renderedSize(row(.large), width: 360)
+        let huge = try renderedSize(row(.accessibility5), width: 360)
+        #expect(huge.height > large.height + 40)
     }
 }

@@ -1278,7 +1278,7 @@ public final class PlaybackCoordinator {
         }
         return AudioEngineSource(
             timeline: timeline, trackURLs: urls, trackMIMETypes: mimeTypes,
-            networkAccess: NetworkAccess(policy: settings.streamingUsingCellular),
+            networkAccess: NetworkAccess(policy: settings.streamingUsingCellular), headerTransport: stream.transport,
             prefersPreciseTiming: settings.enableMp3IndexSeeking, seekTolerance: stream.plan.kind == .hls ? 0.5 : 0)
     }
 
