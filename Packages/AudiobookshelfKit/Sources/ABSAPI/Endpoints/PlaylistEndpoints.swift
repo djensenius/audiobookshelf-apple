@@ -30,6 +30,15 @@ public enum PlaylistEndpoints {
         Endpoint(.post, "\(path(id))/batch/remove", body: request)
     }
 
+    /// `DELETE /api/playlists/:id/item/:itemId[/:episodeId]`: removes one member, a book or (with
+    /// `episodeID`) a podcast episode. A nonmember is 404. Like ``removeItems(id:_:)``, removing
+    /// the last member returns 200 with empty items and deletes the playlist. An empty `episodeID` is a book, like nil.
+    public static func removeItem(id: String, libraryItemID: String, episodeID: String? = nil) -> Endpoint<Playlist> {
+        var itemPath = "\(path(id))/item/\(pathSegment(libraryItemID))"
+        if let episodeID, !episodeID.isEmpty { itemPath += "/\(pathSegment(episodeID))" }
+        return Endpoint(.delete, itemPath)
+    }
+
     private static func path(_ id: String) -> String {
         "/api/playlists/\(pathSegment(id))"
     }
