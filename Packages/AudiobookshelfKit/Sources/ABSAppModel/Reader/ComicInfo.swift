@@ -61,6 +61,10 @@ public struct ComicInfo: Sendable, Hashable {
             text += string
         }
 
+        func parser(_ parser: XMLParser, foundCDATA block: Data) {
+            text += String(decoding: block, as: UTF8.self)
+        }
+
         func parser(
             _ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?
         ) {

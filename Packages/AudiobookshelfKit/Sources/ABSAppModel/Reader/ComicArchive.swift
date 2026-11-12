@@ -11,8 +11,10 @@ public enum ComicArchiveError: Error, Equatable, Sendable {
     case noPages
     /// `page` isn't between 1 and `pageCount`.
     case pageOutOfRange(page: Int, pageCount: Int)
-    /// The page's entry couldn't be extracted, for example because it is damaged.
+    /// The page's entry couldn't be extracted, or its checksum doesn't match.
     case unreadablePage(Int)
+    /// The page decompresses to more than ``ComicArchive/maxPageBytes``.
+    case pageTooLarge(Int)
 }
 
 /// A CBZ comic, read page by page (ADR 0008 §3).
@@ -22,6 +24,9 @@ public enum ComicArchiveError: Error, Equatable, Sendable {
 /// and returns its file. The cache keeps the ``maxCachedPages`` most recently requested pages: an
 /// older page's file is deleted when a newer one is extracted, so callers read a page's file
 /// before requesting many others. ``removeCache()`` deletes the directory, and so does `deinit`.
+///
+/// Entry sizes in the ZIP headers aren't trusted: extraction stops at ``maxPageBytes`` of output
+/// (64 MiB by default) and at 1 MiB for `ComicInfo.xml`, and each entry's CRC-32 is checked.
 public actor ComicArchive {
     /// The entry paths of the pages; page `n` is `pagePaths[n - 1]`.
     public nonisolated let pagePaths: [String]
@@ -31,6 +36,8 @@ public actor ComicArchive {
     public nonisolated let cacheDirectory: URL
     /// How many extracted pages are kept.
     public nonisolated let maxCachedPages: Int
+    /// The most bytes one page may decompress to, so a small entry can't fill the disk.
+    public nonisolated let maxPageBytes: Int
 
     public nonisolated var pageCount: Int { pagePaths.count }
 
@@ -42,11 +49,14 @@ public actor ComicArchive {
     private(set) var extractionCount = 0
 
     /// The largest `ComicInfo.xml` read, so a hostile archive can't make the parser read gigabytes.
-    static let maxComicInfoSize: UInt64 = 1 << 20
+    static let maxComicInfoSize = 1 << 20
+    public static let defaultMaxPageBytes = 64 << 20
 
     /// Opens the archive at `url`. `cacheDirectory` is emptied: earlier contents may be pages of
     /// another file.
-    public init(url: URL, cacheDirectory: URL, maxCachedPages: Int = 12) throws(ComicArchiveError) {
+    public init(
+        url: URL, cacheDirectory: URL, maxCachedPages: Int = 12, maxPageBytes: Int = defaultMaxPageBytes
+    ) throws(ComicArchiveError) {
         if (try? ComicArchiveFormat(contentsOf: url)) == .rar { throw .unsupportedRAR }
         let archive: Archive
         do {
@@ -54,8 +64,10 @@ public actor ComicArchive {
         } catch {
             throw .notAZip
         }
-        let files = archive.filter { $0.type == .file }
-        let pagePaths = Self.pageOrder(files.map(\.path))
+        let all = Array(archive)
+        let files = all.filter { $0.type == .file }
+        // Other entries only create folders, which decide the web client's order.
+        let pagePaths = Self.pageOrder(all.map { $0.type == .file || $0.path.hasSuffix("/") ? $0.path : $0.path + "/" })
         guard !pagePaths.isEmpty else { throw .noPages }
         let byPath = Dictionary(files.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
 
@@ -65,6 +77,7 @@ public actor ComicArchive {
         self.comicInfo = Self.comicInfoEntry(in: files).flatMap { Self.readComicInfo($0, from: archive) }
         self.cacheDirectory = cacheDirectory
         self.maxCachedPages = max(maxCachedPages, 1)
+        self.maxPageBytes = maxPageBytes
         try? FileManager.default.removeItem(at: cacheDirectory)
     }
 
@@ -85,8 +98,10 @@ public actor ComicArchive {
         cachedPages.removeAll { $0 == number }
         do {
             try FileManager.default.createDirectory(at: cacheDirectory, withIntermediateDirectories: true)
+            try extract(entries[number - 1], to: url)
+        } catch ExtractionError.tooLarge {
             try? FileManager.default.removeItem(at: url)
-            _ = try archive.extract(entries[number - 1], to: url)
+            throw .pageTooLarge(number)
         } catch {
             try? FileManager.default.removeItem(at: url)
             throw .unreadablePage(number)
@@ -97,6 +112,42 @@ public actor ComicArchive {
             try? FileManager.default.removeItem(at: fileURL(ofPage: cachedPages.removeFirst()))
         }
         return url
+    }
+
+    /// Streams `entry` into a new file at `url`, stopping at ``maxPageBytes``.
+    private func extract(_ entry: Entry, to url: URL) throws(ExtractionError) {
+        try? FileManager.default.removeItem(at: url)
+        guard FileManager.default.createFile(atPath: url.path, contents: nil),
+            let handle = try? FileHandle(forWritingTo: url)
+        else { throw .unreadable }
+        defer { try? handle.close() }
+        var written = 0
+        let limit = maxPageBytes
+        let checksum = try Self.extract(entry, from: archive) { chunk in
+            written += chunk.count
+            guard written <= limit else { throw ExtractionError.tooLarge }
+            try handle.write(contentsOf: chunk)
+        }
+        guard checksum == entry.checksum else { throw .unreadable }
+    }
+
+    enum ExtractionError: Error {
+        case unreadable
+        case tooLarge
+    }
+
+    /// Extracts `entry` through `consumer` and returns its CRC-32. ZIPFoundation computes it but
+    /// doesn't compare it with the entry's, so callers do.
+    private static func extract(
+        _ entry: Entry, from archive: Archive, consumer: (Data) throws -> Void
+    ) throws(ExtractionError) -> CRC32 {
+        do {
+            return try archive.extract(entry, skipCRC32: false, consumer: consumer)
+        } catch ExtractionError.tooLarge {
+            throw .tooLarge
+        } catch {
+            throw .unreadable
+        }
     }
 
     /// Deletes the extracted pages and the cache directory. Later pages are extracted again.
@@ -119,15 +170,16 @@ extension ComicArchive {
     /// The page images' extensions, compared case-insensitively.
     static let pageExtensions: Set<String> = ["jpeg", "jpg", "png", "webp"]
 
-    /// The page images among an archive's file `paths`, in the web client's order
-    /// (`ComicReader.vue` `parseFilenames`): sorted by the last number in the basename, then the
-    /// images without a number. Ties keep archive order.
+    /// The page images among an archive's entry `paths` (in archive order; folders end in `/`), in
+    /// the web client's order (`ComicReader.vue` `parseFilenames`): sorted by the last number in
+    /// the basename, then the images without a number. Ties keep the order of ``webFileOrder(_:)``,
+    /// which groups each folder's contents. A path that appears twice is listed once.
     ///
     /// Images in a folder whose name starts with `_` (such as `__MACOSX`) are skipped, as the web
     /// client doesn't flatten those folders. So are dotfiles and dot folders, such as macOS `._`
     /// resource forks.
     static func pageOrder(_ paths: [String]) -> [String] {
-        let pages = paths.filter(isPage).enumerated().map { offset, path in
+        let pages = webFileOrder(paths).filter(isPage).enumerated().map { offset, path in
             (path: path, number: lastNumber(inBasenameOf: path), offset: offset)
         }
         let numbered = pages.filter { $0.number != nil }.sorted { lhs, rhs in
@@ -136,6 +188,89 @@ extension ComicArchive {
             return lhs.offset < rhs.offset
         }
         return (numbered + pages.filter { $0.number == nil }).map(\.path)
+    }
+
+    /// The file paths in the order the web client lists them before sorting. libarchive.js
+    /// `getFilesObject` nests the entries into JavaScript objects by path component, in archive
+    /// order, and `flattenFilesObject` walks them depth first. So a folder's contents stay
+    /// together, at the position where the folder first appeared. JavaScript lists integer-like
+    /// keys (folders named `1`, `2`, …) first, in numeric order. A repeated path keeps its first
+    /// position, and the first entry is kept.
+    static func webFileOrder(_ paths: [String]) -> [String] {
+        let root = Folder()
+        entries: for path in paths {
+            var parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            let isFolder = parts.count > 1 && parts.last == ""
+            if isFolder { parts.removeLast() }
+            guard let name = parts.popLast() else { continue }
+            var folder = root
+            for part in parts {
+                // Below a file, libarchive.js sets properties that the walk never reads.
+                guard let next = folder.folder(named: part) else { continue entries }
+                folder = next
+            }
+            if isFolder {
+                _ = folder.folder(named: name)
+            } else {
+                folder.setFile(named: name, path: path)
+            }
+        }
+        var files: [String] = []
+        root.flatten(into: &files)
+        return files
+    }
+
+    private final class Folder {
+        enum Node {
+            case file(path: String)
+            case folder(Folder)
+        }
+
+        private var names: [String] = []
+        private var nodes: [String: Node] = [:]
+
+        /// The folder `name`, created if new; `nil` if a file has that name.
+        func folder(named name: String) -> Folder? {
+            switch nodes[name] {
+            case .folder(let folder): return folder
+            case .file: return nil
+            case nil:
+                let folder = Folder()
+                names.append(name)
+                nodes[name] = .folder(folder)
+                return folder
+            }
+        }
+
+        /// Like libarchive.js, a file replaces a folder of the same name in place.
+        func setFile(named name: String, path: String) {
+            switch nodes[name] {
+            case .file: return
+            case .folder: break
+            case nil: names.append(name)
+            }
+            nodes[name] = .file(path: path)
+        }
+
+        func flatten(into files: inout [String]) {
+            for name in Self.javaScriptKeyOrder(names) {
+                switch nodes[name] {
+                case .file(let path): files.append(path)
+                case .folder(let folder) where !name.hasPrefix("_"): folder.flatten(into: &files)
+                case .folder, nil: break
+                }
+            }
+        }
+
+        /// JavaScript's own-property order: array-index keys ascending, then the rest as inserted.
+        private static func javaScriptKeyOrder(_ names: [String]) -> [String] {
+            func index(_ name: String) -> UInt32? {
+                guard let value = UInt32(name), value != .max, String(value) == name else { return nil }
+                return value
+            }
+            let indexed = names.compactMap { name in index(name).map { (name, $0) } }.sorted { $0.1 < $1.1 }
+            return indexed.map(\.0) + names.filter { index($0) == nil }
+        }
     }
 
     private static func isPage(_ path: String) -> Bool {
@@ -174,14 +309,15 @@ extension ComicArchive {
         return xml.first { ($0.path as NSString).lastPathComponent.lowercased() == "comicinfo.xml" } ?? xml.first
     }
 
+    /// `nil` if the entry is over ``maxComicInfoSize`` once decompressed (whatever its header says)
+    /// or its checksum doesn't match.
     private static func readComicInfo(_ entry: Entry, from archive: Archive) -> ComicInfo? {
-        guard entry.uncompressedSize <= maxComicInfoSize else { return nil }
         var data = Data()
-        do {
-            _ = try archive.extract(entry) { data.append($0) }
-        } catch {
-            return nil
+        let checksum = try? extract(entry, from: archive) { chunk in
+            guard data.count + chunk.count <= maxComicInfoSize else { throw ExtractionError.tooLarge }
+            data.append(chunk)
         }
+        guard checksum == entry.checksum else { return nil }
         return ComicInfo(xml: data)
     }
 }

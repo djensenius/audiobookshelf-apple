@@ -9,13 +9,15 @@ import Testing
     private var cache: URL { root.appending(path: "cache") }
 
     /// Writes a ZIP at `root/name` whose entries are `files` (path → contents), in order.
-    private func makeZip(_ files: [(String, Data)], name: String = "comic.cbz") throws -> URL {
+    private func makeZip(
+        _ files: [(String, Data)], name: String = "comic.cbz", compression: CompressionMethod = .deflate
+    ) throws -> URL {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let url = root.appending(path: name)
         let archive = try Archive(url: url, accessMode: .create)
         for (path, data) in files {
             try archive.addEntry(
-                with: path, type: .file, uncompressedSize: Int64(data.count), compressionMethod: .deflate,
+                with: path, type: .file, uncompressedSize: Int64(data.count), compressionMethod: compression,
                 provider: { position, size in data.subdata(in: Int(position)..<Int(position) + size) })
         }
         return url
@@ -30,6 +32,25 @@ import Testing
         let url = root.appending(path: name)
         try Data(bytes).write(to: url)
         return url
+    }
+
+    /// Replaces the only occurrence of `old` in the file with `new`, which has the same length.
+    private func patch(_ url: URL, replacing old: Data, with new: Data) throws {
+        var bytes = try Data(contentsOf: url)
+        let range = try #require(bytes.range(of: old))
+        #expect(bytes[range.upperBound...].range(of: old) == nil)
+        bytes.replaceSubrange(range, with: new)
+        try bytes.write(to: url)
+    }
+
+    /// Makes the only entry's local and central headers claim an uncompressed size of 1 byte.
+    private func understateSize(_ url: URL) throws {
+        var bytes = try Data(contentsOf: url)
+        for (signature, offset) in [([0x50, 0x4B, 0x03, 0x04] as [UInt8], 22), ([0x50, 0x4B, 0x01, 0x02], 24)] {
+            let start = try #require(bytes.range(of: Data(signature))).lowerBound + offset
+            bytes.replaceSubrange(start..<start + 4, with: [1, 0, 0, 0])
+        }
+        try bytes.write(to: url)
     }
 
     private func cachedFiles() -> Set<String> {
@@ -85,7 +106,35 @@ import Testing
         #expect(order == ["Comic/page1.jpg"])
     }
 
+    @Test func foldersKeepTheirContentsTogetherLikeTheWebClient() {
+        #expect(ComicArchive.pageOrder(["b/1.jpg", "a/1.jpg", "b/01.jpg"]) == ["b/1.jpg", "b/01.jpg", "a/1.jpg"])
+        #expect(ComicArchive.pageOrder(["b/x.jpg", "a/y.jpg", "b/z.jpg"]) == ["b/x.jpg", "b/z.jpg", "a/y.jpg"])
+    }
+
+    @Test func aFolderEntryPlacesItsFolderWhereItAppears() {
+        #expect(ComicArchive.pageOrder(["a/", "b/1.jpg", "a/1.jpg"]) == ["a/1.jpg", "b/1.jpg"])
+    }
+
+    @Test func integerNamedFoldersComeFirstInNumericOrderLikeJavaScriptKeys() {
+        let order = ComicArchive.pageOrder(["x/cover.jpg", "10/a.jpg", "2/b.jpg", "01/c.jpg"])
+        #expect(order == ["2/b.jpg", "10/a.jpg", "x/cover.jpg", "01/c.jpg"])
+    }
+
+    @Test func aRepeatedPathIsOnePage() {
+        #expect(ComicArchive.pageOrder(["2.jpg", "1.jpg", "2.jpg"]) == ["1.jpg", "2.jpg"])
+    }
+
     // MARK: Opening
+
+    @Test func aRepeatedEntryKeepsTheFirstOne() async throws {
+        let url = try makeZip([
+            ("1.jpg", Data("first".utf8)), ("2.jpg", Data("two".utf8)), ("1.jpg", Data("second".utf8)),
+        ])
+        let comic = try ComicArchive(url: url, cacheDirectory: cache)
+        #expect(comic.pagePaths == ["1.jpg", "2.jpg"])
+        #expect(try Data(contentsOf: try await comic.page(1)) == Data("first".utf8))
+        #expect(try Data(contentsOf: try await comic.page(2)) == Data("two".utf8))
+    }
 
     @Test func opensAZipWithItsPagesInOrder() async throws {
         let url = try makeZip(pages("page10.jpg", "__MACOSX/._page1.jpg", "page9.jpg", "cover.png"))
@@ -194,6 +243,34 @@ import Testing
         #expect(cachedFiles().isEmpty)
     }
 
+    @Test func aPageThatDecompressesPastTheLimitIsRemoved() async throws {
+        let bomb = Data(count: 1 << 20)
+        let url = try makeZip([("1.jpg", bomb), ("2.jpg", Data("small".utf8))])
+        #expect(try Data(contentsOf: url).count < 16 << 10)
+        let comic = try ComicArchive(url: url, cacheDirectory: cache, maxPageBytes: 64 << 10)
+
+        await #expect(throws: ComicArchiveError.pageTooLarge(1)) { try await comic.page(1) }
+        #expect(cachedFiles().isEmpty)
+        #expect(try Data(contentsOf: try await comic.page(2)) == Data("small".utf8))
+    }
+
+    @Test func aPageAtTheLimitIsExtracted() async throws {
+        let comic = try ComicArchive(
+            url: try makeZip([("1.jpg", Data(count: 4096))]), cacheDirectory: cache, maxPageBytes: 4096)
+        #expect(try Data(contentsOf: try await comic.page(1)).count == 4096)
+    }
+
+    @Test func aPageWithTheWrongChecksumIsUnreadable() async throws {
+        let url = try makeZip(
+            [("1.jpg", Data("page one bytes".utf8)), ("2.jpg", Data("two".utf8))], compression: .none)
+        try patch(url, replacing: Data("page one bytes".utf8), with: Data("page one bytez".utf8))
+        let comic = try ComicArchive(url: url, cacheDirectory: cache)
+
+        await #expect(throws: ComicArchiveError.unreadablePage(1)) { try await comic.page(1) }
+        #expect(cachedFiles().isEmpty)
+        #expect(try Data(contentsOf: try await comic.page(2)) == Data("two".utf8))
+    }
+
     @Test func entryPathsNeverNameCacheFiles() async throws {
         let comic = try ComicArchive(url: try makeZip(pages("Comic/Chapter 1/1.jpg")), cacheDirectory: cache)
         let url = try await comic.page(1)
@@ -225,6 +302,36 @@ import Testing
                 == ComicInfo(
                     title: "The Start", series: "Saga", number: "1", pageCount: 3, isRightToLeft: true,
                     singlePageImages: [0, 1]))
+    }
+
+    @Test func comicInfoWithTheWrongChecksumIsIgnored() throws {
+        let xml = "<ComicInfo><Title>Original</Title></ComicInfo>"
+        let url = try makeZip(pages("1.jpg") + [("ComicInfo.xml", Data(xml.utf8))], compression: .none)
+        try patch(url, replacing: Data("Original".utf8), with: Data("Tampered".utf8))
+        #expect(try ComicArchive(url: url, cacheDirectory: cache).comicInfo == nil)
+    }
+
+    @Test func comicInfoThatDecompressesPastTheLimitIsIgnoredWhateverItsHeaderSays() throws {
+        let padding = String(repeating: " ", count: ComicArchive.maxComicInfoSize)
+        let xml = "<ComicInfo><Title>Big</Title>\(padding)</ComicInfo>"
+        let url = try makeZip([("ComicInfo.xml", Data(xml.utf8))] + pages("1.jpg"))
+        try understateSize(url)
+        #expect(try ComicArchive(url: url, cacheDirectory: cache).comicInfo == nil)
+    }
+
+    @Test func comicInfoUnderTheLimitIsReadWhateverItsHeaderSays() throws {
+        let url = try makeZip(
+            [("ComicInfo.xml", Data("<ComicInfo><Title>Small</Title></ComicInfo>".utf8))] + pages("1.jpg"))
+        try understateSize(url)
+        #expect(try ComicArchive(url: url, cacheDirectory: cache).comicInfo?.title == "Small")
+    }
+
+    @Test func readsCDATAText() {
+        let xml =
+            "<ComicInfo><Title><![CDATA[The <Start> & More]]></Title><Manga><![CDATA[YesAndRightToLeft]]></Manga></ComicInfo>"
+        let info = ComicInfo(xml: Data(xml.utf8))
+        #expect(info?.title == "The <Start> & More")
+        #expect(info?.isRightToLeft == true)
     }
 
     @Test func anotherXMLFileIsReadWhenThereIsNoComicInfoFile() throws {
