@@ -45,7 +45,7 @@ final class AppEnvironment {
                 store: ServerConnectionStore(modelContainer: stack.container), keychain: keychain,
                 validator: ServerValidator(sessionConfiguration: sessionConfiguration),
                 openID: OIDCLoginService(sessionConfiguration: sessionConfiguration),
-                sessionConfiguration: sessionConfiguration)
+                sessionConfiguration: sessionConfiguration, settings: settings)
             dataStack = stack
             accounts = manager
             lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))

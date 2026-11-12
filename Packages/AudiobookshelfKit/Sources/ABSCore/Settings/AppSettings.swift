@@ -317,6 +317,51 @@ public final class AppSettings {
         recentSearches = stored
     }
 
+    // MARK: Removing an account
+
+    /// Removes everything saved for one server and user: its last-used library, and every
+    /// library's view preferences and recent searches. For a removed server; signing out keeps
+    /// them for signing in again, recent searches included, as it's still the same user on this
+    /// device. Matches the exact ``accountKey(serverID:userID:)``, or it followed by `|`, so
+    /// account `a|b` doesn't take `a|bc`'s entries. Like ``setLastLibraryID(_:serverID:userID:)``
+    /// it changes the dictionaries currently in the store, so other accounts' entries written
+    /// elsewhere aren't overwritten.
+    public func removeAccountData(serverID: String, userID: String) {
+        let account = Self.accountKey(serverID: serverID, userID: userID)
+        removeAccountEntries { Self.isEntry($0, of: account) }
+    }
+
+    /// Removes everything saved for accounts other than `accounts`, as
+    /// ``removeAccountData(serverID:userID:)`` would for each: for a launch-time sweep of data
+    /// whose server was removed without clearing it, for example by a removal the app was
+    /// terminated in. An entry is kept if it's any listed account's, by the same matching, so a
+    /// listed account's data is never removed.
+    public func removeAccountData(keepingOnly accounts: [(serverID: String, userID: String)]) {
+        let kept = accounts.map { Self.accountKey(serverID: $0.serverID, userID: $0.userID) }
+        removeAccountEntries { key in !kept.contains { Self.isEntry(key, of: $0) } }
+    }
+
+    /// Whether a key of the account-keyed dictionaries is `account`'s: the key itself, or it
+    /// followed by `|`, so account `a|b` doesn't take `a|bc`'s entries.
+    private nonisolated static func isEntry(_ key: String, of account: String) -> Bool {
+        key == account || key.hasPrefix(account + "|")
+    }
+
+    /// Removes the entries `shouldRemove` picks from each account-keyed dictionary, as stored.
+    private func removeAccountEntries(where shouldRemove: (String) -> Bool) {
+        let reader = Reader(defaults: defaults)
+        let dictionaries: [(Key, ReferenceWritableKeyPath<AppSettings, [String: String]>)] = [
+            (.lastLibraryIDs, \.lastLibraryIDs), (.libraryViewPreferences, \.libraryViewPreferences),
+            (.recentSearches, \.recentSearches),
+        ]
+        for (key, property) in dictionaries {
+            let stored = reader.stringDictionary(key)
+            let kept = stored.filter { !shouldRemove($0.key) }
+            // Unchanged dictionaries aren't written, so nothing is stored that wasn't.
+            if kept.count != stored.count { self[keyPath: property] = kept }
+        }
+    }
+
     // MARK: Store selection
 
     /// The App Group `UserDefaults`, or `.standard` when the App Group container is
