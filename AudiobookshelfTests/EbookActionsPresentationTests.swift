@@ -46,6 +46,16 @@ import Testing
                 == L10n.string("MessageItemDetailEbookNowSupplementary", L10n.string("LabelEbook")))
     }
 
+    /// An unconfirmed change names the file without claiming a direction.
+    @Test func unconfirmedStatusChangeIsAnnouncedWithoutDirection() throws {
+        let feedback = try #require(EbookActionsPresentation.feedback(for: .statusUpdated(filename: "b.epub")))
+        #expect(feedback.alertTitle == nil)
+        #expect(feedback.announcement == L10n.string("MessageItemDetailEbookStatusUpdated", "b.epub"))
+        #expect(feedback.announcement != L10n.string("MessageItemDetailEbookNowPrimary", "b.epub"))
+        let unnamed = try #require(EbookActionsPresentation.feedback(for: .statusUpdated(filename: "")))
+        #expect(unnamed.announcement == L10n.string("MessageItemDetailEbookStatusUpdated", L10n.string("LabelEbook")))
+    }
+
     @Test func sendingAnnouncementNamesDevice() {
         let text = EbookActionsPresentation.sendingAnnouncement(deviceName: "Kindle")
         #expect(text == L10n.string("MessageItemDetailEbookSending", "Kindle"))

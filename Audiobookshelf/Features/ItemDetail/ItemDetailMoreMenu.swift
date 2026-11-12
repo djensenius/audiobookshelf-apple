@@ -140,7 +140,7 @@ private struct ItemDetailMoreMenu: ViewModifier {
                     let outcome = await ebookActions.apply(change, offered: offered) {
                         // Not `error == nil`: a cancelled or superseded reload leaves it nil and
                         // the old files in place.
-                        await model.reload()
+                        await model.reload() ? model.item : nil
                     }
                     show(outcome, lifetime: lifetime, ticket: ticket)
                 }

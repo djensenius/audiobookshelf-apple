@@ -35,6 +35,11 @@ enum EbookActionsPresentation {
             let key =
                 change.makesPrimary ? "MessageItemDetailEbookNowPrimary" : "MessageItemDetailEbookNowSupplementary"
             return Feedback(alertTitle: nil, alertMessage: nil, announcement: L10n.string(key, name))
+        case .statusUpdated(let filename):
+            let name = filename.isEmpty ? L10n.string("LabelEbook") : filename
+            return Feedback(
+                alertTitle: nil, alertMessage: nil,
+                announcement: L10n.string("MessageItemDetailEbookStatusUpdated", name))
         case .statusChangeFailed(let message):
             let title = L10n.string("MessageItemDetailEbookStatusFailed")
             return Feedback(alertTitle: title, alertMessage: message, announcement: joined(title, message))

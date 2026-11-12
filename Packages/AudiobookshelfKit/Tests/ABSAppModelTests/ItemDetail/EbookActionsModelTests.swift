@@ -90,6 +90,8 @@ private func auth(
 
 private let twoFiles = item(primary: "a", files: [ebook("a", supplementary: false), ebook("b", supplementary: true)])
 private let makeB = EbookActionsModel.StatusChange(id: "b", filename: "b.epub", makesPrimary: true)
+/// ``twoFiles`` after ``makeB``: b is primary, a supplementary.
+private let afterB = item(primary: "b", files: [ebook("a", supplementary: true), ebook("b", supplementary: false)])
 /// The devices the menu offers when tapped.
 private let offered = ["Kindle", "Kobo", "K"].map { EReaderDevice(name: $0) }
 
@@ -170,7 +172,8 @@ struct EbookActionsModelTests {
         let service = FakeEbookActionsService()
         let model = EbookActionsModel(itemID: "li1", service: service)
         let offered = model.offeredStatusChanges(authorization: auth(update: true), item: legacy, isGone: false)
-        #expect(await model.apply(changes[1], offered: offered) { true } == .statusChanged(changes[1]))
+        let reloaded = item(id: legacy.id, files: [ebook("a", supplementary: nil), ebook("b", supplementary: false)])
+        #expect(await model.apply(changes[1], offered: offered) { reloaded } == .statusChanged(changes[1]))
         #expect(service.calls == ["toggle li1 b"])
     }
 
@@ -295,7 +298,7 @@ struct EbookActionsModelTests {
         let outcome = await model.apply(makeB, offered: [makeB]) {
             busyDuringReload = model.isBusy
             callsAtReload = service.calls
-            return true
+            return afterB
         }
         #expect(outcome == .statusChanged(makeB))
         #expect(callsAtReload == ["toggle li1 b"])
@@ -304,9 +307,31 @@ struct EbookActionsModelTests {
         #expect(!model.needsReload)
     }
 
+    /// The server flips the file's current status. If another client made b primary after the
+    /// menu was built, the toggle makes it supplementary again: the reload shows that, so the
+    /// outcome doesn't claim b is now primary. Nor does a reload of another item, or one without
+    /// the file.
+    @Test func unconfirmedChangeIsNotDirectional() async {
+        let flippedBack = twoFiles
+        let otherItem = item(id: "li2", primary: "b", files: [ebook("b", supplementary: false)])
+        let fileGone = item(primary: "a", files: [ebook("a", supplementary: false)])
+        for reloaded in [flippedBack, otherItem, fileGone] {
+            let model = EbookActionsModel(itemID: "li1", service: FakeEbookActionsService())
+            #expect(await model.apply(makeB, offered: [makeB]) { reloaded } == .statusUpdated(filename: "b.epub"))
+            #expect(!model.needsReload)
+        }
+        // Negative control: the confirming reload gives the directional outcome, both ways.
+        let model = EbookActionsModel(itemID: "li1", service: FakeEbookActionsService())
+        #expect(await model.apply(makeB, offered: [makeB]) { afterB } == .statusChanged(makeB))
+        let makeBSupplementary = EbookActionsModel.StatusChange(id: "b", filename: "b.epub", makesPrimary: false)
+        #expect(
+            await model.apply(makeBSupplementary, offered: [makeBSupplementary]) { twoFiles }
+                == .statusChanged(makeBSupplementary))
+    }
+
     @Test func failedReloadHidesChangesUntilTheItemLoads() async {
         let model = EbookActionsModel(itemID: "li1", service: FakeEbookActionsService())
-        #expect(await model.apply(makeB, offered: [makeB]) { false } == .statusChanged(makeB))
+        #expect(await model.apply(makeB, offered: [makeB]) { nil } == .statusUpdated(filename: "b.epub"))
         #expect(model.needsReload)
         #expect(model.offeredStatusChanges(authorization: auth(update: true), item: twoFiles, isGone: false).isEmpty)
         model.itemDidLoad()
@@ -322,12 +347,12 @@ struct EbookActionsModelTests {
         #expect(
             await model.apply(makeB, offered: [now]) {
                 reloads += 1
-                return true
+                return afterB
             } == .ignored)
         #expect(
             await model.apply(makeB, offered: []) {
                 reloads += 1
-                return true
+                return afterB
             } == .ignored)
         #expect(service.calls.isEmpty)
         #expect(reloads == 0)
@@ -343,7 +368,7 @@ struct EbookActionsModelTests {
         var reloads = 0
         let outcome = await model.apply(makeB, offered: [makeB]) {
             reloads += 1
-            return true
+            return afterB
         }
         #expect(outcome == .statusChangeFailed(message: EbookActionsModel.serverMessage(error)))
         #expect(reloads == 0)
@@ -361,7 +386,7 @@ struct EbookActionsModelTests {
         var busyDuringReload: Bool?
         let outcome = await model.apply(makeB, offered: [makeB]) {
             busyDuringReload = model.isBusy
-            return false
+            return nil
         }
         #expect(outcome == .statusChangeFailed(message: nil))
         #expect(busyDuringReload == true)
@@ -374,7 +399,7 @@ struct EbookActionsModelTests {
         var reloads = 0
         _ = await model.apply(makeB, offered: [makeB]) {
             reloads += 1
-            return true
+            return afterB
         }
         #expect(reloads == 1)
         #expect(!model.needsReload)
@@ -388,7 +413,7 @@ struct EbookActionsModelTests {
         // A change whose reload failed stays hidden across the reconnect.
         let first = FakeEbookActionsService()
         let model = EbookActionsModel(itemID: "li1", service: first)
-        #expect(await model.apply(makeB, offered: [makeB]) { false } == .statusChanged(makeB))
+        #expect(await model.apply(makeB, offered: [makeB]) { nil } == .statusUpdated(filename: "b.epub"))
         let second = FakeEbookActionsService(holdsFirstCall: true)
         model.replaceService(second)
         #expect(model.needsReload)
@@ -437,7 +462,7 @@ struct EbookActionsModelTests {
             _ = await first.value
             return
         }
-        #expect(await model.apply(makeB, offered: [makeB]) { true } == .ignored)
+        #expect(await model.apply(makeB, offered: [makeB]) { afterB } == .ignored)
         #expect(await model.send(to: "Kobo", offered: offered) == .ignored)
         service.release()
         #expect(await first.value == .sent(deviceName: "Kindle"))

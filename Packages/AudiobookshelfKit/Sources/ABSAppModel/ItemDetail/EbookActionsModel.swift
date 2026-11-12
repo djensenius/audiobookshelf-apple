@@ -73,8 +73,12 @@ public final class EbookActionsModel {
     public enum Outcome: Sendable, Hashable {
         /// The server accepted the ebook for `deviceName`.
         case sent(deviceName: String)
-        /// The file's status changed as `change` asked.
+        /// The file's status changed as `change` asked, as the reloaded item confirms.
         case statusChanged(StatusChange)
+        /// The server accepted the toggle, but the reload couldn't confirm the direction: it
+        /// failed, or the file is gone or shows the other status (another client changed it
+        /// first, so the toggle flipped it back). `filename` is the change's.
+        case statusUpdated(filename: String)
         /// The send failed. `message` is the server's explanation (``serverMessage(_:)``).
         case sendFailed(deviceName: String, message: String?)
         /// The status change failed. `message` is the server's explanation (``serverMessage(_:)``).
@@ -165,14 +169,19 @@ public final class EbookActionsModel {
     }
 
     /// Applies `change` if `offered` (what the menu would offer now) still contains it, then
-    /// awaits `reload`, which returns whether the item loaded, before the entries are enabled
-    /// again. A failed reload sets ``needsReload``.
+    /// awaits `reload`, which returns the item it loaded or `nil` if it failed, before the entries
+    /// are enabled again. A failed reload sets ``needsReload``.
+    ///
+    /// The server flips the file's current status, which another client may have changed since
+    /// the menu was built, so success is ``Outcome/statusChanged(_:)`` only when the reloaded
+    /// item shows the file in the requested state (``confirms(_:in:)``); otherwise it's
+    /// ``Outcome/statusUpdated(filename:)``.
     ///
     /// The toggle isn't idempotent, so a failure reloads too unless the server certainly didn't
     /// apply it (``wasRejected(_:)``): after a timeout, a lost connection or a 5xx it may have,
     /// and offering the old direction again would undo it.
     public func apply(
-        _ change: StatusChange, offered: [StatusChange], reload: () async -> Bool
+        _ change: StatusChange, offered: [StatusChange], reload: () async -> LibraryItem?
     ) async -> Outcome {
         guard !isBusy, offered.contains(change) else { return .ignored }
         isBusy = true
@@ -180,11 +189,22 @@ public final class EbookActionsModel {
         do {
             try await service.toggleEbookFileStatus(itemID: itemID, fileID: change.id)
         } catch {
-            if !Self.wasRejected(error) { needsReload = !(await reload()) }
+            if !Self.wasRejected(error) { needsReload = await reload() == nil }
             return .statusChangeFailed(message: Self.serverMessage(error))
         }
-        needsReload = !(await reload())
-        return .statusChanged(change)
+        let reloaded = await reload()
+        needsReload = reloaded == nil
+        return confirms(change, in: reloaded) ? .statusChanged(change) : .statusUpdated(filename: change.filename)
+    }
+
+    /// `item` is this model's item and has the changed file in the state `change` asked for:
+    /// supplementary or not, the server's own `isSupplementary` (a missing value is primary, as
+    /// in ``statusChanges(authorization:item:isGone:)``).
+    func confirms(_ change: StatusChange, in item: LibraryItem?) -> Bool {
+        guard let item, item.id == itemID,
+            let file = item.libraryFiles?.first(where: { $0.ino == change.id && $0.fileType == "ebook" })
+        else { return false }
+        return (file.isSupplementary == true) != change.makesPrimary
     }
 
     /// The request certainly didn't change anything: it never left (no URL, encoding, no
