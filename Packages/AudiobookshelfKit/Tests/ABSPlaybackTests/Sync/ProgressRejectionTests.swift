@@ -110,6 +110,44 @@ struct ProgressRejectionTests {
         #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
     }
 
+    /// The syncer that failed to save a rejection's cleanup retires; a replacement sharing the
+    /// store saves it without PATCHing the rejected values, then sends a later edit.
+    @Test func aReplacementSyncerFinishesAFailedRejectionCleanup() async throws {
+        let s = try SyncHarness()
+        let started = Gate()
+        let response = Gate()
+        s.service.state.withLock {
+            $0.patchErrors = [.notFound]
+            $0.patchStarted = started
+            $0.patchGates = [response]
+        }
+        try await edit(s, 50)
+        let drain = Task { await s.syncer.drainPendingProgress() }
+        await started.wait()
+        await s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        response.open()
+        await drain.value
+        s.syncer.detach()
+
+        let clock = s.h.clock
+        let service = StubProgressSyncService(serverConnectionID: s.h.connectionID)
+        let replacement = ProgressSyncer(
+            source: s.coordinator, service: service, store: s.store,
+            clock: ProgressSyncClock(now: { clock.now }, uptime: { clock.now.timeIntervalSince1970 }),
+            tickInterval: 0.5)
+        await replacement.drainPendingProgress()
+
+        let cleaned = try #require(try await s.store.progress(for: s.h.key("a")))
+        #expect(!cleaned.needsServerSync && cleaned.lastSyncError == "rejected 404")
+        #expect(service.patches.isEmpty)
+        s.h.clock.advance(by: 1)
+        try await edit(s, 60)
+        await replacement.drainPendingProgress()
+        #expect(service.patches.map(\.update) == [SyncHarness.audio(60)])
+        #expect(s.service.patches.map(\.update) == [SyncHarness.audio(50)])
+        replacement.detach()
+    }
+
     /// An edit made while the rejected PATCH was in flight is still sent.
     @Test func editDuringTheRejectedPatchIsSent() async throws {
         let s = try SyncHarness()
