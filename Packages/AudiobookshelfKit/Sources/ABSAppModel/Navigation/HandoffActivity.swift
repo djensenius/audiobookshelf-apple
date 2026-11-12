@@ -22,13 +22,17 @@ public struct HandoffAccount: Sendable, Hashable {
     /// The `userInfo` entries a publisher adds, beside `item`, `episode` and `position`.
     public var userInfo: [String: String] { ["serverAddress": serverAddress, "userID": userID] }
 
-    /// The saved connection signed in to this account, if any. A connection that was signed out
-    /// of isn't one. Connections are expected most recently used first, so the first match wins.
+    /// The first saved connection that ``matches(_:)`` this account. It doesn't check that the
+    /// connection still has a saved session; ``AccountSessionSource/connectionID(for:)`` does.
     public func connectionID(in connections: [ServerConnectionDTO]) -> UUID? {
-        connections.first { connection in
-            connection.signedOutAt == nil && !connection.isDisconnected && connection.userId == userID
-                && ServerAddress(connection.address)?.description == serverAddress
-        }?.id
+        connections.first(where: matches)?.id
+    }
+
+    /// Whether a saved connection is this account's: the same server and the same user, and
+    /// neither signed out of nor disconnected.
+    public func matches(_ connection: ServerConnectionDTO) -> Bool {
+        connection.signedOutAt == nil && !connection.isDisconnected && connection.userId == userID
+            && ServerAddress(connection.address)?.description == serverAddress
     }
 }
 
@@ -62,11 +66,12 @@ public struct HandoffActivity: Sendable, Hashable {
     /// Without an account the link opens on the active account, as before the payload named one.
     /// With one, the link names the matching connection, so the router opens it when that's the
     /// active connection and otherwise asks before switching (``Router/pendingServerSwitch``).
-    /// With no matching connection the result is ``HandoffResolution/accountNotSignedIn(_:)``,
-    /// and nothing should open.
-    @MainActor public func resolve(using accounts: some AccountSessionSource) -> HandoffResolution {
+    /// With no matching connection, or only ones without a saved session (an expired session
+    /// deletes its tokens but keeps the connection), the result is
+    /// ``HandoffResolution/accountNotSignedIn(_:)``, and nothing should open.
+    @MainActor public func resolve(using accounts: some AccountSessionSource) async -> HandoffResolution {
         guard let account else { return .open(link) }
-        guard let connectionID = accounts.connectionID(for: account) else { return .accountNotSignedIn(account) }
+        guard let connectionID = await accounts.connectionID(for: account) else { return .accountNotSignedIn(account) }
         return .open(DeepLink(link.target, serverID: connectionID.uuidString))
     }
 }

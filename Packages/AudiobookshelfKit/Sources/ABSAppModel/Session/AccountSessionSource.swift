@@ -42,11 +42,12 @@ public protocol AccountSessionSource: AnyObject, Observable, Sendable {
     /// - Returns: An OpenID end-session URL to open, as for ``logout()``.
     func remove(_ connectionID: UUID) async throws -> URL?
     /// The saved connection signed in to a Handoff activity's account, for
-    /// ``HandoffActivity/resolve(using:)``. `nil` when no connection here is.
-    func connectionID(for account: HandoffAccount) -> UUID?
+    /// ``HandoffActivity/resolve(using:)``: one that matches it and still has a saved session to
+    /// switch to. `nil` when no connection here is.
+    func connectionID(for account: HandoffAccount) async -> UUID?
 }
 
 extension AccountSessionSource {
     /// No saved connections to match, so an activity that names an account opens nothing.
-    public func connectionID(for account: HandoffAccount) -> UUID? { nil }
+    public func connectionID(for account: HandoffAccount) async -> UUID? { nil }
 }

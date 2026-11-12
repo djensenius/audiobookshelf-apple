@@ -132,30 +132,32 @@ private let connectionB = UUID(uuidString: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
         #expect(try account(address, "usr_1").connectionID(in: [signedOut, disconnected]) == nil)
     }
 
-    @Test func noMatchDoesNotNavigate() throws {
+    @Test func noMatchDoesNotNavigate() async throws {
         let accounts = MatchingAccounts(connections: [connection(connectionA, address: otherAddress, userID: "usr_1")])
         let activity = try #require(HandoffActivity(userInfo: payload(address, "usr_1")))
-        let resolution = activity.resolve(using: accounts)
+        let resolution = await activity.resolve(using: accounts)
         #expect(resolution == .accountNotSignedIn(try account(address, "usr_1")))
     }
 
-    @Test func aSourceWithoutConnectionsMatchesNothing() throws {
+    @Test func aSourceWithoutConnectionsMatchesNothing() async throws {
         // The protocol's default: a source that can't list connections opens no named account.
         let accounts = FakeAccountSource(log: CallLog())
         let activity = try #require(HandoffActivity(userInfo: payload(address, "usr_1")))
-        #expect(activity.resolve(using: accounts) == .accountNotSignedIn(try account(address, "usr_1")))
+        let resolution = await activity.resolve(using: accounts)
+        #expect(resolution == .accountNotSignedIn(try account(address, "usr_1")))
     }
 
-    @Test func noAccountOpensTheLinkUnchanged() throws {
+    @Test func noAccountOpensTheLinkUnchanged() async throws {
         let accounts = MatchingAccounts(connections: [])
         let activity = try #require(HandoffActivity(userInfo: ["item": "li_1"]))
-        #expect(activity.resolve(using: accounts) == .open(DeepLink(.item(id: "li_1", episodeID: nil))))
+        let resolution = await activity.resolve(using: accounts)
+        #expect(resolution == .open(DeepLink(.item(id: "li_1", episodeID: nil))))
     }
 
-    @Test func theActiveConnectionOpensTheItem() throws {
+    @Test func theActiveConnectionOpensTheItem() async throws {
         let accounts = MatchingAccounts(connections: [connection(connectionA, address: address, userID: "usr_1")])
         let activity = try #require(HandoffActivity(userInfo: payload(address, "usr_1")))
-        let resolution = activity.resolve(using: accounts)
+        let resolution = await activity.resolve(using: accounts)
         #expect(resolution == .open(DeepLink(.item(id: "li_1", episodeID: nil), serverID: connectionA.uuidString)))
 
         let router = Router(serverID: connectionA.uuidString, userID: "usr_1")
@@ -165,13 +167,13 @@ private let connectionB = UUID(uuidString: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
         #expect(router[path: .library] == [.item(id: "li_1")])
     }
 
-    @Test func anInactiveConnectionAsksBeforeSwitching() throws {
+    @Test func anInactiveConnectionAsksBeforeSwitching() async throws {
         let accounts = MatchingAccounts(connections: [
             connection(connectionA, address: address, userID: "usr_1"),
             connection(connectionB, address: address, userID: "usr_2"),
         ])
         let activity = try #require(HandoffActivity(userInfo: payload(address, "usr_2")))
-        let resolution = activity.resolve(using: accounts)
+        let resolution = await activity.resolve(using: accounts)
         let expected = DeepLink(.item(id: "li_1", episodeID: nil), serverID: connectionB.uuidString)
         #expect(resolution == .open(expected))
 
@@ -198,7 +200,7 @@ private final class MatchingAccounts: AccountSessionSource {
     func logout() async -> URL? { nil }
     func `switch`(to connectionID: UUID) async throws {}
     func remove(_ connectionID: UUID) async throws -> URL? { nil }
-    func connectionID(for account: HandoffAccount) -> UUID? { account.connectionID(in: connections) }
+    func connectionID(for account: HandoffAccount) async -> UUID? { account.connectionID(in: connections) }
 }
 
 private func payload(_ address: Any, _ userID: Any) -> [AnyHashable: Any] {
