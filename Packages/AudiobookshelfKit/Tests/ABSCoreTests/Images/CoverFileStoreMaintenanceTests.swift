@@ -108,6 +108,29 @@ import Testing
         #expect(await store.size == 16_384)
     }
 
+    /// With no folder to move aside, the live path isn't deleted: a fresh-generation write that
+    /// recreates it while the removal would be deleting must keep its leased cover.
+    @Test func removalWithoutAFolderKeepsARecreatedCover() async throws {
+        let gate = ListingGate()
+        let store = store(deletion: gate)
+        let finished = Mutex(false)
+        let removal = Task {
+            await store.removeServer(serverID)
+            finished.withLock { $0 = true }
+        }
+        #expect(await poll { gate.entries >= 1 || finished.withLock { $0 } })
+
+        let generation = await store.generation(for: serverID)
+        let held = try await store.insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "webp", generation: generation)
+        gate.release()
+        await removal.value
+        #expect(FileManager.default.fileExists(atPath: held.url.path))
+        #expect(await store.isLeased(held.url))
+        #expect(await store.size == 16_384)
+        withExtendedLifetime(held) {}
+    }
+
     @Test func passFinishedDuringARemovalIsNotReducedAgain() async throws {
         try await seed([serverID, otherServerID])
         let gate = ListingGate()

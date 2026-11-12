@@ -303,7 +303,8 @@ public actor CoverFileStore {
     /// leases (decodes reading its files) to be released, for at most a few seconds, so a decode
     /// in progress isn't left without its input; past that the files are deleted anyway, which
     /// open readers survive. The folder is then moved aside, so later lookups miss and later
-    /// writes start a fresh folder, and is measured and deleted off the actor.
+    /// writes start a fresh folder, and is measured and deleted off the actor. A folder that
+    /// can't be moved aside isn't deleted.
     public func removeServer(_ serverID: UUID) async {
         serverGenerations[serverID, default: 0] += 1
         let prefix = "\(root)/\(serverID.uuidString)/"
@@ -316,15 +317,19 @@ public actor CoverFileStore {
         let isMoved = rename(folder.path, removing.path) == 0
         // Refuses writes whose generation was read during the lease wait.
         serverGenerations[serverID, default: 0] += 1
+        versions = versions.filter { !$0.key.hasPrefix(prefix) }
+        // Only a folder moved aside is deleted. If the move failed (no folder, or refused), the
+        // path is still the live one, which a fresh-generation write may recreate and lease while
+        // a deletion is suspended. Files left behind stay counted, and `removeServers(keepingOnly:)`
+        // sweeps them in a later launch.
+        guard isMoved else { return }
         // A pass listing the folder meanwhile drops these files itself, by their move count.
         folderMoves[serverID, default: 0] += 1
         let moved = folderMoves[serverID, default: 0]
-        versions = versions.filter { !$0.key.hasPrefix(prefix) }
-        let target = isMoved ? removing : folder
-        removingFolders.insert(target.lastPathComponent)
+        removingFolders.insert(removing.lastPathComponent)
         let removed = await Self.deleteFolder(
-            target, as: serverID, root: root, excluding: retired, hook: deletionHook)
-        removingFolders.remove(target.lastPathComponent)
+            removing, as: serverID, root: root, excluding: retired, hook: deletionHook)
+        removingFolders.remove(removing.lastPathComponent)
         // Only if the size still counts these files: the last pass finished before the move
         // (even during the lease wait) and didn't drop the server for a move while it listed.
         if let lastPass, lastPass.listed[serverID, default: 0] == lastPass.finished[serverID, default: 0],
