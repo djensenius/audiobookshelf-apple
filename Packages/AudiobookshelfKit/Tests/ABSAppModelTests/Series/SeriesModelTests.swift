@@ -74,6 +74,7 @@ private typealias F = SeriesAuthorsFixtures
             })
         let model = SeriesDetailModel(seriesID: "s1", libraryID: "lib-route", service: service, cache: ProgressCache())
         #expect(model.phase == .idle)
+        #expect(model.booksLibraryID == "lib-route")
 
         await model.loadIfNeeded()
 
@@ -86,6 +87,9 @@ private typealias F = SeriesAuthorsFixtures
         // The series' own library, the series filter, no sort and no paging.
         let request = try #require(requests.value.first)
         #expect(request.libraryID == "lib-series")
+        // Actions on the books (Add to playlist) go to the library they loaded from.
+        #expect(detail.libraryID == "lib-series")
+        #expect(model.booksLibraryID == "lib-series")
         #expect(request.query == LibraryQuery(filter: .series(id: "s1")))
         #expect(request.query.queryItems.map(\.name) == ["filter"])
         #expect(request.query.queryItems.first?.value == "series.czE%3D")
@@ -108,6 +112,7 @@ private typealias F = SeriesAuthorsFixtures
 
         let request = try #require(requests.value.first)
         #expect(request.libraryID == "lib-route")
+        #expect(model.booksLibraryID == "lib-route")
         #expect(request.query.queryItems.map(\.name) == ["filter", "collapseseries"])
         #expect(model.detail?.books.map(\.id) == ["series-sub", "b3"])
         #expect(model.detail?.books.first?.sequence == "1")

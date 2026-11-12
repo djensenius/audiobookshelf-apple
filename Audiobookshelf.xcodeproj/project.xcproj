@@ -49,7 +49,9 @@
           ],
         },
       ],
-    }, {
+    },
+    { "path": "THIRD_PARTY_NOTICES.md", "target-membership": [ "Audiobookshelf/resources" ] },
+    {
       "kind": "group",
       "name": "Products",
       "children": [

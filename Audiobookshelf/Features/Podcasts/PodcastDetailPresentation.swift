@@ -144,19 +144,19 @@ enum PodcastDetailPresentation {
 /// The actions of the podcast screen's episodes, performed as Home performs its card actions.
 /// The only place the screen uses Home's helpers, so moving them changes one file.
 enum PodcastEpisodeActions {
-    /// The actions an episode's row offers: Play and the finished toggle, as legacy's rows did;
+    /// The actions an episode's row offers: Play, the finished toggle and Add to playlist, as legacy's rows did;
     /// none when the podcast is gone from the server. The row itself opens the episode.
     static func available(
         for summary: ItemSummary?, progress: ItemProgress?, context: ItemActionContext, isGone: Bool
     ) -> [ItemAction] {
         guard let summary, !isGone else { return [] }
-        let offered: Set<ItemActionKind> = [.play, .markFinished, .markNotFinished]
+        let offered: Set<ItemActionKind> = [.play, .markFinished, .markNotFinished, .addToPlaylist]
         return ItemAction.available(for: summary, progress: progress, context: context)
             .filter { offered.contains($0.kind) }
     }
 
-    static func context(canPlay: Bool) -> ItemActionContext {
-        ItemCardActions.actionContext(canPlay: canPlay)
+    static func context(canPlay: Bool, canEditPlaylists: Bool = false) -> ItemActionContext {
+        ItemCardActions.actionContext(canPlay: canPlay, canEditPlaylists: canEditPlaylists)
     }
 
     /// Performs `kind` on the episode `summary` stands for. A finished episode plays from the
