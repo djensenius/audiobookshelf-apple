@@ -12,6 +12,8 @@ final class PlaybackHistoryLog {
         let name: PlaybackHistoryEventName
         let media: PlaybackHistoryMedia
         let position: TimeInterval?
+        /// Tells this event from an equal one, such as a replacement session's under a reused ID.
+        let id = UUID()
     }
 
     private let recorder: any PlaybackHistoryRecording

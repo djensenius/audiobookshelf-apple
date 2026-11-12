@@ -44,6 +44,43 @@ final class HistorySpy: PlaybackHistoryRecording {
     }
 }
 
+/// The coordinator as the syncer's source, with `before` running ahead of the syncer's
+/// observer: as if another observer ran first (the coordinator's order is unspecified).
+@MainActor
+private final class ObserverFirstSource: PlaybackProgressSource {
+    let base: PlaybackCoordinator
+    var before: (@MainActor (PlaybackCoordinatorEvent) -> Void)?
+
+    init(_ base: PlaybackCoordinator) { self.base = base }
+
+    var currentTime: Double { base.currentTime }
+    var confirmedPlaybackTime: Double? { base.confirmedPlaybackTime }
+    var loadedPositionIsExplicit: Bool { base.loadedPositionIsExplicit }
+    var duration: Double { base.duration }
+    var isPlaying: Bool { base.isPlaying }
+    var chapterIndex: Int? { base.chapterIndex }
+    var sessionDisplayTitle: String? { base.sessionDisplayTitle }
+    var resumeRewindLanding: Double? { base.resumeRewindLanding }
+    var startProgressChange: ServerAudioPositionChange? { base.startProgressChange }
+    var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)? {
+        get { base.finalCloseReport }
+        set { base.finalCloseReport = newValue }
+    }
+    var quiesceProgressTransport: (@MainActor () -> Void)? {
+        get { base.quiesceProgressTransport }
+        set { base.quiesceProgressTransport = newValue }
+    }
+
+    func addObserver(_ handler: @escaping @MainActor (PlaybackCoordinatorEvent) -> Void) -> PlaybackObserverToken {
+        base.addObserver { [weak self] event in
+            self?.before?(event)
+            handler(event)
+        }
+    }
+
+    func removeObserver(_ token: PlaybackObserverToken) { base.removeObserver(token) }
+}
+
 @MainActor
 @Suite(.timeLimit(.minutes(1)))
 struct PlaybackHistoryReportingTests {
@@ -143,6 +180,31 @@ struct PlaybackHistoryReportingTests {
         #expect(spy.entries(.pause).isEmpty)
     }
 
+    @Test func finishedIsRecordedWhenAnotherEndedObserverStopsFirst() async throws {
+        let spy = HistorySpy()
+        var wrapped: ObserverFirstSource?
+        let s = try SyncHarness(history: spy) { coordinator in
+            let source = ObserverFirstSource(coordinator)
+            wrapped = source
+            return source
+        }
+        let source = try #require(wrapped)
+        source.before = { [coordinator = s.coordinator] event in
+            if case .ended = event { coordinator.stop() }
+        }
+        await s.coordinator.play(itemID: "a", startTime: 3590)
+        await s.play(for: 2)
+        s.h.engine.finish()
+        await s.coordinator.waitForPendingCloses()
+        await Self.settle(s)
+
+        #expect(s.h.service.closes.count == 1)
+        #expect(spy.entries.filter { $0.name != .play }.map(\.name) == [.finished, .stop])
+        #expect(spy.entries(.finished).map(\.position) == [3600])
+        #expect(spy.entries(.finished).map(\.sync) == [.succeeded])
+        #expect(spy.entries(.stop).map(\.sync) == [.succeeded])
+    }
+
     nonisolated static let closeOutcomes: [(String, PlaybackHistorySyncResult)] = [
         ("acknowledged", .succeeded), ("failed", .failed(message: "http")), ("signOut", .notAttempted),
     ]
@@ -232,6 +294,39 @@ struct PlaybackHistoryReportingTests {
         #expect(s.h.service.closes == [session.id])
         #expect(spy.entries(.stop).map(\.position) == [9, 6])
         #expect(spy.entries(.stop).map(\.sync) == [.notAttempted, .succeeded])
+    }
+
+    @Test func aReplacementUnderAReusedIDKeepsItsOwnPauseResult() async throws {
+        let (s, spy) = try Self.harness()
+        let preparing = Gate()
+        let preparation = Gate()
+        defer { preparation.open() }
+        await s.coordinator.play(itemID: "a")
+        await s.play(for: 6)
+        let session = try #require(s.coordinator.session)
+        // The server hands out the same session ID again.
+        s.h.service.state.withLock { $0.sessionOverride = session }
+        s.syncer.beforeSessionAudioPreparation = {
+            preparing.open()
+            await preparation.wait()
+        }
+        s.coordinator.pause()
+        await preparing.wait()
+        // The session closes while the pause's `/sync` is prepared: its `/close` reports the pause.
+        s.coordinator.stop()
+        await s.coordinator.waitForPendingCloses()
+        s.syncer.beforeSessionAudioPreparation = nil
+        // The replacement, under the same ID, pauses while the old `/sync` is still held.
+        await s.coordinator.play(itemID: "a")
+        #expect(s.coordinator.session?.id == session.id)
+        await s.play(for: 3, settling: false)
+        s.coordinator.pause()
+        preparation.open()
+        await Self.settle(s)
+
+        #expect(s.service.reports.map(\.currentTime) == [9])
+        #expect(spy.entries(.pause).map(\.position) == [6, 9])
+        #expect(spy.entries(.pause).map(\.sync) == [.succeeded, .succeeded])
     }
 
     @Test func closeEventsAreRecordedAfterTheLogIsReleased() async throws {
