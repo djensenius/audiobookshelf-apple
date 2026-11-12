@@ -20,7 +20,7 @@ never edit the catalog by hand or in Xcode's catalog editor: the next import ove
 | Command | What it does |
 | --- | --- |
 | `mise run strings` | Regenerate `Localizable.xcstrings` and print warnings for skipped translations |
-| `mise run strings:check` | Fail if the catalog or the app's `CFBundleLocalizations` is out of date (runs in CI) |
+| `mise run strings:check` | Fail if the catalog or the app's `CFBundleLocalizations` is out of date, or the Swift sources fail the [source checks](#source-checks) (runs in CI) |
 | `mise run test:tools` | Test the importer (runs in CI) |
 
 The importer is the local package `Tools/StringsImport` (library `StringsImportCore`, executable
@@ -81,6 +81,43 @@ asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
   use `Text(verbatim:)` for literals that aren't localized. A `Text("…")` literal or
   `String(localized:)` call in ABSUI would let Xcode's string extraction add entries to
   the catalog, which then fails `strings:check`.
+
+## Source checks
+
+`mise run strings` and `strings:check` also scan the Swift sources (`Audiobookshelf/` and
+`Packages/AudiobookshelfKit/Sources/`), skipping comment lines:
+
+- **Missing keys fail.** A key is the literal first argument of `L10n.string`, `L10n.attributed`
+  or `L10n.plural`, or any identifier-like literal named like a key (`"Button…"`, `"Header…"`,
+  `"Label…"`, `"Message…"`, `"Note…"`, `"Placeholder…"`, `"Shared…"`, `"Toast…"`, `"Unit…"`
+  followed by an uppercase letter or digit), because keys often reach `L10n` through a
+  `titleKey` property or a ternary. Each must exist in `strings/en-us.json` or
+  `Localization/native/en-us.json`; the error gives `file:line`. Keys built at run time
+  (`"Label" + name`) aren't seen; don't build keys that way.
+- **Unused keys warn.** A key in either `en-us.json` that no Swift literal names is listed,
+  separately for native and legacy keys. Many legacy keys are kept for features not ported yet,
+  so this never fails.
+- **Hard-coded strings in `Audiobookshelf/Features/` fail.** A literal with a letter (outside its
+  interpolations) passed straight to `Text`, `Text(verbatim:)`, `Button`, `Label`, `Toggle`,
+  `Picker`, `Section`, `Menu`, `TextField`, `SecureField`, `Link`, `LabeledContent`,
+  `ContentUnavailableView`, `ProgressView`, `GroupBox`, `DisclosureGroup`, `Tab`,
+  `.navigationTitle`, `.navigationSubtitle`, `.accessibilityLabel`, `.accessibilityHint`,
+  `.accessibilityValue`, `.help`, `.alert`, `.confirmationDialog`, or a `prompt:` argument is
+  reported with `file:line`, unless it is a key. Symbols and numbers (`Text(verbatim: "•")`) pass.
+  Only single-line literals on the call's line are seen.
+
+To opt a line out of both checks (an example URL, a literal that only looks like a key), put
+`l10n-ignore` and the reason in a comment on that line or on a comment line just above it:
+
+```swift
+// l10n-ignore: an example address, not prose.
+TextField(text: $model.address, prompt: Text(verbatim: "https://abs.example.com")) {
+```
+
+Placeholders are compared across locales as described under the conversion rules below: a
+translation with a placeholder its English string lacks, or a malformed one, is skipped with a
+warning; one that drops a placeholder (a string, or a plural's forms together) is kept with a
+warning.
 
 ## Conversion rules
 
