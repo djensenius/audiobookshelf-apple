@@ -218,6 +218,34 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(reloader.kinds.count == 2)
     }
 
+    @Test func aFlushWritesTheThrottledPositionAtOnce() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = await writer()
+        writer.update(snapshot(at: 10, playing: false))
+        clock.advance(by: 5)
+        writer.update(snapshot(at: 200, playing: false))
+        #expect(await eventually { sleeper.sleeping == 1 })
+
+        // Backgrounding flushes before the app can be suspended.
+        await writer.flush()
+        #expect(onDisk?.currentTime == 200)
+        #expect(reloader.kinds.count == 2)
+        #expect(await eventually { sleeper.sleeping == 0 })
+
+        // The cancelled timer and a second flush write nothing more.
+        clock.advance(by: 295)
+        sleeper.wake()
+        await writer.flush()
+        for _ in 0..<100 { await Task.yield() }
+        #expect(reloader.kinds.count == 2)
+        // Nor does one after the session ends.
+        writer.update(snapshot(at: 250, playing: false))
+        await writer.sessionWillEnd(.switch)
+        await writer.flush()
+        #expect(onDisk?.currentTime == 200)
+        #expect(reloader.kinds.count == 2)
+    }
+
     @Test func playPauseChapterAndItemChangesWriteAtOnce() async {
         defer { try? FileManager.default.removeItem(at: directory) }
         let writer = await writer()

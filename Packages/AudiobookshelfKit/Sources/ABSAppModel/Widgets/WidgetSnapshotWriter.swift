@@ -15,7 +15,7 @@ public protocol WidgetTimelineReloading: AnyObject {
 ///   or pause, a new chapter, title, author or cover. A position-only change waits until
 ///   ``minimumInterval`` has passed since the last write, so playback's ticks don't spend the
 ///   widget's reload budget: the latest one is written then, even if nothing changes after it
-///   (a seek while paused).
+///   (a seek while paused), or sooner when the session flushes (``flush()``, on background).
 /// - It clears the snapshot (deletes the file and reloads) when the user signs out, removes the
 ///   active account or the server rejects the session (``SessionParticipant``), and when the
 ///   snapshot's connection is removed while another one is active (``followRemovals(of:)``). A
@@ -151,6 +151,14 @@ public final class WidgetSnapshotWriter: SessionParticipant {
 
     public func sessionDidStart(_ context: SessionContext) async {
         connectionID = context.identity.connectionID
+    }
+
+    /// Writes a throttled position now, on background or before the session ends, so the app
+    /// isn't suspended before the trailing write (a seek while paused, then leaving the app).
+    /// Nothing is pending after ``sessionWillEnd(_:)``, so a late flush writes nothing.
+    public func flush() async {
+        guard let pending, pending.serverID == connectionID else { return }
+        write(pending)
     }
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
