@@ -593,6 +593,22 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
             stored.recentSearchesJSON(serverID: saved.serverID, userID: saved.userID, libraryID: "lib") == "[\"Dune\"]")
     }
 
+    @Test func savedConnectionIDsAreReadFromTheStoreBeforeTheConnectionsLoad() async throws {
+        let harness = try Harness()
+        let (first, second, third) = (FakeServer(), FakeServer(), FakeServer())
+        let earlier = harness.makeManager()
+        let firstID = try await signIn(earlier, to: first)
+        let secondID = try await signIn(earlier, to: second)
+        let thirdID = try await signIn(earlier, to: third)
+        // Removed, and kept disconnected for its unsynced progress.
+        try harness.retainRecords(of: secondID)
+        try await earlier.remove(secondID)
+
+        let relaunched = harness.makeManager()
+        #expect(relaunched.connections.isEmpty)
+        #expect(await relaunched.savedConnectionIDs() == [firstID, thirdID])
+    }
+
     @Test func refreshedTokensArePersisted() async throws {
         let harness = try Harness()
         let server = FakeServer()
