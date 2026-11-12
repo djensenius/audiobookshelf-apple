@@ -28,6 +28,8 @@ struct CoordinatorHarness {
     let lastPlayed: InMemoryLastPlayedStore
     let progressStore: LocalProgressStore
     let sleep = TestSleep()
+    /// Recovery's backoff; it never ends unless a test makes it.
+    let recoverySleep = TestSleep()
     let coordinator: PlaybackCoordinator
     let events = EventLog()
 
@@ -43,11 +45,12 @@ struct CoordinatorHarness {
             try progressStore ?? LocalProgressStore(modelContainer: DataStack(location: .inMemory).container)
         let clock = clock
         let sleep = sleep
+        let recoverySleep = recoverySleep
         coordinator = PlaybackCoordinator(
             engine: engine, sessions: service, progressStore: progressReader ?? self.progressStore,
             settings: settings, policy: policy,
             lastPlayedStore: lastPlayed, now: { clock.now }, sleep: { await sleep.sleep($0) },
-            backgroundActivity: backgroundActivity)
+            backgroundActivity: backgroundActivity, recoveryWait: { await recoverySleep.sleep($0) })
         let events = events
         _ = coordinator.addObserver { events.events.append($0) }
     }
@@ -993,7 +996,9 @@ struct PlaybackCoordinatorTests {
 
     @Test func engineFailureEventIsSurfaced() async {
         await coordinator.play(itemID: "A")
-        let failure = PlaybackFailure(kind: .network, domain: NSURLErrorDomain, code: -1009, description: "offline")
+        // Not recoverable (ADR 0007), so recovery surfaces it at once.
+        let failure = PlaybackFailure(
+            kind: .http(status: 403), domain: "CoreMediaErrorDomain", code: -12660, description: "forbidden")
         engine.onEvent?(.failed(.playerFailed(failure)))
 
         #expect(coordinator.error == .playback(failure))

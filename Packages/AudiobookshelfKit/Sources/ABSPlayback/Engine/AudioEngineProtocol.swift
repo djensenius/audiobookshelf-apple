@@ -122,6 +122,9 @@ public protocol AudioEngineProtocol: AnyObject, Observable {
     var defaultRate: Float { get }
     /// Whether the user asked to play; stays `true` while buffering or seeking.
     var isPlaybackRequested: Bool { get }
+    /// ``isPlaybackRequested`` when the latest ``AudioEngineEvent/failed(_:)`` happened: the
+    /// failure clears it, and recovery resumes only playback that was wanted.
+    var wasPlaybackRequestedAtFailure: Bool { get }
     /// Target of the latest seek until a seek to it completes.
     var pendingSeekTarget: Double? { get }
     /// Whether the engine has activated its audio session to play: set once activation succeeds,

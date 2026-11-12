@@ -111,6 +111,25 @@ struct APIPlaybackSessionServiceTests {
         }
     }
 
+    @Test func refreshStreamAccessReplacesEvenAnUnexpiredToken() async throws {
+        // Recovery's 401 path: the stream was rejected, so the token is refreshed whatever its expiry.
+        let fresh = jwt(expiringAt: pinnedNow.addingTimeInterval(7200))
+        let (service, tokens, server) = try await refreshingService(
+            accessToken: jwt(expiringAt: pinnedNow.addingTimeInterval(3600)), refresh: .issuing(fresh))
+
+        try await service.refreshStreamAccess()
+
+        #expect(server.requests.map { $0.url?.path() } == ["/abs/auth/refresh"])
+        #expect(tokens.current?.accessToken == fresh)
+    }
+
+    @Test func refreshStreamAccessReportsARejectedRefresh() async throws {
+        let (service, _, _) = try await refreshingService(
+            accessToken: jwt(expiringAt: pinnedNow.addingTimeInterval(3600)), refresh: .rejected)
+
+        await #expect(throws: APIError.sessionExpired) { try await service.refreshStreamAccess() }
+    }
+
     @Test func tokenFallbackPropagatesCancellation() async throws {
         let fresh = jwt(expiringAt: pinnedNow.addingTimeInterval(3600))
         let (service, _, _) = try await refreshingService(

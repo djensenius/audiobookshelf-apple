@@ -86,4 +86,12 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
     public func closeSession(id: String, report: PlaybackSyncReport?) async throws {
         _ = try await client.send(SessionEndpoints.close(sessionID: id, report: report))
     }
+
+    /// Replaces the stored access token through the client's single-flight refresh; a token
+    /// another caller already replaced isn't refreshed again. ``APIError/notAuthenticated`` when
+    /// signed out.
+    public func refreshStreamAccess() async throws {
+        guard let token = await client.currentAccessToken() else { throw APIError.notAuthenticated }
+        _ = try await client.accessToken(replacing: token)
+    }
 }

@@ -23,6 +23,9 @@ public protocol PlaybackSessionService: Sendable {
     func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream
     /// `POST /api/session/:id/close`, applying `report` first when given.
     func closeSession(id: String, report: PlaybackSyncReport?) async throws
+    /// Refreshes the access token after the stream got a 401 (ADR 0007's 401 path), joining a
+    /// refresh in flight. Throws the ``APIError``: ``APIError/sessionExpired`` leads to sign-in.
+    func refreshStreamAccess() async throws
 }
 
 /// A session's stream plan with the URL to load for each of its tracks.

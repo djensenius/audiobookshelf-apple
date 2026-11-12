@@ -12,6 +12,7 @@ final class FakeAudioEngine: AudioEngineProtocol {
     var currentTrackIndex: Int?
     var defaultRate: Float = 1
     var isPlaybackRequested = false
+    var wasPlaybackRequestedAtFailure = false
     var pendingSeekTarget: Double?
     var isAudioSessionActive = false
     var timeline: PlaybackTimeline?

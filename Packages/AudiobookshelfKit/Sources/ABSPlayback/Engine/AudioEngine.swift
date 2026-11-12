@@ -25,6 +25,7 @@ public final class AudioEngine: AudioEngineProtocol {
     /// Output volume, `0...1` (the sleep timer fade). A replacement player gets it too.
     public private(set) var volume: Float = 1
     public private(set) var isPlaybackRequested = false
+    public private(set) var wasPlaybackRequestedAtFailure = false
     public private(set) var pendingSeekTarget: Double?
     public private(set) var isAudioSessionActive = false
     public private(set) var timeline: PlaybackTimeline?
@@ -497,6 +498,7 @@ public final class AudioEngine: AudioEngineProtocol {
         guard failure == nil else { return }
         logger.error("Playback failed: \(String(describing: error), privacy: .public)")
         failure = error
+        wasPlaybackRequestedAtFailure = isPlaybackRequested
         isPlaybackRequested = false
         player.pause()
         refreshState()
