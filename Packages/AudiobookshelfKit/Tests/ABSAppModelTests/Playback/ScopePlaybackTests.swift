@@ -110,7 +110,7 @@ private final class LastPlayed: LastPlayedStoring {
 private final class PrimaryRequests: NowPlayingHandle {
     var count = 0
     func invalidate() {}
-    func requestSystemPrimary() async { count += 1 }
+    func claimSystemPrimary() async { count += 1 }
 }
 
 private struct Device: DeviceIdentifying {

@@ -9,12 +9,21 @@ import Foundation
 public protocol NowPlayingHandle: AnyObject {
     /// Ends the Now Playing session for good.
     func invalidate()
-    /// Asks the system to make this app's session the primary one, after a user-initiated play.
-    func requestSystemPrimary() async
+    /// Asks the system to make this app's session the primary one, after a user-initiated play,
+    /// once playback is active. Publishes the current state first, so the application-primary
+    /// activation it waits for has started.
+    func claimSystemPrimary() async
 }
 
 @available(iOSApplicationExtension, unavailable)
-extension NowPlayingBridge: NowPlayingHandle {}
+extension NowPlayingBridge: NowPlayingHandle {
+    public func claimSystemPrimary() async {
+        // The bridge otherwise republishes on a later main-actor turn, and a request made before
+        // the application-primary activation started would do nothing.
+        refresh()
+        await requestSystemPrimary()
+    }
+}
 
 /// Playback for one account session (#183): its services, coordinator, attached progress syncer
 /// and Now Playing bridge, built together and torn down together.
@@ -94,6 +103,8 @@ public final class PlaybackScope {
     private var releaseHooks: [@MainActor () -> Void] = []
     private var hasRaisedRejection = false
     private(set) var isReleased = false
+    /// A user play's system-primary claim, waiting for playback to become active.
+    private var pendingPrimaryClaim: Task<Void, Never>?
 
     /// The `UserDefaults` key of a connection's last-played record.
     public static func lastPlayedKey(for connectionID: UUID) -> String {
@@ -156,22 +167,68 @@ public final class PlaybackScope {
         coordinator.restoreLastPlayed()
     }
 
-    /// Plays an item for the user, then asks for the system's primary Now Playing session if
-    /// playback started without an error.
+    /// Plays an item for the user, then claims the system's primary Now Playing session
+    /// (``claimSystemPrimaryOnceActive()``).
     public func play(itemID: String, episodeID: String?, startTime: Double?) async {
         await coordinator.play(itemID: itemID, episodeID: episodeID, startTime: startTime)
-        guard !coordinator.isRetired, coordinator.phase != .idle, coordinator.error == nil else { return }
-        await nowPlaying.requestSystemPrimary()
+        await claimSystemPrimaryOnceActive()
     }
 
     /// Resumes for the user (the player's play button, which may restart a restored item), then
-    /// asks for the system's primary Now Playing session if playback is requested without an
-    /// error. Remote commands (Lock Screen, headphones) resume the coordinator through the bridge
-    /// instead, and don't ask.
+    /// claims the system's primary Now Playing session (``claimSystemPrimaryOnceActive()``).
+    /// Remote commands (Lock Screen, headphones) resume the coordinator through the bridge
+    /// instead, and don't claim it.
     public func resume(rewindingBy seconds: Double?) async {
         await coordinator.resume(rewindingBy: seconds)
-        guard !coordinator.isRetired, coordinator.isPlaybackRequested, coordinator.error == nil else { return }
-        await nowPlaying.requestSystemPrimary()
+        await claimSystemPrimaryOnceActive()
+    }
+
+    /// After a user play or resume: claims the system's primary session if playback is requested
+    /// without an error (a pause during the play's seek leaves none to claim). Playback may
+    /// still be on its way (an initial seek or a load before the audio session activates); the
+    /// claim then waits until the bridge publishes it playing, and is dropped if the user pauses,
+    /// playback fails, the scope retires or another user play supersedes it.
+    private func claimSystemPrimaryOnceActive() async {
+        pendingPrimaryClaim?.cancel()
+        pendingPrimaryClaim = nil
+        switch PrimaryClaim(of: coordinator, isReleased: isReleased) {
+        case .drop: return
+        case .claim: return await nowPlaying.claimSystemPrimary()
+        case .wait: break
+        }
+        let coordinator = coordinator
+        pendingPrimaryClaim = Task { [weak self] in
+            let states = Observations { @MainActor in PrimaryClaim(of: coordinator, isReleased: false) }
+            for await state in states where state != .wait {
+                guard !Task.isCancelled, let self, !self.isReleased else { return }
+                self.pendingPrimaryClaim = nil
+                if state == .claim { await self.nowPlaying.claimSystemPrimary() }
+                return
+            }
+        }
+    }
+
+    /// What a user play's system-primary claim does now.
+    private enum PrimaryClaim: Equatable {
+        case claim, wait, drop
+
+        @MainActor init(of coordinator: PlaybackCoordinator, isReleased: Bool) {
+            guard !isReleased, !coordinator.isRetired, coordinator.isPlaybackRequested, coordinator.error == nil
+            else {
+                self = .drop
+                return
+            }
+            // As the bridge publishes playing (and so starts the application-primary activation):
+            // playing, or stalled with the audio session active.
+            let active =
+                coordinator.isPlaying || (coordinator.isAudioSessionActive && coordinator.isBuffering)
+            self = active ? .claim : .wait
+        }
+    }
+
+    /// Waits for the pending system-primary claim, if any (tests).
+    func waitForPrimaryClaim() async {
+        await pendingPrimaryClaim?.value
     }
 
     /// Swaps the account's client and features after a reconnect, without rebuilding anything.
@@ -196,6 +253,8 @@ public final class PlaybackScope {
     /// nothing reaches the server after. Pass an account-ending reason, never `.user`.
     public func retire(reason: PlaybackStopReason) {
         assert(reason != .user, "A scope retires only for an account-ending reason")
+        pendingPrimaryClaim?.cancel()
+        pendingPrimaryClaim = nil
         coordinator.stop(reason: reason)
         switch reason {
         case .expired, .signOut, .accountRemoved: services?.invalidate()
@@ -225,6 +284,8 @@ public final class PlaybackScope {
     private func release() {
         guard !isReleased else { return }
         isReleased = true
+        pendingPrimaryClaim?.cancel()
+        pendingPrimaryClaim = nil
         // Only the syncer's hooks on the coordinator are cut here, after the close wait. A library
         // progress sink (#184) must instead be cut off in `retire(reason:)`: the library's
         // progress cache has no generation check, and the next account can start before this runs.

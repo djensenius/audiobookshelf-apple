@@ -14,7 +14,7 @@ final class RecordingNowPlaying: NowPlayingHandle {
     weak var coordinator: PlaybackCoordinator?
 
     func invalidate() { log.append("invalidate") }
-    func requestSystemPrimary() async { log.append("primary") }
+    func claimSystemPrimary() async { log.append("primary") }
 }
 
 /// A scope over a ``SyncHarness``: the coordinator's fakes and an attached syncer.
@@ -206,6 +206,76 @@ struct PlaybackScopeTests {
         await h.scope.resume(rewindingBy: nil)
 
         #expect(!h.nowPlaying.log.contains("primary"))
+    }
+
+    /// Resumes the restored item with its initial seek left pending: playback is requested, but
+    /// the audio session hasn't activated, so there is no Now Playing activation to claim yet.
+    private func resumeWithSeekPending() async throws -> ScopeHarness {
+        let h = try ScopeHarness()
+        h.s.h.lastPlayed.record = record(h.s.h.connectionID, item: "a")
+        try #require(h.scope.start())
+        h.s.h.engine.interruptedLoads = 1
+        await h.scope.resume(rewindingBy: nil)
+        try #require(h.coordinator.isPlaybackRequested)
+        try #require(!h.coordinator.isPlaying)
+        try #require(h.s.h.engine.pendingSeekTarget != nil)
+        #expect(h.nowPlaying.log.isEmpty)
+        return h
+    }
+
+    /// The claim waits for activation, then is made exactly once.
+    @Test func aResumeClaimsPrimaryOnceTheSeekLandsAndPlaybackActivates() async throws {
+        let h = try await resumeWithSeekPending()
+
+        h.s.h.engine.landPendingSeek()
+        #expect(await eventually { h.nowPlaying.log == ["primary"] })
+        await h.scope.waitForPrimaryClaim()
+        h.coordinator.pause()
+        await h.scope.waitForPrimaryClaim()
+        #expect(h.nowPlaying.log == ["primary"])
+    }
+
+    @Test func aPauseBeforeActivationDropsTheClaim() async throws {
+        let h = try await resumeWithSeekPending()
+
+        h.coordinator.pause()
+        await h.scope.waitForPrimaryClaim()
+        h.s.h.engine.landPendingSeek()
+
+        #expect(h.nowPlaying.log.isEmpty)
+    }
+
+    @Test func retiringBeforeActivationDropsTheClaim() async throws {
+        let h = try await resumeWithSeekPending()
+
+        h.scope.retire(reason: .accountSwitch)
+        await h.scope.waitForPrimaryClaim()
+        h.s.h.engine.landPendingSeek()
+
+        #expect(!h.nowPlaying.log.contains("primary"))
+    }
+
+    /// A pause during a loaded item's play seek leaves nothing playing to claim.
+    @Test func aPauseDuringThePlaySeekClaimsNothing() async throws {
+        let h = try ScopeHarness()
+        await h.scope.play(itemID: "a", episodeID: nil, startTime: 50)
+        h.coordinator.pause()
+        h.nowPlaying.log = []
+        let gate = Gate()
+        h.s.h.engine.seekGates = [gate]
+        let seeks = h.s.h.engine.seeks.count
+
+        let play = Task { await h.scope.play(itemID: "a", episodeID: nil, startTime: 30) }
+        try #require(await eventually { h.s.h.engine.seeks.count > seeks })
+        h.coordinator.pause()
+        gate.open()
+        await play.value
+        await h.scope.waitForPrimaryClaim()
+
+        #expect(h.coordinator.phase == .loaded)
+        #expect(h.coordinator.error == nil)
+        #expect(!h.coordinator.isPlaybackRequested)
+        #expect(h.nowPlaying.log.isEmpty)
     }
 
     // MARK: Retire
