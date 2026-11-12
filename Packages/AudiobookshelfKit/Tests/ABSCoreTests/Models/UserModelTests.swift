@@ -159,6 +159,19 @@ private func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
         #expect(progress.ebookProgress == nil)
     }
 
+    /// The server stores the ebook location clients send; a page may be a JSON number.
+    @Test(
+        arguments: [
+            (#""5""#, "5"), ("5", "5"), ("5.0", "5"), (#""epubcfi(/6/4)""#, "epubcfi(/6/4)"), ("5.5", nil),
+            ("null", nil), ("true", nil),
+        ] as [(String, String?)])
+    func decodesEbookLocationAsStringOrWholeNumber(raw: String, expected: String?) throws {
+        let json = #"{"id":"mp","libraryItemId":"li","ebookLocation":\#(raw),"lastUpdate":1}"#
+        let progress = try decode(MediaProgress.self, json)
+        #expect(progress.ebookLocation == expected)
+        #expect(progress.lastUpdate == 1)
+    }
+
     @Test func keepsProgressRowWithNumericStrings() throws {
         // Rows migrated from the old JSON store can carry numeric strings.
         let json = #"""

@@ -472,7 +472,7 @@ import Testing
         let capture = await store.captureGeneration()
         try await store.applyServerProgress(
             [key: Self.server(currentTime: 900, ebookLocation: "B", lastUpdate: Self.at(2))], capturedAt: capture,
-            source: .socket)
+            source: .fetch)
         let merged = try #require(try await store.progress(for: key))
         #expect(merged.currentTime == 200)
         #expect(merged.audioDirty)
@@ -740,7 +740,8 @@ import Testing
 
     /// The server auto-finishes an un-finish sent fewer than 10 s from the end. Another device's
     /// later write arrives by socket before the confirming fetch: the fetch's normalized value is
-    /// taken, then the held socket value, which is newer.
+    /// taken, then the held socket value, which is newer. Its ebook value isn't merged from the
+    /// socket; it asks for a fetch instead.
     @Test func confirmingFetchTakesNormalizedValueAndThenNewerSocketValue() async throws {
         let (store, _) = try makeStore()
         try await store.recordEdit(
@@ -762,9 +763,10 @@ import Testing
         try await store.applyServerProgress([key: server], capturedAt: capture, source: .fetch)
         let row = try #require(try await store.progress(for: key))
         #expect(row.isFinished)
-        #expect(row.ebookLocation == "epubcfi(/6/8)")
+        #expect(row.ebookLocation == nil)
         #expect(row.dirtyGroups.isEmpty)
         #expect(await store.needsConfirmationFetch.isEmpty)
+        #expect(await store.needsEbookFetch == [key])
     }
 
     /// Two server writes can share a millisecond: a held pre-PATCH snapshot with the same
