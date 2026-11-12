@@ -29,7 +29,7 @@ struct ItemDetailView: View {
     var body: some View {
         Group {
             if let host, host.key == key {
-                ItemDetailScreen(model: host.model, serverURL: host.serverURL)
+                ItemDetailScreen(model: host.model, serverURL: host.serverURL, playlists: host.services)
             } else if key == nil || unavailableKey == key {
                 ErrorStateView(title: L10n.string("MessageItemDetailUnavailable"), systemImage: "book")
                     .navigationTitle(Text(verbatim: L10n.string("HeaderDetails")))
@@ -83,6 +83,8 @@ struct ItemDetailScreen: View {
     let model: ItemDetailModel
     /// The server's address, for the More menu's Share; without it there is no Share.
     var serverURL: URL?
+    /// The account's playlist writes, for the More menu's Add to playlist; without them there is no Add to playlist.
+    var playlists: (any PlaylistEditingService)?
 
     var body: some View {
         if model.hasLoaded, model.mediaType == .podcast {
@@ -95,7 +97,7 @@ struct ItemDetailScreen: View {
                 #if os(iOS)
                     .navigationBarTitleDisplayMode(.inline)
                 #endif
-                .itemDetailMoreMenu(model: model, serverURL: serverURL)
+                .itemDetailMoreMenu(model: model, serverURL: serverURL, playlists: playlists)
                 .rssFeedEntry(RssFeedItemEntry(item: model.item))
         }
     }

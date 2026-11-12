@@ -6,9 +6,11 @@ import SwiftUI
 
 extension View {
     /// Adds the book screen's More menu ("…") to the toolbar, with its confirmations, failure
-    /// alert and details sheet.
-    func itemDetailMoreMenu(model: ItemDetailModel, serverURL: URL?) -> some View {
-        modifier(ItemDetailMoreMenu(model: model, serverURL: serverURL))
+    /// alert, details sheet and, with `playlists`, the add-to-playlist sheet.
+    func itemDetailMoreMenu(
+        model: ItemDetailModel, serverURL: URL?, playlists: (any PlaylistEditingService)? = nil
+    ) -> some View {
+        modifier(ItemDetailMoreMenu(model: model, serverURL: serverURL, playlists: playlists))
     }
 }
 
@@ -17,7 +19,8 @@ extension View {
 /// through ``DetailMoreMenu``, which also runs the progress actions with their confirmations and
 /// failure alert and remembers a 404. Share links to the web client, so it needs the server's
 /// address; History pushes its route on the scene's ``Router`` (ADR 0004), so it is hidden
-/// without one (previews); Add to playlist stays hidden until the playlist editor exists.
+/// without one (previews); Add to playlist opens ``AddToPlaylistSheet`` for the book, so it needs the account's
+/// playlist writes (`playlists`).
 ///
 /// The ebook entries (``ItemDetailEbookEntries``) follow, gated by ``EbookActionsModel`` on the
 /// signed-in account's authorization and the loaded item; they're hidden offline and without an
@@ -29,6 +32,7 @@ extension View {
 private struct ItemDetailMoreMenu: ViewModifier {
     let model: ItemDetailModel
     let serverURL: URL?
+    let playlists: (any PlaylistEditingService)?
     @Environment(Router.self) private var router: Router?
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var showsDetails = false
@@ -40,9 +44,7 @@ private struct ItemDetailMoreMenu: ViewModifier {
     /// Ended when the menu disappears or shows another item model or account, so a late result
     /// isn't shown there.
     @State private var feedbackLifetime = EbookFeedbackLifetime()
-
-    /// The playlist editor doesn't exist yet.
-    private static let canEditPlaylists = false
+    @State private var addToPlaylist: AddToPlaylistModel?
 
     /// What the ebook actions are made for.
     private struct EbookActionsKey: Hashable {
@@ -56,11 +58,12 @@ private struct ItemDetailMoreMenu: ViewModifier {
         // Read once, so the menu depends on it explicitly and its closures capture this one. Hidden
         // without a client, while the model is kept for the next one.
         let ebookActions = ebookActions.flatMap { $0.itemID == model.itemID && accounts?.client != nil ? $0 : nil }
+        let canEditPlaylists = playlists != nil
         content
             .modifier(
                 DetailMoreMenu(model: model) { [model] isGone in
                     ItemDetailMenuPresentation.actions(
-                        for: model, isGone: isGone, canEditPlaylists: Self.canEditPlaylists, canShare: canShare,
+                        for: model, isGone: isGone, canEditPlaylists: canEditPlaylists, canShare: canShare,
                         canRoute: canRoute)
                 } entry: { action in
                     entry(action)
@@ -104,6 +107,7 @@ private struct ItemDetailMoreMenu: ViewModifier {
                     Text(verbatim: message)
                 }
             }
+            .addToPlaylistSheet($addToPlaylist)
     }
 
     private func ebookEntries(_ ebookActions: EbookActionsModel, isGone: Bool) -> some View {
@@ -186,8 +190,13 @@ private struct ItemDetailMoreMenu: ViewModifier {
                 DetailMoreMenuLabel(action: action)
             }
         case .addToPlaylist:
-            // Not offered while `canEditPlaylists` is false.
-            EmptyView()
+            Button {
+                guard let playlists, let libraryID = model.item?.libraryId else { return }
+                addToPlaylist = AddToPlaylistModel(
+                    entries: [PlaylistEntryKey(itemID: model.itemID)], libraryID: libraryID, service: playlists)
+            } label: {
+                DetailMoreMenuLabel(action: action)
+            }
         case .markFinished, .markNotFinished, .discardProgress, .hideFromContinueListening:
             // Shown by ``DetailMoreMenu``.
             EmptyView()
