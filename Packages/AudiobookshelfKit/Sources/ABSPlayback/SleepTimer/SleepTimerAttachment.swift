@@ -7,7 +7,8 @@ import Observation
 /// - Installs the coordinator's ``PlaybackCoordinator/willResume`` hook, which calls
 ///   ``SleepTimer/playbackWillStart(at:)``. The hook has one owner: a later attachment on the same coordinator replaces
 ///   this one's, and any other feature that needs it must chain through the attachment's hook.
-/// - Passes item changes, landed seeks and pauses to the timer.
+/// - Passes item changes, landed seeks, pauses and the end of the media to the timer. The coordinator delivers the
+///   end before it advances to another item, so a timer that pauses there cancels the advance.
 /// - Applies changes to the sleep timer settings as they happen.
 ///
 /// Create one per coordinator and keep it while the coordinator can play. ``detach()``, or releasing the attachment,
@@ -45,11 +46,15 @@ public final class SleepTimerAttachment {
             control: coordinator, feedback: feedback, shakeDetector: shakeDetector,
             options: Self.options(from: settings), clock: clock, calendar: calendar, tickInterval: tickInterval)
         let timer = timer
+        // The timer's own pause on `.ended` is delivered after `.ended`, and would end the grace period it opened.
+        var pausedAtEnd = false
         observerToken = coordinator.addObserver { [weak timer] event in
             switch event {
             case .itemChanged(let key): timer?.itemDidChange(key?.rawValue)
             case .didSeek(let time): timer?.didSeek(to: time)
+            case .paused where pausedAtEnd: pausedAtEnd = false
             case .paused: timer?.playbackDidPause()
+            case .ended: pausedAtEnd = timer?.playbackDidEnd() == true
             default: break
             }
         }

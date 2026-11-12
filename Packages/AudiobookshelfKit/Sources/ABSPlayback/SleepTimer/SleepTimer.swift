@@ -22,6 +22,7 @@ import Observation
 /// - ``playbackWillStart(at:)`` before every play, before its resume seek (AutoRewind), adding what it returns to
 ///   that rewind, measured from where playback is heading (`pendingSeekTarget ?? currentTime`);
 /// - ``playbackDidPause()`` whenever anything but the timer pauses playback;
+/// - ``playbackDidEnd()`` when the media ends, before it advances to another item;
 /// - ``didSeek(to:)`` synchronously once a seek, chapter skip, resume rewind or item load lands (right after the
 ///   `await`). A tick treats a jump nobody reported as a seek.
 @MainActor
@@ -288,6 +289,17 @@ public final class SleepTimer {
             awaitsTimelineForAutoStart = options.autoSleep.mode == .endOfChapter && control.timeline == nil
         }
         return rewind + fade
+    }
+
+    /// Call when playback reaches the end of the media, before it advances to another item. An end-of-chapter run
+    /// that has reached its goal expires now: at the next tick the next item could already be loading, and its load
+    /// would retarget the run to one of that item's chapters. Returns whether the timer paused playback.
+    @discardableResult
+    public func playbackDidEnd() -> Bool {
+        guard let run, run.goal.isChapterEnd, remaining(of: run, at: control.currentTime) <= 0 else { return false }
+        lastPosition = control.currentTime
+        expire()
+        return true
     }
 
     /// Call when anything but the timer pauses playback (the user, an interruption). Only the timer's own pause is

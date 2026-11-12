@@ -160,6 +160,54 @@ struct SleepTimerAttachmentTests {
         attachment.detach()
     }
 
+    /// The timer pauses on `.ended`, before its next tick, so the queue doesn't advance and retarget it to B.
+    @Test func endOfChapterTimerOnTheFinalChapterStopsTheQueueAdvance() async throws {
+        let a = try AdvanceHarness()
+        let settings = try ScratchSettings()
+        let clock = ManualClock()
+        let attachment = SleepTimerAttachment(
+            coordinator: a.coordinator, settings: settings.value, feedback: nil, shakeDetector: nil, clock: clock,
+            calendar: .gregorianUTC, tickInterval: .seconds(1))
+        let timer = attachment.timer
+        a.enqueue("B")
+        await a.play("A")
+        #expect(await a.coordinator.seek(to: 3000) == 3000)
+        #expect(timer.start(.endOfChapter))
+        #expect(timer.remaining == 600)
+
+        a.h.engine.finish()
+        await a.coordinator.waitForAutoAdvance()
+
+        #expect(a.coordinator.mediaKey == a.key("A"))
+        #expect(a.service.starts == ["A"])
+        #expect(!a.coordinator.isPlaying)
+        #expect(!timer.isRunning)
+        #expect(timer.canRestart, "The grace period still applies")
+        #expect(a.queue.items.map(\.libraryItemID) == ["B"])
+        attachment.detach()
+    }
+
+    /// A duration with time left carries on into the next item.
+    @Test func durationTimerContinuesIntoTheNextItem() async throws {
+        let a = try AdvanceHarness()
+        let settings = try ScratchSettings()
+        let attachment = SleepTimerAttachment(
+            coordinator: a.coordinator, settings: settings.value, feedback: nil, shakeDetector: nil,
+            clock: ManualClock(), calendar: .gregorianUTC, tickInterval: .seconds(1))
+        let timer = attachment.timer
+        a.enqueue("B")
+        await a.play("A")
+        #expect(timer.start(.duration(600)))
+
+        a.h.engine.finish()
+        await a.coordinator.waitForAutoAdvance()
+
+        #expect(a.coordinator.mediaKey == a.key("B"))
+        #expect(a.coordinator.isPlaying)
+        #expect(timer.mode == .duration(600))
+        attachment.detach()
+    }
+
     @Test func detachRestoresHooksAndCancels() async throws {
         let t = try AttachmentHarness()
         let attachment = try t.attach()
