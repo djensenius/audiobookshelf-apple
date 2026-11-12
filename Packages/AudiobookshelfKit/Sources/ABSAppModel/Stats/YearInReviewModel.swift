@@ -76,7 +76,9 @@ public final class YearInReviewModel {
     @ObservationIgnored private var sequence = 0
 
     /// - Parameters:
-    ///   - calendar: decides the current year and month, in the device's time zone.
+    ///   - calendar: supplies the time zone that decides the current year and month. The years
+    ///     themselves are always Gregorian, as the stats endpoints expect, whatever the
+    ///     calendar's identifier (Japanese, Buddhist, …).
     ///   - now: the current time.
     public init(
         service: any StatsService, calendar: Calendar = .autoupdatingCurrent,
@@ -84,7 +86,7 @@ public final class YearInReviewModel {
     ) {
         self.service = service
         let date = now()
-        let current = calendar.component(.year, from: date)
+        let current = Self.gregorian(in: calendar).component(.year, from: date)
         year = Self.defaultYear(for: date, in: calendar)
         availableYears = (0..<Self.pickerYearCount).map { current - $0 }
     }
@@ -95,11 +97,18 @@ public final class YearInReviewModel {
     }
 
     /// The year legacy opens on: the previous year, except in December, when the current year
-    /// is nearly done.
+    /// is nearly done. Gregorian, in `calendar`'s time zone.
     nonisolated static func defaultYear(for date: Date, in calendar: Calendar) -> Int {
-        let components = calendar.dateComponents([.year, .month], from: date)
+        let components = gregorian(in: calendar).dateComponents([.year, .month], from: date)
         let year = components.year ?? 2000
         return components.month == 12 ? year : year - 1
+    }
+
+    /// A Gregorian calendar in `calendar`'s time zone: the stats endpoints take Gregorian years.
+    nonisolated static func gregorian(in calendar: Calendar) -> Calendar {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        return gregorian
     }
 
     /// Loads unless stats for the current selection have loaded. Views call it each time they

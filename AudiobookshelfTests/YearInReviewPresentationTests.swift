@@ -134,4 +134,62 @@ private func redPixelCount(_ image: CGImage) throws -> Int {
         #expect(summary.contains("Top Authors: Mary Shelley and Bram Stoker"))
         #expect(summary.hasSuffix("Top Genres: Horror"))
     }
+
+    /// The year shows as plain Gregorian digits, whatever the locale's calendar or grouping.
+    /// The negative control shows what formatting it through such a locale would give instead.
+    @Test func yearIsShownAsAPlainGregorianNumber() throws {
+        let japanese = Locale(identifier: "ja_JP@calendar=japanese")
+        let summary = YearInReviewCard.summary(for: .user(userStats), year: 2025, locale: japanese)
+        #expect(summary.hasPrefix("2025 Year in Review"))
+        let card = YearInReviewCard(
+            content: .user(userStats), year: 2025, covers: YearInReviewCovers(), locale: japanese)
+        #expect(try #require(YearInReviewShareImage.render(card, variant: .user, scale: 2)).filename.contains("2025"))
+
+        #expect(2025.formatted(.number.locale(english)) == "2,025")
+        let june = try Date("2025-06-15T12:00:00Z", strategy: .iso8601)
+        let style = Date.FormatStyle(locale: japanese, calendar: Calendar(identifier: .japanese), timeZone: .gmt)
+        #expect(!june.formatted(style.year()).contains("2025"))
+    }
+
+    // MARK: Render slot
+
+    private func key(year: Int, variant: YearInReviewVariant = .user) -> YearInReviewRenderKey {
+        YearInReviewRenderKey(content: .user(userStats), year: year, variant: variant, scale: 2, locale: english)
+    }
+
+    /// A render that finishes after the selection changed doesn't replace the newer one's image,
+    /// whether or not the newer render has begun.
+    @Test func lateRenderDoesNotReplaceANewerSelection() {
+        let old = key(year: 2024)
+        let new = key(year: 2025, variant: .server)
+        var slot = YearInReviewRenderSlot<String>()
+        slot.begin(old)
+        // The selection changed; its render hasn't begun yet.
+        let published1 = slot.finish("2024", for: old, current: new)
+        #expect(!published1)
+        #expect(slot.image == nil)
+        slot.begin(new)
+        let published2 = slot.finish("2025", for: new, current: new)
+        #expect(published2)
+        let published3 = slot.finish("2024", for: old, current: new)
+        #expect(!published3)
+        #expect(slot.image == "2025")
+        #expect(!slot.failed)
+    }
+
+    /// Negative control: the same late render is published when its key is still the selection,
+    /// and a render without an image marks the slot failed.
+    @Test func renderForTheCurrentSelectionIsPublished() {
+        let current = key(year: 2024)
+        var slot = YearInReviewRenderSlot<String>()
+        slot.begin(current)
+        let publishedImage = slot.finish("2024", for: current, current: current)
+        #expect(publishedImage)
+        #expect(slot.image == "2024")
+        slot.begin(current)
+        #expect(slot.image == nil)
+        let publishedFailure = slot.finish(nil, for: current, current: current)
+        #expect(publishedFailure)
+        #expect(slot.failed)
+    }
 }

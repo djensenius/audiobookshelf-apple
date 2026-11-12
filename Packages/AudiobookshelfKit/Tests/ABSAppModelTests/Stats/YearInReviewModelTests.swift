@@ -82,6 +82,38 @@ private func date(_ iso: String) throws -> Date {
         #expect(YearInReviewModel.defaultYear(for: try date("2025-12-31T23:59:59Z"), in: calendar) == 2025)
     }
 
+    /// The stats endpoints take Gregorian years, whatever the device's calendar. The negative
+    /// control shows each calendar would give a different year for the same date.
+    @Test(arguments: [(Calendar.Identifier.japanese, 7), (.buddhist, 2568)])
+    func yearsAreGregorianInAnyCalendar(identifier: Calendar.Identifier, nativeYear: Int) async throws {
+        var calendar = Calendar(identifier: identifier)
+        calendar.timeZone = .gmt
+        let june = try date("2025-06-15T12:00:00Z")
+        #expect(calendar.component(.year, from: june) == nativeYear)
+
+        let service = FakeYearService(type: .user)
+        let model = YearInReviewModel(service: service, calendar: calendar, now: { june })
+        #expect(model.year == 2024)
+        #expect(model.availableYears == [2025, 2024, 2023, 2022, 2021])
+        #expect(YearInReviewModel.defaultYear(for: try date("2025-12-15T12:00:00Z"), in: calendar) == 2025)
+        await model.load()
+        #expect(service.calls.withLock { $0 } == ["me", "user/2024"])
+    }
+
+    /// The supplied calendar's time zone still decides the year: in Tokyo, 20:00 UTC on
+    /// 31 December is already January.
+    @Test func gregorianYearsKeepTheCalendarsTimeZone() throws {
+        var calendar = Calendar(identifier: .japanese)
+        calendar.timeZone = try #require(TimeZone(identifier: "Asia/Tokyo"))
+        let instant = try date("2025-12-31T20:00:00Z")
+        #expect(YearInReviewModel.defaultYear(for: instant, in: calendar) == 2025)
+        let model = YearInReviewModel(service: FakeYearService(type: .user), calendar: calendar, now: { instant })
+        #expect(model.availableYears.first == 2026)
+        // Negative control: in UTC it is still 2025.
+        let utcModel = YearInReviewModel(service: FakeYearService(type: .user), calendar: utc(), now: { instant })
+        #expect(utcModel.availableYears.first == 2025)
+    }
+
     @Test func pickerOffersTheCurrentAndEarlierYears() throws {
         let model = try model(FakeYearService(type: .user))
         #expect(model.year == 2024)

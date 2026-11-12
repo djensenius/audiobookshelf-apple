@@ -40,17 +40,18 @@ private struct YearInReviewContentView: View {
     @Environment(\.imagePipeline) private var pipeline
     @Environment(\.displayScale) private var displayScale
     @Environment(\.locale) private var locale
-    @State private var shareImage: YearInReviewShareImage?
-    /// Whether the last render of the loaded stats produced no image.
-    @State private var renderFailed = false
+    @State private var rendered = YearInReviewRenderSlot<YearInReviewShareImage>()
+    /// A render started by the retry button; cancelled when the selection changes.
+    @State private var retryTask: Task<Void, Never>?
 
-    /// What the rendered image depends on.
-    private struct RenderKey: Equatable {
-        var content: YearInReviewContent?
-        var year: Int
-        var variant: YearInReviewVariant
-        var scale: Double
-        var locale: Locale
+    private var shareImage: YearInReviewShareImage? { rendered.image }
+    /// Whether the last render of the loaded stats produced no image.
+    private var renderFailed: Bool { rendered.failed }
+
+    /// What the card shows now.
+    private var renderKey: YearInReviewRenderKey {
+        YearInReviewRenderKey(
+            content: model.content, year: model.year, variant: model.variant, scale: renderScale, locale: locale)
     }
 
     var body: some View {
@@ -101,11 +102,10 @@ private struct YearInReviewContentView: View {
             #endif
         }
         .refreshable { await model.load() }
-        .task(
-            id: RenderKey(
-                content: model.content, year: model.year, variant: model.variant, scale: renderScale, locale: locale)
-        ) {
-            await render()
+        .task(id: renderKey) {
+            retryTask?.cancel()
+            retryTask = nil
+            await render(renderKey)
         }
     }
 
@@ -152,7 +152,9 @@ private struct YearInReviewContentView: View {
             }
         } else if renderFailed, model.content != nil {
             ErrorStateView(title: L10n.string("MessageYearInReviewLoadFailed")) {
-                Task { await render() }
+                retryTask?.cancel()
+                let key = renderKey
+                retryTask = Task { await render(key) }
             }
         } else {
             ProgressView()
@@ -175,18 +177,52 @@ private struct YearInReviewContentView: View {
         }
     }
 
-    /// Loads the covers first, then renders the card: `ImageRenderer` doesn't wait for them.
-    private func render() async {
+    /// Loads the covers first, then renders the card for `key`: `ImageRenderer` doesn't wait
+    /// for them. The image is published only if `key` is still the selection when it's done.
+    private func render(_ key: YearInReviewRenderKey) async {
         // Never show or share the previous year's or variant's image while this one renders.
-        shareImage = nil
-        renderFailed = false
-        guard let content = model.content else { return }
-        let year = model.year
-        let variant = model.variant
+        rendered.begin(key)
+        guard let content = key.content else { return }
         let covers = await YearInReviewCovers.load(ids: content.coverItemIDs, serverID: serverID, pipeline: pipeline)
-        guard !Task.isCancelled else { return }
-        let card = YearInReviewCard(content: content, year: year, covers: covers, locale: locale)
-        shareImage = YearInReviewShareImage.render(card, variant: variant, scale: renderScale)
-        renderFailed = shareImage == nil
+        guard !Task.isCancelled, key == renderKey else { return }
+        let card = YearInReviewCard(content: content, year: key.year, covers: covers, locale: key.locale)
+        let image = YearInReviewShareImage.render(card, variant: key.variant, scale: key.scale)
+        rendered.finish(image, for: key, current: renderKey)
+    }
+}
+
+/// What the year in review card's image depends on.
+struct YearInReviewRenderKey: Hashable {
+    var content: YearInReviewContent?
+    var year: Int
+    var variant: YearInReviewVariant
+    var scale: Double
+    var locale: Locale
+}
+
+/// The card image shown and shared. Renders await covers, so an earlier one can finish after
+/// the selection changed; its image is dropped instead of replacing the new selection's.
+struct YearInReviewRenderSlot<Image> {
+    private(set) var image: Image?
+    /// Whether the render of ``key`` finished without an image.
+    private(set) var failed = false
+    /// The render started last.
+    private(set) var key: YearInReviewRenderKey?
+
+    /// Starts rendering `key`, clearing the image so another selection's isn't shown meanwhile.
+    mutating func begin(_ key: YearInReviewRenderKey) {
+        self.key = key
+        image = nil
+        failed = false
+    }
+
+    /// Publishes a render of `key` unless another render began since or `current`, the selection
+    /// now, isn't `key`. Returns whether it was published.
+    @discardableResult
+    mutating func finish(_ image: Image?, for key: YearInReviewRenderKey, current: YearInReviewRenderKey) -> Bool {
+        guard key == self.key, key == current else { return false }
+        self.image = image
+        failed = image == nil
+        return true
     }
 }
