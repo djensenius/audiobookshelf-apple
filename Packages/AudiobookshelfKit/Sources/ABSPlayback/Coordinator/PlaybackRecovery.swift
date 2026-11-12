@@ -175,8 +175,12 @@ final class PlaybackRecovery {
     /// Whether a run in flight for the item at `generation` will play it once it succeeds: the
     /// user's play intent while the engine, having failed, holds none.
     func wantsPlay(at generation: Int) -> Bool {
-        guard isRunning, let episode else { return false }
-        return episode.generation == generation && episode.wantsPlay
+        isRecovering(at: generation) && episode?.wantsPlay == true
+    }
+
+    /// Whether a run is in flight for the item at `generation`.
+    func isRecovering(at generation: Int) -> Bool {
+        isRunning && episode?.generation == generation
     }
 
     /// Playback left the playing state (a pause, a system pause, buffering): the

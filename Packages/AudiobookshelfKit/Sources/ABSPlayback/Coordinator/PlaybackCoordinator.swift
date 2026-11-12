@@ -582,6 +582,9 @@ public final class PlaybackCoordinator {
             playWhenLoaded = true
             // A recovery rebuild that fails carries this on to the next attempt.
             recovery.notePlayIntent(true)
+        case .unloaded where recovery.isRecovering(at: generation):
+            // Recovery's next rebuild plays it, within its budget.
+            recovery.notePlayIntent(true)
         case .unloaded: await play(itemID: key.libraryItemId, episodeID: key.episodeId)
         case .loaded: await resumeLoaded(rewindingBy: seconds, startingAt: nil)
         }
@@ -681,9 +684,10 @@ public final class PlaybackCoordinator {
             reachedEnd = false
             awaitingSeekLanding = true
             // A seek during recovery takes over, and plays once it lands if recovery would have: a
-            // resume intent, so a pause (or lost output) meanwhile cancels it.
+            // resume intent, so a pause (or lost output) meanwhile cancels it. A rebuild finishing
+            // its load stays in charge: the load path plays it.
             var resume: Int?
-            if recovery.yieldToSeek() {
+            if !isFinishingLoad, recovery.yieldToSeek() {
                 resumeIntent += 1
                 resume = resumeIntent
                 resumingIntent = resume
@@ -764,7 +768,9 @@ public final class PlaybackCoordinator {
         case .loaded where isFinishingLoad: return playWhenLoaded
         case .loaded:
             return engine.isPlaybackRequested || resumingIntent != nil || recovery.wantsPlay(at: generation)
-        case .idle, .unloaded: return false
+        // Between failed rebuilds: the restart recovery will make.
+        case .unloaded: return recovery.wantsPlay(at: generation)
+        case .idle: return false
         }
     }
 

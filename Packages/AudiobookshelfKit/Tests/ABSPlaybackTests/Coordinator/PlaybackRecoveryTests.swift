@@ -474,6 +474,71 @@ struct PlaybackRecoveryTests {
     }
 
     @Test(arguments: [false, true])
+    func aSeekWhileARebuildFinishesItsLoadStillPlays(seekLandsFirst: Bool) async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let load = Gate()
+        engine.loadGates = [load]
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { engine.loads.count == 2 }
+        // A seek during the load makes the rebuild's load path catch up to it; that is held.
+        _ = await coordinator.seek(to: 1200)
+        let catchUp = Gate()
+        let userSeek = Gate()
+        engine.seekGates = [catchUp, userSeek]
+        let seeks = engine.seeks.count
+        load.open()
+        await settle { engine.seeks.count == seeks + 1 }
+
+        // The user seeks again while the rebuild is finishing its load.
+        let seek = Task { _ = await coordinator.seek(to: 1500) }
+        await settle { engine.seeks.count == seeks + 2 }
+        if seekLandsFirst {
+            userSeek.open()
+            await seek.value
+            catchUp.open()
+        } else {
+            catchUp.open()
+            for _ in 0..<200 { await Task.yield() }
+            userSeek.open()
+            await seek.value
+        }
+        await settle { engine.isPlaybackRequested }
+
+        #expect(coordinator.isPlaying)
+        #expect(coordinator.currentTime == 1500)
+        #expect(coordinator.error == nil)
+    }
+
+    @Test func aToggleBetweenFailedRebuildsPausesTheNextOne() async {
+        let gate = await holdFirstRebuild(failing: .load)
+        gate.open()
+        await settle { coordinator.phase == .unloaded && h.recoverySleep.waitingCount == 1 }
+        engine.loadError = nil
+
+        // The pending restart is the coordinator's play request, so a toggle pauses it.
+        #expect(coordinator.isPlaybackRequested)
+        coordinator.pause()
+        #expect(!coordinator.isPlaybackRequested)
+        // Toggling back plays the next rebuild without starting a session of its own.
+        await coordinator.resume()
+        #expect(coordinator.isPlaybackRequested)
+        #expect(service.starts.count == 2)
+        coordinator.pause()
+
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 3 && coordinator.phase == .loaded }
+        for _ in 0..<200 { await Task.yield() }
+
+        #expect(!engine.isPlaybackRequested)
+        #expect(coordinator.currentTime == 600)
+        #expect(coordinator.error == nil)
+        #expect(h.recoverySleep.durations == [.seconds(1), .seconds(2)])
+    }
+
+    @Test(arguments: [false, true])
     func aPauseDuringASeekThatTookOverRecoveryKeepsItPaused(outputLost: Bool) async {
         h.recoverySleep.isManual = true
         await playAt600()
