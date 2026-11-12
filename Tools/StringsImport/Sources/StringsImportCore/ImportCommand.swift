@@ -6,7 +6,8 @@ import Foundation
 /// `Localizable.xcstrings`, and verifies the app's `CFBundleLocalizations`. With `--check`
 /// it writes nothing and fails if either is out of date. Both modes also check the Swift
 /// sources (``SourceScanner``): they fail on a key missing from `en-us.json` or a hard-coded
-/// user-facing string in `Features/`, and warn about keys no longer used.
+/// user-facing string in `Features/` or ABSUI that ``HardCodedBaseline`` doesn't list (or an
+/// entry there that no longer matches), and warn about keys no longer used.
 public enum ImportCommand {
     public static let catalogPath = "Packages/AudiobookshelfKit/Sources/ABSUI/Resources/Localizable.xcstrings"
     public static let infoPlistPath = "Audiobookshelf/Info.plist"
@@ -129,13 +130,20 @@ public enum ImportCommand {
                     + keys.sorted().joined(separator: ", "))
         }
 
-        for file in sources where file.path.hasPrefix(SourceScanner.featuresPath + "/") {
-            for string in SourceScanner.hardCodedStrings(in: file, keys: sourceKeys) {
-                log(
-                    "error: \(string): hard-coded user-facing string; use an L10n key "
-                        + "(or mark the line \(SourceScanner.ignoreMarker) if it isn't prose)")
-                passed = false
-            }
+        let hardCoded = sources.filter { SourceScanner.scansForHardCodedStrings($0.path) }
+            .flatMap { SourceScanner.hardCodedStrings(in: $0, keys: sourceKeys) }
+        let (new, stale) = try HardCodedBaseline.load(root: root).match(hardCoded)
+        for string in new {
+            log(
+                "error: \(string): hard-coded user-facing string; use an L10n key "
+                    + "(or mark the line \(SourceScanner.ignoreMarker) if it isn't prose)")
+            passed = false
+        }
+        for (line, entry) in stale {
+            log(
+                "error: \(HardCodedBaseline.path):\(line): \(entry.path): no longer hard-coded "
+                    + "(or the line changed); remove the entry")
+            passed = false
         }
         return passed
     }

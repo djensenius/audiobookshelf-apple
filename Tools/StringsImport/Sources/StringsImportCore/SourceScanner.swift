@@ -14,8 +14,14 @@ import Foundation
 public enum SourceScanner {
     /// Swift sources whose keys must exist in the source strings files.
     public static let keyPaths = ["Audiobookshelf", "Packages/AudiobookshelfKit/Sources"]
-    /// Swift sources that must not hard-code user-facing strings.
-    public static let featuresPath = "Audiobookshelf/Features"
+    /// Swift sources that must not hard-code user-facing strings, outside previews and `#if DEBUG`
+    /// code (``SourceFile/previewAndDebugLines``).
+    public static let hardCodedPaths = ["Audiobookshelf/Features", "Packages/AudiobookshelfKit/Sources/ABSUI"]
+
+    /// Whether the file at `path` (relative to the repository root) is in ``hardCodedPaths``.
+    public static func scansForHardCodedStrings(_ path: String) -> Bool {
+        hardCodedPaths.contains { path.hasPrefix($0 + "/") }
+    }
     /// The opt-out comment, e.g. `// l10n-ignore: an example URL, not prose`.
     public static let ignoreMarker = "l10n-ignore"
 
@@ -49,6 +55,42 @@ public enum SourceScanner {
         /// and line numbers match ``text``.
         var codeText: String { String(decoding: SourceLexer.blankingComments(Array(text.utf8)), as: UTF8.self) }
 
+        /// The 1-based numbers of the lines in previews (a `#Preview` or a `PreviewProvider` type,
+        /// from its line to its closing brace) or in the `#if DEBUG` branch of a conditional (not
+        /// its `#else`). Braces and `#` in comments and strings don't count.
+        var previewAndDebugLines: Set<Int> {
+            let code = String(decoding: SourceLexer.blankingComments(Array(text.utf8), strings: true), as: UTF8.self)
+            var result: Set<Int> = []
+            // One entry per open `#if`: whether its current branch is DEBUG code.
+            var conditionals: [Bool] = []
+            // The brace depth a preview started at while in one, and whether its body has opened.
+            var previewDepth: Int?
+            var previewOpened = false
+            var depth = 0
+            for (index, line) in code.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+                let directive = line.drop { $0.isWhitespace }.split(whereSeparator: \.isWhitespace).map(String.init)
+                switch directive.first {
+                case "#if": conditionals.append(directive.dropFirst().first == "DEBUG")
+                case "#elseif", "#else": if !conditionals.isEmpty { conditionals[conditionals.count - 1] = false }
+                case "#endif": _ = conditionals.popLast()
+                default: break
+                }
+                if previewDepth == nil, line.contains("#Preview") || line.contains("PreviewProvider") {
+                    previewDepth = depth
+                    previewOpened = false
+                }
+                let opened = line.filter { $0 == "{" }.count
+                depth += opened - line.filter { $0 == "}" }.count
+                if previewDepth != nil || conditionals.contains(true) { result.insert(index + 1) }
+                // A preview ends when its braces close, once its body has opened.
+                if let start = previewDepth {
+                    previewOpened = previewOpened || opened > 0
+                    if previewOpened, depth <= start { previewDepth = nil }
+                }
+            }
+            return result
+        }
+
         /// The lines of ``codeText`` with their 1-based numbers, opted-out lines dropped.
         var codeLines: [(number: Int, text: Substring)] {
             let ignored = ignoredLines
@@ -72,6 +114,9 @@ public enum SourceScanner {
         public var line: Int
         /// The literal as written, quotes included.
         public var literal: String
+        /// The line's source, trimmed: what ``HardCodedBaseline`` matches, so an entry survives
+        /// edits that only move the line.
+        public var code: String = ""
 
         public var description: String { "\(path):\(line): \(literal)" }
     }
@@ -233,14 +278,18 @@ public enum SourceScanner {
 
     /// String literals passed straight to a user-facing view or modifier (``userFacingCall``,
     /// `Text(verbatim:)` included) or a `prompt:` argument that contain a letter outside their
-    /// interpolations and aren't a key in `keys`. Symbols and numbers (`"•"`, `"+"`) are allowed.
+    /// interpolations and aren't a key in `keys`. Symbols and numbers (`"•"`, `"+"`) are allowed,
+    /// and previews and `#if DEBUG` code aren't checked.
     public static func hardCodedStrings(in file: SourceFile, keys: Set<String>) -> [HardCodedString] {
         var result: [HardCodedString] = []
-        for (number, line) in file.codeLines where line.contains("\"") {
+        let skipped = file.previewAndDebugLines
+        let lines = file.text.split(separator: "\n", omittingEmptySubsequences: false)
+        for (number, line) in file.codeLines where line.contains("\"") && !skipped.contains(number) {
             for match in line.matches(of: userFacingCall) {
                 guard let (literal, text) = stringLiteral(at: match.range.upperBound, in: line) else { continue }
                 guard text.contains(where: \.isLetter), !keys.contains(text) else { continue }
-                result.append(HardCodedString(path: file.path, line: number, literal: literal))
+                let code = lines[number - 1].trimmingCharacters(in: .whitespaces)
+                result.append(HardCodedString(path: file.path, line: number, literal: literal, code: code))
             }
         }
         return result

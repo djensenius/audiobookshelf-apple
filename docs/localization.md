@@ -68,6 +68,10 @@ through Weblate commits to this repository; rerun `mise run strings` after synci
 `strings/`. If upstream adds a locale, the importer either maps it or fails with a message
 asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
 `CFBundleLocalizations` in `Audiobookshelf/Info.plist` (`strings:check` prints the list).
+That plist is shared by the iOS and macOS app (one multiplatform target), and `strings:check`
+fails unless it lists exactly the imported locales. The widget extension's plist has no
+`CFBundleLocalizations` because the widget shows no localized text yet; add the list there,
+and to the check, when it does.
 
 ## Using strings in Swift
 
@@ -97,14 +101,21 @@ asking for an entry in `LocaleMapping.overrides`; then add the new identifier to
 - **Unused keys warn.** A key in either `en-us.json` that no Swift literal names is listed,
   separately for native and legacy keys. Many legacy keys are kept for features not ported yet,
   so this never fails.
-- **Hard-coded strings in `Audiobookshelf/Features/` fail.** A literal with a letter (outside its
+- **Hard-coded strings in `Audiobookshelf/Features/` and ABSUI fail.** A literal with a letter (outside its
   interpolations) passed straight to `Text`, `Text(verbatim:)`, `Button`, `Label`, `Toggle`,
   `Picker`, `Section`, `Menu`, `TextField`, `SecureField`, `Link`, `LabeledContent`,
   `ContentUnavailableView`, `ProgressView`, `GroupBox`, `DisclosureGroup`, `Tab`,
   `.navigationTitle`, `.navigationSubtitle`, `.accessibilityLabel`, `.accessibilityHint`,
   `.accessibilityValue`, `.help`, `.alert`, `.confirmationDialog`, or a `prompt:` argument is
   reported with `file:line`, unless it is a key. Symbols and numbers (`Text(verbatim: "•")`) pass.
-  Only single-line literals on the call's line are seen.
+  Only single-line literals on the call's line are seen. Previews (`#Preview { … }` and
+  `PreviewProvider` types) and the `#if DEBUG` branch of a conditional (not `#elseif DEBUG`) are
+  skipped.
+- **The baseline only shrinks.** `Localization/hardcoded-strings-baseline.txt` lists strings
+  accepted until they're localized, one per line as `<file path><TAB><trimmed source line>`,
+  matched by file and source rather than line number. A string with no entry fails, and so does
+  an entry that no longer matches one: localize the string, then delete its entry. It was empty
+  when introduced; don't add entries for new code.
 
 To opt a line out of both checks (an example URL, a literal that only looks like a key), put
 `l10n-ignore` and the reason in a comment on that line or on a comment line just above it:

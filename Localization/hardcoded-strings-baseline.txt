@@ -1,0 +1,10 @@
+# Hard-coded user-facing strings that `mise run strings:check` accepts until they're localized.
+#
+# One per line: <file path relative to the repository root><TAB><the line's trimmed source>.
+# Entries match by file and source, not line number. A string found with no entry fails the
+# check, and so does an entry that no longer matches one, so this list only shrinks: localize
+# the string (or mark the line `l10n-ignore: <why>` if it isn't prose), then delete its entry.
+# Don't add entries for new code.
+#
+# Scanned: Audiobookshelf/Features/ and Packages/AudiobookshelfKit/Sources/ABSUI/, outside
+# previews and `#if DEBUG` code. Empty when introduced: the tree had no violations.
