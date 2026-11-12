@@ -55,7 +55,9 @@ private actor FakeEngine: DownloadsLifecycleEngine {
         isActive = false
     }
 
+    /// Skipped when cancelled, as work that checks for cancellation would be.
     func discardResumeData(connectionID: UUID) {
+        guard !Task.isCancelled else { return calls.append("cancelled discard \(connectionID)") }
         calls.append("discard \(connectionID)")
     }
 }
@@ -88,7 +90,12 @@ private actor FakeManager: DownloadsLifecycleManager {
         }
     }
 
+    /// Skipped when cancelled, as work that checks for cancellation would be.
     func pause(recordID: UUID) async throws(DownloadManagerError) -> Bool {
+        guard !Task.isCancelled else {
+            calls.append("cancelled pause \(recordID)")
+            return false
+        }
         calls.append("pause \(recordID)")
         if let gate = pauseGate {
             pauseGate = nil
