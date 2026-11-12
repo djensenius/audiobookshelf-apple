@@ -4,8 +4,9 @@ import ABSUI
 import SwiftUI
 
 /// The full player (port of the expanded `components/app/AudioPlayer.vue`): the cover, title,
-/// author and chapter, the scrubber with its chapter-track toggle, the transport controls, a
-/// speed menu and the AirPlay picker, with ``PlayerActionsBar`` in the bottom toolbar.
+/// author and chapter, the scrubber with its chapter-track toggle, the transport controls, the
+/// speed control and the AirPlay picker, with ``PlayerActionsBar`` in the bottom toolbar. It
+/// presents one ``PlayerSheet`` at a time, per window.
 ///
 /// iOS presents it as a full-screen cover on every size (ADR 0004); ``PlayerSlot`` closes it
 /// when playback closes.
@@ -16,6 +17,7 @@ import SwiftUI
 struct NowPlayingView: View {
     let model: PlayerViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var sheet: PlayerSheet?
 
     var body: some View {
         NavigationStack {
@@ -46,8 +48,11 @@ struct NowPlayingView: View {
                         .labelStyle(.iconOnly)
                     }
                 }
-                PlayerActionsBar(model: model)
+                PlayerActionsBar(model: model, sheet: $sheet)
             }
+        }
+        .sheet(item: $sheet) { sheet in
+            PlayerSheetContent(sheet: sheet, model: model) { self.sheet = nil }
         }
     }
 
@@ -74,7 +79,7 @@ struct NowPlayingView: View {
             }
             .toggleStyle(.button)
             Spacer()
-            PlaybackSpeedMenu(model: model)
+            PlaybackSpeedButton(model: model, sheet: $sheet)
             Spacer()
             RoutePicker(player: nil)
                 .frame(width: 44, height: 44)
@@ -148,37 +153,6 @@ private struct NowPlayingTransport: View {
         ) { action in
             Task { await model.perform(action) }
         }
-    }
-}
-
-/// The basic speed menu: the legacy speed modal's preset rates. The full speed sheet is #57.
-private struct PlaybackSpeedMenu: View {
-    let model: PlayerViewModel
-
-    /// Legacy `PlaybackSpeedModal` rates.
-    private static let rates: [Double] = [0.5, 1, 1.2, 1.5, 1.7, 2, 3]
-
-    private static func label(_ rate: Double) -> String {
-        L10n.string("LabelPlaybackRate", rate.formatted(.number.precision(.fractionLength(0...2))))
-    }
-
-    var body: some View {
-        Menu {
-            Picker(selection: Binding(get: { model.rate }, set: { model.setRate($0) })) {
-                ForEach(Self.rates, id: \.self) { rate in
-                    Text(verbatim: Self.label(rate)).tag(rate)
-                }
-            } label: {
-                Text(verbatim: L10n.string("LabelPlaybackSpeed"))
-            }
-        } label: {
-            Text(verbatim: Self.label(model.rate))
-                .font(.headline)
-                .monospacedDigit()
-                .frame(minWidth: 44, minHeight: 44)
-        }
-        .accessibilityLabel(Text(verbatim: L10n.string("LabelPlaybackSpeed")))
-        .accessibilityValue(Text(verbatim: Self.label(model.rate)))
     }
 }
 

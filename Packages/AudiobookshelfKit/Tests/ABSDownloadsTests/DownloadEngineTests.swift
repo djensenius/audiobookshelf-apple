@@ -67,6 +67,25 @@ import Testing
         #expect(harness.fileExists("li_1/cover.jpg"))
     }
 
+    /// The record is reported started once, when its first part moves it from queued to
+    /// downloading, before any part completes; its other part starts without a report.
+    @Test func reportsARecordStartedOnce() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partIDs = [UUID(), UUID()]
+        let record = try await harness.addRecord(parts: partIDs)
+        let engine = harness.makeEngine()
+
+        await engine.start(partIDs: partIDs)
+
+        var updates: [DownloadUpdate] = []
+        for await update in engine.updates {
+            updates.append(update)
+            if case .recordComplete = update { break }
+        }
+        #expect(updates.first == .recordStarted(recordID: record.id))
+        #expect(updates.filter { $0 == .recordStarted(recordID: record.id) }.count == 1)
+    }
+
     @Test(arguments: [404, 204])
     func errorStatusFailsWithoutTouchingMediaLocation(status: Int) async throws {
         let harness = try await DownloadHarness { _ in .status(status, body: Data("Nope".utf8)) }

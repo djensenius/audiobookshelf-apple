@@ -211,6 +211,19 @@ import Testing
         #expect(try await store.beginRunning(partID: queued.id, expecting: [.running]))
     }
 
+    /// Only the start that moves the record from queued to downloading reports it.
+    @Test func startPartTellsWhetherTheRecordStarted() async throws {
+        let (store, _) = try makeStore()
+        let first = Self.part()
+        let second = Self.part(trackIndex: 2, filename: "b.mp3")
+        let created = try await store.upsertRecord(Self.record(key: key, parts: [first, second]), now: now).record
+
+        #expect(try await store.startPart(partID: first.id, expecting: [.queued]) == .startedRecord(created.id))
+        #expect(try await store.startPart(partID: second.id, expecting: [.queued]) == .started)
+        #expect(try await store.startPart(partID: first.id, expecting: [.queued]) == .refused)
+        #expect(try await store.record(id: created.id)?.state == .downloading)
+    }
+
     @Test(arguments: [DownloadState.paused, .failed])
     func beginRunningRefusesStoppedAndFailedRecords(state: DownloadState) async throws {
         let (store, _) = try makeStore()

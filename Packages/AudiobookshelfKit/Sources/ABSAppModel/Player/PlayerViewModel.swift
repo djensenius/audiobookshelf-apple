@@ -67,8 +67,9 @@ public enum PlayerErrorMessage: Sendable, Hashable {
 @MainActor
 @Observable
 public final class PlayerViewModel {
-    @ObservationIgnored private let playback: any PlayerPlaybackControlling
-    @ObservationIgnored private let settings: AppSettings
+    // Internal, not private, for the feature extensions in other files (`PlayerViewModel+Chapters`).
+    @ObservationIgnored let playback: any PlayerPlaybackControlling
+    @ObservationIgnored let settings: AppSettings
     /// The scrub in progress, if any.
     private var scrubState: Scrub?
     /// The last display text seen, so a dropped session keeps it. Updated whenever the display is
