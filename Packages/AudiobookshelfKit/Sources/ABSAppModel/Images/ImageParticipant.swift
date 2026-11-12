@@ -1,6 +1,5 @@
 import ABSAPI
 import ABSCore
-import ABSData
 import Foundation
 import Observation
 
@@ -19,46 +18,39 @@ extension ImagePipeline: ImageRequestBuilderSink {}
 ///
 /// A ``SessionStage/connect`` participant:
 /// - On start and reconnect it installs a builder from the session client's configuration, so
-///   covers follow the connection's address and custom headers.
-/// - While the session runs it watches the active connection and rebuilds the builder when that
-///   connection changes, say after its custom headers were edited. The watch ends with the
-///   session.
+///   covers follow the connection's address and custom headers. A new sign-in brings a new client,
+///   and so a reconnect.
 /// - On end, whatever the reason, it removes the builder; cached covers stay on disk for the next
 ///   sign-in. Only ``remove(_:)`` deletes a server's covers, once the server is removed
 ///   (``followRemovals(of:)``).
 ///
-/// Every change to the pipeline runs in call order, so a rebuild still in flight when the session
-/// ends can't install its builder after the end removed it.
+/// The pipeline keys every builder by connection, so only calls for the same connection need an
+/// order: each connection's calls run one at a time, in call order. A builder still being
+/// installed when the session ends (or an end the lifecycle stopped waiting for) therefore lands
+/// before that end's removal, or before the builder of the connection's next session; and no
+/// connection waits for another's, such as a removed server's cover deletion.
 @MainActor
 public final class ImageParticipant: SessionParticipant {
     private let sink: any ImageRequestBuilderSink
-    private let activeConnection: @MainActor @Sendable () -> ServerConnectionDTO?
 
-    /// Bumped on start and end, so work of an earlier session does nothing.
+    /// Bumped on start and end, so an install queued for an earlier session does nothing.
     private var generation = 0
     /// The running session's connection; `nil` when none runs.
     private var connectionID: UUID?
     private var client: APIClient?
-    /// The active-connection watch; cancelled on end.
-    private(set) var observation: Task<Void, Never>?
     private var removals: Task<Void, Never>?
-    /// The latest change to the pipeline; the next one waits for it.
-    private var tail: Task<Void, Never>?
+    /// The latest pipeline call of each connection; the connection's next call waits for it.
+    private var tails: [UUID: (call: Int, task: Task<Void, Never>)] = [:]
+    private var nextCall = 0
 
-    /// - Parameters:
-    ///   - sink: The image pipeline.
-    ///   - activeConnection: The account's active connection (`AccountManager.activeConnection`),
-    ///     read with Observation: a change to the session's connection rebuilds the builder.
-    public init(
-        sink: any ImageRequestBuilderSink,
-        activeConnection: @escaping @MainActor @Sendable () -> ServerConnectionDTO? = { nil }
-    ) {
+    // TODO(#40): Editing a saved server's custom headers needs a per-connection header revision
+    // to observe here, and a rebuild when it changes. Nothing edits them today: they're saved with
+    // each sign-in, whose new client reaches `sessionDidReconnect(_:)` or a new session.
+    public init(sink: any ImageRequestBuilderSink) {
         self.sink = sink
-        self.activeConnection = activeConnection
     }
 
     isolated deinit {
-        observation?.cancel()
         removals?.cancel()
     }
 
@@ -68,27 +60,24 @@ public final class ImageParticipant: SessionParticipant {
         generation += 1
         connectionID = context.identity.connectionID
         client = context.client
-        observeActiveConnection()
-        await install().value
+        await install(for: context.identity.connectionID).value
     }
 
     /// Rebuilds the builder from the new client.
     public func sessionDidReconnect(_ context: SessionContext) async {
         guard connectionID == context.identity.connectionID else { return }
         client = context.client
-        await install().value
+        await install(for: context.identity.connectionID).value
     }
 
-    /// Stops the watch before the first `await`, then removes the builder. Never deletes covers.
+    /// Ends the session before the first `await`, then removes the builder. Never deletes covers.
     public func sessionWillEnd(_ reason: SessionEndReason) async {
         generation += 1
-        observation?.cancel()
-        observation = nil
         client = nil
         guard let connectionID else { return }
         self.connectionID = nil
         let sink = self.sink
-        await enqueue { await sink.setRequestBuilder(nil, for: connectionID) }.value
+        await enqueue(for: connectionID) { await sink.setRequestBuilder(nil, for: connectionID) }.value
     }
 
     // MARK: - Removal
@@ -96,7 +85,7 @@ public final class ImageParticipant: SessionParticipant {
     /// Forgets a removed server's builder and cached covers.
     public func remove(_ connectionID: UUID) async {
         let sink = self.sink
-        await enqueue { await sink.removeServer(connectionID) }.value
+        await enqueue(for: connectionID) { await sink.removeServer(connectionID) }.value
     }
 
     /// Calls ``remove(_:)`` for every connection that leaves `savedConnections`, read with
@@ -122,12 +111,11 @@ public final class ImageParticipant: SessionParticipant {
     // MARK: - Builder
 
     /// Installs a builder from the latest client, unless the session has ended by its turn.
-    @discardableResult
-    private func install() -> Task<Void, Never> {
+    private func install(for connectionID: UUID) -> Task<Void, Never> {
         let generation = generation
         let sink = self.sink
-        return enqueue { [weak self] in
-            guard let self, generation == self.generation, let connectionID = self.connectionID else { return }
+        return enqueue(for: connectionID) { [weak self] in
+            guard let self, generation == self.generation else { return }
             // Offline without a client, the pipeline only serves cached covers.
             var builder: MediaURLBuilder?
             if let client = self.client {
@@ -138,30 +126,19 @@ public final class ImageParticipant: SessionParticipant {
         }
     }
 
-    private func observeActiveConnection() {
-        observation?.cancel()
-        let generation = generation
-        let activeConnection = self.activeConnection
-        let initial = activeConnection()
-        observation = Task { [weak self] in
-            var seen = initial
-            for await connection in Observations({ @MainActor in activeConnection() }) {
-                guard let self, generation == self.generation, !Task.isCancelled else { return }
-                guard connection != seen else { continue }
-                seen = connection
-                guard connection?.id == self.connectionID else { continue }
-                self.install()
-            }
-        }
-    }
-
-    private func enqueue(_ body: @escaping @MainActor @Sendable () async -> Void) -> Task<Void, Never> {
-        let previous = tail
-        let task = Task { @MainActor in
+    private func enqueue(
+        for connectionID: UUID, _ body: @escaping @MainActor @Sendable () async -> Void
+    ) -> Task<Void, Never> {
+        let previous = tails[connectionID]?.task
+        nextCall += 1
+        let call = nextCall
+        let task = Task { @MainActor [weak self] in
             await previous?.value
             await body()
+            // Nothing queued behind it: the connection's chain is empty again.
+            if self?.tails[connectionID]?.call == call { self?.tails[connectionID] = nil }
         }
-        tail = task
+        tails[connectionID] = (call, task)
         return task
     }
 }
