@@ -182,6 +182,7 @@
         "GENERATE_INFOPLIST_FILE": "YES",
         "INFOPLIST_FILE": "AudiobookshelfWidgets/Info.plist",
         "INFOPLIST_KEY_CFBundleDisplayName": "Audiobookshelf",
+        "INFOPLIST_KEY_ITSAppUsesNonExemptEncryption": "NO",
         "LD_RUNPATH_SEARCH_PATHS": [
           "$(inherited)",
           "@executable_path/Frameworks",
