@@ -53,12 +53,15 @@ public final class ComicReaderModel {
     public private(set) var isVerticalScroll: Bool
     /// Whether the layout asks for two-page spreads; vertical scroll ignores it.
     public private(set) var isTwoUp = false
+    /// The decoded pages' sizes in pixels, kept after their images are released.
+    public private(set) var pageSizes: [Int: CGSize] = [:]
 
     /// The visible spread's lower page, 1-based.
     public var currentPage: Int { spreads.indices.contains(spreadIndex) ? spreads[spreadIndex].lower : 1 }
 
     @ObservationIgnored private let fileURL: URL
     @ObservationIgnored private let cacheDirectory: URL
+    @ObservationIgnored private let maxCachedPages: Int
     @ObservationIgnored private let startLocation: EbookLocation?
     @ObservationIgnored private let defaults: UserDefaults?
     @ObservationIgnored private let preferencesKey: String?
@@ -72,16 +75,19 @@ public final class ComicReaderModel {
     /// - Parameters:
     ///   - fileURL: The CBZ on disk.
     ///   - cacheDirectory: Where pages are extracted; it belongs to this reader and is emptied.
+    ///   - maxCachedPages: The extracted pages the archive keeps on disk.
     ///   - startLocation: The resume point's location.
     ///   - defaults: Where the direction and scroll mode are saved; `nil` saves nothing.
     ///   - preferencesKey: Identifies the book for its saved direction.
     ///   - onPageChange: A turn's location and progress.
     public init(
-        fileURL: URL, cacheDirectory: URL, startLocation: EbookLocation?, defaults: UserDefaults? = nil,
+        fileURL: URL, cacheDirectory: URL, maxCachedPages: Int = 12, startLocation: EbookLocation?,
+        defaults: UserDefaults? = nil,
         preferencesKey: String? = nil, onPageChange: @escaping @MainActor (EbookLocation, Double) -> Void
     ) {
         self.fileURL = fileURL
         self.cacheDirectory = cacheDirectory
+        self.maxCachedPages = maxCachedPages
         self.startLocation = startLocation
         self.defaults = defaults
         self.preferencesKey = preferencesKey
@@ -93,8 +99,8 @@ public final class ComicReaderModel {
     public func open() async {
         guard archive == nil else { return }
         state = .loading
-        let (url, cache) = (fileURL, cacheDirectory)
-        let result = await Self.openArchive(url, cacheDirectory: cache)
+        let (url, cache, limit) = (fileURL, cacheDirectory, maxCachedPages)
+        let result = await Self.openArchive(url, cacheDirectory: cache, maxCachedPages: limit)
         switch result {
         case .success(let archive):
             self.archive = archive
@@ -115,6 +121,7 @@ public final class ComicReaderModel {
     /// shown alone from then on.
     public func image(ofPage page: Int) async -> ComicPageImage? {
         guard let archive, let image = await Self.decode(page, from: archive) else { return nil }
+        if pageSizes[page] != image.size { pageSizes[page] = image.size }
         if ComicReaderLayout.isLandscape(image.size), alone.insert(page).inserted, isTwoUp, !isVerticalScroll {
             relayout()
         }
@@ -184,18 +191,27 @@ public final class ComicReaderModel {
     }
 
     @concurrent private static func openArchive(
-        _ url: URL, cacheDirectory: URL
+        _ url: URL, cacheDirectory: URL, maxCachedPages: Int
     ) async -> Result<ComicArchive, ComicArchiveError> {
         do throws(ComicArchiveError) {
-            return .success(try ComicArchive(url: url, cacheDirectory: cacheDirectory))
+            return .success(try ComicArchive(url: url, cacheDirectory: cacheDirectory, maxCachedPages: maxCachedPages))
         } catch {
             return .failure(error)
         }
     }
 
-    /// Extracts and decodes `page`, downsampled to ``maxPixelSize`` with its EXIF orientation applied.
+    /// Extracts and decodes `page`, off the main actor.
     @concurrent private static func decode(_ page: Int, from archive: ComicArchive) async -> ComicPageImage? {
-        guard let url = try? await archive.page(page),
+        await archive.decodedPage(page, maxPixelSize: maxPixelSize).map { ComicPageImage(page: page, image: $0) }
+    }
+}
+
+extension ComicArchive {
+    /// Extracts and decodes page `number`, downsampled to `maxPixelSize` with its EXIF orientation
+    /// applied. Both happen on the archive without a suspension, so another page's request can't
+    /// evict the extracted file before ImageIO reads it.
+    func decodedPage(_ number: Int, maxPixelSize: Int) -> CGImage? {
+        guard let url = try? page(number),
             let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
         else { return nil }
         let options =
@@ -205,7 +221,6 @@ public final class ComicReaderModel {
                 kCGImageSourceCreateThumbnailWithTransform: true,
                 kCGImageSourceShouldCacheImmediately: true,
             ] as CFDictionary
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
-        return ComicPageImage(page: page, image: image)
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options)
     }
 }

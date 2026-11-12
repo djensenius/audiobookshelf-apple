@@ -40,11 +40,15 @@ import Testing
         #expect(ComicReaderLayout.markedAlone(info) == [3])
     }
 
-    @Test func onlyPagesNearTheCurrentOneStayDecoded() {
-        let kept = (1...20).filter { ComicReaderLayout.keepsDecoded($0, current: 10) }
+    @Test func visiblePagesAndAMarginStayDecoded() {
+        let kept = (1...20).filter { ComicReaderLayout.keepsDecoded($0, visible: 10...10) }
         #expect(kept == Array(6...14))
-        #expect(!ComicReaderLayout.keepsDecoded(Int.min, current: 10))
-        #expect(!ComicReaderLayout.keepsDecoded(Int.max, current: -10))
+        // Vertical scroll: every visible page, however many, plus the margin below the last.
+        let tall = (1...20).filter { ComicReaderLayout.keepsDecoded($0, visible: 1...8) }
+        #expect(tall == Array(1...12))
+        #expect(!ComicReaderLayout.keepsDecoded(Int.min, visible: 10...10))
+        #expect(ComicReaderLayout.keepsDecoded(Int.max, visible: (Int.max - 1)...Int.max))
+        #expect(ComicReaderLayout.keepsDecoded(Int.min, visible: Int.min...Int.min))
     }
 
     @Test func onlyWiderThanTallIsLandscape() {
@@ -86,16 +90,43 @@ import Testing
 
     @Test func aZoomedPageCanPanOnlyToItsEdges() {
         let size = CGSize(width: 100, height: 200)
-        #expect(ComicReaderLayout.clampedOffset(CGSize(width: 30, height: -40), scale: 1, size: size) == .zero)
-        #expect(
-            ComicReaderLayout.clampedOffset(CGSize(width: 80, height: -300), scale: 2, size: size)
-                == CGSize(width: 50, height: -100))
-        #expect(
-            ComicReaderLayout.clampedOffset(CGSize(width: 10, height: 20), scale: 2, size: size)
-                == CGSize(width: 10, height: 20))
+        func clamp(_ offset: CGSize, _ scale: CGFloat) -> CGSize {
+            ComicReaderLayout.clampedOffset(offset, scale: scale, content: size, viewport: size)
+        }
+        #expect(clamp(CGSize(width: 30, height: -40), 1) == .zero)
+        #expect(clamp(CGSize(width: 80, height: -300), 2) == CGSize(width: 50, height: -100))
+        #expect(clamp(CGSize(width: 10, height: 20), 2) == CGSize(width: 10, height: 20))
         // Past the zoom range counts as its end.
+        #expect(clamp(CGSize(width: 1000, height: 0), 50) == CGSize(width: 200, height: 0))
+    }
+
+    @Test func panningStopsAtTheFittedPageNotTheViewport() {
+        let viewport = CGSize(width: 1200, height: 800)
+        let cover = ComicReaderLayout.fittedSize(of: [CGSize(width: 600, height: 800)], gap: 0, in: viewport)
+        #expect(cover == CGSize(width: 600, height: 800))
+        // At 2× the cover is exactly as wide as the viewport, so it can't pan sideways.
         #expect(
-            ComicReaderLayout.clampedOffset(CGSize(width: 1000, height: 0), scale: 50, size: size)
-                == CGSize(width: 200, height: 0))
+            ComicReaderLayout.clampedOffset(
+                CGSize(width: 600, height: 600), scale: 2, content: cover, viewport: viewport)
+                == CGSize(width: 0, height: 400))
+        #expect(
+            ComicReaderLayout.clampedOffset(CGSize(width: 900, height: 0), scale: 3, content: cover, viewport: viewport)
+                == CGSize(width: 300, height: 0))
+    }
+
+    @Test func aSpreadFitsItsPagesSideBySide() {
+        let viewport = CGSize(width: 1000, height: 800)
+        let portrait = CGSize(width: 400, height: 800)
+        #expect(
+            ComicReaderLayout.fittedSize(of: [portrait, portrait], gap: 20, in: viewport)
+                == CGSize(width: 820, height: 800))
+        // Pages too wide for their half fit its width; an undecoded page fills its half.
+        #expect(
+            ComicReaderLayout.fittedSize(of: [CGSize(width: 980, height: 490), nil], gap: 20, in: viewport)
+                == CGSize(width: 1000, height: 800))
+        #expect(
+            ComicReaderLayout.fittedSize(of: [CGSize(width: 500, height: 250)], gap: 0, in: viewport)
+                == CGSize(width: 1000, height: 500))
+        #expect(ComicReaderLayout.fittedSize(of: [], gap: 0, in: viewport) == viewport)
     }
 }

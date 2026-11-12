@@ -66,14 +66,16 @@ public enum ComicReaderLayout {
             })
     }
 
-    /// The pages a reader keeps decoded around `current`, so a long comic doesn't hold every page
-    /// it has shown: the spreads either side, and one more for the swipe in progress.
-    public static let decodeRadius = 4
+    /// The pages kept decoded beyond the visible ones in each direction, so a long comic doesn't
+    /// hold every page it has shown: the spreads either side, and one more for a swipe.
+    public static let decodeMargin = 4
 
-    /// Whether `page` is close enough to `current` to keep its decoded image.
-    public static func keepsDecoded(_ page: Int, current: Int) -> Bool {
-        let (distance, overflow) = page.subtractingReportingOverflow(current)
-        return !overflow && (-decodeRadius...decodeRadius).contains(distance)
+    /// Whether `page` is visible or within ``decodeMargin`` of the visible pages, so it keeps its
+    /// decoded image.
+    public static func keepsDecoded(_ page: Int, visible: ClosedRange<Int>) -> Bool {
+        let (low, lowOverflow) = visible.lowerBound.subtractingReportingOverflow(decodeMargin)
+        let (high, highOverflow) = visible.upperBound.addingReportingOverflow(decodeMargin)
+        return (lowOverflow ? Int.min : low)...(highOverflow ? Int.max : high) ~= page
     }
 
     /// Whether an image is landscape, which usually means a pre-joined spread.
@@ -96,11 +98,30 @@ public enum ComicReaderLayout {
     /// The zoom a pinch may reach.
     public static let zoomRange: ClosedRange<CGFloat> = 1...5
 
-    /// The pan offset of a page zoomed by `scale` in a `size` viewport, kept so the page's edges
-    /// never come inside the viewport. No offset at `1×`.
-    public static func clampedOffset(_ offset: CGSize, scale: CGFloat, size: CGSize) -> CGSize {
+    /// The size of a spread's pages aspect-fitted side by side in `viewport`, `gap` apart: each
+    /// page fits half the width (or all of it alone). A page not yet decoded fills its half.
+    public static func fittedSize(of pages: [CGSize?], gap: CGFloat, in viewport: CGSize) -> CGSize {
+        guard !pages.isEmpty else { return viewport }
+        let gaps = gap * CGFloat(pages.count - 1)
+        let cell = CGSize(width: max(viewport.width - gaps, 0) / CGFloat(pages.count), height: viewport.height)
+        let fitted = pages.map { page -> CGSize in
+            guard let page, page.width > 0, page.height > 0 else { return cell }
+            let ratio = min(cell.width / page.width, cell.height / page.height)
+            return CGSize(width: page.width * ratio, height: page.height * ratio)
+        }
+        return CGSize(width: fitted.reduce(gaps) { $0 + $1.width }, height: fitted.map(\.height).max() ?? 0)
+    }
+
+    /// The pan offset of `content`, centred in `viewport` and zoomed by `scale`, kept so the
+    /// content's edges never come inside the viewport: each axis pans only as far as the zoomed
+    /// content overflows it. No offset at `1×`.
+    public static func clampedOffset(
+        _ offset: CGSize, scale: CGFloat, content: CGSize, viewport: CGSize
+    ) -> CGSize {
         let scale = min(max(scale, zoomRange.lowerBound), zoomRange.upperBound)
-        let limit = CGSize(width: size.width * (scale - 1) / 2, height: size.height * (scale - 1) / 2)
+        let limit = CGSize(
+            width: max(content.width * scale - viewport.width, 0) / 2,
+            height: max(content.height * scale - viewport.height, 0) / 2)
         return CGSize(
             width: min(max(offset.width, -limit.width), limit.width),
             height: min(max(offset.height, -limit.height), limit.height))

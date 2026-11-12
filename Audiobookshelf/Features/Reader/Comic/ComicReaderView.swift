@@ -116,19 +116,25 @@ private struct ComicPagerView: View {
         let shown = spreads.indices.map {
             spreads[ComicReaderLayout.displayIndex($0, count: spreads.count, rightToLeft: model.isRightToLeft)]
         }
+        let current = spreads.indices.contains(model.spreadIndex) ? spreads[model.spreadIndex].pages : [1]
+        let visible = current[0]...current[current.count - 1]
         ScrollView(.horizontal) {
             LazyHStack(spacing: 0) {
                 ForEach(shown, id: \.self) { spread in
                     let pages = spread.displayOrder(rightToLeft: model.isRightToLeft)
                     HStack(spacing: gap) {
                         ForEach(Array(pages.enumerated()), id: \.element) { index, page in
-                            ComicPageView(model: model, page: page)
+                            ComicPageView(model: model, page: page, visible: visible)
                                 .frame(
                                     maxWidth: .infinity, maxHeight: .infinity,
                                     alignment: pages.count == 1 ? .center : index == 0 ? .trailing : .leading)
                         }
                     }
-                    .modifier(ComicZoom(isZoomed: $isZoomed, onTap: onTap))
+                    .modifier(
+                        ComicZoom(
+                            isZoomed: $isZoomed, pages: spread.pages.map { model.pageSizes[$0] }, gap: gap,
+                            onTap: onTap)
+                    )
                     .containerRelativeFrame([.horizontal, .vertical])
                     .clipped()
                 }
@@ -159,18 +165,26 @@ private struct ComicScrollView: View {
     @Binding var isZoomed: Bool
     let onTap: () -> Void
     @State private var position: Int?
+    /// Every page on screen, which can be many short ones.
+    @State private var visible: ClosedRange<Int>?
 
     var body: some View {
         ScrollView(.vertical) {
             LazyVStack(spacing: 0) {
                 ForEach(1...max(model.pageCount, 1), id: \.self) { page in
-                    ComicPageView(model: model, page: page, fillsWidth: true)
-                        .containerRelativeFrame(.horizontal)
+                    ComicPageView(
+                        model: model, page: page, visible: visible ?? model.currentPage...model.currentPage,
+                        fillsWidth: true
+                    )
+                    .containerRelativeFrame(.horizontal)
                 }
             }
             .scrollTargetLayout()
         }
-        .modifier(ComicZoom(isZoomed: $isZoomed, onTap: onTap))
+        .onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.01) { pages in
+            if let first = pages.min(), let last = pages.max() { visible = first...last }
+        }
+        .modifier(ComicZoom(isZoomed: $isZoomed, pages: [], gap: 0, onTap: onTap))
         .scrollPosition(id: $position, anchor: .top)
         .scrollDisabled(isZoomed)
         .onChange(of: position) { _, page in
@@ -182,16 +196,15 @@ private struct ComicScrollView: View {
     }
 }
 
-/// One page, decoded while it's near the page being read and released once it's further away;
-/// lazy stacks keep offscreen views' state, so the image would otherwise stay in memory.
+/// One page, decoded while it's visible or near the visible pages and released once it's further
+/// away; lazy stacks keep offscreen views' state, so the image would otherwise stay in memory.
 private struct ComicPageView: View {
     let model: ComicReaderModel
     let page: Int
+    let visible: ClosedRange<Int>
     /// Vertical scroll: as wide as the reader, as tall as the image needs.
     var fillsWidth = false
     @State private var image: ComicPageImage?
-    /// Kept after the image is released, so vertical scroll heights don't change.
-    @State private var size: CGSize?
     @State private var failed = false
 
     var body: some View {
@@ -200,7 +213,8 @@ private struct ComicPageView: View {
                 Image(decorative: image.image, scale: 1)
                     .resizable()
                     .aspectRatio(image.size, contentMode: .fit)
-            } else if let size {
+            } else if let size = model.pageSizes[page] {
+                // A released page keeps its height, so vertical scroll doesn't jump.
                 Color.clear.aspectRatio(size, contentMode: .fit)
             } else if failed {
                 Image(systemName: "exclamationmark.triangle")
@@ -211,8 +225,8 @@ private struct ComicPageView: View {
                     .frame(maxWidth: .infinity, minHeight: fillsWidth ? 400 : 0)
             }
         }
-        .task(id: ComicReaderLayout.keepsDecoded(page, current: model.currentPage)) {
-            guard ComicReaderLayout.keepsDecoded(page, current: model.currentPage) else {
+        .task(id: ComicReaderLayout.keepsDecoded(page, visible: visible)) {
+            guard ComicReaderLayout.keepsDecoded(page, visible: visible) else {
                 image = nil
                 return
             }
@@ -220,16 +234,18 @@ private struct ComicPageView: View {
             let decoded = await model.image(ofPage: page)
             guard !Task.isCancelled else { return }
             image = decoded
-            size = decoded?.size ?? size
             failed = decoded == nil
         }
     }
 }
 
 /// Pinch to zoom up to 5×, drag to pan while zoomed, double-tap to zoom in or reset; a single tap
-/// calls `onTap`. The pages don't turn while zoomed.
+/// calls `onTap`. The pages don't turn while zoomed. Panning stops at the edges of `pages`
+/// aspect-fitted in the viewport (decoded sizes; empty means the content fills the viewport).
 private struct ComicZoom: ViewModifier {
     @Binding var isZoomed: Bool
+    let pages: [CGSize?]
+    let gap: CGFloat
     let onTap: () -> Void
     @State private var scale: CGFloat = 1
     @State private var baseScale: CGFloat = 1
@@ -245,14 +261,16 @@ private struct ComicZoom: ViewModifier {
                 $0.size
             } action: {
                 size = $0
+                reclamp()
             }
+            .onChange(of: pages) { reclamp() }
             .contentShape(.rect)
             .gesture(
                 MagnifyGesture()
                     .onChanged { value in
                         let range = ComicReaderLayout.zoomRange
                         scale = min(max(baseScale * value.magnification, range.lowerBound), range.upperBound)
-                        offset = ComicReaderLayout.clampedOffset(baseOffset, scale: scale, size: size)
+                        offset = clamped(baseOffset)
                         if isZoomed != (scale > 1) { isZoomed = scale > 1 }
                     }
                     .onEnded { _ in settle() }
@@ -263,7 +281,7 @@ private struct ComicZoom: ViewModifier {
                         let moved = CGSize(
                             width: baseOffset.width + value.translation.width,
                             height: baseOffset.height + value.translation.height)
-                        offset = ComicReaderLayout.clampedOffset(moved, scale: scale, size: size)
+                        offset = clamped(moved)
                     }
                     .onEnded { _ in baseOffset = offset },
                 isEnabled: scale > 1
@@ -283,6 +301,17 @@ private struct ComicZoom: ViewModifier {
                 offset = .zero
                 baseOffset = .zero
             }
+    }
+
+    private func clamped(_ offset: CGSize) -> CGSize {
+        let content = pages.isEmpty ? size : ComicReaderLayout.fittedSize(of: pages, gap: gap, in: size)
+        return ComicReaderLayout.clampedOffset(offset, scale: scale, content: content, viewport: size)
+    }
+
+    /// Keeps the pan inside the content after the viewport or the pages' sizes change.
+    private func reclamp() {
+        offset = clamped(offset)
+        baseOffset = clamped(baseOffset)
     }
 
     private func settle() {

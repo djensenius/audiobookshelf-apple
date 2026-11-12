@@ -160,6 +160,27 @@ import UniformTypeIdentifiers
         #expect(await reader.image(ofPage: 10) == nil)
     }
 
+    @Test func concurrentDecodesDontLoseEvictedPages() async throws {
+        // One cached page: each request evicts the last one's file, so a decode must read its own
+        // file before another extraction runs.
+        let reader = ComicReaderModel(
+            fileURL: try makeComic(pages: 12), cacheDirectory: cache, maxCachedPages: 1, startLocation: nil
+        ) { _, _ in }
+        await reader.open()
+        let decoded = await withTaskGroup(of: Int?.self) { group in
+            for page in 1...12 {
+                group.addTask { await reader.image(ofPage: page)?.page }
+            }
+            var pages = Set<Int>()
+            for await page in group {
+                if let page { pages.insert(page) }
+            }
+            return pages
+        }
+        #expect(decoded == Set(1...12))
+        #expect(reader.pageSizes.count == 12)
+    }
+
     @Test func aHugeMarkedImageIndexDoesntCrashTheOpen() async throws {
         let info = Data(
             """
