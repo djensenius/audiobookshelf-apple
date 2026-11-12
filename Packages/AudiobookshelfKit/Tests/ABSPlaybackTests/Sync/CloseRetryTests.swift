@@ -361,4 +361,77 @@ struct CloseRetryTests {
         #expect(try await f.queued().count == (settlement == "acknowledged" ? 0 : 1))
         #expect((f.s.syncer.drainWake != nil) == (settlement != "acknowledged"))
     }
+
+    /// A coordinator `/close` that failed before the capture looked leaves the capture's
+    /// settlement as the close's first save. If that save fails, the close is held in memory,
+    /// kept to retry, and the next drain saves it before anything else and resends it once due:
+    /// its 5 s count once. If the drain's save fails too, the close waits for the drain after.
+    @Test(arguments: ["saved", "capture's save fails", "drain's save fails too"])
+    func aCloseWhoseFirstSaveFailsIsSavedByADrain(failure: String) async throws {
+        let f = try CloseRetryFixture()
+        await f.s.coordinator.play(itemID: "a")
+        await f.s.play(for: 20)
+        let close = CloseRetryFixture.Request(.unapplied)
+        close.release()
+        await f.model.enqueue(close, for: .close)
+        // The closing position commits only once the coordinator's `/close` failed, so the
+        // capture finds that attempt over and doesn't save the close while it is out.
+        let persistence = Gate()
+        defer { persistence.open() }
+        f.s.syncer.beforePositionPersistence = { await persistence.wait() }
+        f.s.syncer.closeQueue.reached = { step in
+            // The settlement's save is the store's next commit.
+            if step == .transportSettled, failure != "saved" {
+                await f.s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+            }
+        }
+        f.s.coordinator.stop()
+        await f.s.coordinator.waitForPendingCloses()
+        persistence.open()
+        await f.s.syncer.closeQueue.waitForCaptures()
+        f.s.syncer.closeQueue.reached = nil
+
+        let held = f.s.syncer.closeQueue.unsaved
+        #expect(held.map(\.sessionID) == (failure == "saved" ? [] : ["session-1"]))
+        #expect(held.allSatisfy { $0.attempts == 1 && $0.lastAttemptAt != nil })
+        #expect(try await f.queued().count == (failure == "saved" ? 1 : 0))
+        #expect(f.s.syncer.drainWake != nil)
+        #expect(try await f.listened("session-1") == 15)
+        if failure == "drain's save fails too" {
+            // Saving the held close is the drain's first commit.
+            await f.s.store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+            await f.drainWhenDue()
+            #expect(f.s.syncer.closeQueue.unsaved == held)
+            #expect(f.s.service.closes.isEmpty)
+            #expect(try await f.queued().isEmpty)
+            #expect(f.s.syncer.drainWake != nil)
+        }
+
+        await f.drainWhenDue()
+
+        #expect(f.s.syncer.closeQueue.unsaved.isEmpty)
+        #expect(f.s.service.closes.map(\.id) == ["session-1"])
+        #expect(f.verdicts == [.send])
+        #expect(try await f.queued().isEmpty)
+        #expect(try await f.listened("session-1") == 20)
+    }
+
+    /// At most `unsavedLimit` unsaved closes are held, the oldest dropped first, and detaching
+    /// drops them all, as no drain follows.
+    @Test func unsavedClosesAreBoundedAndDroppedOnDetach() throws {
+        let f = try CloseRetryFixture()
+        let queue = f.s.syncer.closeQueue
+        let limit = CloseRetryQueue.unsavedLimit
+        for index in 0...limit {
+            queue.holdUnsaved(
+                PendingSessionCloseDTO(
+                    key: f.key, sessionID: "session-\(index)", currentTime: 20, timeListened: 5, duration: 3600,
+                    positionEditedAt: nil, capturedAt: f.s.h.clock.now))
+        }
+        #expect(queue.unsaved.map(\.sessionID) == (1...limit).map { "session-\($0)" })
+
+        f.s.syncer.detach()
+
+        #expect(queue.unsaved.isEmpty)
+    }
 }

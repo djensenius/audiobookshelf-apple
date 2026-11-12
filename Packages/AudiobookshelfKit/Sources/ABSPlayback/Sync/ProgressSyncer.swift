@@ -234,6 +234,7 @@ public final class ProgressSyncer {
     public func detach() {
         quiesceTransport()
         isDetached = true
+        closeQueue.dropUnsaved()
         if let observer { source?.removeObserver(observer) }
         observer = nil
         source?.finalCloseReport = nil
@@ -832,6 +833,8 @@ public final class ProgressSyncer {
     }
 
     private func drainPass() async {
+        // Only memory holds a close the capture couldn't save, and saving it needs no network.
+        await saveUnsavedCloses()
         guard await settleSessionAudioOutcomes() else {
             drainOutcome.failed = true
             return

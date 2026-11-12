@@ -29,6 +29,11 @@ final class CloseRetryQueue {
     fileprivate var captures: [UUID: Task<Void, Never>] = [:]
     /// Test seam: every admission verdict, in order.
     fileprivate(set) var verdicts: [(sessionID: String, verdict: DeferredReportAdmission)] = []
+    /// Captured closes kept to retry that the store couldn't save, their first save included:
+    /// only this holds them, so each drain saves them first. At most ``unsavedLimit``, the oldest
+    /// dropped first; dropped on detach, as no drain follows.
+    fileprivate(set) var unsaved: [PendingSessionCloseDTO] = []
+    static let unsavedLimit = 16
 
     /// The store calls after which state may have moved on (tests).
     enum Step: Sendable {
@@ -38,6 +43,8 @@ final class CloseRetryQueue {
         case attemptSaved
         /// A captured close was saved while the coordinator's attempt is out.
         case captureSaved
+        /// The coordinator's attempt settled; the capture saves its result next.
+        case transportSettled
     }
 
     /// Test seam: runs after each ``Step``.
@@ -50,12 +57,30 @@ final class CloseRetryQueue {
             captures[id] = nil
         }
     }
+
+    /// Holds a close the store couldn't save until a drain saves it.
+    func holdUnsaved(_ close: PendingSessionCloseDTO) {
+        unsaved.append(close)
+        while unsaved.count > Self.unsavedLimit {
+            ProgressSyncer.logDroppedClose(unsaved.removeFirst().timeListened, reason: "too many couldn't be saved")
+        }
+    }
+
+    /// Drops the unsaved closes, which no drain will save once the syncer is detached.
+    func dropUnsaved() {
+        for close in unsaved {
+            ProgressSyncer.logDroppedClose(close.timeListened, reason: "it was never saved and the syncer detached")
+        }
+        unsaved = []
+    }
 }
 
 extension ProgressSyncer {
     /// After a close with listening time: stores it once its position committed, while the
     /// coordinator's attempt is out, then settles it by that attempt's result. The store
     /// keeps it even if this syncer is detached meanwhile (an account switch lets the close go on).
+    /// One kept to retry that was never saved, its settlement's save included, waits in
+    /// ``CloseRetryQueue/unsaved`` for the next drain to save it.
     func retainClose(_ handoff: PlaybackCloseHandoff, for closing: ClosingSession, token: PlaybackPositionToken?) {
         guard handoff.report.timeListened > 0, closing.key.serverConnectionID == service.serverConnectionID
         else { return }
@@ -99,14 +124,40 @@ extension ProgressSyncer {
                 Self.logDroppedClose(close.timeListened, reason: "its position never committed or was superseded")
                 return
             }
-            let settlement = await Self.settleClose(
-                close, after: result, store: store, now: clock.now(), stored: stored)
+            await queue.reached?(.transportSettled)
+            let now = clock.now()
+            let settlement = await Self.settleClose(close, after: result, store: store, now: now, stored: stored)
+            // Kept to retry but never saved (the attempt failed before it could be, or its save
+            // failed too): nothing but memory holds it now.
+            var unsaved: PendingSessionCloseDTO?
+            if settlement == .storeFailed, !stored, case .failure(let error) = result {
+                unsaved = Self.keptClose(close, after: error, now: now)
+            }
             // A close kept to retry, or one whose settlement couldn't be saved, waits for a drain.
             // A drain running now would end as completed and cancel that retry: mark it failed.
             if settlement != .finished, let self, !self.isDetached, !self.isTransportQuiesced {
+                if let unsaved { queue.holdUnsaved(unsaved) }
                 self.drainOutcome.failed = true
                 self.scheduleDrainRetry()
+            } else if let unsaved {
+                Self.logDroppedClose(unsaved.timeListened, reason: "it couldn't be saved to retry")
             }
+        }
+    }
+
+    /// Saves the closes the capture couldn't (``CloseRetryQueue/unsaved``), first in each drain:
+    /// it needs only the store, and a relaunch would lose them. If a save fails again, the rest
+    /// wait for the next drain, which this one's failure schedules.
+    func saveUnsavedCloses() async {
+        while let close = closeQueue.unsaved.first {
+            do {
+                try await store.saveSessionClose(close)
+            } catch {
+                logger.error("Saving an unsaved close failed: \(Self.caseName(error), privacy: .public)")
+                drainOutcome.failed = true
+                return
+            }
+            if let index = closeQueue.unsaved.firstIndex(of: close) { closeQueue.unsaved.remove(at: index) }
         }
     }
 
@@ -215,12 +266,12 @@ extension ProgressSyncer {
         case finished
         /// Kept to retry.
         case kept
-        /// The store couldn't save the result; the close stays as it was.
+        /// The store couldn't save the result; the close stays as it was (in memory, for a
+        /// capture's close never saved: ``CloseRetryQueue/unsaved``).
         case storeFailed
     }
 
-    /// Removes an acknowledged or moot close and keeps one worth retrying, one attempt more.
-    /// Only an attempt that may have reached the server moves `lastAttemptAt`.
+    /// Removes an acknowledged or moot close and keeps one worth retrying (``keptClose(_:after:now:)``).
     static func settleClose(
         _ close: PendingSessionCloseDTO, after result: Result<Bool, any Error>, store: LocalProgressStore,
         now: Date, stored: Bool = true
@@ -234,11 +285,8 @@ extension ProgressSyncer {
             // TODO(#382): on 404, decide from the item's listening sessions (ADR 0007).
             logDroppedClose(close.timeListened, reason: "the server answered \(caseName(error))")
         case .failure(let error):
-            var kept = close
-            kept.attempts += 1
-            if !neverReachedServer(error), !wasTurnedAway(error) { kept.lastAttemptAt = now }
             do {
-                try await store.saveSessionClose(kept)
+                try await store.saveSessionClose(keptClose(close, after: error, now: now))
                 return .kept
             } catch {
                 logger.error("Saving a close to retry failed: \(caseName(error), privacy: .public)")
@@ -254,6 +302,16 @@ extension ProgressSyncer {
             logger.error("Removing a settled close failed: \(caseName(error), privacy: .public)")
             return .storeFailed
         }
+    }
+
+    /// The close kept to retry after `error`: one attempt more. Only an attempt that may have
+    /// reached the server moves `lastAttemptAt`.
+    static func keptClose(_ close: PendingSessionCloseDTO, after error: any Error, now: Date) -> PendingSessionCloseDTO
+    {
+        var kept = close
+        kept.attempts += 1
+        if !neverReachedServer(error), !wasTurnedAway(error) { kept.lastAttemptAt = now }
+        return kept
     }
 
     private func deleteRetainedClose(_ close: PendingSessionCloseDTO) async -> Bool {
