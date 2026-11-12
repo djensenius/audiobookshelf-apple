@@ -44,7 +44,7 @@
       }
     })
     closed.catch(function () {})
-    return { pendingDisplays: 0, fontApplied: false, closed: closed, close: close }
+    return { pendingDisplays: 0, lastDisplay: Promise.resolve(), fontApplied: false, closed: closed, close: close }
   }
 
   function post(event) {
@@ -58,25 +58,31 @@
   }
 
   // A navigation document's links are relative to it, but epub.js's spine (and `relocated`'s href)
-  // to the package; this makes `href` relative to the package, given the document's `navPath`.
-  function packageHref(href, navPath) {
+  // to the package; this makes `href` relative to the package's `directory` in the archive, given
+  // the document's `navPath` (relative to the package, and possibly above it).
+  function packageHref(href, navPath, directory) {
     if (!navPath) return href
     try {
-      const url = new URL(href, new URL(navPath, 'http://package/'))
-      if (url.origin !== 'http://package') return href
-      return decodeURI(url.pathname.slice(1)) + url.hash
+      const root = new URL(directory || '/', 'http://archive')
+      const url = new URL(href, new URL(navPath, root))
+      if (url.origin !== 'http://archive') return href
+      const from = decodeURI(root.pathname).split('/').slice(1, -1)
+      const to = decodeURI(url.pathname).split('/').slice(1)
+      let shared = 0
+      while (shared < from.length && shared < to.length - 1 && from[shared] === to[shared]) shared++
+      return '../'.repeat(from.length - shared) + to.slice(shared).join('/') + url.hash
     } catch (error) {
       return href
     }
   }
 
-  function tocItems(items, navPath) {
+  function tocItems(items, navPath, directory) {
     return (items || []).map(function (item) {
       return {
         id: String(item.id || ''),
         label: String(item.label || '').trim(),
-        href: packageHref(String(item.href || ''), navPath),
-        subitems: tocItems(item.subitems, navPath)
+        href: packageHref(String(item.href || ''), navPath, directory),
+        subitems: tocItems(item.subitems, navPath, directory)
       }
     })
   }
@@ -170,7 +176,10 @@
     // Settle what's awaiting the old book first: epub.js's destroy can leave its displays pending.
     if (session) session.close()
     session = null
-    if (book) book.destroy()
+    if (book) {
+      if (book.releaseBlobs) book.releaseBlobs()
+      book.destroy()
+    }
     book = null
     rendition = null
     lastRelocation = null
@@ -328,6 +337,28 @@
         if (assets.has(path)) throw (this.refusal = new Error('The book lists a file more than once'))
         assets.add(path)
       }
+      // epub.js's destroy revokes none of the blob URLs it makes for assets; the bridge revokes
+      // them, and its own style sheets', when the book closes (or once made, if it has closed).
+      const blobs = new Set()
+      let released = false
+      const keep = function (url) {
+        if (typeof url !== 'string') return url
+        if (released) URL.revokeObjectURL(url)
+        else blobs.add(url)
+        return url
+      }
+      this.releaseBlobs = function () {
+        released = true
+        blobs.forEach(function (url) {
+          URL.revokeObjectURL(url)
+        })
+        blobs.clear()
+      }
+      const archive = this.archive
+      const createUrl = archive.createUrl
+      archive.createUrl = function (url, options) {
+        return createUrl.call(this, url, options).then(keep)
+      }
       const unpacked = unpack.call(this, packaging)
       const resources = this.resources
       const sheets = new Map()
@@ -348,7 +379,7 @@
         return text.then(
           function (css) {
             const replaced = substituteOnce(css, this.relativeTo(absolute), replacements())
-            const sheet = URL.createObjectURL(new Blob([replaced], { type: 'text/css' }))
+            const sheet = keep(URL.createObjectURL(new Blob([replaced], { type: 'text/css' })))
             sheets.set(href, sheet)
             return sheet
           }.bind(this),
@@ -386,15 +417,22 @@
   }
 
   // Displays `target`. epub.js reports a section it can't render only as `displayerror` and leaves
-  // `display`'s promise pending, so this settles on either, or on the book being closed.
+  // `display`'s promise pending, so this settles on either, or on the book being closed. The event
+  // doesn't say whose display failed, so a book's displays run one at a time.
   async function display(current, shown, target) {
+    const previous = current.lastDisplay
+    let finished
+    current.lastDisplay = new Promise(function (resolve) {
+      finished = resolve
+    })
     let onError
     const failed = new Promise(function (resolve, reject) {
       onError = reject
     })
-    shown.on('displayerror', onError)
     current.pendingDisplays += 1
     try {
+      await Promise.race([previous, current.closed])
+      shown.on('displayerror', onError)
       return await Promise.race([shown.display(target), failed, current.closed])
     } catch (error) {
       releaseQueue(shown)
@@ -402,6 +440,7 @@
     } finally {
       current.pendingDisplays -= 1
       shown.off('displayerror', onError)
+      finished()
     }
   }
 
@@ -495,7 +534,8 @@
       .then(function (navigation) {
         const packaging = opened.packaging || {}
         const navPath = packaging.navPath || packaging.ncxPath
-        if (isCurrent()) post({ type: 'toc', items: tocItems(navigation && navigation.toc, navPath) })
+        const directory = opened.path && opened.path.directory
+        if (isCurrent()) post({ type: 'toc', items: tocItems(navigation && navigation.toc, navPath, directory) })
       })
       .catch(function (error) {
         if (isCurrent()) postError('toc', error)

@@ -123,11 +123,12 @@ private final class ReaderPage {
     /// `window.fakeBook` and `window.fakeRendition`; the sections it shows, `window.fakeContents`.
     func fakeEPUBJS(
         displayError: String? = nil, displayHangs: Bool = false, openedHangs: Bool = false, navigation: Bool = true,
-        toc: [[String: Any]] = [], navPath: String? = nil
+        toc: [[String: Any]] = [], navPath: String? = nil, packageDirectory: String = "/", failTarget: String = ""
     ) async throws {
         let options = try JSONSerialization.data(withJSONObject: [
             "displayError": displayError ?? "", "displayHangs": displayHangs, "openedHangs": openedHangs,
-            "navigation": navigation, "toc": toc, "navPath": navPath ?? "",
+            "navigation": navigation, "toc": toc, "navPath": navPath ?? "", "packageDirectory": packageDirectory,
+            "failTarget": failTarget,
         ])
         _ = try await controller.webView.evaluateJavaScript(
             "window.fakeOptions = \(String(decoding: options, as: UTF8.self));\n\(Self.fakeEPUBJS)")
@@ -137,6 +138,7 @@ private final class ReaderPage {
         window.ePub = function () {
           const options = window.fakeOptions
           const never = new Promise(function () {})
+          let queue = Promise.resolve()
           function emitter(target) {
             const listeners = {}
             target.on = function (type, f) { (listeners[type] = listeners[type] || []).push(f) }
@@ -174,23 +176,32 @@ private final class ReaderPage {
             }),
             getContents: function () { return window.fakeContents },
             currentLocation: function () { return null },
-            display: function () {
+            display: function (target) {
               window.fakeDisplays = (window.fakeDisplays || 0) + 1
               // Held, as epub.js's queue holds it: WebKit fails a call whose promise it collects.
               if (window.fakeOptions.displayHangs) {
                 return new Promise(function (resolve) { (window.fakeHeld = window.fakeHeld || []).push(resolve) })
               }
               if (!options.displayError) return Promise.resolve()
-              // As epub.js's queue does: a failed display holds it until `displaying` settles.
-              rendition.displaying = { resolve: function () { window.fakeReleased = (window.fakeReleased || 0) + 1 } }
-              setTimeout(function () { rendition.emit('displayerror', new Error(options.displayError)) }, 0)
-              return never
+              // As epub.js's queue does: one display at a time, and a failed one holds the queue until
+              // `displaying` settles. Only `failTarget` fails, if given, once the test calls `fakeFail`.
+              return (queue = queue.then(function () {
+                if (options.failTarget && target !== options.failTarget) return
+                return new Promise(function (resolve) {
+                  rendition.displaying = {
+                    resolve: function () { window.fakeReleased = (window.fakeReleased || 0) + 1; resolve() }
+                  }
+                  window.fakeFail = function () { rendition.emit('displayerror', new Error(options.displayError)) }
+                  if (!options.failTarget) setTimeout(window.fakeFail, 0)
+                })
+              }))
             }
           })
           return window.fakeBook = emitter({
             opened: options.openedHangs ? new Promise(function (resolve) { window.fakeHeldOpen = resolve }) : Promise.resolve(),
             ready: never,
             packaging: { navPath: options.navPath },
+            path: { directory: options.packageDirectory },
             loaded: { navigation: options.navigation ? Promise.resolve({ toc: options.toc }) : never },
             spine: {
               get: function () { return null },
@@ -706,6 +717,78 @@ private final class ReaderPage {
         #expect(items.map { $0["href"] as? String } == ["text/c1.xhtml#p2", "https://example.com/c1.xhtml"])
         let subitems = try #require(items.first?["subitems"] as? [[String: Any]])
         #expect(subitems.map { $0["href"] as? String } == ["nav/c 1.xhtml"])
+    }
+
+    /// A navigation document above the package's folder: its links stay relative to the package.
+    @Test(.timeLimit(.minutes(1))) func tableOfContentsLinksAboveThePackageKeepTheirParent() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        let toc: [[String: Any]] = [["id": "one", "label": "One", "href": "text/c1.xhtml#p2"]]
+        try await page.fakeEPUBJS(toc: toc, navPath: "../nav.xhtml", packageDirectory: "/OEBPS/package/")
+
+        try await page.open("tiny")
+
+        let items = try #require(try await page.next("toc")["items"] as? [[String: Any]])
+        #expect(items.map { $0["href"] as? String } == ["../text/c1.xhtml#p2"])
+    }
+
+    /// epub.js's `displayerror` doesn't say whose display failed, so a display queued behind one
+    /// that fails still runs, rather than failing with it.
+    @Test(.timeLimit(.minutes(1))) func aFailedDisplayDoesNotFailTheNextOne() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(displayError: "No such section", failTarget: "bad.xhtml")
+        try await page.open("tiny")
+
+        let bad = Task { try await page.controller.send(Data(#"{"type":"display","target":"bad.xhtml"}"#.utf8)) }
+        while try await page.evaluate("typeof window.fakeFail") != #""function""# {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let good = Task { try await page.controller.send(Data(#"{"type":"display","target":"good.xhtml"}"#.utf8)) }
+        try await Task.sleep(for: .milliseconds(300))
+        _ = try await page.evaluate("window.fakeFail()")
+
+        await #expect(throws: (any Error).self) { try await bad.value }
+        await #expect(throws: Never.self) { try await good.value }
+    }
+
+    /// The blob URLs epub.js makes for a book's assets, and the bridge's rewritten style sheets, are
+    /// revoked when another book replaces it.
+    @Test(.timeLimit(.minutes(1))) func aClosedBooksBlobsAreRevoked() async throws {
+        let manifest =
+            #"<item id="a" href="a.png" media-type="image/png"/>"#
+            + #"<item id="css" href="style.css" media-type="text/css"/>"#
+        let extra = [
+            TinyEPUB.Entry(name: "OEBPS/a.png", body: Data(count: 16)),
+            TinyEPUB.Entry(name: "OEBPS/style.css", body: Data("a.png".utf8)),
+        ]
+        let page = try await ReaderPage(loadBook: { id in
+            guard id == "first" else { throw URLError(.fileDoesNotExist) }
+            return TinyEPUB.data(extra: extra, manifest: manifest)
+        })
+        _ = try await page.controller.webView.evaluateJavaScript(
+            """
+            const ePub = window.ePub
+            window.ePub = function (data, options) { return (window.testBook = ePub(data, options)) }
+            const create = URL.createObjectURL
+            const revoke = URL.revokeObjectURL
+            window.testCreated = []
+            window.testRevoked = []
+            URL.createObjectURL = function (blob) { const url = create(blob); window.testCreated.push(url); return url }
+            URL.revokeObjectURL = function (url) { window.testRevoked.push(url); revoke(url) }
+            1
+            """)
+        let opening = Task { try await page.open("first") }
+        defer { opening.cancel() }
+        while try await page.evaluate("window.testBook !== undefined") != "true" {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        _ = try await page.controller.webView.callAsyncJavaScript(
+            "await window.testBook.opened", arguments: [:], in: nil, contentWorld: .page)
+        #expect(try await page.evaluate("window.testCreated.length") == "3")
+
+        await #expect(throws: (any Error).self) { try await page.open("second") }
+
+        #expect(
+            try await page.evaluate("window.testCreated.every((url) => window.testRevoked.includes(url))") == "true")
     }
 
     /// epub.js copies an asset out of the archive once per listing, all at once, so a book listing
