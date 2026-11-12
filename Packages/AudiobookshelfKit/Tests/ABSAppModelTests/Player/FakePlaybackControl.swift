@@ -37,6 +37,9 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     /// Whether the sleep timer's play is accepted; a refused one leaves playback paused, as when the audio session
     /// won't activate.
     var playsStart = true
+    /// Makes ``resume(rewindingBy:)`` fail as the coordinator's does when the streaming policy blocks
+    /// it or the audio session won't activate: it sets ``error`` and leaves play unrequested.
+    var resumeFailure: PlaybackCoordinatorError?
     private(set) var calls: [Call] = []
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
@@ -50,6 +53,10 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
 
     func resume(rewindingBy seconds: Double?) async {
         calls.append(.resume(rewindingBy: seconds))
+        if let resumeFailure {
+            error = resumeFailure
+            return
+        }
         isPlaybackRequested = true
     }
 

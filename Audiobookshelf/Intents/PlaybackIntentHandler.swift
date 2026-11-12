@@ -87,6 +87,7 @@ extension PlaybackIntentError {
         case .nothingPlaying: self = .nothingPlaying
         case .sleepTimerUnavailable: self = .sleepTimerUnavailable
         case .noChapterEnd: self = .noChapterEnd
+        case .playbackFailed: self = .playbackFailed
         }
     }
 }

@@ -2,6 +2,7 @@
   "IntentErrorNoChapterEnd": "There's no chapter end ahead to stop at.",
   "IntentErrorNothingPlaying": "Nothing is playing in Audiobookshelf.",
   "IntentErrorNothingToResume": "There's nothing to resume. Play a book or episode in Audiobookshelf first.",
+  "IntentErrorPlaybackFailed": "Audiobookshelf couldn't start playback. Open the app to see why.",
   "IntentErrorPlayerUnavailable": "Audiobookshelf can't control playback right now.",
   "IntentErrorSleepTimerUnavailable": "Audiobookshelf couldn't set the sleep timer.",
   "IntentJumpBack": "Back",

@@ -64,6 +64,16 @@ private let restored = LastPlayedRecord(
         }
     }
 
+    @Test func resumeThatDoesNotStartFails() async throws {
+        try await withPerformer { performer, playback, _ in
+            playback.restore(restored)
+            playback.resumeFailure = .unexpected("The audio session wouldn't activate")
+            await #expect(throws: PlaybackIntentFailure.playbackFailed) { try await performer.resume() }
+            await #expect(throws: PlaybackIntentFailure.playbackFailed) { try await performer.togglePlayPause() }
+            #expect(playback.calls == [.resume(rewindingBy: nil), .resume(rewindingBy: nil)])
+        }
+    }
+
     @Test func resumeWithNothingLoadedFails() async throws {
         try await withPerformer { performer, playback, _ in
             await #expect(throws: PlaybackIntentFailure.nothingToResume) { try await performer.resume() }
@@ -89,6 +99,17 @@ private let restored = LastPlayedRecord(
             playback.load(FakePlaybackControl.bookSession(), playing: true)
             try performer.pause()
             #expect(playback.calls == [.pause])
+        }
+    }
+
+    @Test func pauseCancelsAFirstPlayWaitingOnTheStreamingPolicy() async throws {
+        try await withPerformer { performer, playback, _ in
+            // The coordinator is still idle while the first play's policy check runs.
+            playback.isPlaybackRequested = true
+            try performer.pause()
+            playback.isPlaybackRequested = true
+            try await performer.togglePlayPause()
+            #expect(playback.calls == [.pause, .pause])
         }
     }
 

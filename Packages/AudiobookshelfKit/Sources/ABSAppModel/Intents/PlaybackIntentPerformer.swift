@@ -12,6 +12,9 @@ public enum PlaybackIntentFailure: Error, Equatable, Sendable {
     case sleepTimerUnavailable
     /// End of chapter was asked for with no chapter or track end ahead.
     case noChapterEnd
+    /// Playback didn't start: the streaming policy blocked it or asks first, the session failed to
+    /// start, or the audio session wouldn't activate. The player shows why when the app is opened.
+    case playbackFailed
 }
 
 /// The sleep timer command a playback intent needs. ``ABSPlayback/SleepTimer`` conforms; tests pass a fake.
@@ -54,15 +57,21 @@ public struct PlaybackIntentPerformer {
 
     /// Resumes the current item, or starts the last-played one, which the account's playback restores
     /// (paused and unloaded) when its session starts. Already playing, the player ignores it.
-    /// - Throws: ``PlaybackIntentFailure/nothingToResume`` when no item is loaded or restored.
+    /// - Throws: ``PlaybackIntentFailure/nothingToResume`` when no item is loaded or restored, and
+    ///   ``PlaybackIntentFailure/playbackFailed`` when the player didn't start: its `resume` doesn't
+    ///   throw, but a blocked or failed start leaves play no longer requested (a pause that races the
+    ///   resume reads the same).
     public func resume() async throws(PlaybackIntentFailure) {
         guard playback.phase != .idle else { throw .nothingToResume }
         await playback.resume(rewindingBy: nil)
+        guard playback.isPlaybackRequested else { throw .playbackFailed }
     }
 
-    /// - Throws: ``PlaybackIntentFailure/nothingPlaying`` when no item is loaded or restored.
+    /// Pauses, including a first play still waiting on its streaming-policy check (the player is
+    /// still idle then, with play requested), which the player's pause cancels.
+    /// - Throws: ``PlaybackIntentFailure/nothingPlaying`` when nothing is loaded, restored or starting.
     public func pause() throws(PlaybackIntentFailure) {
-        guard playback.phase != .idle else { throw .nothingPlaying }
+        guard playback.phase != .idle || playback.isPlaybackRequested else { throw .nothingPlaying }
         playback.pause()
     }
 

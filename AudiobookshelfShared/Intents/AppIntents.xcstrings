@@ -34,6 +34,17 @@
         }
       }
     },
+    "IntentErrorPlaybackFailed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Audiobookshelf couldn't start playback. Open the app to see why."
+          }
+        }
+      }
+    },
     "IntentErrorPlayerUnavailable" : {
       "extractionState" : "manual",
       "localizations" : {
