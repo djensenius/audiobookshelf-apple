@@ -66,12 +66,8 @@ import SwiftData
                         serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
                 else { throw StoreError.itemNotFound }
                 // A cover the item got meanwhile (an episode carried one) is kept.
-                guard item.coverRelativePath == nil else { return LocalLibraryItemDTO(item) }
-                item.coverRelativePath = coverPath
-                if let coverUpdatedAt = coverUpdatedAt ?? download.media.coverUpdatedAt {
-                    item.coverUpdatedAt = coverUpdatedAt
-                }
-                item.updatedAt = now
+                Self.setCoverIfMissing(
+                    item, relativePath: coverPath, updatedAt: coverUpdatedAt ?? download.media.coverUpdatedAt, now: now)
                 return LocalLibraryItemDTO(item)
             }
         }
@@ -150,6 +146,30 @@ import SwiftData
             item.updatedAt = now
             return true
         }
+    }
+
+    /// Makes `relativePath` the item's cover, with `updatedAt` when known, unless the item has
+    /// a cover: checked and set in one transaction, so a cover a finalised download gave it
+    /// meanwhile is kept. Returns `false` when it has one or the item doesn't exist.
+    @discardableResult
+    public func setCoverIfMissing(
+        itemID: UUID, relativePath: String, updatedAt: Date?, now: Date = .now
+    ) throws -> Bool {
+        try commit {
+            guard let item = try fetchItem(id: itemID) else { return false }
+            return Self.setCoverIfMissing(item, relativePath: relativePath, updatedAt: updatedAt, now: now)
+        }
+    }
+
+    @discardableResult
+    private static func setCoverIfMissing(
+        _ item: LocalLibraryItem, relativePath: String?, updatedAt: Date?, now: Date
+    ) -> Bool {
+        guard item.coverRelativePath == nil else { return false }
+        item.coverRelativePath = relativePath
+        if let updatedAt { item.coverUpdatedAt = updatedAt }
+        item.updatedAt = now
+        return true
     }
 
     /// Removes one downloaded podcast episode, its files and its snapshot entry, in one

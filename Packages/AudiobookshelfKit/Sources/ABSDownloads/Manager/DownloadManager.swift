@@ -380,12 +380,15 @@ public actor DownloadManager {
     ///   record of the item will fetch and attach. The plan gets no cover part.
     /// - `completed`: a cover part another record of the item has already fetched, on disk.
     ///   Its record may never complete (paused or failed), so the plan carries it instead.
+    /// - `completedUpdatedAt`: when that cover was updated, from its record's snapshot.
     /// A pending cover part of a paused or failed record counts for neither: the plan fetches
     /// its own. A cover-only record of the item (whose key is the item's) counts too.
     func existingCover(
         for key: MediaKey, localItem: LocalLibraryItemDTO?
-    ) async throws(DownloadManagerError) -> (pendingPath: String?, completed: DownloadPartDTO?) {
-        if let path = localItem?.coverRelativePath { return (path, nil) }
+    ) async throws(DownloadManagerError) -> (
+        pendingPath: String?, completed: DownloadPartDTO?, completedUpdatedAt: Date?
+    ) {
+        if let path = localItem?.coverRelativePath { return (path, nil, nil) }
         let records = try await read { try await self.store.records(serverConnectionID: key.serverConnectionID) }
         let siblings = records.filter {
             $0.key.libraryItemId == key.libraryItemId && ($0.key != key || $0.isCoverOnly)
@@ -399,11 +402,11 @@ public actor DownloadManager {
                 && (try? locations.fileURL(forRelativePath: part.destinationRelativePath))
                     .map { FileManager.default.fileExists(atPath: $0.path) } == true
         }
-        if let stored { return (nil, stored.1) }
+        if let stored { return (nil, stored.1, stored.0.media.coverUpdatedAt) }
         let pending = covers.first { record, part in
             part.state != .completed && (record.state == .queued || record.state == .downloading)
         }
-        return (pending?.1.destinationRelativePath, nil)
+        return (pending?.1.destinationRelativePath, nil, nil)
     }
 
     private func checkCapacity(for record: DownloadRecordDTO, item: LibraryItem) async throws(DownloadManagerError) {

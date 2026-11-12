@@ -302,15 +302,31 @@ import Testing
 
         try await Self.finalise(second, fixture)
 
-        guard
-            case .completed(_, let itemID, _) = await events.next(where: {
-                if case .completed = $0 { true } else { false }
-            })
-        else { throw UnexpectedEvent() }
+        let itemID = try await Self.completion(events, manager, fixture)
         let local = try #require(try await fixture.localItems.item(id: itemID))
         #expect(local.coverRelativePath == (coverOnDisk ? path : nil))
         #expect(try await fixture.store.allRecords().map(\.id) == [first.id])
         #expect(await fixture.engine.started.count == starts)
+    }
+
+    /// An episode completes into a podcast without a cover while the paused episode holding it
+    /// has fetched it: the local item adopts that cover with the date its record had.
+    @Test func aCompletedSiblingCoverIsAdoptedWithItsDate() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let first = try await Self.enqueue("ep_1", fixture, manager)
+        let second = try await Self.enqueue("ep_2", fixture, manager)
+        let cover = try #require(first.parts.last { $0.kind == .cover })
+        let coverDate = try #require(first.media.coverUpdatedAt)
+        #expect(try await manager.pause(recordID: first.id))
+        try write(cover.destinationRelativePath, fixture)
+        try await fixture.store.completePart(partID: cover.id, finalBytes: 5)
+
+        try await Self.finalise(second, fixture)
+
+        let itemID = try await Self.completion(events, manager, fixture)
+        let local = try #require(try await fixture.localItems.item(id: itemID))
+        #expect(local.coverRelativePath == cover.destinationRelativePath)
+        #expect(local.coverUpdatedAt == coverDate)
     }
 
     /// A deleted podcast's cover can't go to its last episode, being finalised: that episode's
@@ -322,11 +338,7 @@ import Testing
         let cover = try #require(first.parts.last { $0.kind == .cover })
         for part in first.parts { try write(part.destinationRelativePath, fixture) }
         try await Self.finalise(first, fixture)
-        guard
-            case .completed(_, let itemID, _) = await events.next(where: {
-                if case .completed = $0 { true } else { false }
-            })
-        else { throw UnexpectedEvent() }
+        let itemID = try await Self.completion(events, manager, fixture)
         for part in second.parts { try await fixture.store.completePart(partID: part.id, finalBytes: 1) }
         try await fixture.engine.settle(second.id)
 
@@ -350,11 +362,7 @@ import Testing
         let third = try await Self.enqueue("ep_3", fixture, manager)
         for part in third.parts { try write(part.destinationRelativePath, fixture) }
         try await Self.finalise(third, fixture)
-        guard
-            case .completed(_, let itemID, _) = await events.next(where: {
-                if case .completed = $0 { true } else { false }
-            })
-        else { throw UnexpectedEvent() }
+        let itemID = try await Self.completion(events, manager, fixture)
         var discarded = refetch
         discarded.parts[0].state = .completed
         try write(path, fixture)
@@ -419,14 +427,25 @@ import Testing
         try #require(first.parts.contains { $0.kind == .cover } && !second.parts.contains { $0.kind == .cover })
         for part in second.parts { try write(part.destinationRelativePath, fixture) }
         try await finalise(second, fixture)
+        let itemID = try await Self.completion(events, manager, fixture)
+        let local = try #require(try await fixture.localItems.item(id: itemID))
+        try #require(local.coverRelativePath == nil)
+        return (first, local)
+    }
+
+    /// Waits for the next completion, then for the manager to release its item, as the cover
+    /// is restored (``DownloadManager/restoreCover(after:itemID:)``) after `completed` is
+    /// reported. Returns the completed local item's id.
+    private static func completion(
+        _ events: AsyncStream<DownloadManagerEvent>, _ manager: DownloadManager, _ fixture: ManagerFixture
+    ) async throws -> UUID {
         guard
             case .completed(_, let itemID, _) = await events.next(where: {
                 if case .completed = $0 { true } else { false }
             })
         else { throw UnexpectedEvent() }
-        let local = try #require(try await fixture.localItems.item(id: itemID))
-        try #require(local.coverRelativePath == nil)
-        return (first, local)
+        await manager.holdingItem(fixture.key(item)) {}
+        return itemID
     }
 
     /// Completes every part of `record`, then finalises it as the engine does.

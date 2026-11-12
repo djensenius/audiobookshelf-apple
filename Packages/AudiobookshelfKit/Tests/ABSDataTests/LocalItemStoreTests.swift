@@ -364,4 +364,28 @@ import Testing
         }
         #expect(try await store.allItems().map(\.id) == [item.id])
     }
+
+    /// A cover set only while the item has none: one a finalised download gave it meanwhile
+    /// is kept, with its date.
+    @Test func setCoverIfMissingKeepsAnExistingCover() async throws {
+        let (store, _) = try makeStore()
+        let episode = LocalMediaSnapshot.Episode(id: "ep_1", title: "Episode 1")
+        let item = try await store.upsertFromDownload(episodeDownload(episode), now: now)
+        let coverDate = now.addingTimeInterval(-60)
+        let later = now.addingTimeInterval(5)
+
+        #expect(
+            try await store.setCoverIfMissing(
+                itemID: item.id, relativePath: "li_2/cover.jpg", updatedAt: coverDate, now: later))
+        #expect(
+            try await store.setCoverIfMissing(
+                itemID: item.id, relativePath: "li_2/other.jpg", updatedAt: later, now: later.addingTimeInterval(5))
+                == false)
+
+        let kept = try #require(try await store.item(id: item.id))
+        #expect(kept.coverRelativePath == "li_2/cover.jpg")
+        #expect(kept.coverUpdatedAt == coverDate)
+        #expect(kept.updatedAt == later)
+        #expect(try await store.setCoverIfMissing(itemID: UUID(), relativePath: "x.jpg", updatedAt: nil) == false)
+    }
 }

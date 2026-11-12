@@ -37,7 +37,9 @@ extension DownloadManager {
         guard existing.pendingPath == nil else { return }
         let updatedAt = refused?.updatedAt ?? item.coverUpdatedAt
         if let completed = existing.completed {
-            try await adoptCover(completed.destinationRelativePath, updatedAt: updatedAt, for: item)
+            // Dated by the record that fetched it.
+            try await adoptCover(
+                completed.destinationRelativePath, updatedAt: existing.completedUpdatedAt ?? updatedAt, for: item)
             return try await dropStalledRefetch(itemKey)
         }
         let layoutPath = try? DownloadLayout(
@@ -51,12 +53,13 @@ extension DownloadManager {
         }
     }
 
-    /// Makes the file at `path`, on disk, the local item's cover.
+    /// Makes the file at `path`, on disk, the local item's cover, unless it got one meanwhile:
+    /// the engine finalises downloads without holding the item.
     func adoptCover(
         _ path: String, updatedAt: Date?, for item: LocalLibraryItemDTO
     ) async throws(DownloadManagerError) {
         _ = try await read {
-            try await self.localItems.updateCover(itemID: item.id, relativePath: path, updatedAt: updatedAt)
+            try await self.localItems.setCoverIfMissing(itemID: item.id, relativePath: path, updatedAt: updatedAt)
         }
     }
 
