@@ -199,6 +199,12 @@ public actor DownloadEngine {
     /// Records whose `failed` state couldn't be saved after a part failed for good. Their parts
     /// can't launch until ``reconcile()`` saves it.
     private var pendingRecordFailures: Set<UUID> = []
+    /// Parts being failed for good, from the start of their handling until its replay, with
+    /// their connections, and the ``quiesce(connectionID:)`` calls waiting for them.
+    private var failingForGood: [UUID: UUID] = [:]
+    private var failureWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Internal so tests can tell when ``quiesce(connectionID:)`` waits for a failure.
+    var failureWaiterCount: Int { failureWaiters.count }
     /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the results
     /// they finished with meanwhile: those are handled only once the transfer is adopted.
     private var adopting: Set<Int> = []
@@ -521,6 +527,43 @@ public actor DownloadEngine {
             vault.delete(partID: part.id)
             contexts[part.id]?.hasResumeData = false
             await persist { _ = try await $0.updatePart(partID: part.id, hasResumeData: false) }
+        }
+    }
+
+    /// Stops every transfer of `connectionID`'s downloads, whatever their record's state, then
+    /// deletes their resume data, for a sign-out or removal (ADR 0003). It first attaches to the
+    /// transfers that survived a relaunch, so they are stopped too, and waits for the parts being
+    /// failed for good, whose sibling stops and replays could otherwise run after the discard.
+    /// Set the records' state first (for example `paused`), so nothing starts them again.
+    ///
+    /// - Returns: `false`, stopping and deleting nothing, when there is no session (the downloads
+    ///   couldn't be read, or another process holds it); a later call tries again.
+    public func quiesce(connectionID: UUID) async -> Bool {
+        guard await ensureSession() else { return false }
+        let records: [DownloadRecordDTO]
+        do {
+            records = try await loadRecords()
+        } catch {
+            logError("Couldn't read downloads; not stopping a server's downloads", error)
+            return false
+        }
+        await waitForFailuresForGood(of: connectionID)
+        // Only parts with something under way, so an idle part keeps its state.
+        let parts = Set(records.filter { $0.key.serverConnectionID == connectionID }.flatMap(\.parts).map(\.id))
+            .union(contexts.filter { $0.value.connectionID == connectionID }.keys)
+            .filter {
+                tasks[$0] != nil || launching[$0] != nil || stopping[$0] != nil || retries[$0] != nil
+                    || deferredLaunches.contains($0)
+            }
+        await stop(partIDs: Array(parts), keepingResumeData: false)
+        await waitForFailuresForGood(of: connectionID)
+        await discardResumeData(connectionID: connectionID)
+        return true
+    }
+
+    private func waitForFailuresForGood(of connectionID: UUID) async {
+        while failingForGood.values.contains(connectionID) {
+            await withCheckedContinuation { failureWaiters.append($0) }
         }
     }
 
@@ -1389,6 +1432,13 @@ public actor DownloadEngine {
         activationOwnsSession: Bool = false
     ) async {
         guard let context = contexts[partID], settling.insert(partID).inserted else { return }
+        failingForGood[partID] = context.connectionID
+        defer {
+            failingForGood[partID] = nil
+            let waiters = failureWaiters
+            failureWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
         let resumeGenerationAtStart = resumeGenerations[context.recordID, default: 0]
         let resumeWasPendingAtStart = resumingRecords.contains(context.recordID)
         let isReplayedAttempt = replayedResumeGenerationByPart[partID] == resumeGenerationAtStart

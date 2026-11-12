@@ -539,6 +539,88 @@ import Testing
             !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
     }
 
+    /// After a relaunch, a sign-out can come before anything attached the session: the
+    /// quiesce attaches first, so a surviving transfer with the old token is stopped too.
+    @Test func quiesceStopsASurvivorOfARelaunch() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let base = harness.base
+        let engine = harness.makeEngine(prepare: { stub in
+            var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+            request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+            stub.leaveTask(request, description: partID.uuidString)
+        })
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.taskIdentifier == nil)
+        #expect(!part.hasResumeData)
+        #expect(
+            !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
+    }
+
+    /// Without a session nothing can be stopped, so the quiesce reports it didn't finish.
+    @Test func quiesceWithoutASessionReportsItDidNotFinish() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        try await harness.addRecord(parts: [UUID()], state: .downloading, partState: .running)
+        let engine = harness.makeEngine(readRecords: { _ in throw TestError() })
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(harness.sessions.withLock { $0.isEmpty })
+    }
+
+    /// A part failing for good stops its siblings and may replay a start that overlapped it,
+    /// after which its transfer would run with the old token: the quiesce waits for it, then
+    /// stops what it started.
+    @Test func quiesceWaitsForAFailureForGoodAndStopsItsReplay() async throws {
+        let failure = StubGate()
+        let never = StubGate()
+        let failingRequests = Mutex(0)
+        let harness = try await DownloadHarness { request in
+            guard request.url?.path().contains("/file/1/") == true else { return .status(200, gate: never) }
+            let count = failingRequests.withLock {
+                $0 += 1
+                return $0
+            }
+            return count == 1 ? .status(404, body: Data(), gate: failure) : .status(200, gate: never)
+        }
+        let failing = UUID()
+        let sibling = UUID()
+        try await harness.addRecord(parts: [failing, sibling])
+        let seams = FailureSeams()
+        seams.hold(failing)
+        let engine = harness.makeEngine(
+            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure)
+        await engine.start(partIDs: [failing, sibling])
+        await harness.waitForRequests(2)
+        failure.open()
+        _ = await seams.nextHeld()
+        // A start while the part is settling is replayed once its failure is handled.
+        await engine.start(partIDs: [failing])
+
+        let finished = Mutex(false)
+        let quiescing = Task {
+            defer { finished.withLock { $0 = true } }
+            return await engine.quiesce(connectionID: harness.connectionID)
+        }
+        while await engine.failureWaiterCount == 0, !finished.withLock({ $0 }) { await Task.yield() }
+        seams.release()
+        #expect(await quiescing.value)
+        _ = await seams.nextSettled()
+
+        let running = await harness.session?.session.allTasks.filter { $0.state == .running } ?? []
+        #expect(running.isEmpty)
+        for partID in [failing, sibling] {
+            #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        }
+        never.open()
+    }
+
     @Test func partDeletedWhileLaunchingIsNotRequested() async throws {
         let harness = try await DownloadHarness { _ in .status(200) }
         let partID = UUID()
