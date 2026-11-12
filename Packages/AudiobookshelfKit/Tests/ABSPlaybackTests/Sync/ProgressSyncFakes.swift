@@ -251,6 +251,8 @@ final class ManualSleeper: Sendable {
 
     /// Every delay requested so far, in order.
     var delays: [TimeInterval] { state.withLock { $0.delays } }
+    /// The sleeps waiting now; a cancelled one leaves at once.
+    var waitingCount: Int { state.withLock { $0.waiting.count } }
 
     @Sendable func sleep(_ delay: TimeInterval) async throws {
         let id = UUID()

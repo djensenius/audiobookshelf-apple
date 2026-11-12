@@ -23,7 +23,7 @@ public enum PlaybackStopReason: Sendable, Equatable {
 public struct PlaybackCloseHandoff: Sendable {
     public let report: PlaybackSyncReport
     let position: PlaybackCloseResult<Void>
-    /// Resolved once the closing session's last queued `/sync` has finished or been skipped.
+    /// Resolved once the closing session's `/sync` in flight returned.
     let sessionSync: PlaybackCloseResult<Void>?
 
     init(
@@ -40,11 +40,27 @@ public struct PlaybackCloseHandoff: Sendable {
         try await position.wait()
     }
 
-    /// Waits until no `/sync` for the closing session is queued or in flight, so a `/close`
-    /// sent after it is the server's last word on the session (#337). Returns at once when none
-    /// was; throws only when the waiting task is cancelled.
-    public func waitForSessionSync() async throws {
-        try await sessionSync?.wait()
+    /// Waits until the closing session's `/sync` in flight returned, so a `/close` sent after it
+    /// is normally the server's last word on the session (#337), or until `sleep(timeout)` ends.
+    /// Returns at once when none was in flight; throws only when the waiting task is cancelled.
+    func waitForSessionSync(
+        timeout: Duration, sleep: @escaping @Sendable (Duration) async -> Void
+    ) async throws {
+        guard let sessionSync, sessionSync.result == nil else { return }
+        let first = PlaybackCloseResult<Void>()
+        let timer = Task {
+            await sleep(timeout)
+            first.resolve(.success(()))
+        }
+        let sync = Task {
+            _ = try? await sessionSync.wait()
+            first.resolve(.success(()))
+        }
+        defer {
+            timer.cancel()
+            sync.cancel()
+        }
+        try await first.wait()
     }
 }
 

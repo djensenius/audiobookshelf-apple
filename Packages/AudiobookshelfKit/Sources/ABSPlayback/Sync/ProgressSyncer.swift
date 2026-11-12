@@ -19,9 +19,9 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// - **One request at a time.** Every send runs on one serial queue, and a send
 ///   counts as finished only when the service call returns, after its task has completed. So no
 ///   report or PATCH goes out while an earlier one could still reach the server. The
-///   coordinator's final `/close` doesn't go through this queue, but waits until the closing
-///   session's last queued report has returned or been skipped
-///   (`PlaybackCloseHandoff.waitForSessionSync()`).
+///   coordinator's final `/close` doesn't go through this queue, but waits, up to
+///   `PlaybackCoordinator.closeWaitTimeout`, for the closing session's report in flight, if any.
+///   A report still queued for it is skipped, so it doesn't hold the close back.
 /// - **Positions first.** Each report trigger saves `LocalMediaProgress` with `needsServerSync`
 ///   before sending. Local writes have their own serial queue, so a held request doesn't block
 ///   saving a newer seek or pause. Failed writes stay in memory for the next trigger or drain;
@@ -35,7 +35,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// - **Server errors (#171).** A `/sync` answered with 5xx, 408 or 429 backs off that session's
 ///   reports for ``syncInterval`` doubled per consecutive failure, up to ``maxSyncBackoff``;
 ///   ``flush()`` ignores the backoff. Positions are still saved meanwhile, and a periodic report
-///   held back by the backoff falls due when it ends; a wake then reports a paused session too.
+///   held back by the backoff falls due when it ends; a wake then reports a paused session too,
+///   unless a report already went out since the backoff ended. Closing the session cancels it.
 ///   A 404 means the server no longer has the session (ABS keeps open sessions in memory, so a
 ///   restart drops them): the session sends no more `/sync`, and each later trigger drains the
 ///   saved position through PATCH instead, until the server rejects the session's own row.
@@ -119,9 +120,9 @@ public final class ProgressSyncer {
     private var queuedSyncSessionID: String?
     /// Whether a ``flush()`` joined the queued `/sync`, so it goes out despite a backoff.
     private var queuedSyncIgnoresBackoff = false
-    /// The latest `/sync` queued, resolved once it finished or was skipped; the queue is serial,
-    /// so it also covers every earlier one. Its session's final close waits for it.
-    private var lastSync: (sessionID: String, done: PlaybackCloseResult<Void>)?
+    /// The `/sync` inside `service.syncSession` now, resolved when the call returns. Its
+    /// session's final close waits for it; queued reports don't count.
+    private var inFlightSync: (sessionID: String, done: PlaybackCloseResult<Void>)?
     private var tail: Task<Void, Never>?
     private var persistenceTail: Task<Void, Never>?
     /// Test seam: hold local persistence independently of transport.
@@ -251,7 +252,7 @@ public final class ProgressSyncer {
             for await path in paths {
                 guard let self, !self.isDetached, !self.isTransportQuiesced else { return }
                 let reconnected =
-                    previous.map { path.isOnline && (!$0.isOnline || path.onlineEpoch > $0.onlineEpoch) } ?? false
+                    previous.map { path.isOnline && (!$0.isOnline || path.onlineEpoch != $0.onlineEpoch) } ?? false
                 previous = path
                 if reconnected { self.requestDrain() }
                 self.pathHandled?(path, reconnected)
@@ -323,7 +324,10 @@ public final class ProgressSyncer {
         case .tick(let time):
             tick(time, now: now)
         case .sessionWillClose(let closing):
-            if current?.sessionID == closing.sessionID { current = nil }
+            if current?.sessionID == closing.sessionID {
+                current = nil
+                cancelSyncWake()
+            }
             isPlaying = false
             lastTick = nil
         case .itemChanged, .failed:
@@ -355,6 +359,7 @@ public final class ProgressSyncer {
             creditPlayedTime()
             listened = current?.listened ?? 0
             current = nil
+            cancelSyncWake()
         }
         guard
             let report = PlaybackSyncReport(
@@ -363,7 +368,7 @@ public final class ProgressSyncer {
         else { return nil }
         let receipt = PlaybackCloseResult<Void>()
         positionReceipts[closing.key, default: []].append((position.revision, receipt))
-        let sessionSync = lastSync?.sessionID == closing.sessionID ? lastSync?.done : nil
+        let sessionSync = inFlightSync?.sessionID == closing.sessionID ? inFlightSync?.done : nil
         return PlaybackCloseHandoff(report: report, position: receipt, sessionSync: sessionSync)
     }
 
@@ -425,17 +430,11 @@ public final class ProgressSyncer {
         }
         queuedSyncSessionID = sessionID
         queuedSyncIgnoresBackoff = ignoringBackoff
-        let done = PlaybackCloseResult<Void>()
-        lastSync = (sessionID, done)
-        enqueue { [weak self] in
-            await self?.sendSync(sessionID: sessionID, done: done)
-            done.resolve(.success(()))
-        }
+        enqueue { [weak self] in await self?.sendSync(sessionID: sessionID) }
     }
 
-    /// Sends the latest saved trigger for `sessionID`, if it is still current, and resolves
-    /// `done` as soon as the `/sync` returned (before the drain that follows a success).
-    private func sendSync(sessionID: String, done: PlaybackCloseResult<Void>) async {
+    /// Sends the latest saved trigger for `sessionID`, if it is still current.
+    private func sendSync(sessionID: String) async {
         await waitForPendingWrites()
         var ignoringBackoff = false
         if queuedSyncSessionID == sessionID {
@@ -488,15 +487,20 @@ public final class ProgressSyncer {
         // Ticks during the evidence save belong to the next report, not this captured delta.
         current?.listened -= listened
         let outcome: SessionAudioOutcome
+        // No suspension between the guard above and the call: a close sees it in flight.
+        let done = PlaybackCloseResult<Void>()
+        inFlightSync = (sessionID, done)
         do {
-            defer { done.resolve(.success(())) }
+            defer {
+                done.resolve(.success(()))
+                if inFlightSync?.done === done { inFlightSync = nil }
+            }
             try await service.syncSession(id: sessionID, report: report)
             outcome = .succeeded
             if current?.sessionID == sessionID {
                 current?.syncFailures = 0
                 current?.retryAt = nil
-                syncWake?.cancel()
-                syncWake = nil
+                cancelSyncWake()
             }
         } catch {
             let abandoned = noteSyncFailure(error, sessionID: sessionID)
@@ -547,20 +551,30 @@ public final class ProgressSyncer {
         case .http(let status, _) where status == 408 || status == 429 || (500..<600).contains(status):
             let failures = (current?.syncFailures ?? 0) + 1
             let backoff = Self.syncBackoff(afterFailures: failures)
+            let retryAt = clock.uptime() + backoff
             current?.syncFailures = failures
-            current?.retryAt = clock.uptime() + backoff
+            current?.retryAt = retryAt
             // Report when the backoff ends even if no tick or pause triggers it (a paused session).
+            // The clock and the sleep are both monotonic, so the backoff has ended by then. Not
+            // if a newer failure moved it, or a report already went out since it ended: one in
+            // flight answers for itself, and a failure schedules the next wake.
             let ownership = current?.ownership
             syncWake?.cancel()
             syncWake = scheduleWake(after: backoff) { syncer in
-                guard syncer.current?.ownership == ownership else { return }
+                guard syncer.current?.ownership == ownership, syncer.current?.retryAt == retryAt else { return }
                 syncer.syncWake = nil
-                syncer.requestSync(ignoringBackoff: true)
+                if let sent = syncer.lastSyncAt, sent >= retryAt { return }
+                syncer.requestSync()
             }
             return false
         default:
             return false
         }
+    }
+
+    private func cancelSyncWake() {
+        syncWake?.cancel()
+        syncWake = nil
     }
 
     /// Runs `action` after `delay` monotonic seconds, unless cancelled, detached or quiesced first.
