@@ -30,19 +30,20 @@ public struct ResolvedStream: Sendable, Hashable {
     public let plan: StreamPlan
     /// One URL per entry of `plan.tracks`, in the same order.
     public let urls: [URL]
+    /// For ``StreamPlan/Transport/customHeaderResourceLoader``, the transport that loads `urls`
+    /// with the connection's custom headers; `nil` for plain `AVURLAsset`s.
+    public let transport: HeaderStreamingTransport?
 
-    public init(plan: StreamPlan, urls: [URL]) {
+    public init(plan: StreamPlan, urls: [URL], transport: HeaderStreamingTransport? = nil) {
         self.plan = plan
         self.urls = urls
+        self.transport = transport
     }
 }
 
 /// Why a session's tracks can't be played.
 public enum StreamResolutionError: Error, Sendable, Hashable {
     case resolution(TrackURLResolutionError)
-    /// The connection has custom headers, which need the resource-loader transport the engine
-    /// doesn't have yet (ADR 0007 §6).
-    case customHeaderTransportUnavailable
     /// A token-fallback track needs an access token and the connection has none: it is signed out,
     /// or the server rejected its refresh token, so the user has to sign in again.
     case missingAccessToken
