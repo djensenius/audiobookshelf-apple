@@ -13,9 +13,10 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// owns the position, and this model keeps no baseline or history of its own.
 ///
 /// - **Local first.** ``record(_:progress:)`` saves every page turn to the store at once
-///   (`LocalProgressStore.recordEdit`: the ebook fields, `ebookDirty`, and `ebookEditedAt` as the
-///   edit's identity). Saves run one at a time, in order; turns made while one runs are saved
-///   together after it.
+///   (`LocalProgressStore.recordEbookEdit`: the ebook fields, `ebookDirty`, and `ebookEditedAt` as
+///   the edit's identity). Saves run one at a time, in order; turns made while one runs are saved
+///   together after it. Each turn reserves its order in the store when it is made, so a retried
+///   older turn never replaces a newer one another reader of the same book saved meanwhile.
 /// - **Debounced sending.** Only the PATCH waits for ``debounce`` without another turn. The model
 ///   never PATCHes itself: it drains through ``ProgressDraining`` (`ProgressSyncer`), which sends
 ///   one group per PATCH, acknowledges by edit identity, runs the confirmation GET and settles
@@ -60,8 +61,9 @@ public final class EbookProgressModel {
     @ObservationIgnored private(set) var saveTail: Task<Bool, Never>?
     /// The latest drain; the next drain waits for it. Readable for tests.
     @ObservationIgnored private(set) var drainTail: Task<Void, Never>?
-    /// The latest turn not yet saved, dated when it was recorded; kept after a failed save.
-    @ObservationIgnored private var unsaved: (location: EbookLocation, progress: Double?, at: Date)?
+    /// The latest turn not yet saved, dated and ordered when it was recorded; kept after a failed
+    /// save. The store drops it if another reader's later turn for the key was saved meanwhile.
+    @ObservationIgnored private var unsaved: Unsaved?
     /// The last local save's failure; a drain finishing meanwhile doesn't hide it.
     @ObservationIgnored private var saveError: String?
     /// Counts updates of ``hasUnsyncedChanges`` from saves and drains, so ``resume()`` doesn't
@@ -108,11 +110,11 @@ public final class EbookProgressModel {
         debounceTask?.cancel()
         guard let pending = unsaved else { return }
         let (store, key, seed, itemID) = (store, key, knownServerProgress.flatMap(Self.baseline), localLibraryItemID)
-        let edit = ProgressEdit(ebook: .init(location: pending.location.stored, progress: pending.progress))
         Task {
             do {
-                try await store.recordEdit(
-                    edit, for: key, serverProgress: seed, localLibraryItemID: itemID, now: pending.at)
+                try await store.recordEbookEdit(
+                    pending.edit, for: key, token: pending.token, serverProgress: seed, localLibraryItemID: itemID,
+                    now: pending.at)
             } catch {
                 logger.error("Saving ebook progress on close failed: \(Self.caseName(error), privacy: .public)")
             }
@@ -153,7 +155,9 @@ public final class EbookProgressModel {
         guard location != self.location || progress != self.progress else { return }
         self.location = location
         self.progress = progress
-        unsaved = (location, progress, now())
+        unsaved = Unsaved(
+            edit: .init(location: location.stored, progress: progress), at: now(),
+            token: store.reserveEbookEdit(for: key))
         enqueueSave()
         debounceTask?.cancel()
         let (clock, debounce) = (clock, debounce)
@@ -259,13 +263,16 @@ public final class EbookProgressModel {
     private func save() async -> Bool {
         guard let pending = unsaved else { return true }
         unsaved = nil
-        let edit = ProgressEdit(ebook: .init(location: pending.location.stored, progress: pending.progress))
         do {
-            let row = try await store.recordEdit(
-                edit, for: key, serverProgress: knownServerProgress.flatMap(Self.baseline),
+            let row = try await store.recordEbookEdit(
+                pending.edit, for: key, token: pending.token,
+                serverProgress: knownServerProgress.flatMap(Self.baseline),
                 localLibraryItemID: localLibraryItemID, now: pending.at)
-            syncStateRevision += 1
-            hasUnsyncedChanges = row.ebookDirty
+            // `nil`: a later turn for the key, from another reader, is saved; it stays.
+            if let row {
+                syncStateRevision += 1
+                hasUnsyncedChanges = row.ebookDirty
+            }
             saveError = nil
             return true
         } catch {
@@ -275,6 +282,12 @@ public final class EbookProgressModel {
             logger.error("Saving ebook progress failed: \(Self.caseName(error), privacy: .public)")
             return false
         }
+    }
+
+    private struct Unsaved {
+        let edit: ProgressEdit.Ebook
+        let at: Date
+        let token: EbookEditToken
     }
 
     private static func matching(_ progress: MediaProgress, _ key: MediaKey) -> MediaProgress? {

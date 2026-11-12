@@ -405,7 +405,10 @@ Model notes:
     generation, so only a fetch issued afterwards clears it), and the syncer's
     next drain fetches `/api/me/progress/:id` for it (a 404 answers the request
     too, `answerEbookFetch`). Its audio and finished
-    values merge as usual. The reader resumes from the row (falling back to the
+    values merge as usual. A reader reserves each turn's order when it is made
+    (`reserveEbookEdit`), and `recordEbookEdit` drops a retried turn once a later
+    one for the same key is saved, so two readers of one book on this device
+    never move it backwards. The reader resumes from the row (falling back to the
     server's value only when there is no row), and a clean row is refreshed from
     the server first. The trade-off, as in the legacy reader (`EpubReader.vue`
     and `PdfReader.vue` save locally, then PATCH fire-and-forget): delivery is at

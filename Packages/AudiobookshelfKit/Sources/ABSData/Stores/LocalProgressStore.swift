@@ -25,6 +25,14 @@ public enum PlaybackPositionCommitError: Error, Sendable, Equatable {
     case tokenAlreadyCommitted
 }
 
+/// In-process order of a reader's ebook edit for one key, reserved when the page is turned (#101),
+/// so a retried older edit can't replace a newer one saved meanwhile. Not persisted.
+public struct EbookEditToken: Sendable, Equatable {
+    fileprivate let writer: UUID
+    fileprivate let key: MediaKey
+    fileprivate let sequence: UInt64
+}
+
 /// A point in `LocalProgressStore`'s edit history, captured when a progress fetch is issued or a
 /// socket progress event is received. Server values are dropped for rows edited or settled since.
 public struct ProgressGeneration: Sendable, Hashable, Comparable {
@@ -103,6 +111,9 @@ public enum SessionUploadResult: Sendable, Equatable {
 @ModelActor public actor LocalProgressStore: StoreActor {
     private nonisolated let playbackWriterID = UUID()
     private nonisolated let playbackSequence = Mutex<UInt64>(0)
+    private nonisolated let ebookEditSequence = Mutex<UInt64>(0)
+    /// The latest committed ``EbookEditToken`` sequence per key.
+    private var committedEbookEdits: [MediaKey: UInt64] = [:]
     /// One successful watermark per key, never pending reservations or a history of tokens.
     private var committedPlaybackPositions:
         [MediaKey: (sequence: UInt64, row: PersistentIdentifier, audio: ProgressSend.Audio)] = [:]
@@ -274,6 +285,34 @@ public enum SessionUploadResult: Sendable, Equatable {
             ProgressEdit(audio: audio), for: key, serverProgress: nil, localLibraryItemID: nil,
             now: now, playbackToken: token)
         return .committed
+    }
+
+    /// Reserves an ebook edit's order synchronously, when the page is turned, not when its write
+    /// reaches the actor.
+    public nonisolated func reserveEbookEdit(for key: MediaKey) -> EbookEditToken {
+        let sequence = ebookEditSequence.withLock {
+            $0 += 1
+            return $0
+        }
+        return EbookEditToken(writer: playbackWriterID, key: key, sequence: sequence)
+    }
+
+    /// ``recordEdit(_:for:serverProgress:localLibraryItemID:now:)`` for an ebook edit, unless an
+    /// edit for the key reserved at or after `token` already committed: then it writes nothing and
+    /// returns `nil`. The check and the write are one actor step. A failed write supersedes nothing.
+    @discardableResult
+    public func recordEbookEdit(
+        _ ebook: ProgressEdit.Ebook, for key: MediaKey, token: EbookEditToken,
+        serverProgress: ProgressBaseline? = nil, localLibraryItemID: UUID? = nil, now: Date = .now
+    ) throws -> LocalMediaProgressDTO? {
+        guard token.writer == playbackWriterID else { throw PlaybackPositionCommitError.wrongWriter }
+        guard token.key == key else { throw PlaybackPositionCommitError.wrongKey }
+        if let committed = committedEbookEdits[key], token.sequence <= committed { return nil }
+        let row = try recordEdit(
+            ProgressEdit(ebook: ebook), for: key, serverProgress: serverProgress,
+            localLibraryItemID: localLibraryItemID, now: now, playbackToken: nil)
+        committedEbookEdits[key] = token.sequence
+        return row
     }
 
     /// Records a local change, creating the row when needed.

@@ -333,6 +333,42 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(service.writes.value.map(\.update.ebookLocation) == ["3"])
     }
 
+    /// Reader A's page-4 save fails, reader B then saves page 8 for the same book, and A retries:
+    /// the store drops A's older turn, so B's page stays and is the one sent.
+    @Test(arguments: [true, false])
+    func aRetriedOlderTurnDoesNotReplaceANewerOne(viaFlush: Bool) async throws {
+        let readerA = makeModel()
+        let readerB = makeModel()
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        turn(readerA, to: 4)
+        #expect(await readerA.saveTail?.value == false)
+        turn(readerB, to: 8)
+        #expect(await readerB.saveTail?.value == true)
+
+        if viaFlush { await readerA.flush() } else { await readerA.syncPending() }
+        #expect(try await row().ebookLocation == "8")
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["8"])
+        #expect(readerA.lastError == nil)
+        // B's edit kept its identity, so the acknowledgement settled it.
+        #expect(try await !row().ebookDirty)
+    }
+
+    /// The same for a turn A saves in `deinit` after B's newer one: the store drops it.
+    @Test func aReleasedReadersOlderTurnDoesNotReplaceANewerOne() async throws {
+        var readerA: EbookProgressModel? = makeModel()
+        let readerB = makeModel()
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        turn(try #require(readerA), to: 4)
+        #expect(await readerA?.saveTail?.value == false)
+        turn(readerB, to: 8)
+        #expect(await readerB.saveTail?.value == true)
+
+        readerA = nil
+        // Waits out the release's save; with no supersession it would write page 4.
+        #expect(await !stored("4"))
+        #expect(try await row().ebookLocation == "8")
+    }
+
     /// A new row is seeded from known server progress (ADR 0003), so only the ebook group is
     /// dirty and the audio fields aren't sent.
     @Test func seedsANewRowFromServerProgress() async throws {
