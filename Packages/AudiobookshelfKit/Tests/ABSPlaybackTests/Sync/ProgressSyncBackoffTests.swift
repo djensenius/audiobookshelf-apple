@@ -12,8 +12,9 @@ import Testing
 struct ProgressSyncBackoffTests {
     private static func status(_ code: Int) -> APIError { .http(status: code, message: nil) }
 
-    /// A 5xx may have reached the session handler, so its listening time is dropped, never
-    /// counted twice; 408 and 429 turned the request away first, so it rides with the next report.
+    /// A 5xx may have reached the session handler, so its listening time waits for the session
+    /// lookup (#381), which fails here, so it is dropped, never counted twice; 408 and 429 turned
+    /// the request away first, so it rides with the next report.
     @Test(arguments: [
         (500, [15.0, 20, 30]), (503, [15, 20, 30]), (408, [15, 35, 65]), (429, [15, 35, 65]),
     ])
