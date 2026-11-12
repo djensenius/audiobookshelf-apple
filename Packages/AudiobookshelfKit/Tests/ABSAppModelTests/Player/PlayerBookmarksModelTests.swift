@@ -421,6 +421,22 @@ struct PlayerBookmarksModelTests {
         }
     }
 
+    @Test func selectIgnoresBookmarkAfterItemChanged() async throws {
+        try await withBookmarks { model, playback, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 10)
+            playback.clearCalls()
+
+            // The row is tapped; before the sheet's task runs, another window switches the book.
+            let select = Task { await model.select(bookmark("li_book", 120)) }
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            playback.clearCalls()
+            await select.value
+
+            #expect(playback.calls.isEmpty)
+            #expect(playback.currentTime == 10)
+        }
+    }
+
     @Test func onAppearLoadsOnce() async throws {
         let service = FakeBookmarkService()
         try await withBookmarks(service: service) { model, playback, store in

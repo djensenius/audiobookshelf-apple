@@ -98,7 +98,12 @@ public final class PlayerBookmarksModel {
     }
 
     /// Seeks to the bookmark without changing play or pause, as legacy `clickBookmark`.
+    ///
+    /// Does nothing unless the bookmark is on the current item when the seek starts: another
+    /// window or CarPlay may have switched the item since the row was tapped, and the old
+    /// bookmark's time means nothing in the new one.
     public func select(_ bookmark: AudioBookmark) async {
+        guard itemID == bookmark.libraryItemId else { return }
         await player.playback.seek(to: bookmark.time)
     }
 
