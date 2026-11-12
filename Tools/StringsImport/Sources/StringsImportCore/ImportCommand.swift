@@ -4,7 +4,9 @@ import Foundation
 ///
 /// Reads `strings/*.json` and `Localization/native/*.json` under the root, writes ABSUI's
 /// `Localizable.xcstrings`, and verifies the app's `CFBundleLocalizations`. With `--check`
-/// it writes nothing and fails if either is out of date.
+/// it writes nothing and fails if either is out of date. Both modes also check the Swift
+/// sources (``SourceScanner``): they fail on a key missing from `en-us.json` or a hard-coded
+/// user-facing string in `Features/`, and warn about keys no longer used.
 public enum ImportCommand {
     public static let catalogPath = "Packages/AudiobookshelfKit/Sources/ABSUI/Resources/Localizable.xcstrings"
     public static let infoPlistPath = "Audiobookshelf/Info.plist"
@@ -33,10 +35,13 @@ public enum ImportCommand {
         }
 
         let result: CatalogBuildResult
+        let files: [LocaleFile]
+        let native: [LocaleFile]
         do {
-            let files = try LocaleFile.merging(
+            native = try LocaleFile.load(directory: root.appending(path: nativePath))
+            files = try LocaleFile.merging(
                 legacy: LocaleFile.load(directory: root.appending(path: legacyPath)),
-                native: LocaleFile.load(directory: root.appending(path: nativePath))
+                native: native
             )
             result = try CatalogBuilder.build(files: files)
         } catch {
@@ -83,11 +88,60 @@ public enum ImportCommand {
             outOfDate = true
         }
 
+        let sourceKeys = files.first { $0.name == CatalogBuilder.sourceFileName }?.keys ?? []
+        let nativeKeys = native.first { $0.name == CatalogBuilder.sourceFileName }?.keys ?? []
+        do {
+            if try !checkSources(root: root, sourceKeys: sourceKeys, nativeKeys: nativeKeys, log: log) {
+                outOfDate = true
+            }
+        } catch {
+            log("error: could not scan the Swift sources: \(error)")
+            return 1
+        }
+
         if outOfDate {
             return 1
         }
         log("\(result.locales.count) locales: \(result.locales.joined(separator: " "))")
         return 0
+    }
+
+    /// Checks the Swift sources against the source language's keys (see ``SourceScanner``) and
+    /// returns whether they pass: every key used from Swift must exist, and `Features/` must not
+    /// hard-code user-facing strings. Keys no longer used are only warned about,
+    /// because many legacy keys are kept for features not ported yet.
+    static func checkSources(
+        root: URL, sourceKeys: Set<String>, nativeKeys: Set<String>, log: (String) -> Void
+    ) throws -> Bool {
+        var passed = true
+        let sources = try SourceScanner.load(root: root, paths: SourceScanner.keyPaths)
+        let (required, mentioned) = SourceScanner.keyReferences(in: sources)
+        for reference in required where !sourceKeys.contains(reference.key) {
+            log(
+                "error: \(reference.path):\(reference.line): \(reference.key) is not in \(legacyPath)/en-us.json "
+                    + "or \(nativePath)/en-us.json; add it to \(nativePath)/en-us.json "
+                    + "(or mark the line \(SourceScanner.ignoreMarker) if it isn't a key)")
+            passed = false
+        }
+        let unused = sourceKeys.subtracting(mentioned)
+        for (keys, path) in [
+            (unused.intersection(nativeKeys), nativePath), (unused.subtracting(nativeKeys), legacyPath),
+        ]
+        where !keys.isEmpty {
+            log(
+                "warning: keys in \(path)/en-us.json not used from Swift (\(keys.count)): "
+                    + keys.sorted().joined(separator: ", "))
+        }
+
+        for file in sources where file.path.hasPrefix(SourceScanner.featuresPath + "/") {
+            for string in SourceScanner.hardCodedStrings(in: file, keys: sourceKeys) {
+                log(
+                    "error: \(string): hard-coded user-facing string; use an L10n key "
+                        + "(or mark the line \(SourceScanner.ignoreMarker) if it isn't prose)")
+                passed = false
+            }
+        }
+        return passed
     }
 
     private static func declaredLocalizations(at url: URL) -> [String]? {
