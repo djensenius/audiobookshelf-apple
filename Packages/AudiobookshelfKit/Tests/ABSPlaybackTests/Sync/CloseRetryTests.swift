@@ -245,6 +245,8 @@ struct CloseRetryTests {
         #expect(f.verdicts == (saveFails ? [] : [.send]))
         #expect(try await f.queued().first?.lastAttemptAt == (saveFails ? first : nil))
         #expect((f.s.syncer.drainWake != nil) == saveFails)
+        // The pass ended early, or not: its record of captures ended with it.
+        #expect(f.s.syncer.closeQueue.passCaptures == nil)
     }
 
     /// Saving the attempt suspends, so admission's checks run again before the resend: an
@@ -280,6 +282,7 @@ struct CloseRetryTests {
         }
         #expect(f.s.service.closes.map(\.id) == (change == nil ? ["session-1"] : []))
         #expect(try await f.queued().count == (change == "quiesce" || itemAction ? 1 : 0))
+        #expect(f.s.syncer.closeQueue.passCaptures == nil)
         guard itemAction else { return }
 
         f.s.syncer.closeQueue.reached = nil
@@ -362,38 +365,57 @@ struct CloseRetryTests {
         #expect((f.s.syncer.drainWake != nil) == (settlement != "acknowledged"))
     }
 
-    /// A close still being captured when a drain reads the queue is left alone for the whole
-    /// pass: its `/close` may settle while the pass is suspended on an older close, leaving the
-    /// copy the pass read stale. Acknowledged meanwhile, the close isn't recreated or resent;
-    /// kept, it isn't resent before its new retry delay, and then goes out once.
-    @Test(arguments: [CloseRetryFixture.Request.Outcome.acknowledged, .unapplied])
-    func aCloseSettlingDuringAPassIsLeftToTheNextDrain(outcome: CloseRetryFixture.Request.Outcome) async throws {
+    /// A close being captured when a drain reads the queue, its capture begun before the pass or
+    /// as the pass starts, is left alone for the whole pass: its `/close` may settle while the
+    /// pass is suspended on an older close, leaving the copy the pass read stale. Acknowledged
+    /// meanwhile, the close isn't recreated or resent; kept, it isn't resent before its new retry
+    /// delay, and then goes out once. The pass's record of captures ends with the pass.
+    @Test(arguments: [CloseRetryFixture.Request.Outcome.acknowledged, .unapplied], [false, true])
+    func aCloseSettlingDuringAPassIsLeftToTheNextDrain(
+        outcome: CloseRetryFixture.Request.Outcome, capturedAsThePassStarts: Bool
+    ) async throws {
         let f = try CloseRetryFixture()
         try await f.stopSessionOne(.unapplied)
         await f.s.coordinator.play(itemID: "b")
         await f.s.play(for: 20)
+        await f.s.settle()
         let close = CloseRetryFixture.Request(outcome)
         defer { close.release() }
         await f.model.enqueue(close, for: .close)
-        let stored = Gate()
-        f.s.syncer.closeQueue.reached = { if $0 == .captureSaved { stored.open() } }
-        f.s.coordinator.stop()
-        await stored.wait()
-        await f.s.settle()
-        #expect(try await f.queued().map(\.sessionID) == ["session-1", "session-2"])
         let queue = f.s.syncer.closeQueue
+        let stored = Gate()
         queue.reached = { step in
-            // The pass takes session 1 first; session 2's `/close` settles once its attempt is saved.
-            guard step == .attemptSaved else { return }
-            queue.reached = nil
-            close.release()
-            await f.s.coordinator.waitForPendingCloses()
-            await queue.waitForCaptures()
+            switch step {
+            case .captureSaved:
+                stored.open()
+            case .passStarted where capturedAsThePassStarts:
+                // Session 2 stops once the pass noted the sessions being captured, so its close is
+                // stored in flight before the pass reads the queue.
+                f.s.coordinator.stop()
+                await stored.wait()
+            case .attemptSaved:
+                // The pass takes session 1 first. Session 2's `/close` settles a reconcile delay
+                // later, so the copy the pass read is due by then.
+                queue.reached = nil
+                f.s.h.clock.advance(by: f.s.syncer.reconcileDelay)
+                close.release()
+                await f.s.coordinator.waitForPendingCloses()
+                await queue.waitForCaptures()
+            default:
+                break
+            }
         }
+        if !capturedAsThePassStarts {
+            f.s.coordinator.stop()
+            await stored.wait()
+            await f.s.settle()
+            #expect(try await f.queued().map(\.sessionID) == ["session-1", "session-2"])
+        }
+        #expect(queue.passCaptures == nil)
 
-        // Both closes are due.
         await f.drainWhenDue()
 
+        #expect(queue.passCaptures == nil)
         #expect(f.s.service.closes.map(\.id) == ["session-1"])
         #expect(queue.verdicts.map(\.sessionID) == ["session-1"])
         let kept = try await f.queued()

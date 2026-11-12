@@ -26,6 +26,9 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 final class CloseRetryQueue {
     /// Sessions whose coordinator `/close` hasn't settled yet: the drain leaves them alone.
     fileprivate(set) var capturing: Set<String> = []
+    /// The sessions captured during the drain's close pass: those under way when it began and
+    /// those begun since. Drains run one at a time, so one pass owns it; `nil` outside a pass.
+    fileprivate(set) var passCaptures: Set<String>?
     fileprivate var captures: [UUID: Task<Void, Never>] = [:]
     /// Test seam: every admission verdict, in order.
     fileprivate(set) var verdicts: [(sessionID: String, verdict: DeferredReportAdmission)] = []
@@ -45,6 +48,8 @@ final class CloseRetryQueue {
         case captureSaved
         /// The coordinator's attempt settled; the capture saves its result next.
         case transportSettled
+        /// A drain's close pass noted the sessions being captured; it reads the queue next.
+        case passStarted
     }
 
     /// Test seam: runs after each ``Step``.
@@ -56,6 +61,12 @@ final class CloseRetryQueue {
             await task.value
             captures[id] = nil
         }
+    }
+
+    /// Whether the drain's close pass leaves a session's close alone: its capture was under way
+    /// when the pass began, began since, or is under way now.
+    func passLeavesAlone(_ sessionID: String) -> Bool {
+        capturing.contains(sessionID) || passCaptures?.contains(sessionID) == true
     }
 
     /// Holds a close the store couldn't save until a drain saves it.
@@ -90,6 +101,7 @@ extension ProgressSyncer {
         let report = handoff.report
         let id = UUID()
         queue.capturing.insert(closing.sessionID)
+        queue.passCaptures?.insert(closing.sessionID)
         queue.captures[id] = Task { [weak self] in
             defer {
                 queue.capturing.remove(closing.sessionID)
@@ -164,10 +176,14 @@ extension ProgressSyncer {
     /// The drain's close step: resends each retained close that is due and admitted, settling
     /// it by the result. Returns `false` when the drain should stop.
     func retryRetainedCloses() async -> Bool {
-        // A close still being captured when the queue is read may settle while this pass is
-        // suspended on an earlier one, so the copy read here is stale: the whole pass leaves it
-        // alone. A settlement that keeps it schedules another drain.
-        let capturedWhenRead = closeQueue.capturing
+        // A close being captured when the queue is read, or whose capture begins during this
+        // pass, may settle while the pass is suspended on an earlier one, so the copy read here
+        // is stale: the whole pass leaves it alone. A settlement that keeps the close schedules
+        // another drain.
+        assert(closeQueue.passCaptures == nil, "Drains run one at a time, so close passes never overlap")
+        closeQueue.passCaptures = closeQueue.capturing
+        defer { closeQueue.passCaptures = nil }
+        await closeQueue.reached?(.passStarted)
         let closes: [PendingSessionCloseDTO]
         do {
             closes = try await store.sessionCloses(for: service.serverConnectionID)
@@ -176,8 +192,7 @@ extension ProgressSyncer {
             drainOutcome.failed = true
             return false
         }
-        for close in closes
-        where !capturedWhenRead.contains(close.sessionID) && !closeQueue.capturing.contains(close.sessionID) {
+        for close in closes where !closeQueue.passLeavesAlone(close.sessionID) {
             await waitForPendingWrites()
             guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return false }
             if let last = close.lastAttemptAt, clock.now() < last + closeRetryDelay(afterAttempts: close.attempts) {
