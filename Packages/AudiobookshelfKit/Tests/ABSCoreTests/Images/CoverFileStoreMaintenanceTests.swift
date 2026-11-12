@@ -333,6 +333,36 @@ import Testing
         #expect(files(saved).count == 1)
     }
 
+    @Test func pipelineSweepRemovesAServerWhoseDownloadIsStoringItsFirstCover() async throws {
+        let reached = Gate()
+        let proceed = Gate()
+        let store = CoverFileStore(
+            directory: images, limit: 1 << 30, now: Date.init, listingHook: nil,
+            insertHook: {
+                reached.open()
+                // Unstructured, so the sweep cancelling the fetch doesn't let it through early.
+                await Task { await proceed.wait() }.value
+            })
+        let pipeline = ImagePipeline(
+            limits: .iPhone, fileStore: store, sessionConfiguration: ImageStubProtocol.configuration())
+        let host = PipelineHarness.pngRoute()
+        // An external cover needs no session, so the sweep doesn't keep its server.
+        let cover = ImageKey(
+            serverID: serverID, kind: .itemCover, entityID: "a", updatedAt: 1,
+            externalURL: URL(string: "https://\(host)/cover.png"))
+        let load = Task { try await pipeline.image(for: cover, pixelBox: PixelBox(width: 64, height: 64)) }
+
+        // Past the download's cancellation check, before its insert creates the folder.
+        await reached.wait()
+        await pipeline.removeServers(keepingOnly: [])
+        proceed.open()
+        _ = try? await load.value
+
+        // The removal refused the write, so the folder was never created.
+        #expect(!FileManager.default.fileExists(atPath: images.appending(path: serverID.uuidString).path))
+        #expect(await store.size == 0)
+    }
+
     @Test func pipelineSweepClearsMemoryAndBlocksTheRemovedServers() async throws {
         try await seed([serverID])
         let store = store()

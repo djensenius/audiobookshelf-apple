@@ -158,6 +158,8 @@ public actor CoverFileStore {
     private let listingHook: (@Sendable () -> Void)?
     /// Runs on the deleting thread before a removed server's folder is measured, for tests.
     private let deletionHook: (@Sendable () -> Void)?
+    /// Awaited at the start of every ``insert(moving:for:pathExtension:generation:)``, for tests.
+    private let insertHook: (@Sendable () async -> Void)?
     /// How long ``removeServer(_:)`` waits for the server's leases: it returns when the leases
     /// are released or this returns, whichever comes first.
     private let leaseTimeout: @Sendable () async throws -> Void
@@ -170,7 +172,7 @@ public actor CoverFileStore {
 
     init(
         directory: URL, limit: Int, now: @escaping @Sendable () -> Date, listingHook: (@Sendable () -> Void)?,
-        deletionHook: (@Sendable () -> Void)? = nil,
+        deletionHook: (@Sendable () -> Void)? = nil, insertHook: (@Sendable () async -> Void)? = nil,
         leaseTimeout: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(5)) }
     ) {
         self.directory = directory
@@ -179,6 +181,7 @@ public actor CoverFileStore {
         self.now = now
         self.listingHook = listingHook
         self.deletionHook = deletionHook
+        self.insertHook = insertHook
         self.leaseTimeout = leaseTimeout
     }
 
@@ -253,6 +256,7 @@ public actor CoverFileStore {
     func insert(
         moving file: URL, for key: ImageKey, pathExtension: String, generation: Int
     ) async throws -> LeasedFile {
+        await insertHook?()
         await scanIfNeeded()
         // Checked after the scan, which may have let a removal of the server run.
         guard generation == self.generation(for: key.serverID) else { throw CancellationError() }

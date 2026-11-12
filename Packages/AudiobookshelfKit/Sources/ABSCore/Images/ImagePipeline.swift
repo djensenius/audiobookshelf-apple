@@ -163,8 +163,10 @@ public actor ImagePipeline {
     }
 
     /// A sweep's first step: forgets the memory entries and loads of every server not in `saved`
-    /// and not given a builder in this process, and returns the servers with cached files not in
-    /// `saved`, for ``removeServerUnlessInSession(_:)``.
+    /// and not given a builder in this process, and returns those servers and the ones with
+    /// cached files not in `saved`, for ``removeServerUnlessInSession(_:)``. A forgotten load may
+    /// be past its cancellation check and about to store its server's first cover, so its server
+    /// is removed even without a folder: the removal refuses that write.
     public func serversToSweep(keepingOnly saved: Set<UUID>) async -> Set<UUID> {
         let kept = saved.union(sessionServers)
         var unkept = Set(fetches.keys.map(\.key.serverID)).union(decodes.keys.map(\.key.serverID))
@@ -174,7 +176,7 @@ public actor ImagePipeline {
             return true
         }
         for serverID in unkept.subtracting(kept) { forget(serverID) }
-        return await fileStore.servers(notIn: saved)
+        return await fileStore.servers(notIn: saved).union(unkept.subtracting(kept))
     }
 
     /// A sweep's removal of one server, as ``removeServer(_:)``, unless it has been given a
